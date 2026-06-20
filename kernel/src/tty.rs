@@ -90,6 +90,10 @@ pub mod lflag {
     pub const ECHOK: u32 = 0x0020;
     /// Echo a newline even when `ECHO` is off (with `ICANON`).
     pub const ECHONL: u32 = 0x0040;
+    /// Disable flushing the input queue when `INTR`/`QUIT`/`SUSP` generate a
+    /// signal. Without this, a signal character discards the in-progress
+    /// (canonical) line; with it set, the buffered input is preserved.
+    pub const NOFLSH: u32 = 0x0080;
     /// Echo control chars as `^X`.
     pub const ECHOCTL: u32 = 0x0200;
     /// Visual erase for the line kill.
@@ -459,20 +463,29 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
     let vsusp = g(cc::VSUSP, 26);
 
     if t.c_lflag & lflag::ISIG != 0 {
+        // POSIX: a signal character flushes the input queue (here, the
+        // in-progress canonical line) UNLESS NOFLSH is set, in which case the
+        // buffered input is preserved and only the signal is generated.
+        let flush = t.c_lflag & lflag::NOFLSH == 0;
         if ch == vintr {
-            line.clear();
+            if flush {
+                line.clear();
+            }
             return LineStep::Signal(2); // SIGINT
         }
         if ch == vquit {
-            line.clear();
+            if flush {
+                line.clear();
+            }
             return LineStep::Signal(3); // SIGQUIT
         }
         if ch == vsusp {
-            // ^Z: discard the in-progress line and stop the foreground job.
-            // Like SIGINT/SIGQUIT, ISIG flushes the input on a stop char
-            // (NOFLSH is not yet honoured).  SIGTSTP's default action stops
-            // the process; SIGCONT (e.g. shell `fg`/`bg`) resumes it.
-            line.clear();
+            // ^Z: stop the foreground job. SIGTSTP's default action stops the
+            // process; SIGCONT (e.g. shell `fg`/`bg`) resumes it. The
+            // in-progress line is flushed unless NOFLSH is set.
+            if flush {
+                line.clear();
+            }
             return LineStep::Signal(20); // SIGTSTP
         }
     }
@@ -679,7 +692,10 @@ fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
 /// `ISIG` still applies in non-canonical mode: a `VINTR`/`VQUIT`/`VSUSP`
 /// character generates the corresponding signal and aborts the read (returning
 /// [`ConsoleRead::Signal`]), discarding any bytes collected so far in this call
-/// — matching Linux's input flush on a signal char (`NOFLSH` not yet honoured).
+/// — matching Linux's input flush on a signal char. `NOFLSH` (which preserves
+/// buffered input) is honoured only in canonical mode (see [`feed`]): raw reads
+/// keep no kernel-side input queue across calls — each call reads straight from
+/// the keyboard — so there is no buffered input for `NOFLSH` to preserve here.
 /// Programs that want the signal characters delivered as literal data (most
 /// full-screen apps) clear `ISIG`, in which case no signal is generated.
 fn raw_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
@@ -912,6 +928,19 @@ pub fn self_test() {
         assert_eq!(feed(&mut z, 26, &t), LineStep::Signal(20));
         assert_eq!(z.as_slice(), b"", "VSUSP flushes the line");
 
+        // With NOFLSH set, a signal char generates the signal but preserves
+        // the in-progress line (no input flush).
+        let mut noflsh = Termios::sane_default();
+        noflsh.c_lflag |= lflag::NOFLSH;
+        let mut nf = LineBuf::new();
+        let _ = feed(&mut nf, b'a', &noflsh);
+        let _ = feed(&mut nf, b'b', &noflsh);
+        assert_eq!(feed(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
+        assert_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
+        // ...and the preserved line still completes normally afterwards.
+        assert_eq!(feed(&mut nf, b'\n', &noflsh), LineStep::Line);
+        assert_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
+
         // With ISIG cleared, a ^C is just an ordinary byte in the line.
         let mut noisig = Termios::sane_default();
         noisig.c_lflag &= !lflag::ISIG;
@@ -920,7 +949,7 @@ pub fn self_test() {
         assert_eq!(feed(&mut n, b'\n', &noisig), LineStep::Line);
         assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
 
-        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp): OK");
+        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK");
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.
@@ -999,5 +1028,28 @@ mod tests {
         let w = WinSize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
         let back = WinSize::from_bytes(&w.to_bytes());
         assert_eq!(w, back);
+    }
+
+    #[test]
+    fn isig_flushes_line_unless_noflsh() {
+        let t = Termios::sane_default();
+
+        // Default (NOFLSH clear): ^C generates SIGINT and flushes the line.
+        let mut a = LineBuf::new();
+        let _ = feed(&mut a, b'x', &t);
+        assert_eq!(feed(&mut a, 3, &t), LineStep::Signal(2));
+        assert_eq!(a.as_slice(), b"");
+
+        // NOFLSH set: ^C generates SIGINT but preserves the line, which then
+        // completes normally on the next newline.
+        let mut nf = Termios::sane_default();
+        nf.c_lflag |= lflag::NOFLSH;
+        let mut b = LineBuf::new();
+        let _ = feed(&mut b, b'a', &nf);
+        let _ = feed(&mut b, b'b', &nf);
+        assert_eq!(feed(&mut b, 3, &nf), LineStep::Signal(2));
+        assert_eq!(b.as_slice(), b"ab");
+        assert_eq!(feed(&mut b, b'\n', &nf), LineStep::Line);
+        assert_eq!(b.as_slice(), b"ab\n");
     }
 }

@@ -9520,8 +9520,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          Boot self-test pcb::test_orphaned_pgrp (guarded-not-orphaned,
 ##          orphaned-with-stopped, and orphaned-without-stopped negative case)
 ##          PASSED; full boot PASSED (321s).  TD30 now fully RESOLVED.
-##          Remaining nicety only: NOFLSH not honoured (input always flushed on a
-##          signal char).
+##      Increment H (NOFLSH — TD30 closeout):
+##          DONE.  feed() now honours the NOFLSH (0x80) lflag in canonical mode:
+##          a signal char (^C/^\/^Z) flushes the in-progress line by default, but
+##          with NOFLSH set the buffered input is preserved and only the signal is
+##          generated (line completes normally on the next newline).  Raw mode
+##          keeps no input queue across read() calls, so NOFLSH has nothing to
+##          preserve there (documented on raw_read).  tty boot self-test +
+##          #[cfg(test)] unit test added; boot PASSED.  TD30 now FULLY resolved
+##          with no remaining gaps.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

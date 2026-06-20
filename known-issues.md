@@ -1697,7 +1697,7 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` honoured, orphan-pgrp `SIGHUP`/`SIGCONT` — RESOLVED 2026-06-20
+### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` + `NOFLSH` honoured, orphan-pgrp `SIGHUP`/`SIGCONT` — RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
 `raw_read()` (non-canonical reader); driven by `dispatch_console_read` /
@@ -1737,9 +1737,9 @@ unchanged. VTIME is interpreted in deciseconds.
 **RESOLVED — raw-mode `ISIG`:** `raw_read()` now classifies each byte
 against `VINTR`/`VQUIT`/`VSUSP` when `ISIG` is set (in all four
 `(VMIN,VTIME)` arms) and returns `ConsoleRead::Signal`, discarding any
-bytes collected so far in the call (input flush; `NOFLSH` not yet
-honoured).  Apps that clear `ISIG` (most full-screen programs) still get
-the characters as literal data.
+bytes collected so far in the call (input flush — see the `NOFLSH` note
+below for why this is unconditional in raw mode).  Apps that clear `ISIG`
+(most full-screen programs) still get the characters as literal data.
 
 **RESOLVED — orphaned-process-group `SIGHUP`/`SIGCONT`:** POSIX requires
 that when a process exit orphans a process group that still contains a
@@ -1759,11 +1759,18 @@ is stopped — and calls `handlers::kill_orphaned_pgrp(pgid)`, which sends
 the `pcb::test_orphaned_pgrp` boot self-test (guarded-vs-orphaned and the
 no-stopped-member negative case).
 
+**RESOLVED — `NOFLSH`:** `feed()` now honours the `NOFLSH` (0x80) lflag in
+canonical mode: a signal character (`^C`/`^\`/`^Z`) flushes the in-progress
+line by default, but with `NOFLSH` set the buffered input is preserved and
+only the signal is generated (the line then completes normally on the next
+newline). Raw mode keeps no kernel-side input queue across `read(2)` calls
+(each call reads straight from the keyboard), so there is no buffered input
+for `NOFLSH` to preserve there — documented on `raw_read`. Covered by the
+`tty` boot self-test (NOFLSH-preserves-line) and a `#[cfg(test)]` unit test.
+
 **Severity:** none remaining — interactive `^C`/`^\`/`^Z` (canonical and
-raw), `VMIN`/`VTIME` raw reads, and orphaned-process-group hangup all work
-(once a shell installs a foreground pgrp via `tcsetpgrp`). Remaining minor
-nicety: `NOFLSH` is not yet honoured (input is always flushed on a signal
-char); tracked separately if it ever matters.
+raw), `VMIN`/`VTIME` raw reads, orphaned-process-group hangup, and `NOFLSH`
+all work (once a shell installs a foreground pgrp via `tcsetpgrp`).
 
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 

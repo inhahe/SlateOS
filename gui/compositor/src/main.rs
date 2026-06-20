@@ -617,6 +617,44 @@ impl Framebuffer {
         }
     }
 
+    /// Copy an opaque run of source pixels into back-buffer row `y` starting at
+    /// column `x`, clipped to the framebuffer.
+    ///
+    /// This is the fast path for blitting opaque content: it does no per-pixel
+    /// blending or bounds checking — the visible sub-run is resolved once and
+    /// written with a single `copy_from_slice`. Negative `x` (partially
+    /// offscreen on the left) and right-edge overflow are clipped by slicing.
+    pub fn copy_row(&mut self, x: i32, y: u32, src: &[u32]) {
+        if y >= self.height || src.is_empty() {
+            return;
+        }
+        // Resolve the source offset (when clipped on the left) and destination
+        // column, both within bounds.
+        let (src_off, dst_x) = if x < 0 {
+            let skip = x.unsigned_abs() as usize;
+            if skip >= src.len() {
+                return;
+            }
+            (skip, 0usize)
+        } else {
+            (0usize, x as usize)
+        };
+        if dst_x >= self.width as usize {
+            return;
+        }
+        let count = (src.len() - src_off).min(self.width as usize - dst_x);
+        if count == 0 {
+            return;
+        }
+        let row_off = y as usize * self.width as usize + dst_x;
+        if let (Some(dst), Some(s)) = (
+            self.back.get_mut(row_off..row_off + count),
+            src.get(src_off..src_off + count),
+        ) {
+            dst.copy_from_slice(s);
+        }
+    }
+
     /// Get a reference to the front buffer for display.
     pub fn front_buffer(&self) -> &[u32] {
         &self.front
@@ -2872,6 +2910,16 @@ impl Compositor {
     /// `Framebuffer::blend_pixel` honoring the window opacity, so per-pixel
     /// alpha (ARGB) and translucent windows both compose correctly. All writes
     /// are bounds-checked and offscreen (negative) coordinates are skipped.
+    ///
+    /// OPT: when the buffer is opaque (Xrgb) and the window is fully opaque, the
+    /// per-row content is copied straight into the framebuffer
+    /// (`Framebuffer::copy_row`) instead of running a per-pixel float-alpha
+    /// blend — O(h) row memcpys vs O(w*h) blends. This is the common
+    /// game/video case and the path runs every frame for non-fullscreen
+    /// buffer-backed windows (fullscreen ones bypass blitting via direct
+    /// scanout). The opaque copy is bit-identical to the blend result because
+    /// blend_pixel writes `src | 0xFF000000` for opaque pixels and imported
+    /// Xrgb pixels already carry 0xFF alpha.
     fn blit_buffer(
         fb: &mut Framebuffer,
         buf: &SharedBuffer,
@@ -2883,9 +2931,17 @@ impl Compositor {
     ) {
         let cols = buf.width().min(win_width);
         let rows = buf.height().min(win_height);
+        let fast = opacity >= 1.0 && buf.is_opaque();
         for row in 0..rows {
             let sy = win_y.saturating_add(row as i32);
             if sy < 0 {
+                continue;
+            }
+            if fast {
+                if let Some(src) = buf.row(row) {
+                    let run = src.get(..cols as usize).unwrap_or(src);
+                    fb.copy_row(win_x, sy as u32, run);
+                }
                 continue;
             }
             for col in 0..cols {
@@ -3889,6 +3945,60 @@ mod tests {
         // After compositing, the buffer is released exactly once.
         assert_eq!(comp.take_released_buffer_handles(), vec![0xABCD]);
         assert!(comp.take_released_buffer_handles().is_empty());
+    }
+
+    #[test]
+    fn test_copy_row_clips_left_right_and_vertical() {
+        let mut fb = Framebuffer::new(4, 2).unwrap();
+        fb.clear(0xFF000000);
+        let src = [0xFFAAAAAA, 0xFFBBBBBB, 0xFFCCCCCC, 0xFFDDDDDD, 0xFFEEEEEE];
+
+        // Partly offscreen on the left: x=-2 skips the first two src pixels,
+        // writes the remaining 3 at columns 0..3.
+        fb.copy_row(-2, 0, &src);
+        assert_eq!(fb.get_pixel(0, 0), Some(0xFFCCCCCC));
+        assert_eq!(fb.get_pixel(1, 0), Some(0xFFDDDDDD));
+        assert_eq!(fb.get_pixel(2, 0), Some(0xFFEEEEEE));
+        assert_eq!(fb.get_pixel(3, 0), Some(0xFF000000)); // untouched
+
+        // Partly offscreen on the right: x=2 writes only 2 of 5 (cols 2,3).
+        fb.clear(0xFF000000);
+        fb.copy_row(2, 1, &src);
+        assert_eq!(fb.get_pixel(2, 1), Some(0xFFAAAAAA));
+        assert_eq!(fb.get_pixel(3, 1), Some(0xFFBBBBBB));
+        assert_eq!(fb.get_pixel(0, 1), Some(0xFF000000));
+
+        // Out-of-range y or fully-offscreen x is a no-op.
+        fb.clear(0xFF121212);
+        fb.copy_row(0, 5, &src);
+        fb.copy_row(-10, 0, &src);
+        fb.copy_row(4, 0, &src);
+        assert_eq!(fb.get_pixel(0, 0), Some(0xFF121212));
+    }
+
+    #[test]
+    fn test_opaque_buffer_fast_path_matches_blend() {
+        // An Xrgb (opaque) buffer at full opacity must blit bit-identically to
+        // the per-pixel blend path: blend writes `src | 0xFF000000` and Xrgb
+        // import already forced 0xFF alpha, so the fast copy is exact.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Buf".to_string(), 8, 8, 1);
+        let bytes = solid_buffer_bytes(4, 4, 0x0011_2233); // alpha 0x00 in source
+        assert!(comp
+            .attach_buffer(id, 1, 4, 4, 16, BufferFormat::Xrgb8888, &bytes)
+            .is_ok());
+        assert!(comp.compose_frame());
+
+        let front = comp.framebuffer.front_buffer();
+        let stride = 400usize;
+        // First window's client area lands at (100, 80) by default placement;
+        // read via the window's actual client position to stay robust.
+        let (wx, wy) = {
+            let w = comp.window_ref(id).unwrap();
+            (w.x as usize, w.y as usize)
+        };
+        assert_eq!(front[wy * stride + wx], 0xFF11_2233, "opaque fast-path pixel");
+        assert_eq!(front[(wy + 3) * stride + wx + 3], 0xFF11_2233);
     }
 
     #[test]

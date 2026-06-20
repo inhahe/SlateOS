@@ -238,6 +238,25 @@ impl SharedBuffer {
         &self.pixels
     }
 
+    /// A single normalized ARGB8888 pixel row (`width` entries), or `None` if
+    /// `y` is out of range. Used by the compositor's fast opaque blit path.
+    #[must_use]
+    pub fn row(&self, y: u32) -> Option<&[u32]> {
+        if y >= self.height {
+            return None;
+        }
+        let start = (y as usize).checked_mul(self.width as usize)?;
+        let end = start.checked_add(self.width as usize)?;
+        self.pixels.get(start..end)
+    }
+
+    /// Whether every pixel is fully opaque. True for `Xrgb8888` (import forces
+    /// alpha to 0xFF), letting the compositor skip per-pixel alpha blending.
+    #[must_use]
+    pub const fn is_opaque(&self) -> bool {
+        matches!(self.src_format, BufferFormat::Xrgb8888)
+    }
+
     /// Bounds-checked single-pixel read in normalized ARGB8888.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<u32> {

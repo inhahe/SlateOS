@@ -38211,7 +38211,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     // offset and len must both be block-aligned (EINVAL).
                     #[allow(clippy::cast_sign_loss)]
                     let len_u64 = len as u64; // len > 0 by gate (2)
-                    if offset_u64 % bsize != 0 || len_u64 % bsize != 0 {
+                    if !offset_u64.is_multiple_of(bsize) || !len_u64.is_multiple_of(bsize) {
                         return linux_err(errno::EINVAL);
                     }
                     let size = match crate::fs::Vfs::file_size(&path) {

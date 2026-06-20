@@ -724,6 +724,13 @@ pub fn run_all() {
     // L4: ~0.5-1 µs).
     bench_ipc_channel();
 
+    // --- Large (64 KiB) channel round-trip ---
+    //
+    // Baseline-only: establishes the cost of copying a maximum-size
+    // (MAX_MESSAGE_SIZE) payload through the channel today, so a future
+    // zero-copy page-flipping optimization can be measured against it.
+    bench_ipc_channel_large();
+
     // --- Sync (rendezvous) channel round-trip ---
     //
     // Measures the L4/seL4-style synchronous IPC path: send_blocking
@@ -1166,6 +1173,69 @@ fn bench_ipc_channel() {
             result.min_ns, target_ns
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Large-message IPC channel benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark a *large* (64 KiB) channel send + recv round-trip.
+///
+/// The small-message [`bench_ipc_channel`] is dominated by fixed per-call
+/// overhead (queue ops, lock, wakeup) and barely touches the payload.  This
+/// variant uses a `MAX_MESSAGE_SIZE`-byte message so the cost is dominated by
+/// the per-byte data handling instead: `Message::from_bytes` copies the slice
+/// into a heap `Vec`, and (today) the syscall boundary copies it once more in
+/// each direction.  It establishes the baseline that a future zero-copy
+/// page-flipping large-message path (channel.rs module docs, roadmap §2.3 IPC)
+/// would improve — you can't tell whether that optimization helps without a
+/// number for the copy-based path it replaces.
+///
+/// Note: this measures the *kernel-internal* path only (no userspace copy),
+/// where the payload `Vec` is moved through the queue rather than re-copied,
+/// so the dominant term here is the single `from_bytes` allocation+copy of the
+/// 64 KiB buffer plus the queue/wakeup overhead — i.e. the per-message cost a
+/// real sender pays to marshal a large message.
+fn bench_ipc_channel_large() {
+    use crate::ipc::channel::{self, Message};
+
+    // MAX_MESSAGE_SIZE is private to the channel module; mirror its 64 KiB
+    // value here (a compile-time check in channel.rs guards the constant).
+    const LARGE: usize = 64 * 1024;
+
+    let (tx, rx) = channel::create();
+    let payload = alloc::vec![0xABu8; LARGE];
+
+    // Warm up so the allocator free-list and caches are primed.
+    if let Ok(msg) = Message::from_bytes(&payload) {
+        if channel::send(tx, msg).is_ok() {
+            let _ = channel::try_recv(rx);
+        }
+    }
+
+    let result = run("ipc_channel_roundtrip_64k", 500, || {
+        if let Ok(msg) = Message::from_bytes(&payload) {
+            if channel::send(tx, msg).is_ok() {
+                if let Ok(received) = channel::try_recv(rx) {
+                    core::hint::black_box(received);
+                }
+            }
+        }
+    });
+
+    channel::close(tx);
+    channel::close(rx);
+
+    // No hard latency target: this is a baseline for the data-handling cost,
+    // not a pass/fail gate (the small-message round-trip carries the < 2 µs
+    // hot-path target).  Deliberately NOT added to the scorecard — a target of
+    // 0 would always register as a failure and skew the pass/fail summary.
+    // Report min/mean for regression tracking instead; a future zero-copy path
+    // should drive this well below the copy-bound number.
+    serial_println!(
+        "[bench]   ipc_channel_roundtrip_64k: baseline min {}ns mean {}ns (64 KiB payload)",
+        result.min_ns, result.mean_ns
+    );
 }
 
 // ---------------------------------------------------------------------------

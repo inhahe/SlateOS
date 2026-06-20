@@ -41,6 +41,26 @@ Fuchsia/L4 numbers are from published docs on different hardware. \
 Will be replaced with WSL2 pipe round-trip / 2 as a proxy once measured. \
 The real comparison is cycles, not wall-clock time."""
 
+[ipc_channel_roundtrip_64k]
+description   = "Channel IPC send+recv round-trip, 64 KiB (MAX_MESSAGE_SIZE) payload"
+# Baseline only — no pass/fail target. Establishes the copy-bound cost of
+# marshalling a maximum-size message through the channel today, so a future
+# zero-copy page-flipping large-message path can be measured against it.
+target_ns    = 0
+measured_min_cycles  = 1263796
+measured_min_ns      = 342817
+measured_mean_cycles = 17024367
+measured_mean_ns     = 4618032
+source        = "Kernel bench: bench_ipc_channel_large(), 500 iterations, QEMU-TCG boot 2026-06-20"
+notes         = """
+Unlike the 5-byte ipc_channel_roundtrip (dominated by fixed queue/lock/wakeup \
+overhead), this is dominated by per-byte data handling: Message::from_bytes \
+copies the 64 KiB slice into a heap Vec each iteration. Under QEMU-TCG the \
+counts are extremely noisy (mean >> min because of interpreter scheduling), so \
+the min (1.26M cycles / ~343us) is the meaningful figure; treat the mean as an \
+upper bound, not a regression gate. A future zero-copy page-flipping large- \
+message path should drive the min well below this copy-bound figure."""
+
 [context_switch]
 description   = "Full context switch between two threads"
 # pipe round-trip measures 2 syscalls + 2 context switches + pipe overhead.

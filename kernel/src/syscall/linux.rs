@@ -37859,6 +37859,115 @@ fn fallocate_zero_memfd(
     Ok(())
 }
 
+/// `FALLOC_FL_COLLAPSE_RANGE`: remove the byte range `[offset, offset+len)`
+/// from a file and shift every byte after it down by `len`, so the file
+/// shrinks by exactly `len`.  The caller (`sys_fallocate`) has already
+/// validated, against Linux semantics, that `offset` and `len` are multiples
+/// of the filesystem block size and that `offset+len` lies strictly before
+/// EOF — both EINVAL conditions there — so this helper only performs the
+/// data move and the final shrink.
+///
+/// The move is a forward (ascending) memmove of the tail: the destination
+/// (`offset`) is strictly below the source (`offset+len`), so copying low
+/// addresses first never overwrites a not-yet-copied source byte.  Chunked
+/// through `Vfs::read_at`/`write_at` (every backend overrides both
+/// efficiently) so the whole file is never resident at once.  Our backends
+/// are non-sparse, so this is a true content collapse, not an extent splice;
+/// the result a reader observes is identical.
+#[allow(clippy::cast_possible_truncation)]
+fn fallocate_collapse_vfs(
+    path: &str,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = crate::fs::Vfs::file_size(path)?;
+    // end = offset + len; both validated < size by the caller, so the add
+    // cannot overflow a real on-disk size, but stay defensive.
+    let end = offset
+        .checked_add(len)
+        .ok_or(crate::error::KernelError::InvalidArgument)?;
+    // Tail length to slide down.  `end <= size` is guaranteed by the caller.
+    let tail = size.saturating_sub(end);
+    const CHUNK: usize = 16 * 1024;
+    let mut moved = 0u64;
+    while moved < tail {
+        let remaining = tail.saturating_sub(moved);
+        let this = if remaining > CHUNK as u64 {
+            CHUNK
+        } else {
+            remaining as usize
+        };
+        let src = end.saturating_add(moved);
+        let dst = offset.saturating_add(moved);
+        let buf = crate::fs::Vfs::read_at(path, src, this)?;
+        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        moved = moved.saturating_add(this as u64);
+    }
+    // Drop the now-duplicated tail: the file shrinks by exactly `len`.
+    crate::fs::Vfs::truncate(path, size.saturating_sub(len))
+}
+
+/// `FALLOC_FL_INSERT_RANGE`: insert a `len`-byte hole at `offset`, shifting
+/// every byte from `offset` onward up by `len`, so the file grows by exactly
+/// `len` and the inserted region reads as zero.  The caller has validated
+/// that `offset` and `len` are block-size multiples and that `offset < size`
+/// (both EINVAL otherwise), and has already enforced `RLIMIT_FSIZE` against
+/// the new size.
+///
+/// The move is a backward (descending) memmove: the destination
+/// (`offset+len`) is above the source (`offset`), so the tail must be copied
+/// high addresses first to avoid clobbering not-yet-copied source bytes.  The
+/// file is grown first (via `truncate`, which zero-extends), then the tail is
+/// slid up chunk-by-chunk from the end, and finally the freed `[offset,
+/// offset+len)` window is explicitly zeroed (the grow only zero-filled past
+/// the *old* EOF, not the interior hole the shift exposes).
+#[allow(clippy::cast_possible_truncation)]
+fn fallocate_insert_vfs(
+    path: &str,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = crate::fs::Vfs::file_size(path)?;
+    let new_size = size
+        .checked_add(len)
+        .ok_or(crate::error::KernelError::InvalidArgument)?;
+    // Grow first so the destination range exists; the extension past the old
+    // EOF is zero-filled by `truncate`.
+    crate::fs::Vfs::truncate(path, new_size)?;
+    // Slide the tail `[offset, size)` up to `[offset+len, new_size)`, copying
+    // from the end backwards so a chunk's destination never overlaps an
+    // un-copied source chunk.
+    let tail = size.saturating_sub(offset);
+    const CHUNK: usize = 16 * 1024;
+    let mut remaining = tail;
+    while remaining > 0 {
+        let this = if remaining > CHUNK as u64 {
+            CHUNK
+        } else {
+            remaining as usize
+        };
+        // Copy the highest not-yet-moved chunk: it ends at `offset+remaining`.
+        let chunk_start = offset.saturating_add(remaining.saturating_sub(this as u64));
+        let src = chunk_start;
+        let dst = chunk_start.saturating_add(len);
+        let buf = crate::fs::Vfs::read_at(path, src, this)?;
+        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        remaining = remaining.saturating_sub(this as u64);
+    }
+    // Zero the inserted hole `[offset, offset+len)` — the shift left stale
+    // copies of the original head bytes there.
+    let hole_end = offset.saturating_add(len);
+    let zeros = alloc::vec![0u8; CHUNK];
+    let mut pos = offset;
+    while pos < hole_end {
+        let rem = hole_end.saturating_sub(pos);
+        let this = if rem > CHUNK as u64 { CHUNK } else { rem as usize };
+        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        pos = pos.saturating_add(this as u64);
+    }
+    Ok(())
+}
+
 /// `fallocate(fd, mode, offset, len)`.
 ///
 /// Gate order matches Linux's syscall entry + `fs/open.c::vfs_fallocate`:
@@ -38084,7 +38193,64 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                         Err(e) => linux_err(linux_errno_for(e)),
                     };
                 }
-                // COLLAPSE / INSERT / UNSHARE keep the EOPNOTSUPP fallback.
+                // COLLAPSE_RANGE / INSERT_RANGE: real extent-shifting modes
+                // (ext4/xfs/f2fs in Linux).  Both require `offset` and `len`
+                // to be multiples of the filesystem block size (EINVAL
+                // otherwise) and shift file contents; our non-sparse backends
+                // realise them as a chunked data memmove (fallocate_*_vfs).
+                if mode & COLLAPSE_RANGE != 0 || mode & INSERT_RANGE != 0 {
+                    // Block size for the alignment gate.  A backend that can't
+                    // report one (block_size == 0) can't validate the Linux
+                    // alignment contract, so fall back to EOPNOTSUPP rather
+                    // than guess — exactly what an unsupported fs returns.
+                    let bsize = match crate::fs::Vfs::statvfs(&path) {
+                        Ok(info) if info.block_size > 0 => info.block_size,
+                        Ok(_) => return linux_err(errno::EOPNOTSUPP),
+                        Err(e) => return linux_err(linux_errno_for(e)),
+                    };
+                    // offset and len must both be block-aligned (EINVAL).
+                    #[allow(clippy::cast_sign_loss)]
+                    let len_u64 = len as u64; // len > 0 by gate (2)
+                    if offset_u64 % bsize != 0 || len_u64 % bsize != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    let size = match crate::fs::Vfs::file_size(&path) {
+                        Ok(s) => s,
+                        Err(e) => return linux_err(linux_errno_for(e)),
+                    };
+                    if mode & COLLAPSE_RANGE != 0 {
+                        // Collapsing a range that reaches or passes EOF is
+                        // invalid (Linux: use ftruncate instead) — EINVAL.
+                        if end_u64 >= size {
+                            return linux_err(errno::EINVAL);
+                        }
+                        return match fallocate_collapse_vfs(&path, offset_u64, len_u64) {
+                            Ok(()) => SyscallResult::ok(0),
+                            Err(e) => linux_err(linux_errno_for(e)),
+                        };
+                    }
+                    // INSERT_RANGE: the insertion point must lie strictly
+                    // inside the file (Linux: offset >= size is EINVAL; extend
+                    // with ftruncate/fallocate instead).  The file grows by
+                    // `len`, so enforce RLIMIT_FSIZE against the new size
+                    // (gate (9)'s earlier check used `end`, not size+len).
+                    if offset_u64 >= size {
+                        return linux_err(errno::EINVAL);
+                    }
+                    let new_size = match size.checked_add(len_u64) {
+                        Some(v) => v,
+                        None => return linux_err(errno::EFBIG),
+                    };
+                    if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
+                        return linux_err(e);
+                    }
+                    return match fallocate_insert_vfs(&path, offset_u64, len_u64) {
+                        Ok(()) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
+                    };
+                }
+                // UNSHARE_RANGE keeps the EOPNOTSUPP fallback (reflink/CoW
+                // concept our backends don't implement).
                 return linux_err(errno::EOPNOTSUPP);
             }
             HandleKind::MemFd => {
@@ -44481,7 +44647,77 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
         }
     }
 
-    serial_println!("[syscall/linux]   fallocate PUNCH_HOLE/ZERO_RANGE zeroing: OK");
+    // For the content-shifting modes, stage a non-uniform sequence (byte i
+    // holds `i & 0xFF`, exact for our small N) so a misplaced byte is caught,
+    // and compare the result against an explicitly-built expected image.
+    let seq: alloc::vec::Vec<u8> =
+        (0..N).map(|i| u8::try_from(i & 0xFF).unwrap_or(0)).collect();
+    let stage_seq = || -> bool { crate::fs::Vfs::write_file(PATH, &seq).is_ok() };
+    let expect = |want: &[u8], label: &str| -> bool {
+        match crate::fs::Vfs::read_file(PATH) {
+            Ok(c) if c.as_slice() == want => true,
+            Ok(c) => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fallocate {} len {} (want {})",
+                    label, c.len(), want.len()
+                );
+                false
+            }
+            Err(e) => {
+                serial_println!("[syscall/linux]   FAIL: fallocate {} read {:?}", label, e);
+                false
+            }
+        }
+    };
+
+    // (6) COLLAPSE_RANGE: collapse [20,40) (len 20). Result: size 80, the
+    // original [40,100) shifted down to sit right after [0,20).
+    let _ = crate::fs::Vfs::remove(PATH);
+    if !stage_seq() {
+        return Ok(());
+    }
+    fallocate_collapse_vfs(PATH, 20, 20)?;
+    let mut want_collapse = alloc::vec::Vec::new();
+    want_collapse.extend_from_slice(seq.get(..20).unwrap_or(&[]));
+    want_collapse.extend_from_slice(seq.get(40..).unwrap_or(&[]));
+    if !expect(&want_collapse, "COLLAPSE_RANGE") {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // (7) INSERT_RANGE: insert a 20-byte zero hole at offset 30. Result: size
+    // 120, [0,30) unchanged, [30,50) zeroed, the original [30,100) shifted up.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if !stage_seq() {
+        return Ok(());
+    }
+    fallocate_insert_vfs(PATH, 30, 20)?;
+    let mut want_insert = alloc::vec::Vec::new();
+    want_insert.extend_from_slice(seq.get(..30).unwrap_or(&[]));
+    want_insert.extend_from_slice(&[0u8; 20]);
+    want_insert.extend_from_slice(seq.get(30..).unwrap_or(&[]));
+    if !expect(&want_insert, "INSERT_RANGE") {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // (8) Round-trip identity: INSERT_RANGE then COLLAPSE_RANGE of the same
+    // [k,k+len) restores the original file exactly.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if !stage_seq() {
+        return Ok(());
+    }
+    fallocate_insert_vfs(PATH, 40, 16)?;
+    fallocate_collapse_vfs(PATH, 40, 16)?;
+    if !expect(&seq, "INSERT+COLLAPSE-identity") {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    serial_println!(
+        "[syscall/linux]   fallocate PUNCH_HOLE/ZERO_RANGE/COLLAPSE_RANGE/INSERT_RANGE: OK"
+    );
     Ok(())
 }
 

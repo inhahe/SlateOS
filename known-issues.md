@@ -480,7 +480,7 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
-### B-FALLOC1. Linux-ABI `fallocate` PUNCH_HOLE/ZERO_RANGE now zero the range; COLLAPSE/INSERT/UNSHARE still EOPNOTSUPP — PARTIALLY RESOLVED 2026-06-18
+### B-FALLOC1. Linux-ABI `fallocate` COLLAPSE_RANGE/INSERT_RANGE now shift contents; only UNSHARE_RANGE still EOPNOTSUPP — PARTIALLY RESOLVED 2026-06-18, COLLAPSE/INSERT ADDED 2026-06-20
 
 **Status:** `sys_fallocate` (syscall #285) was wired 2026-06-16 (Path Z Part 33)
 from a blanket EOPNOTSUPP terminal to the real VFS for the two *allocate* modes:
@@ -504,19 +504,37 @@ correctness property — our backends are non-sparse). Covered by
 self-test) which exercises ZERO_RANGE+KEEP_SIZE, PUNCH_HOLE, a past-EOF KEEP_SIZE
 no-op, a ZERO_RANGE grow, and a MemFd ZERO_RANGE — all green at boot.
 
-**Remaining limitation:** `COLLAPSE_RANGE`, `INSERT_RANGE`, `UNSHARE_RANGE` (and
-their valid combinations) still return EOPNOTSUPP after passing the mode-validation
-gate ladder. COLLAPSE/INSERT shift file contents and require block-aligned extent
-surgery (offset and len multiples of the fs block size, EINVAL otherwise); UNSHARE
-is a reflink/CoW concept our backends don't have. Well-behaved callers treat
-EOPNOTSUPP as "operation unsupported" and skip it or fall back, so nothing breaks.
+**Update 2026-06-20 — COLLAPSE_RANGE / INSERT_RANGE implemented.** Both
+content-shifting modes now do real work for regular files (`HandleKind::File`)
+instead of returning EOPNOTSUPP. The dispatch (kernel/src/syscall/linux.rs
+`sys_fallocate`) enforces the full Linux contract: it queries the backing fs
+block size via `Vfs::statvfs` and rejects a non-block-aligned `offset`/`len`
+with EINVAL; COLLAPSE at/past EOF is EINVAL (Linux says use ftruncate); INSERT
+at/past EOF (`offset >= size`) is EINVAL; INSERT also re-checks RLIMIT_FSIZE
+against the *grown* size (`size + len`). The shifts themselves are chunked
+(16 KiB) memmoves over `Vfs::read_at`/`write_at`: `fallocate_collapse_vfs`
+slides the tail down (ascending copy, dst < src) then truncates by `len`;
+`fallocate_insert_vfs` grows the file, slides the tail up (descending copy to
+avoid clobber) then zeroes the inserted `[offset, offset+len)` hole. Our
+backends are non-sparse, so this is a true content collapse/insert (not an
+extent splice) — byte-for-byte identical from a reader's view; the only thing
+not provided vs. a native ext4 extent op is the in-place efficiency, an
+optimisation, not a correctness property. Covered by `self_test_fallocate_range`
+cases (6)-(8): COLLAPSE_RANGE, INSERT_RANGE, and an INSERT+COLLAPSE round-trip
+identity, all green at boot. A backend whose `statvfs` reports `block_size == 0`
+(can't validate the alignment contract) keeps the EOPNOTSUPP fallback.
 
-**Proper fix (deferred) for the rest:** Add `collapse_range`/`insert_range`
-operations to the `FileSystem` trait with block-alignment validation and implement
-them per backend, then dispatch those modes here instead of EOPNOTSUPP. Track as a
-VFS enhancement, not a syscall-layer bug. Kernel context (caller_pid None) keeps
-the EOPNOTSUPP terminal for every mode, asserted by the batch-536 FMODE_WRITE +
-vfs_fallocate gate-order self-tests.
+**Remaining limitation:** `UNSHARE_RANGE` still returns EOPNOTSUPP — it is a
+reflink/CoW unshare concept our backends don't implement (there are no shared
+extents to unshare). Well-behaved callers treat EOPNOTSUPP as "operation
+unsupported" and skip it or fall back, so nothing breaks.
+
+**Proper fix (deferred) for UNSHARE:** once a backend grows reflink/CoW extents
+(none do today), dispatch UNSHARE_RANGE to a preallocate-and-unshare path; on a
+non-reflink fs it is correctly a no-op (nothing is shared), so the EOPNOTSUPP
+terminal is the conservative choice until reflinks exist. Kernel context
+(caller_pid None) keeps the EOPNOTSUPP terminal for every mode, asserted by the
+batch-536 FMODE_WRITE + vfs_fallocate gate-order self-tests.
 
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 

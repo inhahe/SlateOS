@@ -11480,6 +11480,235 @@ fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<(
     Ok(())
 }
 
+/// Path Z Part 39 — `make` drives `tcc` to build a multi-file C program.
+///
+/// The capstone of the §4.4 "development tools" toolchain line: it composes
+/// Part 34 (real GNU make runs in ring 3) with Part 38 (tcc separate
+/// compilation) into the realistic "build a C project with make + a compiler"
+/// flow.  A Makefile declares a small dependency graph whose recipes invoke the
+/// staged `tcc` to compile two translation units to objects and link them:
+///   /cap-prog: /cap-a.o /cap-b.o   ->  tcc -o /cap-prog /cap-a.o /cap-b.o
+///   /cap-a.o:  /cap-a.c            ->  tcc -c  /cap-a.c -o /cap-a.o
+///   /cap-b.o:  /cap-b.c            ->  tcc -c  /cap-b.c -o /cap-b.o
+/// make evaluates the graph, fork/exec's `tcc` three times (the heaviest
+/// multi-process glibc workload in the suite — make + tcc×3), and the resulting
+/// dynamic binary runs in ring 3 and prints `SLATE-SEP-42`.
+///
+/// This is genuinely more than Parts 34/38 run separately: it is make *as the
+/// build driver* spawning the compiler across a real prerequisite graph, the
+/// exact integration `gcc`/`cmake`/`make` projects depend on.
+///
+/// No-op (`Ok(())`) when the toolchain rootfs (`/bin/tcc`, the glibc support
+/// set, `/bin/make`, `/bin/sh`) is absent, so a kernel built without it boots
+/// clean.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if make does not reach `Zombie`, exits
+/// non-zero, fails to produce a dynamic ELF at `/cap-prog`, or the built program
+/// does not print the expected line.
+pub fn self_test_linux_real_glibc_make_cc() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // make + tcc×3 is the heaviest multi-process glibc chain in the suite, so it
+    // gets a budget well above the single-tcc compile budget (4_194_304).
+    const MAX_YIELDS: usize = 33_554_432;
+    const SRC_MAKE: &str = "/mnt/bin/make";
+    const SRC_SH: &str = "/mnt/bin/sh";
+    const DST_MAKE: &str = "/bin/make";
+    const DST_SH: &str = "/bin/sh";
+    const A_C: &str = "/cap-a.c";
+    const B_C: &str = "/cap-b.c";
+    const MAKEFILE: &str = "/cap.mk";
+    const PROG: &str = "/cap-prog";
+    const OUT: &str = "/cap-out.txt";
+    const LABEL: &str = "make+tcc";
+
+    const A_SRC: &[u8] = b"/* TU A: defines a function used by main in TU B */\n\
+int slate_add(int a, int b){ return a + b; }\n";
+    const B_SRC: &[u8] = b"/* TU B: main, calls across the TU boundary into TU A */\n\
+extern int printf(const char *fmt, ...);\n\
+extern int slate_add(int a, int b);\n\
+int main(void){\n\
+  int r = slate_add(40, 2);\n\
+  printf(\"SLATE-SEP-%d\\n\", r);\n\
+  return 0;\n\
+}\n";
+    // Recipe lines MUST start with a TAB.  Absolute /bin/tcc avoids PATH-lookup
+    // uncertainty; echo is left ON (no `@`) so a failure surfaces the exact
+    // compile/link command make ran on the serial log.
+    const MAKEFILE_SRC: &[u8] = b"all: /cap-prog\n\
+/cap-prog: /cap-a.o /cap-b.o\n\
+\t/bin/tcc -o /cap-prog /cap-a.o /cap-b.o\n\
+/cap-a.o: /cap-a.c\n\
+\t/bin/tcc -c /cap-a.c -o /cap-a.o\n\
+/cap-b.o: /cap-b.c\n\
+\t/bin/tcc -c /cap-b.c -o /cap-b.o\n";
+
+    // Stage the hosted-cc support set (ld/libc/libm/tcc/crt/libtcc1.a, ...).
+    match stage_hosted_cc_support() {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    // make + its recipe shell are the additional binaries this rung needs.
+    if !crate::fs::Vfs::exists(SRC_MAKE) || !crate::fs::Vfs::exists(SRC_SH) {
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Running REAL make-drives-tcc build (ring 3, Path Z) test..."
+    );
+
+    fn cleanup() {
+        for p in
+            ["/cap-a.c", "/cap-b.c", "/cap.mk", "/cap-a.o", "/cap-b.o", "/cap-prog", "/cap-out.txt"]
+        {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+    cleanup();
+
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_MAKE, DST_MAKE), (SRC_SH, DST_SH)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   make+tcc: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    cleanup();
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   make+tcc: SKIP (reading {} failed: {:?})", src, e);
+                cleanup();
+                return Ok(());
+            }
+        }
+    }
+
+    for (path, data) in [(A_C, A_SRC), (B_C, B_SRC), (MAKEFILE, MAKEFILE_SRC)] {
+        if let Err(e) = crate::fs::Vfs::write_file(path, data) {
+            serial_println!("[spawn]   make+tcc: SKIP (writing {} failed: {:?})", path, e);
+            cleanup();
+            return Ok(());
+        }
+    }
+
+    let make_elf = match crate::fs::Vfs::read_file(DST_MAKE) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   make+tcc: SKIP (re-read {} failed: {:?})", DST_MAKE, e);
+            cleanup();
+            return Ok(());
+        }
+    };
+
+    // --- run make: it builds /cap-prog by invoking tcc per the Makefile ----
+    let argv: &[&[u8]] = &[b"make", b"-f", b"/cap.mk", b"all"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-make-cc",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_MAKE.as_bytes()),
+    };
+
+    let result = match spawn_process(&make_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: make+tcc — make spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let make_exit = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: make+tcc — make did not exit within {} yields (state={:?}); make \
+             startup, Makefile parse, or one of its tcc compile/link children likely hung",
+            MAX_YIELDS, state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if make_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: make+tcc — make exit code={:?}, expected {} (non-zero means make hit \
+             a parse error or one of its tcc recipe children failed)",
+            make_exit, EXPECT_EXIT
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // make claims success — confirm it actually built a dynamic ELF.
+    let prog = match crate::fs::Vfs::read_file(PROG) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: make+tcc — make exited 0 but {} is unreadable: {:?} (the link \
+                 recipe did not run or did not produce the binary)",
+                PROG, e
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_dynamic_elf(&prog, PROG, LABEL) {
+        cleanup();
+        return Err(e);
+    }
+
+    // --- run the make-built binary ----------------------------------------
+    let (run_exit, out) = match run_dynamic_capture(&prog, PROG, OUT, LABEL) {
+        Ok(t) => t,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
+
+    if out.as_slice() == b"SLATE-SEP-42\n" && run_exit == Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   REAL make-drives-tcc build (ring 3: make parsed a 3-target Makefile, \
+             fork/exec'd tcc to compile two TUs to objects and link them into a {}-byte dynamic \
+             ELF, ld.so ran it, exit-time flush wrote {} bytes == expected, exit={:?}): OK",
+            prog.len(), out.len(), run_exit
+        );
+        Ok(())
+    } else {
+        serial_println!(
+            "[spawn]   FAIL: make+tcc — {} holds {} bytes {:?} (exit={:?}), expected {:?} with \
+             exit={}",
+            OUT, out.len(), out.as_slice(), run_exit, b"SLATE-SEP-42\n", EXPECT_EXIT
+        );
+        Err(KernelError::InternalError)
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

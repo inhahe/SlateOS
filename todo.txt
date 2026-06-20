@@ -53083,3 +53083,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## keepcaps block asserts get/set coherence both directions + the lock truth
 ## table; test_reset_linux_state_for_exec proves set_keepcaps drives bit 4.
 ## Build + clippy clean; boot test PASSED.
+
+## [BLOCKED prerequisite 2026-06-19] Path Z: compiling C that #includes glibc headers
+## The hosted-tcc toolchain line (Path Z Parts 35-39) now covers freestanding
+## compile, hosted glibc-linked compile (puts; printf/malloc), separate
+## compilation (tcc -c objects + multi-object link), and GNU make driving tcc to
+## build a multi-file project — all using `extern` prototypes so NO system
+## headers are needed.
+##   The natural next rung — compiling a source that does `#include <stdio.h>`
+## (and friends), the form real-world C / configure scripts / CMake projects
+## use — is BLOCKED: the glibc/system header tree (/usr/include/*) is staged in
+## NEITHER the rootfs.ext4 image (verified: /usr/include/stdio.h absent) NOR the
+## current build host (this WSL has no gcc and no /usr/include). The rootfs is
+## produced elsewhere by scripts/create-ext4-rootfs.sh on a machine with a full
+## glibc-dev toolchain.
+##   PROPER FIX (when a header-carrying build environment is available): extend
+## scripts/create-ext4-rootfs.sh to copy the glibc + linux + gcc/tcc header trees
+## (/usr/include, /usr/include/x86_64-linux-gnu, and tcc's own include dir) into
+## the image, mind the 48MB image / ~free-space budget (trim to the headers a
+## hosted compile actually needs if it doesn't fit), and ensure tcc's default
+## include search path (or a `-I`/`-isystem` / CPATH env in the self-test) finds
+## them. Then add a Path Z rung that compiles `#include <stdio.h>` + printf and
+## runs it, asserting the include-path resolution + preprocessor + glibc link all
+## work end to end. Until the header tree is stageable from this environment, this
+## rung cannot be implemented or validated here.

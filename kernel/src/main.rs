@@ -1854,6 +1854,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 39: the §4.4 toolchain capstone — real GNU make drives tcc to
+    // build a multi-file C program. make parses a 3-target Makefile, fork/exec's
+    // tcc to compile two TUs to objects and link them into a dynamic ELF, which
+    // then runs in ring 3. Composes Part 34 (make) with Part 38 (separate
+    // compilation) into the realistic "build a C project" flow.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_make_cc() {
+        serial_println!(
+            "WARNING: Path-Z make-drives-tcc build self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

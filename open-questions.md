@@ -146,10 +146,64 @@ build a software one at all now) is what's blocked here.
 
 ---
 
-No further open questions remain beyond Q10. All earlier deferred operator
+## Q11 — Zero-copy page-flipping for large channel messages: what ABI does the receiver see?
+
+**Status:** OPEN
+
+**Question.** Channel IPC today copies the message payload (sender userspace
+buffer → kernel `Message.data: Vec<u8>` → receiver userspace buffer). For large
+messages this is the dominant cost — a freshly-measured kernel-internal baseline
+puts a 64 KiB round-trip at **~343 µs min** under QEMU-TCG, virtually all of it
+in the `Message::from_bytes` allocation+copy (`bench_ipc_channel_large`,
+`bench/baselines.toml [ipc_channel_roundtrip_64k]`). The design spec calls for
+**zero-copy page flipping** for large messages (move the sender's pages into the
+receiver's address space instead of copying). Implementing that requires deciding
+*what the receiver observes*, which is a user-visible ABI/policy fork — not an
+internal optimization that can be made transparently, because page granularity
+(16 KiB) and address placement are visible to userspace.
+
+**Options.**
+- **A — Transparent, kernel-chosen mapping.** On `recv`, the kernel maps the
+  flipped pages somewhere in the receiver's address space and hands back a
+  pointer+len. *Pro:* simplest caller model; no pre-arranged buffer. *Con:* the
+  receive buffer address is now kernel-chosen (callers can't `recv` into a fixed
+  buffer); the receiver must later unmap; payloads round up to 16 KiB pages so
+  sub-page tails need a length field; sender loses the pages (move semantics)
+  which changes `send` ownership rules.
+- **B — Opt-in flag + caller-provided page-aligned region.** A `MSG_ZEROCOPY`-style
+  send flag; receiver pre-registers a page-aligned landing region. *Pro:* explicit,
+  predictable, matches `io_uring`/`vmsplice` mental model; copy path stays the
+  default so nothing existing changes. *Con:* more API surface; only helps callers
+  that adopt it.
+- **C — Threshold-automatic: copy below N, flip at/above N, always transparent.**
+  *Pro:* best-case perf with no caller change. *Con:* combines A's ownership/teardown
+  complexity with a silent behavior change at the threshold (a `send` that used to
+  copy now moves the sender's pages); surprising and hard to reason about.
+- **D — Defer; keep copy-only.** *Pro:* the copy path is correct and the 64 KiB cap
+  bounds the worst case; no new ABI to commit to. *Con:* leaves the spec's zero-copy
+  goal unmet; large-message IPC stays copy-bound.
+
+**Claude's recommendation.** Lean **B** (explicit opt-in + caller-provided aligned
+region): it keeps the existing copy path as the zero-risk default, matches the
+zero-copy idioms callers already know, and avoids silently changing `send`
+ownership semantics. **In the meantime** Claude has built only the benchmark
+groundwork (the baseline above) — *not* a stub flip path (that would be a
+band-aid) — and is picking unblocked work elsewhere. This is logged now because
+the implementation can't proceed without the ABI choice, and the choice is
+user-visible enough to want operator input.
+
+**Where it bites.** `kernel/src/ipc/channel.rs` (`Message`, `send`/`recv`,
+`MAX_MESSAGE_SIZE`, the module's "Future Optimizations" note), the MM page-transfer
+mechanism (move/remap pages between address spaces — new in `kernel/src/mm`), and
+the Linux/native syscall glue that marshals channel messages. The benchmark to
+measure any implementation against already exists (`kernel/src/bench.rs::bench_ipc_channel_large`).
+
+---
+
+No further open questions remain beyond Q11. All earlier deferred operator
 decisions (Q1–Q8) have been resolved — see the "Recently resolved" list below
 and `design-decisions.md` for full rationale. New decisions that genuinely need
-the operator should be appended above this line as `## Q11 …`.
+the operator should be appended above this line as `## Q12 …`.
 
 ---
 

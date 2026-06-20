@@ -198,12 +198,73 @@ mechanism (move/remap pages between address spaces — new in `kernel/src/mm`), 
 the Linux/native syscall glue that marshals channel messages. The benchmark to
 measure any implementation against already exists (`kernel/src/bench.rs::bench_ipc_channel_large`).
 
+## Q12 — Which large initiative comes next? (bounded in-context work is exhausted)
+
+**Status:** OPEN
+
+**Question.** As of 2026-06-20 a full sweep of the bounded, in-deep-context work
+queues (fs-admin / TD18, the Linux event-fd family, the POSIX libc layer, and the
+entire `todo.txt` deferred/follow-up changelog) confirms that **every concrete,
+clearly-unblocked, non-boot-risky increment is already implemented** — repeatedly,
+the "owed follow-up" notes turned out to describe already-shipped code (file-backed
+mmap, the per-PCB Linux fd table, fork/exec/wait, the ChaCha20 CSPRNG behind
+`getrandom`, the SA_RESTART sentinel taxonomy, and the canonical line-buffered
+console `read` are all done; the stale notes have been corrected). What remains is
+**all large-grained**, and each remaining vein is gated on something only the
+operator can resolve — a prioritization call, an architectural fork, or an unmet
+prerequisite. The decision needed: **which large initiative should the next block
+of autonomous work target?**
+
+**Options (the remaining large veins, with what gates each).**
+
+- **A — TCP/IP stack → userspace service migration** (roadmap §"Move to userspace
+  service", ~line 1125). *Gate:* this is an **architectural fork** (keep the stack
+  in-kernel vs. re-home it behind a channel-IPC network service) that is costly to
+  reverse and changes a user-visible service boundary — reserved for operator
+  input per the standing rule.
+- **B — Compositor GPU acceleration / video-capture fallback** (roadmap §4.x,
+  §4.5). *Gate:* hard-blocked on **prerequisites** — a real GPU driver
+  (AMDGPU/i915 port) with a 3D/encode engine — and on the **Q10** codec fork
+  already open. Software-only stopgaps were judged band-aids.
+- **C — POSIX libc-layer expansion.** *Gate:* **no concrete gap found.** The layer
+  is mature and the project already runs *real glibc* on the Linux-ABI path (Path
+  Z), so broad libc work risks low-value churn without a specific missing-function
+  driver. Would need the operator to name a target workload that exposes a gap.
+- **D — A large external port** (bash, Mesa/Vulkan, AMDGPU/i915, CPython, the Rust
+  toolchain, Btrfs/F2FS/NTFS, Chromium, WINE — all roadmap `[ ]`). *Gate:*
+  **operator prioritization + prerequisites.** The standing rule asks for operator
+  go-ahead before a *giant* external port (it's a prioritization/sequencing call,
+  not an effort-cost one), and several depend on infrastructure not yet built.
+- **E — Build the operator-pre-approved C-lite read-only page cache now**
+  (design-decisions §23 / Q5). *Gate:* the operator explicitly said "implement
+  **LATER, not now**", with a trigger (first real cross-process `.so` `.text`
+  dedup consumer). Its precursor — stable VFS file identity — *is* now met
+  (`FileMeta.ino` is populated for ext4/FAT/memfs), so only the operator's
+  "not now" and the not-yet-firing consumer trigger hold it back. Starting it
+  would also touch the boot-critical fault/mmap path unsupervised.
+
+**Claude's recommendation.** No autonomous default is clearly correct here: A and
+the §4.x items are operator-reserved forks/prerequisite-blocked, C risks low-value
+churn without a named gap, D needs the operator's prioritization, and E is
+explicitly operator-deferred. The most useful thing the operator can supply is a
+**direction**: either (i) pick which large vein to open (A/B/C/D), (ii) lift the
+"not now" on E if the dynamic-linker dedup payoff is now wanted, or (iii) name a
+concrete workload/target (a specific program to run, a specific port to attempt)
+that turns one of these into a bounded, gap-driven task. **In the meantime**, per
+the state-(3) rule and the "stop scheduling idle heartbeats" rule, Claude is
+ending the autonomous loop rather than firing further no-op ticks; it will resume
+when the operator answers.
+
+**Where it bites.** Project-wide / prioritization — not a single file. The
+specific technical forks remain Q9 (ELF ABI default), Q10 (capture codec), Q11
+(zero-copy channel ABI); E's home is `kernel/src/mm` + the `mmap`/fault path.
+
 ---
 
-No further open questions remain beyond Q11. All earlier deferred operator
+No further open questions remain beyond Q12. All earlier deferred operator
 decisions (Q1–Q8) have been resolved — see the "Recently resolved" list below
 and `design-decisions.md` for full rationale. New decisions that genuinely need
-the operator should be appended above this line as `## Q12 …`.
+the operator should be appended above this line as `## Q13 …`.
 
 ---
 

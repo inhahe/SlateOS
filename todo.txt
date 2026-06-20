@@ -8864,9 +8864,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##             takes the Linux→Linux exec path through this helper and
 ##             only falls back to install_stdio when transitioning
 ##             from Native→Linux.
-##       (iii) Console reads collapse any byte-count to a single
-##             keystroke (one-char read).  Multi-byte reads will need a
-##             line-buffered TTY abstraction.
+##       (iii) RESOLVED (verified 2026-06-20) — the console read path is
+##             now canonical/line-buffered via kernel/src/tty.rs.
+##             dispatch_console_read (linux.rs ~3830) reads into a
+##             MAX_CANON line buffer through crate::tty::console_read,
+##             which consults the termios line discipline (is_canonical /
+##             echo_enabled), handles editing, and returns a full line
+##             (Data(n)) or end-of-line/signal — no longer one keystroke
+##             per read.  TCGETS/TCSETS/TIOCGWINSZ + foreground-pgid
+##             ioctls are wired, so isatty()/tcgetattr() work.
 ##       (iv)  RESOLVED (verified 2026-06-20) — pipe/pipe2, the socket
 ##             family (socket/connect/accept/sendto/recvfrom/...),
 ##             poll/ppoll, select/pselect6, epoll_create[1]/ctl/wait/pwait,
@@ -8908,14 +8914,20 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      EXECVE_MAX_TOTAL_BYTES=256 KiB aggregate.  signal::on_exec is
 ##      called on success to clear caught handlers (POSIX).
 ##      sigreturn / rt_sigreturn still need a real handler.
-##   3. FILE-BACKED MMAP.  `mmap(MAP_PRIVATE | MAP_FILE)` returns
-##      -ENOSYS today.  Anonymous mmap works.  File-backed needs the
-##      fd table first (item 1).
-##   4. REAL CSPRNG.  `getrandom` uses xorshift64 seeded from rdtsc.
-##      This is sufficient for the Linux ABI semantic (it returns
-##      bytes that look random to a stub caller) but is NOT
-##      cryptographically secure.  When a kernel CSPRNG exists, swap
-##      it in.
+##   3. FILE-BACKED MMAP — RESOLVED (verified 2026-06-20).  This note
+##      predated the implementation.  sys_mmap (linux.rs ~5850) routes any
+##      mapping without MAP_ANONYMOUS through the file-backed path: a
+##      demand-paged, 4 KiB-granular VMA whose faults are served by
+##      pcb::try_resolve_fault (file read + tail zero-fill past EOF),
+##      including the MAP_FIXED split case used by ld.so to load shared
+##      objects.  End-to-end boot self-test: linux_file_mmap /
+##      file-backed mmap self-test (linux.rs ~46327), "OK".
+##   4. REAL CSPRNG — RESOLVED (verified 2026-06-20).  This note predated
+##      the kernel CSPRNG.  kernel/src/rng.rs is a full ChaCha20 CSPRNG
+##      (RDRAND/RDSEED + TSC/HPET/interrupt-timing entropy, 1 MiB re-key
+##      for forward secrecy, self_test()).  sys_getrandom (linux.rs
+##      ~44813) fills via crate::rng::fill — no xorshift anywhere on the
+##      getrandom path.
 ##   5. SIGACTION SA_MASK / SA_FLAGS — SUBSTANTIALLY DONE (verified
 ##      2026-06-18).  The full `struct sigaction` is parsed and stored
 ##      per-process/per-signal (linux_sigaction_table) and consumed at

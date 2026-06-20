@@ -8842,15 +8842,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##       (iii) Console reads collapse any byte-count to a single
 ##             keystroke (one-char read).  Multi-byte reads will need a
 ##             line-buffered TTY abstraction.
-##       (iv)  pipe(2) and pipe2(2) DONE.  socket family / poll / epoll
-##             / eventfd are still -ENOSYS in dispatch_linux.  Sockets
-##             require a kernel-side socket layer (the existing
-##             userspace TCP/IP stack would need a bridge).  poll/epoll
-##             require a HandleKind-aware readiness probe across
-##             Console / File / Pipe.
-##       (v)   openat() only accepts AT_FDCWD; directory file
-##             descriptors (the dirfd argument) require a kernel-side
-##             open-dir handle, which the VFS does not currently expose.
+##       (iv)  RESOLVED (verified 2026-06-20) — pipe/pipe2, the socket
+##             family (socket/connect/accept/sendto/recvfrom/...),
+##             poll/ppoll, select/pselect6, epoll_create[1]/ctl/wait/pwait,
+##             and eventfd/eventfd2 are all dispatched now (grep confirms
+##             every one is in dispatch_linux).  The HandleKind-aware
+##             readiness probe and the kernel socket layer were built; this
+##             note predated them.
+##       (v)   RESOLVED (verified 2026-06-20) — openat() and the whole *at
+##             family accept a real directory dirfd, not just AT_FDCWD.
+##             resolve_at_path()/sys_openat resolve the dirfd to its VFS
+##             path and append the relative path (absolute paths ignore
+##             dirfd per POSIX).  Fidelity gap (minor, documented on
+##             AT_FDCWD): resolution is path-reconstruction, not true inode
+##             anchoring, so a dir renamed between open and the *at call
+##             resolves against the new name.
 ##   2. FRAME-MODIFYING PATHS: fork / vfork DONE (route through the
 ##      same fork::fork_process the native ABI uses).  clone DONE for
 ##      both the SIGCHLD-only "fork-equivalent" case AND the

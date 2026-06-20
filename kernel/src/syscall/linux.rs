@@ -62,7 +62,7 @@
 //! | 16       | ioctl             | FIOCLEX / FIONCLEX (set/clear      |
 //! |          |                   | FD_CLOEXEC), FIONBIO (toggle       |
 //! |          |                   | O_NONBLOCK); everything else ENOTTY|
-//! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
+//! | 257      | openat            | AT_FDCWD or real dirfd → VFS open  |
 //! | 292      | dup3              | via per-process Linux fd table     |
 //! | 293      | pipe2             | pipe with O_CLOEXEC / O_NONBLOCK   |
 //! | 35       | nanosleep         | reads timespec, calls SYS_SLEEP    |
@@ -912,10 +912,13 @@ pub mod fcntl_cmd {
 }
 
 /// Linux `AT_FDCWD` — special "current working directory" base fd for
-/// the `*at` family of syscalls.  Our VFS resolves paths against the
-/// caller's cwd unconditionally, so AT_FDCWD is the only `dirfd` value
-/// we accept; any other `dirfd` returns -ENOSYS until we support
-/// directory file descriptors.
+/// the `*at` family of syscalls.  `AT_FDCWD` resolves a relative path
+/// against the caller's cwd; a real directory `dirfd` is also supported
+/// (see [`resolve_at_path`] / [`sys_openat`]): the dirfd is resolved to
+/// its VFS path and the relative path is appended.  An absolute path
+/// ignores `dirfd` per POSIX.  Fidelity note: dirfd resolution is
+/// path-reconstruction, not true inode anchoring, so a directory renamed
+/// between the `open` and the `*at` call resolves against the new name.
 pub const AT_FDCWD: i32 = -100;
 
 // ---------------------------------------------------------------------------

@@ -2028,6 +2028,22 @@ pub const SYS_FS_UMOUNT: u64 = 653;
 /// failure (`NotSupported` for an unsupported fstype).
 pub const SYS_FS_FORMAT: u64 = 654;
 
+/// Check (and optionally repair) a filesystem on a block device (fsck).
+///
+/// `arg0`: pointer to block-device name string (e.g. "vdb"; a leading
+///         "/dev/" is accepted and stripped by the userspace tool).
+/// `arg1`: device name length (bytes).
+/// `arg2`: flags bitfield — bit 0 (`1`) requests repair mode (write corrected
+///         metadata); all other bits are reserved and must be 0.
+///
+/// Root-only (requires fsck authority). Currently only the FAT family is
+/// supported (via the in-kernel `fsck_fat` checker). Returns, as a
+/// non-negative value, the number of *outstanding* errors — problems detected
+/// in check-only mode, or problems remaining after repair in repair mode
+/// (0 = clean). A negative return is a `KernelError` (e.g. device not found, or
+/// the volume is not a recognised FAT filesystem).
+pub const SYS_FS_CHECK: u64 = 655;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

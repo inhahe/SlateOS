@@ -6,11 +6,11 @@
 //!
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
 //!
-//! NOTE: `format` is wired to `SYS_FS_FORMAT` (654) for the FAT family. The
-//! remaining write/query operations (verify, repair, trim, statfs) still lack a
-//! kernel ABI and honestly report `ENOSYS` until the corresponding syscalls
-//! (fsck, discard, statfs) land. All read-only listing/info/usage logic works
-//! via sysfs/procfs.
+//! NOTE: `format` is wired to `SYS_FS_FORMAT` (654) and `verify`/`repair` to
+//! `SYS_FS_CHECK` (655), both for the FAT family. The remaining operations
+//! (trim, statfs) still lack a kernel ABI and honestly report `ENOSYS` until the
+//! corresponding syscalls (discard, statfs) land. All read-only
+//! listing/info/usage logic works via sysfs/procfs.
 //!
 //! # Usage
 //!
@@ -45,11 +45,22 @@ use std::time::Instant;
 /// optional label ptr+len (0/0 = none). Root-only and destructive.
 const SYS_FS_FORMAT: u64 = 654;
 
+/// `SYS_FS_CHECK` — check/repair a filesystem on a block device (fsck).
+///
+/// ABI: arg0/arg1 = device-name ptr+len (registry name, not a `/dev/` path),
+/// arg2 = flags (bit 0 = repair). Returns the number of outstanding errors
+/// (problems found in check-only mode, or remaining after repair), or a
+/// negative `KernelError`. FAT family only so far. Root-only.
+const SYS_FS_CHECK: u64 = 655;
+
+/// Repair-mode flag bit for `SYS_FS_CHECK` (arg2 bit 0).
+const FS_CHECK_REPAIR: u64 = 1 << 0;
+
 /// Result code for fs-admin operations that still have no syscall.
 ///
-/// `format` is now wired to `SYS_FS_FORMAT` (654), but verify/repair/trim/statfs
-/// still lack a kernel ABI; those ops resolve to this honest `ENOSYS` until the
-/// corresponding syscalls (fsck, discard, statfs) land.
+/// `format` is wired to `SYS_FS_FORMAT` (654) and `verify`/`repair` to
+/// `SYS_FS_CHECK` (655), but trim/statfs still lack a kernel ABI; those ops
+/// resolve to this honest `ENOSYS` until the corresponding syscalls land.
 const ENOSYS: i64 = -38;
 
 /// Raw 6-argument native syscall. Returns the kernel's `i64` result (negative
@@ -901,9 +912,34 @@ fn cmd_verify(device_name: &str) {
     }
     println!("  Mode: read-only check");
 
-    // No fs-verify syscall exists yet (see ENOSYS note); fail honestly.
-    eprintln!("Verification FAILED: {}", syscall_error_msg(ENOSYS));
-    process::exit(1);
+    // Check-only run via SYS_FS_CHECK (FAT family only in the kernel so far).
+    let dev_bytes = dev_name.as_bytes();
+    let ret = syscall6(
+        SYS_FS_CHECK,
+        dev_bytes.as_ptr() as u64,
+        dev_bytes.len() as u64,
+        0, // flags: check-only.
+        0,
+        0,
+        0,
+    );
+
+    if ret < 0 {
+        eprintln!("Verification FAILED: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    if ret == 0 {
+        println!("  Result: clean (no errors found).");
+    } else {
+        println!(
+            "  Result: {} error{} found. Run 'diskutil repair /dev/{}' to fix.",
+            ret,
+            if ret == 1 { "" } else { "s" },
+            dev_name
+        );
+        process::exit(1);
+    }
 }
 
 // ============================================================================
@@ -929,10 +965,33 @@ fn cmd_repair(device_name: &str) {
 
     println!("Repairing filesystem on /dev/{}...", dev_name);
 
-    // No fs-repair syscall exists yet (see ENOSYS note); fail honestly rather
-    // than claim a repair that never happened.
-    eprintln!("Repair FAILED: {}", syscall_error_msg(ENOSYS));
-    process::exit(1);
+    // Repair run via SYS_FS_CHECK with the repair bit set (FAT family only).
+    let dev_bytes = dev_name.as_bytes();
+    let ret = syscall6(
+        SYS_FS_CHECK,
+        dev_bytes.as_ptr() as u64,
+        dev_bytes.len() as u64,
+        FS_CHECK_REPAIR,
+        0,
+        0,
+        0,
+    );
+
+    if ret < 0 {
+        eprintln!("Repair FAILED: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    if ret == 0 {
+        println!("  Result: filesystem is clean (all errors repaired).");
+    } else {
+        println!(
+            "  Result: {} error{} could not be repaired.",
+            ret,
+            if ret == 1 { "" } else { "s" }
+        );
+        process::exit(1);
+    }
 }
 
 // ============================================================================

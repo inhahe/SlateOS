@@ -2466,12 +2466,27 @@ client-side number correction:
   that `-F`/`-s`/`-S` are advisory (the kernel backend auto-selects FAT type and
   cluster geometry from device size). Host tests: `cargo test -p mkfs --target
   x86_64-pc-windows-gnu` (35 pass).
-- **fsck/diskutil verify+repair+trim, statfs**: still no
-  `FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`/`STATFS` syscall. `fs::fat::fsck_fat` exists
-  in-kernel but is not yet exposed via a syscall; a future `SYS_FS_CHECK` would
-  wire `fsck`/`diskutil verify`/`diskutil repair`. diskutil's verify/repair/trim
-  and the statfs query remain honest ENOSYS stubs. `fsck`'s old `652`/`653` were
-  *unassigned* (not aliasing a real syscall) — left as-is for now.
+- **fsck/diskutil verify+repair: RESOLVED 2026-06-20** — added a real
+  `SYS_FS_CHECK=655` (`kernel/src/syscall/number.rs`), dispatched in
+  `dispatch.rs`, handled in `handlers.rs` (`sys_fs_check`, root-gated via
+  `require_fsck_authority`). ABI: arg0/arg1 = device-name ptr+len (the registry
+  name, e.g. `vda`/`sda`, NOT the `/dev/` path), arg2 = flags (bit0 = repair).
+  Returns the count of *outstanding* errors (after repair if requested) or a
+  negative `KernelError`. FAT only — delegates to the existing in-kernel
+  `fs::fat::fsck_fat(device, repair)`. Kernel boot self-test:
+  `fs::fat::fsck_self_test()` — registers a 4 MiB `RamBlockDevice` ("fscktest0"),
+  `mkfs_fat`, then `fsck_fat(dev, false)` (expects 0 errors) and
+  `fsck_fat(dev, true)` (expects 0 outstanding after repair), teardown via
+  `cache::invalidate` + `blkdev::unregister`; runs unconditionally on any root
+  (verified "[fat] fsck self-test PASSED" in serial). Both `userspace/fsck`
+  (rewired from the **colliding** `652`/`653` — which I had just reassigned to
+  `SYS_FS_MOUNT`/`SYS_FS_UMOUNT`, so `fsck` was invoking mount/umount with garbage
+  args; now uses `655` + `FS_CHECK_REPAIR=1<<0`) and `userspace/diskutil`
+  (`verify` = `fs_check(false)`, `repair` = `fs_check(true)`) now issue the real
+  syscall. Host tests: `fsck` 39 pass, `mkfs` 35 pass, `diskutil` 0.
+- **diskutil trim, statfs**: still no `FS_TRIM`/`STATFS` syscall. diskutil's
+  `trim` and the statfs query remain honest ENOSYS stubs (trim needs a discard
+  ABI; statfs needs a real free/used-block query).
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
   real process-credential + filesystem-root ABI. **Already neutered** — `chroot`
   carries ENOSYS stubs and a comment about the earlier fake syscall numbers.
@@ -2597,10 +2612,13 @@ while formatting nothing. Fix:
   round-trip and goes straight to its existing sysfs-based estimate. The
   exact-usage formatting is retained, ready to wire once a real statfs ABI lands.
   Builds + clippy clean.
-- **`fsck`** left as-is: its `652`/`653` are *unassigned*, so the kernel already
-  returns a clean `ENOSYS` (no real-syscall aliasing) — benign. Neutering it
-  would only cascade `build_flags`/`FSCK_FLAG_*` into dead code for no safety
-  gain; revisit when the fs-admin ABI lands.
+- **`fsck`** left as-is at the time: its `652`/`653` were *unassigned*, so the
+  kernel returned a clean `ENOSYS` (no real-syscall aliasing) — benign **then**.
+  **SUPERSEDED 2026-06-20** — when `SYS_FS_MOUNT`/`SYS_FS_UMOUNT` were assigned to
+  `652`/`653`, `fsck`'s stale numbers started aliasing the mount handlers (a real
+  collision I introduced), and the fs-admin ABI now exists. `fsck` was rewired to
+  the real `SYS_FS_CHECK=655` — see the "fsck/diskutil verify+repair: RESOLVED
+  2026-06-20" bullet above.
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

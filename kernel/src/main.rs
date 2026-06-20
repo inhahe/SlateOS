@@ -1231,6 +1231,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::fat::format_self_test() {
         serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);
     }
+    // fsck self-test (exercises the SYS_FS_CHECK backend on a RAM disk).
+    if let Err(e) = fs::fat::fsck_self_test() {
+        serial_println!("WARNING: FAT fsck self-test failed: {:?}", e);
+    }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS

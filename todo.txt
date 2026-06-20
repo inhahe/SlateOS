@@ -9608,6 +9608,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          and statfs have no syscall yet; fs::fat::fsck_fat exists in-kernel but
 ##          unexposed — a future SYS_FS_CHECK would wire them.
 ##
+##      Increment K (fsck/verify+repair native ABI — TD18 fsck/diskutil sub-item):
+##          DONE.  Added SYS_FS_CHECK=655 (kernel/src/syscall/number.rs,
+##          doc-commented; registered in dispatch.rs import+table; handler
+##          sys_fs_check in handlers.rs).  ABI: arg0/arg1 = device-name ptr+len
+##          (the BLOCK-DEVICE REGISTRY name e.g. "vda"/"sda", NOT a /dev/ path),
+##          arg2 = flags (bit0 = repair).  Returns the count of OUTSTANDING errors
+##          (report.errors after repair, i.e. errors.saturating_sub(repaired) when
+##          repair requested, else report.errors) or a negative KernelError.  FAT
+##          only — delegates to the existing fs::fat::fsck_fat(device, repair).
+##          Root-gated via require_fsck_authority() — which, along with
+##          require_format/mount/clock_authority, now delegates to a single new
+##          private require_root_authority() helper (collapsed 4 duplicated bodies
+##          per the "no band-aid accumulation" rule; named wrappers kept for
+##          doc/future per-capability split).  Boot self-test:
+##          fs::fat::fsck_self_test() runs unconditionally (called from main.rs
+##          after format_self_test()) — registers a 4 MiB RamBlockDevice
+##          "fscktest0", mkfs_fat(dev, Some("FSCKTEST")), fsck_fat(dev, false)
+##          asserts errors==0, fsck_fat(dev, true) asserts
+##          errors.saturating_sub(repaired)==0, teardown via invalidate+unregister;
+##          boot PASSED (serial: "[fat] fsck self-test PASSED").  Userspace:
+##          - userspace/fsck REWIRED from the COLLIDING SYS_FS_VERIFY=652 /
+##            SYS_FS_REPAIR=653 (those numbers had just been reassigned to
+##            SYS_FS_MOUNT/SYS_FS_UMOUNT in Increment-J-adjacent mount work, so fsck
+##            was invoking mount/umount with garbage args — a real bug I introduced).
+##            Now uses fs_check(dev_name, repair) inline-asm helper +
+##            FS_CHECK_REPAIR=1<<0; removed syscall3/build_flags/FSCK_FLAG_*; added
+##            wants_repair(opts) and device_registry_name() (strips /dev/) helpers;
+##            errno_msg -> native codes.  cargo test -p fsck -> 39 pass.
+##          - userspace/diskutil `verify` = fs_check(false), `repair` =
+##            fs_check(true) (FS_CHECK_REPAIR); trim/statfs still honest ENOSYS.
+##          Both build for x86_64-slateos and pass clippy.  RESIDUAL (still TD18):
+##          diskutil trim (needs discard ABI) + statfs (needs free/used-block
+##          query) have no syscall yet.
+##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
 ##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;

@@ -134,6 +134,37 @@ pub(crate) fn require_cap_type(
     }
 }
 
+/// Shared root-authority predicate for the privileged-syscall gates below.
+///
+/// All of our `CAP_SYS_*`-class authorities (set the clock, mount/unmount,
+/// format a device, run fsck) reduce to the same check on our current
+/// user/group model: the caller must be root (uid 0), with kernel/bare tasks
+/// (no owning process, or PID 0) bypassing. The distinct named wrappers
+/// (`require_clock_authority`, `require_mount_authority`, …) exist for doc
+/// clarity and so individual authorities can be split off later (e.g. a storage
+/// daemon granted format-but-not-mount rights); they all funnel through here so
+/// the actual root check lives in exactly one place.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process exists and is not root.
+fn require_root_authority() -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    match crate::proc::pcb::get_credentials(pid) {
+        Some(creds) if creds.is_root() => Ok(()),
+        // A live, non-root process: deny.
+        Some(_) => Err(KernelError::PermissionDenied),
+        // No credentials record (process exited out from under us): fail closed.
+        None => Err(KernelError::PermissionDenied),
+    }
+}
+
 /// Check that the calling process is privileged enough to set the system
 /// wall clock (`SYS_CLOCK_SETTIME` / `SYS_CLOCK_ADJTIME`).
 ///
@@ -154,22 +185,7 @@ pub(crate) fn require_cap_type(
 ///
 /// - `PermissionDenied` — the calling process is not root.
 fn require_clock_authority() -> Result<(), KernelError> {
-    let pid = match caller_pid() {
-        Some(pid) => pid,
-        None => return Ok(()), // Bare kernel task — bypass.
-    };
-    if pid == 0 {
-        return Ok(()); // Kernel process — implicit authority.
-    }
-    match crate::proc::pcb::get_credentials(pid) {
-        // Only root may set the system clock.
-        Some(creds) if creds.is_root() => Ok(()),
-        // A live, non-root process: deny.
-        Some(_) => Err(KernelError::PermissionDenied),
-        // No credentials record (e.g. the process exited out from under us):
-        // deny rather than fail open.
-        None => Err(KernelError::PermissionDenied),
-    }
+    require_root_authority()
 }
 
 /// Check that the calling process is privileged enough to mount or unmount
@@ -187,21 +203,7 @@ fn require_clock_authority() -> Result<(), KernelError> {
 ///
 /// - `PermissionDenied` — the calling process is not root.
 fn require_mount_authority() -> Result<(), KernelError> {
-    let pid = match caller_pid() {
-        Some(pid) => pid,
-        None => return Ok(()), // Bare kernel task — bypass.
-    };
-    if pid == 0 {
-        return Ok(()); // Kernel process — implicit authority.
-    }
-    match crate::proc::pcb::get_credentials(pid) {
-        // Only root may change the mount namespace.
-        Some(creds) if creds.is_root() => Ok(()),
-        // A live, non-root process: deny.
-        Some(_) => Err(KernelError::PermissionDenied),
-        // No credentials record (process exited out from under us): fail closed.
-        None => Err(KernelError::PermissionDenied),
-    }
+    require_root_authority()
 }
 
 /// Check that the calling process is privileged enough to format a block
@@ -220,18 +222,25 @@ fn require_mount_authority() -> Result<(), KernelError> {
 ///
 /// - `PermissionDenied` — the calling process is not root.
 fn require_format_authority() -> Result<(), KernelError> {
-    let pid = match caller_pid() {
-        Some(pid) => pid,
-        None => return Ok(()), // Bare kernel task — bypass.
-    };
-    if pid == 0 {
-        return Ok(()); // Kernel process — implicit authority.
-    }
-    match crate::proc::pcb::get_credentials(pid) {
-        Some(creds) if creds.is_root() => Ok(()),
-        Some(_) => Err(KernelError::PermissionDenied),
-        None => Err(KernelError::PermissionDenied),
-    }
+    require_root_authority()
+}
+
+/// Check that the calling process is privileged enough to check/repair a
+/// filesystem on a block device (`SYS_FS_CHECK`).
+///
+/// fsck reads the raw block device and, in repair mode, writes corrected FAT
+/// tables and directory entries — both `CAP_SYS_ADMIN`-class operations that
+/// map to root (uid 0) on our user/group model.  Kept distinct from
+/// [`require_format_authority`] so a future storage daemon could be granted
+/// check-but-not-format rights.
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_fsck_authority() -> Result<(), KernelError> {
+    require_root_authority()
 }
 
 // ---------------------------------------------------------------------------
@@ -6079,6 +6088,57 @@ pub fn sys_fs_format(args: &SyscallArgs) -> SyscallResult {
 
     match result {
         Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_CHECK` — check (and optionally repair) a filesystem on a block
+/// device (fsck).
+///
+/// ABI: `arg0`/`arg1` = device-name ptr+len (the block-device registry name,
+/// e.g. "vda" — **not** a `/dev/` path); `arg2` = flags, where bit 0 requests
+/// repair mode (write corrected metadata) and all other bits are reserved.
+///
+/// Root-only.  Currently only the FAT family is supported (via the in-kernel
+/// `fsck_fat` checker); other on-disk formats fail when the FAT superblock
+/// cannot be parsed.
+///
+/// Returns (as a non-negative success value) the number of *outstanding*
+/// errors: in check-only mode the count of problems detected; in repair mode
+/// the count that remain *after* repair (0 = fully clean/repaired).  A negative
+/// return is a `KernelError` (e.g. the device does not exist, or the volume is
+/// not a recognised FAT filesystem).
+pub fn sys_fs_check(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_fsck_authority() {
+        return SyscallResult::err(e);
+    }
+
+    // Device name is mandatory.
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let mut dev_buf = [0u8; 64];
+    let device = match read_user_str(args.arg0, args.arg1 as usize, 64, &mut dev_buf) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let repair = (args.arg2 & 1) != 0;
+
+    match crate::fs::fat::fsck_fat(device, repair) {
+        Ok(report) => {
+            // In repair mode, report.errors is the total found and
+            // report.repaired is how many were fixed; the outstanding count is
+            // the difference.  In check-only mode nothing is repaired, so the
+            // outstanding count is simply the number found.
+            let outstanding = if repair {
+                report.errors.saturating_sub(report.repaired)
+            } else {
+                report.errors
+            };
+            SyscallResult::ok(i64::from(outstanding))
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

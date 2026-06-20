@@ -1,7 +1,9 @@
 //! Slate OS Filesystem Check and Repair Utility
 //!
 //! Traditional `fsck` front-end that delegates to the kernel's filesystem
-//! verification and repair syscalls (`SYS_FS_VERIFY` / `SYS_FS_REPAIR`).
+//! check/repair syscall (`SYS_FS_CHECK`, 655 — a check-only pass when the
+//! repair bit is clear, a repair pass when it is set). Only the FAT family has
+//! an in-kernel checker so far.
 //!
 //! Supports check-only, auto-repair, forced-yes, progress display, JSON
 //! output, and batch checking via `/etc/fstab`.  The executable can also be
@@ -49,64 +51,66 @@ const EXIT_USAGE: i32 = 8;
 // Syscall interface (fs zone, numbers 600-799)
 // ============================================================================
 
-/// Check filesystem integrity.
-/// arg1 = path_ptr, arg2 = path_len, arg3 = flags.
-/// Returns 0 if clean, positive = error count, negative = errno.
-const SYS_FS_VERIFY: u64 = 652;
-
-/// Repair filesystem.
-/// arg1 = path_ptr, arg2 = path_len, arg3 = flags.
-/// Returns 0 if clean after repair, positive = remaining errors, negative = errno.
-const SYS_FS_REPAIR: u64 = 653;
-
-// Verify / repair flag bits.
-const FSCK_FLAG_FORCE: u64 = 1 << 0;
-const FSCK_FLAG_AUTO_REPAIR: u64 = 1 << 1;
-const FSCK_FLAG_YES_ALL: u64 = 1 << 2;
-const FSCK_FLAG_NO_MODIFY: u64 = 1 << 3;
-const FSCK_FLAG_VERBOSE: u64 = 1 << 4;
-const FSCK_FLAG_PROGRESS: u64 = 1 << 5;
-
-/// Invoke a raw syscall with three arguments.
+/// Check (and optionally repair) a filesystem on a block device (fsck).
 ///
-/// The kernel ABI places arguments in rdi, rsi, rdx, r10, r8, and the
-/// syscall number in rax.  Only rdi/rsi/rdx are used here.
+/// ABI: arg0/arg1 = device-name ptr+len (the block-device registry name, e.g.
+/// "vda" — the tool strips any "/dev/" prefix); arg2 = flags, where bit 0
+/// requests repair mode.  Returns the number of *outstanding* errors (problems
+/// detected in check-only mode, or remaining after repair), or a negative
+/// `KernelError` code.
+const SYS_FS_CHECK: u64 = 655;
+
+/// Repair-mode flag bit for `SYS_FS_CHECK` (arg2 bit 0).
+const FS_CHECK_REPAIR: u64 = 1 << 0;
+
+/// Invoke `SYS_FS_CHECK`.
+///
+/// `dev_name` is the block-device registry name (no "/dev/" prefix); `repair`
+/// selects repair mode.  Returns the kernel's `i64` result.
 #[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+fn fs_check(dev_name: &str, repair: bool) -> i64 {
+    let bytes = dev_name.as_bytes();
+    let flags = if repair { FS_CHECK_REPAIR } else { 0 };
     let ret: i64;
-    // SAFETY: caller guarantees a1 points to a valid buffer of length a2,
-    // and a3 contains valid flag bits.  The kernel validates everything and
-    // returns a negative errno on failure.
+    // SAFETY: register-only syscall; the kernel copies the device name from the
+    // (ptr, len) pair we pass and validates it. All clobbers are declared.
     unsafe {
         core::arch::asm!(
             "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
+            in("rax") SYS_FS_CHECK,
+            in("rdi") bytes.as_ptr() as u64,
+            in("rsi") bytes.len() as u64,
+            in("rdx") flags,
+            lateout("rax") ret,
             lateout("rcx") _,
-            lateout("r10") _,
             lateout("r11") _,
-            lateout("r8") _,
             options(nostack),
         );
     }
     ret
 }
 
-/// Human-readable string for a negative errno returned by a syscall.
+/// Host-build fallback so the tool compiles and unit-tests on the dev machine.
+#[cfg(not(target_arch = "x86_64"))]
+fn fs_check(_dev_name: &str, _repair: bool) -> i64 {
+    -2 // NotSupported on non-target hosts.
+}
+
+/// Human-readable string for a negative `KernelError` code returned by
+/// `SYS_FS_CHECK`.
 fn errno_msg(code: i64) -> &'static str {
     match code {
-        -1 => "operation not permitted",
-        -2 => "no such file or directory",
-        -5 => "I/O error",
-        -12 => "out of memory",
+        -2 => "operation not supported",
+        -3 => "invalid argument",
+        -400 => "permission denied — must be root",
+        -500 => "no such device",
+        -509 => "read-only device",
+        -601 => "no such device",
+        -602 => "device busy",
+        -1 => "internal kernel error",
+        // Legacy POSIX-errno fallbacks (host-build path uses -2 via NotSupported).
         -13 => "permission denied",
-        -16 => "device busy",
-        -19 => "no such device",
         -22 => "invalid argument",
-        -28 => "no space left on device",
-        -30 => "read-only filesystem",
         -38 => "function not implemented",
         _ => "unknown error",
     }
@@ -478,28 +482,14 @@ struct CheckResult {
     syscall_error: Option<String>,
 }
 
-/// Build the bitwise flags word from parsed options.
-fn build_flags(opts: &Options) -> u64 {
-    let mut flags: u64 = 0;
-    if opts.force {
-        flags |= FSCK_FLAG_FORCE;
-    }
-    if opts.auto_repair {
-        flags |= FSCK_FLAG_AUTO_REPAIR;
-    }
-    if opts.yes_all {
-        flags |= FSCK_FLAG_YES_ALL;
-    }
-    if opts.no_modify {
-        flags |= FSCK_FLAG_NO_MODIFY;
-    }
-    if opts.verbose {
-        flags |= FSCK_FLAG_VERBOSE;
-    }
-    if opts.progress {
-        flags |= FSCK_FLAG_PROGRESS;
-    }
-    flags
+/// Whether the parsed options request a repair (vs. a check-only run).
+///
+/// `SYS_FS_CHECK` only distinguishes check-only from repair; the finer-grained
+/// fsck options (`-y`/`-a`/`-f`/…) still shape the tool's prompting and output,
+/// but only the repair decision crosses the syscall boundary.  `-n` (no-modify)
+/// forces check-only regardless of the repair flags.
+fn wants_repair(opts: &Options) -> bool {
+    (opts.auto_repair || opts.yes_all) && !opts.no_modify
 }
 
 /// Normalise a device path: ensure it starts with "/dev/" unless it already
@@ -510,6 +500,12 @@ fn normalise_device(device: &str) -> String {
     } else {
         format!("/dev/{device}")
     }
+}
+
+/// Strip a leading "/dev/" so the bare block-device registry name can be passed
+/// to `SYS_FS_CHECK` (which keys on the registry name, not a path).
+fn device_registry_name(dev_path: &str) -> &str {
+    dev_path.strip_prefix("/dev/").unwrap_or(dev_path)
 }
 
 /// Check (and optionally repair) a single device.
@@ -551,20 +547,10 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
         show_progress(&dev_display);
     }
 
-    let flags = build_flags(opts);
+    let dev_name = device_registry_name(&dev_path);
 
-    // ---- Phase 1: verify ----
-    let path_bytes = dev_path.as_bytes();
-    let verify_ret = unsafe {
-        // SAFETY: path_bytes points to a valid byte slice whose length is
-        // passed in a2.  The kernel copies from userspace and validates.
-        syscall3(
-            SYS_FS_VERIFY,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            flags,
-        )
-    };
+    // ---- Phase 1: verify (check-only) ----
+    let verify_ret = fs_check(dev_name, false);
 
     if verify_ret < 0 {
         result.syscall_error = Some(format!(
@@ -602,22 +588,14 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
     }
 
     // ---- Phase 2: repair (if requested) ----
-    let will_repair = (opts.auto_repair || opts.yes_all) && !opts.no_modify;
+    let will_repair = wants_repair(opts);
 
     if will_repair {
         if !opts.json {
             println!("  Attempting repair on {dev_display}...");
         }
 
-        let repair_ret = unsafe {
-            // SAFETY: same pointer/length guarantees as the verify call.
-            syscall3(
-                SYS_FS_REPAIR,
-                path_bytes.as_ptr() as u64,
-                path_bytes.len() as u64,
-                flags,
-            )
-        };
+        let repair_ret = fs_check(dev_name, true);
 
         if repair_ret < 0 {
             result.syscall_error = Some(format!(
@@ -1025,71 +1003,46 @@ mod tests {
         assert_eq!(opts.devices.len(), 3);
     }
 
-    // --- build_flags --------------------------------------------------------
+    // --- wants_repair -------------------------------------------------------
 
     #[test]
-    fn build_flags_empty_options_is_zero() {
-        let opts = Options::new();
-        assert_eq!(build_flags(&opts), 0);
+    fn wants_repair_default_is_false() {
+        assert!(!wants_repair(&Options::new()));
     }
 
     #[test]
-    fn build_flags_each_bit_sets_correctly() {
-        let mut opts = Options::new();
-        opts.force = true;
-        assert_eq!(build_flags(&opts) & FSCK_FLAG_FORCE, FSCK_FLAG_FORCE);
-
+    fn wants_repair_auto_or_yes_enables() {
         let mut opts = Options::new();
         opts.auto_repair = true;
-        assert_eq!(
-            build_flags(&opts) & FSCK_FLAG_AUTO_REPAIR,
-            FSCK_FLAG_AUTO_REPAIR
-        );
+        assert!(wants_repair(&opts));
 
         let mut opts = Options::new();
         opts.yes_all = true;
-        assert_eq!(build_flags(&opts) & FSCK_FLAG_YES_ALL, FSCK_FLAG_YES_ALL);
-
-        let mut opts = Options::new();
-        opts.no_modify = true;
-        assert_eq!(
-            build_flags(&opts) & FSCK_FLAG_NO_MODIFY,
-            FSCK_FLAG_NO_MODIFY
-        );
-
-        let mut opts = Options::new();
-        opts.verbose = true;
-        assert_eq!(build_flags(&opts) & FSCK_FLAG_VERBOSE, FSCK_FLAG_VERBOSE);
-
-        let mut opts = Options::new();
-        opts.progress = true;
-        assert_eq!(build_flags(&opts) & FSCK_FLAG_PROGRESS, FSCK_FLAG_PROGRESS);
+        assert!(wants_repair(&opts));
     }
 
     #[test]
-    fn build_flags_all_set() {
-        let opts = Options {
-            fstype: None,
-            devices: vec![],
-            auto_repair: true,
-            yes_all: true,
-            no_modify: true,
-            force: true,
-            verbose: true,
-            progress: true,
-            check_all: false,
-            json: false,
-        };
-        let flags = build_flags(&opts);
-        assert_eq!(
-            flags,
-            FSCK_FLAG_FORCE
-                | FSCK_FLAG_AUTO_REPAIR
-                | FSCK_FLAG_YES_ALL
-                | FSCK_FLAG_NO_MODIFY
-                | FSCK_FLAG_VERBOSE
-                | FSCK_FLAG_PROGRESS
-        );
+    fn wants_repair_no_modify_forces_check_only() {
+        // -n overrides -a/-y: never write.
+        let mut opts = Options::new();
+        opts.auto_repair = true;
+        opts.yes_all = true;
+        opts.no_modify = true;
+        assert!(!wants_repair(&opts));
+    }
+
+    // --- device_registry_name -----------------------------------------------
+
+    #[test]
+    fn device_registry_name_strips_dev_prefix() {
+        assert_eq!(device_registry_name("/dev/vda"), "vda");
+        assert_eq!(device_registry_name("/dev/sda1"), "sda1");
+    }
+
+    #[test]
+    fn device_registry_name_passthrough_without_prefix() {
+        assert_eq!(device_registry_name("vda"), "vda");
+        assert_eq!(device_registry_name("/mnt/loop"), "/mnt/loop");
     }
 
     // --- normalise_device ---------------------------------------------------
@@ -1198,10 +1151,11 @@ mod tests {
 
     #[test]
     fn errno_msg_known_codes() {
-        assert_eq!(errno_msg(-2), "no such file or directory");
-        assert_eq!(errno_msg(-5), "I/O error");
-        assert_eq!(errno_msg(-13), "permission denied");
-        assert_eq!(errno_msg(-22), "invalid argument");
+        assert_eq!(errno_msg(-2), "operation not supported");
+        assert_eq!(errno_msg(-3), "invalid argument");
+        assert_eq!(errno_msg(-400), "permission denied — must be root");
+        assert_eq!(errno_msg(-601), "no such device");
+        assert_eq!(errno_msg(-602), "device busy");
     }
 
     #[test]

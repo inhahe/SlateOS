@@ -5508,6 +5508,63 @@ pub fn format_self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// Self-test for the `SYS_FS_CHECK` backend (`fsck_fat`).
+///
+/// Formats a fresh RAM disk, then runs fsck in check-only and repair modes and
+/// asserts a freshly-formatted volume reports zero outstanding errors.  Uses
+/// scratch device/mount names that nothing else touches and always cleans up.
+pub fn fsck_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[fat] Running fsck self-test...");
+
+    let dev = "fscktest0";
+
+    // Clean up any leftovers from a previous run.
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
+    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+
+    // Run the whole check inside a closure so teardown happens on every path.
+    let result = (|| -> KernelResult<()> {
+        mkfs_fat(dev, Some("FSCKTEST"))?;
+
+        // Check-only: a pristine volume must report zero errors.
+        let check = fsck_fat(dev, false)?;
+        if check.errors != 0 {
+            serial_println!(
+                "[fat]   FAIL: fresh volume reported {} error(s) in check mode",
+                check.errors
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[fat]   fsck check-only on fresh volume: 0 errors OK");
+
+        // Repair mode: still clean, nothing to repair.
+        let repaired = fsck_fat(dev, true)?;
+        let outstanding = repaired.errors.saturating_sub(repaired.repaired);
+        if outstanding != 0 {
+            serial_println!(
+                "[fat]   FAIL: {} error(s) remain after repair on fresh volume",
+                outstanding
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[fat]   fsck repair on fresh volume: 0 outstanding OK");
+        Ok(())
+    })();
+
+    // Tear down regardless of outcome.
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    result?;
+    serial_println!("[fat] fsck self-test PASSED");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // fsck — filesystem consistency check
 // ---------------------------------------------------------------------------

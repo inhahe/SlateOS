@@ -6,11 +6,11 @@
 //!
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
 //!
-//! NOTE: Slate OS has no filesystem-admin syscalls yet, so the write/query
-//! operations (format, verify, repair, trim, statfs) honestly report `ENOSYS`
-//! instead of issuing a syscall — see the `ENOSYS` note for why the earlier
-//! `650..=655` calls were wrong (650/651 are the unrelated SEEK_DATA/SEEK_HOLE).
-//! All read-only listing/info/usage logic works via sysfs/procfs.
+//! NOTE: `format` is wired to `SYS_FS_FORMAT` (654) for the FAT family. The
+//! remaining write/query operations (verify, repair, trim, statfs) still lack a
+//! kernel ABI and honestly report `ENOSYS` until the corresponding syscalls
+//! (fsck, discard, statfs) land. All read-only listing/info/usage logic works
+//! via sysfs/procfs.
 //!
 //! # Usage
 //!
@@ -38,24 +38,71 @@ use std::time::Instant;
 // Filesystem-admin operations
 // ============================================================================
 
-/// Result code for an unsupported filesystem-admin operation.
+/// `SYS_FS_FORMAT` — format a registered block device (FAT family only so far).
 ///
-/// Slate OS has no filesystem-admin syscalls (format/verify/repair/trim/statfs).
-/// The earlier implementation hand-rolled `syscall(650..=655, ...)`, but those
-/// numbers are **not** an fs-admin ABI: `650`/`651` are the unrelated
-/// `SYS_FS_SEEK_DATA`/`SYS_FS_SEEK_HOLE` (a format request thus handed a device
-/// *path pointer* to `seek_hole` as a *file descriptor*, yielding a misleading
-/// `EBADF`/`EINVAL` while formatting nothing), and `652..=655` are unassigned
-/// (so the kernel already bounced them with `ENOSYS`). Rather than issue a real
-/// but wrong syscall — or trip into the kernel only to bounce — every fs-admin
-/// op resolves to this honest `ENOSYS` until a real fs-admin ABI lands.
+/// ABI: arg0/arg1 = device-name ptr+len (the block-device registry name, e.g.
+/// "vda"/"sda" — NOT a `/dev/` path), arg2/arg3 = fstype ptr+len, arg4/arg5 =
+/// optional label ptr+len (0/0 = none). Root-only and destructive.
+const SYS_FS_FORMAT: u64 = 654;
+
+/// Result code for fs-admin operations that still have no syscall.
+///
+/// `format` is now wired to `SYS_FS_FORMAT` (654), but verify/repair/trim/statfs
+/// still lack a kernel ABI; those ops resolve to this honest `ENOSYS` until the
+/// corresponding syscalls (fsck, discard, statfs) land.
 const ENOSYS: i64 = -38;
 
+/// Raw 6-argument native syscall. Returns the kernel's `i64` result (negative
+/// values are `-KernelError` codes).
+///
+/// Register convention: rax = number; rdi/rsi/rdx/r10/r8/r9 = arg0..arg5.
+/// rcx/r11 are clobbered by `syscall`, so the 4th argument goes in r10.
+#[cfg(target_arch = "x86_64")]
+fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: register-only syscall; the kernel validates the pointers we pass.
+    // All clobbers (rax result, rcx, r11) are declared.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            in("r9") a6,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Host-build fallback so the tool compiles and unit-tests on the dev machine.
+#[cfg(not(target_arch = "x86_64"))]
+fn syscall6(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    -38 // ENOSYS on non-target hosts.
+}
+
 /// Translate a negative syscall return into a human-readable error.
+///
+/// Covers both the native `KernelError` codes that `SYS_FS_FORMAT` returns and
+/// the legacy POSIX-errno fallbacks used by the not-yet-wired ops.
 fn syscall_error_msg(ret: i64) -> String {
     match ret {
+        // Native KernelError codes (SYS_FS_FORMAT).
+        -2 => "operation not supported".to_string(),
+        -3 => "invalid argument".to_string(),
+        -400 => "permission denied — must be root".to_string(),
+        -500 => "no such device".to_string(),
+        -509 => "read-only device".to_string(),
+        -601 => "no such device".to_string(),
+        -602 => "device busy".to_string(),
+        // Legacy POSIX-errno fallbacks (ENOSYS path).
         -1 => "operation not permitted".to_string(),
-        -2 => "no such file or directory".to_string(),
         -5 => "I/O error".to_string(),
         -12 => "out of memory".to_string(),
         -13 => "permission denied".to_string(),
@@ -791,12 +838,40 @@ fn cmd_format(device_name: &str, fstype: &str) {
         process::exit(1);
     }
 
+    // The in-kernel mkfs backend only formats the FAT family so far.
+    let kernel_fstype = match fstype {
+        "fat32" | "vfat" => "vfat",
+        other => {
+            eprintln!(
+                "error: the kernel cannot format '{other}' yet — only the FAT \
+                 family (fat32/vfat) has an in-kernel mkfs backend"
+            );
+            process::exit(1);
+        }
+    };
+
     println!("Formatting /dev/{} as {}...", dev_name, fstype);
 
-    // No fs-format syscall exists yet (see ENOSYS note); fail honestly rather
-    // than issue a real but unrelated syscall.
-    eprintln!("error: format failed: {}", syscall_error_msg(ENOSYS));
-    process::exit(1);
+    // SYS_FS_FORMAT takes the block-device registry name (no /dev/ prefix), the
+    // fstype string, and no label (0/0).
+    let dev_bytes = dev_name.as_bytes();
+    let fstype_bytes = kernel_fstype.as_bytes();
+    let ret = syscall6(
+        SYS_FS_FORMAT,
+        dev_bytes.as_ptr() as u64,
+        dev_bytes.len() as u64,
+        fstype_bytes.as_ptr() as u64,
+        fstype_bytes.len() as u64,
+        0,
+        0,
+    );
+
+    if ret < 0 {
+        eprintln!("error: format failed: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    println!("Formatted /dev/{} as {} successfully.", dev_name, fstype);
 }
 
 // ============================================================================

@@ -2012,6 +2012,22 @@ pub const SYS_FS_MOUNT: u64 = 652;
 /// Returns: 0 on success, negative error code on failure.
 pub const SYS_FS_UMOUNT: u64 = 653;
 
+/// Format (create a fresh filesystem on) a block device.
+///
+/// `arg0`: pointer to block-device name string (e.g. "vdb"; a leading
+///         "/dev/" is accepted and stripped by the userspace tool).
+/// `arg1`: device name length (bytes).
+/// `arg2`: pointer to filesystem-type string (currently only the FAT family
+///         is supported: "vfat"/"fat"/"fat32"/"fat16"/"msdos").
+/// `arg3`: filesystem-type string length (bytes).
+/// `arg4`: pointer to optional volume-label string (may be null/empty).
+/// `arg5`: volume-label string length (bytes; 0 = no label).
+///
+/// Root-only (requires format authority). **Destructive** — all data on the
+/// target device is lost. Returns 0 on success, negative error code on
+/// failure (`NotSupported` for an unsupported fstype).
+pub const SYS_FS_FORMAT: u64 = 654;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

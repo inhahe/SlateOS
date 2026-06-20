@@ -9573,6 +9573,41 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          rewired to the real ABI or deleted (it duplicates mount); logged in
 ##          known-issues TD18 mount/umount sub-item.
 ##
+##      Increment J (mkfs/format native ABI — TD18 mkfs/diskutil sub-item):
+##          DONE.  Added SYS_FS_FORMAT=654 (kernel/src/syscall/number.rs,
+##          doc-commented; registered in dispatch.rs import+table; handler in
+##          handlers.rs).  ABI: arg0/arg1 = device-name ptr+len (the BLOCK-DEVICE
+##          REGISTRY name e.g. "vda"/"sda"/"nvme0n1", NOT a /dev/ path),
+##          arg2/arg3 = fstype ptr+len, arg4/arg5 = optional label ptr+len
+##          (0/0 = none).  sys_fs_format dispatches on the fstype string to the
+##          existing kernel fs::fat::mkfs_fat(device, label) for the FAT family
+##          (vfat|fat|fat32|fat16|msdos); all other fstypes -> NotSupported
+##          (ext4 mkfs not yet ported; tmpfs has no device to format).  Root-gated
+##          via a new require_format_authority() helper (mirrors
+##          require_mount_authority/require_clock_authority; creds.is_root();
+##          kernel/PID-0 bypass).  Reuses read_user_str() (its needless explicit
+##          lifetime was also elided per clippy).  New test infra in blkdev.rs:
+##          blkdev::unregister(name) + a RamBlockDevice (Vec-backed, impls
+##          BlockDevice; bounds via try_from/checked_mul/checked_add).  Boot
+##          self-test: fs::fat::format_self_test() runs unconditionally (called
+##          from main.rs right after mount_self_test()) — registers a 4 MiB
+##          RamBlockDevice "fmttest0" (-> mkfs auto-selects FAT16), runs
+##          mkfs_fat, mounts the formatted volume via FatFs::mount + Vfs::mount at
+##          /_fmt_selftest, write/read roundtrips HELLO.TXT, tears everything down
+##          (remove/unmount/invalidate/unregister) regardless of outcome; boot
+##          PASSED (serial: "[fat] mkfs/format self-test PASSED").  Userspace:
+##          both userspace/mkfs and userspace/diskutil `format` now issue the real
+##          syscall via a syscall6 inline-asm helper (FAT family only; unsupported
+##          fstypes -> honest "kernel cannot format X yet" error, not ENOSYS).
+##          mkfs warns that -F/-s/-S are advisory (kernel auto-selects FAT type +
+##          cluster geometry from device size).  syscall_error_msg in both tools
+##          updated to map native KernelError codes (-2/-3/-400/-500/-509/-601/
+##          -602) plus legacy errno fallbacks.  cargo test -p mkfs --target
+##          x86_64-pc-windows-gnu -> 35 pass; both build for x86_64-slateos and
+##          pass clippy.  RESIDUAL (still TD18): fsck/diskutil verify+repair+trim
+##          and statfs have no syscall yet; fs::fat::fsck_fat exists in-kernel but
+##          unexposed — a future SYS_FS_CHECK would wire them.
+##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
 ##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;

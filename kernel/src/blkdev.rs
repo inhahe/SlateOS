@@ -286,6 +286,23 @@ pub fn register(name: &str, device: Box<dyn BlockDevice>) {
     });
 }
 
+/// Remove a registered block device by name.
+///
+/// Returns `true` if a matching device was found and removed.  Intended for
+/// self-tests that register a temporary RAM-backed device and need to clean
+/// it up afterwards; production storage devices live for the lifetime of the
+/// system and are never unregistered.
+pub fn unregister(name: &str) -> bool {
+    let mut registry = REGISTRY.lock();
+    let before = registry.len();
+    registry.retain(|entry| entry.name != name);
+    let removed = registry.len() != before;
+    if removed {
+        crate::serial_println!("[blkdev] Unregistered device '{}'", name);
+    }
+    removed
+}
+
 /// Execute a closure with a named block device.
 ///
 /// Returns `None` if no device with that name is registered.
@@ -317,6 +334,95 @@ pub fn list_devices() -> Vec<BlockDeviceInfo> {
 /// snapshot.  Retained as a separate name for existing callers.
 pub fn list_devices_full() -> Vec<BlockDeviceInfo> {
     list_devices()
+}
+
+// ---------------------------------------------------------------------------
+// In-memory block device (for self-tests)
+// ---------------------------------------------------------------------------
+
+/// A RAM-backed block device whose contents live in a `Vec<u8>`.
+///
+/// This exists so disk-administration code paths (mkfs, fsck, partitioning)
+/// can be exercised in boot self-tests without a real, data-bearing device —
+/// formatting a real disk in a self-test would destroy user data.  A test
+/// constructs one, [`register`]s it under a scratch name, runs the operation
+/// under test, then [`unregister`]s it.
+pub struct RamBlockDevice {
+    /// Backing storage, exactly `sector_count * SECTOR_SIZE` bytes.
+    data: Vec<u8>,
+    /// Total capacity in sectors.
+    sector_count: u64,
+    /// Whether writes are rejected.
+    read_only: bool,
+}
+
+impl RamBlockDevice {
+    /// Create a zeroed RAM disk of `sector_count` 512-byte sectors.
+    ///
+    /// Returns `OutOfMemory`-style failure implicitly via allocation; the
+    /// caller picks a small size (a few MiB) for tests.
+    #[must_use]
+    pub fn new(sector_count: u64) -> Self {
+        let bytes = usize::try_from(sector_count)
+            .ok()
+            .and_then(|s| s.checked_mul(SECTOR_SIZE))
+            .unwrap_or(0);
+        Self {
+            data: alloc::vec![0u8; bytes],
+            sector_count,
+            read_only: false,
+        }
+    }
+
+    /// Byte offset of sector `lba`, or `None` if it lies outside the device.
+    fn sector_range(&self, lba: u64) -> Option<(usize, usize)> {
+        let start = usize::try_from(lba)
+            .ok()?
+            .checked_mul(SECTOR_SIZE)?;
+        let end = start.checked_add(SECTOR_SIZE)?;
+        if end > self.data.len() {
+            return None;
+        }
+        Some((start, end))
+    }
+}
+
+impl BlockDevice for RamBlockDevice {
+    fn info(&self) -> BlockDeviceInfo {
+        BlockDeviceInfo {
+            name: String::new(), // overridden by the registry on register().
+            sector_count: self.sector_count,
+            sector_size: SECTOR_SIZE as u32,
+            read_only: self.read_only,
+        }
+    }
+
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
+        let (start, end) = self
+            .sector_range(lba)
+            .ok_or(KernelError::InvalidArgument)?;
+        let src = self
+            .data
+            .get(start..end)
+            .ok_or(KernelError::InvalidArgument)?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
+        if self.read_only {
+            return Err(KernelError::ReadOnlyFilesystem);
+        }
+        let (start, end) = self
+            .sector_range(lba)
+            .ok_or(KernelError::InvalidArgument)?;
+        let dst = self
+            .data
+            .get_mut(start..end)
+            .ok_or(KernelError::InvalidArgument)?;
+        dst.copy_from_slice(buf);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

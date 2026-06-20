@@ -2,11 +2,10 @@
 //!
 //! Creates filesystems on disk devices or image files (ext4, FAT32, tmpfs).
 //!
-//! NOTE: Slate OS has no filesystem-format syscall yet. The format step
-//! (`do_format`) returns `ENOSYS` rather than issuing a syscall — see the note
-//! on `do_format` for why the earlier `SYS_FS_FORMAT=651` call was wrong (651
-//! is `SYS_FS_SEEK_HOLE`). All the device probing/validation/dry-run logic is
-//! real; only the final write is gated on the missing ABI.
+//! The format step (`do_format`) issues `SYS_FS_FORMAT` (654). The kernel's
+//! in-kernel mkfs backend currently formats the FAT family only; ext4 and
+//! tmpfs formatting return an honest "not supported" error until those
+//! backends are wired. All device probing/validation/dry-run logic is real.
 //!
 //! # Usage
 //!
@@ -46,24 +45,68 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-/// Filesystem type identifiers that a future format ABI would accept.
-const FS_TYPE_EXT4: u64 = 1;
-const FS_TYPE_FAT32: u64 = 2;
-const FS_TYPE_TMPFS: u64 = 3;
+/// `SYS_FS_FORMAT` — format a registered block device with a filesystem.
+///
+/// ABI: arg0/arg1 = device-name ptr+len (the block-device registry name, e.g.
+/// "vda"/"sda"/"nvme0n1" — NOT a `/dev/` path), arg2/arg3 = fstype ptr+len
+/// (only the FAT family is supported by the kernel backend so far),
+/// arg4/arg5 = optional volume-label ptr+len (0/0 = no label).  Root-only and
+/// destructive.
+const SYS_FS_FORMAT: u64 = 654;
+
+/// Raw 6-argument native syscall.  Returns the kernel's `i64` result (negative
+/// values are `-KernelError` codes).
+///
+/// Register convention: rax = number; rdi/rsi/rdx/r10/r8/r9 = arg0..arg5.
+/// rcx and r11 are clobbered by the `syscall` instruction itself, so the 4th
+/// argument goes in r10 (not rcx), matching the kernel's `SyscallFrame`.
+#[cfg(target_arch = "x86_64")]
+fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: a register-only syscall with no memory effects beyond the
+    // pointers we pass (which the kernel validates). All clobbers are declared.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            in("r9") a6,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Host-build fallback so the tool compiles and unit-tests on the dev machine.
+#[cfg(not(target_arch = "x86_64"))]
+fn syscall6(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    -38 // ENOSYS on non-target hosts.
+}
 
 /// Translate a negative syscall return into a human-readable error message.
+///
+/// Slate's native `KernelError` codes are distinct from POSIX errnos, so this
+/// maps the values that `SYS_FS_FORMAT` can actually return.
 fn syscall_error_msg(ret: i64) -> &'static str {
     match ret {
-        -1 => "operation not permitted (EPERM)",
-        -2 => "no such file or directory (ENOENT)",
-        -5 => "I/O error (EIO)",
-        -12 => "out of memory (ENOMEM)",
+        -2 => "operation not supported (NotSupported)",
+        -3 => "invalid argument (InvalidArgument)",
+        -400 => "permission denied — must be root (PermissionDenied)",
+        -500 => "no such device (NotFound)",
+        -509 => "read-only device (ReadOnlyFilesystem)",
+        -601 => "no such device (NoSuchDevice)",
+        -602 => "device busy (DeviceBusy)",
+        -1 => "internal kernel error (InternalError)",
+        // Legacy POSIX-errno fallbacks (host-build path uses -38).
         -13 => "permission denied (EACCES)",
-        -16 => "device or resource busy (EBUSY)",
-        -19 => "no such device (ENODEV)",
         -22 => "invalid argument (EINVAL)",
-        -28 => "no space left on device (ENOSPC)",
-        -30 => "read-only filesystem (EROFS)",
         -38 => "function not implemented (ENOSYS)",
         _ => "unknown error",
     }
@@ -330,12 +373,16 @@ fn normalize_fs_type(name: &str) -> String {
     }
 }
 
-/// Map a canonical filesystem type name to the kernel's numeric type id.
-fn fs_type_to_id(fs_type: &str) -> Option<u64> {
+/// Map a canonical mkfs filesystem type to the fstype string the kernel's
+/// `SYS_FS_FORMAT` backend understands, or `None` if the kernel cannot format
+/// that type yet.
+///
+/// Only the FAT family has an in-kernel mkfs backend so far.  ext4 formatting
+/// requires the (not-yet-ported) ext4 mkfs path, and tmpfs is a RAM-backed
+/// filesystem with nothing on a device to format.
+fn fs_type_to_kernel_fstype(fs_type: &str) -> Option<&'static str> {
     match fs_type {
-        "ext4" => Some(FS_TYPE_EXT4),
-        "fat32" => Some(FS_TYPE_FAT32),
-        "tmpfs" => Some(FS_TYPE_TMPFS),
+        "fat32" => Some("vfat"),
         _ => None,
     }
 }
@@ -1016,22 +1063,54 @@ fn check_bad_blocks(dev_path: &str, verbose: bool) {
 // Format execution
 // ============================================================================
 
-/// Create the filesystem on the device.
+/// Create the filesystem on the device by issuing `SYS_FS_FORMAT`.
 ///
-/// Slate OS has no filesystem-format syscall. The earlier implementation issued
-/// `syscall(651, path_ptr, path_len, fs_type)`, but `651` is `SYS_FS_SEEK_HOLE`
-/// — a real but unrelated syscall whose arg0 is an *fd*, not a path pointer. The
-/// call therefore handed a userspace pointer to `seek_hole` as a file
-/// descriptor, yielding a misleading `EBADF`/`EINVAL` instead of an honest
-/// "not implemented", while never formatting anything. Until a real fs-format
-/// ABI lands this returns `ENOSYS` without issuing any syscall, so `mkfs`
-/// honestly reports that it cannot create the filesystem.
-fn do_format(_dev_path: &str, _fs_type_id: u64) -> Result<(), String> {
-    // -38 == ENOSYS. No fs-format syscall exists yet (see note above).
-    Err(format!(
-        "filesystem creation failed (errno 38): {}",
-        syscall_error_msg(-38)
-    ))
+/// `dev_name` is the block-device registry name (e.g. "vda"/"sda"), `fs_type`
+/// is the canonical mkfs type ("fat32"/"ext4"/"tmpfs"), and `label` is the
+/// optional volume label (empty = none).
+///
+/// The kernel backend only formats the FAT family today; for unsupported types
+/// this returns an honest error rather than pretending to succeed.
+fn do_format(dev_name: &str, fs_type: &str, label: &str) -> Result<(), String> {
+    let kernel_fstype = match fs_type_to_kernel_fstype(fs_type) {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "the kernel cannot format '{fs_type}' yet — only the FAT family \
+                 (fat32/vfat) has an in-kernel mkfs backend",
+            ));
+        }
+    };
+
+    let dev_bytes = dev_name.as_bytes();
+    let fstype_bytes = kernel_fstype.as_bytes();
+    let label_bytes = label.as_bytes();
+
+    // arg4/arg5 are 0/0 when no label is requested.
+    let (label_ptr, label_len) = if label_bytes.is_empty() {
+        (0u64, 0u64)
+    } else {
+        (label_bytes.as_ptr() as u64, label_bytes.len() as u64)
+    };
+
+    let ret = syscall6(
+        SYS_FS_FORMAT,
+        dev_bytes.as_ptr() as u64,
+        dev_bytes.len() as u64,
+        fstype_bytes.as_ptr() as u64,
+        fstype_bytes.len() as u64,
+        label_ptr,
+        label_len,
+    );
+
+    if ret < 0 {
+        Err(format!(
+            "filesystem creation failed (code {ret}): {}",
+            syscall_error_msg(ret)
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1128,18 +1207,19 @@ fn main() {
         check_bad_blocks(&dev_path, opts.verbose);
     }
 
-    // --- Resolve the kernel fs_type_id ---
-    let fs_type_id = match fs_type_to_id(&opts.fs_type) {
-        Some(id) => id,
-        None => {
-            // Should never happen after validation, but be defensive.
-            eprintln!(
-                "mkfs: internal error: no type id for '{}'",
-                opts.fs_type
-            );
-            process::exit(1);
-        }
-    };
+    // --- Warn about FAT geometry options the kernel backend ignores ---
+    // The in-kernel mkfs auto-selects FAT16/FAT32 and cluster geometry from the
+    // device size; -F/-s/-S are advisory only until the backend honors them.
+    if opts.fs_type == "fat32"
+        && (opts.fat_sectors_per_cluster > 0
+            || opts.fat_sector_size != 512
+            || opts.fat_size != 32)
+    {
+        eprintln!(
+            "mkfs: warning: -F/-s/-S are advisory — the kernel mkfs backend \
+             auto-selects FAT type and cluster geometry from device size"
+        );
+    }
 
     // --- Verbose pre-format info ---
     if opts.verbose {
@@ -1176,7 +1256,7 @@ fn main() {
     // --- Perform the format ---
     println!("Creating {} filesystem on {} ...", opts.fs_type, dev_path);
 
-    match do_format(&dev_path, fs_type_id) {
+    match do_format(&dev_name, &opts.fs_type, &opts.label) {
         Ok(()) => {
             println!(
                 "mkfs: successfully created {} filesystem on {}",
@@ -1204,12 +1284,15 @@ mod tests {
     // ---- syscall_error_msg -------------------------------------------------
 
     #[test]
-    fn syscall_error_msg_known_codes() {
-        assert_eq!(syscall_error_msg(-2), "no such file or directory (ENOENT)");
-        assert_eq!(syscall_error_msg(-13), "permission denied (EACCES)");
-        assert_eq!(syscall_error_msg(-22), "invalid argument (EINVAL)");
-        assert_eq!(syscall_error_msg(-28), "no space left on device (ENOSPC)");
-        assert_eq!(syscall_error_msg(-38), "function not implemented (ENOSYS)");
+    fn syscall_error_msg_kernel_codes() {
+        assert_eq!(syscall_error_msg(-2), "operation not supported (NotSupported)");
+        assert_eq!(syscall_error_msg(-3), "invalid argument (InvalidArgument)");
+        assert_eq!(
+            syscall_error_msg(-400),
+            "permission denied — must be root (PermissionDenied)"
+        );
+        assert_eq!(syscall_error_msg(-601), "no such device (NoSuchDevice)");
+        assert_eq!(syscall_error_msg(-602), "device busy (DeviceBusy)");
     }
 
     #[test]
@@ -1286,19 +1369,19 @@ mod tests {
         assert_eq!(detect_type_from_argv0("fsck.ext4"), None);
     }
 
-    // ---- fs_type_to_id -----------------------------------------------------
+    // ---- fs_type_to_kernel_fstype ------------------------------------------
 
     #[test]
-    fn fs_type_to_id_known_types() {
-        assert_eq!(fs_type_to_id("ext4"), Some(FS_TYPE_EXT4));
-        assert_eq!(fs_type_to_id("fat32"), Some(FS_TYPE_FAT32));
-        assert_eq!(fs_type_to_id("tmpfs"), Some(FS_TYPE_TMPFS));
+    fn fs_type_to_kernel_fstype_fat_is_vfat() {
+        assert_eq!(fs_type_to_kernel_fstype("fat32"), Some("vfat"));
     }
 
     #[test]
-    fn fs_type_to_id_unknown_returns_none() {
-        assert_eq!(fs_type_to_id("zfs"), None);
-        assert_eq!(fs_type_to_id(""), None);
+    fn fs_type_to_kernel_fstype_unsupported_is_none() {
+        // The kernel has no in-kernel mkfs backend for these yet.
+        assert_eq!(fs_type_to_kernel_fstype("ext4"), None);
+        assert_eq!(fs_type_to_kernel_fstype("tmpfs"), None);
+        assert_eq!(fs_type_to_kernel_fstype("zfs"), None);
     }
 
     // ---- normalize_device --------------------------------------------------

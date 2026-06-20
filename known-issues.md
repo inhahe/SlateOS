@@ -2445,16 +2445,33 @@ client-side number correction:
   `mount`/`umount` (the tool above) and the standalone `userspace/findmnt`
   (reads `/proc/mounts`). Nothing referenced `mount-cli`. (Judgment call —
   removal is reversible via git; see todo.txt.)
-- **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
-  syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned). **Format-path
-  aliasing neutered 2026-06-14** — `mkfs` and `diskutil` defined
-  `SYS_FS_FORMAT=651`, but `651` is `SYS_FS_SEEK_HOLE` (a real syscall whose
-  arg0 is an *fd*), so a format request handed `seek_hole` a device *path
-  pointer* as a file descriptor → misleading `EBADF`/`EINVAL` while formatting
-  nothing. Both now return `ENOSYS` without issuing any syscall (see the
-  dedicated bullet below). `fsck`'s `652`/`653` and diskutil's `652..=655` are
-  *unassigned* (not aliasing a real syscall), so the kernel already bounces them
-  with a clean ENOSYS — benign; `fsck` left as-is.
+- **mkfs/diskutil format: RESOLVED 2026-06-20** — added a real
+  `SYS_FS_FORMAT=654` (`kernel/src/syscall/number.rs`), dispatched in
+  `dispatch.rs`, handled in `handlers.rs` (`sys_fs_format`, root-gated via
+  `require_format_authority`). ABI: arg0/arg1 = device-name ptr+len (the
+  block-device registry name, e.g. "vda"/"sda" — **not** a `/dev/` path),
+  arg2/arg3 = fstype ptr+len, arg4/arg5 = optional label ptr+len (0/0 = none).
+  The handler dispatches on the fstype string to the existing in-kernel
+  `fs::fat::mkfs_fat(device, label)` for the FAT family (vfat/fat/fat32/fat16/
+  msdos); all other fstypes return `NotSupported` (ext4 mkfs not yet ported;
+  tmpfs has no device to format). Kernel boot self-test:
+  `fs::fat::format_self_test()` — registers a 4 MiB `RamBlockDevice` ("fmttest0",
+  added to `blkdev.rs` alongside `blkdev::unregister`), runs `mkfs_fat`, mounts
+  the formatted volume via `FatFs::mount` + `Vfs::mount` at `/_fmt_selftest`,
+  write/read roundtrips a file, then tears everything down — runs unconditionally
+  on any root (verified "[fat] mkfs/format self-test PASSED" in serial). Both
+  `userspace/mkfs` and `userspace/diskutil format` now issue the real syscall
+  via a `syscall6` inline-asm helper (FAT family only; unsupported fstypes report
+  an honest "kernel cannot format X yet" error instead of ENOSYS). mkfs warns
+  that `-F`/`-s`/`-S` are advisory (the kernel backend auto-selects FAT type and
+  cluster geometry from device size). Host tests: `cargo test -p mkfs --target
+  x86_64-pc-windows-gnu` (35 pass).
+- **fsck/diskutil verify+repair+trim, statfs**: still no
+  `FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`/`STATFS` syscall. `fs::fat::fsck_fat` exists
+  in-kernel but is not yet exposed via a syscall; a future `SYS_FS_CHECK` would
+  wire `fsck`/`diskutil verify`/`diskutil repair`. diskutil's verify/repair/trim
+  and the statfs query remain honest ENOSYS stubs. `fsck`'s old `652`/`653` were
+  *unassigned* (not aliasing a real syscall) — left as-is for now.
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
   real process-credential + filesystem-root ABI. **Already neutered** — `chroot`
   carries ENOSYS stubs and a comment about the earlier fake syscall numbers.
@@ -2563,6 +2580,9 @@ remaining userspace tool defines or issues `SYS_NET_IOCTL`/`810` for net-config*
 `inetd`, …) reference the number now.
 
 **Disk-admin format-path safety fix — DONE 2026-06-14** (`mkfs`, `diskutil`).
+**SUPERSEDED 2026-06-20** — `format` is now wired to the real `SYS_FS_FORMAT=654`
+(see the "mkfs/diskutil format: RESOLVED 2026-06-20" bullet above); the honest
+ENOSYS stub described here was the interim state. Historical record follows.
 The same fabricated-syscall pattern lived in the disk-admin tools: both defined
 `SYS_FS_FORMAT=651` and issued `syscall(651, path_ptr, …)`. But `651` is
 `SYS_FS_SEEK_HOLE` — a real syscall whose arg0 is a *file descriptor*, not a

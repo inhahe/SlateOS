@@ -5434,6 +5434,80 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     Ok(())
 }
 
+/// Self-test for `mkfs_fat` (and, by extension, the `SYS_FS_FORMAT` backend).
+///
+/// Formats a small RAM-backed block device as FAT, mounts the result into the
+/// VFS, writes and reads a file, then tears everything down.  Runs on any
+/// boot (it manufactures its own scratch device, so it never touches real
+/// storage).
+///
+/// Returns `Ok(())` on success; logs and returns the first error otherwise.
+pub fn format_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[fat] Running mkfs/format self-test...");
+
+    // Scratch device + mount-point names that nothing else uses.
+    let dev = "fmttest0";
+    let mp = "/_fmt_selftest";
+
+    // Clean up any leftovers from a previous run.
+    let _ = crate::fs::Vfs::unmount(mp);
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
+    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+
+    // Format it.
+    if let Err(e) = mkfs_fat(dev, Some("SELFTEST")) {
+        serial_println!("[fat]   FAIL: mkfs_fat returned {:?}", e);
+        let _ = crate::blkdev::unregister(dev);
+        return Err(e);
+    }
+    serial_println!("[fat]   mkfs_fat formatted 4 MiB RAM disk: OK");
+
+    // Mount the freshly-formatted device into the VFS.
+    let fs = match FatFs::mount(dev) {
+        Ok(fs) => fs,
+        Err(e) => {
+            serial_println!("[fat]   FAIL: FatFs::mount after format: {:?}", e);
+            let _ = crate::blkdev::unregister(dev);
+            return Err(e);
+        }
+    };
+    if let Err(e) = crate::fs::Vfs::mount(mp, alloc::boxed::Box::new(fs)) {
+        serial_println!("[fat]   FAIL: Vfs::mount after format: {:?}", e);
+        let _ = crate::blkdev::unregister(dev);
+        return Err(e);
+    }
+    serial_println!("[fat]   mounted formatted volume at {}: OK", mp);
+
+    // Write and read back a file through the new filesystem.
+    let test_file = "/_fmt_selftest/HELLO.TXT";
+    let payload = b"formatted by mkfs self-test";
+    let verify = (|| -> KernelResult<()> {
+        crate::fs::Vfs::write_file(test_file, payload)?;
+        let back = crate::fs::Vfs::read_file(test_file)?;
+        if back.as_slice() != payload {
+            serial_println!("[fat]   FAIL: read-back mismatch on formatted volume");
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+
+    // Tear down regardless of the verify outcome.
+    let _ = crate::fs::Vfs::remove(test_file);
+    let _ = crate::fs::Vfs::unmount(mp);
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    verify?;
+    serial_println!("[fat]   write/read on formatted volume: OK");
+    serial_println!("[fat] mkfs/format self-test PASSED");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // fsck — filesystem consistency check
 // ---------------------------------------------------------------------------

@@ -204,6 +204,36 @@ fn require_mount_authority() -> Result<(), KernelError> {
     }
 }
 
+/// Check that the calling process is privileged enough to format a block
+/// device (`SYS_FS_FORMAT`).
+///
+/// Formatting writes a fresh filesystem over the entire device, irreversibly
+/// destroying any existing data.  Like mount, this is `CAP_SYS_ADMIN`-class
+/// authority, which on our system maps to running as root (uid 0).  Kept
+/// distinct from [`require_mount_authority`] so the two authorities can be
+/// split later (e.g. a storage daemon granted format-but-not-mount rights)
+/// without conflating their doc semantics.
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_format_authority() -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    match crate::proc::pcb::get_credentials(pid) {
+        Some(creds) if creds.is_root() => Ok(()),
+        Some(_) => Err(KernelError::PermissionDenied),
+        None => Err(KernelError::PermissionDenied),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
@@ -5896,12 +5926,12 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
 ///
 /// - `InvalidArgument` — null pointer with non-zero length, or invalid UTF-8.
 /// - Any error from [`crate::mm::user::validate_user_read`].
-fn read_user_str<'a>(
+fn read_user_str(
     ptr_arg: u64,
     len: usize,
     max_len: usize,
-    buf: &'a mut [u8],
-) -> Result<&'a str, KernelError> {
+    buf: &mut [u8],
+) -> Result<&str, KernelError> {
     if len == 0 {
         return Ok("");
     }
@@ -6001,6 +6031,53 @@ pub fn sys_fs_umount(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::fs::Vfs::unmount(target) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FORMAT` — create a fresh filesystem on a block device.
+///
+/// Root-only and **destructive**.  Currently only the FAT family is
+/// supported (via the in-kernel `mkfs_fat` formatter); other fstypes return
+/// `NotSupported`.
+pub fn sys_fs_format(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_format_authority() {
+        return SyscallResult::err(e);
+    }
+
+    // Device name and fstype are mandatory; label is optional.
+    if args.arg1 == 0 || args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let mut dev_buf = [0u8; 64];
+    let mut fst_buf = [0u8; 64];
+    let mut lbl_buf = [0u8; 64];
+
+    let device = match read_user_str(args.arg0, args.arg1 as usize, 64, &mut dev_buf) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let fstype = match read_user_str(args.arg2, args.arg3 as usize, 64, &mut fst_buf) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let label = match read_user_str(args.arg4, args.arg5 as usize, 64, &mut lbl_buf) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let label_opt = if label.is_empty() { None } else { Some(label) };
+
+    let result = match fstype {
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
+            crate::fs::fat::mkfs_fat(device, label_opt)
+        }
+        // ext4 and other types have no in-kernel formatter yet.
+        _ => Err(KernelError::NotSupported),
+    };
+
+    match result {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

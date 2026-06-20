@@ -1227,6 +1227,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::vfs::mount_self_test() {
         serial_println!("WARNING: VFS mount/unmount self-test failed: {:?}", e);
     }
+    // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
+    if let Err(e) = fs::fat::format_self_test() {
+        serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);
+    }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS

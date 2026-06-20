@@ -1235,6 +1235,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::fat::fsck_self_test() {
         serial_println!("WARNING: FAT fsck self-test failed: {:?}", e);
     }
+    // Block-layer discard (TRIM) primitive self-test on a scratch RAM disk.
+    if let Err(e) = blkdev::self_test_discard() {
+        serial_println!("WARNING: blkdev discard self-test failed: {:?}", e);
+    }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS

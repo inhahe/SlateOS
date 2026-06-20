@@ -129,6 +129,32 @@ pub trait BlockDevice: Send {
         }
         Ok(())
     }
+
+    /// Whether this device supports discard (TRIM/UNMAP).
+    ///
+    /// Filesystems and the `fstrim` path query this before attempting
+    /// [`discard`](BlockDevice::discard); a `false` return lets fstrim treat
+    /// the device as "nothing to do" (a successful no-op) rather than an
+    /// error.  Default: not supported.
+    fn supports_discard(&self) -> bool {
+        false
+    }
+
+    /// Discard (TRIM/UNMAP) a run of `count` contiguous sectors starting at
+    /// `start_lba`, hinting to the device that they no longer hold useful
+    /// data.
+    ///
+    /// Discard is advisory: a conforming implementation may ignore the hint,
+    /// zero the range, or actually release backing flash.  After a successful
+    /// discard the contents of the range are unspecified (commonly read back
+    /// as zero, but callers must not rely on any particular value).
+    ///
+    /// The default implementation reports [`KernelError::NotSupported`];
+    /// drivers that can issue TRIM override both this and
+    /// [`supports_discard`](BlockDevice::supports_discard).
+    fn discard(&mut self, _start_lba: u64, _count: u64) -> KernelResult<()> {
+        Err(KernelError::NotSupported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +345,28 @@ where
     None
 }
 
+/// Query whether the named device supports discard (TRIM/UNMAP).
+///
+/// Returns `None` if no device with that name is registered, otherwise
+/// `Some(true|false)` per [`BlockDevice::supports_discard`].
+pub fn supports_discard(name: &str) -> Option<bool> {
+    let registry = REGISTRY.lock();
+    registry
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.device.supports_discard())
+}
+
+/// Issue a discard (TRIM/UNMAP) for `count` sectors starting at `start_lba`
+/// on the named device.
+///
+/// Returns `None` if no device with that name is registered; otherwise the
+/// inner `KernelResult` reports whether the discard succeeded (devices that
+/// do not support discard return [`KernelError::NotSupported`]).
+pub fn discard(name: &str, start_lba: u64, count: u64) -> Option<KernelResult<()>> {
+    with_device(name, |dev| dev.discard(start_lba, count))
+}
+
 /// List all registered block devices.
 ///
 /// Returns the metadata snapshotted at registration time (real capacity,
@@ -422,6 +470,132 @@ impl BlockDevice for RamBlockDevice {
             .ok_or(KernelError::InvalidArgument)?;
         dst.copy_from_slice(buf);
         Ok(())
+    }
+
+    fn supports_discard(&self) -> bool {
+        // The RAM disk models discard by zeroing the range, so it always
+        // "supports" it (and reads back as zero afterwards — within the
+        // unspecified-contents allowance of the discard contract).
+        !self.read_only
+    }
+
+    fn discard(&mut self, start_lba: u64, count: u64) -> KernelResult<()> {
+        if self.read_only {
+            return Err(KernelError::ReadOnlyFilesystem);
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        // Compute the byte range, rejecting any overflow or out-of-bounds
+        // request rather than silently truncating.
+        let end_lba = start_lba
+            .checked_add(count)
+            .ok_or(KernelError::InvalidArgument)?;
+        if end_lba > self.sector_count {
+            return Err(KernelError::InvalidArgument);
+        }
+        let (start, _) = self
+            .sector_range(start_lba)
+            .ok_or(KernelError::InvalidArgument)?;
+        let byte_len = usize::try_from(count)
+            .ok()
+            .and_then(|c| c.checked_mul(SECTOR_SIZE))
+            .ok_or(KernelError::InvalidArgument)?;
+        let end = start
+            .checked_add(byte_len)
+            .ok_or(KernelError::InvalidArgument)?;
+        let dst = self
+            .data
+            .get_mut(start..end)
+            .ok_or(KernelError::InvalidArgument)?;
+        dst.fill(0);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discard self-test
+// ---------------------------------------------------------------------------
+
+/// Boot self-test for the block-layer discard primitive.
+///
+/// Registers a small scratch [`RamBlockDevice`], fills a few sectors with a
+/// non-zero pattern, discards a sub-range through the registry helper, and
+/// verifies that (a) the discarded sectors read back as zero, (b) the
+/// surrounding sectors are untouched, and (c) out-of-bounds / overflow
+/// requests are rejected.  Runs on the bare-metal target where `#[cfg(test)]`
+/// does not, so the discard path is exercised on every boot.
+pub fn self_test_discard() -> KernelResult<()> {
+    crate::serial_println!("[blkdev] Running discard self-test...");
+
+    let dev = "disctest0";
+    // Clean up any leftovers from a previous run.
+    let _ = unregister(dev);
+
+    // 64 sectors * 512 B = 32 KiB scratch RAM disk.
+    register(dev, Box::new(RamBlockDevice::new(64)));
+
+    let result = (|| -> KernelResult<()> {
+        // Discard must advertise as supported on a writable RAM disk.
+        if supports_discard(dev) != Some(true) {
+            crate::serial_println!("[blkdev]   FAIL: RAM disk reports discard unsupported");
+            return Err(KernelError::InternalError);
+        }
+
+        // Fill sectors 0..8 with 0xAB so we can tell discarded from untouched.
+        let pattern = [0xABu8; SECTOR_SIZE];
+        for lba in 0..8u64 {
+            with_device(dev, |d| d.write_sector(lba, &pattern))
+                .ok_or(KernelError::NotFound)??;
+        }
+
+        // Discard the middle run: sectors 2..6 (count = 4).
+        discard(dev, 2, 4).ok_or(KernelError::NotFound)??;
+
+        // Sectors 2..6 must now read back zero; 0..2 and 6..8 stay 0xAB.
+        for lba in 0..8u64 {
+            let mut buf = [0u8; SECTOR_SIZE];
+            with_device(dev, |d| d.read_sector(lba, &mut buf))
+                .ok_or(KernelError::NotFound)??;
+            let expect_zero = (2..6).contains(&lba);
+            let ok = if expect_zero {
+                buf.iter().all(|&b| b == 0)
+            } else {
+                buf.iter().all(|&b| b == 0xAB)
+            };
+            if !ok {
+                crate::serial_println!(
+                    "[blkdev]   FAIL: sector {} has wrong contents after discard",
+                    lba
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Out-of-bounds discard (past the 64-sector device) must be rejected.
+        if discard(dev, 60, 8).ok_or(KernelError::NotFound)?.is_ok() {
+            crate::serial_println!("[blkdev]   FAIL: out-of-bounds discard was accepted");
+            return Err(KernelError::InternalError);
+        }
+        // Overflow at the u64 boundary must be rejected, not wrap.
+        if discard(dev, u64::MAX, 2).ok_or(KernelError::NotFound)?.is_ok() {
+            crate::serial_println!("[blkdev]   FAIL: overflowing discard was accepted");
+            return Err(KernelError::InternalError);
+        }
+        // Zero-length discard is a successful no-op.
+        discard(dev, 0, 0).ok_or(KernelError::NotFound)??;
+
+        Ok(())
+    })();
+
+    let _ = unregister(dev);
+
+    match result {
+        Ok(()) => {
+            crate::serial_println!("[blkdev]   discard self-test OK");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 

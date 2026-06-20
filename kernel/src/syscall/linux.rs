@@ -21151,16 +21151,29 @@ fn sys_utime(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // signalfd / timerfd / inotify / fanotify
 //
-// We do not yet implement any of these event-fd families.  The honest
-// answer to the caller is ENOSYS after input validation: this lets
-// userspace fall back to alternatives (alarm + signals, polling, etc.)
-// instead of silently misbehaving.
+// signalfd, signalfd4, timerfd_create/settime/gettime, and inotify_init/
+// init1/add_watch/rm_watch are FULLY IMPLEMENTED here as anon_inode fd
+// objects backed by `crate::ipc::{signalfd, timerfd, inotify}` (the
+// eventfd family in this region is likewise real — see sys_eventfd*).
+// Each is a thin Linux-ABI adapter over a native kernel object: create
+// on `fd == -1` (signalfd) or unconditionally (timerfd/inotify), install
+// a per-process `FdEntry`, and serve reads/poll from the backing object.
 //
-// We *do* still validate inputs so that programs probing argument
+// fanotify is the lone exception in this family and remains a
+// validate-then-fail stub (see sys_fanotify_init / sys_fanotify_mark).
+// It is genuinely blocked rather than merely deferred: every real caller
+// is unprivileged (no principal in this kernel holds CAP_SYS_ADMIN), so
+// Linux's own gate forces unprivileged callers onto FID-reporting mode,
+// which needs a stable inode-identity / file-handle (name_to_handle_at)
+// backend the VFS does not yet expose.  Until that exists, a fanotify
+// backend would be unreachable from userspace, so the honest answer is
+// the same EPERM/EINVAL/ENOSYS Linux returns after full flag validation.
+//
+// All of these *do* validate inputs so that programs probing argument
 // validity get the same error codes Linux would give.  In particular,
-// flag-bit validation precedes ENOSYS so callers see EINVAL where Linux
-// would also see EINVAL — useful for portable code that checks for
-// feature support via specific error codes.
+// flag-bit validation precedes any terminal error so callers see EINVAL
+// where Linux would also see EINVAL — useful for portable code that
+// checks for feature support via specific error codes.
 // ---------------------------------------------------------------------------
 
 /// signalfd flag bits (shared by `signalfd` and `signalfd4`).

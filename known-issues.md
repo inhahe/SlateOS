@@ -1697,6 +1697,45 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD30. Console TTY line discipline: no signal generation (`ISIG`) and no `VTIME` — DEBT 2026-06-20
+
+**Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
+`raw_read()` (non-canonical reader); driven by `dispatch_console_read`
+in `kernel/src/syscall/linux.rs`.
+
+**What's missing (two related gaps in the new line discipline):**
+
+1. **`ISIG` signal generation.** `feed()` recognises `VINTR` (`^C`) and
+   `VQUIT` (`^\`) under `ISIG` and returns `LineStep::Signal(2|3)`, and
+   `canonical_read` flushes the in-progress line in response — but it does
+   **not** actually deliver `SIGINT`/`SIGQUIT` to anyone. Linux sends the
+   signal to the terminal's *foreground process group*. We have no concept
+   of a foreground pgrp on the console (no `TIOCSPGRP`/`TIOCGPGRP`, no job
+   control), so there is no correct target to signal yet. Result: typing
+   `^C` at a console-reading program erases the current line but does not
+   interrupt the program.
+
+2. **`VTIME` inter-byte timer.** `raw_read()` honours `VMIN` (0 ⇒ poll,
+   ≥1 ⇒ block for the first byte then drain what's ready) but ignores
+   `VTIME`. Programs that set `VMIN=0,VTIME>0` (a bounded read timeout) or
+   `VMIN>0,VTIME>0` (inter-byte timeout) get "block until VMIN bytes"
+   behaviour instead of timing out. cfmakeraw's default `VMIN=1,VTIME=0`
+   is handled correctly, so most raw-mode programs are unaffected.
+
+**Proper fix:** (1) Implement console job control — track a foreground
+pgrp per tty (`TIOCSPGRP`/`TIOCGPGRP`), and on `LineStep::Signal(sig)`
+deliver `sig` to every process in that pgrp via the existing
+`proc::signal` machinery; the foreground reader's `read(2)` should then
+return `-EINTR` (or restart per `SA_RESTART`). (2) Wire `VTIME` to a
+timer (HPET/`timerfd`-style deadline) in `raw_read` so the drain loop
+wakes on either a byte or the deadline. Both are follow-ups to the
+2026-06-20 line-discipline increment, which deliberately shipped line
+buffering + canonical editing + `VMIN` first.
+
+**Severity:** low — interactive `^C` and raw-mode read timeouts are the
+only affected behaviours; line-oriented reads (the common shell/REPL
+case) and `VMIN`-based raw reads work.
+
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 
 **Resolution:** Implemented sender-faithful `siginfo`. `SignalState`

@@ -3822,22 +3822,47 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     SyscallResult::ok(8)
 }
 
+/// `read(2)` on a `Console` fd, driven by the TTY line discipline.
+///
+/// In canonical mode this blocks until a full line is available and returns up
+/// to `cap` bytes of it; in raw mode it honours `VMIN`.  A `^D` on an empty
+/// canonical line returns `0` (end of file).  See [`crate::tty::console_read`].
+fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    // Resolve the requested length before blocking on input.  One read returns
+    // at most a single canonical line, so a kernel staging buffer of MAX_CANON
+    // bytes is sufficient; larger caps simply read at most a line per call.
+    let want = usize::try_from(cap).unwrap_or(usize::MAX).min(crate::tty::MAX_CANON);
+    // Validate the user destination up front (before we block reading input).
+    if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let mut kbuf = [0u8; crate::tty::MAX_CANON];
+    let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
+    let n = crate::tty::console_read(dst);
+    if n == 0 {
+        // EOF (^D on an empty line) or nothing available — read returns 0.
+        return SyscallResult::ok(0);
+    }
+    // SAFETY: `want` bytes at `buf` were validated writable above and `n <=
+    // want`; copy_to_user re-validates and performs the SMAP dance.  `kbuf`
+    // holds `n` live kernel bytes.
+    match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) } {
+        Ok(()) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
 /// Dispatch a `read(buf, cap)` against an fd entry.
 fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     match entry.kind {
-        HandleKind::Console => {
-            // We approximate Linux TTY read with the line-oriented
-            // single-character read — enough for the typical "read
-            // one keystroke" pattern.  Multi-byte requests are
-            // capped at one byte; libc will retry as needed.
-            if cap == 0 {
-                return SyscallResult::ok(0);
-            }
-            let a = SyscallArgs {
-                arg0: buf, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            };
-            linux_from_native(handlers::sys_console_read_char(&a))
-        }
+        HandleKind::Console => dispatch_console_read(buf, cap),
         HandleKind::File => {
             let a = SyscallArgs {
                 arg0: entry.raw_handle, arg1: buf, arg2: cap,

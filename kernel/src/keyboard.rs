@@ -481,7 +481,14 @@ fn push_char(ch: u8) {
     }
     match ch {
         b'\x08' => {
-            // Backspace: the consumer handles the visual effect.
+            // Backspace: erase the previous glyph (backspace, space,
+            // backspace).  Consumers that drive cursor-aware editing
+            // themselves (e.g. kshell) run with echo disabled, so this only
+            // affects the default echo-on path (the canonical TTY line
+            // discipline), where it gives the expected visual erase.
+            crate::console::putchar(b'\x08');
+            crate::console::putchar(b' ');
+            crate::console::putchar(b'\x08');
         }
         0x1B => {} // Don't echo ESC
         // Don't echo extended key codes (arrow keys, home/end) — the

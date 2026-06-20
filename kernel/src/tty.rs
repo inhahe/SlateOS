@@ -323,8 +323,13 @@ pub fn get_termios() -> Termios {
 }
 
 /// Replace the console termios (for `TCSETS`/`TCSETSW`/`TCSETSF`).
+///
+/// Keeps the keyboard driver's echo in sync with the new `ECHO` bit so that a
+/// program clearing `ECHO` (e.g. a password prompt) stops the driver echoing
+/// immediately, and one setting it restores echo.
 pub fn set_termios(new: Termios) {
     *CONSOLE_TERMIOS.lock() = new;
+    crate::keyboard::set_echo(new.echo_enabled());
 }
 
 /// `true` when the console is in canonical (line-buffered) input mode.
@@ -361,6 +366,276 @@ pub fn get_winsize() -> WinSize {
 /// Store an explicit console window size (for `TIOCSWINSZ`).
 pub fn set_winsize(ws: WinSize) {
     *CONSOLE_WINSIZE.lock() = ws;
+}
+
+// ---------------------------------------------------------------------------
+// Line discipline (canonical / raw console reads)
+// ---------------------------------------------------------------------------
+
+/// Maximum bytes buffered in one canonical line (Linux `MAX_CANON`).  Input
+/// past this in a single line is dropped until a line terminator arrives.
+pub const MAX_CANON: usize = 4096;
+
+/// Outcome of feeding one input byte to the canonical line editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStep {
+    /// Byte consumed; keep editing the current line.
+    Pending,
+    /// A line terminator (`\n`) completed the line; deliver it.
+    Line,
+    /// `VEOF` (`^D`): caller delivers the buffer as-is (empty ⇒ read returns 0).
+    Eof,
+    /// `VINTR`/`VQUIT` under `ISIG`: the line was discarded.  The carried
+    /// value is the signal number (`SIGINT`=2 / `SIGQUIT`=3) the foreground
+    /// process group *should* receive.  Signal delivery itself needs job
+    /// control (a foreground pgrp on the tty), which is a follow-up; for now
+    /// the line is simply flushed.
+    Signal(u8),
+}
+
+/// A fixed-capacity in-progress line buffer for the canonical editor.
+struct LineBuf {
+    buf: [u8; MAX_CANON],
+    len: usize,
+}
+
+impl LineBuf {
+    const fn new() -> Self {
+        Self { buf: [0u8; MAX_CANON], len: 0 }
+    }
+
+    /// Append a byte; `false` if the line is already at `MAX_CANON`.
+    fn push(&mut self, c: u8) -> bool {
+        if let Some(slot) = self.buf.get_mut(self.len) {
+            *slot = c;
+            self.len = self.len.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove the last byte (erase); `false` if the line is empty.
+    fn pop(&mut self) -> bool {
+        if self.len > 0 {
+            self.len = self.len.saturating_sub(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.buf.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// Feed one raw input byte to the canonical line editor.
+///
+/// This is the *pure* core of the line discipline — no I/O, no echo — so it is
+/// exercised directly by the boot self-test.  Echo is handled by the keyboard
+/// driver (synced to the `ECHO` termios bit); this function only maintains the
+/// line buffer and decides when a read should complete.
+fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
+    // Input translation: ICRNL maps a received CR to NL (the common case so
+    // that the Enter key — which the keyboard delivers as '\n' already, but a
+    // serial line would deliver as '\r' — terminates a canonical line).
+    let mut ch = raw;
+    if ch == b'\r' && (t.c_iflag & iflag::ICRNL != 0) {
+        ch = b'\n';
+    }
+
+    let g = |idx: usize, dflt: u8| t.c_cc.get(idx).copied().unwrap_or(dflt);
+    let verase = g(cc::VERASE, 127);
+    let vkill = g(cc::VKILL, 21);
+    let veof = g(cc::VEOF, 4);
+    let vintr = g(cc::VINTR, 3);
+    let vquit = g(cc::VQUIT, 28);
+
+    if t.c_lflag & lflag::ISIG != 0 {
+        if ch == vintr {
+            line.clear();
+            return LineStep::Signal(2); // SIGINT
+        }
+        if ch == vquit {
+            line.clear();
+            return LineStep::Signal(3); // SIGQUIT
+        }
+    }
+
+    if ch == veof {
+        // ^D: submit the line so far (without the EOF byte).  An empty buffer
+        // becomes a zero-length read (end of file).
+        return LineStep::Eof;
+    }
+    if ch == verase {
+        line.pop();
+        return LineStep::Pending;
+    }
+    if ch == vkill {
+        line.clear();
+        return LineStep::Pending;
+    }
+    if ch == b'\n' {
+        // The newline is part of the canonical line returned to the reader.
+        let _ = line.push(b'\n');
+        return LineStep::Line;
+    }
+
+    // Ordinary byte: append (silently dropped if the line is full).
+    let _ = line.push(ch);
+    LineStep::Pending
+}
+
+/// Bytes from a completed canonical line that did not fit in the reader's
+/// buffer, held for the next `read(2)`.
+struct PendingLine {
+    buf: [u8; MAX_CANON],
+    pos: usize,
+    len: usize,
+}
+
+impl PendingLine {
+    const fn new() -> Self {
+        Self { buf: [0u8; MAX_CANON], pos: 0, len: 0 }
+    }
+
+    fn has_data(&self) -> bool {
+        self.pos < self.len
+    }
+
+    /// Replace the held bytes with `src` (truncated to `MAX_CANON`).
+    fn fill(&mut self, src: &[u8]) {
+        let n = src.len().min(MAX_CANON);
+        if let (Some(dst), Some(s)) = (self.buf.get_mut(..n), src.get(..n)) {
+            dst.copy_from_slice(s);
+        }
+        self.pos = 0;
+        self.len = n;
+    }
+
+    /// Copy as many held bytes as fit into `out`, advancing the read cursor.
+    fn drain_into(&mut self, out: &mut [u8]) -> usize {
+        let avail = self.len.saturating_sub(self.pos);
+        let n = avail.min(out.len());
+        if let (Some(dst), Some(src)) =
+            (out.get_mut(..n), self.buf.get(self.pos..self.pos.saturating_add(n)))
+        {
+            dst.copy_from_slice(src);
+        }
+        self.pos = self.pos.saturating_add(n);
+        n
+    }
+}
+
+/// Leftover bytes of a canonical line that overflowed a small reader buffer.
+static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
+
+/// Read from the console into `out` per the current line discipline.
+///
+/// In canonical mode this blocks until a full line (terminated by `\n` or
+/// `VEOF`) is available, then returns up to `out.len()` bytes of it (stashing
+/// any remainder for the next call).  A `^D` on an empty line returns `0`
+/// (end of file).  In non-canonical (raw) mode it honours `VMIN`: `VMIN == 0`
+/// polls and returns whatever is immediately available (possibly `0`), while
+/// `VMIN >= 1` blocks for the first byte and then drains what is ready, up to
+/// `out.len()`.  (`VTIME` inter-byte timing is not yet implemented.)
+///
+/// Echo is performed by the keyboard driver, which this function first syncs
+/// to the termios `ECHO` bit so that raw/no-echo programs (password prompts,
+/// full-screen editors) suppress echo correctly.
+///
+/// Returns the number of bytes written to `out`.
+pub fn console_read(out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    let t = get_termios();
+
+    // The Linux read path is authoritative for console echo: keep the keyboard
+    // driver's echo in sync with this terminal's ECHO bit.
+    crate::keyboard::set_echo(t.echo_enabled());
+
+    // Serve any leftover bytes from a previously-overflowed line first.
+    {
+        let mut p = PENDING.lock();
+        if p.has_data() {
+            return p.drain_into(out);
+        }
+    }
+
+    if t.is_canonical() {
+        canonical_read(&t, out)
+    } else {
+        raw_read(&t, out)
+    }
+}
+
+/// Canonical-mode read: edit a line until a terminator, then deliver it.
+fn canonical_read(t: &Termios, out: &mut [u8]) -> usize {
+    let mut line = LineBuf::new();
+    loop {
+        let raw = crate::keyboard::read_char();
+        match feed(&mut line, raw, t) {
+            LineStep::Pending => {}
+            LineStep::Line => break,
+            LineStep::Eof => {
+                if line.len == 0 {
+                    return 0; // EOF
+                }
+                break;
+            }
+            // Line flushed by a signal char; keep waiting for a fresh line.
+            // (Actual SIGINT/SIGQUIT delivery awaits job control.)
+            LineStep::Signal(_) => {}
+        }
+    }
+    let mut p = PENDING.lock();
+    p.fill(line.as_slice());
+    p.drain_into(out)
+}
+
+/// Non-canonical (raw) read honouring `VMIN` (see [`console_read`]).
+fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
+    let vmin = t.vmin() as usize;
+    let mut n = 0usize;
+
+    if vmin == 0 {
+        // Pure poll: return whatever is immediately available (may be zero).
+        while n < out.len() {
+            match crate::keyboard::try_read_char() {
+                Some(c) => {
+                    if let Some(slot) = out.get_mut(n) {
+                        *slot = c;
+                    }
+                    n = n.saturating_add(1);
+                }
+                None => break,
+            }
+        }
+        return n;
+    }
+
+    // VMIN >= 1: block for the first `vmin` bytes, then drain what is ready.
+    while n < out.len() {
+        let next = if n >= vmin {
+            match crate::keyboard::try_read_char() {
+                Some(c) => c,
+                None => break,
+            }
+        } else {
+            crate::keyboard::read_char()
+        };
+        if let Some(slot) = out.get_mut(n) {
+            *slot = next;
+        }
+        n = n.saturating_add(1);
+    }
+    n
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +696,61 @@ pub fn self_test() {
         live.ws_col,
         live.ws_row
     );
+
+    // Line discipline: drive the pure `feed` core with scripted input.
+    {
+        let t = Termios::sane_default();
+
+        // "hi\n" → a complete line of exactly "hi\n".
+        let mut line = LineBuf::new();
+        assert_eq!(feed(&mut line, b'h', &t), LineStep::Pending);
+        assert_eq!(feed(&mut line, b'i', &t), LineStep::Pending);
+        assert_eq!(feed(&mut line, b'\n', &t), LineStep::Line);
+        assert_eq!(line.as_slice(), b"hi\n", "canonical line content");
+
+        // VERASE (DEL) erases the last byte: "ax\x7fb\n" → "ab\n".
+        let mut e = LineBuf::new();
+        let _ = feed(&mut e, b'a', &t);
+        let _ = feed(&mut e, b'x', &t);
+        assert_eq!(feed(&mut e, 127, &t), LineStep::Pending); // erase 'x'
+        let _ = feed(&mut e, b'b', &t);
+        assert_eq!(feed(&mut e, b'\n', &t), LineStep::Line);
+        assert_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
+
+        // VKILL (^U) clears the whole line.
+        let mut k = LineBuf::new();
+        let _ = feed(&mut k, b'j', &t);
+        let _ = feed(&mut k, b'u', &t);
+        assert_eq!(feed(&mut k, 21, &t), LineStep::Pending); // ^U
+        assert_eq!(k.as_slice(), b"", "VKILL clears the line");
+
+        // VEOF (^D) on an empty line signals end-of-file.
+        let mut eof = LineBuf::new();
+        assert_eq!(feed(&mut eof, 4, &t), LineStep::Eof);
+        assert_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
+
+        // VINTR (^C) under ISIG flushes the line and reports SIGINT.
+        let mut sig = LineBuf::new();
+        let _ = feed(&mut sig, b'z', &t);
+        assert_eq!(feed(&mut sig, 3, &t), LineStep::Signal(2));
+        assert_eq!(sig.as_slice(), b"", "VINTR flushes the line");
+
+        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr): OK");
+    }
+
+    // PendingLine: a line longer than the reader buffer is delivered in pieces.
+    {
+        let mut p = PendingLine::new();
+        p.fill(b"abcdef\n");
+        let mut small = [0u8; 3];
+        assert_eq!(p.drain_into(&mut small), 3);
+        assert_eq!(&small, b"abc");
+        let mut rest = [0u8; 16];
+        assert_eq!(p.drain_into(&mut rest), 4);
+        assert_eq!(rest.get(..4), Some(&b"def\n"[..]));
+        assert!(!p.has_data(), "pending fully drained");
+        crate::serial_println!("[tty]   pending-line chunked delivery: OK");
+    }
 
     crate::serial_println!("[tty] Self-test passed.");
 }

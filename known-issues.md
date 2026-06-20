@@ -1697,7 +1697,7 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD30. Console TTY line discipline: `^C`/`^\` now signal the fg pgrp; `VTIME` and Ctrl-Z/VSUSP still missing — PARTIALLY RESOLVED 2026-06-20
+### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` now signal the fg pgrp; `VTIME` still missing — PARTIALLY RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
 `raw_read()` (non-canonical reader); driven by `dispatch_console_read` /
@@ -1728,28 +1728,28 @@ default action / `-EINTR`. With no foreground group installed
    behaviour instead of timing out. cfmakeraw's default `VMIN=1,VTIME=0`
    is handled correctly, so most raw-mode programs are unaffected.
 
-3. **Ctrl-Z (`VSUSP`) → `SIGTSTP`.** `feed()` does not recognise `VSUSP`,
-   and the job-control stop/continue plumbing (`SIGTSTP`/`SIGCONT`
-   default *stop* action wired to the tty) is not done, so Ctrl-Z does not
-   suspend the foreground job.
-
-4. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
+3. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
    not implemented.
 
-5. **Raw-mode `ISIG`.** `raw_read()` does not call `feed()`, so `^C` in a
+4. **Raw-mode `ISIG`.** `raw_read()` does not call `feed()`, so `^C` in a
    non-canonical terminal generates no signal even when `ISIG` is still
    set. (Correct when the app cleared `ISIG`, as full-screen apps do, but
    a raw read with `ISIG` set should still signal.)
 
+**RESOLVED — Ctrl-Z (`VSUSP`) → `SIGTSTP`:** `feed()` now recognises
+`VSUSP` under `ISIG` (default `^Z`) and returns `LineStep::Signal(20)`,
+flushing the in-progress line like `^C`/`^\`. `deliver_console_signal`
+routes `SIGTSTP` to the foreground pgrp, whose `DefaultAction::Stop`
+(already implemented in `proc::signal`) suspends the job; a later
+`SIGCONT` (shell `fg`/`bg`) resumes it. `NOFLSH` is not yet honoured.
+
 **Proper fix for the remainder:** (2) wire `VTIME` to a timer
 (HPET/`timerfd`-style deadline) in `raw_read` so the drain loop wakes on
-either a byte or the deadline; (3) add `VSUSP` to `feed()` returning a new
-`LineStep::Signal(SIGTSTP)` and implement the stop/cont default actions;
-(4)/(5) follow-ups as job control matures.
+either a byte or the deadline; (3)/(4) follow-ups as job control matures.
 
-**Severity:** low — Ctrl-Z suspend and raw-mode read timeouts are the
-remaining affected behaviours; interactive `^C`/`^\` interruption now
-works once a shell installs a foreground pgrp via `tcsetpgrp`.
+**Severity:** low — raw-mode read timeouts are the main remaining affected
+behaviour; interactive `^C`/`^\`/`^Z` now work once a shell installs a
+foreground pgrp via `tcsetpgrp`.
 
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 

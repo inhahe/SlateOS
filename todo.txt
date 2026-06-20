@@ -9482,15 +9482,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          foreground group installed (pgid==0) ⇒ no signal, read restarts.
 ##          Tested: tty self-test foreground pgrp set/get round-trip; build +
 ##          clippy clean; boot test PASSED (BOOT_OK).
-##      STILL DEFERRED (Increment C remainder):
-##          (1) Ctrl-Z (VSUSP) → SIGTSTP to the foreground group: feed() does
-##              not yet recognise VSUSP, and job-control stop/cont plumbing
-##              (SIGTSTP/SIGCONT default stop action wired to the tty) is not
-##              done.  (2) Orphaned-process-group SIGHUP/SIGCONT on session
-##              leader exit.  (3) Raw-mode ISIG: raw_read() does not call feed()
-##              so ^C in a raw (non-canonical) terminal generates no signal —
-##              matches Linux only when the app cleared ISIG, but a raw read
-##              with ISIG still set should signal; revisit when an app needs it.
+##          UPDATE 2026-06-20 (Increment D): Ctrl-Z (VSUSP) → SIGTSTP now
+##          RESOLVED too.  feed() recognises VSUSP under ISIG (default ^Z=26)
+##          and returns LineStep::Signal(20); deliver_console_signal routes
+##          SIGTSTP to the fg pgrp, whose DefaultAction::Stop (already in
+##          proc::signal) suspends the job (SIGCONT resumes).  Tested:
+##          tty self-test feed VQUIT/VSUSP cases + ISIG-off literal ^C; boot
+##          test PASSED.  NOFLSH not yet honoured.
+##      STILL DEFERRED (TD30 remainder):
+##          (1) VTIME inter-byte timer in raw_read (VMIN handled; VTIME ignored).
+##          (2) Orphaned-process-group SIGHUP/SIGCONT on session leader exit.
+##          (3) Raw-mode ISIG: raw_read() does not call feed() so ^C in a raw
+##              (non-canonical) terminal generates no signal even with ISIG set;
+##              revisit when an app needs it.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

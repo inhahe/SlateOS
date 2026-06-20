@@ -386,11 +386,11 @@ pub enum LineStep {
     Line,
     /// `VEOF` (`^D`): caller delivers the buffer as-is (empty ⇒ read returns 0).
     Eof,
-    /// `VINTR`/`VQUIT` under `ISIG`: the line was discarded.  The carried
-    /// value is the signal number (`SIGINT`=2 / `SIGQUIT`=3) the foreground
-    /// process group *should* receive.  Signal delivery itself needs job
-    /// control (a foreground pgrp on the tty), which is a follow-up; for now
-    /// the line is simply flushed.
+    /// `VINTR`/`VQUIT`/`VSUSP` under `ISIG`: the line was discarded.  The
+    /// carried value is the signal number (`SIGINT`=2 / `SIGQUIT`=3 /
+    /// `SIGTSTP`=20) the foreground process group must receive; the syscall
+    /// layer (`deliver_console_signal`) routes it to the console's foreground
+    /// pgrp and returns the restart/`EINTR` sentinel to the blocked reader.
     Signal(u8),
 }
 
@@ -456,6 +456,7 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
     let veof = g(cc::VEOF, 4);
     let vintr = g(cc::VINTR, 3);
     let vquit = g(cc::VQUIT, 28);
+    let vsusp = g(cc::VSUSP, 26);
 
     if t.c_lflag & lflag::ISIG != 0 {
         if ch == vintr {
@@ -465,6 +466,14 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
         if ch == vquit {
             line.clear();
             return LineStep::Signal(3); // SIGQUIT
+        }
+        if ch == vsusp {
+            // ^Z: discard the in-progress line and stop the foreground job.
+            // Like SIGINT/SIGQUIT, ISIG flushes the input on a stop char
+            // (NOFLSH is not yet honoured).  SIGTSTP's default action stops
+            // the process; SIGCONT (e.g. shell `fg`/`bg`) resumes it.
+            line.clear();
+            return LineStep::Signal(20); // SIGTSTP
         }
     }
 
@@ -784,7 +793,27 @@ pub fn self_test() {
         assert_eq!(feed(&mut sig, 3, &t), LineStep::Signal(2));
         assert_eq!(sig.as_slice(), b"", "VINTR flushes the line");
 
-        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr): OK");
+        // VQUIT (^\) under ISIG flushes the line and reports SIGQUIT.
+        let mut q = LineBuf::new();
+        let _ = feed(&mut q, b'q', &t);
+        assert_eq!(feed(&mut q, 28, &t), LineStep::Signal(3));
+        assert_eq!(q.as_slice(), b"", "VQUIT flushes the line");
+
+        // VSUSP (^Z) under ISIG flushes the line and reports SIGTSTP.
+        let mut z = LineBuf::new();
+        let _ = feed(&mut z, b's', &t);
+        assert_eq!(feed(&mut z, 26, &t), LineStep::Signal(20));
+        assert_eq!(z.as_slice(), b"", "VSUSP flushes the line");
+
+        // With ISIG cleared, a ^C is just an ordinary byte in the line.
+        let mut noisig = Termios::sane_default();
+        noisig.c_lflag &= !lflag::ISIG;
+        let mut n = LineBuf::new();
+        assert_eq!(feed(&mut n, 3, &noisig), LineStep::Pending);
+        assert_eq!(feed(&mut n, b'\n', &noisig), LineStep::Line);
+        assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
+
+        crate::serial_println!("[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp): OK");
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.

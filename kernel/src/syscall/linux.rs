@@ -3842,7 +3842,18 @@ fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
     let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
-    let n = crate::tty::console_read(dst);
+    let n = match crate::tty::console_read(dst) {
+        crate::tty::ConsoleRead::Data(n) => n,
+        crate::tty::ConsoleRead::Signal(sig) => {
+            // A ^C/^\ under ISIG interrupted the read: deliver the terminal
+            // signal to the foreground process group and return the restart
+            // sentinel.  The signal-delivery checkpoint resolves it into a
+            // transparent restart (the reader wasn't in the foreground group,
+            // or the signal is handled with SA_RESTART) or a user-visible
+            // -EINTR / signal default action.
+            return deliver_console_signal(sig);
+        }
+    };
     if n == 0 {
         // EOF (^D on an empty line) or nothing available — read returns 0.
         return SyscallResult::ok(0);
@@ -3857,6 +3868,43 @@ fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
         }
         Err(e) => linux_err(linux_errno_for(e)),
     }
+}
+
+/// Deliver a terminal-generated signal (`SIGINT`/`SIGQUIT` from `^C`/`^\`) to
+/// the console's foreground process group, then return the `ERESTARTSYS`
+/// restart sentinel for the interrupted reader.
+///
+/// Mirrors Linux's `n_tty.c` calling `kill_pgrp(tty->pgrp, sig, …)`: the line
+/// discipline only *decides* a signal is due; the kill is performed in the
+/// surrounding layer.  The signal carries an `SI_KERNEL` siginfo (kernel
+/// origin, no sender pid), matching a tty-generated signal.
+///
+/// If no foreground group is installed (`foreground_pgid() == 0` — e.g. before
+/// any interactive shell ran `tcsetpgrp`), there is no group to signal, so the
+/// `^C` simply restarts the read (Linux likewise generates no signal when the
+/// tty has no foreground pgrp).  Either way we return `ERESTARTSYS`: with a
+/// deliverable signal the checkpoint runs the default action / handler; with
+/// none it transparently restarts the blocking read.
+fn deliver_console_signal(sig: u8) -> SyscallResult {
+    use crate::proc::signal::si_code::SI_KERNEL;
+
+    let pgid = crate::tty::foreground_pgid();
+    if pgid != 0 {
+        for target in pcb::pids_in_group(pgid) {
+            let send_args = SyscallArgs {
+                arg0: target,
+                arg1: u64::from(sig),
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            // Best-effort: a member that exited between the membership snapshot
+            // and delivery just fails its own send; the rest still receive it.
+            let _ = handlers::sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+        }
+    }
+    restart::restart_result(restart::ERESTARTSYS)
 }
 
 /// Dispatch a `read(buf, cap)` against an fd entry.
@@ -8198,6 +8246,14 @@ pub mod ioctl_cmd {
     pub const TIOCGWINSZ: u32 = 0x5413;
     /// `TIOCSWINSZ` — set the terminal window size from `*arg`.
     pub const TIOCSWINSZ: u32 = 0x5414;
+    /// `TIOCGPGRP` — read the terminal's foreground process-group ID into
+    /// `*arg` (a `pid_t`).  `tcgetpgrp(3)` issues this; a job-control shell
+    /// uses it to learn which group currently owns the terminal.
+    pub const TIOCGPGRP: u32 = 0x540F;
+    /// `TIOCSPGRP` — set the terminal's foreground process-group ID from
+    /// `*arg` (a `pid_t`).  `tcsetpgrp(3)` issues this each time the shell
+    /// foregrounds a job, so that job's group receives `^C`/`^\` signals.
+    pub const TIOCSPGRP: u32 = 0x5410;
 }
 
 /// Handle the terminal-control ioctls on a console (tty) fd.
@@ -8264,7 +8320,50 @@ fn console_terminal_ioctl(request: u32, arg: u64) -> SyscallResult {
             tty::set_winsize(tty::WinSize::from_bytes(&bytes));
             SyscallResult::ok(0)
         }
-        // Unreachable: sys_ioctl only routes the six terminal requests here.
+        ioctl_cmd::TIOCGPGRP => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            // Report the foreground process group as a 4-byte pid_t.  A value
+            // of 0 (no foreground group installed) is reported as-is; Linux
+            // returns the real pgrp or, lacking one, a value > 1.
+            #[allow(clippy::cast_possible_truncation)]
+            let pgrp = tty::foreground_pgid() as i32;
+            let bytes = pgrp.to_ne_bytes();
+            // SAFETY: copy_to_user validates the 4-byte user range is mapped
+            // and writable and does the SMAP dance; `bytes` is a live 4-byte
+            // kernel buffer.
+            match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, bytes.len()) } {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        ioctl_cmd::TIOCSPGRP => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let mut bytes = [0u8; 4];
+            // SAFETY: copy_from_user validates the 4-byte user range is mapped
+            // and readable and does the SMAP dance; `bytes` is a live 4-byte
+            // kernel buffer.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(arg, bytes.as_mut_ptr(), bytes.len()) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let pgrp = i32::from_ne_bytes(bytes);
+            // A foreground pgrp must be a positive process-group ID.  Linux
+            // rejects pgrp <= 0 (and groups in a different session) with
+            // EINVAL/EPERM; we have a single session, so we only validate the
+            // sign here.
+            if pgrp <= 0 {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_sign_loss)]
+            tty::set_foreground_pgid(u64::from(pgrp as u32));
+            SyscallResult::ok(0)
+        }
+        // Unreachable: sys_ioctl only routes the terminal requests here.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -8351,7 +8450,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         | ioctl_cmd::TCSETSW
         | ioctl_cmd::TCSETSF
         | ioctl_cmd::TIOCGWINSZ
-        | ioctl_cmd::TIOCSWINSZ => {
+        | ioctl_cmd::TIOCSWINSZ
+        | ioctl_cmd::TIOCGPGRP
+        | ioctl_cmd::TIOCSPGRP => {
             // Terminal-control ioctls only apply to a tty (the console).
             // A non-console fd that exists returns ENOTTY (which is what
             // isatty(3) wants for "not a terminal"); a missing fd is EBADF.

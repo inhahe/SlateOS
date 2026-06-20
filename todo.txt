@@ -9466,12 +9466,31 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          P_PGID case (two forked children moved into a shared group;
 ##          empty-group scan → NoChildProcess, group scan finds the member).
 ##          Build + clippy clean; boot test PASSED (BOOT_OK).
-##      DEFERRED (Increment C — console job control, see known-issues TD30):
-##          Ctrl-Z/Ctrl-C sending SIGTSTP/SIGINT to the foreground process
-##          GROUP (needs a foreground_pgid on the tty + TIOCSPGRP/TIOCGPGRP);
-##          orphaned-process-group SIGHUP/SIGCONT on session leader exit.
-##          The pgrp infrastructure to deliver to now exists; what's missing
-##          is the console's notion of *which* pgrp is in the foreground.
+##      Increment C (console job control, see known-issues TD30):
+##          UPDATE 2026-06-20 (Increment C): PARTIALLY RESOLVED — Ctrl-C/Ctrl-\
+##          (SIGINT/SIGQUIT) now delivered to the console foreground process
+##          group.  The tty gained a FOREGROUND_PGID atomic with
+##          foreground_pgid()/set_foreground_pgid() accessors and the
+##          TIOCGPGRP(0x540F)/TIOCSPGRP(0x5410) ioctls (tcgetpgrp/tcsetpgrp);
+##          console_read() now returns a ConsoleRead{Data(n)|Signal(sig)} enum,
+##          and on a ^C/^\ in canonical mode (feed → LineStep::Signal) the
+##          syscall layer's deliver_console_signal() resolves the foreground
+##          pgrp via pcb::pids_in_group and posts SIGINT/SIGQUIT (SI_KERNEL
+##          siginfo) to every member, then returns ERESTARTSYS so the blocked
+##          reader's signal checkpoint runs (transparent restart when not in
+##          the fg group / SA_RESTART, else EINTR / default action).  No
+##          foreground group installed (pgid==0) ⇒ no signal, read restarts.
+##          Tested: tty self-test foreground pgrp set/get round-trip; build +
+##          clippy clean; boot test PASSED (BOOT_OK).
+##      STILL DEFERRED (Increment C remainder):
+##          (1) Ctrl-Z (VSUSP) → SIGTSTP to the foreground group: feed() does
+##              not yet recognise VSUSP, and job-control stop/cont plumbing
+##              (SIGTSTP/SIGCONT default stop action wired to the tty) is not
+##              done.  (2) Orphaned-process-group SIGHUP/SIGCONT on session
+##              leader exit.  (3) Raw-mode ISIG: raw_read() does not call feed()
+##              so ^C in a raw (non-canonical) terminal generates no signal —
+##              matches Linux only when the app cleared ISIG, but a raw read
+##              with ISIG still set should signal; revisit when an app needs it.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

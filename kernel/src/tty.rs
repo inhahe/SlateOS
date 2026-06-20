@@ -35,6 +35,7 @@
 // are wired incrementally; not every accessor has an in-tree caller yet.
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Number of control characters in the Linux *kernel* `struct termios`
@@ -535,6 +536,47 @@ impl PendingLine {
 /// Leftover bytes of a canonical line that overflowed a small reader buffer.
 static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
 
+/// The process group ID currently in the *foreground* of the console — the
+/// group that owns the terminal for the purpose of job control.  A `^C`/`^\`
+/// under `ISIG` delivers `SIGINT`/`SIGQUIT` to this group (see
+/// [`ConsoleRead::Signal`]); `TIOCGPGRP`/`TIOCSPGRP` read and set it.
+///
+/// `0` means "no foreground group set" (the kernel-startup / no-shell state),
+/// in which case a generated terminal signal has no group to target and is
+/// dropped.  This mirrors Linux's `tty->pgrp`, which an interactive shell
+/// installs via `tcsetpgrp(3)` for each job it foregrounds.
+static FOREGROUND_PGID: AtomicU64 = AtomicU64::new(0);
+
+/// Read the console's foreground process-group ID (0 if none is set).
+#[must_use]
+pub fn foreground_pgid() -> u64 {
+    FOREGROUND_PGID.load(Ordering::Relaxed)
+}
+
+/// Set the console's foreground process-group ID (`tcsetpgrp(3)` /
+/// `TIOCSPGRP`).  A value of `0` clears the foreground group.
+pub fn set_foreground_pgid(pgid: u64) {
+    FOREGROUND_PGID.store(pgid, Ordering::Relaxed);
+}
+
+/// Outcome of a console [`console_read`].
+///
+/// A normal read yields [`ConsoleRead::Data`] with the number of bytes written
+/// to the caller's buffer (`0` means end-of-file on a `^D` at an empty line, or
+/// nothing immediately available in a polling raw read).  A `^C`/`^\` typed
+/// under `ISIG` interrupts the read and yields [`ConsoleRead::Signal`] carrying
+/// the signal number (`SIGINT`=2 / `SIGQUIT`=3) the foreground process group
+/// must receive; the syscall layer performs the actual group delivery and
+/// returns the restart/`EINTR` sentinel to the blocked reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleRead {
+    /// `n` bytes were written to the caller's buffer (`0` ⇒ EOF / no data).
+    Data(usize),
+    /// A terminal signal (`SIGINT`/`SIGQUIT`) was generated; deliver it to the
+    /// foreground process group.  No bytes were written to the caller's buffer.
+    Signal(u8),
+}
+
 /// Read from the console into `out` per the current line discipline.
 ///
 /// In canonical mode this blocks until a full line (terminated by `\n` or
@@ -549,10 +591,11 @@ static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
 /// to the termios `ECHO` bit so that raw/no-echo programs (password prompts,
 /// full-screen editors) suppress echo correctly.
 ///
-/// Returns the number of bytes written to `out`.
-pub fn console_read(out: &mut [u8]) -> usize {
+/// Returns a [`ConsoleRead`]: either the number of bytes written to `out`, or a
+/// [`ConsoleRead::Signal`] when a `^C`/`^\` interrupted a canonical read.
+pub fn console_read(out: &mut [u8]) -> ConsoleRead {
     if out.is_empty() {
-        return 0;
+        return ConsoleRead::Data(0);
     }
     let t = get_termios();
 
@@ -564,19 +607,24 @@ pub fn console_read(out: &mut [u8]) -> usize {
     {
         let mut p = PENDING.lock();
         if p.has_data() {
-            return p.drain_into(out);
+            return ConsoleRead::Data(p.drain_into(out));
         }
     }
 
     if t.is_canonical() {
         canonical_read(&t, out)
     } else {
-        raw_read(&t, out)
+        ConsoleRead::Data(raw_read(&t, out))
     }
 }
 
 /// Canonical-mode read: edit a line until a terminator, then deliver it.
-fn canonical_read(t: &Termios, out: &mut [u8]) -> usize {
+///
+/// A `^C`/`^\` typed under `ISIG` interrupts the read immediately and returns
+/// [`ConsoleRead::Signal`]; the line in progress has already been discarded by
+/// [`feed`], so no partial data is delivered (matching Linux: an interrupted
+/// canonical read returns `-EINTR`, not the editing buffer).
+fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
     let mut line = LineBuf::new();
     loop {
         let raw = crate::keyboard::read_char();
@@ -585,18 +633,19 @@ fn canonical_read(t: &Termios, out: &mut [u8]) -> usize {
             LineStep::Line => break,
             LineStep::Eof => {
                 if line.len == 0 {
-                    return 0; // EOF
+                    return ConsoleRead::Data(0); // EOF
                 }
                 break;
             }
-            // Line flushed by a signal char; keep waiting for a fresh line.
-            // (Actual SIGINT/SIGQUIT delivery awaits job control.)
-            LineStep::Signal(_) => {}
+            // A signal char (^C/^\) flushed the in-progress line: abandon the
+            // read and let the syscall layer deliver the signal to the
+            // foreground process group, returning EINTR/ERESTARTSYS to us.
+            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
         }
     }
     let mut p = PENDING.lock();
     p.fill(line.as_slice());
-    p.drain_into(out)
+    ConsoleRead::Data(p.drain_into(out))
 }
 
 /// Non-canonical (raw) read honouring `VMIN` (see [`console_read`]).
@@ -750,6 +799,20 @@ pub fn self_test() {
         assert_eq!(rest.get(..4), Some(&b"def\n"[..]));
         assert!(!p.has_data(), "pending fully drained");
         crate::serial_println!("[tty]   pending-line chunked delivery: OK");
+    }
+
+    // Foreground process group (job control): set/get round-trips and 0 clears.
+    {
+        let saved = foreground_pgid();
+        set_foreground_pgid(0);
+        assert_eq!(foreground_pgid(), 0, "0 clears the foreground group");
+        set_foreground_pgid(4242);
+        assert_eq!(foreground_pgid(), 4242, "foreground pgid round-trips");
+        set_foreground_pgid(0);
+        assert_eq!(foreground_pgid(), 0, "foreground pgid re-cleared");
+        // Restore whatever the running system had installed (none, at boot).
+        set_foreground_pgid(saved);
+        crate::serial_println!("[tty]   foreground pgrp set/get: OK");
     }
 
     crate::serial_println!("[tty] Self-test passed.");

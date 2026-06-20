@@ -11709,6 +11709,158 @@ int main(void){\n\
     }
 }
 
+/// Path Z Part 40 — a multi-TU C project that `#include`s its own project header.
+///
+/// Every earlier hosted rung (Parts 36-39) deliberately declared its libc and
+/// cross-TU prototypes with bare `extern` statements so the build needed *no*
+/// header files at all.  Real-world C projects instead factor shared
+/// declarations + macros into their own headers and pull them in with
+/// `#include "project_header.h"` — the double-quote, *project-relative* form,
+/// distinct from the `<system_header.h>` glibc-tree form (which is still blocked
+/// on a header-carrying rootfs; see todo.txt).  This rung exercises exactly that
+/// previously-untested capability: tcc's preprocessor resolving a quote-include
+/// to a sibling header, expanding a macro it defines, and honoring a prototype
+/// it declares across a real translation-unit boundary.
+///
+/// Two TUs both `#include "caphdr-hdr.h"`, which provides `#define SLATE_BASE 40`
+/// and `int slate_combine(int);`.  TU A implements `slate_combine` using the
+/// macro; TU B's `main` calls it and prints `SLATE-HDR-42`.  A single
+/// `tcc -o /caphdr-prog /caphdr-a.c /caphdr-b.c` compiles both sources and links
+/// them into a dynamic binary that then runs in ring 3.
+///
+/// No-op (`Ok(())`) when the hosted-cc rootfs (`/bin/tcc`, the glibc support
+/// set) is absent, so a kernel built without it boots clean.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if tcc fails to build the project, the
+/// output is not a dynamic ELF, or the program does not print the expected line.
+pub fn self_test_linux_real_glibc_cc_project_header() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const LABEL: &str = "project-header";
+    const HDR: &str = "/caphdr-hdr.h";
+    const A_C: &str = "/caphdr-a.c";
+    const B_C: &str = "/caphdr-b.c";
+    const PROG: &str = "/caphdr-prog";
+    const OUT: &str = "/caphdr-out.txt";
+
+    // The shared project header: a macro + a cross-TU prototype, include-guarded.
+    const HDR_SRC: &[u8] = b"/* project-local header pulled in via #include \"...\" */\n\
+#ifndef CAPHDR_H\n\
+#define CAPHDR_H\n\
+#define SLATE_BASE 40\n\
+int slate_combine(int x);\n\
+#endif\n";
+    // TU A: includes the header for the macro + prototype, defines the function.
+    const A_SRC: &[u8] = b"#include \"caphdr-hdr.h\"\n\
+int slate_combine(int x){ return SLATE_BASE + x; }\n";
+    // TU B: includes the header for the prototype; main calls across the TU.
+    const B_SRC: &[u8] = b"#include \"caphdr-hdr.h\"\n\
+extern int printf(const char *fmt, ...);\n\
+int main(void){\n\
+  printf(\"SLATE-HDR-%d\\n\", slate_combine(2));\n\
+  return 0;\n\
+}\n";
+
+    match stage_hosted_cc_support() {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => return Err(e),
+    }
+
+    serial_println!(
+        "[spawn] Running REAL project-header C build (tcc, #include \"...\", ring 3, Path Z) test..."
+    );
+
+    fn cleanup() {
+        for p in
+            ["/caphdr-hdr.h", "/caphdr-a.c", "/caphdr-b.c", "/caphdr-prog", "/caphdr-out.txt"]
+        {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+    cleanup();
+
+    for (path, data) in [(HDR, HDR_SRC), (A_C, A_SRC), (B_C, B_SRC)] {
+        if let Err(e) = crate::fs::Vfs::write_file(path, data) {
+            serial_println!("[spawn]   {}: SKIP (writing {} failed: {:?})", LABEL, path, e);
+            cleanup();
+            return Ok(());
+        }
+    }
+
+    let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   {}: SKIP (re-read /bin/tcc failed: {:?})", LABEL, e);
+            cleanup();
+            return Ok(());
+        }
+    };
+
+    // --- compile + link both TUs in one tcc invocation ---------------------
+    let cc_argv: &[&[u8]] =
+        &[b"tcc", b"-o", PROG.as_bytes(), A_C.as_bytes(), B_C.as_bytes()];
+    let cc_exit = match spawn_reap_tcc(&tcc_elf, cc_argv, LABEL) {
+        Ok(x) => x,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    if cc_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: {} — tcc exit code={:?}, expected {} (non-zero means the preprocessor \
+             could not resolve the quote-include, or hit a compile/link error)",
+            LABEL, cc_exit, EXPECT_EXIT
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    let prog = match crate::fs::Vfs::read_file(PROG) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: {} — tcc exited 0 but {} is unreadable: {:?} (the build did not \
+                 produce the binary)",
+                LABEL, PROG, e
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_dynamic_elf(&prog, PROG, LABEL) {
+        cleanup();
+        return Err(e);
+    }
+
+    let (run_exit, out) = match run_dynamic_capture(&prog, PROG, OUT, LABEL) {
+        Ok(t) => t,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
+
+    if out.as_slice() == b"SLATE-HDR-42\n" && run_exit == Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   REAL project-header build (ring 3: tcc resolved #include \"caphdr-hdr.h\" \
+             from two TUs, expanded SLATE_BASE, linked the cross-TU call into a {}-byte dynamic \
+             ELF, ld.so ran it, output {} bytes == expected, exit={:?}): OK",
+            prog.len(), out.len(), run_exit
+        );
+        Ok(())
+    } else {
+        serial_println!(
+            "[spawn]   FAIL: {} — {} holds {} bytes {:?} (exit={:?}), expected {:?} with exit={}",
+            LABEL, OUT, out.len(), out.as_slice(), run_exit, b"SLATE-HDR-42\n", EXPECT_EXIT
+        );
+        Err(KernelError::InternalError)
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

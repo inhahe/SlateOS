@@ -1866,6 +1866,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 40: a multi-TU C project that #includes its own project header
+    // via `#include "..."` (the project-relative quote form, distinct from the
+    // still-blocked <system_header.h> glibc-tree form). tcc's preprocessor must
+    // resolve the quote-include to a sibling header from two TUs, expand a macro
+    // it defines, and honor a prototype it declares across the TU boundary; the
+    // linked dynamic binary then runs in ring 3 and prints SLATE-HDR-42. Fills
+    // the header-include gap left by Parts 36-39 (which used bare `extern`s).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_project_header() {
+        serial_println!(
+            "WARNING: Path-Z project-header C build self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

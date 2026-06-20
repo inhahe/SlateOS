@@ -61,7 +61,14 @@ SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
-TIMEOUT=300
+# Default boot timeout.  The boot path runs the full self-test suite before
+# printing BOOT_OK, including the Path-Z ring-3 toolchain tests (each spawns a
+# real glibc/tcc/make/dash process under ld.so), which now dominate boot time:
+# a clean boot reaches BOOT_OK around ~305s and the suite keeps growing as new
+# Path-Z rungs land.  Keep a comfortable margin over the observed boot time so
+# the default invocation never spuriously "times out" on a healthy kernel;
+# override with --timeout= for slower hosts or the --bench wait marker.
+TIMEOUT=480
 NO_BUILD=0
 BENCH=0
 # Which serial marker the wait loop treats as "boot finished".  Default is

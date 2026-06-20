@@ -730,7 +730,22 @@ this fix the `http_gzip_1KiB` and `http_gzip_8KiB` benchmarks now **complete**
 single stack frame and removing it is correct regardless (gzip should never use
 16 KiB of stack).
 
-**OPEN part — the systemic interrupt-on-near-full-stack overflow.** After the
+**OPEN part — RESOLVED 2026-06-15 by the Q7 option-A per-CPU IRQ stack;
+empirically confirmed 2026-06-20.** The systemic interrupt-on-near-full-stack
+overflow was fixed by moving interrupt handling off the interrupted task's stack
+onto a dedicated per-CPU guard-page IRQ stack (`idt.rs::init_irq_stack` /
+`run_on_irq_stack` / `IRQ_STACK_TOP`/`IRQ_STACK_BOTTOM`, with nesting-aware
+manual RSP switch + `sched::do_deferred_preempt` after RSP is back on the task
+stack — see open-questions.md Q7 / design-decisions.md §26). Once IRQ frames no
+longer land on a near-full task stack, the 64 KiB task stack is sufficient for
+the debug-built `core::fmt`-heavy dashboard path. **Validated 2026-06-20:**
+`scripts/boot-test.sh --bench` runs the *entire* deferred suite to completion —
+`dashboard_api_status`/`_health`/`_metrics`, `isr_latency`, the 62-entry
+scorecard, and a clean `BENCH_OK` — with no double fault (serial-test.txt lines
+9843–9913). The stale "still double-faults entering dashboard_api_status"
+description below is retained for history only and no longer reproduces.
+
+_Historical (pre-fix) description:_ After the
 gzip fix the suite advances one stage further and double-faults again at the
 **identical** guard-page `RSP=0xffffc1000003ffb8`, now in `Task 114` during
 `bench_dashboard_api_status` (`crate::net::dashboard::bench_api_status`). The
@@ -768,10 +783,11 @@ Note these arrays are **not** the immediate dashboard double fault: the
 `core::fmt` call-chain depth — so reducing stack arrays will not by itself make
 `BENCH_OK` appear; only the Q7 IRQ-stack / stack-size decision will.
 
-**Impact:** `BENCH_OK` and the last benchmarks (dashboard API, ISR latency,
-scorecard) still don't complete. Does **not** affect normal operation: the
-default `BOOT_OK` boot test passes (the deferred bench suite runs only after
-BOOT_OK).
+**Impact (historical):** Before the Q7 IRQ-stack fix, `BENCH_OK` and the last
+benchmarks (dashboard API, ISR latency, scorecard) did not complete. As of the
+fix (and re-confirmed 2026-06-20) the full deferred suite completes and
+`BENCH_OK` prints. Normal operation was never affected: the default `BOOT_OK`
+boot test always passed (the deferred bench suite runs only after BOOT_OK).
 
 ### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
 

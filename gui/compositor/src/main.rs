@@ -48,6 +48,11 @@ use guitk::style::CornerRadii;
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
+mod stream;
+pub use stream::{
+    StreamFrame, StreamSession, StreamWindow, WindowSnapshot, apply_frame, decode_commands,
+    decode_frame, encode_commands, encode_frame, tree_from_commands,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -3325,6 +3330,37 @@ impl Compositor {
                 win.z_order = i as u32;
             }
         }
+    }
+
+    /// Capture the current scene as a draw-command stream frame for a remote
+    /// viewer (native compositor-level streaming).
+    ///
+    /// Walks the z-stack bottom-to-top, includes every visible, non-minimized
+    /// window, and hands the per-window render-command lists to `session`,
+    /// which forwards only the commands that changed since the last frame
+    /// (geometry-only deltas otherwise). The buffer (DMA-BUF) path has no
+    /// vector commands to forward, so such windows stream as empty command
+    /// lists — pixel forwarding for those is the video-encoded fallback's job,
+    /// not this path's.
+    pub fn capture_stream_frame(&self, session: &mut StreamSession) -> StreamFrame {
+        let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
+        for &id in &self.z_stack {
+            if let Some(win) = self.window_ref(id) {
+                if !win.visible || win.minimized {
+                    continue;
+                }
+                snaps.push(WindowSnapshot {
+                    id: win.id.raw(),
+                    x: win.x,
+                    y: win.y,
+                    width: win.width,
+                    height: win.height,
+                    opacity: win.opacity,
+                    commands: &win.render_tree.commands,
+                });
+            }
+        }
+        session.build_frame(self.framebuffer.width, self.framebuffer.height, &snaps)
     }
 
     /// Focus the topmost visible window.

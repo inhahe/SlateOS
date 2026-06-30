@@ -74,6 +74,10 @@ const MAX_RULES_PER_NS: usize = 64;
 /// Maximum number of namespaces (prevents resource exhaustion).
 const MAX_NAMESPACES: usize = 256;
 
+/// Maximum number of volume (bind) mounts a single process may hold
+/// (prevents an unbounded per-process mount list).
+const MAX_VOLUMES_PER_PROCESS: usize = 64;
+
 /// Maximum length of a path prefix in a rule.
 const MAX_PREFIX_LEN: usize = 1024;
 
@@ -143,6 +147,36 @@ static PROCESS_NS: Mutex<BTreeMap<u64, NamespaceId>> =
 /// never escape above its root (the security-critical difference from a
 /// plain prefix Bind rule).  See `apply_root` / `normalize_jailed`.
 static PROCESS_ROOT: Mutex<BTreeMap<u64, String>> =
+    Mutex::new(BTreeMap::new());
+
+/// A single volume (bind) mount: a guest-path prefix that resolves to an
+/// arbitrary host-path target instead of being prefixed with the container
+/// rootfs.  This is the Docker `-v host:guest` mechanism.
+#[derive(Clone)]
+struct VolumeMount {
+    /// Guest absolute path the volume is mounted at (e.g. `/data`), already
+    /// normalized (no trailing slash except the root case, no `.`/`..`).
+    guest_prefix: String,
+    /// Host absolute path the volume's contents live at (e.g.
+    /// `/host/shared`), already normalized.
+    host_target: String,
+}
+
+/// Per-process volume (bind) mounts.
+///
+/// Maps ProcessId (u64) → an ordered list of [`VolumeMount`]s.  Consulted
+/// during the chroot-resolution step ([`resolve_path_for`] step 2): after a
+/// guest absolute path is `..`-clamped within the jail, the **longest**
+/// matching volume prefix wins and the path is re-anchored under that
+/// volume's host target instead of under the container rootfs.  A process
+/// absent from this table has no volumes (every path resolves against its
+/// rootfs as before).
+///
+/// Security: matching happens on the already-`..`-clamped guest path
+/// (`normalize_jailed`), so a guest cannot use `..` to slip *into* a volume
+/// it shouldn't reach, nor *out* of a volume's subtree — the whole path is
+/// normalized against the guest root `/` before any volume is considered.
+static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> =
     Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
@@ -369,9 +403,11 @@ pub fn detach(process_id: u64) {
         }
     }
 
-    // Also drop any filesystem-root jail this process held, so a later
-    // process that happens to reuse the same PID does not inherit it.
+    // Also drop any filesystem-root jail and volume mounts this process
+    // held, so a later process that happens to reuse the same PID does not
+    // inherit them.
     PROCESS_ROOT.lock().remove(&process_id);
+    PROCESS_MOUNTS.lock().remove(&process_id);
 }
 
 /// Query which namespace a process belongs to.
@@ -419,6 +455,85 @@ pub fn clear_root(process_id: u64) {
 /// Returns `None` if the process is not jailed (sees the host root).
 pub fn get_root(process_id: u64) -> Option<String> {
     PROCESS_ROOT.lock().get(&process_id).cloned()
+}
+
+/// Add a volume (bind) mount to a process: the guest path `guest_prefix`
+/// resolves to the host path `host_target` instead of being prefixed with
+/// the container rootfs.  This is the Docker `-v host_target:guest_prefix`
+/// mechanism.
+///
+/// Both paths must be absolute.  They are normalized before storage.  A
+/// `guest_prefix` that normalizes to `/` (the guest root) is rejected:
+/// re-rooting the entire guest view is the job of [`set_root`], not a
+/// volume.  Re-adding a volume at an existing `guest_prefix` replaces it.
+///
+/// Volumes are matched **longest-prefix-first** at resolution time, so a
+/// volume at `/data/cache` correctly shadows a volume at `/data`.
+pub fn add_volume(
+    process_id: u64,
+    guest_prefix: &str,
+    host_target: &str,
+) -> KernelResult<()> {
+    validate_prefix(guest_prefix)?;
+    validate_prefix(host_target)?;
+    let guest = normalize_jailed(guest_prefix);
+    if guest == "/" {
+        // A volume at the guest root would shadow the entire rootfs — that
+        // is what `set_root` is for, not a volume.
+        return Err(KernelError::InvalidArgument);
+    }
+    let host = normalize_jailed(host_target);
+    let mut mounts = PROCESS_MOUNTS.lock();
+    let list = mounts.entry(process_id).or_default();
+    // Replace an existing volume at the same guest prefix rather than
+    // stacking duplicates (last-writer-wins, matching Docker re-mount).
+    if let Some(existing) = list.iter_mut().find(|v| v.guest_prefix == guest) {
+        existing.host_target = host;
+        return Ok(());
+    }
+    if list.len() >= MAX_VOLUMES_PER_PROCESS {
+        return Err(KernelError::ResourceExhausted);
+    }
+    list.push(VolumeMount { guest_prefix: guest, host_target: host });
+    Ok(())
+}
+
+/// Remove all volume mounts for a process.
+///
+/// Called when a jailed process exits (alongside [`clear_root`]) so a later
+/// process that reuses the same PID does not inherit stale volumes.
+/// Idempotent.
+pub fn clear_mounts(process_id: u64) {
+    PROCESS_MOUNTS.lock().remove(&process_id);
+}
+
+/// Number of volume mounts a process has (diagnostics/testing).
+pub fn volume_count(process_id: u64) -> usize {
+    PROCESS_MOUNTS.lock().get(&process_id).map_or(0, Vec::len)
+}
+
+/// Find the longest-matching volume for a (jail-normalized) guest path.
+///
+/// Returns `(host_target, suffix)` where `suffix` is the remainder of the
+/// guest path after the volume's `guest_prefix` (begins with `/`, or is
+/// empty when the path *is* the mount point).  `None` if no volume matches.
+fn longest_volume_match(
+    list: &[VolumeMount],
+    normalized_guest: &str,
+) -> Option<(String, String)> {
+    let mut best: Option<&VolumeMount> = None;
+    for v in list {
+        if strip_prefix_match(normalized_guest, &v.guest_prefix).is_some()
+            && best.is_none_or(|b| v.guest_prefix.len() > b.guest_prefix.len())
+        {
+            best = Some(v);
+        }
+    }
+    let v = best?;
+    // strip_prefix_match already confirmed a boundary match above.
+    let suffix = strip_prefix_match(normalized_guest, &v.guest_prefix)
+        .unwrap_or("");
+    Some((v.host_target.clone(), String::from(suffix)))
 }
 
 /// Resolve a path through the current process's namespace.
@@ -474,7 +589,20 @@ pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
     // clamped so the jail cannot be escaped.
     let root = { PROCESS_ROOT.lock().get(&process_id).cloned() };
     match root {
-        Some(r) => Ok(apply_root(&r, &translated)),
+        Some(r) => {
+            // Volume (bind) mounts only apply within a jail: they re-anchor a
+            // guest subtree onto an arbitrary host target instead of under the
+            // container rootfs.  Most jailed processes have none, so avoid the
+            // clone when the list is empty.
+            let volumes = {
+                PROCESS_MOUNTS.lock().get(&process_id).cloned().unwrap_or_default()
+            };
+            if volumes.is_empty() {
+                Ok(apply_root(&r, &translated))
+            } else {
+                Ok(apply_root_with_volumes(&r, &volumes, &translated))
+            }
+        }
         None => Ok(translated),
     }
 }
@@ -499,18 +627,52 @@ pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
 /// - `host` not within `root` (unexpected — a dirfd the process opened is
 ///   always within its jail): returned unchanged as a best-effort fallback.
 ///
-/// **Limitation:** this reverses only the chroot (`apply_root`) layer, not
-/// any namespace Bind/Hide remapping from step 1 of `resolve_path_for`.
-/// The container runtime isolates with the chroot jail alone (no Bind rules
-/// on a jailed process), so the reversal is exact for that use case.  A
-/// process that combined Bind rules *and* a chroot jail and then called
-/// `fchdir` would get the post-Bind guest path; recovering the pre-Bind
-/// path would require storing the original guest path on the open handle.
+/// This also reverses **volume (bind) mounts**: a host path inside a
+/// volume's `host_target` maps back to the volume's `guest_prefix` (longest
+/// match wins), mirroring `apply_root_with_volumes`.
+///
+/// **Limitation:** this reverses the chroot (`apply_root`) and volume layers,
+/// but not any namespace Bind/Hide remapping from step 1 of
+/// `resolve_path_for`.  The container runtime isolates with the chroot jail
+/// plus volumes (no step-1 Bind rules on a jailed process), so the reversal
+/// is exact for that use case.  A process that combined step-1 Bind rules
+/// *and* a chroot jail and then called `fchdir` would get the post-Bind guest
+/// path; recovering the pre-Bind path would require storing the original
+/// guest path on the open handle.
 pub fn unjail_path_for(process_id: u64, host: &str) -> String {
     let root = match PROCESS_ROOT.lock().get(&process_id).cloned() {
         Some(r) => r,
         None => return String::from(host),
     };
+    // A host path inside a volume target maps back to that volume's guest
+    // prefix (longest host_target match wins, mirroring forward resolution
+    // in `apply_root_with_volumes`).  Checked before the rootfs strip
+    // because a volume's contents live *outside* the rootfs subtree.
+    {
+        let mounts = PROCESS_MOUNTS.lock();
+        if let Some(list) = mounts.get(&process_id) {
+            let mut best: Option<&VolumeMount> = None;
+            for v in list {
+                if strip_prefix_match(host, &v.host_target).is_some()
+                    && best.is_none_or(|b| {
+                        v.host_target.len() > b.host_target.len()
+                    })
+                {
+                    best = Some(v);
+                }
+            }
+            if let Some(v) = best {
+                let suffix =
+                    strip_prefix_match(host, &v.host_target).unwrap_or("");
+                let mut result = String::with_capacity(
+                    v.guest_prefix.len().saturating_add(suffix.len()),
+                );
+                result.push_str(&v.guest_prefix);
+                result.push_str(suffix);
+                return result;
+            }
+        }
+    }
     if host == root {
         return String::from("/");
     }
@@ -519,8 +681,8 @@ pub fn unjail_path_for(process_id: u64, host: &str) -> String {
             return String::from(suffix);
         }
     }
-    // Host path is not within this process's root — unexpected; return
-    // unchanged rather than fabricate a guest path.
+    // Host path is not within this process's root or any volume — unexpected;
+    // return unchanged rather than fabricate a guest path.
     String::from(host)
 }
 
@@ -653,6 +815,53 @@ fn apply_root(root: &str, path: &str) -> String {
     result
 }
 
+/// Like [`apply_root`], but consults the process's volume (bind) mounts
+/// first.
+///
+/// Resolution order, after `..`-clamping the guest path within the jail:
+/// 1. If the normalized guest path falls under a volume's `guest_prefix`
+///    (longest match wins), re-anchor it under that volume's `host_target`.
+/// 2. Otherwise prefix it with the container `root` exactly like
+///    [`apply_root`].
+///
+/// Because the path is normalized (`..` clamped against the guest root `/`)
+/// *before* any volume is considered, a guest cannot use `..` to escape a
+/// volume's subtree or to climb out of one volume and into another — the
+/// security property of the bare chroot is preserved.
+fn apply_root_with_volumes(
+    root: &str,
+    volumes: &[VolumeMount],
+    path: &str,
+) -> String {
+    if !path.starts_with('/') {
+        // Relative — handled by the cwd layer, same as `apply_root`.
+        return String::from(path);
+    }
+    let normalized = normalize_jailed(path);
+    if let Some((host_target, suffix)) =
+        longest_volume_match(volumes, &normalized)
+    {
+        if suffix.is_empty() {
+            return host_target;
+        }
+        let mut result = String::with_capacity(
+            host_target.len().saturating_add(suffix.len()),
+        );
+        result.push_str(&host_target);
+        result.push_str(&suffix);
+        return result;
+    }
+    if normalized == "/" {
+        return String::from(root);
+    }
+    let mut result = String::with_capacity(
+        root.len().saturating_add(normalized.len()),
+    );
+    result.push_str(root);
+    result.push_str(&normalized);
+    result
+}
+
 /// Normalize an absolute path, clamping `..` so it cannot rise above `/`.
 ///
 /// Returns a canonical absolute path with no `.`/`..`/empty components and
@@ -699,6 +908,7 @@ pub fn self_test() -> KernelResult<()> {
     test_clone_namespace()?;
     test_process_attach_detach()?;
     test_process_root()?;
+    test_volume_mounts()?;
 
     serial_println!("[namespace] All self-tests PASSED");
     Ok(())
@@ -990,5 +1200,98 @@ fn test_process_root() -> KernelResult<()> {
     assert!(set_root(pid, "").is_err());
 
     serial_println!("[namespace]   Process filesystem root (chroot): OK");
+    Ok(())
+}
+
+/// Exercise volume (bind) mounts layered on top of a chroot jail.
+fn test_volume_mounts() -> KernelResult<()> {
+    let pid: u64 = 88889;
+    clear_root(pid);
+    clear_mounts(pid);
+    assert_eq!(volume_count(pid), 0);
+
+    // Jail to a container rootfs, then mount a host directory as a volume.
+    set_root(pid, "/containers/v1/rootfs")?;
+    add_volume(pid, "/data", "/host/shared")?;
+    assert_eq!(volume_count(pid), 1);
+
+    // The mount point itself resolves to the volume target.
+    assert_eq!(resolve_path_for(pid, "/data")?, "/host/shared");
+    // Paths under the volume resolve under the target (escaping the rootfs).
+    assert_eq!(
+        resolve_path_for(pid, "/data/file.txt")?,
+        "/host/shared/file.txt",
+    );
+    assert_eq!(
+        resolve_path_for(pid, "/data/sub/x")?,
+        "/host/shared/sub/x",
+    );
+    // Non-volume paths still resolve under the rootfs.
+    assert_eq!(
+        resolve_path_for(pid, "/bin/sh")?,
+        "/containers/v1/rootfs/bin/sh",
+    );
+
+    // SECURITY: `..` is clamped against the guest root *before* volume
+    // matching, so a guest cannot climb out of the volume into the host.
+    // `/data/../secret` normalizes to `/secret`, which no longer matches the
+    // `/data` volume and resolves under the rootfs — not the host target.
+    assert_eq!(
+        resolve_path_for(pid, "/data/../secret")?,
+        "/containers/v1/rootfs/secret",
+    );
+    // Repeated `..` cannot escape the volume's host subtree upward either.
+    assert_eq!(
+        resolve_path_for(pid, "/data/../../etc")?,
+        "/containers/v1/rootfs/etc",
+    );
+    // `..` *within* the volume stays in the volume.
+    assert_eq!(
+        resolve_path_for(pid, "/data/sub/../x")?,
+        "/host/shared/x",
+    );
+
+    // Longest-prefix wins: a nested volume shadows the parent.
+    add_volume(pid, "/data/cache", "/fastcache")?;
+    assert_eq!(volume_count(pid), 2);
+    assert_eq!(resolve_path_for(pid, "/data/cache/a")?, "/fastcache/a");
+    assert_eq!(resolve_path_for(pid, "/data/cache")?, "/fastcache");
+    // A sibling under the parent volume is unaffected.
+    assert_eq!(resolve_path_for(pid, "/data/other")?, "/host/shared/other");
+
+    // Re-adding at an existing guest prefix replaces (does not stack).
+    add_volume(pid, "/data", "/host/shared2")?;
+    assert_eq!(volume_count(pid), 2);
+    assert_eq!(resolve_path_for(pid, "/data/file")?, "/host/shared2/file");
+
+    // Reverse mapping (fchdir into a volume): host path → guest path.
+    assert_eq!(unjail_path_for(pid, "/host/shared2/file"), "/data/file");
+    assert_eq!(unjail_path_for(pid, "/host/shared2"), "/data");
+    assert_eq!(unjail_path_for(pid, "/fastcache/a"), "/data/cache/a");
+    // Rootfs paths still reverse to their guest path.
+    assert_eq!(
+        unjail_path_for(pid, "/containers/v1/rootfs/bin/sh"),
+        "/bin/sh",
+    );
+
+    // Trailing slashes / `.` in volume args are normalized away.
+    add_volume(pid, "/logs/", "/var/log/./c1/")?;
+    assert_eq!(resolve_path_for(pid, "/logs/app.log")?, "/var/log/c1/app.log");
+
+    // A volume at the guest root is rejected (that is `set_root`'s job).
+    assert!(add_volume(pid, "/", "/whatever").is_err());
+    // Non-absolute args are rejected.
+    assert!(add_volume(pid, "data", "/host").is_err());
+    assert!(add_volume(pid, "/data", "host").is_err());
+    assert!(add_volume(pid, "", "/host").is_err());
+
+    // detach() drops volumes (PID-reuse safety).
+    detach(pid);
+    assert_eq!(volume_count(pid), 0);
+    assert!(get_root(pid).is_none());
+    // After detach, the former volume path is a plain host path again.
+    assert_eq!(resolve_path_for(pid, "/data/file")?, "/data/file");
+
+    serial_println!("[namespace]   Volume (bind) mounts: OK");
     Ok(())
 }

@@ -2184,6 +2184,24 @@ in §45). With parts (a) [CoW, inc 6] and (b) [this] done, TD32's remaining scop
 is the broader mount-namespace/`pivot_root` work deferred in §42 (a separate,
 larger feature, not a containment gap).
 
+**Update 2026-06-30 (increment 9): volume (bind) mounts — DONE.** The first
+concrete slice of TD32's remaining mount-namespace scope landed. A per-process
+volume table (`PROCESS_MOUNTS` in `namespace.rs`) layers Docker `-v`-style bind
+mounts *over* the chroot: a guest path under a volume prefix resolves to an
+arbitrary host target (escaping the rootfs), while everything else still jails
+under the rootfs. Volume matching runs *after* `..`-normalization, so a guest
+cannot climb out of a volume into the host (security-critical ordering).
+`unjail_path_for` reverses volumes too (longest host-target match), so `fchdir`
+into a volume reports the guest path and stays single-jailed. Container plumbing:
+`Container.volumes` + `add_volume_mount()` (Created-only, `-v` order), installed
+on the init process in `add_process_task`, cleared in `remove_process_task`/
+`delete`/`detach`. Covered by `namespace::test_volume_mounts` and container
+self-test 19; build/clippy clean, boot-test green. Design rationale in §46.
+Still deferred (TD32 remainder): a true longest-prefix mount-tree that subsumes
+the rootfs as the `/` mount (the `pivot_root` target), read-only volumes
+(`-v …:ro`), and tmpfs/named-volume types — all straightforward extensions on
+the same table.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

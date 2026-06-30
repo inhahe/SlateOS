@@ -56,6 +56,11 @@ pub const MAX_CONTAINERS: usize = 32;
 /// Container name maximum length.
 pub const MAX_NAME_LEN: usize = 64;
 
+/// Maximum number of volume (bind) mounts per container.  Kept at the
+/// per-process namespace cap so a container can never queue more volumes
+/// than [`crate::ipc::namespace::add_volume`] will accept.
+pub const MAX_VOLUMES_PER_CONTAINER: usize = 64;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -224,6 +229,13 @@ struct Container {
     /// container's jail (if any) points at a plain host directory that the
     /// container module does not own and must not unmount.
     rootfs_mount: String,
+    /// Volume (bind) mounts as `(guest_prefix, host_target)` pairs — the
+    /// Docker `-v host_target:guest_prefix` mechanism.  Each is installed on
+    /// every process launched by [`run`] via
+    /// [`crate::ipc::namespace::add_volume`], so a guest path under
+    /// `guest_prefix` resolves to `host_target` instead of under the
+    /// container rootfs.  Empty for a container with no volumes.
+    volumes: Vec<(String, String)>,
 }
 
 impl Container {
@@ -241,6 +253,7 @@ impl Container {
             init_pid: None,
             root_path: String::new(),
             rootfs_mount: String::new(),
+            volumes: Vec::new(),
         }
     }
 }
@@ -281,6 +294,8 @@ pub struct ContainerInfo {
     /// container does not own a mounted overlay (the jail, if any, points at
     /// a plain host directory). Unmounted by [`delete`].
     pub rootfs_mount: String,
+    /// Volume (bind) mounts as `(guest_prefix, host_target)` pairs.
+    pub volumes: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +657,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].init_pid = None;
         table.containers[idx].root_path.clear();
         table.containers[idx].rootfs_mount.clear();
+        table.containers[idx].volumes.clear();
 
         Ok(result)
     })?;
@@ -710,20 +726,22 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 /// [`run`] always uses this entry point with both ids from the spawn
 /// result.
 pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id, root_path) = with_table(|table| {
-        let idx = id as usize;
-        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
-            return Err(KernelError::InvalidArgument);
-        }
-        table.containers[idx].pids.push(pid);
-        Ok((
-            table.containers[idx].pid_ns,
-            table.containers[idx].user_ns,
-            table.containers[idx].net_ns,
-            table.containers[idx].cgroup_id,
-            table.containers[idx].root_path.clone(),
-        ))
-    })?;
+    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes) =
+        with_table(|table| {
+            let idx = id as usize;
+            if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+                return Err(KernelError::InvalidArgument);
+            }
+            table.containers[idx].pids.push(pid);
+            Ok((
+                table.containers[idx].pid_ns,
+                table.containers[idx].user_ns,
+                table.containers[idx].net_ns,
+                table.containers[idx].cgroup_id,
+                table.containers[idx].root_path.clone(),
+                table.containers[idx].volumes.clone(),
+            ))
+        })?;
 
     // Track in sub-resources.
     // pidns uses alloc_pid (maps global PID into namespace).
@@ -750,6 +768,16 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
     // jail automatically.  An empty `root_path` means no jail.
     if !root_path.is_empty() {
         let _ = crate::ipc::namespace::set_root(pid, &root_path);
+    }
+
+    // Install the container's volume (bind) mounts on the process, keyed on
+    // the same global PID as the chroot.  Each maps a guest path prefix to a
+    // host target that escapes the rootfs.  A malformed pair (rejected by
+    // `add_volume`) is skipped rather than failing the whole bind — the
+    // volume list is validated at `add_volume_mount` time, so this is purely
+    // defensive.
+    for (guest_prefix, host_target) in &volumes {
+        let _ = crate::ipc::namespace::add_volume(pid, guest_prefix, host_target);
     }
 
     Ok(())
@@ -800,10 +828,12 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     // revert to the host namespace.
     let _ = crate::sched::set_task_net_ns(task_id, crate::netns::ROOT_NS);
 
-    // Drop the filesystem-root jail (keyed on the global PID), symmetric
-    // with the `set_root` in `add_process_task`.  Idempotent if the
-    // container had no rootfs configured.
+    // Drop the filesystem-root jail and volume mounts (keyed on the global
+    // PID), symmetric with the `set_root`/`add_volume` calls in
+    // `add_process_task`.  Idempotent if the container had no rootfs or
+    // volumes configured.
     crate::ipc::namespace::clear_root(pid);
+    crate::ipc::namespace::clear_mounts(pid);
 
     Ok(())
 }
@@ -960,6 +990,65 @@ pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
     })
 }
 
+/// Add a volume (bind) mount to a container before it is run — the Docker
+/// `-v host_target:guest_prefix` mechanism.
+///
+/// `host_target` is an absolute host path whose contents become visible
+/// inside the container at the absolute guest path `guest_prefix`.  Unlike
+/// the rootfs (which clamps `..` and re-anchors *every* path), a volume
+/// re-anchors only the `guest_prefix` subtree, letting a container share a
+/// host directory (e.g. `-v /srv/data:/data`).  `..`-escape is still
+/// prevented: the guest path is normalized within the jail before volume
+/// matching, so a guest cannot climb out of a volume into the host (see
+/// [`crate::ipc::namespace::add_volume`]).
+///
+/// Must be called while the container is still in
+/// [`Created`](ContainerState::Created) state — volumes are installed on the
+/// init process at [`run`] time, so adding one to a running container would
+/// not affect its live processes.  Re-adding at an existing `guest_prefix`
+/// replaces the target (last-writer-wins).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not
+///   in `Created` state, either path is not absolute, or `guest_prefix` is
+///   the guest root `/` (that is [`set_root_path`]'s job).
+pub fn add_volume_mount(
+    id: ContainerId,
+    host_target: &str,
+    guest_prefix: &str,
+) -> KernelResult<()> {
+    if !host_target.starts_with('/') || !guest_prefix.starts_with('/') {
+        return Err(KernelError::InvalidArgument);
+    }
+    if guest_prefix == "/" {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        let vols = &mut table.containers[idx].volumes;
+        // Replace an existing volume at the same guest prefix (last-writer-
+        // wins), mirroring `namespace::add_volume` semantics.
+        if let Some(existing) =
+            vols.iter_mut().find(|(g, _)| g == guest_prefix)
+        {
+            existing.1 = String::from(host_target);
+            return Ok(());
+        }
+        if vols.len() >= MAX_VOLUMES_PER_CONTAINER {
+            return Err(KernelError::ResourceExhausted);
+        }
+        vols.push((String::from(guest_prefix), String::from(host_target)));
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API: queries
 // ---------------------------------------------------------------------------
@@ -986,6 +1075,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             init_pid: ct.init_pid,
             root_path: ct.root_path.clone(),
             rootfs_mount: ct.rootfs_mount.clone(),
+            volumes: ct.volumes.clone(),
         })
     })
 }
@@ -1356,6 +1446,84 @@ pub fn self_test() {
         delete(ct_jail).expect("delete jail container");
     }
     serial_println!("[container]   Rootfs jail (chroot) for init process: OK");
+
+    // Test 19: a container with volume (bind) mounts installs them on its
+    // init process, so a guest path under a volume resolves to the host
+    // target (escaping the rootfs), while non-volume paths stay jailed.
+    {
+        static HELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        let vol_cfg = ContainerConfig::new("test-vol-ct").memory(4096);
+        let ct_vol = create(&vol_cfg).expect("create vol container");
+        set_root_path(ct_vol, "/containers/test-vol/rootfs")
+            .expect("set rootfs");
+        // Volumes are configurable only before run.
+        add_volume_mount(ct_vol, "/srv/data", "/data")
+            .expect("add data volume");
+        add_volume_mount(ct_vol, "/var/log/test-vol", "/logs")
+            .expect("add logs volume");
+        // Bad args / guest-root volume are rejected.
+        assert!(add_volume_mount(ct_vol, "relative", "/x").is_err());
+        assert!(add_volume_mount(ct_vol, "/host", "rel").is_err());
+        assert!(add_volume_mount(ct_vol, "/host", "/").is_err());
+        // Re-adding at an existing guest prefix replaces, not stacks.
+        add_volume_mount(ct_vol, "/srv/data2", "/data")
+            .expect("replace data volume");
+        assert_eq!(
+            info(ct_vol).unwrap().volumes.len(),
+            2,
+            "re-mount at /data must replace, not add a third volume",
+        );
+
+        let opts = crate::proc::spawn::SpawnOptions::new("vol-init");
+        let pid = run(ct_vol, HELLO_ELF, &opts).expect("run vol init");
+
+        // Volume path escapes the rootfs to the host target.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/data/file.txt")
+                .expect("resolve volume path"),
+            "/srv/data2/file.txt",
+        );
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/logs/app.log")
+                .expect("resolve logs volume"),
+            "/var/log/test-vol/app.log",
+        );
+        // Non-volume path stays jailed under the rootfs.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/bin/sh")
+                .expect("resolve non-volume path"),
+            "/containers/test-vol/rootfs/bin/sh",
+        );
+        // `..` cannot climb out of a volume into the host.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/data/../escape")
+                .expect("resolve escape attempt"),
+            "/containers/test-vol/rootfs/escape",
+        );
+        // Adding a volume to a running container is rejected.
+        assert!(add_volume_mount(ct_vol, "/host/x", "/x").is_err());
+
+        // Tear down: remove_process_task must drop the volumes too.
+        let init_task = crate::proc::pcb::get_threads(pid)
+            .and_then(|t| t.first().copied())
+            .expect("vol init has a thread");
+        remove_process_task(ct_vol, pid, init_task)
+            .expect("detach vol init");
+        assert_eq!(
+            crate::ipc::namespace::volume_count(pid),
+            0,
+            "volumes must be cleared after detaching the init process",
+        );
+        crate::proc::thread::kill_process_threads(pid);
+        crate::proc::pcb::destroy(pid);
+
+        stop(ct_vol).expect("stop vol container");
+        delete(ct_vol).expect("delete vol container");
+    }
+    serial_println!("[container]   Volume (bind) mounts for init process: OK");
 
     // Cleanup.
     stop(ct2).ok(); // may already be stopped

@@ -67706,7 +67706,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67806,13 +67806,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]
+            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -67871,6 +67871,12 @@ fn cmd_oci(args: &str) {
             // pairs stored on the container (no runtime behavior). A bare KEY
             // (no `=`) gets an empty value, matching Docker.
             let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+            // Docker `--label-file FILE`: KEY=VALUE lines (same format as
+            // --env-file). Owned because they come from file contents.
+            // Precedence: --label-file < CLI --label (CLI wins).
+            let mut label_file_entries:
+                alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
+                alloc::vec::Vec::new();
             // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
             // after the image dir override the image's CMD (the ENTRYPOINT is
             // kept unless --entrypoint is also given). The first non-option
@@ -68125,6 +68131,50 @@ fn cmd_oci(args: &str) {
                             i = i.saturating_add(1);
                         }
                     }
+                    "--label-file" => {
+                        if let Some(&path) = parts.get(i.saturating_add(1)) {
+                            match crate::fs::vfs::Vfs::read_file(path) {
+                                Ok(bytes) => {
+                                    // Reuse the env-file line parser (same
+                                    // KEY=VALUE format). Labels must be UTF-8
+                                    // (they are stored as strings), so reject
+                                    // (rather than corrupt) any non-UTF-8 line.
+                                    let parsed = oci::parse_env_file(&bytes);
+                                    for n in &parsed.rejected_lines {
+                                        crate::console_println!(
+                                            "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
+                                            path, n
+                                        );
+                                    }
+                                    for entry in &parsed.entries {
+                                        let key_bytes = oci::env_entry_key(entry);
+                                        let val_bytes = entry
+                                            .get(key_bytes.len().saturating_add(1)..)
+                                            .unwrap_or(&[]);
+                                        match (
+                                            core::str::from_utf8(key_bytes),
+                                            core::str::from_utf8(val_bytes),
+                                        ) {
+                                            (Ok(k), Ok(v)) => label_file_entries.push((
+                                                alloc::string::String::from(k),
+                                                alloc::string::String::from(v),
+                                            )),
+                                            _ => crate::console_println!(
+                                                "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
+                                                path
+                                            ),
+                                        }
+                                    }
+                                }
+                                Err(e) => crate::console_println!(
+                                    "[oci] Could not read label-file '{}': {:?}", path, e
+                                ),
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     tok if tok.starts_with('-') => {
                         // Unknown option: skip it (and don't consume a value,
                         // since we don't know its arity).
@@ -68259,8 +68309,12 @@ fn cmd_oci(args: &str) {
             if let Some(hn) = hostname {
                 cfg = cfg.hostname(hn);
             }
-            // Apply metadata labels (--label/-l). The builder deduplicates by
-            // key with last-write-wins.
+            // Apply metadata labels. --label-file first, then CLI --label, so
+            // the builder's last-write-wins dedup makes CLI labels override
+            // file labels (Docker precedence).
+            for (k, v) in &label_file_entries {
+                cfg = cfg.label(k, v);
+            }
             for (k, v) in &labels {
                 cfg = cfg.label(k, v);
             }
@@ -68593,7 +68647,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

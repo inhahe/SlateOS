@@ -67268,6 +67268,11 @@ fn cmd_container(args: &str) {
             crate::console_println!("=== Container {} ===", id);
             crate::console_println!("  Name:       {}", ci.name);
             crate::console_println!("  State:      {}", ci.state);
+            // Docker's "Exited (N)": show the init process's recorded exit
+            // code once the container has stopped.
+            if let Some(code) = ci.exit_code {
+                crate::console_println!("  Exit code:  {}", code);
+            }
             crate::console_println!("  Processes:  {}", ci.nr_procs);
             match ci.init_pid {
                 Some(pid) => crate::console_println!("  Init PID:   {}", pid),

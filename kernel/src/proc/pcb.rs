@@ -1995,6 +1995,9 @@ pub fn remove_thread(
         if proc.exit_code.is_none() {
             proc.exit_code = Some(0); // Default exit code.
         }
+        // Capture the final exit code for the container layer (init-exit
+        // notification) before the lock is dropped below.
+        let zombie_exit_code = proc.exit_code.unwrap_or(0);
         let wake = proc.wait_task.take();
         // Capture the parent before re-borrowing the table so we can
         // wake any `waitpid(-1)` waiter blocked in the parent.
@@ -2039,7 +2042,7 @@ pub fn remove_thread(
         // Done after dropping PROCESS_TABLE to respect lock ordering — the
         // container/NAT locks must never be taken while holding PROCESS_TABLE.
         // A no-op for ordinary (non-container-init) processes.
-        crate::container::notify_init_exit(pid);
+        crate::container::notify_init_exit(pid, zombie_exit_code);
 
         return Ok((true, wake, any_waiter));
     }

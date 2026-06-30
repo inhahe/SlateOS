@@ -330,6 +330,13 @@ struct Container {
     /// Captured from [`ContainerConfig::labels`] at create time; carries no
     /// runtime behavior and is surfaced only via [`info`].
     labels: Vec<(String, String)>,
+    /// Exit code of the container's init process, recorded automatically when
+    /// the init exits and the container transitions to `Stopped` (Docker's
+    /// "Exited (N)").  `None` while the container has never stopped (Created
+    /// or Running) — once set, it persists until the slot is reused.  A
+    /// negative value indicates a crash (negated exception code), mirroring
+    /// the kernel's process exit-code convention.
+    exit_code: Option<i32>,
 }
 
 impl Container {
@@ -353,6 +360,7 @@ impl Container {
             container_ip: None,
             published_ports: Vec::new(),
             labels: Vec::new(),
+            exit_code: None,
         }
     }
 }
@@ -406,6 +414,9 @@ pub struct ContainerInfo {
     pub published_ports: Vec<PublishedPort>,
     /// Arbitrary user metadata `(key, value)` pairs (Docker `--label`).
     pub labels: Vec<(String, String)>,
+    /// Exit code of the container's init process, or `None` if the container
+    /// has not stopped yet (Docker's "Exited (N)"). Negative means a crash.
+    pub exit_code: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +681,9 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.hostname = config.hostname.clone();
         ct.labels = config.labels.clone();
         ct.published_ports.clear();
+        // Fresh container has not exited yet (clears any stale value from a
+        // reused slot).
+        ct.exit_code = None;
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -735,18 +749,20 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
 /// Notify the container layer that process `pid` has exited.
 ///
 /// If `pid` is the init process of a `Running` container, that container
-/// transitions to [`Stopped`](ContainerState::Stopped) and its published-port
-/// NAT forwards are torn down — Docker semantics: *a container lives as long
-/// as its init process*. This is the automatic counterpart to the manual
-/// [`stop`]; it is called from the process-exit (zombie-transition) path so a
-/// container's state tracks its init process without an explicit `stop`.
+/// transitions to [`Stopped`](ContainerState::Stopped), records `exit_code`
+/// (Docker's "Exited (N)"; negative means a crash, per the kernel's process
+/// exit-code convention), and tears down its published-port NAT forwards —
+/// Docker semantics: *a container lives as long as its init process*. This is
+/// the automatic counterpart to the manual [`stop`]; it is called from the
+/// process-exit (zombie-transition) path so a container's state tracks its
+/// init process without an explicit `stop`.
 ///
 /// Idempotent and cheap: a no-op when `pid` is not a `Running` container's
 /// init process (including already-stopped containers and ordinary
 /// non-container processes). Takes no locks other than the container table
 /// (and the NAT table), so it must be called with no incompatible locks held
 /// — in particular **not** while holding `PROCESS_TABLE`.
-pub fn notify_init_exit(pid: u64) {
+pub fn notify_init_exit(pid: u64, exit_code: i32) {
     // This runs from the generic process-exit path, which can fire during
     // early boot before `container::init()` has populated the table (e.g. a
     // bootstrap thread exiting). Access the table directly and treat an
@@ -763,6 +779,9 @@ pub fn notify_init_exit(pid: u64) {
                 && ct.init_pid == Some(pid)
             {
                 ct.state = ContainerState::Stopped;
+                // Record the init's exit code (Docker's "Exited (N)").  A
+                // negative value indicates a crash (negated exception code).
+                ct.exit_code = Some(exit_code);
                 found = Some(ct.net_ns);
                 break;
             }
@@ -1458,6 +1477,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             container_ip: ct.container_ip,
             published_ports: ct.published_ports.clone(),
             labels: ct.labels.clone(),
+            exit_code: ct.exit_code,
         })
     })
 }
@@ -2164,31 +2184,47 @@ pub fn self_test() {
             table.containers[idx].init_pid = Some(INIT_PID);
         });
         assert_eq!(info(ct_exit).unwrap().state, ContainerState::Running);
+        // A running (never-exited) container has no recorded exit code.
+        assert_eq!(info(ct_exit).unwrap().exit_code, None);
 
         // A non-matching pid must not disturb the container.
-        notify_init_exit(INIT_PID.wrapping_add(1));
+        notify_init_exit(INIT_PID.wrapping_add(1), 0);
         assert_eq!(
             info(ct_exit).unwrap().state,
             ContainerState::Running,
             "unrelated pid exit must not stop the container",
         );
+        assert_eq!(
+            info(ct_exit).unwrap().exit_code, None,
+            "unrelated pid exit must not record an exit code",
+        );
 
-        // The init pid exiting transitions the container to Stopped.
-        notify_init_exit(INIT_PID);
+        // The init pid exiting transitions the container to Stopped and records
+        // the init's exit code (Docker's "Exited (N)").
+        notify_init_exit(INIT_PID, 7);
         assert_eq!(
             info(ct_exit).unwrap().state,
             ContainerState::Stopped,
             "init exit must stop the container",
         );
+        assert_eq!(
+            info(ct_exit).unwrap().exit_code, Some(7),
+            "init exit must record the exit code",
+        );
 
         // Idempotent: a second notification (or a stale pid) is a harmless
-        // no-op now that the container is no longer Running.
-        notify_init_exit(INIT_PID);
+        // no-op now that the container is no longer Running — and must not
+        // overwrite the recorded exit code.
+        notify_init_exit(INIT_PID, 99);
         assert_eq!(info(ct_exit).unwrap().state, ContainerState::Stopped);
+        assert_eq!(
+            info(ct_exit).unwrap().exit_code, Some(7),
+            "a stale notification must not overwrite the recorded exit code",
+        );
 
         delete(ct_exit).expect("delete exited container");
     }
-    serial_println!("[container]   init-exit auto-stop (notify_init_exit): OK");
+    serial_println!("[container]   init-exit auto-stop + exit code (notify_init_exit): OK");
 
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,

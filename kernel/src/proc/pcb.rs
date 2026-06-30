@@ -4493,11 +4493,14 @@ fn vma_subrange(
     flags: crate::mm::page_table::PageFlags,
 ) -> Vma {
     let kind = match orig.kind {
-        VmaKind::FileBacked { handle, file_offset } => VmaKind::FileBacked {
+        VmaKind::FileBacked { handle, file_offset, file_id } => VmaKind::FileBacked {
             handle,
             // new_start >= orig.start by construction; wrapping_sub keeps
             // the arithmetic lint satisfied without a panic path.
             file_offset: file_offset.wrapping_add(new_start.wrapping_sub(orig.start)),
+            // Sub-ranging never changes the backing file, so its identity
+            // carries through unchanged.
+            file_id,
         },
         other => other,
     };
@@ -5059,7 +5062,9 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Guard/Fixed faults are never resolvable here.
     let file_backing = match vma.kind {
         VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => None,
-        VmaKind::FileBacked { handle, file_offset } => Some((handle, file_offset)),
+        VmaKind::FileBacked { handle, file_offset, file_id } => {
+            Some((handle, file_offset, file_id))
+        }
         VmaKind::Guard | VmaKind::Fixed => return false,
     };
 
@@ -5100,7 +5105,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
                 VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => {
                     Some(SubpageFill { flags: sv.flags, file: None })
                 }
-                VmaKind::FileBacked { handle, file_offset } => {
+                VmaKind::FileBacked { handle, file_offset, .. } => {
                     #[allow(clippy::arithmetic_side_effects)]
                     let off = file_offset + (sub_va - sv.start);
                     Some(SubpageFill { flags: sv.flags, file: Some((handle, off)) })
@@ -5123,6 +5128,37 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     if pml4_phys == 0 {
         // No user address space — can't resolve.
         return false;
+    }
+
+    // ---------------------------------------------------------------
+    // Shared read-only page-cache fast path (C-lite, design §23/§36/§37).
+    //
+    // A whole-frame `MAP_PRIVATE` file mapping over a filesystem with a
+    // stable inode identity (`file_id` Some) is served from the shared
+    // page cache: one physical frame per (file, page) is shared across
+    // every mapper, mapped read-only.  Because the cache permanently
+    // holds one reference, a shared file page always has refcount ≥ 2,
+    // so a private write *always* CoW-copies out of the shared frame
+    // (it can never upgrade the shared frame in place) — exactly the
+    // semantics `MAP_PRIVATE` requires.
+    //
+    // Eligible only when the page's file offset is 16 KiB frame-aligned
+    // (the cache keys whole frames).  A misaligned offset — possible
+    // when userspace assumes a 4 KiB page size — falls through to the
+    // private per-mapping read path below.
+    if let Some((handle, file_offset, Some(file_id))) = file_backing {
+        // frame_base >= vma_start (both frame-aligned, fault is in-VMA),
+        // so the subtraction never underflows.
+        let page_file_off = file_offset.wrapping_add(frame_base.wrapping_sub(vma_start));
+        // Cache keys whole frames: only a 16 KiB-aligned file offset is
+        // eligible.  FRAME_SIZE is a power of two, so the low bits form the
+        // alignment mask; `wrapping_sub(1)` cannot underflow (FRAME_SIZE > 0).
+        let align_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+        if page_file_off & align_mask == 0 {
+            return resolve_file_cached(
+                pml4_phys, frame_base, flags, file_id, handle, page_file_off, pid,
+            );
+        }
     }
 
     // Allocate, zero, and map a frame.
@@ -5164,7 +5200,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // For a file-backed mapping, fill the (already zeroed) frame with the
     // page's bytes from the backing file.  A short read past EOF leaves the
     // tail zero, matching Linux's page zero-fill semantics.
-    if let Some((handle, file_offset)) = file_backing {
+    if let Some((handle, file_offset, _file_id)) = file_backing {
         // Byte offset into the file for the page containing the fault.
         // `frame_base >= vma_start` (both frame-aligned, fault is in-VMA),
         // so the subtraction never underflows.
@@ -5219,6 +5255,88 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     serial_println!(
         "[fault] Demand-paged user frame for pid {} at {:#x}",
         pid, frame_base
+    );
+    true
+}
+
+/// Resolve a whole-frame, frame-aligned `MAP_PRIVATE` file fault from the
+/// shared read-only page cache (design §23/§36/§37).
+///
+/// Sources the page from `mm::page_cache::get_or_fill` — one physical
+/// frame per `(file_id, page)` shared across every mapper — and maps it
+/// **read-only** into this address space.  The returned frame carries one
+/// caller reference (the cache holds its own), so its refcount is ≥ 2 and
+/// a private write always copy-on-write-copies out of the shared frame via
+/// the existing [`crate::mm::cow`] path.
+///
+/// Mapping flags:
+/// - If the VMA is writable, the frame is mapped present + `COW` with
+///   `WRITABLE` cleared; the first write faults into `resolve_cow_fault`,
+///   which (refcount ≥ 2) copies to a fresh private, writable frame.
+/// - If the VMA is read-only, the frame is mapped with the VMA flags
+///   unchanged (already not writable); a write traps as an access
+///   violation, matching a read-only mapping.
+///
+/// The shared cache frame is deliberately **not** registered with the swap
+/// clock or the rmap: it is a clean, file-backed page pinned resident by
+/// the cache, and reclaim/compaction of shared cache pages is handled by
+/// the page-cache lifecycle (sub-task 4), not the anonymous-swap path —
+/// registering it there would let swap write a clean file page out and
+/// invalidate the cache's stable frame pointer.  Private CoW copies made
+/// on write *do* go through the normal path and are registered there.
+///
+/// Returns `true` if the page was mapped, `false` (→ access violation) on
+/// any allocation, fill, or mapping failure.
+fn resolve_file_cached(
+    pml4_phys: u64,
+    frame_base: u64,
+    flags: crate::mm::page_table::PageFlags,
+    file_id: crate::fs::vfs::FileId,
+    handle: u64,
+    page_file_off: u64,
+    pid: ProcessId,
+) -> bool {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    // Obtain the shared frame (filling it from the file on a cache miss).
+    // The fill closure runs only on a miss; a short read past EOF leaves
+    // the frame's tail zero, matching Linux's page zero-fill semantics.
+    let phys_frame = match crate::mm::page_cache::get_or_fill(file_id, page_file_off, |buf| {
+        crate::fs::handle::read_at(handle, page_file_off, buf).map(|_| ())
+    }) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    // Map read-only.  A writable VMA becomes RO + COW so the first write
+    // copies; a read-only VMA is mapped with its flags unchanged.
+    let map_flags = if flags.contains(PageFlags::WRITABLE) {
+        let with_cow = flags | PageFlags::COW;
+        PageFlags::from_bits(with_cow.bits() & !PageFlags::WRITABLE.bits())
+    } else {
+        flags
+    };
+
+    let virt = VirtAddr::new(frame_base);
+    // SAFETY: `pml4_phys` is the faulting process's valid PML4, `phys_frame`
+    // is a live cache frame holding our caller reference, and `virt` lies in
+    // a VMA that permits this (read-only) mapping.
+    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) };
+    if map_result.is_err() {
+        // Mapping failed — drop our caller reference on the cache frame.
+        crate::mm::page_cache::release(phys_frame);
+        return false;
+    }
+
+    // Flush the TLB so the CPU observes the new mapping.
+    // SAFETY: `invlpg` is always safe in ring 0.
+    unsafe {
+        page_table::flush_frame(virt);
+    }
+
+    serial_println!(
+        "[fault] Page-cache mapped pid {} at {:#x} (file {:?} off {:#x})",
+        pid, frame_base, file_id, page_file_off
     );
     true
 }

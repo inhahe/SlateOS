@@ -829,6 +829,26 @@ pub fn handle_path(handle: u64) -> KernelResult<String> {
     Ok(file.path.clone())
 }
 
+/// Resolve the stable system-wide file identity of an open handle.
+///
+/// Returns the backing file's [`crate::fs::vfs::FileId`] (mount `fs_id`
+/// plus inode number) by querying the VFS for the handle's cached
+/// resolved path.  Used at mmap time to key the shared read-only page
+/// cache.
+///
+/// - `Ok(Some(id))` — the backing filesystem exposes a stable inode.
+/// - `Ok(None)` — no stable identity (`ino == 0`: FAT, ISO9660, pseudo
+///   filesystems); the caller must fall back to the per-mapping read path.
+/// - `Err(_)` — the handle is invalid or the path no longer resolves.
+pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>> {
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        file.path.clone()
+    };
+    crate::fs::Vfs::file_identity(&path)
+}
+
 /// Get the current number of open file handles (for diagnostics).
 pub fn open_count() -> usize {
     OPEN_FILES.lock().len()

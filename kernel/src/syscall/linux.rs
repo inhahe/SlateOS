@@ -10697,7 +10697,14 @@ fn linux_file_mmap(
                     return linux_err(errno::ENOMEM);
                 }
             };
-            let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset };
+            // Resolve stable file identity once, here (off the fault hot
+            // path).  The per-subpage overlay fault resolver does NOT use
+            // the whole-frame page cache (it backs 4 KiB subpages that can
+            // share a 16 KiB frame with a differently-permissioned
+            // neighbour), so `file_id` is informational for this VMA; we
+            // still record it for /proc and future coherence work.
+            let file_id = crate::fs::handle::file_identity(mapped_handle).unwrap_or(None);
+            let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset, file_id };
             if pcb::add_vma(pid, Vma { start: base, end, kind, flags: page_flags }).is_err() {
                 // Drop our reference and refund — the overlay never took.
                 let _ = crate::fs::handle::close(mapped_handle);
@@ -10762,7 +10769,13 @@ fn linux_file_mmap(
                 return linux_err(errno::ENOMEM);
             }
         };
-        let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset };
+        // Resolve stable file identity once at mmap time (off the page-fault
+        // hot path) so whole-frame demand faults can source shared, refcounted
+        // pages from the read-only page cache.  `None` (FAT/ISO9660/pseudo-fs
+        // with no stable inode) makes the fault path fall back to a private
+        // per-mapping `read_at` copy.
+        let file_id = crate::fs::handle::file_identity(mapped_handle).unwrap_or(None);
+        let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset, file_id };
         let base = match pcb::reserve_unmapped_area(
             pid,
             length_aligned,

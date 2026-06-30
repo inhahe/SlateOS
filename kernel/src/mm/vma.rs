@@ -89,6 +89,15 @@ pub enum VmaKind {
         handle: u64,
         /// Byte offset into the backing file that `start` maps to.
         file_offset: u64,
+        /// Stable system-wide identity of the backing file, resolved once
+        /// at mmap time (off the page-fault hot path).  `Some(id)` enables
+        /// the shared read-only page cache: whole-frame faults source pages
+        /// from the cache (one shared, refcounted frame across all mappers)
+        /// and CoW-copy on a private write.  `None` when the backing
+        /// filesystem exposes no stable inode identity (`ino == 0`: FAT,
+        /// ISO9660, pseudo-filesystems) — those mappings fall back to the
+        /// per-mapping `read_at` private-frame path.
+        file_id: Option<crate::fs::vfs::FileId>,
     },
 }
 

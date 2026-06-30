@@ -67154,6 +67154,11 @@ fn cmd_container(args: &str) {
                         Some(code) => alloc::format!("exited ({})", code),
                         None => alloc::format!("{}", state),
                     }
+                } else if *state == container::ContainerState::Running
+                    && container::is_frozen(*id) == Some(true)
+                {
+                    // A frozen running container shows "paused" (Docker `ps`).
+                    alloc::format!("{} (paused)", state)
                 } else {
                     alloc::format!("{}", state)
                 };
@@ -67279,7 +67284,13 @@ fn cmd_container(args: &str) {
             };
             crate::console_println!("=== Container {} ===", id);
             crate::console_println!("  Name:       {}", ci.name);
-            crate::console_println!("  State:      {}", ci.state);
+            // A frozen running container shows "running (paused)" (Docker
+            // reports paused as a sub-state of running).
+            if ci.frozen {
+                crate::console_println!("  State:      {} (paused)", ci.state);
+            } else {
+                crate::console_println!("  State:      {}", ci.state);
+            }
             // Docker's "Exited (N)": show the init process's recorded exit
             // code once the container has stopped.
             if let Some(code) = ci.exit_code {
@@ -67630,6 +67641,38 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "pause" => {
+            // container pause <id>  (Docker `pause`): freeze the container,
+            // suspending all of its threads until `unpause`.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container pause <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::pause(id) {
+                Ok(n) => crate::console_println!("Container {} paused ({} thread(s) suspended)", id, n),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "unpause" | "resume" => {
+            // container unpause <id>  (Docker `unpause`): thaw a frozen
+            // container, resuming all of its threads.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container unpause <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::unpause(id) {
+                Ok(n) => crate::console_println!("Container {} unpaused ({} thread(s) resumed)", id, n),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67777,7 +67820,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|pause|unpause|exec|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67786,6 +67829,8 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");
             crate::console_println!("  container kill ID                        — force-kill all container processes");
+            crate::console_println!("  container pause ID                       — freeze (suspend all threads)");
+            crate::console_println!("  container unpause ID                     — thaw (resume all threads)");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");

@@ -67593,6 +67593,43 @@ fn cmd_container(args: &str) {
                 crate::console_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
             }
         }
+        "wait" => {
+            // container wait <id>  (Docker `wait`): block until the container
+            // reaches a terminal state (stopped/failed), then print its init
+            // exit code.  Polls the pure `wait_status` primitive, yielding the
+            // CPU between checks so the container's init can run and exit.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container wait <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            // Validate the id once up front; if it vanishes mid-wait we stop.
+            if container::wait_status(id).is_none() {
+                crate::console_println!("Container {} not found", id);
+                return;
+            }
+            loop {
+                match container::wait_status(id) {
+                    Some((true, exit_code)) => {
+                        crate::console_println!("{}", exit_code.unwrap_or(0));
+                        break;
+                    }
+                    Some((false, _)) => {
+                        // Non-terminal: yield so the init process can progress,
+                        // then re-poll.
+                        crate::sched::yield_now();
+                    }
+                    None => {
+                        // Container was deleted out from under us.
+                        crate::console_println!("Container {} removed while waiting", id);
+                        break;
+                    }
+                }
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67740,7 +67777,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|port|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67756,6 +67793,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container update ID [--cpus N] [--memory SIZE] — change live CPU/memory limits");
             crate::console_println!("  container rename ID <new-name>           — rename a container");
             crate::console_println!("  container port ID                        — list published port mappings");
+            crate::console_println!("  container wait ID                        — block until container stops, print exit code");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");

@@ -1526,6 +1526,38 @@ pub fn published_ports(id: ContainerId) -> Option<Vec<PublishedPort>> {
     })
 }
 
+/// Report whether a container has reached a terminal state, with its recorded
+/// exit code (Docker `wait`).
+///
+/// A container is *terminal* once it is [`Stopped`](ContainerState::Stopped) or
+/// [`Failed`](ContainerState::Failed): its init process has exited (or it was
+/// never started but explicitly stopped) and it will not run again without a
+/// fresh `run`.  [`Created`](ContainerState::Created) and
+/// [`Running`](ContainerState::Running) are non-terminal — a caller polling
+/// for completion should keep waiting.
+///
+/// Returns `Some((is_terminal, exit_code))`, where `exit_code` is the init
+/// process's recorded code (`None` if the container was stopped manually before
+/// any init exit recorded one). `None` if the container id is invalid/inactive.
+///
+/// This is the pure state-query primitive behind the blocking `container wait`
+/// CLI, which loops on it (yielding between polls) until `is_terminal` is true.
+#[must_use]
+pub fn wait_status(id: ContainerId) -> Option<(bool, Option<i32>)> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        let ct = &table.containers[idx];
+        let terminal = matches!(
+            ct.state,
+            ContainerState::Stopped | ContainerState::Failed
+        );
+        Some((terminal, ct.exit_code))
+    })
+}
+
 /// Rename a container (Docker `rename`).
 ///
 /// Replaces the container's human-readable name. The new name is truncated to
@@ -2532,6 +2564,35 @@ pub fn self_test() {
     }
     serial_println!("[container]   published port list (published_ports): OK");
 
+    // Test 19k: wait_status() reports terminal state + exit code (Docker
+    // `wait`).  A just-created container is non-terminal; after stop() it
+    // becomes terminal.  Invalid id → None.  (The blocking poll loop in the
+    // CLI is exercised by the run/exec integration path, not here.)
+    {
+        // Invalid id is rejected.
+        assert!(wait_status(MAX_CONTAINERS as ContainerId).is_none());
+
+        let ct_w = create(&ContainerConfig::new("test-wait-ct")).expect("create");
+        // Created is non-terminal: a waiter should keep polling.
+        assert_eq!(
+            wait_status(ct_w).expect("status"),
+            (false, None),
+            "a created container is non-terminal with no exit code",
+        );
+
+        // After stop(), it is terminal.  Manual stop records no exit code
+        // (only an init exit via notify_init_exit does).
+        stop(ct_w).expect("stop");
+        assert_eq!(
+            wait_status(ct_w).expect("status after stop"),
+            (true, None),
+            "a stopped container is terminal",
+        );
+
+        delete(ct_w).expect("delete wait container");
+    }
+    serial_println!("[container]   wait status (wait_status): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2631,5 +2692,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (29 tests)");
+    serial_println!("[container] Self-test PASSED (30 tests)");
 }

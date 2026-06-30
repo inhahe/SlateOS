@@ -505,12 +505,35 @@ pub fn self_test() {
     serial_println!("[accounting]   Uncharge: OK (saturating)");
 
     // -- 4. Largest RSS --
+    //
+    // `largest_rss()` scans the GLOBAL accounting table, which during a live
+    // boot also contains *real* process address spaces — some with an RSS far
+    // exceeding our fake test entries.  The old assertion `largest.pml4_phys
+    // == pml4_b` therefore had a false isolation assumption: it held only when
+    // no concurrent real process happened to hold >50 frames at this instant,
+    // and panicked (halting the whole boot) whenever one did — a load-
+    // dependent flake (see known-issues).  Instead, verify the invariant that
+    // is actually deterministic with real entries present:
+    //   (1) among our own entries, b outranks a (the ordering this exercises);
+    //   (2) `largest_rss()` never reports a maximum *below* a known live entry
+    //       (b = 50) — i.e. it returns a true global upper bound.
     charge(pml4_a, 20);
     charge(pml4_b, 50);
+    let qa = query(pml4_a).expect("query(a) returned None");
+    let qb = query(pml4_b).expect("query(b) returned None");
+    assert_eq!(qa.rss_frames, 20, "a.rss should be 20");
+    assert_eq!(qb.rss_frames, 50, "b.rss should be 50");
+    assert!(qb.rss_frames > qa.rss_frames, "b should outrank a");
     let largest = largest_rss().expect("largest_rss returned None");
-    assert_eq!(largest.pml4_phys, pml4_b, "largest should be b");
-    assert_eq!(largest.rss_frames, 50, "largest rss should be 50");
-    serial_println!("[accounting]   Largest RSS: OK (b=50)");
+    assert!(
+        largest.rss_frames >= qb.rss_frames,
+        "largest_rss must be >= any known entry (b=50), got {}",
+        largest.rss_frames,
+    );
+    serial_println!(
+        "[accounting]   Largest RSS: OK (b=50, global max={})",
+        largest.rss_frames,
+    );
 
     // -- 5. Kernel PML4 excluded --
     let kernel_pml4 = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);

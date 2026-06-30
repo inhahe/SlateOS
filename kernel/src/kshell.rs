@@ -67467,12 +67467,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest ...] [-p host:container[/proto] ...]
+            //                      [-e KEY=value ...]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...]");
                 return;
             };
 
@@ -67490,9 +67491,37 @@ fn cmd_oci(args: &str) {
             // Installed after the container is created (Created state).
             let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
                 alloc::vec::Vec::new();
+            // Extra `KEY=value` environment entries from `-e`/`--env`. These
+            // override the image's declared ENV (Docker semantics) and are
+            // merged at launch (see the env construction below).
+            let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
+                    "--env" | "-e" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // Require KEY=value: a bare `-e KEY` would mean
+                            // "inherit the host's KEY" in Docker, but a
+                            // container has no host environment to inherit, so
+                            // reject it rather than silently pass an empty var.
+                            if let Some((key, _)) = spec.split_once('=') {
+                                if key.is_empty() {
+                                    crate::console_println!(
+                                        "[oci] Ignoring env '{}': empty key", spec
+                                    );
+                                } else {
+                                    extra_env.push(spec);
+                                }
+                            } else {
+                                crate::console_println!(
+                                    "[oci] Ignoring env '{}': expected KEY=value", spec
+                                );
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--publish" | "-p" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
                             // Format: host:container[/proto]. Split the proto
@@ -67846,9 +67875,27 @@ fn cmd_oci(args: &str) {
                                     command.iter().map(|s| s.as_bytes().to_vec()).collect();
                                 let argv_refs: alloc::vec::Vec<&[u8]> =
                                     argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                let envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-                                    image.config.env.iter()
-                                        .map(|s| s.as_bytes().to_vec()).collect();
+                                // Merge `-e KEY=value` overrides with the image's
+                                // declared ENV using Docker semantics: a `-e` entry
+                                // wins over an image ENV entry with the same key, and
+                                // the merged set has no duplicate keys. We add all the
+                                // CLI `-e` entries first, then append each image ENV
+                                // entry only if its key isn't already overridden.
+                                let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                                    alloc::vec::Vec::new();
+                                for spec in &extra_env {
+                                    envp_owned.push(spec.as_bytes().to_vec());
+                                }
+                                for entry in &image.config.env {
+                                    let key = entry.split_once('=')
+                                        .map_or(entry.as_str(), |(k, _)| k);
+                                    let overridden = extra_env.iter().any(|e| {
+                                        e.split_once('=').map_or(*e, |(k, _)| k) == key
+                                    });
+                                    if !overridden {
+                                        envp_owned.push(entry.as_bytes().to_vec());
+                                    }
+                                }
                                 let envp_refs: alloc::vec::Vec<&[u8]> =
                                     envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
                                 let opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
@@ -67914,8 +67961,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

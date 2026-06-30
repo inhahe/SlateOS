@@ -2268,6 +2268,19 @@ deterministically (forwards are per-netns, not per-PID). This is orthogonal to
 the rootfs/volume mount-namespace scope; the TD32 mount remainder (read-only
 volumes, mount-tree/`pivot_root`, tmpfs) is still open.
 
+**Update 2026-06-30 (increment 12): env injection (`-e`) — DONE.** Docker
+`-e KEY=value`/`--env` environment injection landed entirely in the CLI launch
+path (`kshell::cmd_oci` `run`/`create`); the container/kernel layer needed no
+change because env already passes through `SpawnOptions::envp`. The parser
+requires `KEY=value` (a bare `-e KEY` is rejected — a container has no host
+environment to inherit) and rejects an empty key. At launch the CLI `-e` entries
+are merged over the image's declared ENV with Docker override semantics: each
+`-e` entry wins over an image ENV entry with the same key, and the merged set has
+no duplicate keys (CLI entries added first, then image ENV entries whose key is
+not already overridden). Usage/help strings updated to include `[-e KEY=value
+...]`. The TD32 mount remainder (read-only volumes, mount-tree/`pivot_root`,
+tmpfs) is still open.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

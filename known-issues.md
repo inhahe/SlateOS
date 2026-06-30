@@ -192,6 +192,54 @@ Which layer owns process→cgroup assignment, and whether to unify them,
 is an operator call. The fork/clone/spawn cgroup *inheritance* part is
 clearly correct but inert until an assignment path exists.
 
+### D-PTHREAD-DETACH-LEAK. Detached pthread stacks are never freed (64 KiB leaked per detached thread) — TECH DEBT
+
+**Where:** `posix/src/pthread.rs`. `pthread_create` mmaps a
+`DEFAULT_THREAD_STACK_SIZE` (64 KiB) user stack and records it in
+`THREAD_TABLE`. `pthread_join` frees the stack after `SYS_THREAD_JOIN`
+returns. But a **detached** thread is never joined, so nothing ever
+munmaps its stack — the `ThreadInfo` slot and the 64 KiB mapping leak for
+the life of the process. `pthread_detach` only flips `info.detached`.
+
+**Effect:** A long-running process that repeatedly spawns detached
+worker threads leaks 64 KiB per thread plus a `THREAD_TABLE` slot (only
+64 slots), eventually exhausting the table and address space. Most
+current userspace tools don't spawn many detached threads, so it's
+low-frequency, but it is a genuine unbounded leak.
+
+**Proper fix (userspace-only, no kernel change):** the exiting thread
+must free its *own* stack, glibc-`__unmapself`-style. Add a small
+bare-metal asm primitive `__pthread_exit_unmap(stack_base, stack_size,
+retval)` that issues `SYS_MUNMAP(stack_base, stack_size)` then
+`SYS_THREAD_EXIT(retval)` **without touching the stack between the two
+syscalls** (stash `retval` in a callee-saved reg that `SYSCALL` doesn't
+clobber — not the stack). In `pthread_exit`, after running TSD
+destructors, look up the calling thread's `ThreadInfo`: if `detached`,
+`take_thread_info()` and tail-call `__pthread_exit_unmap`; if joinable,
+fall through to the normal `SYS_THREAD_EXIT` (the joiner frees the
+stack). Threads created detached, or detached before exit, both work.
+
+**Concurrency caveat that must be handled:** `pthread_detach` (called
+from another thread) races the exiting thread's read of `info.detached`
++ `take_thread_info`. The `THREAD_TABLE` currently relies on a
+"single-creator convention" with NO lock — that is unsafe for the
+detach-vs-exit window. The proper fix must add a real lock (or an atomic
+detached flag per slot, CAS'd by whichever of detach/exit gets there
+first) so exactly one of {joiner, self-unmap} frees the stack and there
+is no use-after-free. Model on glibc's `joinid`/`cancelhandling` atomic.
+
+**Why deferred:** the asm self-unmap path is `target_os="none"`-only and
+cannot be unit-tested on the host; combined with the detach/exit data
+race it is too risky to land without a QEMU multithread stress test.
+Landing it blind risks a use-after-free crash, which is far worse than a
+slow leak. Do it as its own focused task with a boot self-test that
+spawns N detached threads in a loop and asserts address-space / table
+usage stays bounded.
+
+**Discovered/documented:** 2026-06-30 (already noted as a `// Known
+limitation` in `pthread_detach`'s doc comment; promoted to tracked tech
+debt while implementing per-thread TSD).
+
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 
 **Where:** `kernel/src/idt.rs` page-fault handler (~line 1787). After

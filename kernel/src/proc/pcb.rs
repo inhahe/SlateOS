@@ -2034,6 +2034,13 @@ pub fn remove_thread(
             let _ = crate::initproc::register_orphan(orphan_pid as u32);
         }
 
+        // If this process was a container's init, transition that container to
+        // Stopped (Docker: a container lives as long as its init process).
+        // Done after dropping PROCESS_TABLE to respect lock ordering — the
+        // container/NAT locks must never be taken while holding PROCESS_TABLE.
+        // A no-op for ordinary (non-container-init) processes.
+        crate::container::notify_init_exit(pid);
+
         return Ok((true, wake, any_waiter));
     }
 

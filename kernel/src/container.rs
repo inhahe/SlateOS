@@ -732,6 +732,50 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Notify the container layer that process `pid` has exited.
+///
+/// If `pid` is the init process of a `Running` container, that container
+/// transitions to [`Stopped`](ContainerState::Stopped) and its published-port
+/// NAT forwards are torn down — Docker semantics: *a container lives as long
+/// as its init process*. This is the automatic counterpart to the manual
+/// [`stop`]; it is called from the process-exit (zombie-transition) path so a
+/// container's state tracks its init process without an explicit `stop`.
+///
+/// Idempotent and cheap: a no-op when `pid` is not a `Running` container's
+/// init process (including already-stopped containers and ordinary
+/// non-container processes). Takes no locks other than the container table
+/// (and the NAT table), so it must be called with no incompatible locks held
+/// — in particular **not** while holding `PROCESS_TABLE`.
+pub fn notify_init_exit(pid: u64) {
+    // This runs from the generic process-exit path, which can fire during
+    // early boot before `container::init()` has populated the table (e.g. a
+    // bootstrap thread exiting). Access the table directly and treat an
+    // uninitialized table as "no containers" rather than panicking.
+    let net_ns = {
+        let mut guard = TABLE.lock();
+        let Some(table) = guard.as_mut() else {
+            return;
+        };
+        let mut found = None;
+        for ct in table.containers.iter_mut() {
+            if ct.active
+                && ct.state == ContainerState::Running
+                && ct.init_pid == Some(pid)
+            {
+                ct.state = ContainerState::Stopped;
+                found = Some(ct.net_ns);
+                break;
+            }
+        }
+        found
+    };
+    // Outside the table lock: tear down the dead container's host-port NAT
+    // forwards (idempotent if it had none), mirroring `stop`.
+    if let Some(net_ns) = net_ns {
+        crate::net::nat::flush_port_forwards(net_ns);
+    }
+}
+
 /// Mark a container as failed.
 ///
 /// # Errors
@@ -2104,6 +2148,48 @@ pub fn self_test() {
     }
     serial_println!("[container]   metadata labels (--label) + filter: OK");
 
+    // Test 19e: notify_init_exit transitions a Running container to Stopped
+    // when its init process exits (Docker: a container lives as long as its
+    // init).  We drive the state directly via the table rather than scheduling
+    // a real process, so the test is deterministic (no run()/spawn race).
+    {
+        const INIT_PID: u64 = 88894;
+
+        let ct_exit = create(&ContainerConfig::new("test-exit-ct")).expect("create");
+        // Force the container into the Running state with a synthetic init PID,
+        // simulating a successfully-launched init process.
+        with_table(|table| {
+            let idx = ct_exit as usize;
+            table.containers[idx].state = ContainerState::Running;
+            table.containers[idx].init_pid = Some(INIT_PID);
+        });
+        assert_eq!(info(ct_exit).unwrap().state, ContainerState::Running);
+
+        // A non-matching pid must not disturb the container.
+        notify_init_exit(INIT_PID.wrapping_add(1));
+        assert_eq!(
+            info(ct_exit).unwrap().state,
+            ContainerState::Running,
+            "unrelated pid exit must not stop the container",
+        );
+
+        // The init pid exiting transitions the container to Stopped.
+        notify_init_exit(INIT_PID);
+        assert_eq!(
+            info(ct_exit).unwrap().state,
+            ContainerState::Stopped,
+            "init exit must stop the container",
+        );
+
+        // Idempotent: a second notification (or a stale pid) is a harmless
+        // no-op now that the container is no longer Running.
+        notify_init_exit(INIT_PID);
+        assert_eq!(info(ct_exit).unwrap().state, ContainerState::Stopped);
+
+        delete(ct_exit).expect("delete exited container");
+    }
+    serial_println!("[container]   init-exit auto-stop (notify_init_exit): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2203,5 +2289,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (23 tests)");
+    serial_println!("[container] Self-test PASSED (24 tests)");
 }

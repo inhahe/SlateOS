@@ -216,6 +216,14 @@ struct Container {
     /// means "no jail" — processes see the host root (used by tests and by
     /// containers whose rootfs has not been configured).
     root_path: String,
+    /// VFS mountpoint of this container's overlay rootfs, if one was mounted
+    /// for copy-on-write isolation (e.g. `/containers/<name>/rootfs`).
+    ///
+    /// When non-empty, [`delete`] unmounts this path from the VFS so the
+    /// per-container `OverlayFs` adapter is released.  Empty means the
+    /// container's jail (if any) points at a plain host directory that the
+    /// container module does not own and must not unmount.
+    rootfs_mount: String,
 }
 
 impl Container {
@@ -232,6 +240,7 @@ impl Container {
             pids: Vec::new(),
             init_pid: None,
             root_path: String::new(),
+            rootfs_mount: String::new(),
         }
     }
 }
@@ -268,6 +277,10 @@ pub struct ContainerInfo {
     /// Filesystem root (chroot) for the container, or empty if processes
     /// see the host root (no rootfs configured).
     pub root_path: String,
+    /// VFS mountpoint of the container's overlay rootfs, or empty if the
+    /// container does not own a mounted overlay (the jail, if any, points at
+    /// a plain host directory). Unmounted by [`delete`].
+    pub rootfs_mount: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +621,7 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name) = with_table(|table| {
+    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -619,7 +632,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
 
         let ct = &table.containers[idx];
         let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
-                      ct.veth_pair, ct.name.clone());
+                      ct.veth_pair, ct.name.clone(), ct.rootfs_mount.clone());
 
         // Mark slot as inactive.
         table.containers[idx].active = false;
@@ -627,6 +640,8 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].veth_pair = None;
         table.containers[idx].pids.clear();
         table.containers[idx].init_pid = None;
+        table.containers[idx].root_path.clear();
+        table.containers[idx].rootfs_mount.clear();
 
         Ok(result)
     })?;
@@ -647,6 +662,15 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     let _ = crate::netns::delete(net_ns);
     let _ = crate::userns::delete(user_ns);
     let _ = crate::pidns::delete(pid_ns);
+
+    // Release the container's overlay rootfs mount, if it owns one.  Done
+    // outside the table lock (VFS has its own per-mount locking) and only
+    // when the container actually mounted an overlay — when `rootfs_mount`
+    // is empty the jail (if any) points at a plain host directory we don't
+    // own and must not unmount.
+    if !rootfs_mount.is_empty() {
+        let _ = crate::fs::Vfs::unmount(&rootfs_mount);
+    }
 
     serial_println!("[container] Deleted '{}' (id={})", name, id);
 
@@ -905,6 +929,37 @@ pub fn set_root_path(id: ContainerId, root: &str) -> KernelResult<()> {
     })
 }
 
+/// Record the VFS mountpoint of the container's overlay rootfs.
+///
+/// Stored so that [`delete`] can unmount the per-container `OverlayFs`
+/// adapter when the container is torn down.  Like [`set_root_path`], this
+/// only takes effect for a container still in `Created` state — a running
+/// container's mounts are fixed.  Passing an empty string clears the
+/// recorded mount (the container then owns no overlay and `delete` will not
+/// unmount anything).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is
+///   not in `Created` state, or `mount` is non-empty but not an absolute
+///   path.
+pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
+    if !mount.is_empty() && !mount.starts_with('/') {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].rootfs_mount = String::from(mount);
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API: queries
 // ---------------------------------------------------------------------------
@@ -930,6 +985,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             nr_procs: ct.pids.len(),
             init_pid: ct.init_pid,
             root_path: ct.root_path.clone(),
+            rootfs_mount: ct.rootfs_mount.clone(),
         })
     })
 }

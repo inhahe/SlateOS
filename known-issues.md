@@ -2078,6 +2078,22 @@ open for TD32:** wiring `oci run`/`container create` to actually mount an
 `OverlayFs` at the container rootfs and point `root_path` at that mountpoint
 instead of `lower` (increment 6), plus part (b) cwd jailing.
 
+**Update 2026-06-30 (increment 6): part (a) DONE.** `oci run` now VFS-mounts the
+per-container `OverlayFs` adapter at `/containers/<name>/rootfs` and jails the
+container at that merged mountpoint (not the read-only `lower`), so container
+writes are copy-on-write isolated — reads see the merged view, writes land in the
+per-container `upper` layer. The overlay creation (`fs::overlay::create`) now
+flows its `OverlayId` into the mount step; if the overlay can't be created or
+mounted, the launch gracefully falls back to jailing at the read-only `lower`.
+The mountpoint is recorded on the `Container` (`rootfs_mount` field +
+`set_rootfs_mount` setter, Created-only) and `container::delete` unmounts it on
+teardown (outside the table lock; the VFS has its own per-mount locking). Both the
+entrypoint-ELF read and the jail now route through `jail_root`.
+**Still open for TD32:** part (b) — cwd jailing (relative-path containment). The
+absolute-path read isolation and now CoW write isolation are both in place; the
+remaining gap is jailing a container process's *cwd* so relative resolution is
+contained, alongside the mount-namespace/`pivot_root` work deferred in §42.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

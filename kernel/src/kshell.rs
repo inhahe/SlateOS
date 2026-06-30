@@ -67591,16 +67591,23 @@ fn cmd_oci(args: &str) {
             }
             crate::console_println!("[oci] Rootfs: {} total files in {}", total_files, rootfs_lower);
 
-            // Step 3: Create overlay filesystem.
+            // Step 3: Create overlay filesystem (lower = extracted image
+            // layers, upper = writable scratch).  On success we mount it into
+            // the VFS so the container's writes are copy-on-write isolated
+            // from the read-only image.  If overlay creation fails we fall
+            // back to jailing the container directly at the read-only lower
+            // dir (no write isolation, but still runnable).
             let overlay_name = alloc::format!("oci-{}", image_name);
-            match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
+            let overlay_id = match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
                 Ok(ov_id) => {
                     crate::console_println!("[oci] Overlay created (id={}): lower={}, upper={}", ov_id, rootfs_lower, rootfs_upper);
+                    Some(ov_id)
                 }
                 Err(e) => {
                     crate::console_println!("[oci] Overlay creation failed: {:?} (continuing without overlay)", e);
+                    None
                 }
-            }
+            };
 
             // Step 4: Create container.
             let mut cfg = crate::container::ContainerConfig::new(image_name);
@@ -67617,7 +67624,49 @@ fn cmd_oci(args: &str) {
                     crate::console_println!("=== Container Created ===");
                     crate::console_println!("  Container ID: {}", ct_id);
                     crate::console_println!("  Name:         {}", image_name);
-                    crate::console_println!("  Rootfs:       {}", rootfs_lower);
+
+                    // Determine the container's jail root.  Prefer the merged
+                    // overlay mount (copy-on-write isolation): mount the
+                    // per-container `OverlayFs` adapter at
+                    // `/containers/<name>/rootfs` so reads see the merged view
+                    // and writes land in the upper layer.  If the overlay was
+                    // not created or the mount fails, fall back to jailing the
+                    // container directly at the read-only lower dir.
+                    let merged_mount = alloc::format!("/containers/{}/rootfs", image_name);
+                    let mut jail_root = rootfs_lower.clone();
+                    let mut mounted_overlay = false;
+                    if let Some(ov_id) = overlay_id {
+                        match crate::fs::overlay::OverlayFs::new(ov_id) {
+                            Ok(ovfs) => {
+                                match crate::fs::vfs::Vfs::mount(
+                                    &merged_mount,
+                                    alloc::boxed::Box::new(ovfs),
+                                ) {
+                                    Ok(()) => {
+                                        jail_root = merged_mount.clone();
+                                        mounted_overlay = true;
+                                        crate::console_println!(
+                                            "[oci] Overlay mounted at {} (copy-on-write)",
+                                            merged_mount
+                                        );
+                                    }
+                                    Err(e) => {
+                                        crate::console_println!(
+                                            "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
+                                            merged_mount, e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::console_println!(
+                                    "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    crate::console_println!("  Rootfs:       {}", jail_root);
 
                     // Show image runtime config.
                     let command = image.config.command();
@@ -67641,14 +67690,23 @@ fn cmd_oci(args: &str) {
                         crate::console_println!("  Net NS:       {}", ns.2);
                     }
 
-                    // Jail the container to its extracted rootfs (must happen
-                    // while still in Created state, before `run`).  The init
-                    // process then resolves `/bin/sh`, `/lib/...`, etc.
-                    // against the image's filesystem instead of the host.
-                    if let Err(e) = crate::container::set_root_path(ct_id, &rootfs_lower) {
+                    // Jail the container to its rootfs (must happen while
+                    // still in Created state, before `run`).  The init process
+                    // then resolves `/bin/sh`, `/lib/...`, etc. against the
+                    // container's filesystem instead of the host.
+                    if let Err(e) = crate::container::set_root_path(ct_id, &jail_root) {
                         crate::console_println!(
                             "[oci] Warning: could not set rootfs jail: {:?}", e
                         );
+                    }
+                    // If we mounted an overlay, record it on the container so
+                    // `container delete` unmounts the adapter on teardown.
+                    if mounted_overlay {
+                        if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount) {
+                            crate::console_println!(
+                                "[oci] Warning: could not record rootfs mount: {:?}", e
+                            );
+                        }
                     }
 
                     // Launch the image's entrypoint/cmd as the container's
@@ -67671,8 +67729,10 @@ fn cmd_oci(args: &str) {
                         } else {
                             alloc::format!("/{}", exe_rel)
                         };
-                        // Host path to read the ELF from (rootfs + guest path).
-                        let exe_host = alloc::format!("{}{}", rootfs_lower, exe_guest);
+                        // Host path to read the ELF from (jail root + guest
+                        // path).  When an overlay is mounted this reads through
+                        // the merged view; otherwise it reads the lower dir.
+                        let exe_host = alloc::format!("{}{}", jail_root, exe_guest);
 
                         match crate::fs::vfs::Vfs::read_file(&exe_host) {
                             Ok(elf) => {

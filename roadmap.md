@@ -5240,8 +5240,10 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     - [x] Process tracking across all sub-resources
     - [x] container::run(id, elf, opts): spawn a real init process into a container, bind it (cgroup billing via Q14 + pidns/userns/netns), record init PID, Created→Running; rolls back the spawn on bind failure
     - [x] PID-vs-task-id binding split: add_process_task/remove_process_task key scheduler resources (cgroup, net_ns) on the initial-thread task id, pidns mapping + tracking on the global PID (a spawned process's PID != its task id); add_process/remove_process are pid==task wrappers (design-decisions §41)
-    - [x] kshell `container`/`ct` command: list/create/delete/run/start/stop/exec/info/test (`run ID <elf-path> [args]` loads an ELF from the VFS and launches it as the container init process; `info` shows the init PID)
-    - [x] 17 self-tests (veth auto-setup, net_ns task propagation, run init process + end-to-end cgroup billing)
+    - [x] Per-container filesystem root (chroot): ipc::namespace PROCESS_ROOT map (set_root/clear_root/get_root) re-anchors a process's absolute paths under its rootfs and clamps `..` so the jail can't be escaped (apply_root/normalize_jailed); resolve_path_for applies it after Bind/Hide rules, keyed on the global PID so child threads inherit it; Container gains root_path + set_root_path (Created-only), wired through add_process_task/remove_process_task (design-decisions §42)
+    - [x] oci run launches the image entrypoint as the container init, jailed to the extracted rootfs (sets root_path, reads command[0] from the host path inside the rootfs, runs with image argv+env); falls back to start()+`container exec` when there's no entrypoint/unreadable binary. Limitation: jail points at the extracted lower dir, no overlay CoW write-isolation yet; relative paths not jailed (known-issues TD32)
+    - [x] kshell `container`/`ct` command: list/create/delete/rootfs/run/start/stop/exec/info/test (`rootfs ID <host-path>` sets the chroot; `run ID <elf-path> [args]` loads an ELF from the VFS and launches it as the jailed container init; `info` shows init PID + Rootfs)
+    - [x] 18 self-tests (veth auto-setup, net_ns task propagation, run init process + end-to-end cgroup billing, rootfs jail/chroot for init process)
     - [x] Automatic veth pair creation for networked containers
       - [x] setup_container_veth(): create pair, move end B to container NS, bring up both
       - [x] Veth pair ID stored in Container and ContainerInfo for lifecycle tracking

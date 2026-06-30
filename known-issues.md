@@ -2031,6 +2031,42 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD32. Container rootfs jail uses the extracted `lower` dir directly (no overlay CoW) and only jails absolute paths
+
+**Where:** `kernel/src/kshell.rs` (`oci run`, `cmd_oci`) sets the container's
+`root_path` to the extracted `/tmp/oci-<name>/lower` tree;
+`kernel/src/ipc/namespace.rs` (`apply_root`). The `fs::overlay` module exists and
+`oci run` *creates* an overlay (lower+upper) but the overlay is ID-addressed, not
+mounted into the VFS path tree, so the per-process root jail (which prepends a
+host path prefix and routes through the normal VFS) cannot resolve through it.
+
+**The debt.**
+1. **No copy-on-write isolation.** Because the jail points at `lower`, writes the
+   container makes land in the shared extracted image tree, not the per-container
+   `upper`. Two containers from the same image would see each other's writes, and
+   `overlay reset`/`commit` semantics don't apply to the running container.
+2. **Relative paths are not jailed.** `apply_root` only re-anchors absolute
+   paths; relative paths pass through for a per-process cwd layer to resolve. That
+   cwd layer does not yet jail cwd, so a container process using relative paths
+   from an unjailed cwd could currently resolve outside its root. The image
+   entrypoint and its libraries use absolute paths, so this doesn't bite the
+   common launch path, but it is a real containment gap.
+
+**Why it didn't block increments 3–4 (§42):** the entrypoint binary and its
+libraries are read via absolute paths under the rootfs, which `apply_root` jails
+correctly (`..` clamped), so launching a statically-linked image entrypoint
+works and is isolated for reads. The gaps are CoW write-isolation and
+relative-path containment.
+
+**Proper fix.** (a) VFS-mount the overlay at the container's rootfs mountpoint so
+the jail routes through copy-on-write (writes → `upper`, reads → merged), i.e.
+give `fs::overlay` a real VFS mount adapter and point `root_path` at the merged
+mountpoint instead of `lower`. (b) Jail cwd end-to-end: make the per-process cwd
+itself a jailed (absolute, within-root) path so relative resolution is contained,
+then have `apply_root` (or the cwd-join layer) treat relative paths as
+rooted-after-join. Track alongside the mount-namespace/`pivot_root` work deferred
+in §42.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

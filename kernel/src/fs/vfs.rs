@@ -851,6 +851,11 @@ impl core::fmt::Display for MountOptions {
     }
 }
 
+/// A mounted filesystem instance behind its per-mount lock.  Cloning the
+/// `Arc` hands out an independent handle that can be queried without holding
+/// the global VFS lock (see [`MountPoint::fs`] and design-decisions §43).
+type MountedFs = Arc<Mutex<Box<dyn FileSystem>>>;
+
 struct MountPoint {
     /// Path where this filesystem is mounted (e.g., `"/"`).
     path: String,
@@ -863,7 +868,7 @@ struct MountPoint {
     /// lock is released the moment the mount table lookup is done, and the
     /// per-mount lock taken here is a *different* lock from the one guarding
     /// any lower-layer mount.  See design-decisions §43.
-    fs: Arc<Mutex<Box<dyn FileSystem>>>,
+    fs: MountedFs,
     /// Mount options (read-only, noatime, etc.).
     options: MountOptions,
     /// Stable, never-reused id for this mounted filesystem instance.
@@ -2370,10 +2375,7 @@ impl Vfs {
         // mount iff `resolve_mount` hands back the *same* per-mount filesystem
         // handle (`Arc::ptr_eq`), so we compare the handles directly.
         let (fs_from, _id_from, _opts_from, rel_from) = resolve_mount(&from)?;
-        let (fs_to, fs_id_to, _opts_to, rel_to) = match resolve_mount(&to) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
+        let (fs_to, fs_id_to, _opts_to, rel_to) = resolve_mount(&to)?;
         let same_mount = Arc::ptr_eq(&fs_from, &fs_to);
 
         if same_mount {
@@ -2962,7 +2964,7 @@ impl Vfs {
         // Snapshot (path, handle) pairs under a brief global lock, then query
         // each filesystem lock-free — `statvfs` on a stacked mount may itself
         // re-enter the VFS, so it must not run under the global lock.
-        let mounts: Vec<(String, Arc<Mutex<Box<dyn FileSystem>>>)> = {
+        let mounts: Vec<(String, MountedFs)> = {
             let vfs = VFS.lock();
             vfs.mounts
                 .iter()
@@ -3190,7 +3192,7 @@ impl Vfs {
     pub fn sync() -> KernelResult<()> {
         // Snapshot the handles under a brief global lock, then sync each
         // lock-free (a stacked filesystem's sync may re-enter the VFS).
-        let handles: Vec<Arc<Mutex<Box<dyn FileSystem>>>> = {
+        let handles: Vec<MountedFs> = {
             let vfs = VFS.lock();
             vfs.mounts.iter().map(|mp| Arc::clone(&mp.fs)).collect()
         };
@@ -3876,7 +3878,7 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
 /// and from any lower-layer mount's lock, so reentrancy is safe.
 fn resolve_mount(
     path: &str,
-) -> KernelResult<(Arc<Mutex<Box<dyn FileSystem>>>, u64, MountOptions, String)> {
+) -> KernelResult<(MountedFs, u64, MountOptions, String)> {
     let mut vfs = VFS.lock();
     let (mp, relative) = find_mount(&mut vfs, path)?;
     Ok((

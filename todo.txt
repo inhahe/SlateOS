@@ -64,8 +64,17 @@
 ##   wired into main.rs alongside the other post-VFS Linux self-tests.
 
 ## ============================================================================
-## DEFERRED (2026-06-14): C-lite unified read-only page cache (Q5 / design-decisions §23)
+## ACTIVE (2026-06-24): C-lite unified read-only page cache (Q5/Q12 / design-decisions §23, §36)
 ## ============================================================================
+## STATUS CHANGE 2026-06-24: operator selected option E for Q12 — build this NOW.
+##   The §23 "implement LATER, not now" hold is LIFTED; the trigger is considered
+##   fired. Implementation plan + sub-task order recorded in design-decisions §36.
+##   Sub-tasks: (1) confirm stable VFS file-identity precursor (FileMeta.ino now
+##   populated for ext4/FAT/memfs — verify all backends), (2) host-testable
+##   read-only page-cache structure keyed by (file-identity, page-offset) ->
+##   refcounted frame, (3) VmaKind::FileBacked fault-path sources pages from the
+##   cache, (4) lifecycle/eviction/buffer-cache coherence. Start with (2) (zero
+##   boot-risk) before wiring the boot-critical fault path (3).
 ## WHAT: a unified *read-only* page cache so a file's pages are cached once and
 ##   shared (read-only) across every process that maps/reads them. Two payoffs:
 ##   (1) shared-library/.text dedup — N procs mapping the same .so share one set

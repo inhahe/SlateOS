@@ -2452,3 +2452,183 @@ gated: kernel pages legitimately lack `USER_ACCESSIBLE`, and there is no
 read-vs-execute-only distinctions the U bit can't express, or pkeys), add the
 explicit access mask to `Vma` then; the resolver gate and the `mprotect`
 `want_access` plumbing are the only call sites that would change.
+
+## 33. Bare-ELF ABI auto-classification (Q9) — Hybrid (option D): default unmarked bare ELF → Linux, note-walk as a positive Linux signal, stamp native binaries with an explicit SlateOS marker
+
+**Date:** 2026-06-24
+
+**Decided by:** Operator (this was `open-questions.md` Q9; the operator chose
+option **D**, which Claude recommended). The operator's words: *"Q9: Let's do
+with D."*
+
+**The decision.** Resolve the bare-static-ELF ambiguity (a `SYSV` static binary
+carrying only generic GNU-toolchain artifacts is genuinely indistinguishable
+between "Linux binary" and "SlateOS-native binary built with a GNU/LLVM
+toolchain") with the **hybrid** approach:
+1. **Flip the default for unmarked bare ELFs to Linux ABI.** Any ELF with no
+   positive native marker is treated as Linux — every real-world Linux static
+   binary (`tcc -nostdlib -static`, static musl, hand-rolled asm) "just works".
+2. **Add `NT_GNU_ABI_TAG` note-walking** as an additional *positive* Linux signal,
+   on top of the existing `EI_OSABI == ELFOSABI_GNU` / Linux `PT_INTERP` /
+   `PT_GNU_PROPERTY` markers.
+3. **Stamp SlateOS-native binaries with an explicit marker** — a SlateOS
+   `EI_OSABI` value in the architecture range 64–255 and/or a `.note.slateos`
+   `PT_NOTE`. Native is the side we fully control and can always mark; Linux is
+   the open-world default.
+4. **Keep `spawn_process_with_abi(elf, options, AbiMode)`** as the override for
+   callers that already know the ABI.
+
+**Rationale (both sides).** *For D:* native binaries are produced exclusively by
+our own toolchain, so marking them is cheap and unambiguous; Linux binaries
+arrive from the outside world unmarked, so the default should be the side we
+can't mark — makes "a Makefile builds a tool with tcc then `exec`s it" work
+transparently (central to the Path-Z toolchain goal). *Against / cost:* a
+user-visible policy flip; the native toolchain must emit the marker, and existing
+bare native test ELFs (`build_test_elf`) need it added, or a truly unmarked
+native binary would be mis-run as Linux.
+
+**Where it bites.** `kernel/src/proc/elf.rs::detect_linux_abi` (flip default + add
+`NT_GNU_ABI_TAG` note-walk + recognise the native marker);
+`kernel/src/proc/spawn.rs::spawn_process_inner` and the `exec` path around
+`new_abi_mode`; `build_test_elf` and the native toolchain (emit the marker).
+**Sequencing:** decided but not the immediate priority — Q12 selected the page
+cache (§36) as the next initiative; Q9 is unblocked and can land when the
+native-binary marker is wired into the toolchain.
+
+## 34. Fullscreen-capture video codec (Q10) — hardware encode via the GPU driver long-term (option C); defer the software-codec port near-term (option D); no stub encoder meanwhile
+
+**Date:** 2026-06-24
+
+**Decided by:** Operator (this was `open-questions.md` Q10; the operator deferred
+to Claude's recommendation). The operator's words: *"Q10: I'll go with your
+recommendation."* Claude's recommendation was **C long-term, D near-term**.
+
+**The decision.** The proper home for the remote-desktop fullscreen capture
+fallback (roadmap §4.5 — DMA-BUF/buffer-backed game/video surfaces with raw
+pixels, not vector `RenderCommand`s) is **hardware video encode via the GPU
+driver's encode engine**, which is hard-blocked on a GPU driver with an encode
+engine (AMDGPU/i915, roadmap §4.x) that does not exist yet. So:
+- **Near-term: defer the whole fallback** rather than build a software encoder
+  hardware encode would later obsolete.
+- **If** a software fallback is ever wanted before GPU encode lands, prefer
+  **AV1 via `rav1e`** (royalty-free + Rust-native), not H.264/x264
+  (patent/GPL friction).
+- **No stub encoder meanwhile** (band-aid); the draw-command stream already
+  covers the flat-shaded-desktop case.
+
+**Rationale (both sides).** *For C/D:* avoids a soon-obsolete software-codec port;
+matches real streaming architecture; keeps the royalty-free posture. *Against:*
+fullscreen game/video remoting stays unsupported until GPU encode exists —
+acceptable because the capture substrate is codec-agnostic (only the encoder
+backend is blocked) and the desktop case already streams.
+
+**Where it bites.** `gui/compositor` (fullscreen pixel capture + frame pacing + an
+`Encoder` trait) and a future encoder crate; IPC extends
+`CompositorRequest`/`CompositorResponse` alongside `StreamStart`/`StreamCapture`/
+`StreamStop`. No code now — records the deferral + codec choice for when GPU
+encode lands.
+
+## 35. Zero-copy page-flipping for large channel messages (Q11) — explicit opt-in `MSG_ZEROCOPY`-style flag + caller-provided page-aligned landing region (option B); copy path stays the default
+
+**Date:** 2026-06-24
+
+**Decided by:** Operator (this was `open-questions.md` Q11; the operator chose
+option **B**, which Claude recommended). The operator's words: *"Q11: Yeah, I
+like B."*
+
+**The decision.** Implement "zero-copy page flipping for large messages" as an
+**explicit, opt-in** mechanism, not transparent or threshold-automatic:
+- A `MSG_ZEROCOPY`-style **send flag**; without it, `send` keeps copy semantics
+  (the zero-risk default — nothing existing changes).
+- The **receiver pre-registers a page-aligned landing region**; on a zero-copy
+  send the kernel moves (page-flips) the sender's pages into it. Move semantics
+  (sender loses the pages) are explicit and opt-in — no silent `send` ownership
+  change.
+- Matches the `io_uring`/`vmsplice` model; 16 KiB page granularity and the
+  sub-page-tail length field are visible only to opt-in callers.
+
+**Rationale (both sides).** *For B:* keeps the correct copy path as default,
+avoids silently changing `send` ownership at a size threshold (option C's
+footgun), explicit/predictable. *Against:* more API surface; only helps adopters.
+Accepted because the alternative changes user-visible ownership semantics.
+
+**Compiler involvement (operator's follow-up — "should our compilers auto-choose
+the flag, or is that up to the programmer?").** *Decision:* **keep it
+programmer-/library-controlled; the compiler does not auto-insert the flag.** It
+belongs in the IPC **runtime/library wrapper**, not `fastpy`/`rustc`/the C
+compiler, for three reasons:
+1. **It is a runtime decision on runtime values** — whether to page-flip depends
+   on the runtime message length, buffer page-alignment, and whether the sender
+   still needs the pages, none of which the compiler reliably knows statically
+   (message size is usually dynamic).
+2. **It changes semantics, not just performance** — zero-copy *moves* the
+   sender's pages; a compiler silently changing ownership/aliasing would violate
+   the language memory model (the same transparent-threshold footgun B avoids).
+   Optimizations must be semantics-preserving; this isn't.
+3. **The right ergonomic home is the channel library** — the send wrapper can
+   offer an *auto-threshold helper* (`if len >= N && region.is_page_aligned() {
+   send_zerocopy() } else { send_copy() }`) so most callers get "it just works"
+   without the compiler, while a caller who needs the pages after send simply
+   doesn't use that helper. For `fastpy`, the high-level channel binding exposes
+   both an explicit zero-copy hint and the library-level auto-threshold default;
+   the AOT compiler emits ordinary calls into that library and does not reason
+   about page flipping itself.
+
+*Net:* document a **library-level auto-threshold helper** as the ergonomic path;
+do **not** add compiler analysis. (Recorded at the operator's request as part of
+the Q11 resolution.)
+
+**Where it bites.** `kernel/src/ipc/channel.rs` (`Message`, `send`/`recv`,
+`MAX_MESSAGE_SIZE`), a new MM page-transfer mechanism (`kernel/src/mm`), the
+Linux/native syscall glue marshalling channel messages, and the userspace channel
+library (the auto-threshold helper). Benchmark exists:
+`kernel/src/bench.rs::bench_ipc_channel_large` /
+`bench/baselines.toml [ipc_channel_roundtrip_64k]` (~343 µs/64 KiB today,
+copy-bound). **Sequencing:** decided but not the immediate priority — Q12 chose
+the page cache (§36); Q11 is unblocked and can be built afterward.
+
+## 36. Next large initiative (Q12) — build the operator-pre-approved C-lite read-only page cache now (lifts the §23 "not now")
+
+**Date:** 2026-06-24
+
+**Decided by:** Operator (this was `open-questions.md` Q12; the operator chose
+option **E**). The operator's words: *"Q12: I guess let's go with E."*
+
+**The decision.** With the bounded in-context work verified exhausted, the
+operator selected the **C-lite unified read-only page cache** (§23 / Q5) as the
+next large initiative. **This lifts the §23 "implement later, not now" hold** —
+the trigger is now considered fired (the shared-library `.text` dedup payoff plus
+the precursor being met), so the work is cleared to start. Scope is exactly §23's
+C-lite: cache a file's pages once and share them **read-only** across every
+process that maps/reads them (shared-library `.text` dedup + de-double-caching vs
+the block buffer cache). **Writable `MAP_SHARED` writeback stays declined
+(`ENOSYS`)** per §22/§23 — out of scope.
+
+**Implementation plan (sub-tasks, in order).**
+1. **Precursor — stable VFS file identity.** The cache is keyed by
+   `(file-identity, offset)`. Verified 2026-06-24 that `FileMeta.ino` is now
+   populated (ext4 real inode, FAT first-cluster, memfs `alloc_memfs_ino()`), so
+   the precursor is substantially met; confirm every backend yields a stable
+   non-zero identity and define the cache key around it.
+2. **Read-only page cache structure.** A frame store keyed by
+   `(file-identity, page-offset)` → refcounted physical frame, host-testable in
+   isolation (insert/lookup/refcount/evict), zero boot-risk before any fault-path
+   wiring. Likely unifies or fronts `kernel/src/fs/cache.rs`.
+3. **Fault-path integration.** `VmaKind::FileBacked` faults source pages from the
+   cache (shared read-only frame, refcount++) instead of a per-mapping `read_at`
+   copy; mark shared frames read-only/refcounted; a private write CoW-copies out
+   of the shared frame (existing CoW path derives flags correctly).
+4. **Lifecycle.** Refcount on map/unmap/exit; eviction policy; coherence with the
+   block buffer cache so a file's pages live in one place.
+
+**Rationale.** The §23-recorded Pareto-optimal slice: the cheap, reversible,
+high-value read-only half that captures the memory-saving win for the common
+shared-library case without the writable-shared hairiness §22/§23 declined.
+Starting with the host-testable cache structure (sub-task 2) before the
+boot-critical fault-path wiring (sub-task 3) keeps boot-risk out of early
+increments.
+
+**Where it lives:** `kernel/src/fs/vfs.rs` (identity precursor),
+`kernel/src/fs/cache.rs` (unify/front the cache) or a new page-cache module,
+`kernel/src/mm/` (`VmaKind::FileBacked` fault path), `kernel/src/syscall/linux.rs`
+(`linux_file_mmap`).

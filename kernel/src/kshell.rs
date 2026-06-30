@@ -67228,15 +67228,28 @@ fn cmd_container(args: &str) {
             }
         }
         "delete" | "del" | "rm" => {
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container delete <id>");
+            // `--force`/`-f` removes a running container (Docker `rm -f`); the
+            // flag may appear before or after the id.  The first non-flag token
+            // after the subcommand is the id.
+            let force = parts.iter().skip(1).any(|&t| t == "-f" || t == "--force");
+            let Some(id_str) = parts
+                .iter()
+                .skip(1)
+                .find(|&&t| t != "-f" && t != "--force")
+            else {
+                crate::console_println!("Usage: container delete [-f|--force] <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 crate::console_println!("Invalid container ID");
                 return;
             };
-            match container::delete(id) {
+            let result = if force {
+                container::force_delete(id)
+            } else {
+                container::delete(id)
+            };
+            match result {
                 Ok(()) => crate::console_println!("Deleted container {}", id),
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
@@ -67950,7 +67963,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
-            crate::console_println!("  container delete ID                      — delete stopped container");
+            crate::console_println!("  container delete [-f] ID                 — delete container (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
             crate::console_println!("  container restart ID                     — re-launch the recorded init command");

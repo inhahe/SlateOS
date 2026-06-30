@@ -913,6 +913,38 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Force-remove a container, even if it is running (Docker `rm -f`).
+///
+/// If the container is [`Running`](ContainerState::Running), its processes are
+/// killed and it is transitioned to `Stopped` first, then it is deleted exactly
+/// as [`delete`] would.  A non-running container is deleted directly.  This is
+/// the only one-step path that can remove a running container — plain [`delete`]
+/// deliberately refuses to, to avoid yanking a live container out from under
+/// its processes by accident.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the id is invalid/inactive.
+/// - Any error propagated from [`delete`] after the kill/stop.
+pub fn force_delete(id: ContainerId) -> KernelResult<()> {
+    // Snapshot whether the container is running under the table lock; perform
+    // the kill/stop transition outside it, since kill()/stop() re-take the
+    // table lock (and kill() also touches the scheduler/process tables).
+    let running = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].state == ContainerState::Running)
+    })?;
+    if running {
+        // Best-effort termination: if the processes already exited or stop()
+        // races a self-exit, delete() below still runs and reports the result.
+        let _ = kill(id);
+        let _ = stop(id);
+    }
+    delete(id)
+}
+
 // ---------------------------------------------------------------------------
 // Public API: process tracking
 // ---------------------------------------------------------------------------
@@ -3576,6 +3608,31 @@ pub fn self_test() {
     }
     serial_println!("[container]   commit (snapshot rootfs): OK");
 
+    // Test 19r: force_delete() removes a running container in one step (Docker
+    // `rm -f`), where plain delete() refuses.  A non-running container is still
+    // removed, and an invalid id is rejected.
+    {
+        // A Running container cannot be removed by delete() but can by
+        // force_delete().
+        let ct_run = create(&ContainerConfig::new("test-forcedel-run")).expect("create");
+        start(ct_run).expect("start force-del container");
+        assert!(
+            delete(ct_run).is_err(),
+            "delete() must refuse a running container",
+        );
+        force_delete(ct_run).expect("force_delete a running container");
+        assert!(info(ct_run).is_none(), "force_delete must remove the container");
+
+        // force_delete also works on a non-running (Created) container.
+        let ct_new = create(&ContainerConfig::new("test-forcedel-new")).expect("create");
+        force_delete(ct_new).expect("force_delete a created container");
+        assert!(info(ct_new).is_none(), "force_delete removes a created container");
+
+        // An invalid id is rejected.
+        assert!(force_delete(9999).is_err(), "invalid id must be rejected");
+    }
+    serial_println!("[container]   force_delete (rm -f): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3700,5 +3757,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (37 tests)");
+    serial_println!("[container] Self-test PASSED (38 tests)");
 }

@@ -455,8 +455,10 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     // POSIX: run key destructors and release this thread's TSD storage
-    // before the kernel reclaims the thread.
-    tsd_thread_cleanup(pthread_self());
+    // before the kernel reclaims the thread; also free its name slot.
+    let self_tid = pthread_self();
+    tsd_thread_cleanup(self_tid);
+    thread_name_release(self_tid);
     let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
     loop {
@@ -2248,19 +2250,96 @@ pub extern "C" fn pthread_rwlockattr_getpshared(
 /// Linux limit is 16 bytes.
 const PTHREAD_NAME_MAX: usize = 16;
 
-/// Thread name storage.
-///
-/// Simple global array indexed by task ID modulo array size.
-/// Not ideal (collisions possible) but sufficient for basic use.
-/// A real implementation would store names per-thread in TLS.
+/// Maximum number of threads that can have a stored name simultaneously.
 const MAX_NAMED_THREADS: usize = 64;
-static mut THREAD_NAMES: [[u8; PTHREAD_NAME_MAX]; MAX_NAMED_THREADS] =
-    [[0u8; PTHREAD_NAME_MAX]; MAX_NAMED_THREADS];
+
+/// One thread's name, keyed by kernel task ID (`task_id == 0` ⇒ free).
+///
+/// Keying on the real task ID (rather than the old `tid % N` hash) means
+/// two threads whose IDs collide modulo the table size no longer clobber
+/// each other's names.  Slots are released at thread exit
+/// (`thread_name_release`, called from `pthread_exit`).
+#[derive(Clone, Copy)]
+struct ThreadNameSlot {
+    task_id: u64,
+    name: [u8; PTHREAD_NAME_MAX],
+}
+
+impl ThreadNameSlot {
+    const EMPTY: Self = Self {
+        task_id: 0,
+        name: [0u8; PTHREAD_NAME_MAX],
+    };
+}
+
+static mut THREAD_NAMES: [ThreadNameSlot; MAX_NAMED_THREADS] =
+    [ThreadNameSlot::EMPTY; MAX_NAMED_THREADS];
+
+/// Guards [`THREAD_NAMES`] (names are set/read from arbitrary threads).
+static THREAD_NAME_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn thread_name_lock() {
+    while THREAD_NAME_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn thread_name_unlock() {
+    THREAD_NAME_LOCK.store(false, Ordering::Release);
+}
+
+/// Find the table index for `task_id`, optionally allocating a free slot.
+/// Caller must hold [`THREAD_NAME_LOCK`].
+fn thread_name_index(task_id: u64, create: bool) -> Option<usize> {
+    if task_id == 0 {
+        return None;
+    }
+    // SAFETY: caller holds THREAD_NAME_LOCK.
+    let table = unsafe { &mut *core::ptr::addr_of_mut!(THREAD_NAMES) };
+    for (i, slot) in table.iter().enumerate() {
+        if slot.task_id == task_id {
+            return Some(i);
+        }
+    }
+    if !create {
+        return None;
+    }
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.task_id == 0 {
+            *slot = ThreadNameSlot::EMPTY;
+            slot.task_id = task_id;
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Release the calling thread's name slot at exit.
+fn thread_name_release(task_id: u64) {
+    if task_id == 0 {
+        return;
+    }
+    thread_name_lock();
+    if let Some(idx) = thread_name_index(task_id, false) {
+        // SAFETY: lock held; idx in range.
+        let table = unsafe { &mut *core::ptr::addr_of_mut!(THREAD_NAMES) };
+        if let Some(slot) = table.get_mut(idx) {
+            *slot = ThreadNameSlot::EMPTY;
+        }
+    }
+    thread_name_unlock();
+}
 
 /// Set the name of a thread (GNU extension).
 ///
 /// `name` must be a null-terminated string of at most 15 characters
-/// (plus null).  Returns 0 on success, ERANGE if too long.
+/// (plus null).  Returns 0 on success, ERANGE if too long, ENOMEM if the
+/// name table is full.
 ///
 /// # Safety
 ///
@@ -2276,35 +2355,38 @@ pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -
         return errno::ERANGE;
     }
 
-    let idx = (thread as usize) % MAX_NAMED_THREADS;
-
-    // SAFETY: Single-threaded access assumption (same as rest of posix crate).
-    let slot = unsafe {
-        core::ptr::addr_of_mut!(THREAD_NAMES)
-            .as_mut()
-            .and_then(|names| names.get_mut(idx))
-    };
-    let Some(slot) = slot else {
-        return errno::EINVAL;
-    };
-    let mut i: usize = 0;
-    while i < name_len {
-        if let Some(s) = slot.get_mut(i) {
-            *s = unsafe { *name.add(i) };
+    thread_name_lock();
+    let rc = match thread_name_index(thread, true) {
+        Some(idx) => {
+            // SAFETY: lock held; idx in range.
+            let table = unsafe { &mut *core::ptr::addr_of_mut!(THREAD_NAMES) };
+            if let Some(slot) = table.get_mut(idx) {
+                slot.name = [0u8; PTHREAD_NAME_MAX];
+                let mut i: usize = 0;
+                while i < name_len {
+                    if let Some(s) = slot.name.get_mut(i) {
+                        // SAFETY: i < name_len ≤ strlen(name).
+                        *s = unsafe { *name.add(i) };
+                    }
+                    i = i.wrapping_add(1);
+                }
+                0
+            } else {
+                errno::EINVAL
+            }
         }
-        i = i.wrapping_add(1);
-    }
-    if let Some(s) = slot.get_mut(i) {
-        *s = 0;
-    }
-
-    0
+        // Table full.
+        None => errno::ENOMEM,
+    };
+    thread_name_unlock();
+    rc
 }
 
 /// Get the name of a thread (GNU extension).
 ///
 /// Copies the thread name into `name` (at most `len` bytes including null).
-/// Returns 0 on success, ERANGE if buffer too small.
+/// Returns 0 on success, ERANGE if buffer too small.  A thread with no
+/// name set yields the empty string.
 ///
 /// # Safety
 ///
@@ -2318,26 +2400,33 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
         return errno::EINVAL;
     }
 
-    let idx = (thread as usize) % MAX_NAMED_THREADS;
-
-    // SAFETY: Single-threaded access assumption.
-    let slot = unsafe {
-        core::ptr::addr_of!(THREAD_NAMES)
-            .as_ref()
-            .and_then(|names| names.get(idx))
-    };
-    let Some(slot) = slot else {
-        return errno::EINVAL;
-    };
+    // Snapshot the name under the lock into a local buffer, then copy out.
+    let mut local = [0u8; PTHREAD_NAME_MAX];
     let name_len = {
-        let mut l: usize = 0;
-        while l < PTHREAD_NAME_MAX {
-            if slot.get(l).copied().unwrap_or(0) == 0 {
-                break;
+        thread_name_lock();
+        let nl = match thread_name_index(thread, false) {
+            Some(idx) => {
+                // SAFETY: lock held; idx in range.
+                let table = unsafe { &*core::ptr::addr_of!(THREAD_NAMES) };
+                let mut l = 0usize;
+                if let Some(slot) = table.get(idx) {
+                    while l < PTHREAD_NAME_MAX {
+                        let b = slot.name.get(l).copied().unwrap_or(0);
+                        if b == 0 {
+                            break;
+                        }
+                        if let Some(d) = local.get_mut(l) {
+                            *d = b;
+                        }
+                        l = l.wrapping_add(1);
+                    }
+                }
+                l
             }
-            l = l.wrapping_add(1);
-        }
-        l
+            None => 0,
+        };
+        thread_name_unlock();
+        nl
     };
 
     if name_len.wrapping_add(1) > len {
@@ -2346,11 +2435,13 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
 
     let mut i: usize = 0;
     while i < name_len {
+        // SAFETY: i < name_len < len (checked above); name valid for len.
         unsafe {
-            *name.add(i) = slot.get(i).copied().unwrap_or(0);
+            *name.add(i) = local.get(i).copied().unwrap_or(0);
         }
         i = i.wrapping_add(1);
     }
+    // SAFETY: i == name_len < len.
     unsafe {
         *name.add(i) = 0;
     }
@@ -4227,6 +4318,55 @@ mod tests {
         let ret = unsafe { pthread_getname_np(5, buf.as_mut_ptr(), 16) };
         assert_eq!(ret, 0);
         assert_eq!(buf[0], 0, "Empty name should give empty string");
+    }
+
+    #[test]
+    fn test_pthread_name_no_modulo_collision() {
+        // Two task IDs that alias under the old `tid % MAX_NAMED_THREADS`
+        // hash (100 and 100 + MAX_NAMED_THREADS ≡ same slot) must now keep
+        // independent names.
+        let a: PthreadT = 100;
+        let b: PthreadT = 100 + MAX_NAMED_THREADS as PthreadT;
+        let na = b"alpha\0";
+        let nb = b"bravo\0";
+        assert_eq!(unsafe { pthread_setname_np(a, na.as_ptr()) }, 0);
+        assert_eq!(unsafe { pthread_setname_np(b, nb.as_ptr()) }, 0);
+
+        let mut buf = [0u8; 16];
+        assert_eq!(unsafe { pthread_getname_np(a, buf.as_mut_ptr(), 16) }, 0);
+        assert_eq!(&buf[..5], b"alpha");
+        let mut buf2 = [0u8; 16];
+        assert_eq!(unsafe { pthread_getname_np(b, buf2.as_mut_ptr(), 16) }, 0);
+        assert_eq!(&buf2[..5], b"bravo");
+
+        // Cleanup so the slots don't accumulate across the suite.
+        thread_name_release(a);
+        thread_name_release(b);
+    }
+
+    #[test]
+    fn test_pthread_name_release_clears_slot() {
+        let t: PthreadT = 200;
+        let n = b"worker\0";
+        assert_eq!(unsafe { pthread_setname_np(t, n.as_ptr()) }, 0);
+        let mut buf = [0u8; 16];
+        assert_eq!(unsafe { pthread_getname_np(t, buf.as_mut_ptr(), 16) }, 0);
+        assert_eq!(&buf[..6], b"worker");
+
+        // After release, the (unnamed) thread reports the empty string.
+        thread_name_release(t);
+        let mut buf2 = [0xFFu8; 16];
+        assert_eq!(unsafe { pthread_getname_np(t, buf2.as_mut_ptr(), 16) }, 0);
+        assert_eq!(buf2[0], 0, "released slot should yield empty name");
+    }
+
+    #[test]
+    fn test_pthread_getname_unset_thread_is_empty() {
+        // A thread ID that was never named yields the empty string (not an
+        // error), regardless of any stale data at the old modulo slot.
+        let mut buf = [0xFFu8; 16];
+        assert_eq!(unsafe { pthread_getname_np(54321, buf.as_mut_ptr(), 16) }, 0);
+        assert_eq!(buf[0], 0);
     }
 
     // -----------------------------------------------------------------------

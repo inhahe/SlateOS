@@ -1467,49 +1467,111 @@ pub fn copy_from_container(
     crate::fs::vfs::Vfs::read_file(&host_path)
 }
 
-/// Upper bound on the number of filesystem objects packed into a single
-/// [`export_rootfs`] archive.  Bounds memory/time against a pathological or
-/// adversarially-deep rootfs so the traversal can never run unbounded.
-const MAX_EXPORT_ENTRIES: usize = 65_536;
-
-/// Export a container's filesystem as an uncompressed `ustar` tar archive
-/// (Docker `container export`).
-///
-/// Walks the container's rootfs subtree iteratively (an explicit work stack,
-/// never kernel-stack recursion) and packs every directory, regular file and
-/// symlink into the archive with names **relative to the rootfs root**, so the
-/// result unpacks to the same layout under any target directory.  Permissions,
-/// owner uid/gid and mtime are preserved from the source metadata where the
-/// underlying filesystem tracks them, with conventional defaults otherwise.
+/// Report the entry kind (file/directory/symlink) of a path inside a
+/// container's rootfs, so a caller (e.g. the `cp` command) can choose between a
+/// single-file and a recursive-directory copy.
 ///
 /// # Errors
-/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive or
-///   has no rootfs configured (nothing to export).
-/// - [`KernelError::ResourceExhausted`] if the subtree exceeds
-///   [`MAX_EXPORT_ENTRIES`] objects.
-/// - Any VFS error encountered while reading the tree.
-pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
+///   no rootfs, or `container_path` is unsafe.
+/// - Any VFS `stat` error (e.g. path not found).
+pub fn entry_kind_in_container(
+    id: ContainerId,
+    container_path: &str,
+) -> KernelResult<crate::fs::vfs::EntryType> {
     let root_path = with_table_ref(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        let rp = table.containers[idx].root_path.clone();
-        if rp.is_empty() {
+        Ok(table.containers[idx].root_path.clone())
+    })?;
+    let host_path = resolve_in_rootfs(&root_path, container_path)?;
+    Ok(crate::fs::vfs::Vfs::stat(&host_path)?.entry_type)
+}
+
+/// Recursively copy a directory *out of* a container's filesystem as a tar
+/// archive (Docker `cp` of a directory, container → host side).
+///
+/// `container_path` is resolved under the container's rootfs (see
+/// [`resolve_in_rootfs`]) and its subtree is packed via [`tar_tree`] with names
+/// relative to that directory.  The caller extracts the archive on the host
+/// side (e.g. via [`untar_tree`]).
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
+///   no rootfs, or `container_path` is unsafe.
+/// - Any error propagated from [`tar_tree`].
+pub fn copy_dir_from_container(
+    id: ContainerId,
+    container_path: &str,
+) -> KernelResult<Vec<u8>> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        Ok(rp)
+        Ok(table.containers[idx].root_path.clone())
     })?;
-    let base = String::from(root_path.trim_end_matches('/'));
+    let host_path = resolve_in_rootfs(&root_path, container_path)?;
+    tar_tree(&host_path)
+}
 
+/// Recursively copy a tar archive *into* a container's filesystem under a
+/// directory (Docker `cp` of a directory, host → container side).
+///
+/// `container_path` is resolved under the container's rootfs (see
+/// [`resolve_in_rootfs`]) and `archive` is extracted there via [`untar_tree`].
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
+///   no rootfs, or `container_path` is unsafe.
+/// - Any error propagated from [`untar_tree`].
+pub fn copy_dir_to_container(
+    id: ContainerId,
+    container_path: &str,
+    archive: &[u8],
+) -> KernelResult<()> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].root_path.clone())
+    })?;
+    let host_path = resolve_in_rootfs(&root_path, container_path)?;
+    untar_tree(&host_path, archive)
+}
+
+/// Upper bound on the number of filesystem objects packed into a single
+/// tar archive by [`tar_tree`].  Bounds memory/time against a pathological or
+/// adversarially-deep tree so the traversal can never run unbounded.
+const MAX_EXPORT_ENTRIES: usize = 65_536;
+
+/// Pack an arbitrary host VFS directory subtree into an uncompressed `ustar`
+/// tar archive, with member names **relative to `base`**.
+///
+/// Walks the subtree iteratively (an explicit work stack, never kernel-stack
+/// recursion) and packs every directory, regular file and symlink.  Permissions,
+/// owner uid/gid and mtime are preserved from the source metadata where the
+/// underlying filesystem tracks them, with conventional defaults otherwise.
+/// This is the shared primitive behind both [`export_rootfs`] and the recursive
+/// container→host `cp` of a directory.
+///
+/// # Errors
+/// - [`KernelError::ResourceExhausted`] if the subtree exceeds
+///   [`MAX_EXPORT_ENTRIES`] objects.
+/// - Any VFS error encountered while reading the tree.
+pub fn tar_tree(base: &str) -> KernelResult<Vec<u8>> {
     use crate::fs::tar::{EntryKind, TarWriteEntry};
     use crate::fs::vfs::{EntryType, Vfs};
 
     let mut entries: Vec<TarWriteEntry> = Vec::new();
     // Explicit work stack of (host_path, archive_rel) directories still to
     // visit; an iterative walk avoids unbounded kernel-stack recursion on a
-    // deeply-nested rootfs.
-    let mut dirs: Vec<(String, String)> = alloc::vec![(base, String::new())];
+    // deeply-nested tree.
+    let mut dirs: Vec<(String, String)> =
+        alloc::vec![(String::from(base.trim_end_matches('/')), String::new())];
     while let Some((host_dir, rel_dir)) = dirs.pop() {
         let listing = Vfs::readdir(&host_dir)?;
         for de in listing {
@@ -1589,6 +1651,32 @@ pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
     Ok(crate::fs::tar::create(&entries))
 }
 
+/// Export a container's filesystem as an uncompressed `ustar` tar archive
+/// (Docker `container export`).
+///
+/// Thin wrapper over [`tar_tree`] rooted at the container's configured rootfs:
+/// the archive holds the whole rootfs with names relative to its root, so it
+/// unpacks to the same layout under any target directory.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive or
+///   has no rootfs configured (nothing to export).
+/// - Any error propagated from [`tar_tree`].
+pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        let rp = table.containers[idx].root_path.clone();
+        if rp.is_empty() {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(rp)
+    })?;
+    tar_tree(&root_path)
+}
+
 /// Idempotently create every prefix directory of `rel` underneath `base`.
 ///
 /// `base/<comp1>`, `base/<comp1>/<comp2>`, … are each `mkdir`'d in order
@@ -1610,39 +1698,29 @@ fn ensure_dir_path(base: &str, rel: &str) {
     }
 }
 
-/// Import a tar archive into a fresh container's rootfs (Docker `import`).
+/// Extract a `ustar` tar archive into the host VFS directory `base`.
 ///
-/// Parses `archive` as a `ustar` tar, extracts every directory, regular file
-/// and symlink into `dest_dir` on the host VFS (creating parent directories as
-/// needed, independent of the archive's entry ordering), then creates a new
-/// container named `name` whose rootfs is `dest_dir`.  Archive member names are
-/// taken relative to `dest_dir`; any name containing a `..` component is
-/// rejected as a jail-escape attempt.  Returns the new container's id.
-///
-/// The archive is parsed (and validated) *before* any container state is
-/// created, so a malformed tar fails without leaving a half-built container.
-/// If the rootfs cannot be attached after creation, the container is rolled
-/// back so no orphan is left behind.
+/// Parses and validates the archive *before* writing anything (a malformed tar
+/// or a `..`-escaping member name fails without partial extraction), then
+/// creates `base` and writes every directory, regular file and symlink with
+/// names relative to `base`, creating parent directories as needed independent
+/// of the archive's entry ordering.  This is the shared primitive behind both
+/// [`import_rootfs`] and the recursive host→container `cp` of a directory.
 ///
 /// # Errors
-/// - [`KernelError::InvalidArgument`] if `dest_dir` is empty/contains NUL, an
-///   archive name escapes the destination, or `name` is invalid.
+/// - [`KernelError::InvalidArgument`] if `base` is empty/contains NUL or an
+///   archive member name contains a `..` component (jail escape).
 /// - Any tar-parse or VFS error encountered while extracting.
-pub fn import_rootfs(
-    name: &str,
-    archive: &[u8],
-    dest_dir: &str,
-) -> KernelResult<ContainerId> {
-    if dest_dir.is_empty() || dest_dir.contains('\0') {
+pub fn untar_tree(base: &str, archive: &[u8]) -> KernelResult<()> {
+    if base.is_empty() || base.contains('\0') {
         return Err(KernelError::InvalidArgument);
     }
-    let base = dest_dir.trim_end_matches('/');
+    let base = base.trim_end_matches('/');
     if base.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
 
-    // Parse (and thereby validate) the archive before mutating any state, so a
-    // malformed tar fails cleanly without a half-built container or rootfs.
+    // Parse (and thereby validate) the archive before mutating any state.
     let entries = crate::fs::tar::parse(archive)?;
 
     // Validate every member name up front (reject `..` escapes) before writing
@@ -1691,6 +1769,35 @@ pub fn import_rootfs(
             }
         }
     }
+    Ok(())
+}
+
+/// Import a tar archive into a fresh container's rootfs (Docker `import`).
+///
+/// Extracts `archive` into `dest_dir` on the host VFS (via [`untar_tree`], which
+/// validates the archive and rejects `..`-escaping member names), then creates a
+/// new container named `name` whose rootfs is `dest_dir`.  Returns the new
+/// container's id.
+///
+/// The archive is extracted (and validated) *before* any container state is
+/// created, so a malformed tar fails without leaving a half-built container.
+/// If the rootfs cannot be attached after creation, the container is rolled
+/// back so no orphan is left behind.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `dest_dir` is empty/contains NUL, an
+///   archive name escapes the destination, or `name` is invalid.
+/// - Any tar-parse or VFS error encountered while extracting.
+pub fn import_rootfs(
+    name: &str,
+    archive: &[u8],
+    dest_dir: &str,
+) -> KernelResult<ContainerId> {
+    // Extract the archive into the destination first; this also validates
+    // `dest_dir` and the archive (a `..` escape or malformed tar fails here,
+    // before any container state is created).
+    untar_tree(dest_dir, archive)?;
+    let base = dest_dir.trim_end_matches('/');
 
     // Materialise the container and attach the freshly-populated rootfs.  Roll
     // back the container if the rootfs can't be attached, leaving no orphan.
@@ -3633,6 +3740,70 @@ pub fn self_test() {
     }
     serial_println!("[container]   force_delete (rm -f): OK");
 
+    // Test 19s: recursive cp — a directory subtree round-trips host → container
+    // → host through the tar primitives, preserving the nested layout/bytes.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Host source directory tree: /tmp/cpdir-src/{a.txt, sub/b.txt}.
+        Vfs::mkdir("/tmp/cpdir-src").expect("mkdir cpdir src");
+        Vfs::mkdir("/tmp/cpdir-src/sub").expect("mkdir cpdir src/sub");
+        Vfs::write_file("/tmp/cpdir-src/a.txt", b"AAA").expect("write a.txt");
+        Vfs::write_file("/tmp/cpdir-src/sub/b.txt", b"BBB").expect("write b.txt");
+
+        // Container with /tmp/cpdir-root as rootfs.
+        Vfs::mkdir("/tmp/cpdir-root").expect("mkdir cpdir root");
+        let ct = create(&ContainerConfig::new("test-cpdir-ct")).expect("create");
+        set_root_path(ct, "/tmp/cpdir-root").expect("set rootfs");
+
+        // host dir -> container:/d  (tar the host tree, extract under rootfs).
+        let archive = tar_tree("/tmp/cpdir-src").expect("tar host dir");
+        copy_dir_to_container(ct, "/d", &archive).expect("copy dir into container");
+        // The extracted files land under the rootfs at /tmp/cpdir-root/d/...
+        assert_eq!(
+            Vfs::read_file("/tmp/cpdir-root/d/a.txt").expect("read extracted a"),
+            b"AAA",
+        );
+        assert_eq!(
+            Vfs::read_file("/tmp/cpdir-root/d/sub/b.txt").expect("read extracted b"),
+            b"BBB",
+        );
+        // entry_kind_in_container reports the directory.
+        assert_eq!(
+            entry_kind_in_container(ct, "/d").expect("kind of /d"),
+            crate::fs::vfs::EntryType::Directory,
+        );
+
+        // container:/d -> host /tmp/cpdir-out  (tar from container, extract host).
+        let back = copy_dir_from_container(ct, "/d").expect("tar container dir");
+        untar_tree("/tmp/cpdir-out", &back).expect("extract to host");
+        assert_eq!(
+            Vfs::read_file("/tmp/cpdir-out/a.txt").expect("read out a"),
+            b"AAA",
+        );
+        assert_eq!(
+            Vfs::read_file("/tmp/cpdir-out/sub/b.txt").expect("read out b"),
+            b"BBB",
+        );
+
+        // Cleanup.
+        delete(ct).expect("delete cpdir container");
+        let _ = Vfs::remove("/tmp/cpdir-src/sub/b.txt");
+        let _ = Vfs::remove("/tmp/cpdir-src/a.txt");
+        let _ = Vfs::rmdir("/tmp/cpdir-src/sub");
+        let _ = Vfs::rmdir("/tmp/cpdir-src");
+        let _ = Vfs::remove("/tmp/cpdir-root/d/sub/b.txt");
+        let _ = Vfs::remove("/tmp/cpdir-root/d/a.txt");
+        let _ = Vfs::rmdir("/tmp/cpdir-root/d/sub");
+        let _ = Vfs::rmdir("/tmp/cpdir-root/d");
+        let _ = Vfs::rmdir("/tmp/cpdir-root");
+        let _ = Vfs::remove("/tmp/cpdir-out/sub/b.txt");
+        let _ = Vfs::remove("/tmp/cpdir-out/a.txt");
+        let _ = Vfs::rmdir("/tmp/cpdir-out/sub");
+        let _ = Vfs::rmdir("/tmp/cpdir-out");
+    }
+    serial_println!("[container]   cp -r (recursive directory copy): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3757,5 +3928,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (38 tests)");
+    serial_println!("[container] Self-test PASSED (39 tests)");
 }

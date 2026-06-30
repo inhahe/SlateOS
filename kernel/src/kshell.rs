@@ -67788,31 +67788,68 @@ fn cmd_container(args: &str) {
                 let id = left.parse::<u32>().ok()?;
                 Some((id, alloc::string::String::from(right)))
             };
+            use crate::fs::vfs::{EntryType, Vfs};
             match (parse_ref(src), parse_ref(dst)) {
                 (Some((id, cpath)), None) => {
-                    // container -> host
-                    match container::copy_from_container(id, &cpath) {
-                        Ok(data) => match crate::fs::vfs::Vfs::write_file(dst, &data) {
-                            Ok(()) => crate::console_println!(
-                                "Copied {} bytes from container {}:{} to {}",
-                                data.len(), id, cpath, dst
-                            ),
-                            Err(e) => crate::console_println!("Failed to write '{}': {:?}", dst, e),
+                    // container -> host.  Directories are copied recursively via
+                    // a tar transfer; regular files copy their bytes directly.
+                    match container::entry_kind_in_container(id, &cpath) {
+                        Ok(EntryType::Directory) => {
+                            match container::copy_dir_from_container(id, &cpath) {
+                                Ok(archive) => match container::untar_tree(dst, &archive) {
+                                    Ok(()) => crate::console_println!(
+                                        "Copied directory {}:{} -> {} ({} bytes archived)",
+                                        id, cpath, dst, archive.len()
+                                    ),
+                                    Err(e) => crate::console_println!(
+                                        "Failed to extract into '{}': {:?}", dst, e
+                                    ),
+                                },
+                                Err(e) => crate::console_println!("Error: {:?}", e),
+                            }
+                        }
+                        Ok(_) => match container::copy_from_container(id, &cpath) {
+                            Ok(data) => match Vfs::write_file(dst, &data) {
+                                Ok(()) => crate::console_println!(
+                                    "Copied {} bytes from container {}:{} to {}",
+                                    data.len(), id, cpath, dst
+                                ),
+                                Err(e) => crate::console_println!("Failed to write '{}': {:?}", dst, e),
+                            },
+                            Err(e) => crate::console_println!("Error: {:?}", e),
                         },
                         Err(e) => crate::console_println!("Error: {:?}", e),
                     }
                 }
                 (None, Some((id, cpath))) => {
-                    // host -> container
-                    match crate::fs::vfs::Vfs::read_file(src) {
-                        Ok(data) => match container::copy_to_container(id, &cpath, &data) {
-                            Ok(()) => crate::console_println!(
-                                "Copied {} bytes from {} to container {}:{}",
-                                data.len(), src, id, cpath
-                            ),
-                            Err(e) => crate::console_println!("Error: {:?}", e),
+                    // host -> container.  A host directory is copied recursively
+                    // via a tar transfer; a regular file copies its bytes.
+                    match Vfs::stat(src) {
+                        Ok(meta) if meta.entry_type == EntryType::Directory => {
+                            match container::tar_tree(src) {
+                                Ok(archive) => match container::copy_dir_to_container(id, &cpath, &archive) {
+                                    Ok(()) => crate::console_println!(
+                                        "Copied directory {} -> {}:{} ({} bytes archived)",
+                                        src, id, cpath, archive.len()
+                                    ),
+                                    Err(e) => crate::console_println!("Error: {:?}", e),
+                                },
+                                Err(e) => crate::console_println!(
+                                    "Failed to archive '{}': {:?}", src, e
+                                ),
+                            }
+                        }
+                        Ok(_) => match Vfs::read_file(src) {
+                            Ok(data) => match container::copy_to_container(id, &cpath, &data) {
+                                Ok(()) => crate::console_println!(
+                                    "Copied {} bytes from {} to container {}:{}",
+                                    data.len(), src, id, cpath
+                                ),
+                                Err(e) => crate::console_println!("Error: {:?}", e),
+                            },
+                            Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
                         },
-                        Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
+                        Err(e) => crate::console_println!("Failed to stat '{}': {:?}", src, e),
                     }
                 }
                 (Some(_), Some(_)) => {
@@ -67974,7 +68011,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container unpause ID                     — thaw (resume all threads)");
             crate::console_println!("  container prune                          — remove all stopped containers");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
-            crate::console_println!("  container cp <src> <dest>                — copy file host<->rootfs (one side ID:/path)");
+            crate::console_println!("  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)");
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");

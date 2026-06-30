@@ -67045,12 +67045,19 @@ fn cmd_container(args: &str) {
 
     match cmd {
         "" | "list" | "ls" => {
-            // Optional Docker-style `--filter label=KEY` (label exists) or
-            // `--filter label=KEY=VALUE` (label equals value); repeatable, and
-            // a container must match ALL filters (Docker AND semantics).
-            // `(key, Some(value))` requires an exact value; `(key, None)` only
-            // requires the key to be present.
+            // Optional Docker-style `--filter`/`-f`, repeatable, with three
+            // supported keys:
+            //   label=KEY            label present (any value)
+            //   label=KEY=VALUE      label equals value
+            //   name=SUBSTRING       container name contains the substring
+            //   status=STATE         state is created|running|stopped|failed
+            // A container must satisfy ALL given filters (AND semantics). Note
+            // this is slightly stricter than Docker for repeated same-key
+            // filters (Docker ORs those), but it is simple and predictable.
             let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> =
+                alloc::vec::Vec::new();
+            let mut name_filters: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+            let mut status_filters: alloc::vec::Vec<container::ContainerState> =
                 alloc::vec::Vec::new();
             let mut fi = 1;
             while fi < parts.len() {
@@ -67070,9 +67077,25 @@ fn cmd_container(args: &str) {
                                         spec
                                     ),
                                 }
+                            } else if let Some(nm) = spec.strip_prefix("name=") {
+                                if nm.is_empty() {
+                                    crate::console_println!(
+                                        "[container] Ignoring filter '{}': empty name", spec
+                                    );
+                                } else {
+                                    name_filters.push(nm);
+                                }
+                            } else if let Some(st) = spec.strip_prefix("status=") {
+                                match container::parse_state(st) {
+                                    Some(state) => status_filters.push(state),
+                                    None => crate::console_println!(
+                                        "[container] Ignoring filter '{}': status must be created|running|stopped|failed",
+                                        spec
+                                    ),
+                                }
                             } else {
                                 crate::console_println!(
-                                    "[container] Unsupported filter '{}' (only label= is supported)",
+                                    "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
                                     spec
                                 );
                             }
@@ -67090,9 +67113,19 @@ fn cmd_container(args: &str) {
                 crate::console_println!("No containers.");
                 return;
             }
-            // When filtering, a container matches only if every filter is
-            // satisfied by its labels (fetched via info()).
-            let matches = |id: container::ContainerId| -> bool {
+            // A container matches only if every filter is satisfied. Name and
+            // status are checked against the listing tuple directly; labels
+            // require an info() lookup (only performed when label filters exist).
+            let matches = |id: container::ContainerId,
+                           name: &str,
+                           state: container::ContainerState|
+             -> bool {
+                if !name_filters.iter().all(|sub| name.contains(sub)) {
+                    return false;
+                }
+                if !status_filters.is_empty() && !status_filters.contains(&state) {
+                    return false;
+                }
                 if label_filters.is_empty() {
                     return true;
                 }
@@ -67101,7 +67134,7 @@ fn cmd_container(args: &str) {
             };
 
             let shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
-                all.iter().filter(|(id, _, _)| matches(*id)).collect();
+                all.iter().filter(|(id, name, state)| matches(*id, name, *state)).collect();
             if shown.is_empty() {
                 crate::console_println!("No containers match the filter.");
                 return;
@@ -67428,7 +67461,7 @@ fn cmd_container(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|test]");
-            crate::console_println!("  container [list] [--filter label=K[=V]]  — list containers (optionally filtered by label)");
+            crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");

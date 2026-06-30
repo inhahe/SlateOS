@@ -1449,6 +1449,20 @@ pub fn list() -> Vec<(ContainerId, String, ContainerState)> {
     })
 }
 
+/// Parse a container state name (as printed by [`ContainerState`]'s
+/// `Display`) into the corresponding variant, for `docker ps --filter
+/// status=...`. Returns `None` for an unrecognised name.
+#[must_use]
+pub fn parse_state(s: &str) -> Option<ContainerState> {
+    match s {
+        "created" => Some(ContainerState::Created),
+        "running" => Some(ContainerState::Running),
+        "stopped" => Some(ContainerState::Stopped),
+        "failed" => Some(ContainerState::Failed),
+        _ => None,
+    }
+}
+
 /// Test whether a container's labels satisfy a set of Docker-style label
 /// filters (`docker ps --filter label=...`).
 ///
@@ -2077,6 +2091,14 @@ pub fn self_test() {
             !labels_match(&got, &[("role", Some("api")), ("tier", Some("backend"))]),
             "one failing filter must fail the AND",
         );
+
+        // parse_state: round-trips ContainerState Display names; rejects junk.
+        assert_eq!(parse_state("created"), Some(ContainerState::Created));
+        assert_eq!(parse_state("running"), Some(ContainerState::Running));
+        assert_eq!(parse_state("stopped"), Some(ContainerState::Stopped));
+        assert_eq!(parse_state("failed"), Some(ContainerState::Failed));
+        assert_eq!(parse_state("RUNNING"), None, "case-sensitive");
+        assert_eq!(parse_state("bogus"), None);
 
         delete(ct_lbl).expect("delete labeled container");
     }

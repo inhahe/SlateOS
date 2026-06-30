@@ -2758,6 +2758,69 @@ routing through the page cache), and the ext4/FAT data read/write paths under
 `kernel/src/fs/` and `fs/` (route data through the page cache, metadata through
 the buffer cache).
 
+### Implementation sub-design (2026-06-30)
+
+**Decided by:** Claude (operator-approved scope — the operator chose option A;
+these are the implementation-level sub-decisions made while building it). All
+reversible.
+
+The refactor landed in four increments, all preserving the **per-block
+read/write cache-path symmetry** invariant: for any one physical block, reads
+and writes use the *same* cache path, or a read-after-write serves stale bytes.
+
+1. **Two buffer-cache-bypassing sector primitives** (`fs/cache.rs`):
+   `read_sector_uncached` (serves a *dirty* buffer-cache hit if present —
+   that's legitimate metadata pending writeback — else drops a clean hit and
+   reads straight from `blkdev`) and `write_sector_uncached` (writes straight
+   to `blkdev`, then `invalidate_range` drops any buffer-cache alias). Plus
+   ext4 `BlockReader` data methods (`read_data_block`/`write_data_block`/
+   `invalidate_block`) and `read_block_classed`/`write_block_classed`
+   dispatchers taking an `is_file_data: bool`.
+
+2. **Block-reuse coherence** (`fs/ext4/balloc.rs`): `free_block` now calls
+   `reader.invalidate_block` on the freed LBAs. Directory/extent-tree blocks
+   are allocated from the same data-region pool; when a freed metadata block is
+   later reused as file data (written via the bypass path), a stale *dirty*
+   metadata buffer-cache entry would otherwise win. This mirrors Linux's
+   `clean_bdev_aliases`.
+
+3. **Data-vs-metadata classification by inode mode** (`fs/ext4/driver.rs`):
+   `inode_holds_file_data(inode)` = `(i_mode & S_IFMT) == S_IFREG`. The shared
+   leaf read/write helpers (`read_file_data`, `write_file_data`,
+   `write_to_existing_blocks`, the extent/indirect leaf readers) are used by
+   **both** directories and regular files, so the data/metadata split is keyed
+   on the inode mode threaded through as `is_file_data`, *not* on the function.
+   A blanket switch would have read directories (written via the buffer cache)
+   back through the bypass path → stale directory reads. Extent-tree *internal*
+   nodes, htree directory blocks, xattr blocks, bitmaps and inode tables stay on
+   the buffer cache (metadata).
+
+4. **`read(2)`/`read_file` routed through the page cache** (`fs/vfs.rs`):
+   `Vfs::read_at` and `Vfs::read_file` now serve **stable-identity regular
+   files** (`ino != 0`: ext4, memfs) from `mm::page_cache` via a new
+   `page_cache::read_through` (splits an arbitrary `[offset,len)` into covering
+   16 KiB pages, fills misses from the FS *data* path, copies out, drops each
+   caller ref). Non-regular files and no-stable-identity filesystems (FAT,
+   ISO9660, pseudo-fs — they keep their own caching) fall back to the
+   per-filesystem read unchanged. This is what restores caching for `read(2)`
+   after increment 3 removed regular-file data from the buffer cache — and it
+   unifies `read(2)`/`mmap` on one shared frame.
+
+   - **Reentrancy fix.** The `mmap` fault fill (`proc/pcb.rs resolve_file_cached`)
+     previously filled via `handle::read_at`, which now routes through
+     `get_or_fill` → it would recurse on the very page being filled. New
+     `Vfs::read_at_uncached` / `handle::read_at_uncached` read straight from the
+     FS data path (bypassing *both* caches); the mmap fill and `read_through`'s
+     fill closure use them. No lock nesting: the page-cache lock is always
+     dropped before a fill closure takes the VFS lock (order is VFS→drop,
+     cache→drop, VFS-fill→drop — never simultaneous).
+
+**Known minor inefficiency (logged):** memfs/tmpfs files now hold their data
+both in memfs's own store *and* (when read/mmap'd) in the page cache — Linux's
+tmpfs *is* the page cache, so this is a double-store for tmpfs specifically. It
+is coherent (writes invalidate) and was already true for `mmap` of memfs before
+this change; not worth special-casing now.
+
 ## 39. Connect the two cgroup subsystems (Q14) — cgroupfs as the frontend, `kernel/src/cgroup.rs` as the enforcement engine (option A)
 
 **Date:** 2026-06-30

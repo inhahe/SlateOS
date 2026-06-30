@@ -279,6 +279,88 @@ where
     Ok(new_frame)
 }
 
+/// Copy `dest.len()` bytes starting at byte offset `file_offset` of `file` out
+/// of the page cache, filling any missing 16 KiB pages via `fill_page`.
+///
+/// This is the **`read(2)` data path** for the page-cache-primary model
+/// (design-decisions §38): a regular file's data is served from the single
+/// shared cache frame, exactly as the mmap fault path serves it — so `read(2)`
+/// and `mmap` share one copy with no separate read-side invalidation.
+///
+/// `file_offset` and `dest.len()` are arbitrary (no alignment requirement); the
+/// range is split into the covering 16 KiB pages internally.  For each covered
+/// page, `fill_page(page_file_off, page_buf)` is invoked **only on a cache
+/// miss**, where `page_file_off` is the frame-aligned start of that page and
+/// `page_buf` is the full, already-zeroed `FRAME_SIZE`-byte page buffer (a short
+/// fill past EOF leaves the tail zero, matching demand-paging semantics).
+///
+/// The caller is responsible for clamping `dest.len()` to the bytes that
+/// actually exist in the file (this routine zero-extends past EOF, like the
+/// fault path, and does not itself know the file size).
+///
+/// Each page's caller reference is dropped here (the bytes are copied out, never
+/// mapped), so no reference leaks.
+///
+/// # Errors
+///
+/// - [`KernelError::InternalError`] if the HHDM is unavailable or an internal
+///   offset computation overflows.
+/// - Whatever `fill_page` returns on a read error (propagated from the failing
+///   page; the just-allocated frame is freed inside [`get_or_fill`]).
+/// - Frame-allocation / reference-bump errors from [`get_or_fill`].
+pub fn read_through<F>(
+    file: FileId,
+    file_offset: u64,
+    dest: &mut [u8],
+    fill_page: F,
+) -> KernelResult<()>
+where
+    F: Fn(u64, &mut [u8]) -> KernelResult<()>,
+{
+    if dest.is_empty() {
+        return Ok(());
+    }
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    // FRAME_SIZE is a power of two, so `& !mask` floors to the page base and
+    // `& mask` gives the in-page offset without arithmetic-side-effect ops.
+    let mask = (FRAME_SIZE as u64).wrapping_sub(1);
+
+    let mut copied: usize = 0;
+    while copied < dest.len() {
+        let cur = file_offset
+            .checked_add(copied as u64)
+            .ok_or(KernelError::InternalError)?;
+        let page_off = cur & !mask;
+        let in_page = (cur & mask) as usize;
+        let remaining = dest.len().saturating_sub(copied);
+        let avail_in_page = FRAME_SIZE.saturating_sub(in_page);
+        let n = remaining.min(avail_in_page);
+        if n == 0 {
+            break;
+        }
+
+        // Obtain the page (fill on miss); one caller reference is returned.
+        let frame = get_or_fill(file, page_off, |buf| fill_page(page_off, buf))?;
+
+        // Copy [in_page, in_page + n) out of the frame's HHDM alias.
+        // SAFETY: `frame` is a live cache frame on which we hold one reference,
+        // so it cannot be freed under us; `to_virt(hhdm)` is its valid HHDM alias
+        // spanning exactly FRAME_SIZE bytes, and `in_page + n <= FRAME_SIZE` by
+        // construction (n <= avail_in_page = FRAME_SIZE - in_page).  `dest` is a
+        // distinct caller buffer, so source and destination do not overlap.
+        unsafe {
+            let src = (frame.to_virt(hhdm) as *const u8).add(in_page);
+            let dst = dest.as_mut_ptr().add(copied);
+            core::ptr::copy_nonoverlapping(src, dst, n);
+        }
+        // Drop the caller reference (the page was copied out, never mapped).
+        release(frame);
+
+        copied = copied.checked_add(n).ok_or(KernelError::InternalError)?;
+    }
+    Ok(())
+}
+
 /// Drop one caller reference obtained from [`get_or_fill`] / [`lookup`] that was
 /// **never mapped** (e.g. the fault path failed to install the PTE).
 ///

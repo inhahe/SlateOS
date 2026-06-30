@@ -1245,6 +1245,7 @@ impl Ext4Driver {
                 last_logical,
                 offset,
                 actual_len,
+                inode_holds_file_data(inode),
                 &mut result,
             )?;
 
@@ -1262,7 +1263,13 @@ impl Ext4Driver {
                 let phys = self.lookup_indirect_block(inode, logical)?;
                 match phys {
                     Some(p) => {
-                        self.reader.read_block(p, &mut block_buf)?;
+                        // Regular-file data → page-cache path (bypass buffer
+                        // cache); directory/symlink content → buffer cache (§38).
+                        self.reader.read_block_classed(
+                            p,
+                            &mut block_buf,
+                            inode_holds_file_data(inode),
+                        )?;
                     }
                     None => {
                         // Sparse hole — zero block.
@@ -1770,7 +1777,9 @@ impl Ext4Driver {
             if let Some(dest) = buf.get_mut(..chunk.len()) {
                 dest.copy_from_slice(chunk);
             }
-            self.reader.write_block(block_nr, &buf)?;
+            // Regular-file data bypasses the buffer cache; directory/symlink
+            // content stays on it (§38). write_file_data serves both.
+            self.reader.write_block_classed(block_nr, &buf, inode_holds_file_data(inode))?;
 
             offset = end;
         }
@@ -1870,7 +1879,9 @@ impl Ext4Driver {
                 last_logical_block.saturating_sub(last_logical_start)
             );
             let mut buf = vec![0u8; block_size];
-            self.reader.read_block(phys, &mut buf)?;
+            // Regular-file data bypasses the buffer cache (§38).
+            self.reader
+                .read_block_classed(phys, &mut buf, inode_holds_file_data(inode))?;
 
             // Write the existing partial block back with the start of append_data.
             let space_in_block = block_size.saturating_sub(tail_bytes_in_last_block);
@@ -1881,7 +1892,9 @@ impl Ext4Driver {
             ) {
                 dest.copy_from_slice(src);
             }
-            self.reader.write_block(phys, &buf)?;
+            // Regular-file data bypasses the buffer cache (§38).
+            self.reader
+                .write_block_classed(phys, &buf, inode_holds_file_data(inode))?;
 
             // Return the remaining data that needs new blocks.
             append_data.get(fill..).unwrap_or(&[]).to_vec()
@@ -1932,7 +1945,9 @@ impl Ext4Driver {
             if let Some(dest) = buf.get_mut(..chunk.len()) {
                 dest.copy_from_slice(chunk);
             }
-            self.reader.write_block(block_nr, &buf)?;
+            // Regular-file data bypasses the buffer cache (§38).
+            self.reader
+                .write_block_classed(block_nr, &buf, inode_holds_file_data(inode))?;
 
             data_offset = end;
         }
@@ -2516,7 +2531,10 @@ impl Ext4Driver {
                 if let Some(dest) = buf.get_mut(..chunk.len()) {
                     dest.copy_from_slice(chunk);
                 }
-                self.reader.write_block(block_nr, &buf)?;
+                // Regular-file data bypasses the buffer cache; directory content
+                // (the common caller here) stays on it (§38).
+                self.reader
+                    .write_block_classed(block_nr, &buf, inode_holds_file_data(inode))?;
 
                 data_offset = end;
             }
@@ -3257,7 +3275,9 @@ impl Ext4Driver {
 
             // Read the existing block.
             let mut buf = vec![0u8; block_size_usize];
-            self.reader.read_block(phys, &mut buf)?;
+            // Regular-file data bypasses the buffer cache (§38).
+            self.reader
+                .read_block_classed(phys, &mut buf, inode_holds_file_data(inode))?;
 
             // Calculate how much to write in this block.
             let space_in_block = block_size_usize.saturating_sub(offset_in_block);
@@ -3271,7 +3291,9 @@ impl Ext4Driver {
             }
 
             // Write the modified block back.
-            self.reader.write_block(phys, &buf)?;
+            // Regular-file data bypasses the buffer cache (§38).
+            self.reader
+                .write_block_classed(phys, &buf, inode_holds_file_data(inode))?;
 
             written = written.saturating_add(chunk_len);
         }
@@ -3290,6 +3312,7 @@ impl Ext4Driver {
         last_logical: u64,
         byte_offset: u64,
         byte_len: usize,
+        is_file_data: bool,
         result: &mut Vec<u8>,
     ) -> KernelResult<()> {
         let block_size = u64::from(self.sb.block_size);
@@ -3335,7 +3358,8 @@ impl Ext4Driver {
                     let mut buf = vec![0u8; block_size_usize];
                     if !ext_unwritten {
                         let phys = ext_phys.saturating_add(b);
-                        self.reader.read_block(phys, &mut buf)?;
+                        // Regular-file data bypasses the buffer cache (§38).
+                        self.reader.read_block_classed(phys, &mut buf, is_file_data)?;
                     }
                     // Unwritten extents: buf stays zeroed.
 
@@ -3398,6 +3422,7 @@ impl Ext4Driver {
                     last_logical,
                     byte_offset,
                     byte_len,
+                    is_file_data,
                     result,
                 )?;
             }
@@ -4047,7 +4072,12 @@ impl Ext4Driver {
                     let mut buf = vec![0u8; block_size as usize];
                     if !unwritten {
                         let block_nr = phys_block.saturating_add(b);
-                        self.reader.read_block(block_nr, &mut buf)?;
+                        // Regular-file data bypasses the buffer cache (§38).
+                        self.reader.read_block_classed(
+                            block_nr,
+                            &mut buf,
+                            inode_holds_file_data(inode),
+                        )?;
                     }
                     // Unwritten extents: buf stays zeroed (correct behavior).
 
@@ -4065,7 +4095,8 @@ impl Ext4Driver {
             // Deeper trees are rare for files under ~340 MB.
             let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
             self.read_extent_tree_recursive(
-                ino_seed, block_bytes, &header, file_size, &mut result,
+                ino_seed, block_bytes, &header, file_size,
+                inode_holds_file_data(inode), &mut result,
             )?;
         }
 
@@ -4081,6 +4112,7 @@ impl Ext4Driver {
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         file_size: u64,
+        is_file_data: bool,
         result: &mut Vec<u8>,
     ) -> KernelResult<()> {
         let block_size = self.sb.block_size as usize;
@@ -4107,7 +4139,8 @@ impl Ext4Driver {
                     let mut buf = vec![0u8; block_size];
                     if !unwritten {
                         let block_nr = phys_block.saturating_add(b);
-                        self.reader.read_block(block_nr, &mut buf)?;
+                        // Regular-file data bypasses the buffer cache (§38).
+                        self.reader.read_block_classed(block_nr, &mut buf, is_file_data)?;
                     }
 
                     let remaining = file_size.saturating_sub(result.len() as u64);
@@ -4151,7 +4184,8 @@ impl Ext4Driver {
                 )?;
 
                 self.read_extent_tree_recursive(
-                    ino_seed, &child_data, &child_header, file_size, result,
+                    ino_seed, &child_data, &child_header, file_size,
+                    is_file_data, result,
                 )?;
             }
         }
@@ -4180,7 +4214,12 @@ impl Ext4Driver {
             let phys = self.lookup_indirect_block(inode, logical)?;
             match phys {
                 Some(p) => {
-                    self.reader.read_block(p, &mut block_buf)?;
+                    // Regular-file data bypasses the buffer cache (§38).
+                    self.reader.read_block_classed(
+                        p,
+                        &mut block_buf,
+                        inode_holds_file_data(inode),
+                    )?;
                 }
                 None => {
                     // Sparse hole — zero fill.
@@ -5140,6 +5179,21 @@ fn xattr_split_key(key: &str) -> (u8, &str) {
 ///
 /// The i_block field is 15 * u32 = 60 bytes, which holds either
 /// block pointers (ext2) or an extent tree (ext4).
+/// Whether an inode's content blocks hold regular-file *data* (page-cache
+/// eligible, so read/written via the buffer-cache-bypassing data path of
+/// design-decisions §38) rather than filesystem *metadata*.
+///
+/// Only `S_IFREG` regular files participate in the page cache; directories
+/// (whose blocks are also allocated from the data region), symlink target
+/// blocks, and special files are metadata and stay on the buffer cache. The
+/// read and write paths must agree on this classification per block so a
+/// read-after-write never serves stale bytes.
+#[inline]
+#[must_use]
+pub fn inode_holds_file_data(inode: &Ext4Inode) -> bool {
+    (inode.i_mode & file_type::S_IFMT) == file_type::S_IFREG
+}
+
 pub fn inode_block_as_bytes(inode: &Ext4Inode) -> &[u8] {
     // SAFETY: i_block is [u32; 15] inside a repr(C) struct.
     // Reinterpreting as bytes is safe on any platform.

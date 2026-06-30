@@ -133,6 +133,119 @@ impl BlockReader {
         Ok(())
     }
 
+    /// Read a single ext4 block of regular-file **data** into `buf`, bypassing
+    /// the buffer cache (design-decisions §38, "page-cache-primary").
+    ///
+    /// Identical to [`read_block`](Self::read_block) but reads data sectors
+    /// directly from the device so file data is never cached in the buffer
+    /// cache (it lives in the page cache instead). Use this only for regular-
+    /// file data extents; metadata (extent-tree nodes, directory blocks,
+    /// bitmaps, inode tables, superblock) must still use
+    /// [`read_block`](Self::read_block).
+    ///
+    /// `buf` must be at least `block_size` bytes.
+    pub fn read_data_block(&self, block_nr: u64, buf: &mut [u8]) -> KernelResult<()> {
+        let bs = self.block_size as usize;
+        if buf.len() < bs {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let start_lba = block_nr.saturating_mul(u64::from(self.sectors_per_block));
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+
+        for i in 0..self.sectors_per_block {
+            let lba = start_lba.saturating_add(u64::from(i));
+            crate::fs::cache::read_sector_uncached(&self.device, lba, &mut sector_buf)?;
+
+            let offset = (i as usize).saturating_mul(SECTOR_SIZE);
+            if let Some(dest) = buf.get_mut(offset..offset.saturating_add(SECTOR_SIZE)) {
+                dest.copy_from_slice(&sector_buf);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write a single ext4 block of regular-file **data** from `buf`, bypassing
+    /// the buffer cache (design-decisions §38, "page-cache-primary").
+    ///
+    /// Identical to [`write_block`](Self::write_block) but writes data sectors
+    /// directly to the device so file data is never cached in the buffer cache.
+    /// Use this only for regular-file data extents; metadata must still use
+    /// [`write_block`](Self::write_block).
+    ///
+    /// `buf` must be at least `block_size` bytes.
+    pub fn write_data_block(&self, block_nr: u64, buf: &[u8]) -> KernelResult<()> {
+        let bs = self.block_size as usize;
+        if buf.len() < bs {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let start_lba = block_nr.saturating_mul(u64::from(self.sectors_per_block));
+
+        for i in 0..self.sectors_per_block {
+            let lba = start_lba.saturating_add(u64::from(i));
+            let offset = (i as usize).saturating_mul(SECTOR_SIZE);
+            let end = offset.saturating_add(SECTOR_SIZE);
+            let src = buf.get(offset..end).ok_or(KernelError::IoError)?;
+
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            sector_buf.copy_from_slice(src);
+            crate::fs::cache::write_sector_uncached(&self.device, lba, &sector_buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Read a single ext4 block, choosing the buffer-cache-bypassing data path
+    /// when `is_file_data` is true (regular-file content) or the buffer-cache
+    /// metadata path otherwise (directories, symlinks, special files) — see
+    /// design-decisions §38 and [`super::driver::inode_holds_file_data`].
+    pub fn read_block_classed(
+        &self,
+        block_nr: u64,
+        buf: &mut [u8],
+        is_file_data: bool,
+    ) -> KernelResult<()> {
+        if is_file_data {
+            self.read_data_block(block_nr, buf)
+        } else {
+            self.read_block(block_nr, buf)
+        }
+    }
+
+    /// Write a single ext4 block, choosing the buffer-cache-bypassing data path
+    /// when `is_file_data` is true or the buffer-cache metadata path otherwise.
+    pub fn write_block_classed(
+        &self,
+        block_nr: u64,
+        buf: &[u8],
+        is_file_data: bool,
+    ) -> KernelResult<()> {
+        if is_file_data {
+            self.write_data_block(block_nr, buf)
+        } else {
+            self.write_block(block_nr, buf)
+        }
+    }
+
+    /// Invalidate the buffer-cache entries backing ext4 block `block_nr`.
+    ///
+    /// Called from the block-free path so that when a block leaves metadata use
+    /// (e.g. a freed directory or extent-tree block) no stale buffer-cache entry
+    /// survives to be served after the block is reallocated as file data (which
+    /// is written via the buffer-cache-bypassing data path). Drops without
+    /// flushing: the block's old contents are now free space and must not be
+    /// written back.
+    pub fn invalidate_block(&self, block_nr: u64) {
+        let start_lba = block_nr.saturating_mul(u64::from(self.sectors_per_block));
+        let _ = crate::fs::cache::invalidate_range(
+            &self.device,
+            start_lba,
+            u64::from(self.sectors_per_block),
+        );
+    }
+
     /// Write a range of bytes to the device at an absolute byte offset.
     ///
     /// Uses read-modify-write for sectors that are partially overwritten.

@@ -5297,8 +5297,10 @@ fn resolve_file_cached(
     // Obtain the shared frame (filling it from the file on a cache miss).
     // The fill closure runs only on a miss; a short read past EOF leaves
     // the frame's tail zero, matching Linux's page zero-fill semantics.
+    // Fill via the *uncached* read so we don't re-enter the page cache for the
+    // very page we're filling (read_at now routes through get_or_fill — §38).
     let phys_frame = match crate::mm::page_cache::get_or_fill(file_id, page_file_off, |buf| {
-        crate::fs::handle::read_at(handle, page_file_off, buf).map(|_| ())
+        crate::fs::handle::read_at_uncached(handle, page_file_off, buf).map(|_| ())
     }) {
         Ok(f) => f,
         Err(_) => return false,

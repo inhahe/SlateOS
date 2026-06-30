@@ -715,6 +715,96 @@ pub fn write_sector(
     Ok(())
 }
 
+/// Read a sector **directly from the block device**, bypassing the buffer
+/// cache entirely (design-decisions §38, "page-cache-primary").
+///
+/// Regular-file *data* sectors live in the page cache, never the buffer cache,
+/// so reading them must not pollute (or be served stale by) the buffer cache.
+/// The page-cache fill path and the ext4 file-data read path use this instead
+/// of [`read_sector`].
+///
+/// Coherence invariant: a data LBA is never resident in the buffer cache (the
+/// ext4 block-free path invalidates an LBA's buffer-cache entry when the block
+/// leaves metadata use — see `ext4::balloc::free_block`). We therefore read
+/// straight from the device. As defense in depth against a transient invariant
+/// violation, any *clean* buffer-cache entry for this LBA is dropped first; a
+/// *dirty* entry (which would indicate the LBA is still legitimately metadata)
+/// is honored by serving its contents rather than silently losing the write.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchDevice`] if the device is unknown, or an I/O error from
+/// the device read.
+pub fn read_sector_uncached(
+    device: &str,
+    lba: u64,
+    buf: &mut [u8; SECTOR_SIZE],
+) -> KernelResult<()> {
+    {
+        let mut cache = CACHE.lock();
+        cache.ensure_init();
+        if let Some(dev_id) = cache.device_id(device) {
+            if let Some(idx) = cache.find_index(dev_id, lba) {
+                if cache.entries[idx].dirty {
+                    // Honor a still-dirty entry (the LBA is legitimately metadata
+                    // that has pending write-back): serve it from the cache.
+                    buf.copy_from_slice(&cache.entries[idx].data);
+                    cache.touch(idx);
+                    return Ok(());
+                }
+                // Clean entry for a data LBA: drop it so the buffer cache holds
+                // no file data, then fall through to a direct device read.
+                cache.index.remove(&(dev_id, lba));
+                cache.valid_count = cache.valid_count.saturating_sub(1);
+                cache.entries[idx].valid = false;
+                cache.free_slots.push(idx);
+            }
+        }
+    }
+
+    let result = blkdev::with_device(device, |dev| dev.read_sector(lba, buf));
+    match result {
+        Some(Ok(())) => {
+            blkdev::record_io(false);
+            Ok(())
+        }
+        Some(Err(e)) => Err(e),
+        None => Err(KernelError::NoSuchDevice),
+    }
+}
+
+/// Write a sector **directly to the block device**, bypassing the buffer cache
+/// (design-decisions §38, "page-cache-primary").
+///
+/// Used for regular-file *data* writes so that file data is never cached in the
+/// buffer cache. The write is synchronous to the device (no write-back). Any
+/// stale buffer-cache entry for this LBA is dropped afterward so a later
+/// [`read_sector`] (were the block ever reused as metadata before the free-path
+/// invalidation ran) cannot serve pre-write contents.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchDevice`] if the device is unknown, or an I/O error from
+/// the device write.
+pub fn write_sector_uncached(
+    device: &str,
+    lba: u64,
+    buf: &[u8; SECTOR_SIZE],
+) -> KernelResult<()> {
+    let result = blkdev::with_device(device, |dev| dev.write_sector(lba, buf));
+    match result {
+        Some(Ok(())) => blkdev::record_io(true),
+        Some(Err(e)) => return Err(e),
+        None => return Err(KernelError::NoSuchDevice),
+    }
+    // Drop any buffer-cache entry for this LBA so the buffer cache holds no
+    // file data and cannot serve stale bytes. invalidate_range drops without
+    // flushing, which is correct here: we just wrote the authoritative contents
+    // to the device, so any cached copy is moot.
+    let _ = invalidate_range(device, lba, 1);
+    Ok(())
+}
+
 /// Flush all dirty entries for a specific device to disk.
 pub fn flush(device: &str) -> KernelResult<()> {
     let mut cache = CACHE.lock();

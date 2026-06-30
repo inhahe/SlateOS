@@ -1690,11 +1690,7 @@ impl Vfs {
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let result = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.read_file(relative)
-        };
+        let result = Self::read_file_routed(&path);
         // inotify IN_ACCESS: emit an Accessed event after a successful read,
         // but only when some watch actually requested ACCESS (a lock-free
         // gate).  The read path is high-frequency, so without an ACCESS watch
@@ -1706,6 +1702,35 @@ impl Vfs {
             super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
         }
         result
+    }
+
+    /// Whole-file read that routes regular-file data through the shared page
+    /// cache (design-decisions §38), mirroring [`read_at_routed`](Self::read_at_routed).
+    ///
+    /// A stable-identity regular file (`ino != 0`) is served from the page
+    /// cache, sharing one copy with `mmap` and byte-range `read(2)`.  Everything
+    /// else — symlinks (whose `read_file` returns the link target), and objects
+    /// without a stable identity (FAT/ISO/pseudo-filesystems) — falls back to
+    /// the per-filesystem `read_file` unchanged.
+    fn read_file_routed(path: &str) -> KernelResult<Vec<u8>> {
+        let (file_id, size) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let meta = mp.fs.metadata(relative)?;
+            if meta.entry_type != EntryType::File || meta.ino == 0 {
+                return mp.fs.read_file(relative);
+            }
+            (FileId { fs_id: mp.fs_id, ino: meta.ino }, meta.size)
+        };
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let out_len = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
+        let mut buf = alloc::vec![0u8; out_len];
+        crate::mm::page_cache::read_through(file_id, 0, &mut buf, |page_off, page_buf| {
+            Self::fill_file_page(path, page_off, page_buf)
+        })?;
+        Ok(buf)
     }
 
     /// Get metadata for a path.
@@ -2052,11 +2077,7 @@ impl Vfs {
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let result = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.read_at(relative, offset, len)
-        };
+        let result = Self::read_at_routed(&path, offset, len);
         // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
         // The gate keeps this off the read hot path when no watch wants it —
         // the reason ACCESS was historically not emitted here at all.
@@ -2066,6 +2087,108 @@ impl Vfs {
             super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
         }
         result
+    }
+
+    /// Read implementation that routes regular-file data through the shared
+    /// **page cache** (design-decisions §38, page-cache-primary).
+    ///
+    /// A regular file with a *stable identity* (`ino != 0`: ext4, memfs) has its
+    /// data served from the single shared cache frame — exactly the frame the
+    /// `mmap` fault path uses — so `read(2)` and `mmap` share one copy and
+    /// `read(2)` coherence falls out of the §36 write/truncate invalidation
+    /// hooks for free.  On a cache miss the page is filled from the backing
+    /// filesystem's *data* path, which (post-§38) bypasses the block buffer
+    /// cache, leaving that cache for metadata only.
+    ///
+    /// Everything else falls back to the per-filesystem read unchanged: objects
+    /// without a stable identity (FAT, ISO9660, pseudo-filesystems — they keep
+    /// their own caching) and non-regular files.
+    ///
+    /// The VFS lock is taken only to resolve identity/size and, separately,
+    /// inside the page-fill closure — it is **never** held across
+    /// [`crate::mm::page_cache::read_through`], so the cache→VFS fill path does
+    /// not nest the two locks (the cache lock is already dropped before the fill
+    /// closure runs).
+    fn read_at_routed(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Resolve identity, size, and regular-file-ness, then drop the VFS lock.
+        let (file_id, size) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let meta = mp.fs.metadata(relative)?;
+            // Only stable-identity regular files are page-cacheable; anything
+            // else reads straight from the filesystem (current behaviour).
+            if meta.entry_type != EntryType::File || meta.ino == 0 {
+                return mp.fs.read_at(relative, offset, len);
+            }
+            (FileId { fs_id: mp.fs_id, ino: meta.ino }, meta.size)
+        };
+
+        // Clamp the request to the bytes that actually exist (the page cache
+        // zero-extends past EOF; the caller must not see those padding bytes).
+        if offset >= size {
+            return Ok(Vec::new());
+        }
+        let avail = size.saturating_sub(offset);
+        let out_len = (len as u64).min(avail) as usize;
+        if out_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buf = alloc::vec![0u8; out_len];
+        crate::mm::page_cache::read_through(file_id, offset, &mut buf, |page_off, page_buf| {
+            Self::fill_file_page(path, page_off, page_buf)
+        })?;
+        Ok(buf)
+    }
+
+    /// Page-cache fill: populate one 16 KiB `page_buf` with the bytes of `path`
+    /// starting at the frame-aligned `page_off`, reading from the filesystem's
+    /// *data* path (which bypasses the block buffer cache — §38).
+    ///
+    /// Shared by [`read_at_routed`](Self::read_at_routed) and
+    /// [`read_file_routed`](Self::read_file_routed).  Bytes past EOF are left as
+    /// the caller's pre-zeroed page (demand-paging zero-fill semantics).  The
+    /// mount is re-resolved under the VFS lock here; the page-cache lock is
+    /// already dropped before this runs, so the cache and VFS locks never nest.
+    fn fill_file_page(path: &str, page_off: u64, page_buf: &mut [u8]) -> KernelResult<()> {
+        let data = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.read_at(relative, page_off, page_buf.len())?
+        };
+        let n = data.len().min(page_buf.len());
+        if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        Ok(())
+    }
+
+    /// Read a range of bytes from a file **directly from the backing
+    /// filesystem**, bypassing the page cache.
+    ///
+    /// This is the fill primitive behind the page cache itself: the `mmap`
+    /// fault path and [`read_at_routed`](Self::read_at_routed)'s page-fill
+    /// closure both need to read a file's data *without* re-entering
+    /// [`crate::mm::page_cache::get_or_fill`] (which would recurse on the same
+    /// key).  It performs the same path resolution and tag check as
+    /// [`read_at`](Self::read_at) but goes straight to `mp.fs.read_at`, so for
+    /// regular files it reads through the filesystem's *data* path (which, after
+    /// §38, bypasses the block buffer cache too — a genuinely uncached read).
+    ///
+    /// It deliberately does **not** emit the inotify `IN_ACCESS` event: callers
+    /// are internal cache fills, not user-visible reads (the user-visible read
+    /// that triggered the fill emits `ACCESS` at the [`read_at`](Self::read_at)
+    /// layer).
+    pub fn read_at_uncached(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.read_at(relative, offset, len)
     }
 
     /// Write bytes at a specific offset within a file.

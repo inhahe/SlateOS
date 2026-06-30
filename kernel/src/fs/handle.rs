@@ -551,6 +551,46 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
     Ok(copy_len)
 }
 
+/// Read up to `buf.len()` bytes at an explicit `offset` **directly from the
+/// backing filesystem**, bypassing the page cache.
+///
+/// Identical to [`read_at`] except it routes through
+/// [`crate::fs::Vfs::read_at_uncached`].  Used by the `mmap` fault path's
+/// page-cache fill closure, which must read a file's data *without* re-entering
+/// [`crate::mm::page_cache::get_or_fill`] — calling the cached [`read_at`] there
+/// would recurse on the very page being filled (design-decisions §38).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::IsADirectory`] — `handle` refers to a directory.
+/// - [`KernelError::PermissionDenied`] — handle was not opened for reading.
+/// - VFS errors propagated unchanged.
+pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
+    let (path, size) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_readable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        (file.path.clone(), file.size)
+    };
+    if buf.is_empty() || offset >= size {
+        return Ok(0);
+    }
+    let data = crate::fs::Vfs::read_at_uncached(&path, offset, buf.len())?;
+    let copy_len = data.len().min(buf.len());
+    if let Some(dest) = buf.get_mut(..copy_len) {
+        if let Some(src) = data.get(..copy_len) {
+            dest.copy_from_slice(src);
+        }
+    }
+    Ok(copy_len)
+}
+
 /// Write bytes at an explicit `offset`, **without** modifying the
 /// file's current offset.
 ///

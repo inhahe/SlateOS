@@ -436,6 +436,13 @@ pub fn free_block(
     sb.free_block_count = sb.free_block_count.saturating_add(1);
     update_sb_free_blocks(&mut sb.raw, sb.free_block_count, sb.is_64bit);
 
+    // Coherence (design-decisions §38): drop any buffer-cache entries backing
+    // this block. The block has left use and may be reallocated as regular-file
+    // data, which is written via the buffer-cache-bypassing data path; a stale
+    // metadata entry left here could otherwise be served on a later metadata
+    // read of a different block reusing this LBA, or shadow the new data.
+    reader.invalidate_block(block_nr);
+
     Ok(())
 }
 

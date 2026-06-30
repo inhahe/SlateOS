@@ -67179,6 +67179,10 @@ fn cmd_container(args: &str) {
             crate::console_println!("  Name:       {}", ci.name);
             crate::console_println!("  State:      {}", ci.state);
             crate::console_println!("  Processes:  {}", ci.nr_procs);
+            match ci.init_pid {
+                Some(pid) => crate::console_println!("  Init PID:   {}", pid),
+                None => crate::console_println!("  Init PID:   (not run)"),
+            }
             crate::console_println!("  PID NS:     {}", ci.pid_ns);
             crate::console_println!("  User NS:    {}", ci.user_ns);
             crate::console_println!("  Net NS:     {}", ci.net_ns);
@@ -67206,6 +67210,64 @@ fn cmd_container(args: &str) {
                 if s.mem_limit > 0 {
                     crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
                 }
+            }
+        }
+        "run" => {
+            // container run <id> <elf-path> [args...]
+            //
+            // Launches a real init process inside an existing (Created)
+            // container: loads the ELF from the host VFS, binds the process
+            // to the container's cgroup (Q14 billing) + PID/user/network
+            // namespaces, and transitions the container Created → Running.
+            //
+            // NOTE: the ELF path is resolved against the *host* filesystem —
+            // the per-container root pivot (chroot/pivot_root) is not yet
+            // wired (known-issues: container rootfs isolation).  Give an
+            // absolute host path to the binary you want as the container's
+            // init process.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(&path) = parts.get(2) else {
+                crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                return;
+            };
+
+            // Load the ELF image from the VFS.
+            let elf = match crate::fs::vfs::Vfs::read_file(path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    crate::console_println!("Failed to read '{}': {:?}", path, e);
+                    return;
+                }
+            };
+
+            // Build argv: argv[0] = the binary path, then any extra args.
+            // Own the byte buffers, then borrow them for SpawnOptions.
+            let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> = core::iter::once(path)
+                .chain(parts.iter().skip(3).copied())
+                .map(|s| s.as_bytes().to_vec())
+                .collect();
+            let argv_refs: alloc::vec::Vec<&[u8]> =
+                argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+
+            let opts = crate::proc::spawn::SpawnOptions::new(path)
+                .argv(&argv_refs)
+                .exe_path(path.as_bytes());
+
+            match container::run(id, &elf, &opts) {
+                Ok(pid) => {
+                    crate::console_println!(
+                        "Container {} running: init pid={} ({} bytes ELF: {})",
+                        id, pid, elf.len(), path
+                    );
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
         "exec" => {
@@ -67269,10 +67331,11 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|start|stop|exec|info|test]");
+            crate::console_println!("Usage: container [list|create|delete|run|start|stop|exec|info|test]");
             crate::console_println!("  container                                — list containers");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
+            crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");
             crate::console_println!("  container exec ID <command>              — run command in container NS");

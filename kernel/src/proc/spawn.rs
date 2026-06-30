@@ -264,6 +264,16 @@ pub struct SpawnOptions<'a> {
     /// the canonical path they loaded the binary from.  Bytes, not
     /// `&str`: a path may contain any byte except `/` and NUL.
     pub exe_path: Option<&'a [u8]>,
+    /// Initial working directory for the child process.
+    ///
+    /// `None` (the default) leaves the child at the PCB default cwd `/`.
+    /// When set, it must be an absolute path (start with `/`); it backs the
+    /// child's `getcwd`/`*at(AT_FDCWD, …)` resolution.  Used to honor a
+    /// container image's `WorkingDir` / the Docker `--workdir`/`-w` flag: the
+    /// init process starts in that directory (a *guest* path, resolved under
+    /// the container jail).  Bytes, not `&str`: a path may contain any byte
+    /// except `/` and NUL.  A malformed value is ignored (child stays at `/`).
+    pub cwd: Option<&'a [u8]>,
 }
 
 impl<'a> SpawnOptions<'a> {
@@ -279,7 +289,19 @@ impl<'a> SpawnOptions<'a> {
             argv: &[],
             envp: &[],
             exe_path: None,
+            cwd: None,
         }
+    }
+
+    /// Set the initial working directory for the child (absolute path bytes).
+    ///
+    /// Honors a container's `WorkingDir` / `--workdir`. A non-absolute or
+    /// otherwise malformed value is ignored at spawn time (child stays at `/`).
+    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
+    #[must_use]
+    pub fn cwd(mut self, dir: &'a [u8]) -> Self {
+        self.cwd = Some(dir);
+        self
     }
 
     /// Set the resolved executable path (backs `/proc/<pid>/exe`).
@@ -822,6 +844,20 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_exe_path(pid, path.to_vec()) {
             serial_println!(
                 "[spawn] Failed to record exe path for process {}: {:?}",
+                pid, e,
+            );
+        }
+    }
+
+    // Apply the initial working directory (container `WorkingDir`/`--workdir`)
+    // when the caller supplied one.  Best-effort: a malformed value (not an
+    // absolute path, too long, or containing NUL) is rejected by `set_cwd` and
+    // logged — the child simply stays at the PCB default cwd `/`, never failing
+    // the spawn.
+    if let Some(dir) = options.cwd {
+        if let Err(e) = pcb::set_cwd(pid, dir.to_vec()) {
+            serial_println!(
+                "[spawn] Ignoring invalid initial cwd for process {}: {:?}",
                 pid, e,
             );
         }
@@ -1853,6 +1889,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
+    test_spawn_with_cwd()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
@@ -2159,6 +2196,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -2291,6 +2329,7 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2415,6 +2454,7 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
             argv,
             envp,
             exe_path: None,
+            cwd: None,
         };
 
         let result = match spawn_process(exe_elf, &options) {
@@ -2513,6 +2553,7 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2600,6 +2641,7 @@ pub fn self_test_linux_sa_restart() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2714,6 +2756,7 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2829,6 +2872,7 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2942,6 +2986,7 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3055,6 +3100,7 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3165,6 +3211,7 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3278,6 +3325,7 @@ pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3387,6 +3435,7 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3473,6 +3522,7 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3563,6 +3613,7 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3684,6 +3735,7 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3800,6 +3852,7 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3901,6 +3954,7 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4048,6 +4102,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4158,6 +4213,7 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4264,6 +4320,7 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4382,6 +4439,7 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4495,6 +4553,7 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4604,6 +4663,7 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4723,6 +4783,7 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
             argv,
             envp,
             exe_path: None,
+            cwd: None,
         };
         spawn_process(&elf_img, &options)
     };
@@ -4836,6 +4897,7 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
             argv,
             envp,
             exe_path: None,
+            cwd: None,
         };
         spawn_process(&elf_img, &options)
     };
@@ -4961,6 +5023,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             argv,
             envp,
             exe_path: None,
+            cwd: None,
         };
 
         let result = match spawn_process(launcher_elf, &options) {
@@ -5066,6 +5129,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let nofollow_result = spawn_process(&elf_nofollow, &options);
@@ -5147,6 +5211,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         argv,
         envp,
         exe_path: None,
+        cwd: None,
     };
 
     let (state_d, exit_d) = match spawn_process(&elf_argv, &options) {
@@ -5317,6 +5382,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_HELLO.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5481,6 +5547,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_STDIO.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5703,6 +5770,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_FULL.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5918,6 +5986,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_PT.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6116,6 +6185,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_SIG.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6310,6 +6380,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_FAULT.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6506,6 +6577,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_SIGQUEUE.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6706,6 +6778,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_FORKEXEC.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6902,6 +6975,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_PIPE.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7123,6 +7197,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_REDIR.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7301,6 +7376,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_REDIRIN.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7460,6 +7536,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7640,6 +7717,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7828,6 +7906,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8002,6 +8081,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8207,6 +8287,7 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8416,6 +8497,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8593,6 +8675,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8749,6 +8832,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8902,6 +8986,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9058,6 +9143,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9218,6 +9304,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9382,6 +9469,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9538,6 +9626,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9694,6 +9783,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9848,6 +9938,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9994,6 +10085,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10140,6 +10232,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10326,6 +10419,7 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
         argv,
         envp,
         exe_path: Some(DST_MAKE.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10540,6 +10634,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         argv: cc_argv,
         envp: cc_envp,
         exe_path: Some(DST_TCC.as_bytes()),
+        cwd: None,
     };
 
     let cc_result = match spawn_process(&tcc_elf, &cc_options) {
@@ -10631,6 +10726,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         argv: run_argv,
         envp: run_envp,
         exe_path: Some(OBJ_PATH.as_bytes()),
+        cwd: None,
     };
 
     // Open a fresh capture file for the compiled program's fd 1.
@@ -10911,6 +11007,7 @@ fn spawn_reap_tcc(
         argv,
         envp: cc_envp,
         exe_path: Some(b"/bin/tcc"),
+        cwd: None,
     };
 
     let cc_result = match spawn_process(tcc_elf, &cc_options) {
@@ -11012,6 +11109,7 @@ fn run_dynamic_capture(
         argv: run_argv,
         envp: run_envp,
         exe_path: Some(prog_path.as_bytes()),
+        cwd: None,
     };
 
     let capture_handle = match handle::open(
@@ -11619,6 +11717,7 @@ int main(void){\n\
         argv,
         envp,
         exe_path: Some(DST_MAKE.as_bytes()),
+        cwd: None,
     };
 
     let result = match spawn_process(&make_elf, &options) {
@@ -11935,6 +12034,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
         argv: &[],
         envp: &[],
         exe_path: None,
+        cwd: None,
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -12755,6 +12855,66 @@ fn test_spawn_with_argv_envp() -> KernelResult<()> {
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Spawn with argv + envp: OK");
+    Ok(())
+}
+
+/// Test: `SpawnOptions::cwd` sets the child's initial working directory, and
+/// an invalid value is ignored (child stays at the PCB default `/`).
+///
+/// Backs the container `WorkingDir`/`--workdir` feature: the init process must
+/// start in the requested directory without an explicit `chdir`.  Uses the
+/// synchronous half of spawn (the PCB cwd is set during `spawn_process_inner`,
+/// before the thread runs), so reading it back is deterministic.
+fn test_spawn_with_cwd() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    // Valid absolute cwd is applied.
+    let options = SpawnOptions::new("spawn-test-cwd").cwd(b"/app/work");
+    let result = spawn_process(&elf_data, &options)?;
+    match pcb::get_cwd(result.pid) {
+        Some(cwd) if cwd == b"/app/work" => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: expected cwd /app/work, got {:?}",
+                other.as_deref().map(<[u8]>::to_vec)
+            );
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    // A relative (invalid) cwd is rejected by set_cwd → child stays at `/`.
+    let bad = SpawnOptions::new("spawn-test-cwd-bad").cwd(b"relative/dir");
+    let result2 = spawn_process(&elf_data, &bad)?;
+    match pcb::get_cwd(result2.pid) {
+        Some(cwd) if cwd == b"/" => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: invalid cwd should leave default /, got {:?}",
+                other.as_deref().map(<[u8]>::to_vec)
+            );
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result2.task_id);
+            pcb::destroy(result2.pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result2.task_id);
+    pcb::destroy(result2.pid);
+
+    serial_println!("[spawn]   Spawn with initial cwd (valid + invalid): OK");
     Ok(())
 }
 

@@ -67611,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]
+            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
                 return;
             };
 
@@ -67749,6 +67749,10 @@ fn cmd_oci(args: &str) {
             // writes that don't land in a writable (`:rw`) volume are denied
             // with EROFS. Applied to the container at create time (Step 4).
             let mut read_only_root = false;
+            // Docker `--workdir`/`-w`: initial working directory of the init
+            // process (a guest path resolved under the container jail). When
+            // unset, the image's `WorkingDir` config is used, else `/`.
+            let mut workdir: Option<&str> = None;
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
@@ -67885,6 +67889,23 @@ fn cmd_oci(args: &str) {
                         // Flag (no argument): make the container rootfs RO.
                         read_only_root = true;
                         i = i.saturating_add(1);
+                    }
+                    "--workdir" | "-w" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // Must be an absolute guest path; a relative
+                            // workdir is rejected (Docker requires absolute).
+                            if spec.starts_with('/') {
+                                workdir = Some(spec);
+                            } else {
+                                crate::console_println!(
+                                    "[oci] Ignoring workdir '{}': must be an absolute path",
+                                    spec
+                                );
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
                     }
                     "--name" | "-n" => {
                         if let Some(&n) = parts.get(i.saturating_add(1)) {
@@ -68220,10 +68241,27 @@ fn cmd_oci(args: &str) {
                                 }
                                 let envp_refs: alloc::vec::Vec<&[u8]> =
                                     envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                let opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
+                                // Effective working directory: CLI `--workdir`/`-w`
+                                // wins, else the image's `WorkingDir`, else none
+                                // (init starts at `/`). Owned so the bytes outlive
+                                // `opts`, which borrows them via `.cwd()`.
+                                let effective_workdir: Option<alloc::string::String> =
+                                    workdir.map(alloc::string::String::from).or_else(|| {
+                                        let wd = &image.config.working_dir;
+                                        if wd.is_empty() {
+                                            None
+                                        } else {
+                                            Some(wd.clone())
+                                        }
+                                    });
+                                let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
                                     .argv(&argv_refs)
                                     .envp(&envp_refs)
                                     .exe_path(exe_guest.as_bytes());
+                                if let Some(wd) = effective_workdir.as_deref() {
+                                    opts = opts.cwd(wd.as_bytes());
+                                    crate::console_println!("  WorkDir:      {}", wd);
+                                }
                                 match crate::container::run(ct_id, &elf, &opts) {
                                     Ok(pid) => {
                                         crate::console_println!(
@@ -68283,8 +68321,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

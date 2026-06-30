@@ -1342,6 +1342,99 @@ pub fn restart(id: ContainerId) -> KernelResult<u64> {
     run_path(id, &exe_path, &arg_refs)
 }
 
+/// Resolve a container-relative path to its host VFS path under the container's
+/// rootfs, rejecting any attempt to escape the jail.
+///
+/// `container_path` is interpreted as absolute inside the container (a leading
+/// `/` is optional and stripped).  The result is `root_path` joined with the
+/// cleaned container path.  Any `..` component is rejected (it could escape the
+/// rootfs), as is a NUL byte — consistent with the kernel's path rules (all
+/// bytes allowed except `/` separator and NUL).
+///
+/// Returns the host VFS path, or [`KernelError::InvalidArgument`] if the
+/// container has no rootfs configured or the path is unsafe.
+fn resolve_in_rootfs(root_path: &str, container_path: &str) -> KernelResult<String> {
+    if root_path.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    if container_path.contains('\0') {
+        return Err(KernelError::InvalidArgument);
+    }
+    let rel = container_path.trim_start_matches('/');
+    // Reject any `..` path component (jail escape) and empty/`.`-only paths.
+    let mut has_real_component = false;
+    for comp in rel.split('/') {
+        if comp == ".." {
+            return Err(KernelError::InvalidArgument);
+        }
+        if !comp.is_empty() && comp != "." {
+            has_real_component = true;
+        }
+    }
+    if !has_real_component {
+        // Refuse to copy the rootfs root itself (must name a file).
+        return Err(KernelError::InvalidArgument);
+    }
+    let base = root_path.trim_end_matches('/');
+    Ok(alloc::format!("{base}/{rel}"))
+}
+
+/// Copy a file's bytes *into* a container's filesystem (Docker `cp` host →
+/// container).
+///
+/// `container_path` is resolved under the container's rootfs (see
+/// [`resolve_in_rootfs`]) and the `data` is written there via the VFS.  The
+/// container must have a rootfs configured (`container rootfs`), and the
+/// destination's parent directory must already exist.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
+///   no rootfs, or `container_path` is unsafe (escapes the jail / names the
+///   root).
+/// - Any VFS write error (missing parent directory, read-only fs, …).
+pub fn copy_to_container(
+    id: ContainerId,
+    container_path: &str,
+    data: &[u8],
+) -> KernelResult<()> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].root_path.clone())
+    })?;
+    let host_path = resolve_in_rootfs(&root_path, container_path)?;
+    crate::fs::vfs::Vfs::write_file(&host_path, data)
+}
+
+/// Copy a file's bytes *out of* a container's filesystem (Docker `cp`
+/// container → host).
+///
+/// `container_path` is resolved under the container's rootfs (see
+/// [`resolve_in_rootfs`]) and its bytes are read via the VFS and returned.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, has
+///   no rootfs, or `container_path` is unsafe.
+/// - Any VFS read error (file not found, …).
+pub fn copy_from_container(
+    id: ContainerId,
+    container_path: &str,
+) -> KernelResult<Vec<u8>> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].root_path.clone())
+    })?;
+    let host_path = resolve_in_rootfs(&root_path, container_path)?;
+    crate::fs::vfs::Vfs::read_file(&host_path)
+}
+
 /// Set a container's filesystem root (rootfs) before it is run.
 ///
 /// `root` is an absolute host path (e.g. the container's extracted/overlay
@@ -2959,6 +3052,45 @@ pub fn self_test() {
     }
     serial_println!("[container]   restart (run_path/restart): OK");
 
+    // Test 19n: copy_to_container/copy_from_container move file bytes between
+    // the host and a container's rootfs (Docker `cp`), resolving paths under
+    // the jail and rejecting escapes.  A container with no rootfs cannot be
+    // copied to/from.
+    {
+        // No-rootfs container: copy is rejected (nothing to resolve against).
+        let ct_norf = create(&ContainerConfig::new("test-cp-norootfs")).expect("create");
+        assert!(copy_to_container(ct_norf, "/f.txt", b"x").is_err());
+        assert!(copy_from_container(ct_norf, "/f.txt").is_err());
+        delete(ct_norf).expect("delete no-rootfs container");
+
+        // Use /tmp (a known-writable VFS dir) as the container's rootfs.
+        let ct_cp = create(&ContainerConfig::new("test-cp-ct")).expect("create");
+        set_root_path(ct_cp, "/tmp").expect("set rootfs");
+
+        // Jail-escape attempts and the root itself are rejected.
+        assert!(
+            copy_to_container(ct_cp, "/../escape.txt", b"x").is_err(),
+            "`..` must not escape the rootfs",
+        );
+        assert!(
+            copy_to_container(ct_cp, "/", b"x").is_err(),
+            "the rootfs root is not a file",
+        );
+
+        // Round-trip: copy bytes in, read them back out.
+        let payload = b"container cp payload";
+        copy_to_container(ct_cp, "/cp-test.txt", payload).expect("copy into container");
+        let got = copy_from_container(ct_cp, "/cp-test.txt").expect("copy out of container");
+        assert_eq!(
+            got.as_slice(), payload,
+            "round-trip copy must preserve the file bytes",
+        );
+
+        let _ = crate::fs::vfs::Vfs::remove("/tmp/cp-test.txt");
+        delete(ct_cp).expect("delete cp container");
+    }
+    serial_println!("[container]   cp (copy_to/from_container): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3058,5 +3190,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (32 tests)");
+    serial_println!("[container] Self-test PASSED (33 tests)");
 }

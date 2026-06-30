@@ -67760,6 +67760,56 @@ fn cmd_container(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "cp" => {
+            // container cp <src> <dest>  (Docker `cp`): copy a file between the
+            // host VFS and a container's rootfs.  Exactly one of <src>/<dest>
+            // is a container reference of the form `ID:/path`; the other is a
+            // plain host VFS path.
+            let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
+                return;
+            };
+            // Parse "ID:/path" into (id, path); a plain host path yields None.
+            let parse_ref = |s: &str| -> Option<(u32, alloc::string::String)> {
+                let (left, right) = s.split_once(':')?;
+                let id = left.parse::<u32>().ok()?;
+                Some((id, alloc::string::String::from(right)))
+            };
+            match (parse_ref(src), parse_ref(dst)) {
+                (Some((id, cpath)), None) => {
+                    // container -> host
+                    match container::copy_from_container(id, &cpath) {
+                        Ok(data) => match crate::fs::vfs::Vfs::write_file(dst, &data) {
+                            Ok(()) => crate::console_println!(
+                                "Copied {} bytes from container {}:{} to {}",
+                                data.len(), id, cpath, dst
+                            ),
+                            Err(e) => crate::console_println!("Failed to write '{}': {:?}", dst, e),
+                        },
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                }
+                (None, Some((id, cpath))) => {
+                    // host -> container
+                    match crate::fs::vfs::Vfs::read_file(src) {
+                        Ok(data) => match container::copy_to_container(id, &cpath, &data) {
+                            Ok(()) => crate::console_println!(
+                                "Copied {} bytes from {} to container {}:{}",
+                                data.len(), src, id, cpath
+                            ),
+                            Err(e) => crate::console_println!("Error: {:?}", e),
+                        },
+                        Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    crate::console_println!("cp between two containers is not supported");
+                }
+                (None, None) => {
+                    crate::console_println!("One of <src>/<dest> must be a container ref (ID:/path)");
+                }
+            }
+        }
         "exec" => {
             // container exec <id> <command...>
             // Temporarily enters the container's network namespace and executes
@@ -67821,7 +67871,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|exec|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|exec|cp|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67834,6 +67884,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container pause ID                       — freeze (suspend all threads)");
             crate::console_println!("  container unpause ID                     — thaw (resume all threads)");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
+            crate::console_println!("  container cp <src> <dest>                — copy file host<->rootfs (one side ID:/path)");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");

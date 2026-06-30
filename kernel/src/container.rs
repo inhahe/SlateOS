@@ -1389,13 +1389,29 @@ pub fn self_test() {
     }
     serial_println!("[container]   Run init process + cgroup billing: OK");
 
-    // Test 18: a container with a configured rootfs jails its init process
-    // to that root — the init PID's path resolution is re-anchored under
-    // the rootfs and cannot escape it.
+    // Test 18: a container with a configured rootfs jails the processes it
+    // registers — `add_process_task` reads the container's `root_path` and
+    // re-anchors the registered PID's path resolution under that rootfs, so
+    // `..` cannot escape it.
+    //
+    // This uses a *synthetic*, never-scheduled PID rather than spawning a
+    // real init process via `run()`.  The reason is determinism: a real
+    // schedulable init process can run and **exit** on another CPU between
+    // two of the test's resolves, and on exit its thread teardown calls
+    // `namespace::detach(pid)`, which drops `PROCESS_ROOT[pid]` — a later
+    // `resolve_path_for(pid, …)` would then return the unjailed input
+    // verbatim and the assertion would flake (see known-issues.md
+    // B-CONTAINER-JAIL-TESTRACE).  The end-to-end `run()` → cgroup-billing
+    // path is already covered by the "Run init process + cgroup billing"
+    // test above; the resolution *semantics* (`..` clamping, longest-prefix
+    // volume match) are covered deterministically by
+    // `namespace::test_process_root` / `test_volume_mounts` (synthetic PIDs).
+    // The unique job of this test is to prove the *container layer*
+    // (`add_process_task`) installs the configured root onto a registered
+    // PID and that `remove_process_task` clears it — neither of which needs
+    // a live process.
     {
-        static HELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        const JAIL_PID: u64 = 88890;
 
         let jail_cfg = ContainerConfig::new("test-jail-ct").memory(4096);
         let ct_jail = create(&jail_cfg).expect("create jail container");
@@ -1410,50 +1426,48 @@ pub fn self_test() {
         // Non-absolute rootfs is rejected.
         assert!(set_root_path(ct_jail, "relative").is_err());
 
-        let opts = crate::proc::spawn::SpawnOptions::new("jail-init");
-        let pid = run(ct_jail, HELLO_ELF, &opts).expect("run jailed init");
+        // Register a synthetic process: this drives the same wiring path
+        // `run()` uses (cgroup/namespace binding + chroot install), but for
+        // a PID with no schedulable thread, so it cannot exit mid-test.
+        add_process(ct_jail, JAIL_PID).expect("register jailed process");
 
-        // The init process resolves paths inside its rootfs.
+        // The registered process resolves paths inside its rootfs.
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/bin/sh")
+            crate::ipc::namespace::resolve_path_for(JAIL_PID, "/bin/sh")
                 .expect("resolve jailed path"),
             "/containers/test-jail/rootfs/bin/sh",
         );
         // `..` cannot escape the jail.
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/../../etc/passwd")
+            crate::ipc::namespace::resolve_path_for(JAIL_PID, "/../../etc/passwd")
                 .expect("resolve escape attempt"),
             "/containers/test-jail/rootfs/etc/passwd",
         );
 
-        // Changing the rootfs of a running container is rejected.
-        assert!(set_root_path(ct_jail, "/other").is_err());
-
         // Tear down: remove_process_task must also drop the jail.
-        let init_task = crate::proc::pcb::get_threads(pid)
-            .and_then(|t| t.first().copied())
-            .expect("jailed init has a thread");
-        remove_process_task(ct_jail, pid, init_task)
-            .expect("detach jailed init");
+        remove_process(ct_jail, JAIL_PID).expect("deregister jailed process");
         assert!(
-            crate::ipc::namespace::get_root(pid).is_none(),
-            "jail must be cleared after detaching the init process",
+            crate::ipc::namespace::get_root(JAIL_PID).is_none(),
+            "jail must be cleared after deregistering the process",
         );
-        crate::proc::thread::kill_process_threads(pid);
-        crate::proc::pcb::destroy(pid);
 
+        // Changing the rootfs of a non-Created container is rejected (the
+        // `state != Created` guard — exercised here via `stop()` rather than
+        // a live process, so the check is deterministic).
         stop(ct_jail).expect("stop jail container");
+        assert!(set_root_path(ct_jail, "/other").is_err());
         delete(ct_jail).expect("delete jail container");
     }
     serial_println!("[container]   Rootfs jail (chroot) for init process: OK");
 
-    // Test 19: a container with volume (bind) mounts installs them on its
-    // init process, so a guest path under a volume resolves to the host
-    // target (escaping the rootfs), while non-volume paths stay jailed.
+    // Test 19: a container with volume (bind) mounts installs them on the
+    // processes it registers, so a guest path under a volume resolves to the
+    // host target (escaping the rootfs), while non-volume paths stay jailed.
+    //
+    // Uses a synthetic, never-scheduled PID for the same determinism reason
+    // as Test 18 (see the comment there and B-CONTAINER-JAIL-TESTRACE).
     {
-        static HELLO_ELF: &[u8] = include_bytes!(
-            "../../services/hello/target/x86_64-unknown-none/release/hello"
-        );
+        const VOL_PID: u64 = 88891;
 
         let vol_cfg = ContainerConfig::new("test-vol-ct").memory(4096);
         let ct_vol = create(&vol_cfg).expect("create vol container");
@@ -1477,50 +1491,45 @@ pub fn self_test() {
             "re-mount at /data must replace, not add a third volume",
         );
 
-        let opts = crate::proc::spawn::SpawnOptions::new("vol-init");
-        let pid = run(ct_vol, HELLO_ELF, &opts).expect("run vol init");
+        // Register a synthetic process via the same wiring path `run()` uses.
+        add_process(ct_vol, VOL_PID).expect("register vol process");
 
         // Volume path escapes the rootfs to the host target.
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/data/file.txt")
+            crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/file.txt")
                 .expect("resolve volume path"),
             "/srv/data2/file.txt",
         );
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/logs/app.log")
+            crate::ipc::namespace::resolve_path_for(VOL_PID, "/logs/app.log")
                 .expect("resolve logs volume"),
             "/var/log/test-vol/app.log",
         );
         // Non-volume path stays jailed under the rootfs.
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/bin/sh")
+            crate::ipc::namespace::resolve_path_for(VOL_PID, "/bin/sh")
                 .expect("resolve non-volume path"),
             "/containers/test-vol/rootfs/bin/sh",
         );
         // `..` cannot climb out of a volume into the host.
         assert_eq!(
-            crate::ipc::namespace::resolve_path_for(pid, "/data/../escape")
+            crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/../escape")
                 .expect("resolve escape attempt"),
             "/containers/test-vol/rootfs/escape",
         );
-        // Adding a volume to a running container is rejected.
-        assert!(add_volume_mount(ct_vol, "/host/x", "/x").is_err());
 
         // Tear down: remove_process_task must drop the volumes too.
-        let init_task = crate::proc::pcb::get_threads(pid)
-            .and_then(|t| t.first().copied())
-            .expect("vol init has a thread");
-        remove_process_task(ct_vol, pid, init_task)
-            .expect("detach vol init");
+        remove_process(ct_vol, VOL_PID).expect("deregister vol process");
         assert_eq!(
-            crate::ipc::namespace::volume_count(pid),
+            crate::ipc::namespace::volume_count(VOL_PID),
             0,
-            "volumes must be cleared after detaching the init process",
+            "volumes must be cleared after deregistering the process",
         );
-        crate::proc::thread::kill_process_threads(pid);
-        crate::proc::pcb::destroy(pid);
 
+        // Adding a volume to a non-Created container is rejected (the
+        // `state != Created` guard, exercised deterministically via stop()).
         stop(ct_vol).expect("stop vol container");
+        assert!(add_volume_mount(ct_vol, "/host/x", "/x").is_err());
         delete(ct_vol).expect("delete vol container");
     }
     serial_println!("[container]   Volume (bind) mounts for init process: OK");
@@ -1534,5 +1543,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (18 tests)");
+    serial_println!("[container] Self-test PASSED (19 tests)");
 }

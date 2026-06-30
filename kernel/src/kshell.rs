@@ -67466,12 +67466,13 @@ fn cmd_oci(args: &str) {
         }
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
+            //                      [-v host:guest ...]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...]");
                 return;
             };
 
@@ -67480,9 +67481,38 @@ fn cmd_oci(args: &str) {
             let mut net_ip: Option<[u8; 4]> = None;
             let mut net_gw: Option<[u8; 4]> = None;
             let mut net_dns: Option<[u8; 4]> = None;
+            // Volume (bind) mounts as (host_target, guest_prefix) pairs from
+            // `-v host:guest` (Docker order). Installed after the container is
+            // created (while still in Created state).
+            let mut volumes: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
+                    "--volume" | "-v" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // Split on the first ':'. Host and guest are both
+                            // absolute Unix paths (validated below); Docker
+                            // itself splits a `-v host:guest` spec on the first
+                            // ':', so match that.
+                            if let Some((host, guest)) = spec.split_once(':') {
+                                if host.starts_with('/') && guest.starts_with('/') {
+                                    volumes.push((host, guest));
+                                } else {
+                                    crate::console_println!(
+                                        "[oci] Ignoring volume '{}': both paths must be absolute (host:guest)",
+                                        spec
+                                    );
+                                }
+                            } else {
+                                crate::console_println!(
+                                    "[oci] Ignoring volume '{}': expected host:guest", spec
+                                );
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--name" | "-n" => {
                         if let Some(&n) = parts.get(i.saturating_add(1)) {
                             name = Some(n);
@@ -67709,6 +67739,22 @@ fn cmd_oci(args: &str) {
                         }
                     }
 
+                    // Install any `-v host:guest` volume (bind) mounts (also
+                    // while still in Created state).  A volume lets the
+                    // container see a host directory at a guest path, escaping
+                    // the rootfs (e.g. `-v /srv/data:/data`).
+                    for &(host, guest) in &volumes {
+                        match crate::container::add_volume_mount(ct_id, host, guest) {
+                            Ok(()) => crate::console_println!(
+                                "  Volume:       {} -> {}", host, guest
+                            ),
+                            Err(e) => crate::console_println!(
+                                "[oci] Warning: could not add volume {}:{}: {:?}",
+                                host, guest, e
+                            ),
+                        }
+                    }
+
                     // Launch the image's entrypoint/cmd as the container's
                     // init process, jailed to the rootfs.  `command[0]` is the
                     // executable; it is read from the host *inside* the rootfs
@@ -67808,8 +67854,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]]");
-            crate::console_println!("                     — create container from OCI image");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

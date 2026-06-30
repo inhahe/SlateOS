@@ -1579,39 +1579,55 @@ pub fn self_test() {
         );
 
         let opts = crate::proc::spawn::SpawnOptions::new("hello-init");
-        let pid = run(ct_run, HELLO_ELF, &opts).expect("run init process");
 
-        // After run: Running, init pid recorded, one tracked process,
-        // and exactly one task billed to the container's cgroup.
-        let ci = info(ct_run).unwrap();
-        assert_eq!(ci.state, ContainerState::Running);
-        assert_eq!(ci.init_pid, Some(pid));
-        assert_eq!(ci.nr_procs, 1);
-        assert_eq!(
-            crate::cgroup::stats(cg).map(|s| s.nr_tasks),
-            Some(1),
-            "container init process must be billed to the container cgroup"
-        );
+        // Bracket the entire spawn→teardown window with interrupts disabled.
+        // `run()` enqueues a *real, schedulable* init task; with interrupts on,
+        // a timer ISR could preempt this boot self-test thread into that task
+        // before we tear it down, executing `hello` (which prints one line and
+        // exits). The exiting thread's own teardown then races our explicit
+        // teardown below — observed as a load-dependent boot HANG (the whole
+        // serial log froze mid-test on a heavy boot, BOOT_OK never reached).
+        // Disabling interrupts closes that window deterministically: the task
+        // is still *registered* (so cgroup billing — the only thing this test
+        // verifies that needs a real spawn — is exercised end-to-end), but it
+        // can never be *scheduled* before `destroy()` removes it. This is the
+        // "synthetic-PID" determinism of Tests 18/19 without giving up the real
+        // `run()` path. See known-issues.md B-CONTAINER-JAIL-TESTRACE.
+        crate::cpu::without_interrupts(|| {
+            let pid = run(ct_run, HELLO_ELF, &opts).expect("run init process");
 
-        // Can't run a container twice.
-        assert!(run(ct_run, HELLO_ELF, &opts).is_err(),
-            "running an already-running container must fail");
+            // After run: Running, init pid recorded, one tracked process,
+            // and exactly one task billed to the container's cgroup.
+            let ci = info(ct_run).unwrap();
+            assert_eq!(ci.state, ContainerState::Running);
+            assert_eq!(ci.init_pid, Some(pid));
+            assert_eq!(ci.nr_procs, 1);
+            assert_eq!(
+                crate::cgroup::stats(cg).map(|s| s.nr_tasks),
+                Some(1),
+                "container init process must be billed to the container cgroup"
+            );
 
-        // Tear down the init process.  Detach from the cgroup/namespaces
-        // first (while the task is still alive so the count decrements),
-        // then kill its threads and free its address space.  Resolve the
-        // real initial-thread task id from the process (PID != task id).
-        let init_task = crate::proc::pcb::get_threads(pid)
-            .and_then(|t| t.first().copied())
-            .expect("init process has a thread");
-        remove_process_task(ct_run, pid, init_task).expect("detach init process");
-        assert_eq!(
-            crate::cgroup::stats(cg).map(|s| s.nr_tasks),
-            Some(0),
-            "cgroup must be empty after detaching the init process"
-        );
-        crate::proc::thread::kill_process_threads(pid);
-        crate::proc::pcb::destroy(pid);
+            // Can't run a container twice.
+            assert!(run(ct_run, HELLO_ELF, &opts).is_err(),
+                "running an already-running container must fail");
+
+            // Tear down the init process.  Detach from the cgroup/namespaces
+            // first (while the task is still alive so the count decrements),
+            // then kill its threads and free its address space.  Resolve the
+            // real initial-thread task id from the process (PID != task id).
+            let init_task = crate::proc::pcb::get_threads(pid)
+                .and_then(|t| t.first().copied())
+                .expect("init process has a thread");
+            remove_process_task(ct_run, pid, init_task).expect("detach init process");
+            assert_eq!(
+                crate::cgroup::stats(cg).map(|s| s.nr_tasks),
+                Some(0),
+                "cgroup must be empty after detaching the init process"
+            );
+            crate::proc::thread::kill_process_threads(pid);
+            crate::proc::pcb::destroy(pid);
+        });
 
         stop(ct_run).expect("stop run container");
         delete(ct_run).expect("delete run container");

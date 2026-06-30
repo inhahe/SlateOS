@@ -68,12 +68,24 @@ prefix volume match) by `namespace::test_process_root` /
 rather than a live process, so it too is deterministic. Verified: clean
 build + green boot self-test ("Self-test PASSED (19 tests)").
 
-**Note (latent, not yet observed):** Test 17 still spawns a real init
-process and checks `cgroup::stats(cg).nr_tasks == Some(1)` immediately
-after `run()`. If a future change makes process *exit* decrement the
-container cgroup task count (it currently does not — only the explicit
-`remove_process_task` teardown does), Test 17 could develop the same
-liveness flake. If that happens, apply the same synthetic-PID treatment.
+**Update (2026-06-30) — latent flake OBSERVED as a boot hang, now FIXED:**
+The Test 17 liveness risk noted above stopped being theoretical. On a
+heavy boot run the serial log froze mid-test right after the `run()` log
+line (`[container] run id=8 'test-run-ct': init pid=219 …`) and never
+reached `BOOT_OK` (480s timeout → boot gate FAILED). An identical-binary
+re-run passed (`BOOT_OK after 187s`), confirming a load-dependent race,
+not a logic bug — a timer ISR preempted the boot self-test thread into
+the freshly-spawned init task, which executed `hello`; the exiting
+thread's teardown then raced the test's explicit teardown, deadlocking
+(a hang, not an assert panic — no `[PANIC]` was printed). This was worse
+than the predicted assertion flake because a hang fails the *entire* boot
+gate. **Fix:** Test 17's spawn→teardown window is now bracketed in
+`cpu::without_interrupts(...)`, so the init task is still *registered*
+(cgroup billing is verified end-to-end exactly as before) but can never
+be *scheduled* before `destroy()` removes it — deterministic, with no
+loss of real-`run()` coverage. Verified: clean build + green boot
+self-test. Production code is unaffected (a live process only ever
+resolves its *own* state inside its own syscall handler).
 
 ### B-PTHREAD-YIELDBUDGET. `/bin/pthread` self-test (4 threads × 40 000 mutex ops) can exceed the 262 144-yield exit budget under heavy boot load — WATCH (non-fatal)
 

@@ -44896,26 +44896,9 @@ fn caller_pid() -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic RENAME_NOREPLACE self-test (VFS-dependent)
+// Post-mount statfs(2) self-test (VFS-dependent)
 // ---------------------------------------------------------------------------
 
-/// End-to-end test of `Vfs::rename_noreplace` / `Vfs::rename_exchange` and the
-/// Linux-ABI `renameat2(RENAME_NOREPLACE | RENAME_EXCHANGE)` paths that route
-/// through them.
-///
-/// Runs after the `/tmp` memfs is mounted (so writes succeed) rather than in
-/// [`self_test`], which precedes VFS init and therefore only sees a read-only
-/// root — the in-`self_test` rename round-trip skips there. Uses `/tmp` paths
-/// so the writable memfs exercises the same-mount (atomic) branches.
-///
-/// Coverage:
-///  1. no-replace rename onto a FREE destination → succeeds, src gone, dst present;
-///  2. no-replace rename onto an EXISTING destination → `AlreadyExists` (EEXIST),
-///     and the destination is left untouched (original survivor content);
-///  3. the same EEXIST result via the `renameat2` syscall with `RENAME_NOREPLACE`;
-///  4. `RENAME_EXCHANGE` atomically swaps two existing entries' contents;
-///  5. `RENAME_EXCHANGE` with a missing operand → `NotFound` (ENOENT), leaving
-///     the surviving entry untouched (all-or-nothing).
 /// Post-mount validation of the Linux `statfs(2)` translation against a real,
 /// mounted filesystem.
 ///
@@ -44967,6 +44950,23 @@ pub fn self_test_statfs_root() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// End-to-end test of `Vfs::rename_noreplace` / `Vfs::rename_exchange` and the
+/// Linux-ABI `renameat2(RENAME_NOREPLACE | RENAME_EXCHANGE)` paths that route
+/// through them.
+///
+/// Runs after the `/tmp` memfs is mounted (so writes succeed) rather than in
+/// [`self_test`], which precedes VFS init and therefore only sees a read-only
+/// root — the in-`self_test` rename round-trip skips there. Uses `/tmp` paths
+/// so the writable memfs exercises the same-mount (atomic) branches.
+///
+/// Coverage:
+///  1. no-replace rename onto a FREE destination → succeeds, src gone, dst present;
+///  2. no-replace rename onto an EXISTING destination → `AlreadyExists` (EEXIST),
+///     and the destination is left untouched (original survivor content);
+///  3. the same EEXIST result via the `renameat2` syscall with `RENAME_NOREPLACE`;
+///  4. `RENAME_EXCHANGE` atomically swaps two existing entries' contents;
+///  5. `RENAME_EXCHANGE` with a missing operand → `NotFound` (ENOENT), leaving
+///     the surviving entry untouched (all-or-nothing).
 pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::serial_println;

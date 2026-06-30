@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -856,6 +857,49 @@ struct MountPoint {
     fs: Box<dyn FileSystem>,
     /// Mount options (read-only, noatime, etc.).
     options: MountOptions,
+    /// Stable, never-reused id for this mounted filesystem instance.
+    ///
+    /// Assigned monotonically at mount time from [`NEXT_FS_ID`] and kept for
+    /// the lifetime of the mount.  Unlike the mount's index in the `mounts`
+    /// `Vec` (which shifts when an earlier mount is removed), this id is
+    /// stable across unmounts of *other* filesystems, so it can disambiguate
+    /// inode numbers that two different filesystems might both use.  It is the
+    /// device-id half of a [`FileId`] (the `(fs_id, ino)` pair that uniquely
+    /// identifies a file system-wide), used as the page-cache key — see
+    /// design-decisions §23/§36.
+    fs_id: u64,
+}
+
+/// Monotonic source of stable mount ids ([`MountPoint::fs_id`]).
+///
+/// Starts at 1 so `0` can mean "no/unknown filesystem".  Never decrements and
+/// ids are never reused, so a `FileId` minted for one mount can never collide
+/// with a later mount even after the original is unmounted.
+static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A system-wide-unique identity for a filesystem object.
+///
+/// A file is uniquely identified by the pair `(fs_id, ino)`: the stable mount
+/// id ([`MountPoint::fs_id`]) plus the filesystem-local inode number
+/// ([`FileMeta::ino`]).  Two paths that resolve to the same `(fs_id, ino)` are
+/// the same underlying object (e.g. hard links on ext4); two objects on
+/// different mounts that happen to share an `ino` are distinguished by `fs_id`.
+///
+/// This is the key type for the read-only page cache (design-decisions
+/// §23/§36): cached frames are keyed by `(FileId, page-offset)` so that N
+/// processes mapping the same shared library share one set of physical frames.
+/// A file is only cacheable when it has a *stable* identity — i.e. its backing
+/// filesystem reports a non-zero `ino` (ext4 real inodes, memfs synthetic
+/// ids).  Filesystems without stable per-object identity (FAT, ISO9660,
+/// pseudo-filesystems reporting `ino == 0`) are not cacheable;
+/// [`Vfs::file_identity`] returns `None` for them so callers fall back to the
+/// per-mapping read path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileId {
+    /// Stable mount id of the filesystem holding this object.
+    pub fs_id: u64,
+    /// Filesystem-local inode number (guaranteed non-zero in a `FileId`).
+    pub ino: u64,
 }
 
 /// The global VFS state.
@@ -1277,6 +1321,8 @@ impl Vfs {
             path: String::from(mount_path),
             fs,
             options,
+            // Stable, never-reused id for this mount instance (see FileId).
+            fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -2331,6 +2377,42 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.metadata(relative)
+    }
+
+    /// Resolve `path` to its stable system-wide [`FileId`], or `None` if the
+    /// object has no stable identity (and is therefore not cacheable).
+    ///
+    /// Combines the owning mount's stable [`MountPoint::fs_id`] with the
+    /// backing filesystem's inode number ([`FileMeta::ino`]) into the
+    /// `(fs_id, ino)` pair that uniquely identifies a file across the whole
+    /// VFS namespace.  This is the page-cache key (design-decisions §23/§36):
+    /// two mappings that resolve to the same `FileId` are the same underlying
+    /// object and may share read-only physical frames.
+    ///
+    /// Returns `Ok(None)` — meaning "no stable identity, do not cache" — when
+    /// the backing filesystem reports `ino == 0` (FAT, ISO9660, pseudo-
+    /// filesystems).  Callers must treat `None` as "fall back to the
+    /// per-mapping read path", never as an error.  Symlinks are followed
+    /// (identity is of the final target, matching `stat`/`metadata`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates path-resolution / metadata errors (`NotFound`, etc.).  A
+    /// missing or unreadable path is a real error; only a *successfully
+    /// resolved* object that lacks a stable inode yields `Ok(None)`.
+    pub fn file_identity(path: &str) -> KernelResult<Option<FileId>> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        let fs_id = mp.fs_id;
+        let ino = mp.fs.metadata(relative)?.ino;
+        // ino == 0 ⇒ filesystem has no stable per-object identity ⇒ not
+        // cacheable.  Returning None (not an error) lets the caller degrade
+        // gracefully to the per-mapping read path.
+        if ino == 0 {
+            return Ok(None);
+        }
+        Ok(Some(FileId { fs_id, ino }))
     }
 
     /// Compute the SHA-256 content hash of a file.
@@ -4702,6 +4784,110 @@ pub fn mount_self_test() -> KernelResult<()> {
     serial_println!("[vfs]   unmount {}: OK", mp);
 
     serial_println!("[vfs] Mount/unmount self-test PASSED");
+    Ok(())
+}
+
+/// Self-test for stable file identity ([`Vfs::file_identity`]) — the page-cache
+/// key precursor for the C-lite read-only page cache (design-decisions §23/§36).
+///
+/// Validates the four properties callers depend on:
+/// 1. A real file on a stable-inode backend (memfs) yields `Some(FileId)` with a
+///    non-zero `ino`.
+/// 2. Identity is stable: two lookups of the same path return the same `FileId`.
+/// 3. Distinct files on the same mount have distinct `FileId`s (same `fs_id`,
+///    different `ino`).
+/// 4. Files on *different* mounts never collide even if their inode numbers
+///    happen to match — the `fs_id` half disambiguates them.
+pub fn file_identity_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[vfs] Running file-identity self-test...");
+
+    let mp_a = "/_fileid_selftest_a";
+    let mp_b = "/_fileid_selftest_b";
+
+    // Refuse to clobber stale mounts from a previous run.
+    for mp in [mp_a, mp_b] {
+        if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+            let _ = Vfs::unmount(mp);
+        }
+    }
+
+    // Helper that always tears down both scratch mounts before returning an
+    // error, so a failure never leaks mounts into the rest of the boot.
+    fn teardown(mp_a: &str, mp_b: &str) {
+        let _ = Vfs::remove("/_fileid_selftest_a/f1");
+        let _ = Vfs::remove("/_fileid_selftest_a/f2");
+        let _ = Vfs::remove("/_fileid_selftest_b/f1");
+        let _ = Vfs::unmount(mp_a);
+        let _ = Vfs::unmount(mp_b);
+    }
+
+    crate::fs::memfs::mount(mp_a)?;
+    if let Err(e) = crate::fs::memfs::mount(mp_b) {
+        let _ = Vfs::unmount(mp_a);
+        return Err(e);
+    }
+
+    // Macro-free inline error handling: on any failure, tear down and bail.
+    let run = || -> KernelResult<()> {
+        Vfs::write_file("/_fileid_selftest_a/f1", b"alpha")?;
+        Vfs::write_file("/_fileid_selftest_a/f2", b"beta")?;
+        Vfs::write_file("/_fileid_selftest_b/f1", b"gamma")?;
+
+        // (1) Real file ⇒ Some(FileId) with non-zero ino.
+        let a1 = Vfs::file_identity("/_fileid_selftest_a/f1")?;
+        let a1 = match a1 {
+            Some(id) if id.ino != 0 => id,
+            other => {
+                serial_println!("[vfs]   FAIL: expected Some(non-zero ino), got {:?}", other);
+                return Err(KernelError::InternalError);
+            }
+        };
+        serial_println!("[vfs]   identity(a/f1) = {:?}: OK", a1);
+
+        // (2) Stable across repeated lookups.
+        let a1_again = Vfs::file_identity("/_fileid_selftest_a/f1")?;
+        if a1_again != Some(a1) {
+            serial_println!("[vfs]   FAIL: identity not stable across lookups");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]   identity stable across lookups: OK");
+
+        // (3) Distinct files on the same mount ⇒ same fs_id, different ino.
+        let a2 = Vfs::file_identity("/_fileid_selftest_a/f2")?
+            .ok_or(KernelError::InternalError)?;
+        if a2.fs_id != a1.fs_id {
+            serial_println!("[vfs]   FAIL: same-mount files have different fs_id");
+            return Err(KernelError::InternalError);
+        }
+        if a2 == a1 {
+            serial_println!("[vfs]   FAIL: distinct files share a FileId");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]   distinct files on one mount differ: OK");
+
+        // (4) Different mounts never collide — distinct fs_id even if ino matches.
+        let b1 = Vfs::file_identity("/_fileid_selftest_b/f1")?
+            .ok_or(KernelError::InternalError)?;
+        if b1.fs_id == a1.fs_id {
+            serial_println!("[vfs]   FAIL: separate mounts share an fs_id");
+            return Err(KernelError::InternalError);
+        }
+        if b1 == a1 {
+            serial_println!("[vfs]   FAIL: cross-mount FileId collision");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]   cross-mount identities never collide: OK");
+
+        Ok(())
+    };
+
+    let result = run();
+    teardown(mp_a, mp_b);
+    result?;
+
+    serial_println!("[vfs] File-identity self-test PASSED");
     Ok(())
 }
 

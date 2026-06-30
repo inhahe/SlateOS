@@ -67710,14 +67710,14 @@ fn cmd_oci(args: &str) {
         }
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
-            //                      [-v host:guest ...] [-p host:container[/proto] ...]
+            //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
             //                      [-e KEY=value ...] [-m SIZE] [--cpus N]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
                 return;
             };
 
@@ -67729,7 +67729,7 @@ fn cmd_oci(args: &str) {
             // Volume (bind) mounts as (host_target, guest_prefix) pairs from
             // `-v host:guest` (Docker order). Installed after the container is
             // created (while still in Created state).
-            let mut volumes: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+            let mut volumes: alloc::vec::Vec<(&str, &str, bool)> = alloc::vec::Vec::new();
             // Published ports as (proto, host_port, container_port) from
             // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
             // Installed after the container is created (Created state).
@@ -67840,23 +67840,37 @@ fn cmd_oci(args: &str) {
                     }
                     "--volume" | "-v" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Split on the first ':'. Host and guest are both
-                            // absolute Unix paths (validated below); Docker
-                            // itself splits a `-v host:guest` spec on the first
-                            // ':', so match that.
-                            if let Some((host, guest)) = spec.split_once(':') {
-                                if host.starts_with('/') && guest.starts_with('/') {
-                                    volumes.push((host, guest));
-                                } else {
+                            // Docker `-v host:guest[:mode]`.  Host and guest are
+                            // both absolute Unix paths; an optional third field
+                            // is the access mode (`ro` = read-only, `rw` =
+                            // read-write, the default).  Split into at most
+                            // three colon-separated segments.
+                            let mut segs = spec.splitn(3, ':');
+                            let host = segs.next().unwrap_or("");
+                            let guest = segs.next().unwrap_or("");
+                            let mode = segs.next();
+                            let read_only = match mode {
+                                None | Some("rw") => Some(false),
+                                Some("ro") => Some(true),
+                                Some(other) => {
                                     crate::console_println!(
-                                        "[oci] Ignoring volume '{}': both paths must be absolute (host:guest)",
+                                        "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
+                                        spec, other
+                                    );
+                                    None
+                                }
+                            };
+                            match read_only {
+                                Some(ro) if host.starts_with('/') && guest.starts_with('/') => {
+                                    volumes.push((host, guest, ro));
+                                }
+                                Some(_) => {
+                                    crate::console_println!(
+                                        "[oci] Ignoring volume '{}': both paths must be absolute (host:guest[:ro|:rw])",
                                         spec
                                     );
                                 }
-                            } else {
-                                crate::console_println!(
-                                    "[oci] Ignoring volume '{}': expected host:guest", spec
-                                );
+                                None => {}
                             }
                             i = i.saturating_add(2);
                         } else {
@@ -68101,10 +68115,12 @@ fn cmd_oci(args: &str) {
                     // while still in Created state).  A volume lets the
                     // container see a host directory at a guest path, escaping
                     // the rootfs (e.g. `-v /srv/data:/data`).
-                    for &(host, guest) in &volumes {
-                        match crate::container::add_volume_mount(ct_id, host, guest) {
+                    for &(host, guest, read_only) in &volumes {
+                        match crate::container::add_volume_mount(ct_id, host, guest, read_only) {
                             Ok(()) => crate::console_println!(
-                                "  Volume:       {} -> {}", host, guest
+                                "  Volume:       {} -> {}{}",
+                                host, guest,
+                                if read_only { " (ro)" } else { "" }
                             ),
                             Err(e) => crate::console_println!(
                                 "[oci] Warning: could not add volume {}:{}: {:?}",
@@ -68247,7 +68263,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

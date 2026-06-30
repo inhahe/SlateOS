@@ -1431,6 +1431,46 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F19. rmap self-test used low fake frame addresses that collided with real CoW frames → flaky `assertion failed: is_private(frame2)` panic — FIXED 2026-06-30
+
+**Where:** `kernel/src/mm/rmap.rs` (`self_test()`), invoked from
+`kernel/src/main.rs:3288`.
+
+**Symptom:** Intermittent boot panic `panicked at kernel\src\mm\rmap.rs:445:
+assertion failed: is_private(frame2)` (also reproducible at the Test-1
+`add(frame1,...)`/`count==1` assertion). The rmap self-test ran to completion on
+most boots but panicked on others — pure timing/allocation flakiness, not a
+deterministic failure. Surfaced while validating the container read-only-volume
+work (increment 15); that change is functionally invisible to this MM path —
+it merely perturbed frame-allocation timing enough to expose the latent test
+bug. (A separate, also-flaky CoW-pipeline hang in the same boot run is the known
+F18-family fragility of the `dash | … > file` ring-3 test and is unrelated.)
+
+**Root cause:** The rmap is a **global** hash table keyed by physical frame
+address, and `self_test()` runs *late* in boot — after the Path-Z ring-3
+toolchain tests (dash pipelines, tcc, make) have done heavy CoW/fork activity
+that registers thousands of **real** user frames in that global table. The test
+used fixed low fake addresses (`frame1 = 0x10_0000` = 1 MiB, `frame2 = 0x20_0000`
+= 2 MiB, untracked-frame probe `0xDEAD_0000`). When a real user frame happened to
+sit at exactly one of those physical addresses, it already had a mapper in the
+table, so the test's `add(frame2, pml4_a, virt2)` appended a *second* mapper and
+`is_private(frame2)` returned false → assertion panic. Whether a real frame
+landed on 0x20_0000 depended on allocation order, making it flaky.
+
+**Fix:** Move the test frames far above any installed physical RAM (machines here
+have at most a few GiB) so the global table can never hold a pre-existing entry
+for them: `frame1 = 0x0F00_0000_0000` (~15 TiB), `frame2 = frame1 + 16 KiB`, and
+the untracked-frame probe to `0x0F00_0001_0000`. These remain valid u64 hash keys
+(the rmap does not validate physical-address width) and are impossible as real
+frames, so the test is now collision-proof regardless of allocation timing. A
+detailed comment records the invariant. (A fuller fix — refactoring the rmap API
+to operate on an injectable test-local table instead of the global static — was
+rejected as disproportionate: it would add a `&mut table` parameter to every
+production rmap entry point purely for testability. Impossible-address selection
+is the minimal correct fix.) The self-test still cleans up all its entries
+(`frame1`/`frame2` removed before exit), so no fake entries leak into the live
+table.
+
 ### F18. CoW refcount granularity mismatch (per-16 KiB-frame refcount vs per-4 KiB-PTE resolution) double-freed a still-shared frame → parent `dash` #GP in a pipeline — FIXED 2026-06-16
 
 **Where:** `kernel/src/mm/cow.rs` (`resolve_cow_fault`, `clone_frame_group`)
@@ -2302,6 +2342,36 @@ and float-free (kernel has no FPU state in this path); two helpers
 `kshell::cli_resource_parser_self_test()`, wired into the boot self-test run in
 `main.rs`. The TD32 mount remainder (read-only volumes, mount-tree/`pivot_root`,
 tmpfs) is still open.
+
+**Update 2026-06-30 (increment 15): read-only volumes (`-v …:ro`) — DONE.**
+Docker `-v host:guest[:ro|:rw]` now carries an access mode end-to-end. The
+volume table entry (`VolumeMount` in `namespace.rs`, `VolumeSpec = (guest,
+host, read_only)` in `container.rs`) gained a `read_only` flag; `add_volume`
+and `add_volume_mount` take it (last-writer-wins, so re-mounting the same guest
+prefix `:rw` clears a prior `:ro`). Enforcement is a new
+`namespace::check_writable(path)` / `check_writable_for(pid, path)` that mirrors
+the exact resolution pipeline used by `resolve_path_for` — step-1 namespace
+translation, `..`-clamping `normalize_jailed`, then longest-prefix volume match —
+and returns `KernelError::ReadOnlyFilesystem` (EROFS) when the matched volume is
+read-only. It is a cheap `Ok(())` no-op for any process without volumes or
+without a chroot root (all non-container processes, and containers with only
+read-write volumes), making the wide enforcement surface zero-risk to existing
+behavior. Two chokepoints gate writes: (1) fd-based writes via
+`fs::handle::open()` reject up front when the open flags request write/create/
+truncate/append; (2) ~17 path-based mutating `Vfs` methods (`write_file`,
+`write_at`, `truncate`, `remove`, `remove_recursive`, `mkdir`, `mkdir_all`,
+`rmdir`, `rename`/`rename_noreplace` via `rename_inner`, `rename_exchange`,
+`set_permissions`, `set_times`, `set_xattr`, `remove_xattr`, `symlink`, `link`,
+`atomic_write`) call the namespace check on the caller's (guest) path before
+host-path resolution. The `_resolved` variants are intentionally *not* gated
+(they take already-translated host paths). CLI: `oci run -v /srv/data:/data:ro`
+parses an optional third `:mode` segment (`ro`/`rw`, default `rw`); unknown
+modes are rejected. Covered by `namespace::test_volume_mounts` (read-only volume
+write-denied / read-allowed assertions) and container self-test 19
+(`check_writable_for` on `/logs` ro vs `/data` rw vs `/bin/sh` rootfs).
+The TD32 mount remainder (a true longest-prefix mount-tree subsuming the rootfs
+as the `/` mount / `pivot_root` target, `--read-only` root, and tmpfs/named-
+volume types) is still open.
 
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 

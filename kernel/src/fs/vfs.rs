@@ -1782,6 +1782,7 @@ impl Vfs {
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::write_file_resolved(&path, data)
     }
@@ -1937,6 +1938,7 @@ impl Vfs {
     ///
     /// Recursion depth is limited to 64 levels to prevent stack overflow.
     pub fn remove_recursive(path: &str) -> KernelResult<u64> {
+        crate::ipc::namespace::check_writable(path)?;
         Self::remove_recursive_inner(path, 0)
     }
 
@@ -1978,6 +1980,7 @@ impl Vfs {
     ///
     /// Does NOT follow the final symlink — removes the link itself.
     pub fn remove(path: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
@@ -2022,6 +2025,7 @@ impl Vfs {
     /// Intermediate symlinks are followed; the last component is the
     /// new directory name (not followed if it happens to exist).
     pub fn mkdir(path: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
@@ -2056,6 +2060,7 @@ impl Vfs {
     ///
     /// Limited to 64 path components to prevent abuse.
     pub fn mkdir_all(path: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         validate_path(path)?;
         let norm = normalize_path(path);
 
@@ -2095,6 +2100,7 @@ impl Vfs {
 
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
@@ -2255,6 +2261,7 @@ impl Vfs {
 
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::write_at_resolved(&path, offset, data)
     }
@@ -2302,6 +2309,7 @@ impl Vfs {
 
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::truncate_resolved(&path, size)
     }
@@ -2362,6 +2370,8 @@ impl Vfs {
     }
 
     fn rename_inner(from: &str, to: &str, noreplace: bool) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(from)?;
+        crate::ipc::namespace::check_writable(to)?;
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
         check_file_tags(&from)?;
@@ -2471,6 +2481,8 @@ impl Vfs {
     /// `EINVAL` (mirroring Linux's `->rename` returning `EINVAL` when it
     /// cannot honour the flag).
     pub fn rename_exchange(a: &str, b: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(a)?;
+        crate::ipc::namespace::check_writable(b)?;
         let a = Self::resolve_no_follow(a)?;
         let b = Self::resolve_no_follow(b)?;
         check_file_tags(&a)?;
@@ -2709,6 +2721,7 @@ impl Vfs {
 
     /// Set Unix-style permission bits.
     pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
@@ -2726,7 +2739,9 @@ impl Vfs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().set_times(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
@@ -2741,6 +2756,7 @@ impl Vfs {
 
     /// Set an extended attribute.
     pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
@@ -2754,6 +2770,7 @@ impl Vfs {
 
     /// Remove an extended attribute.
     pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
@@ -2779,6 +2796,7 @@ impl Vfs {
     /// `path` is the location of the new symlink.  `target` is the
     /// string it points to (stored as-is, resolved on traversal).
     pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny symlink creation.
@@ -2817,6 +2835,7 @@ impl Vfs {
     /// path is followed through symlinks (the link points to the
     /// underlying file, not the symlink).
     pub fn link(existing: &str, new_path: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(new_path)?;
         let existing = Self::resolve_follow(existing)?;
         let new_path = Self::resolve_no_follow(new_path)?;
         check_writable(&new_path)?;
@@ -3241,6 +3260,11 @@ impl Vfs {
     /// This is the standard safe-write pattern (used by editors, databases,
     /// config writers, etc.) exposed as a single VFS operation.
     pub fn atomic_write(path: &str, data: &[u8]) -> KernelResult<()> {
+        // Authoritative read-only volume check on the caller's (guest) path,
+        // before resolution.  Internal write_file/rename calls below operate
+        // on already-resolved host temp paths, so this top-level check is the
+        // one that enforces per-process read-only volume mounts.
+        crate::ipc::namespace::check_writable(path)?;
         let resolved = Self::resolve_follow(path)?;
         check_file_tags(&resolved)?;
         check_writable(&resolved)?;

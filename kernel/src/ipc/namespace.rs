@@ -160,6 +160,11 @@ struct VolumeMount {
     /// Host absolute path the volume's contents live at (e.g.
     /// `/host/shared`), already normalized.
     host_target: String,
+    /// When `true`, writes into this volume's subtree are denied (`EROFS`).
+    /// The Docker `-v host:guest:ro` mechanism. Path *resolution* is
+    /// unaffected — only mutating operations are gated (see
+    /// [`check_writable_for`]).
+    read_only: bool,
 }
 
 /// Per-process volume (bind) mounts.
@@ -469,10 +474,16 @@ pub fn get_root(process_id: u64) -> Option<String> {
 ///
 /// Volumes are matched **longest-prefix-first** at resolution time, so a
 /// volume at `/data/cache` correctly shadows a volume at `/data`.
+///
+/// `read_only == true` marks the volume so that writes into its subtree are
+/// rejected with `EROFS` (see [`check_writable_for`]); resolution itself is
+/// unaffected. Re-adding at an existing prefix overwrites both the host
+/// target and the read-only flag.
 pub fn add_volume(
     process_id: u64,
     guest_prefix: &str,
     host_target: &str,
+    read_only: bool,
 ) -> KernelResult<()> {
     validate_prefix(guest_prefix)?;
     validate_prefix(host_target)?;
@@ -489,12 +500,13 @@ pub fn add_volume(
     // stacking duplicates (last-writer-wins, matching Docker re-mount).
     if let Some(existing) = list.iter_mut().find(|v| v.guest_prefix == guest) {
         existing.host_target = host;
+        existing.read_only = read_only;
         return Ok(());
     }
     if list.len() >= MAX_VOLUMES_PER_PROCESS {
         return Err(KernelError::ResourceExhausted);
     }
-    list.push(VolumeMount { guest_prefix: guest, host_target: host });
+    list.push(VolumeMount { guest_prefix: guest, host_target: host, read_only });
     Ok(())
 }
 
@@ -604,6 +616,80 @@ pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
             }
         }
         None => Ok(translated),
+    }
+}
+
+/// Check whether the current process may *write* to `path`.
+///
+/// Returns `Err(KernelError::ReadOnlyFilesystem)` (→ `EROFS`) when `path`
+/// resolves into a read-only volume mount, `Ok(())` otherwise. This is the
+/// write-side companion to [`resolve_path`]: read/stat operations call
+/// `resolve_path`, while mutating operations (open-for-write, mkdir, rmdir,
+/// unlink, rename, symlink, link, truncate, chmod, xattr writes) additionally
+/// call this. For processes with no read-only volumes — every non-container
+/// process, and containers without `:ro` mounts — this is a cheap `Ok(())`.
+pub fn check_writable(path: &str) -> KernelResult<()> {
+    let task_id = crate::sched::current_task_id();
+    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    check_writable_for(process_id, path)
+}
+
+/// Like [`check_writable`] but for a specific process (used by tests and by
+/// callers acting on another process's behalf).
+///
+/// Mirrors the volume-matching pipeline of [`resolve_path_for`]: it applies
+/// the same step-1 namespace translation and `..`-clamping normalization, then
+/// finds the longest-matching volume prefix. If that volume is read-only the
+/// write is denied. Read-only enforcement only applies to *jailed* processes
+/// (volumes re-anchor paths only within a chroot root); an unjailed process
+/// has no volume re-anchoring and is always writable here.
+pub fn check_writable_for(process_id: u64, path: &str) -> KernelResult<()> {
+    // Fast path: a process with no volumes can have no read-only mount.
+    let volumes = {
+        let mounts = PROCESS_MOUNTS.lock();
+        match mounts.get(&process_id) {
+            Some(list) if !list.is_empty() => list.clone(),
+            _ => return Ok(()),
+        }
+    };
+    // Volumes only re-anchor paths within a chroot jail; without a root there
+    // is no volume in effect, so nothing is read-only-gated.
+    if PROCESS_ROOT.lock().get(&process_id).is_none() {
+        return Ok(());
+    }
+    // Step 1: the same namespace (Bind/Hide) translation the resolver applies.
+    let ns_id = {
+        let pns = PROCESS_NS.lock();
+        pns.get(&process_id).copied().unwrap_or(ROOT_NAMESPACE)
+    };
+    let translated = if ns_id == ROOT_NAMESPACE {
+        String::from(path)
+    } else {
+        let table = NS_TABLE.lock();
+        match table.get(&ns_id) {
+            Some(ns) => apply_rules(&ns.rules, path)?,
+            None => String::from(path),
+        }
+    };
+    // A relative path is canonicalized against the cwd before reaching the
+    // mutating VFS ops, which then re-check with an absolute path; allow here.
+    if !translated.starts_with('/') {
+        return Ok(());
+    }
+    // Step 2: longest-prefix volume match on the `..`-clamped guest path,
+    // identical to `longest_volume_match` used during resolution.
+    let normalized = normalize_jailed(&translated);
+    let mut best: Option<&VolumeMount> = None;
+    for v in &volumes {
+        if strip_prefix_match(&normalized, &v.guest_prefix).is_some()
+            && best.is_none_or(|b| v.guest_prefix.len() > b.guest_prefix.len())
+        {
+            best = Some(v);
+        }
+    }
+    match best {
+        Some(v) if v.read_only => Err(KernelError::ReadOnlyFilesystem),
+        _ => Ok(()),
     }
 }
 
@@ -1212,7 +1298,7 @@ fn test_volume_mounts() -> KernelResult<()> {
 
     // Jail to a container rootfs, then mount a host directory as a volume.
     set_root(pid, "/containers/v1/rootfs")?;
-    add_volume(pid, "/data", "/host/shared")?;
+    add_volume(pid, "/data", "/host/shared", false)?;
     assert_eq!(volume_count(pid), 1);
 
     // The mount point itself resolves to the volume target.
@@ -1252,7 +1338,7 @@ fn test_volume_mounts() -> KernelResult<()> {
     );
 
     // Longest-prefix wins: a nested volume shadows the parent.
-    add_volume(pid, "/data/cache", "/fastcache")?;
+    add_volume(pid, "/data/cache", "/fastcache", false)?;
     assert_eq!(volume_count(pid), 2);
     assert_eq!(resolve_path_for(pid, "/data/cache/a")?, "/fastcache/a");
     assert_eq!(resolve_path_for(pid, "/data/cache")?, "/fastcache");
@@ -1260,7 +1346,7 @@ fn test_volume_mounts() -> KernelResult<()> {
     assert_eq!(resolve_path_for(pid, "/data/other")?, "/host/shared/other");
 
     // Re-adding at an existing guest prefix replaces (does not stack).
-    add_volume(pid, "/data", "/host/shared2")?;
+    add_volume(pid, "/data", "/host/shared2", false)?;
     assert_eq!(volume_count(pid), 2);
     assert_eq!(resolve_path_for(pid, "/data/file")?, "/host/shared2/file");
 
@@ -1275,15 +1361,30 @@ fn test_volume_mounts() -> KernelResult<()> {
     );
 
     // Trailing slashes / `.` in volume args are normalized away.
-    add_volume(pid, "/logs/", "/var/log/./c1/")?;
+    add_volume(pid, "/logs/", "/var/log/./c1/", false)?;
     assert_eq!(resolve_path_for(pid, "/logs/app.log")?, "/var/log/c1/app.log");
 
+    // Read-only volumes: writes under a read-only volume are rejected with
+    // EROFS, while reads/path resolution still work.  Add a read-only volume
+    // and verify check_writable_for enforces it.
+    add_volume(pid, "/ro", "/host/ro-target", true)?;
+    assert_eq!(resolve_path_for(pid, "/ro/file")?, "/host/ro-target/file");
+    assert!(check_writable_for(pid, "/ro/file").is_err());
+    assert!(check_writable_for(pid, "/ro").is_err());
+    // A read-write volume permits writes.
+    assert!(check_writable_for(pid, "/data/file").is_ok());
+    // Non-volume (rootfs) paths are writable (rootfs is not read-only here).
+    assert!(check_writable_for(pid, "/bin/sh").is_ok());
+    // Re-adding the same guest prefix as read-write clears the read-only flag.
+    add_volume(pid, "/ro", "/host/ro-target", false)?;
+    assert!(check_writable_for(pid, "/ro/file").is_ok());
+
     // A volume at the guest root is rejected (that is `set_root`'s job).
-    assert!(add_volume(pid, "/", "/whatever").is_err());
+    assert!(add_volume(pid, "/", "/whatever", false).is_err());
     // Non-absolute args are rejected.
-    assert!(add_volume(pid, "data", "/host").is_err());
-    assert!(add_volume(pid, "/data", "host").is_err());
-    assert!(add_volume(pid, "", "/host").is_err());
+    assert!(add_volume(pid, "data", "/host", false).is_err());
+    assert!(add_volume(pid, "/data", "host", false).is_err());
+    assert!(add_volume(pid, "", "/host", false).is_err());
 
     // detach() drops volumes (PID-reuse safety).
     detach(pid);

@@ -225,6 +225,19 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
         return Err(KernelError::InvalidArgument);
     }
 
+    // Read-only volume enforcement: if this open would mutate the file
+    // (write, create, truncate, or append), and the calling process has a
+    // read-only volume mount covering this path, reject with EROFS before
+    // touching the filesystem.  This is a cheap no-op for any process
+    // without read-only volumes (the common case).
+    if flags.is_writable()
+        || flags.contains(OpenFlags::CREATE)
+        || flags.contains(OpenFlags::TRUNCATE)
+        || flags.contains(OpenFlags::APPEND)
+    {
+        crate::ipc::namespace::check_writable(path)?;
+    }
+
     // Resolve symlinks at open time so the handle refers to the
     // underlying file, not the symlink.  This matches Unix semantics:
     // if the symlink is later changed, existing handles still point

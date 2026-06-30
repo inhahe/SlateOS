@@ -70,6 +70,11 @@ pub const MAX_PUBLISHED_PORTS: usize = 32;
 /// container_port)`.  The Docker `-p host:container[/proto]` mechanism.
 pub type PublishedPort = (crate::net::nat::NatProto, u16, u16);
 
+/// A container's volume (bind) mount spec: `(guest_prefix, host_target,
+/// read_only)`.  The Docker `-v host_target:guest_prefix[:ro]` mechanism.
+/// `read_only == true` makes the mount reject writes (mapped to `EROFS`).
+pub type VolumeSpec = (String, String, bool);
+
 /// Snapshot of the data [`run`] needs to install a container's published-port
 /// NAT rules, taken under the table lock: `(net_ns, container_ip, ports)`.
 type PortInstall = (u32, [u8; 4], Vec<PublishedPort>);
@@ -242,13 +247,14 @@ struct Container {
     /// container's jail (if any) points at a plain host directory that the
     /// container module does not own and must not unmount.
     rootfs_mount: String,
-    /// Volume (bind) mounts as `(guest_prefix, host_target)` pairs — the
-    /// Docker `-v host_target:guest_prefix` mechanism.  Each is installed on
-    /// every process launched by [`run`] via
+    /// Volume (bind) mounts as `(guest_prefix, host_target, read_only)`
+    /// triples — the Docker `-v host_target:guest_prefix[:ro]` mechanism.
+    /// Each is installed on every process launched by [`run`] via
     /// [`crate::ipc::namespace::add_volume`], so a guest path under
     /// `guest_prefix` resolves to `host_target` instead of under the
-    /// container rootfs.  Empty for a container with no volumes.
-    volumes: Vec<(String, String)>,
+    /// container rootfs.  A `read_only` volume rejects writes with `EROFS`.
+    /// Empty for a container with no volumes.
+    volumes: Vec<VolumeSpec>,
     /// The container's own IPv4 address inside its network namespace, captured
     /// from [`ContainerConfig::net_ip`] at create time.  `None` when no
     /// network was configured.  Needed as the *target* of published-port NAT
@@ -320,8 +326,8 @@ pub struct ContainerInfo {
     /// container does not own a mounted overlay (the jail, if any, points at
     /// a plain host directory). Unmounted by [`delete`].
     pub rootfs_mount: String,
-    /// Volume (bind) mounts as `(guest_prefix, host_target)` pairs.
-    pub volumes: Vec<(String, String)>,
+    /// Volume (bind) mounts as `(guest_prefix, host_target, read_only)`.
+    pub volumes: Vec<VolumeSpec>,
     /// The container's own IPv4 address, or `None` if no network configured.
     pub container_ip: Option<[u8; 4]>,
     /// Published ports as `(proto, host_port, container_port)`.
@@ -819,8 +825,10 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
     // `add_volume`) is skipped rather than failing the whole bind — the
     // volume list is validated at `add_volume_mount` time, so this is purely
     // defensive.
-    for (guest_prefix, host_target) in &volumes {
-        let _ = crate::ipc::namespace::add_volume(pid, guest_prefix, host_target);
+    for (guest_prefix, host_target, read_only) in &volumes {
+        let _ = crate::ipc::namespace::add_volume(
+            pid, guest_prefix, host_target, *read_only,
+        );
     }
 
     Ok(())
@@ -1095,10 +1103,15 @@ pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not
 ///   in `Created` state, either path is not absolute, or `guest_prefix` is
 ///   the guest root `/` (that is [`set_root_path`]'s job).
+///
+/// `read_only == true` makes the volume reject writes once the container runs
+/// (writes to the mount and its subtree fail with `EROFS`), matching Docker
+/// `-v host:guest:ro`.
 pub fn add_volume_mount(
     id: ContainerId,
     host_target: &str,
     guest_prefix: &str,
+    read_only: bool,
 ) -> KernelResult<()> {
     if !host_target.starts_with('/') || !guest_prefix.starts_with('/') {
         return Err(KernelError::InvalidArgument);
@@ -1116,17 +1129,23 @@ pub fn add_volume_mount(
         }
         let vols = &mut table.containers[idx].volumes;
         // Replace an existing volume at the same guest prefix (last-writer-
-        // wins), mirroring `namespace::add_volume` semantics.
+        // wins), mirroring `namespace::add_volume` semantics. Both the host
+        // target and the read-only flag are overwritten.
         if let Some(existing) =
-            vols.iter_mut().find(|(g, _)| g == guest_prefix)
+            vols.iter_mut().find(|(g, _, _)| g == guest_prefix)
         {
             existing.1 = String::from(host_target);
+            existing.2 = read_only;
             return Ok(());
         }
         if vols.len() >= MAX_VOLUMES_PER_CONTAINER {
             return Err(KernelError::ResourceExhausted);
         }
-        vols.push((String::from(guest_prefix), String::from(host_target)));
+        vols.push((
+            String::from(guest_prefix),
+            String::from(host_target),
+            read_only,
+        ));
         Ok(())
     })
 }
@@ -1620,17 +1639,18 @@ pub fn self_test() {
         let ct_vol = create(&vol_cfg).expect("create vol container");
         set_root_path(ct_vol, "/containers/test-vol/rootfs")
             .expect("set rootfs");
-        // Volumes are configurable only before run.
-        add_volume_mount(ct_vol, "/srv/data", "/data")
+        // Volumes are configurable only before run. `/data` is read-write,
+        // `/logs` is read-only (Docker `-v host:guest:ro`).
+        add_volume_mount(ct_vol, "/srv/data", "/data", false)
             .expect("add data volume");
-        add_volume_mount(ct_vol, "/var/log/test-vol", "/logs")
+        add_volume_mount(ct_vol, "/var/log/test-vol", "/logs", true)
             .expect("add logs volume");
         // Bad args / guest-root volume are rejected.
-        assert!(add_volume_mount(ct_vol, "relative", "/x").is_err());
-        assert!(add_volume_mount(ct_vol, "/host", "rel").is_err());
-        assert!(add_volume_mount(ct_vol, "/host", "/").is_err());
+        assert!(add_volume_mount(ct_vol, "relative", "/x", false).is_err());
+        assert!(add_volume_mount(ct_vol, "/host", "rel", false).is_err());
+        assert!(add_volume_mount(ct_vol, "/host", "/", false).is_err());
         // Re-adding at an existing guest prefix replaces, not stacks.
-        add_volume_mount(ct_vol, "/srv/data2", "/data")
+        add_volume_mount(ct_vol, "/srv/data2", "/data", false)
             .expect("replace data volume");
         assert_eq!(
             info(ct_vol).unwrap().volumes.len(),
@@ -1665,6 +1685,30 @@ pub fn self_test() {
             "/containers/test-vol/rootfs/escape",
         );
 
+        // Read-only volume enforcement: a write under the read-only `/logs`
+        // volume is denied (EROFS), while a write under the read-write `/data`
+        // volume and a write to a plain jailed path are allowed.
+        assert!(
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs/app.log")
+                .is_err(),
+            "write to read-only volume must be denied",
+        );
+        assert!(
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/logs")
+                .is_err(),
+            "write to the read-only mount point itself must be denied",
+        );
+        assert!(
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/data/file.txt")
+                .is_ok(),
+            "write to read-write volume must be allowed",
+        );
+        assert!(
+            crate::ipc::namespace::check_writable_for(VOL_PID, "/bin/sh")
+                .is_ok(),
+            "write to a non-volume jailed path must be allowed",
+        );
+
         // Tear down: remove_process_task must drop the volumes too.
         remove_process(ct_vol, VOL_PID).expect("deregister vol process");
         assert_eq!(
@@ -1676,7 +1720,7 @@ pub fn self_test() {
         // Adding a volume to a non-Created container is rejected (the
         // `state != Created` guard, exercised deterministically via stop()).
         stop(ct_vol).expect("stop vol container");
-        assert!(add_volume_mount(ct_vol, "/host/x", "/x").is_err());
+        assert!(add_volume_mount(ct_vol, "/host/x", "/x", false).is_err());
         delete(ct_vol).expect("delete vol container");
     }
     serial_println!("[container]   Volume (bind) mounts for init process: OK");

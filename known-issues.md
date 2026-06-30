@@ -2031,6 +2031,44 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
+
+**Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),
+`kernel/src/sched/mod.rs` (`sched::spawn` ~L1046 sets `new_task.cgroup_id` on
+creation but does **not** call `cgroup::attach_task`; `reap_dead_tasks` ~L2789
+removes a dead task without `cgroup::detach_task`). The single authoritative
+mover `set_task_cgroup` *does* keep the counts balanced (detach old, attach new).
+
+**The debt.** `nr_tasks` only counts tasks that were *explicitly moved* via
+`set_task_cgroup`. Two asymmetries:
+1. **Creation:** a task that simply *inherits* its creator's `cgroup_id`
+   (the common case — every fork/clone/spawn) bumps no counter, so a busy
+   cgroup can report `nr_tasks == 0` while hosting many tasks.
+2. **Death:** when a task is reaped, its cgroup's `nr_tasks` is never
+   decremented (and `set_task_cgroup`-style moves to ROOT on container
+   `remove_process` leave ROOT's count permanently inflated, since the task is
+   then killed without a matching detach).
+
+`detach_task` saturates at 0 so neither asymmetry can panic/underflow, but the
+counter is unreliable for anything that needs a true membership count (e.g. a
+cgroup "no new forks past a task limit" controller, or `cgroup.procs`-style
+introspection).
+
+**Why it didn't block container increment 1 (§41):** `container::run` binds the
+init task via `set_task_cgroup`, which *does* increment the container cgroup, so
+the end-to-end "process billed to container cgroup" assertion (`nr_tasks == 1`)
+holds. The self-test cleanup calls `remove_process_task` (a `set_task_cgroup` to
+ROOT) *before* killing the task, so the container cgroup returns to 0 and
+`delete()` (which requires `nr_tasks == 0`) succeeds.
+
+**Proper fix.** Make membership counting symmetric with task lifetime, not with
+explicit moves: call `cgroup::attach_task(inherit_cgroup)` in `sched::spawn` when
+a new task adopts a cgroup, and `cgroup::detach_task(task.cgroup_id)` in
+`reap_dead_tasks` (after dropping the SCHED lock, honoring the SCHED → cgroup
+lock order). Audit ROOT_CGROUP bootstrapping so the idle/boot tasks are counted
+consistently. Once symmetric, `cgroup::delete`'s `nr_tasks > 0 ⇒ NotEmpty` guard
+becomes a true "container still has live processes" check.
+
 ### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` + `NOFLSH` honoured, orphan-pgrp `SIGHUP`/`SIGCONT` — RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and

@@ -202,6 +202,12 @@ struct Container {
     veth_pair: Option<crate::net::veth::VethPairId>,
     /// Process IDs running in this container (global PIDs).
     pids: Vec<u64>,
+    /// The container's init process (PID 1 inside the container), i.e. the
+    /// process launched by [`run`].  `None` until the container has been
+    /// run.  When the init process exits, the container is considered
+    /// stopped (Docker semantics: the container lives as long as its
+    /// init process).
+    init_pid: Option<u64>,
 }
 
 impl Container {
@@ -216,6 +222,7 @@ impl Container {
             cgroup_id: 0,
             veth_pair: None,
             pids: Vec::new(),
+            init_pid: None,
         }
     }
 }
@@ -246,6 +253,9 @@ pub struct ContainerInfo {
     pub veth_pair: Option<crate::net::veth::VethPairId>,
     /// Number of processes.
     pub nr_procs: usize,
+    /// The container's init process (global PID), or `None` if the
+    /// container has not been run yet.
+    pub init_pid: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +614,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].name.clear();
         table.containers[idx].veth_pair = None;
         table.containers[idx].pids.clear();
+        table.containers[idx].init_pid = None;
 
         Ok(result)
     })?;
@@ -636,16 +647,39 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
 
 /// Register a process as belonging to a container.
 ///
-/// Increments process counts in all the container's namespaces and sets
-/// the task's network namespace so syscall-level socket operations
-/// (TCP connect/bind, UDP bind) use the container's isolated network.
+/// Convenience wrapper over [`add_process_task`] for callers that do not
+/// distinguish the global PID from the initial-thread task id (e.g.
+/// binding the *current* task, where the two coincide).  Prefer
+/// [`add_process_task`] when launching a fresh process whose PID and
+/// task id are distinct allocations (see [`run`]).
 pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
+    add_process_task(id, global_pid, global_pid)
+}
+
+/// Register an already-spawned process in a container, distinguishing the
+/// global process id from the process's initial-thread task id.
+///
+/// - `pid` — the global process id.  It is tracked in the container's
+///   process list and mapped into the container's PID namespace.
+/// - `task_id` — the process's *initial thread* (scheduler task).  The
+///   cgroup assignment (Q14 resource billing) and network-namespace
+///   assignment are keyed on the task, not the process: threads the
+///   process spawns later inherit the cgroup automatically on
+///   creation (`sched::spawn` copies the creator's `cgroup_id`).
+///
+/// The two ids are independent allocations — for a freshly
+/// [`spawn`](crate::proc::spawn::spawn_process)ed process they generally
+/// differ — so binding the scheduler resources to the *process id* (as a
+/// naive wrapper would) silently no-ops when no task carries that id.
+/// [`run`] always uses this entry point with both ids from the spawn
+/// result.
+pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
     let (pid_ns, user_ns, net_ns, cgroup_id) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.containers[idx].pids.push(global_pid);
+        table.containers[idx].pids.push(pid);
         Ok((
             table.containers[idx].pid_ns,
             table.containers[idx].user_ns,
@@ -656,33 +690,48 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 
     // Track in sub-resources.
     // pidns uses alloc_pid (maps global PID into namespace).
-    let _ = crate::pidns::alloc_pid(pid_ns, global_pid);
+    let _ = crate::pidns::alloc_pid(pid_ns, pid);
     let _ = crate::userns::attach_process(user_ns);
     let _ = crate::netns::attach_process(net_ns);
 
-    // Assign the task to the container's cgroup.  `set_task_cgroup` both
+    // Assign the *task* to the container's cgroup.  `set_task_cgroup` both
     // sets the task's `cgroup_id` (so the frame allocator and scheduler
     // bill the container's group — the assignment that was previously
     // missing, D-CGROUP-TASK-UNASSIGNED) and maintains the group's task
     // count; it supersedes a bare `cgroup::attach_task`, which only
     // bumped the counter without ever pointing the task at the group.
-    let _ = crate::sched::set_task_cgroup(global_pid, cgroup_id);
+    let _ = crate::sched::set_task_cgroup(task_id, cgroup_id);
 
     // Set the task's net_ns field so syscall handlers automatically use
     // this container's network namespace for socket operations.
-    let _ = crate::sched::set_task_net_ns(global_pid, net_ns);
+    let _ = crate::sched::set_task_net_ns(task_id, net_ns);
 
     Ok(())
 }
 
 /// Unregister a process from a container.
+///
+/// Convenience wrapper over [`remove_process_task`] for the
+/// pid==task_id case (symmetric with [`add_process`]).
 pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
+    remove_process_task(id, global_pid, global_pid)
+}
+
+/// Unregister a process from a container, distinguishing the global PID
+/// (untracked / unmapped from the PID namespace) from the initial-thread
+/// task id (whose cgroup and network namespace are reset to the host).
+///
+/// Symmetric counterpart of [`add_process_task`].
+pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
     let (pid_ns, user_ns, net_ns) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
         }
-        table.containers[idx].pids.retain(|&p| p != global_pid);
+        table.containers[idx].pids.retain(|&p| p != pid);
+        if table.containers[idx].init_pid == Some(pid) {
+            table.containers[idx].init_pid = None;
+        }
         Ok((
             table.containers[idx].pid_ns,
             table.containers[idx].user_ns,
@@ -691,21 +740,105 @@ pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     })?;
 
     // pidns uses free_pid (removes global PID mapping from namespace).
-    let _ = crate::pidns::free_pid(pid_ns, global_pid);
+    let _ = crate::pidns::free_pid(pid_ns, pid);
     let _ = crate::userns::detach_process(user_ns);
     let _ = crate::netns::detach_process(net_ns);
 
     // Move the task back to the root cgroup.  `set_task_cgroup` detaches
     // it from the container's group (decrementing that group's task
     // count) and re-points it at the root — the symmetric counterpart of
-    // the `set_task_cgroup` in `add_process`.
-    let _ = crate::sched::set_task_cgroup(global_pid, crate::cgroup::ROOT_CGROUP);
+    // the `set_task_cgroup` in `add_process_task`.
+    let _ = crate::sched::set_task_cgroup(task_id, crate::cgroup::ROOT_CGROUP);
 
     // Reset the task's net_ns to root so any remaining socket operations
     // revert to the host namespace.
-    let _ = crate::sched::set_task_net_ns(global_pid, crate::netns::ROOT_NS);
+    let _ = crate::sched::set_task_net_ns(task_id, crate::netns::ROOT_NS);
 
     Ok(())
+}
+
+/// Launch an init process inside a container and start it running.
+///
+/// This is the orchestration entry point that turns a `Created`
+/// container into a `Running` one — the kernel-side equivalent of
+/// `docker run` / `runc start`.  It:
+///
+/// 1. Verifies the container exists and is in [`Created`](ContainerState::Created)
+///    state (a container can only be run once).
+/// 2. Spawns the process from `elf_data`.  The new process's initial
+///    thread is enqueued but does **not** execute until the scheduler
+///    next picks it, so the cgroup/namespace binding in step 3 is
+///    guaranteed to be in place before the process runs its first
+///    instruction.
+/// 3. Binds the process into the container via [`add_process_task`]:
+///    cgroup resource billing (Q14), PID-namespace mapping, and the
+///    user/network namespaces.  Because the binding uses the spawn
+///    result's *task id* for the scheduler resources, the process is
+///    correctly charged to the container's cgroup.
+/// 4. Records the process as the container's init PID and transitions
+///    the container to [`Running`](ContainerState::Running).
+///
+/// On any failure after the spawn, the just-created process is torn down
+/// (threads killed, address space freed) so a failed `run` never leaks
+/// an un-billed process.
+///
+/// Returns the global PID of the launched init process.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist or
+///   is not in `Created` state.
+/// - Any error from [`spawn_process`](crate::proc::spawn::spawn_process)
+///   (invalid ELF, out of memory).
+pub fn run(
+    id: ContainerId,
+    elf_data: &[u8],
+    options: &crate::proc::spawn::SpawnOptions<'_>,
+) -> KernelResult<u64> {
+    // Step 1: container must exist and be freshly created.
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(())
+    })?;
+
+    // Step 2: spawn the init process.  It is enqueued but not yet run.
+    let result = crate::proc::spawn::spawn_process(elf_data, options)?;
+
+    // Step 3: bind it into the container (cgroup billing + namespaces),
+    // keyed on the spawn result's task id for the scheduler resources.
+    if let Err(e) = add_process_task(id, result.pid, result.task_id) {
+        // Roll back the spawn so a failed run leaks nothing.
+        crate::proc::thread::kill_process_threads(result.pid);
+        crate::proc::pcb::destroy(result.pid);
+        return Err(e);
+    }
+
+    // Step 4: record init PID and flip Created → Running atomically under
+    // the table lock.
+    with_table(|table| {
+        let idx = id as usize;
+        if idx < MAX_CONTAINERS && table.containers[idx].active {
+            table.containers[idx].init_pid = Some(result.pid);
+            table.containers[idx].state = ContainerState::Running;
+        }
+    });
+
+    serial_println!(
+        "[container] run id={} '{}': init pid={} task={} entry={:#x}",
+        id,
+        info(id).map_or(String::new(), |ci| ci.name),
+        result.pid,
+        result.task_id,
+        result.entry_point
+    );
+
+    Ok(result.pid)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +864,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             cgroup_id: ct.cgroup_id,
             veth_pair: ct.veth_pair,
             nr_procs: ct.pids.len(),
+            init_pid: ct.init_pid,
         })
     })
 }
@@ -981,6 +1115,69 @@ pub fn self_test() {
     }
     serial_println!("[container]   Net NS task propagation: OK");
 
+    // Test 17: `run` launches a real init process inside a container and
+    // bills it to the container's cgroup (Q14 enforcement end-to-end).
+    {
+        // A real, compiled userspace ELF — same binary the init path
+        // installs as /bin/hello.  We only need it to be a valid loadable
+        // ELF; the process is torn down before it ever executes.
+        static HELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        let run_cfg = ContainerConfig::new("test-run-ct").memory(4096);
+        let ct_run = create(&run_cfg).expect("create run container");
+        let cg = cgroup(ct_run).expect("run container cgroup");
+
+        // Before run: Created, no init pid, cgroup empty.
+        assert_eq!(info(ct_run).unwrap().state, ContainerState::Created);
+        assert!(info(ct_run).unwrap().init_pid.is_none());
+        assert_eq!(
+            crate::cgroup::stats(cg).map(|s| s.nr_tasks),
+            Some(0),
+            "fresh container cgroup must have no tasks"
+        );
+
+        let opts = crate::proc::spawn::SpawnOptions::new("hello-init");
+        let pid = run(ct_run, HELLO_ELF, &opts).expect("run init process");
+
+        // After run: Running, init pid recorded, one tracked process,
+        // and exactly one task billed to the container's cgroup.
+        let ci = info(ct_run).unwrap();
+        assert_eq!(ci.state, ContainerState::Running);
+        assert_eq!(ci.init_pid, Some(pid));
+        assert_eq!(ci.nr_procs, 1);
+        assert_eq!(
+            crate::cgroup::stats(cg).map(|s| s.nr_tasks),
+            Some(1),
+            "container init process must be billed to the container cgroup"
+        );
+
+        // Can't run a container twice.
+        assert!(run(ct_run, HELLO_ELF, &opts).is_err(),
+            "running an already-running container must fail");
+
+        // Tear down the init process.  Detach from the cgroup/namespaces
+        // first (while the task is still alive so the count decrements),
+        // then kill its threads and free its address space.  Resolve the
+        // real initial-thread task id from the process (PID != task id).
+        let init_task = crate::proc::pcb::get_threads(pid)
+            .and_then(|t| t.first().copied())
+            .expect("init process has a thread");
+        remove_process_task(ct_run, pid, init_task).expect("detach init process");
+        assert_eq!(
+            crate::cgroup::stats(cg).map(|s| s.nr_tasks),
+            Some(0),
+            "cgroup must be empty after detaching the init process"
+        );
+        crate::proc::thread::kill_process_threads(pid);
+        crate::proc::pcb::destroy(pid);
+
+        stop(ct_run).expect("stop run container");
+        delete(ct_run).expect("delete run container");
+    }
+    serial_println!("[container]   Run init process + cgroup billing: OK");
+
     // Cleanup.
     stop(ct2).ok(); // may already be stopped
     stop(ct3).ok();
@@ -990,5 +1187,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (16 tests)");
+    serial_println!("[container] Self-test PASSED (17 tests)");
 }

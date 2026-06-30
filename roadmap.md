@@ -5238,8 +5238,10 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     - [x] Atomic create with rollback (pidns + userns + netns + cgroup as unit)
     - [x] State machine: Created → Running → Stopped/Failed → deleted
     - [x] Process tracking across all sub-resources
+    - [x] container::run(id, elf, opts): spawn a real init process into a container, bind it (cgroup billing via Q14 + pidns/userns/netns), record init PID, Created→Running; rolls back the spawn on bind failure
+    - [x] PID-vs-task-id binding split: add_process_task/remove_process_task key scheduler resources (cgroup, net_ns) on the initial-thread task id, pidns mapping + tracking on the global PID (a spawned process's PID != its task id); add_process/remove_process are pid==task wrappers (design-decisions §41)
     - [x] kshell `container`/`ct` command: list/create/delete/start/stop/info/test
-    - [x] 16 self-tests (veth auto-setup, net_ns task propagation)
+    - [x] 17 self-tests (veth auto-setup, net_ns task propagation, run init process + end-to-end cgroup billing)
     - [x] Automatic veth pair creation for networked containers
       - [x] setup_container_veth(): create pair, move end B to container NS, bring up both
       - [x] Veth pair ID stored in Container and ContainerInfo for lifecycle tracking

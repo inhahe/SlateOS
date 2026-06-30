@@ -57,7 +57,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
@@ -94,6 +94,13 @@ struct CacheEntry {
 /// The cache map.  A `BTreeMap` keyed by `(FileId, page_index)` gives ordered
 /// per-file ranges (used by [`invalidate_file`]) with `O(log n)` lookup.
 static PAGE_CACHE: Mutex<BTreeMap<PageKey, CacheEntry>> = Mutex::new(BTreeMap::new());
+
+/// Resident-entry count, mirrored as a lock-free atomic so coherence hooks on
+/// the (hot) write/truncate/unlink paths can ask "is anything cached at all?"
+/// with a single relaxed load instead of taking the cache lock or resolving a
+/// `FileId`.  Kept in lockstep with `PAGE_CACHE.len()`: bumped on insert,
+/// dropped on every removal.
+static RESIDENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // Counters (monitoring; mirror what fs::pagecache exposes for stats).
 static STAT_HITS: AtomicU64 = AtomicU64::new(0);
@@ -267,6 +274,7 @@ where
     // SAFETY: `new_frame` is a freshly allocated, valid frame; cache lock held.
     unsafe { frame::ref_inc(new_frame)? };
     cache.insert(key, CacheEntry { frame: new_frame });
+    RESIDENT_COUNT.fetch_add(1, Ordering::Relaxed);
     STAT_INSERTS.fetch_add(1, Ordering::Relaxed);
     Ok(new_frame)
 }
@@ -299,6 +307,7 @@ pub fn invalidate(file: FileId, file_offset: u64) -> bool {
     let mut cache = PAGE_CACHE.lock();
     if let Some(entry) = cache.remove(&key) {
         let frame = entry.frame;
+        RESIDENT_COUNT.fetch_sub(1, Ordering::Relaxed);
         drop(cache);
         STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
         // SAFETY: removing the index entry drops the cache's one reference;
@@ -325,6 +334,7 @@ pub fn try_evict(file: FileId, file_offset: u64) -> bool {
         // refcount() takes the allocator lock; cache → allocator ordering holds.
         if frame::refcount(frame) <= 1 {
             cache.remove(&key);
+            RESIDENT_COUNT.fetch_sub(1, Ordering::Relaxed);
             drop(cache);
             STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
             // SAFETY: refcount ≤ 1 ⇒ only the cache references this frame, so
@@ -355,6 +365,7 @@ pub fn invalidate_file(file: FileId) -> usize {
             frames.push(entry.frame);
         }
     }
+    RESIDENT_COUNT.fetch_sub(frames.len(), Ordering::Relaxed);
     drop(cache);
     let removed = frames.len();
     for f in frames {
@@ -364,6 +375,36 @@ pub fn invalidate_file(file: FileId) -> usize {
         let _ = unsafe { frame::free_frame(f) };
     }
     removed
+}
+
+/// Is anything at all currently cached?
+///
+/// A single relaxed atomic load — the cheap gate for coherence hooks on the
+/// write/truncate/unlink paths.  When the cache is empty (the common case for
+/// a system with no active file mappings) callers skip the cost of resolving a
+/// [`FileId`] and invalidating.  Racy by construction (an entry may appear or
+/// vanish immediately after the load), which is fine: the hooks run *after* the
+/// mutation, so a page inserted concurrently is filled from the post-mutation
+/// file contents anyway, and a stale "empty" reading can only occur if nothing
+/// was cached at the moment of the write — exactly when there is nothing to
+/// invalidate.
+#[must_use]
+pub fn is_populated() -> bool {
+    RESIDENT_COUNT.load(Ordering::Relaxed) != 0
+}
+
+/// Coherence hook: invalidate every cached page of a file **if** the cache is
+/// non-empty, given the file's `(fs_id, ino)` identity components.
+///
+/// This is the entry point the VFS mutation paths call after a `write`,
+/// `truncate`, `unlink`, or `rename`-over-existing.  It is a no-op (one atomic
+/// load) when nothing is cached, so the common write path pays almost nothing.
+/// `ino == 0` (no stable identity) is never cacheable, so it is skipped.
+pub fn invalidate_identity(fs_id: u64, ino: u64) {
+    if ino == 0 || !is_populated() {
+        return;
+    }
+    let _ = invalidate_file(FileId { fs_id, ino });
 }
 
 /// Test/diagnostic helper: is a page currently resident in the cache index?
@@ -534,6 +575,29 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[page_cache]   invalidate_file reclaims idle pages: OK");
+
+        // (8) is_populated tracks residency; invalidate_identity (the VFS
+        //     coherence hook) drops a file's pages by (fs_id, ino).
+        let file_c = FileId { fs_id: 0, ino: 0xC0DE_0003 };
+        let fc = get_or_fill(file_c, 0, |buf| {
+            if let [b0, ..] = buf {
+                *b0 = 0x33;
+            }
+            Ok(())
+        })?;
+        if !is_populated() {
+            serial_println!("[page_cache]   FAIL: is_populated false with a resident page");
+            return Err(KernelError::InternalError);
+        }
+        release(fc); // drop caller ref → cache holds the sole reference
+        invalidate_identity(file_c.fs_id, file_c.ino);
+        if is_resident(file_c, 0) {
+            serial_println!("[page_cache]   FAIL: invalidate_identity left the page resident");
+            return Err(KernelError::InternalError);
+        }
+        // ino == 0 is never cacheable; the hook must be a safe no-op for it.
+        invalidate_identity(0, 0);
+        serial_println!("[page_cache]   is_populated + invalidate_identity: OK");
 
         Ok(())
     })();

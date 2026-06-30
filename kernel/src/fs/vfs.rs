@@ -1733,10 +1733,16 @@ impl Vfs {
         // reads the file through VFS internally).  TOCTOU between read and
         // write is acceptable — version history is best-effort.
         super::history::try_auto_record(&path);
-        {
+        let cache_inval = {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_file(relative, data)?;
+            // Coherence: a full overwrite replaces the file's contents — drop
+            // any cached pages so mappers see the new bytes.
+            cache_identity(mp, relative)
+        };
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
         // Charge quota usage after successful write.
         super::quota::charge_bytes(0, 0, data.len() as u64);
@@ -1913,10 +1919,19 @@ impl Vfs {
         // Auto-version: save the file content before deleting.
         // Allows `fhist restore` to recover accidentally deleted files.
         super::history::try_auto_record(&path);
-        {
+        let cache_inval = {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
+            // Capture identity *before* removal — the inode (and its number)
+            // is gone afterward, and that number may be reused by a future
+            // file.  Dropping the cached pages now prevents a later file that
+            // reuses this inode from being served the removed file's bytes.
+            let id = cache_identity(mp, relative);
             mp.fs.remove(relative)?;
+            id
+        };
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
         // Release quota usage for deleted file.
         if file_size > 0 {
@@ -2061,10 +2076,16 @@ impl Vfs {
         // Intercept and quota checks on partial writes.
         super::intercept::pre_write(&path)?;
         enforce_quota_write(&path, data.len() as u64)?;
-        {
+        let cache_inval = {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_at(relative, offset, data)?;
+            // Coherence: drop any cached pages of this file so a later mapper
+            // (or re-fault) reads the post-write bytes, not stale cached ones.
+            cache_identity(mp, relative)
+        };
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
         super::quota::charge_bytes(0, 0, data.len() as u64);
         super::notify::emit_modified(&path);
@@ -2092,10 +2113,16 @@ impl Vfs {
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
-        {
+        let cache_inval = {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.truncate(relative, size)?;
+            // Coherence: truncation changes (or zeroes the tail of) the file's
+            // pages — drop cached copies.
+            cache_identity(mp, relative)
+        };
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
         super::notify::emit_modified(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2159,21 +2186,33 @@ impl Vfs {
 
         if same_mount {
             // Same mount — delegate to the filesystem's native rename.
-            let mut vfs = VFS.lock();
-            let (_mp_from, rel_from) = find_mount(&mut vfs, &from)?;
-            let rel_from_owned = String::from(rel_from);
-            let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
-            if noreplace {
-                // Atomic RENAME_NOREPLACE: the destination-existence check and
-                // the rename below execute under the same held `VFS.lock()`,
-                // closing the TOCTOU window a separate pre-check would leave.
-                match mp_to.fs.stat(rel_to) {
-                    Ok(_) => return Err(KernelError::AlreadyExists),
-                    Err(KernelError::NotFound) => {}
-                    Err(e) => return Err(e),
+            let dest_inval = {
+                let mut vfs = VFS.lock();
+                let (_mp_from, rel_from) = find_mount(&mut vfs, &from)?;
+                let rel_from_owned = String::from(rel_from);
+                let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
+                if noreplace {
+                    // Atomic RENAME_NOREPLACE: the destination-existence check and
+                    // the rename below execute under the same held `VFS.lock()`,
+                    // closing the TOCTOU window a separate pre-check would leave.
+                    match mp_to.fs.stat(rel_to) {
+                        Ok(_) => return Err(KernelError::AlreadyExists),
+                        Err(KernelError::NotFound) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
+                // A replacing rename unlinks the destination's existing inode
+                // (whose number may later be reused); capture its identity
+                // before the rename so we can drop its cached pages.  The
+                // source's identity is unchanged (same inode, new name), so its
+                // cached pages stay valid.
+                let id = cache_identity(mp_to, rel_to);
+                mp_to.fs.rename(&rel_from_owned, rel_to)?;
+                id
+            };
+            if let Some((fs_id, ino)) = dest_inval {
+                crate::mm::page_cache::invalidate_identity(fs_id, ino);
             }
-            mp_to.fs.rename(&rel_from_owned, rel_to)?;
         } else {
             // Cross-mount rename: copy + delete.  This is the only way to
             // "move" files between different filesystems (like Linux's mv).
@@ -3571,6 +3610,25 @@ fn mount_matches(mount_path: &str, path: &str) -> bool {
 ///
 /// Returns a mutable reference to the mount point and the
 /// path relative to that mount's root.
+/// Capture a file's page-cache identity `(fs_id, ino)` under the held VFS lock,
+/// for coherence invalidation after a content/lifecycle mutation.
+///
+/// Gated on [`crate::mm::page_cache::is_populated`] (a single relaxed atomic
+/// load): when nothing is cached — the common case — this returns `None`
+/// without the per-mutation `metadata` lookup, so the write/truncate/remove
+/// hot paths pay almost nothing.  Returns `None` for `ino == 0` (no stable
+/// identity, never cacheable).
+fn cache_identity(mp: &mut MountPoint, relative: &str) -> Option<(u64, u64)> {
+    if !crate::mm::page_cache::is_populated() {
+        return None;
+    }
+    let ino = mp.fs.metadata(relative).ok()?.ino;
+    if ino == 0 {
+        return None;
+    }
+    Some((mp.fs_id, ino))
+}
+
 fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a mut MountPoint, &'p str)> {
     if vfs.mounts.is_empty() {
         return Err(KernelError::NotFound);

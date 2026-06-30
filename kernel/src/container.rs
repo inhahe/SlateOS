@@ -142,6 +142,11 @@ pub struct ContainerConfig {
     pub net_mask: Option<[u8; 4]>,
     pub net_gateway: Option<[u8; 4]>,
     pub net_dns: Option<[u8; 4]>,
+    /// Arbitrary user metadata as `(key, value)` pairs (Docker `--label`).
+    /// Labels carry no runtime behavior; they are stored on the container and
+    /// surfaced by inspection. Keys are unique — setting an existing key
+    /// replaces its value (last-write-wins, matching Docker).
+    pub labels: Vec<(String, String)>,
 }
 
 
@@ -195,6 +200,23 @@ impl ContainerConfig {
     pub fn hostname(mut self, name: &str) -> Self {
         let name = if name.len() > 64 { name.get(..64).unwrap_or("") } else { name };
         self.hostname = String::from(name);
+        self
+    }
+
+    /// Add or replace a metadata label (Docker `--label key=value`).
+    ///
+    /// If `key` already exists, its value is replaced (last-write-wins,
+    /// matching Docker). Empty keys are ignored.
+    #[must_use]
+    pub fn label(mut self, key: &str, value: &str) -> Self {
+        if key.is_empty() {
+            return self;
+        }
+        if let Some(slot) = self.labels.iter_mut().find(|(k, _)| k == key) {
+            slot.1 = String::from(value);
+        } else {
+            self.labels.push((String::from(key), String::from(value)));
+        }
         self
     }
 
@@ -304,6 +326,10 @@ struct Container {
     /// [`run`] time (see [`crate::net::nat::add_port_forward`]).  Flushed on
     /// [`stop`]/[`delete`].  Empty for a container that publishes no ports.
     published_ports: Vec<PublishedPort>,
+    /// Arbitrary user metadata `(key, value)` pairs (Docker `--label`).
+    /// Captured from [`ContainerConfig::labels`] at create time; carries no
+    /// runtime behavior and is surfaced only via [`info`].
+    labels: Vec<(String, String)>,
 }
 
 impl Container {
@@ -326,6 +352,7 @@ impl Container {
             hostname: String::new(),
             container_ip: None,
             published_ports: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -377,6 +404,8 @@ pub struct ContainerInfo {
     pub container_ip: Option<[u8; 4]>,
     /// Published ports as `(proto, host_port, container_port)`.
     pub published_ports: Vec<PublishedPort>,
+    /// Arbitrary user metadata `(key, value)` pairs (Docker `--label`).
+    pub labels: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +668,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.container_ip = config.net_ip;
         ct.read_only_root = config.read_only_root;
         ct.hostname = config.hostname.clone();
+        ct.labels = config.labels.clone();
         ct.published_ports.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -1383,6 +1413,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             hostname: ct.hostname.clone(),
             container_ip: ct.container_ip,
             published_ports: ct.published_ports.clone(),
+            labels: ct.labels.clone(),
         })
     })
 }
@@ -1977,6 +2008,35 @@ pub fn self_test() {
     }
     serial_println!("[container]   UTS hostname (--hostname) for init process: OK");
 
+    // Test 19d: container metadata labels (Docker `--label`).  Labels are pure
+    // metadata — stored on the container, surfaced via info(), with no runtime
+    // behavior — so this needs no process and stays fully deterministic.
+    {
+        let lbl_cfg = ContainerConfig::new("test-label-ct")
+            .label("role", "web")
+            .label("tier", "frontend")
+            .label("role", "api"); // last-write-wins replaces "web"
+        assert_eq!(lbl_cfg.labels.len(), 2, "duplicate key must not grow the set");
+        assert_eq!(
+            lbl_cfg.labels.iter().find(|(k, _)| k == "role").map(|(_, v)| v.as_str()),
+            Some("api"),
+            "last-write-wins must replace the value",
+        );
+        // Empty keys are ignored.
+        let empty_key = ContainerConfig::new("x").label("", "v");
+        assert!(empty_key.labels.is_empty(), "empty key must be ignored");
+
+        let ct_lbl = create(&lbl_cfg).expect("create labeled container");
+        let got = info(ct_lbl).unwrap().labels;
+        assert_eq!(got.len(), 2, "info must report all labels");
+        assert!(
+            got.iter().any(|(k, v)| k == "tier" && v == "frontend"),
+            "info must preserve label values",
+        );
+        delete(ct_lbl).expect("delete labeled container");
+    }
+    serial_println!("[container]   metadata labels (--label): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2076,5 +2136,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (22 tests)");
+    serial_println!("[container] Self-test PASSED (23 tests)");
 }

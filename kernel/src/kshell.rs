@@ -67217,6 +67217,12 @@ fn cmd_container(args: &str) {
                     crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
                 }
             }
+            if !ci.hostname.is_empty() {
+                crate::console_println!("  Hostname:   {}", ci.hostname);
+            }
+            for (k, v) in &ci.labels {
+                crate::console_println!("  Label:      {}={}", k, v);
+            }
         }
         "rootfs" => {
             // container rootfs <id> <host-path>
@@ -67611,7 +67617,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67717,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]
+            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -67772,6 +67778,10 @@ fn cmd_oci(args: &str) {
             // init process sees via uname(2), independent of any rootfs jail.
             // Truncated to 64 bytes by the container layer.
             let mut hostname: Option<&str> = None;
+            // Docker `--label`/`-l KEY=VALUE`: arbitrary metadata `(key, value)`
+            // pairs stored on the container (no runtime behavior). A bare KEY
+            // (no `=`) gets an empty value, matching Docker.
+            let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
             // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
             // after the image dir override the image's CMD (the ENTRYPOINT is
             // kept unless --entrypoint is also given). The first non-option
@@ -68007,6 +68017,25 @@ fn cmd_oci(args: &str) {
                             i = i.saturating_add(1);
                         }
                     }
+                    "--label" | "-l" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // KEY=VALUE; a bare KEY gets an empty value.
+                            let (key, value) = match spec.split_once('=') {
+                                Some((k, v)) => (k, v),
+                                None => (spec, ""),
+                            };
+                            if key.is_empty() {
+                                crate::console_println!(
+                                    "[oci] Ignoring label '{}': empty key", spec
+                                );
+                            } else {
+                                labels.push((key, value));
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     tok if tok.starts_with('-') => {
                         // Unknown option: skip it (and don't consume a value,
                         // since we don't know its arity).
@@ -68141,6 +68170,11 @@ fn cmd_oci(args: &str) {
             if let Some(hn) = hostname {
                 cfg = cfg.hostname(hn);
             }
+            // Apply metadata labels (--label/-l). The builder deduplicates by
+            // key with last-write-wins.
+            for (k, v) in &labels {
+                cfg = cfg.label(k, v);
+            }
 
             match crate::container::create(&cfg) {
                 Ok(ct_id) => {
@@ -68150,6 +68184,9 @@ fn cmd_oci(args: &str) {
                     crate::console_println!("  Name:         {}", image_name);
                     if !cfg.hostname.is_empty() {
                         crate::console_println!("  Hostname:     {}", cfg.hostname);
+                    }
+                    for (k, v) in &cfg.labels {
+                        crate::console_println!("  Label:        {}={}", k, v);
                     }
 
                     // Determine the container's jail root.  Prefer the merged
@@ -68467,7 +68504,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

@@ -67141,11 +67141,23 @@ fn cmd_container(args: &str) {
             }
             crate::console_println!("=== Containers ({}) ===", shown.len());
             crate::console_println!(
-                "{:<5} {:<20} {:<10}",
-                "ID", "Name", "State"
+                "{:<5} {:<20} {:<18}",
+                "ID", "Name", "Status"
             );
             for (id, name, state) in &shown {
-                crate::console_println!("{:<5} {:<20} {:<10}", id, name, state);
+                // Docker `ps -a` style status: a stopped container shows its
+                // recorded init exit code ("exited (N)"); other states show the
+                // bare state word. The exit code requires an info() lookup, so
+                // we only pay for it for stopped containers.
+                let status = if *state == container::ContainerState::Stopped {
+                    match container::info(*id).and_then(|ci| ci.exit_code) {
+                        Some(code) => alloc::format!("exited ({})", code),
+                        None => alloc::format!("{}", state),
+                    }
+                } else {
+                    alloc::format!("{}", state)
+                };
+                crate::console_println!("{:<5} {:<20} {:<18}", id, name, status);
             }
         }
         "create" => {

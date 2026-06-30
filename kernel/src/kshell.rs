@@ -67382,6 +67382,135 @@ fn cmd_container(args: &str) {
     }
 }
 
+/// Parse a Docker-style memory size string into a count of 16 KiB frames.
+///
+/// Accepts a non-negative integer optionally followed by a binary unit
+/// suffix (`b`, `k`, `m`, `g`, case-insensitive, with an optional trailing
+/// `b` — e.g. `512m`, `512mb`, `1g`). A bare number is bytes. The byte total
+/// is rounded **up** to a whole frame so the limit never under-counts. Returns
+/// `None` for an empty/zero/unparseable value or an unknown unit.
+fn parse_mem_size_to_frames(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Split the leading digit run from the optional unit suffix.
+    let bytes = s.as_bytes();
+    let mut num_end = 0usize;
+    while num_end < bytes.len()
+        && bytes.get(num_end).copied().is_some_and(|c| c.is_ascii_digit())
+    {
+        num_end = num_end.saturating_add(1);
+    }
+    if num_end == 0 {
+        return None;
+    }
+    let num: u64 = s.get(..num_end)?.parse().ok()?;
+    let unit = s.get(num_end..)?.trim();
+    let mult: u64 = match unit {
+        "" | "b" | "B" => 1,
+        "k" | "K" | "kb" | "Kb" | "kB" | "KB" => 1_024,
+        "m" | "M" | "mb" | "Mb" | "mB" | "MB" => 1_048_576,
+        "g" | "G" | "gb" | "Gb" | "gB" | "GB" => 1_073_741_824,
+        _ => return None,
+    };
+    let total_bytes = num.checked_mul(mult)?;
+    if total_bytes == 0 {
+        return None;
+    }
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    // Ceiling division: (bytes + frame - 1) / frame.
+    let frames = total_bytes.checked_add(frame.saturating_sub(1))?.checked_div(frame)?;
+    if frames == 0 { None } else { Some(frames) }
+}
+
+/// Parse a Docker-style `--cpus` value (fractional cores) into a percentage
+/// of one core, where one full core is 100.
+///
+/// Examples: `1` → 100, `1.5` → 150, `0.25` → 25, `2` → 200. Only the first
+/// two fractional digits are significant (percent granularity); a single
+/// fractional digit is treated as tenths (`0.5` → 50). Float arithmetic is
+/// avoided entirely (no kernel FPU state). Returns `None` for an
+/// empty/zero/non-numeric value.
+fn parse_cpus_to_percent(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((a, b)) => (a, b),
+        None => (s, ""),
+    };
+    let int_val: u64 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().ok()?
+    };
+    // Accumulate up to two fractional digits as hundredths; all remaining
+    // fractional characters must still be digits (reject garbage like "1.5x").
+    let mut frac2: u64 = 0;
+    let mut taken: u32 = 0;
+    for &c in frac_part.as_bytes() {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        if taken < 2 {
+            let digit = u64::from(c.saturating_sub(b'0'));
+            frac2 = frac2.saturating_mul(10).saturating_add(digit);
+            taken = taken.saturating_add(1);
+        }
+    }
+    // A single fractional digit means tenths → scale to hundredths.
+    if taken == 1 {
+        frac2 = frac2.saturating_mul(10);
+    }
+    let percent = int_val.checked_mul(100)?.checked_add(frac2)?;
+    if percent == 0 { None } else { Some(percent) }
+}
+
+/// Boot-time self-test for the container CLI resource-limit parsers.
+///
+/// Kernel tests are QEMU boot self-tests (the target is `no_std` on a custom
+/// triple, so host `cargo test` cannot run them). This exercises the pure
+/// `parse_mem_size_to_frames` / `parse_cpus_to_percent` helpers added for
+/// `oci run --memory`/`--cpus`, covering the happy paths and the rejection
+/// cases. Called from `main.rs` alongside the other subsystem self-tests.
+pub fn cli_resource_parser_self_test() {
+    let frame = crate::mm::frame::FRAME_SIZE as u64; // 16384
+
+    // Memory: bare bytes round up to whole frames.
+    assert_eq!(parse_mem_size_to_frames("16384"), Some(1));
+    assert_eq!(parse_mem_size_to_frames("16385"), Some(2));
+    assert_eq!(parse_mem_size_to_frames("1"), Some(1)); // <1 frame rounds up
+    // Unit suffixes (binary), with and without a trailing 'b'.
+    assert_eq!(parse_mem_size_to_frames("1k"), Some(1)); // 1024 → 1 frame
+    assert_eq!(parse_mem_size_to_frames("1m"), Some(1_048_576 / frame));
+    assert_eq!(parse_mem_size_to_frames("512m"), Some(512 * 1_048_576 / frame));
+    assert_eq!(parse_mem_size_to_frames("512mb"), Some(512 * 1_048_576 / frame));
+    assert_eq!(parse_mem_size_to_frames("1g"), Some(1_073_741_824 / frame));
+    // Rejections.
+    assert_eq!(parse_mem_size_to_frames(""), None);
+    assert_eq!(parse_mem_size_to_frames("0"), None);
+    assert_eq!(parse_mem_size_to_frames("abc"), None);
+    assert_eq!(parse_mem_size_to_frames("10x"), None);
+
+    // CPUs → percent of one core.
+    assert_eq!(parse_cpus_to_percent("1"), Some(100));
+    assert_eq!(parse_cpus_to_percent("2"), Some(200));
+    assert_eq!(parse_cpus_to_percent("1.5"), Some(150));
+    assert_eq!(parse_cpus_to_percent("0.5"), Some(50)); // single frac digit = tenths
+    assert_eq!(parse_cpus_to_percent("0.25"), Some(25));
+    assert_eq!(parse_cpus_to_percent("0.05"), Some(5));
+    // Rejections.
+    assert_eq!(parse_cpus_to_percent(""), None);
+    assert_eq!(parse_cpus_to_percent("0"), None);
+    assert_eq!(parse_cpus_to_percent("0.0"), None);
+    assert_eq!(parse_cpus_to_percent("1.5x"), None);
+    assert_eq!(parse_cpus_to_percent("abc"), None);
+
+    crate::serial_println!("[kshell] CLI resource-limit parser self-test PASSED");
+}
+
 /// `docker` (alias `dk`) — Docker-CLI-compatible front-end.
 ///
 /// This is a thin translation layer over the native `oci` (image) and
@@ -67482,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67582,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...]
+            //                      [-e KEY=value ...] [-m SIZE] [--cpus N]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
                 return;
             };
 
@@ -67610,9 +67739,43 @@ fn cmd_oci(args: &str) {
             // override the image's declared ENV (Docker semantics) and are
             // merged at launch (see the env construction below).
             let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+            // Resource limits from `--memory`/`-m <size>` (bytes, with optional
+            // k/m/g suffix → 16 KiB frames) and `--cpus <N[.M]>` (fractional
+            // cores → percent of one core, e.g. 1.5 → 150%). Applied to the
+            // container cgroup at create time (Step 4 below).
+            let mut mem_frames: Option<u64> = None;
+            let mut cpu_percent: Option<u64> = None;
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
+                    "--memory" | "-m" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            match parse_mem_size_to_frames(spec) {
+                                Some(frames) => mem_frames = Some(frames),
+                                None => crate::console_println!(
+                                    "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
+                                    spec
+                                ),
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    "--cpus" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            match parse_cpus_to_percent(spec) {
+                                Some(pct) => cpu_percent = Some(pct),
+                                None => crate::console_println!(
+                                    "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
+                                    spec
+                                ),
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--env" | "-e" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
                             // Require KEY=value: a bare `-e KEY` would mean
@@ -67833,6 +67996,14 @@ fn cmd_oci(args: &str) {
             cfg.net_dns = net_dns;
             if net_ip.is_some() {
                 cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+            }
+            // Apply optional resource limits (--memory / --cpus). 0 = unlimited
+            // is the cgroup default, so we only override when a flag was given.
+            if let Some(frames) = mem_frames {
+                cfg.mem_limit = frames;
+            }
+            if let Some(pct) = cpu_percent {
+                cfg.cpu_quota = pct;
             }
 
             match crate::container::create(&cfg) {
@@ -68076,8 +68247,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

@@ -2281,6 +2281,28 @@ not already overridden). Usage/help strings updated to include `[-e KEY=value
 ...]`. The TD32 mount remainder (read-only volumes, mount-tree/`pivot_root`,
 tmpfs) is still open.
 
+**Update 2026-06-30 (increment 13): `docker`/`dk` CLI-compat shim — DONE.** A
+thin Docker-CLI front-end (`docker`, alias `dk`) translates familiar verbs to
+the native `oci` (image) and `container` (lifecycle) handlers: `run`/`create`
+→ `oci run`/`create`; `ps [-a]` → `container list` (all states; `-a` accepted +
+ignored since there is no running-only index); `start`/`stop`/`rm` →
+`container start`/`stop`/`delete`; `inspect` → `container info`; `exec` →
+`container exec`; `images <dir>` → `oci inspect` (SlateOS has no name-keyed
+image registry — images are on-disk OCI layout dirs). Argument spacing is
+preserved verbatim when delegating. Registered in dispatch, `is_builtin`, and
+the tab-completion list.
+
+**Update 2026-06-30 (increment 14): resource limits (`--memory`/`--cpus`) —
+DONE.** `oci run`/`create` now accept Docker `--memory`/`-m <SIZE>` (bytes with
+optional binary k/m/g[b] suffix, rounded up to whole 16 KiB frames → cgroup
+`mem_limit`) and `--cpus <N[.M]>` (fractional cores → percent of one core, e.g.
+`1.5` → 150 → `CpuLimit::from_percent` via cgroup `cpu_quota`). Parsing is pure
+and float-free (kernel has no FPU state in this path); two helpers
+(`parse_mem_size_to_frames`, `parse_cpus_to_percent`) are covered by
+`kshell::cli_resource_parser_self_test()`, wired into the boot self-test run in
+`main.rs`. The TD32 mount remainder (read-only volumes, mount-tree/`pivot_root`,
+tmpfs) is still open.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

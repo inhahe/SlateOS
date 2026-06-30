@@ -3449,6 +3449,8 @@ extern "C" fn kernel_main() -> ! {
     // into a single lifecycle with create/start/stop/delete state machine.
     container::init();
     container::self_test();
+    // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
+    kshell::cli_resource_parser_self_test();
 
     // Step 22e⅞++++p10a: JSON parser self-test.
     // Minimal recursive-descent JSON parser for OCI image manifests.

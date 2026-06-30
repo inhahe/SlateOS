@@ -23,9 +23,56 @@ Format for each entry:
 
 ---
 
+## Q16 `container diff` baseline semantics — OPEN
+
+- **Question** — What should Docker-style `container diff` (list filesystem
+  changes since the container's "base") compare against, given our container
+  model supports two rootfs kinds?
+- **Context** — Two kinds of container rootfs exist today:
+  1. **Overlay-backed** (created via `oci run`): a real overlayfs with a
+     read-only lower (the image layers) and a writable upper. Docker's diff is
+     *defined* here — Added/Changed = entries in the upper, Deleted = whiteouts.
+     `kernel/src/fs/overlay.rs` already tracks `whiteouts` and the upper dir, so
+     this is computable cleanly **iff** the container records its `OverlayId`.
+  2. **Plain bind-rootfs** (created via `container create` + `container rootfs
+     <dir>`): a chroot to a plain host directory with no lower/upper distinction.
+     There is no natural "base" to diff against.
+- **Options**
+  - **A. Overlay-only diff.** Implement `diff` only for overlay-backed
+    containers (enumerate upper + whiteouts, classify A/C/D); return
+    `NotSupported` for plain bind-rootfs containers. *Pro:* matches Docker
+    semantics exactly, no band-aid, cheap (no rootfs walk). *Con:* needs the
+    container to record its `OverlayId` (today it only stores `rootfs_mount`, a
+    path); `diff` is unavailable for the common plain-rootfs path.
+  - **B. Point-in-time baseline.** Capture a manifest (path → size/mtime, or a
+    content hash) of the rootfs when the container first `start()`s, and diff the
+    live tree against it. *Pro:* works for every container regardless of rootfs
+    kind. *Con:* not Docker's semantics (baseline is "first start", not "image"),
+    adds a full rootfs walk + a stored per-container manifest on the start hot
+    path, and a large rootfs makes start() expensive.
+  - **C. Both.** Overlay diff when an overlay is present, fall back to a
+    point-in-time baseline otherwise. *Pro:* always available, exact where it can
+    be. *Con:* two code paths and two different meanings of "diff" under one
+    command — potentially confusing.
+- **Claude's recommendation** — **A** (overlay-only), as the only option that is
+  a *proper* (non-band-aid) implementation matching Docker. It requires a small
+  plumbing change: record the `OverlayId` on the `Container` struct at
+  `oci run` time. In the meantime `container diff` is simply not implemented;
+  all other `container` subcommands (export/import/commit/prune/rm -f/…) are
+  done and don't depend on this.
+- **Where it bites** — `kernel/src/container.rs` (`Container` struct would gain
+  an `overlay_id: Option<OverlayId>` field set on the `oci run` path; a new
+  `diff(id)` fn), `kernel/src/fs/overlay.rs` (would need an `upper_entries(id)`
+  enumerator + expose `whiteouts`), `kernel/src/oci.rs` (overlay creation site),
+  `kernel/src/kshell.rs` (`container diff` arm).
+- **Status** — `OPEN` (deferred; not blocking — other container increments
+  continue).
+
+---
+
 All deferred operator decisions (Q1–Q15) have been resolved — see the
 "Recently resolved" list below and `design-decisions.md` for full rationale. New
-decisions should be appended above this line as `## Q16 …`.
+decisions should be appended above this line as `## Q17 …`.
 
 ---
 

@@ -67564,6 +67564,35 @@ fn cmd_container(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "port" => {
+            // container port <id>  (Docker `port`): list the container's
+            // published port mappings (`-p host:container[/proto]`) in the
+            // form `CONTAINER/PROTO -> HOST`, matching Docker's output.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container port <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(ports) = container::published_ports(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            if ports.is_empty() {
+                crate::console_println!("Container {} publishes no ports.", id);
+                return;
+            }
+            for (proto, host_port, container_port) in ports {
+                let p = match proto {
+                    crate::net::nat::NatProto::Tcp => "tcp",
+                    crate::net::nat::NatProto::Udp => "udp",
+                };
+                // Docker renders forwards as `80/tcp -> 0.0.0.0:8080`.
+                crate::console_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67711,7 +67740,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|port|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67726,6 +67755,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
             crate::console_println!("  container update ID [--cpus N] [--memory SIZE] — change live CPU/memory limits");
             crate::console_println!("  container rename ID <new-name>           — rename a container");
+            crate::console_println!("  container port ID                        — list published port mappings");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");

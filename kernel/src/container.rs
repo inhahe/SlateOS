@@ -1505,6 +1505,27 @@ pub fn pids(id: ContainerId) -> Option<Vec<u64>> {
     })
 }
 
+/// List a container's published (forwarded) port mappings (Docker `port`).
+///
+/// Returns the container's `(proto, host_port, container_port)` publish specs
+/// in the order they were added via [`add_port_publish`] (the `-p` mechanism).
+/// The list is what `run` installs as host-port NAT rules when the container
+/// starts; it is a static property of the container's configuration, so it is
+/// available in any state (including before the container has run).
+///
+/// `None` if the container id is invalid or its slot is inactive; `Some(empty)`
+/// if the container publishes no ports.
+#[must_use]
+pub fn published_ports(id: ContainerId) -> Option<Vec<PublishedPort>> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        Some(table.containers[idx].published_ports.clone())
+    })
+}
+
 /// Rename a container (Docker `rename`).
 ///
 /// Replaces the container's human-readable name. The new name is truncated to
@@ -2478,6 +2499,39 @@ pub fn self_test() {
     }
     serial_println!("[container]   kill (kill): OK");
 
+    // Test 19j: published_ports() accessor (Docker `port`) reports a
+    // container's `-p` publish specs in insertion order, independent of run
+    // state.  Invalid id → None; a container with no publishes → Some(empty).
+    {
+        use crate::net::nat::NatProto;
+        // Invalid id is rejected.
+        assert!(published_ports(MAX_CONTAINERS as ContainerId).is_none());
+
+        // A network-capable container with no publishes lists none.
+        let ct_pp = create(
+            &ContainerConfig::new("test-port-list-ct")
+                .memory(4096)
+                .network([10, 7, 0, 11], None, None, None),
+        )
+        .expect("create port-list container");
+        assert_eq!(
+            published_ports(ct_pp).expect("ports").len(),
+            0,
+            "a container with no -p publishes lists no ports",
+        );
+
+        // After publishing, the accessor reflects the specs in insertion order.
+        add_port_publish(ct_pp, NatProto::Tcp, 8080, 80).expect("publish tcp");
+        add_port_publish(ct_pp, NatProto::Udp, 5353, 53).expect("publish udp");
+        let ports = published_ports(ct_pp).expect("ports after publish");
+        assert_eq!(ports.len(), 2, "two published ports expected");
+        assert_eq!(ports[0], (NatProto::Tcp, 8080, 80), "first publish: tcp 8080->80");
+        assert_eq!(ports[1], (NatProto::Udp, 5353, 53), "second publish: udp 5353->53");
+
+        delete(ct_pp).expect("delete port-list container");
+    }
+    serial_println!("[container]   published port list (published_ports): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2577,5 +2631,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (28 tests)");
+    serial_println!("[container] Self-test PASSED (29 tests)");
 }

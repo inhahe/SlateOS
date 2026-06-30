@@ -1754,18 +1754,39 @@ pub extern "C" fn chroot(path: *const u8) -> i32 {
 
 /// Detach from the controlling terminal and run in the background.
 ///
-/// If `nochdir` is 0, changes the working directory to `/`.
-/// If `noclose` is 0, redirects stdin/stdout/stderr to `/dev/null`
-/// (stubbed — we don't have `/dev/null`, so we just close them).
+/// Follows the classic glibc implementation: `fork()`, the parent
+/// `_exit(0)`s (so the caller's shell sees the foreground process
+/// finish), and the child calls `setsid()` to start a new session with
+/// no controlling terminal.  Then, in the child:
+/// - if `nochdir` is 0, changes the working directory to `/`;
+/// - if `noclose` is 0, detaches stdin/stdout/stderr.  glibc reopens
+///   them onto `/dev/null`, but we don't have `/dev/null` yet, so we
+///   close them instead — close prevents the daemon from holding the
+///   terminal open or emitting stray output.
 ///
-/// Our OS doesn't have `fork()`, so this is a best-effort stub that
-/// performs the CWD change and fd redirection but cannot actually
-/// create a background process.  Programs that call `daemon()` will
-/// continue running in the foreground.
-///
-/// Returns 0 on success, -1 on error with errno set.
+/// Returns 0 in the (backgrounded) child on success, or -1 with `errno`
+/// set if the fork or `setsid` fails.  On the host build `fork()` is
+/// unavailable (`ENOSYS`), so `daemon()` returns -1 there.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
+    // Fork: the parent exits so the daemon runs detached from the
+    // caller; the child carries on.  Use `_exit` (not `exit`) in the
+    // parent so we don't flush the child-shared stdio buffers or run
+    // atexit handlers twice.
+    match crate::process::fork() {
+        // fork failed: errno was set by fork(); propagate.
+        n if n < 0 => return -1,
+        // Child (return value 0): continue daemonising below.
+        0 => {}
+        // Parent (child PID > 0): exit, leaving the child backgrounded.
+        _ => crate::process::_exit(0),
+    }
+
+    // Become a session leader, detaching from any controlling terminal.
+    if crate::process::setsid() < 0 {
+        return -1;
+    }
+
     // Change CWD to root unless suppressed.
     if nochdir == 0 {
         let root = b"/\0";
@@ -1775,18 +1796,15 @@ pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
         }
     }
 
-    // Close standard fds unless suppressed.
-    // A real daemon would reopen them to /dev/null, but we don't have
-    // /dev/null yet.  Closing them prevents accidental terminal output.
+    // Detach standard fds unless suppressed.  A real daemon would reopen
+    // them onto /dev/null, but we don't have /dev/null yet, so we close
+    // them — this prevents the backgrounded process from keeping the
+    // terminal open or writing stray output to it.
     if noclose == 0 {
         crate::file::close(STDIN_FILENO);
         crate::file::close(STDOUT_FILENO);
         crate::file::close(STDERR_FILENO);
     }
-
-    // Cannot fork — we stay in the same process.  Call setsid() to
-    // create a new session (best effort at detaching).
-    let _ = crate::process::setsid();
 
     0
 }
@@ -8090,18 +8108,27 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_daemon_nochdir_noclose() {
-        // daemon(1, 1) skips both chdir and close — essentially a no-op
-        // except for setsid.
+    fn test_daemon_fork_unavailable_on_host_returns_error() {
+        // daemon() now forks (parent _exit, child detaches).  On the host
+        // build fork() is unavailable (SYS_PROCESS_FORK → ENOSYS), so the
+        // fork-failure path is taken and daemon() must return -1 with
+        // errno set rather than silently "succeeding" in the foreground.
+        errno::set_errno(0);
         let ret = daemon(1, 1);
-        assert_eq!(ret, 0);
+        assert_eq!(ret, -1);
+        assert_ne!(
+            errno::get_errno(),
+            0,
+            "daemon must set errno on fork failure"
+        );
     }
 
     #[test]
-    fn test_daemon_noclose_only() {
-        // daemon(0, 1) attempts chdir("/") which may succeed or fail
-        // on the test host.  Either way, should not crash.
-        let _ret = daemon(0, 1);
+    fn test_daemon_noclose_only_does_not_crash() {
+        // daemon(0, 1) hits the same host fork-failure path; it must
+        // return -1 without crashing (and never reaches the chdir).
+        let ret = daemon(0, 1);
+        assert_eq!(ret, -1);
     }
 
     // ------------------------------------------------------------------

@@ -67466,13 +67466,13 @@ fn cmd_oci(args: &str) {
         }
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
-            //                      [-v host:guest ...]
+            //                      [-v host:guest ...] [-p host:container[/proto] ...]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...]");
                 return;
             };
 
@@ -67485,9 +67485,52 @@ fn cmd_oci(args: &str) {
             // `-v host:guest` (Docker order). Installed after the container is
             // created (while still in Created state).
             let mut volumes: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+            // Published ports as (proto, host_port, container_port) from
+            // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
+            // Installed after the container is created (Created state).
+            let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
+                alloc::vec::Vec::new();
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
+                    "--publish" | "-p" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // Format: host:container[/proto]. Split the proto
+                            // suffix first, then the host:container pair.
+                            let (pair, proto) = match spec.split_once('/') {
+                                Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
+                                Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
+                                Some((_, other)) => {
+                                    crate::console_println!(
+                                        "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
+                                        spec, other
+                                    );
+                                    i = i.saturating_add(2);
+                                    continue;
+                                }
+                                None => (spec, crate::net::nat::NatProto::Tcp),
+                            };
+                            match pair.split_once(':') {
+                                Some((h, c)) => {
+                                    match (h.parse::<u16>(), c.parse::<u16>()) {
+                                        (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
+                                            ports.push((proto, hp, cp));
+                                        }
+                                        _ => crate::console_println!(
+                                            "[oci] Ignoring port '{}': expected host:container with nonzero ports",
+                                            spec
+                                        ),
+                                    }
+                                }
+                                None => crate::console_println!(
+                                    "[oci] Ignoring port '{}': expected host:container", spec
+                                ),
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--volume" | "-v" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
                             // Split on the first ':'. Host and guest are both
@@ -67755,6 +67798,23 @@ fn cmd_oci(args: &str) {
                         }
                     }
 
+                    // Install any `-p host:container` published ports (Created
+                    // state).  The NAT rules forwarding host traffic to the
+                    // container are installed at run() time; this records the
+                    // intent.  Requires the container to have a network IP
+                    // (set via `--net`), which add_port_publish enforces.
+                    for &(proto, hp, cp) in &ports {
+                        match crate::container::add_port_publish(ct_id, proto, hp, cp) {
+                            Ok(()) => crate::console_println!(
+                                "  Publish:      {:?} :{} -> :{}", proto, hp, cp
+                            ),
+                            Err(e) => crate::console_println!(
+                                "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
+                                proto, hp, cp, e
+                            ),
+                        }
+                    }
+
                     // Launch the image's entrypoint/cmd as the container's
                     // init process, jailed to the rootfs.  `command[0]` is the
                     // executable; it is read from the host *inside* the rootfs
@@ -67854,8 +67914,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest ...] [-p host:container[/proto] ...]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

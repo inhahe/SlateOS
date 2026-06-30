@@ -61,6 +61,19 @@ pub const MAX_NAME_LEN: usize = 64;
 /// than [`crate::ipc::namespace::add_volume`] will accept.
 pub const MAX_VOLUMES_PER_CONTAINER: usize = 64;
 
+/// Maximum number of published (forwarded) ports per container — the Docker
+/// `-p host:container` mechanism.  A small cap: each entry installs a global
+/// host-port NAT rule, and a container rarely publishes more than a handful.
+pub const MAX_PUBLISHED_PORTS: usize = 32;
+
+/// A container's published-port forward spec: `(proto, host_port,
+/// container_port)`.  The Docker `-p host:container[/proto]` mechanism.
+pub type PublishedPort = (crate::net::nat::NatProto, u16, u16);
+
+/// Snapshot of the data [`run`] needs to install a container's published-port
+/// NAT rules, taken under the table lock: `(net_ns, container_ip, ports)`.
+type PortInstall = (u32, [u8; 4], Vec<PublishedPort>);
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -236,6 +249,17 @@ struct Container {
     /// `guest_prefix` resolves to `host_target` instead of under the
     /// container rootfs.  Empty for a container with no volumes.
     volumes: Vec<(String, String)>,
+    /// The container's own IPv4 address inside its network namespace, captured
+    /// from [`ContainerConfig::net_ip`] at create time.  `None` when no
+    /// network was configured.  Needed as the *target* of published-port NAT
+    /// rules (`-p host:container` forwards host traffic to `container_ip:port`).
+    container_ip: Option<[u8; 4]>,
+    /// Published (forwarded) ports as `(proto, host_port, container_port)` —
+    /// the Docker `-p host:container[/proto]` mechanism.  Configured while the
+    /// container is in `Created` state and installed as host-port NAT rules at
+    /// [`run`] time (see [`crate::net::nat::add_port_forward`]).  Flushed on
+    /// [`stop`]/[`delete`].  Empty for a container that publishes no ports.
+    published_ports: Vec<PublishedPort>,
 }
 
 impl Container {
@@ -254,6 +278,8 @@ impl Container {
             root_path: String::new(),
             rootfs_mount: String::new(),
             volumes: Vec::new(),
+            container_ip: None,
+            published_ports: Vec::new(),
         }
     }
 }
@@ -296,6 +322,10 @@ pub struct ContainerInfo {
     pub rootfs_mount: String,
     /// Volume (bind) mounts as `(guest_prefix, host_target)` pairs.
     pub volumes: Vec<(String, String)>,
+    /// The container's own IPv4 address, or `None` if no network configured.
+    pub container_ip: Option<[u8; 4]>,
+    /// Published ports as `(proto, host_port, container_port)`.
+    pub published_ports: Vec<PublishedPort>,
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +583,10 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.cgroup_id = cgroup_id;
         ct.veth_pair = veth_pair;
         ct.pids.clear();
+        // Record the container's own IP so published-port NAT rules know
+        // where to forward (the `-p host:container` target).
+        ct.container_ip = config.net_ip;
+        ct.published_ports.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -598,14 +632,21 @@ pub fn start(id: ContainerId) -> KernelResult<()> {
 ///
 /// - [`KernelError::InvalidArgument`] if container doesn't exist.
 pub fn stop(id: ContainerId) -> KernelResult<()> {
-    with_table(|table| {
+    let net_ns = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].state = ContainerState::Stopped;
-        Ok(())
-    })
+        Ok(table.containers[idx].net_ns)
+    })?;
+    // A stopped container publishes no ports (Docker semantics): tear down its
+    // host-port NAT forwards so a dead container can't keep receiving traffic.
+    // The publish intents stay recorded in `published_ports`, so a future
+    // restart could reinstall them.  Done outside the table lock (the NAT
+    // table has its own lock).  Idempotent if the container had no forwards.
+    crate::net::nat::flush_port_forwards(net_ns);
+    Ok(())
 }
 
 /// Mark a container as failed.
@@ -658,6 +699,8 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].root_path.clear();
         table.containers[idx].rootfs_mount.clear();
         table.containers[idx].volumes.clear();
+        table.containers[idx].container_ip = None;
+        table.containers[idx].published_ports.clear();
 
         Ok(result)
     })?;
@@ -901,14 +944,53 @@ pub fn run(
     }
 
     // Step 4: record init PID and flip Created → Running atomically under
-    // the table lock.
-    with_table(|table| {
-        let idx = id as usize;
-        if idx < MAX_CONTAINERS && table.containers[idx].active {
+    // the table lock.  Snapshot the network namespace, container IP, and
+    // published ports for step 5 while we hold the lock.
+    let port_install: Option<PortInstall> =
+        with_table(|table| {
+            let idx = id as usize;
+            if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+                return None;
+            }
             table.containers[idx].init_pid = Some(result.pid);
             table.containers[idx].state = ContainerState::Running;
+            // Only install port forwards when the container has both an IP
+            // (forward target) and at least one published port.
+            match table.containers[idx].container_ip {
+                Some(ip) if !table.containers[idx].published_ports.is_empty() => Some((
+                    table.containers[idx].net_ns,
+                    ip,
+                    table.containers[idx].published_ports.clone(),
+                )),
+                _ => None,
+            }
+        });
+
+    // Step 5: install the container's published-port NAT rules (the
+    // `-p host:container` forwards).  Done after the state flip and outside
+    // the table lock (the NAT table has its own lock).  Best-effort per rule:
+    // a duplicate host port (already claimed by another container) is logged
+    // and skipped rather than failing the whole run — the container still
+    // starts, just without that one forward.  All rules are flushed when the
+    // container stops or is deleted (`flush_port_forwards`).
+    if let Some((net_ns, ip, ports)) = port_install {
+        let container_ip =
+            crate::net::interface::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
+        for (proto, host_port, container_port) in ports {
+            match crate::net::nat::add_port_forward(
+                proto, host_port, container_ip, container_port, net_ns,
+            ) {
+                Ok(()) => serial_println!(
+                    "[container] run id={}: published {:?} :{} -> {}:{}",
+                    id, proto, host_port, container_ip, container_port
+                ),
+                Err(e) => serial_println!(
+                    "[container] run id={}: WARNING could not publish {:?} :{} -> :{}: {:?}",
+                    id, proto, host_port, container_port, e
+                ),
+            }
         }
-    });
+    }
 
     serial_println!(
         "[container] run id={} '{}': init pid={} task={} entry={:#x}",
@@ -1049,6 +1131,69 @@ pub fn add_volume_mount(
     })
 }
 
+/// Publish a container port to the host — the Docker `-p host:container[/proto]`
+/// mechanism.
+///
+/// Records a port-forward intent so that, when the container is [`run`], a NAT
+/// rule is installed forwarding host traffic arriving at `host_port` to the
+/// container's `container_port` inside its network namespace.  The forward
+/// target is the container's own IP (captured at create time), so the
+/// container must have been created with a network IP
+/// ([`ContainerConfig::network`]) — publishing a port on a network-less
+/// container is rejected.
+///
+/// Must be called while the container is still in
+/// [`Created`](ContainerState::Created) state — the NAT rules are installed at
+/// `run` time.  Re-publishing the same `(proto, host_port)` replaces the
+/// container-port target (last-writer-wins), matching the volume/rootfs
+/// configuration semantics.  `host_port`/`container_port` of 0 are rejected
+/// (port 0 is not a valid forwarding endpoint).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not in
+///   `Created` state, has no network IP configured, or either port is 0.
+/// - [`KernelError::ResourceExhausted`] if the container already publishes
+///   [`MAX_PUBLISHED_PORTS`] ports.
+pub fn add_port_publish(
+    id: ContainerId,
+    proto: crate::net::nat::NatProto,
+    host_port: u16,
+    container_port: u16,
+) -> KernelResult<()> {
+    if host_port == 0 || container_port == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        // A published port forwards to the container's own IP — without one
+        // there is no forward target, so reject rather than silently no-op.
+        if table.containers[idx].container_ip.is_none() {
+            return Err(KernelError::InvalidArgument);
+        }
+        let ports = &mut table.containers[idx].published_ports;
+        // Replace an existing publish at the same (proto, host_port)
+        // (last-writer-wins) — a host port can map to only one target.
+        if let Some(existing) =
+            ports.iter_mut().find(|(p, h, _)| *p == proto && *h == host_port)
+        {
+            existing.2 = container_port;
+            return Ok(());
+        }
+        if ports.len() >= MAX_PUBLISHED_PORTS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        ports.push((proto, host_port, container_port));
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API: queries
 // ---------------------------------------------------------------------------
@@ -1076,6 +1221,8 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             root_path: ct.root_path.clone(),
             rootfs_mount: ct.rootfs_mount.clone(),
             volumes: ct.volumes.clone(),
+            container_ip: ct.container_ip,
+            published_ports: ct.published_ports.clone(),
         })
     })
 }
@@ -1534,6 +1681,96 @@ pub fn self_test() {
     }
     serial_println!("[container]   Volume (bind) mounts for init process: OK");
 
+    // Test 20: a container with published ports (`-p host:container`) installs
+    // host-port NAT forwards at run() time, targeting the container's own IP,
+    // and tears them down on stop()/delete().  Unlike the jail/volume tests,
+    // the forwards are per-netns container state (not per-PID), installed
+    // synchronously by run() before it returns and unaffected by the init
+    // process's lifetime — so reading them back is deterministic even though
+    // run() spawns a real (short-lived) init process.
+    {
+        use crate::net::nat::NatProto;
+        static HELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        // Publishing requires a network IP (the forward target).
+        let netless = create(&ContainerConfig::new("test-noport-ct").memory(4096))
+            .expect("create netless container");
+        assert!(
+            add_port_publish(netless, NatProto::Tcp, 8080, 80).is_err(),
+            "publishing on a network-less container must fail",
+        );
+        delete(netless).expect("delete netless container");
+
+        let port_cfg = ContainerConfig::new("test-port-ct")
+            .memory(4096)
+            .network([10, 7, 0, 9], None, None, None);
+        let ct_port = create(&port_cfg).expect("create port container");
+
+        // Publish TCP 8080->80 and UDP 5353->53.
+        add_port_publish(ct_port, NatProto::Tcp, 8080, 80).expect("publish tcp");
+        add_port_publish(ct_port, NatProto::Udp, 5353, 53).expect("publish udp");
+        // Port 0 is rejected on either side.
+        assert!(add_port_publish(ct_port, NatProto::Tcp, 0, 80).is_err());
+        assert!(add_port_publish(ct_port, NatProto::Tcp, 8081, 0).is_err());
+        // Re-publishing the same (proto, host_port) replaces the target.
+        add_port_publish(ct_port, NatProto::Tcp, 8080, 8080).expect("replace tcp");
+        assert_eq!(
+            info(ct_port).unwrap().published_ports.len(),
+            2,
+            "re-publish at :8080 must replace, not add a third rule",
+        );
+
+        // Before run, no NAT rule exists yet.
+        assert!(
+            crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080).is_none(),
+            "forwards must not be installed until run()",
+        );
+
+        let opts = crate::proc::spawn::SpawnOptions::new("port-init");
+        let pid = run(ct_port, HELLO_ELF, &opts).expect("run port container");
+
+        // After run, the forwards are live, targeting the container IP.
+        let tcp = crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080)
+            .expect("tcp forward installed");
+        assert_eq!(tcp.container_port, 8080);
+        assert_eq!(
+            tcp.container_ip,
+            crate::net::interface::Ipv4Addr::new(10, 7, 0, 9),
+        );
+        let udp = crate::net::nat::lookup_port_forward(NatProto::Udp, 5353)
+            .expect("udp forward installed");
+        assert_eq!(udp.container_port, 53);
+        // Publishing on a running container is rejected.
+        assert!(add_port_publish(ct_port, NatProto::Tcp, 9090, 90).is_err());
+
+        // Tear down the init process (the thread record persists until
+        // destroy, so this is safe even if the short-lived init already
+        // exited; tolerate a missing thread defensively).
+        if let Some(init_task) = crate::proc::pcb::get_threads(pid)
+            .and_then(|t| t.first().copied())
+        {
+            let _ = remove_process_task(ct_port, pid, init_task);
+        }
+        crate::proc::thread::kill_process_threads(pid);
+        crate::proc::pcb::destroy(pid);
+
+        // stop() flushes the forwards (a stopped container publishes nothing).
+        stop(ct_port).expect("stop port container");
+        assert!(
+            crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080).is_none(),
+            "stop() must flush published-port forwards",
+        );
+        assert!(
+            crate::net::nat::lookup_port_forward(NatProto::Udp, 5353).is_none(),
+            "stop() must flush all of the container's forwards",
+        );
+
+        delete(ct_port).expect("delete port container");
+    }
+    serial_println!("[container]   Published ports (-p) for container: OK");
+
     // Cleanup.
     stop(ct2).ok(); // may already be stopped
     stop(ct3).ok();
@@ -1543,5 +1780,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (19 tests)");
+    serial_println!("[container] Self-test PASSED (20 tests)");
 }

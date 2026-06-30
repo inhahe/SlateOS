@@ -1505,6 +1505,43 @@ pub fn pids(id: ContainerId) -> Option<Vec<u64>> {
     })
 }
 
+/// Update a container's live resource limits (Docker `update`).
+///
+/// Applies new CPU and/or memory limits to the container's cgroup without
+/// recreating it, affecting the container's running processes immediately.
+/// Each limit is optional — `None` leaves it unchanged:
+///
+/// - `cpu_percent`: CPU quota as a percentage of one core (`50` = half a
+///   core, `200` = two cores). `Some(0)` sets *unlimited*.
+/// - `mem_frames`: memory limit in 16 KiB frames. `Some(0)` sets
+///   *unlimited*.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive,
+///   or if the underlying cgroup update fails.
+pub fn update_resources(
+    id: ContainerId,
+    cpu_percent: Option<u64>,
+    mem_frames: Option<u64>,
+) -> KernelResult<()> {
+    let cgroup_id = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].cgroup_id)
+    })?;
+
+    if let Some(pct) = cpu_percent {
+        crate::cgroup::set_cpu_limit(cgroup_id, crate::cgroup::CpuLimit::from_percent(pct))?;
+    }
+    if let Some(frames) = mem_frames {
+        crate::cgroup::set_mem_limit(cgroup_id, crate::cgroup::MemLimit::frames(frames))?;
+    }
+    Ok(())
+}
+
 /// Check if a container exists.
 #[must_use]
 pub fn exists(id: ContainerId) -> bool {
@@ -2281,6 +2318,45 @@ pub fn self_test() {
     }
     serial_println!("[container]   process listing (pids/top): OK");
 
+    // Test 19g: update_resources() applies new CPU/memory limits to a live
+    // container's cgroup (Docker `update`).  We read the limits back through
+    // cgroup::stats to confirm they took effect, and verify that a `None`
+    // leaves the corresponding limit untouched.
+    {
+        let ct_upd = create(&ContainerConfig::new("test-update-ct")).expect("create");
+        let cg = info(ct_upd).unwrap().cgroup_id;
+
+        // Apply both limits.
+        update_resources(ct_upd, Some(50), Some(128)).expect("update both");
+        let s = crate::cgroup::stats(cg).expect("cgroup stats");
+        assert_eq!(s.cpu_quota, 50, "cpu quota must update to 50%");
+        assert_eq!(s.mem_limit, 128, "mem limit must update to 128 frames");
+
+        // Update only CPU (mem unchanged).
+        update_resources(ct_upd, Some(150), None).expect("update cpu only");
+        let s = crate::cgroup::stats(cg).expect("cgroup stats");
+        assert_eq!(s.cpu_quota, 150, "cpu quota must update to 150%");
+        assert_eq!(s.mem_limit, 128, "mem limit must remain 128 frames");
+
+        // Update only memory (cpu unchanged).
+        update_resources(ct_upd, None, Some(256)).expect("update mem only");
+        let s = crate::cgroup::stats(cg).expect("cgroup stats");
+        assert_eq!(s.cpu_quota, 150, "cpu quota must remain 150%");
+        assert_eq!(s.mem_limit, 256, "mem limit must update to 256 frames");
+
+        // Some(0) means unlimited.
+        update_resources(ct_upd, Some(0), Some(0)).expect("update unlimited");
+        let s = crate::cgroup::stats(cg).expect("cgroup stats");
+        assert_eq!(s.cpu_quota, 0, "cpu quota Some(0) -> unlimited");
+        assert_eq!(s.mem_limit, 0, "mem limit Some(0) -> unlimited");
+
+        // Invalid id is rejected.
+        assert!(update_resources(MAX_CONTAINERS as ContainerId, Some(1), None).is_err());
+
+        delete(ct_upd).expect("delete update container");
+    }
+    serial_println!("[container]   live resource update (update_resources): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2380,5 +2456,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (25 tests)");
+    serial_println!("[container] Self-test PASSED (26 tests)");
 }

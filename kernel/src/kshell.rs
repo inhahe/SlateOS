@@ -67434,6 +67434,99 @@ fn cmd_container(args: &str) {
                 );
             }
         }
+        "update" => {
+            // container update <id> [--cpus N[.M]] [--memory SIZE]
+            //
+            // Docker `update`: change a running container's CPU and/or memory
+            // limits in place (applied to its cgroup, affecting live
+            // processes). A value of 0 (`--cpus 0` / `--memory 0`) sets the
+            // corresponding limit to unlimited. At least one limit is required.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container update <id> [--cpus N] [--memory SIZE]");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let mut cpu_percent: Option<u64> = None;
+            let mut mem_frames: Option<u64> = None;
+            let mut i = 2;
+            while let Some(&arg) = parts.get(i) {
+                match arg {
+                    "--cpus" => {
+                        let Some(&val) = parts.get(i + 1) else {
+                            crate::console_println!("--cpus requires a value");
+                            return;
+                        };
+                        // "0" explicitly means unlimited; parse_cpus_to_percent
+                        // returns None for 0, so treat it specially.
+                        if val == "0" {
+                            cpu_percent = Some(0);
+                        } else {
+                            match parse_cpus_to_percent(val) {
+                                Some(p) => cpu_percent = Some(p),
+                                None => {
+                                    crate::console_println!("Invalid --cpus value: {}", val);
+                                    return;
+                                }
+                            }
+                        }
+                        i += 2;
+                    }
+                    "--memory" | "-m" => {
+                        let Some(&val) = parts.get(i + 1) else {
+                            crate::console_println!("--memory requires a value");
+                            return;
+                        };
+                        if val == "0" {
+                            mem_frames = Some(0);
+                        } else {
+                            match parse_mem_size_to_frames(val) {
+                                Some(f) => mem_frames = Some(f),
+                                None => {
+                                    crate::console_println!("Invalid --memory value: {}", val);
+                                    return;
+                                }
+                            }
+                        }
+                        i += 2;
+                    }
+                    other => {
+                        crate::console_println!("Unknown option: {}", other);
+                        return;
+                    }
+                }
+            }
+            if cpu_percent.is_none() && mem_frames.is_none() {
+                crate::console_println!(
+                    "Usage: container update <id> [--cpus N] [--memory SIZE] (at least one)"
+                );
+                return;
+            }
+            match container::update_resources(id, cpu_percent, mem_frames) {
+                Ok(()) => {
+                    if let Some(p) = cpu_percent {
+                        if p == 0 {
+                            crate::console_println!("Container {} CPU: unlimited", id);
+                        } else {
+                            crate::console_println!("Container {} CPU: {}%", id, p);
+                        }
+                    }
+                    if let Some(f) = mem_frames {
+                        if f == 0 {
+                            crate::console_println!("Container {} memory: unlimited", id);
+                        } else {
+                            crate::console_println!(
+                                "Container {} memory: {} frames ({} MiB)",
+                                id, f, f / 64
+                            );
+                        }
+                    }
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67581,7 +67674,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|stats|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|stats|update|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67593,6 +67686,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
+            crate::console_println!("  container update ID [--cpus N] [--memory SIZE] — change live CPU/memory limits");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");

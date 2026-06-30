@@ -208,6 +208,14 @@ struct Container {
     /// stopped (Docker semantics: the container lives as long as its
     /// init process).
     init_pid: Option<u64>,
+    /// Filesystem root (chroot) for processes in this container.
+    ///
+    /// An absolute host path (e.g. the container's overlay rootfs
+    /// `/containers/<id>/rootfs`) that every process launched by [`run`] is
+    /// jailed to via [`crate::ipc::namespace::set_root`].  Empty string
+    /// means "no jail" — processes see the host root (used by tests and by
+    /// containers whose rootfs has not been configured).
+    root_path: String,
 }
 
 impl Container {
@@ -223,6 +231,7 @@ impl Container {
             veth_pair: None,
             pids: Vec::new(),
             init_pid: None,
+            root_path: String::new(),
         }
     }
 }
@@ -256,6 +265,9 @@ pub struct ContainerInfo {
     /// The container's init process (global PID), or `None` if the
     /// container has not been run yet.
     pub init_pid: Option<u64>,
+    /// Filesystem root (chroot) for the container, or empty if processes
+    /// see the host root (no rootfs configured).
+    pub root_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +686,7 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 /// [`run`] always uses this entry point with both ids from the spawn
 /// result.
 pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id) = with_table(|table| {
+    let (pid_ns, user_ns, net_ns, cgroup_id, root_path) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -685,6 +697,7 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
             table.containers[idx].user_ns,
             table.containers[idx].net_ns,
             table.containers[idx].cgroup_id,
+            table.containers[idx].root_path.clone(),
         ))
     })?;
 
@@ -705,6 +718,15 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
     // Set the task's net_ns field so syscall handlers automatically use
     // this container's network namespace for socket operations.
     let _ = crate::sched::set_task_net_ns(task_id, net_ns);
+
+    // Jail the process to the container's filesystem root, if one is
+    // configured.  The jail is keyed on the *global PID* (not the task id):
+    // VFS path resolution looks the root up via the current task's owning
+    // process, and child threads share the process, so they inherit the
+    // jail automatically.  An empty `root_path` means no jail.
+    if !root_path.is_empty() {
+        let _ = crate::ipc::namespace::set_root(pid, &root_path);
+    }
 
     Ok(())
 }
@@ -753,6 +775,11 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     // Reset the task's net_ns to root so any remaining socket operations
     // revert to the host namespace.
     let _ = crate::sched::set_task_net_ns(task_id, crate::netns::ROOT_NS);
+
+    // Drop the filesystem-root jail (keyed on the global PID), symmetric
+    // with the `set_root` in `add_process_task`.  Idempotent if the
+    // container had no rootfs configured.
+    crate::ipc::namespace::clear_root(pid);
 
     Ok(())
 }
@@ -841,6 +868,43 @@ pub fn run(
     Ok(result.pid)
 }
 
+/// Set a container's filesystem root (rootfs) before it is run.
+///
+/// `root` is an absolute host path (e.g. the container's extracted/overlay
+/// rootfs `/containers/<id>/rootfs`).  Every process subsequently launched
+/// by [`run`] (and registered via [`add_process_task`]) is jailed to this
+/// root via the per-process chroot in [`crate::ipc::namespace`], so the
+/// container's processes resolve `/bin/sh`, `/lib/...`, etc. against their
+/// own rootfs rather than the host filesystem.
+///
+/// Must be called while the container is still in
+/// [`Created`](ContainerState::Created) state — changing the root of a
+/// already-running container would not retroactively re-jail its live
+/// processes, so it is rejected.  Passing an empty string clears the root
+/// (processes see the host filesystem).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is
+///   not in `Created` state, or `root` is non-empty but not an absolute
+///   path.
+pub fn set_root_path(id: ContainerId, root: &str) -> KernelResult<()> {
+    if !root.is_empty() && !root.starts_with('/') {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].root_path = String::from(root);
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API: queries
 // ---------------------------------------------------------------------------
@@ -865,6 +929,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             veth_pair: ct.veth_pair,
             nr_procs: ct.pids.len(),
             init_pid: ct.init_pid,
+            root_path: ct.root_path.clone(),
         })
     })
 }
@@ -1178,6 +1243,64 @@ pub fn self_test() {
     }
     serial_println!("[container]   Run init process + cgroup billing: OK");
 
+    // Test 18: a container with a configured rootfs jails its init process
+    // to that root — the init PID's path resolution is re-anchored under
+    // the rootfs and cannot escape it.
+    {
+        static HELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        let jail_cfg = ContainerConfig::new("test-jail-ct").memory(4096);
+        let ct_jail = create(&jail_cfg).expect("create jail container");
+
+        // Configuring the rootfs is only allowed before run.
+        set_root_path(ct_jail, "/containers/test-jail/rootfs")
+            .expect("set rootfs");
+        assert_eq!(
+            info(ct_jail).unwrap().root_path,
+            "/containers/test-jail/rootfs",
+        );
+        // Non-absolute rootfs is rejected.
+        assert!(set_root_path(ct_jail, "relative").is_err());
+
+        let opts = crate::proc::spawn::SpawnOptions::new("jail-init");
+        let pid = run(ct_jail, HELLO_ELF, &opts).expect("run jailed init");
+
+        // The init process resolves paths inside its rootfs.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/bin/sh")
+                .expect("resolve jailed path"),
+            "/containers/test-jail/rootfs/bin/sh",
+        );
+        // `..` cannot escape the jail.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(pid, "/../../etc/passwd")
+                .expect("resolve escape attempt"),
+            "/containers/test-jail/rootfs/etc/passwd",
+        );
+
+        // Changing the rootfs of a running container is rejected.
+        assert!(set_root_path(ct_jail, "/other").is_err());
+
+        // Tear down: remove_process_task must also drop the jail.
+        let init_task = crate::proc::pcb::get_threads(pid)
+            .and_then(|t| t.first().copied())
+            .expect("jailed init has a thread");
+        remove_process_task(ct_jail, pid, init_task)
+            .expect("detach jailed init");
+        assert!(
+            crate::ipc::namespace::get_root(pid).is_none(),
+            "jail must be cleared after detaching the init process",
+        );
+        crate::proc::thread::kill_process_threads(pid);
+        crate::proc::pcb::destroy(pid);
+
+        stop(ct_jail).expect("stop jail container");
+        delete(ct_jail).expect("delete jail container");
+    }
+    serial_println!("[container]   Rootfs jail (chroot) for init process: OK");
+
     // Cleanup.
     stop(ct2).ok(); // may already be stopped
     stop(ct3).ok();
@@ -1187,5 +1310,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (17 tests)");
+    serial_println!("[container] Self-test PASSED (18 tests)");
 }

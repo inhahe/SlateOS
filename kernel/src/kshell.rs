@@ -67183,6 +67183,11 @@ fn cmd_container(args: &str) {
                 Some(pid) => crate::console_println!("  Init PID:   {}", pid),
                 None => crate::console_println!("  Init PID:   (not run)"),
             }
+            if ci.root_path.is_empty() {
+                crate::console_println!("  Rootfs:     (host root)");
+            } else {
+                crate::console_println!("  Rootfs:     {}", ci.root_path);
+            }
             crate::console_println!("  PID NS:     {}", ci.pid_ns);
             crate::console_println!("  User NS:    {}", ci.user_ns);
             crate::console_println!("  Net NS:     {}", ci.net_ns);
@@ -67212,19 +67217,47 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "rootfs" => {
+            // container rootfs <id> <host-path>
+            //
+            // Configures the container's filesystem root (chroot) before it
+            // is run.  Every process launched by `container run` is jailed
+            // to this host subtree: it resolves `/bin/sh`, `/lib/...`, etc.
+            // against the rootfs, and `..` cannot escape it.  Must be set
+            // while the container is still in the Created state.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container rootfs <id> <host-path>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(&path) = parts.get(2) else {
+                crate::console_println!("Usage: container rootfs <id> <host-path>");
+                return;
+            };
+            match container::set_root_path(id, path) {
+                Ok(()) => crate::console_println!(
+                    "Container {} rootfs set to '{}'", id, path
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         "run" => {
             // container run <id> <elf-path> [args...]
             //
             // Launches a real init process inside an existing (Created)
             // container: loads the ELF from the host VFS, binds the process
             // to the container's cgroup (Q14 billing) + PID/user/network
-            // namespaces, and transitions the container Created → Running.
+            // namespaces, jails it to the container's rootfs (if one was set
+            // via `container rootfs`), and transitions Created → Running.
             //
-            // NOTE: the ELF path is resolved against the *host* filesystem —
-            // the per-container root pivot (chroot/pivot_root) is not yet
-            // wired (known-issues: container rootfs isolation).  Give an
-            // absolute host path to the binary you want as the container's
-            // init process.
+            // NOTE: the ELF path passed here is resolved against the *host*
+            // filesystem (the kernel reads the image before the jail takes
+            // effect).  Once the process is running, its own syscalls
+            // resolve against the container rootfs.  Give an absolute host
+            // path to the binary you want as the container's init process.
             let Some(id_str) = parts.get(1) else {
                 crate::console_println!("Usage: container run <id> <elf-path> [args...]");
                 return;
@@ -67331,10 +67364,11 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|run|start|stop|exec|info|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|test]");
             crate::console_println!("  container                                — list containers");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
+            crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");

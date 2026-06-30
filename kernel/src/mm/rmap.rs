@@ -414,9 +414,23 @@ pub fn stats() -> RmapStats {
 pub fn self_test() {
     serial_println!("[rmap] Running self-test...");
 
-    // Use fake addresses for testing (not real frames/PML4s).
-    let frame1: u64 = 0x0010_0000; // 1 MiB
-    let frame2: u64 = 0x0020_0000; // 2 MiB
+    // Use fake frame addresses for testing (not real frames/PML4s).
+    //
+    // CRITICAL: the rmap is a GLOBAL table keyed by physical frame address,
+    // and this self-test runs late in boot — *after* heavy CoW/fork activity
+    // (the Path-Z ring-3 toolchain tests) has populated the table with many
+    // real frames.  If the test reused a low address like 1 MiB / 2 MiB, a
+    // *real* user frame at that exact physical address could already have a
+    // mapper registered, so `add(frame, ...)` would append a *second* mapper
+    // and `is_private(frame)` would be false → spurious assertion panic
+    // (observed: `assertion failed: is_private(frame2)` at this line).  To stay
+    // collision-proof regardless of allocation timing, the test frames must sit
+    // far above any installed physical RAM (machines here have at most a few
+    // GiB), so the global table can never hold a pre-existing entry for them.
+    // 15 TiB is comfortably beyond any real frame while remaining a valid u64
+    // hash key (the rmap does not validate the physical-address width).
+    let frame1: u64 = 0x0000_0F00_0000_0000; // ~15 TiB, impossible as real RAM
+    let frame2: u64 = 0x0000_0F00_0000_4000; // frame1 + 16 KiB
     let pml4_a: u64 = 0x00A0_0000;
     let pml4_b: u64 = 0x00B0_0000;
     let virt1: u64 = 0x0000_4000_0000_0000; // User space
@@ -459,8 +473,10 @@ pub fn self_test() {
     assert_eq!(result.filled, 0);
     serial_println!("[rmap]   Remove last mapper (entry freed): OK");
 
-    // Test 6: Frame not tracked.
-    let result = lookup(0xDEAD_0000, &mut buf);
+    // Test 6: Frame not tracked.  Use another impossible-as-real address (see
+    // the frame1/frame2 note above) so a real frame can never make this lookup
+    // return a nonzero count.
+    let result = lookup(0x0000_0F00_0001_0000, &mut buf);
     assert_eq!(result.count, 0);
     assert!(result.is_complete);
     serial_println!("[rmap]   Lookup untracked frame: OK");

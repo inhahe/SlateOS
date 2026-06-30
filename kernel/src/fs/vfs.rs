@@ -26,6 +26,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -854,7 +855,15 @@ struct MountPoint {
     /// Path where this filesystem is mounted (e.g., `"/"`).
     path: String,
     /// The filesystem implementation.
-    fs: Box<dyn FileSystem>,
+    ///
+    /// Held behind a *per-mount* lock (not the global VFS lock) so that
+    /// filesystem I/O does not serialize on a single global mutex and,
+    /// crucially, so stacked filesystems (e.g. the overlay) can re-enter the
+    /// VFS to read their backing layers without deadlocking: the global VFS
+    /// lock is released the moment the mount table lookup is done, and the
+    /// per-mount lock taken here is a *different* lock from the one guarding
+    /// any lower-layer mount.  See design-decisions §43.
+    fs: Arc<Mutex<Box<dyn FileSystem>>>,
     /// Mount options (read-only, noatime, etc.).
     options: MountOptions,
     /// Stable, never-reused id for this mounted filesystem instance.
@@ -1319,7 +1328,7 @@ impl Vfs {
 
         vfs.mounts.push(MountPoint {
             path: String::from(mount_path),
-            fs,
+            fs: Arc::new(Mutex::new(fs)),
             options,
             // Stable, never-reused id for this mount instance (see FileId).
             fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
@@ -1370,7 +1379,7 @@ impl Vfs {
         }
 
         // Sync before removing.
-        if let Err(e) = vfs.mounts[idx].fs.sync() {
+        if let Err(e) = vfs.mounts[idx].fs.lock().sync() {
             crate::serial_println!(
                 "[vfs] WARNING: sync failed during unmount of '{}': {:?}",
                 mount_path, e
@@ -1382,7 +1391,7 @@ impl Vfs {
         let removed = vfs.mounts.remove(idx);
         crate::serial_println!(
             "[vfs] Unmounted {} from '{}'",
-            removed.fs.fs_type(),
+            removed.fs.lock().fs_type(),
             mount_path
         );
 
@@ -1556,9 +1565,8 @@ impl Vfs {
             // Only check for symlinks if we should follow at this position.
             if !is_last || follow_last {
                 let entry_type = {
-                    let mut vfs = VFS.lock();
-                    match find_mount(&mut vfs, &resolved) {
-                        Ok((mp, relative)) => match mp.fs.lstat(relative) {
+                    match resolve_mount(&resolved) {
+                        Ok((fs, _id, _opts, relative)) => match fs.lock().lstat(&relative) {
                             Ok(e) => Some(e.entry_type),
                             // Last component may not exist yet (creating a
                             // new file/dir/symlink).
@@ -1573,9 +1581,8 @@ impl Vfs {
                 if entry_type == Some(EntryType::Symlink) {
                     // Read the symlink target (separate lock acquisition).
                     let target = {
-                        let mut vfs = VFS.lock();
-                        let (mp, relative) = find_mount(&mut vfs, &resolved)?;
-                        mp.fs.readlink(relative)?
+                        let (fs, _id, _opts, relative) = resolve_mount(&resolved)?;
+                        fs.lock().readlink(&relative)?
                     }; // lock released
 
                     // Build new path: symlink target + remaining components.
@@ -1623,15 +1630,17 @@ impl Vfs {
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let mut vfs = VFS.lock();
 
         // Collect mount-point names that are direct children of `path`.
         // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
         // Nested mounts like "/mnt/usb" are NOT direct children of "/".
-        let submount_names: Vec<String> = Self::submount_children(&vfs, &path);
+        let submount_names: Vec<String> = {
+            let vfs = VFS.lock();
+            Self::submount_children(&vfs, &path)
+        };
 
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        let mut entries = mp.fs.readdir(relative)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        let mut entries = fs.lock().readdir(&relative)?;
 
         // Inject submount directories that the underlying FS doesn't know about.
         for name in submount_names {
@@ -1661,12 +1670,14 @@ impl Vfs {
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
 
-        let submount_names: Vec<String> = Self::submount_children(&vfs, &path);
+        let submount_names: Vec<String> = {
+            let vfs = VFS.lock();
+            Self::submount_children(&vfs, &path)
+        };
 
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        let mut entries = mp.fs.readdir(relative)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        let mut entries = fs.lock().readdir(&relative)?;
 
         // Inject submount directories.
         for name in submount_names {
@@ -1714,13 +1725,13 @@ impl Vfs {
     /// the per-filesystem `read_file` unchanged.
     fn read_file_routed(path: &str) -> KernelResult<Vec<u8>> {
         let (file_id, size) = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
-            let meta = mp.fs.metadata(relative)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+            let mut guard = fs.lock();
+            let meta = guard.metadata(&relative)?;
             if meta.entry_type != EntryType::File || meta.ino == 0 {
-                return mp.fs.read_file(relative);
+                return guard.read_file(&relative);
             }
-            (FileId { fs_id: mp.fs_id, ino: meta.ino }, meta.size)
+            (FileId { fs_id, ino: meta.ino }, meta.size)
         };
         if size == 0 {
             return Ok(Vec::new());
@@ -1737,9 +1748,8 @@ impl Vfs {
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.stat(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().stat(&relative)
     }
 
     /// Write data to a file (create or overwrite).
@@ -1759,12 +1769,12 @@ impl Vfs {
         // write is acceptable — version history is best-effort.
         super::history::try_auto_record(&path);
         let cache_inval = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.write_file(relative, data)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let mut guard = fs.lock();
+            guard.write_file(&relative, data)?;
             // Coherence: a full overwrite replaces the file's contents — drop
             // any cached pages so mappers see the new bytes.
-            cache_identity(mp, relative)
+            cache_identity(&mut guard, fs_id, &relative)
         };
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
@@ -1945,14 +1955,14 @@ impl Vfs {
         // Allows `fhist restore` to recover accidentally deleted files.
         super::history::try_auto_record(&path);
         let cache_inval = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let mut guard = fs.lock();
             // Capture identity *before* removal — the inode (and its number)
             // is gone afterward, and that number may be reused by a future
             // file.  Dropping the cached pages now prevents a later file that
             // reuses this inode from being served the removed file's bytes.
-            let id = cache_identity(mp, relative);
-            mp.fs.remove(relative)?;
+            let id = cache_identity(&mut guard, fs_id, &relative);
+            guard.remove(&relative)?;
             id
         };
         if let Some((fs_id, ino)) = cache_inval {
@@ -1986,9 +1996,8 @@ impl Vfs {
         // Quota: check inode creation limit.
         enforce_quota_create(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.mkdir(relative)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().mkdir(&relative)?;
         }
         // Charge quota for new inode.
         super::quota::charge_inode(0, 0);
@@ -2058,9 +2067,8 @@ impl Vfs {
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.rmdir(relative)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().rmdir(&relative)?;
         }
         // Release inode quota for removed directory.
         super::quota::release_inode(0, 0);
@@ -2116,15 +2124,15 @@ impl Vfs {
 
         // Resolve identity, size, and regular-file-ness, then drop the VFS lock.
         let (file_id, size) = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
-            let meta = mp.fs.metadata(relative)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+            let mut guard = fs.lock();
+            let meta = guard.metadata(&relative)?;
             // Only stable-identity regular files are page-cacheable; anything
             // else reads straight from the filesystem (current behaviour).
             if meta.entry_type != EntryType::File || meta.ino == 0 {
-                return mp.fs.read_at(relative, offset, len);
+                return guard.read_at(&relative, offset, len);
             }
-            (FileId { fs_id: mp.fs_id, ino: meta.ino }, meta.size)
+            (FileId { fs_id, ino: meta.ino }, meta.size)
         };
 
         // Clamp the request to the bytes that actually exist (the page cache
@@ -2156,9 +2164,8 @@ impl Vfs {
     /// already dropped before this runs, so the cache and VFS locks never nest.
     fn fill_file_page(path: &str, page_off: u64, page_buf: &mut [u8]) -> KernelResult<()> {
         let data = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
-            mp.fs.read_at(relative, page_off, page_buf.len())?
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
+            fs.lock().read_at(&relative, page_off, page_buf.len())?
         };
         let n = data.len().min(page_buf.len());
         if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
@@ -2186,9 +2193,8 @@ impl Vfs {
     pub fn read_at_uncached(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.read_at(relative, offset, len)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().read_at(&relative, offset, len)
     }
 
     /// Write bytes at a specific offset within a file.
@@ -2200,12 +2206,12 @@ impl Vfs {
         super::intercept::pre_write(&path)?;
         enforce_quota_write(&path, data.len() as u64)?;
         let cache_inval = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.write_at(relative, offset, data)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let mut guard = fs.lock();
+            guard.write_at(&relative, offset, data)?;
             // Coherence: drop any cached pages of this file so a later mapper
             // (or re-fault) reads the post-write bytes, not stale cached ones.
-            cache_identity(mp, relative)
+            cache_identity(&mut guard, fs_id, &relative)
         };
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
@@ -2237,12 +2243,12 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         let cache_inval = {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.truncate(relative, size)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let mut guard = fs.lock();
+            guard.truncate(&relative, size)?;
             // Coherence: truncation changes (or zeroes the tail of) the file's
             // pages — drop cached copies.
-            cache_identity(mp, relative)
+            cache_identity(&mut guard, fs_id, &relative)
         };
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
@@ -2261,9 +2267,8 @@ impl Vfs {
     pub fn fallocate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.fallocate(relative, size)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().fallocate(&relative, size)
     }
 
     /// Rename or move a file or directory.
@@ -2298,27 +2303,29 @@ impl Vfs {
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_rename(&from, &to)?;
 
-        // Check if both paths are on the same mount point.
-        let same_mount = {
-            let mut vfs = VFS.lock();
-            let (mp_from, _) = find_mount(&mut vfs, &from)?;
-            let from_path = mp_from.path.clone();
-            let (mp_to, _) = find_mount(&mut vfs, &to)?;
-            mp_to.path == from_path
+        // Check if both paths are on the same mount point.  Two paths share a
+        // mount iff `resolve_mount` hands back the *same* per-mount filesystem
+        // handle (`Arc::ptr_eq`), so we compare the handles directly.
+        let (fs_from, _id_from, _opts_from, rel_from) = resolve_mount(&from)?;
+        let (fs_to, fs_id_to, _opts_to, rel_to) = match resolve_mount(&to) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
         };
+        let same_mount = Arc::ptr_eq(&fs_from, &fs_to);
 
         if same_mount {
-            // Same mount — delegate to the filesystem's native rename.
+            // Same mount — delegate to the filesystem's native rename.  Both
+            // relative paths live on the one filesystem, so a single per-mount
+            // lock keeps the no-replace check and the rename atomic w.r.t. that
+            // filesystem (the old global-lock guarantee, now scoped per mount).
             let dest_inval = {
-                let mut vfs = VFS.lock();
-                let (_mp_from, rel_from) = find_mount(&mut vfs, &from)?;
-                let rel_from_owned = String::from(rel_from);
-                let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
+                let mut guard = fs_to.lock();
                 if noreplace {
-                    // Atomic RENAME_NOREPLACE: the destination-existence check and
-                    // the rename below execute under the same held `VFS.lock()`,
-                    // closing the TOCTOU window a separate pre-check would leave.
-                    match mp_to.fs.stat(rel_to) {
+                    // Atomic RENAME_NOREPLACE: the destination-existence check
+                    // and the rename below execute under the same held per-mount
+                    // lock, closing the TOCTOU window a separate pre-check would
+                    // leave.
+                    match guard.stat(&rel_to) {
                         Ok(_) => return Err(KernelError::AlreadyExists),
                         Err(KernelError::NotFound) => {}
                         Err(e) => return Err(e),
@@ -2329,8 +2336,8 @@ impl Vfs {
                 // before the rename so we can drop its cached pages.  The
                 // source's identity is unchanged (same inode, new name), so its
                 // cached pages stay valid.
-                let id = cache_identity(mp_to, rel_to);
-                mp_to.fs.rename(&rel_from_owned, rel_to)?;
+                let id = cache_identity(&mut guard, fs_id_to, &rel_to);
+                guard.rename(&rel_from, &rel_to)?;
                 id
             };
             if let Some((fs_id, ino)) = dest_inval {
@@ -2410,19 +2417,16 @@ impl Vfs {
         super::intercept::pre_rename(&a, &b)?;
 
         {
-            let mut vfs = VFS.lock();
-            let (mp_a, rel_a) = find_mount(&mut vfs, &a)?;
-            let a_mount = mp_a.path.clone();
-            let rel_a_owned = String::from(rel_a);
-            let (mp_b, rel_b) = find_mount(&mut vfs, &b)?;
-            if mp_b.path != a_mount {
+            let (fs_a, _id_a, _opts_a, rel_a) = resolve_mount(&a)?;
+            let (fs_b, _id_b, _opts_b, rel_b) = resolve_mount(&b)?;
+            if !Arc::ptr_eq(&fs_a, &fs_b) {
                 // Cross-mount exchange: no atomic cross-FS swap exists.
                 // Linux returns EXDEV here (not EINVAL); surface it as
                 // CrossDevice so the syscall layer maps it correctly.
                 return Err(KernelError::CrossDevice);
             }
-            // Same FS — perform the atomic swap under the held lock.
-            mp_b.fs.rename_exchange(&rel_a_owned, rel_b)?;
+            // Same FS — perform the atomic swap under the per-mount lock.
+            fs_b.lock().rename_exchange(&rel_a, &rel_b)?;
         }
 
         // Both entries moved: invalidate caches and notify for each.
@@ -2450,7 +2454,7 @@ impl Vfs {
         let vfs = VFS.lock();
         vfs.mounts
             .iter()
-            .map(|mp| (mp.path.clone(), String::from(mp.fs.fs_type())))
+            .map(|mp| (mp.path.clone(), String::from(mp.fs.lock().fs_type())))
             .collect()
     }
 
@@ -2459,7 +2463,7 @@ impl Vfs {
         let vfs = VFS.lock();
         vfs.mounts
             .iter()
-            .map(|mp| (mp.path.clone(), String::from(mp.fs.fs_type()), mp.options))
+            .map(|mp| (mp.path.clone(), String::from(mp.fs.lock().fs_type()), mp.options))
             .collect()
     }
 
@@ -2536,9 +2540,8 @@ impl Vfs {
     /// Get rich metadata for a path.
     pub fn metadata(path: &str) -> KernelResult<FileMeta> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.metadata(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().metadata(&relative)
     }
 
     /// Resolve `path` to its stable system-wide [`FileId`], or `None` if the
@@ -2564,10 +2567,8 @@ impl Vfs {
     /// resolved* object that lacks a stable inode yields `Ok(None)`.
     pub fn file_identity(path: &str) -> KernelResult<Option<FileId>> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        let fs_id = mp.fs_id;
-        let ino = mp.fs.metadata(relative)?.ino;
+        let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+        let ino = fs.lock().metadata(&relative)?.ino;
         // ino == 0 ⇒ filesystem has no stable per-object identity ⇒ not
         // cacheable.  Returning None (not an error) lets the caller degrade
         // gracefully to the per-mapping read path.
@@ -2591,9 +2592,8 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.set_attributes(relative, attrs)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_attributes(&relative, attrs)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2622,9 +2622,8 @@ impl Vfs {
             (uid, gid)
         };
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.set_owner(relative, uid, gid)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_owner(&relative, uid, gid)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2636,9 +2635,8 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.set_permissions(relative, permissions)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_permissions(&relative, permissions)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2652,18 +2650,16 @@ impl Vfs {
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.set_times(relative, accessed_ns, modified_ns)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().set_times(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
 
     /// Get an extended attribute value.
     pub fn get_xattr(path: &str, key: &str) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.get_xattr(relative, key)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().get_xattr(&relative, key)
     }
 
     /// Set an extended attribute.
@@ -2671,9 +2667,8 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.set_xattr(relative, key, value)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_xattr(&relative, key, value)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2685,9 +2680,8 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.remove_xattr(relative, key)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().remove_xattr(&relative, key)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -2697,9 +2691,8 @@ impl Vfs {
     /// List all extended attribute keys.
     pub fn list_xattrs(path: &str) -> KernelResult<Vec<String>> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.list_xattrs(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().list_xattrs(&relative)
     }
 
     // --- Symlink VFS methods ---
@@ -2720,9 +2713,8 @@ impl Vfs {
         // Quota: creating a symlink consumes an inode.
         enforce_quota_create(&path)?;
         {
-            let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, &path)?;
-            mp.fs.symlink(relative, target)?;
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().symlink(&relative, target)?;
         }
         // Charge inode quota for new symlink.
         super::quota::charge_inode(0, 0);
@@ -2761,69 +2753,16 @@ impl Vfs {
         enforce_quota_create(&new_path)?;
 
         {
-            let mut vfs = VFS.lock();
-            // Both paths must be on the same mount.
-            let mount_idx_existing = {
-                let mut best = None;
-                let mut best_len = 0;
-                for (i, mp) in vfs.mounts.iter().enumerate() {
-                    let prefix = &mp.path;
-                    if existing.starts_with(prefix.as_str())
-                        && (existing.len() == prefix.len()
-                            || existing.as_bytes().get(prefix.len()) == Some(&b'/')
-                            || prefix == "/")
-                    {
-                        if prefix.len() > best_len {
-                            best = Some(i);
-                            best_len = prefix.len();
-                        }
-                    }
-                }
-                best.ok_or(KernelError::NotFound)?
-            };
-            let mount_idx_new = {
-                let mut best = None;
-                let mut best_len = 0;
-                for (i, mp) in vfs.mounts.iter().enumerate() {
-                    let prefix = &mp.path;
-                    if new_path.starts_with(prefix.as_str())
-                        && (new_path.len() == prefix.len()
-                            || new_path.as_bytes().get(prefix.len()) == Some(&b'/')
-                            || prefix == "/")
-                    {
-                        if prefix.len() > best_len {
-                            best = Some(i);
-                            best_len = prefix.len();
-                        }
-                    }
-                }
-                best.ok_or(KernelError::NotFound)?
-            };
-
-            if mount_idx_existing != mount_idx_new {
+            // Both paths must be on the same mount — they share one iff
+            // `resolve_mount` hands back the same per-mount handle.  Resolving
+            // each also yields the mount-relative paths, replacing the manual
+            // longest-prefix scan the global-lock version performed inline.
+            let (fs_existing, _id_e, _opts_e, rel_existing) = resolve_mount(&existing)?;
+            let (fs_new, _id_n, _opts_n, rel_new) = resolve_mount(&new_path)?;
+            if !Arc::ptr_eq(&fs_existing, &fs_new) {
                 return Err(KernelError::InvalidArgument); // Cross-mount hard link.
             }
-
-            let mp = &mut vfs.mounts[mount_idx_existing];
-            let mount_prefix = &mp.path;
-
-            // Strip mount prefix to get filesystem-relative paths.
-            let rel_existing = if mount_prefix == "/" {
-                &existing[..]
-            } else if existing.len() > mount_prefix.len() {
-                &existing[mount_prefix.len()..]
-            } else {
-                "/"
-            };
-            let rel_new = if mount_prefix == "/" {
-                &new_path[..]
-            } else if new_path.len() > mount_prefix.len() {
-                &new_path[mount_prefix.len()..]
-            } else {
-                "/"
-            };
-
-            mp.fs.link(rel_existing, rel_new)?;
+            fs_existing.lock().link(&rel_existing, &rel_new)?;
         }
 
         // Charge inode quota for new link.
@@ -2842,17 +2781,15 @@ impl Vfs {
     /// Does NOT follow the symlink — returns the stored target string.
     pub fn readlink(path: &str) -> KernelResult<String> {
         let path = Self::resolve_no_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.readlink(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().readlink(&relative)
     }
 
     /// Stat a path without following the final symbolic link.
     pub fn lstat(path: &str) -> KernelResult<DirEntry> {
         let path = Self::resolve_no_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.lstat(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().lstat(&relative)
     }
 
     /// Get rich metadata for a path WITHOUT following a trailing symlink.
@@ -2862,20 +2799,25 @@ impl Vfs {
     /// resolved; only the final component is left unfollowed.
     pub fn lmetadata(path: &str) -> KernelResult<FileMeta> {
         let path = Self::resolve_no_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.lmetadata(relative)
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().lmetadata(&relative)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.
     pub fn debug_stats(path: &str) -> KernelResult<String> {
-        let vfs = VFS.lock();
-        for mp in &vfs.mounts {
-            if path.starts_with(&mp.path) {
-                return Ok(mp.fs.debug_stats());
-            }
+        // Clone the per-mount handle under a brief global lock, then query it
+        // lock-free (debug_stats may itself touch the VFS on stacked mounts).
+        let fs = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .find(|mp| path.starts_with(&mp.path))
+                .map(|mp| Arc::clone(&mp.fs))
+        };
+        match fs {
+            Some(fs) => Ok(fs.lock().debug_stats()),
+            None => Err(KernelError::NotFound),
         }
-        Err(KernelError::NotFound)
     }
 
     /// Query filesystem space and configuration for the mount at `path`.
@@ -2884,9 +2826,8 @@ impl Vfs {
     /// metadata.  Analogous to POSIX `statvfs()`.
     pub fn statvfs(path: &str) -> KernelResult<FsInfo> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, _relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.statvfs()
+        let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
+        fs.lock().statvfs()
     }
 
     /// Discard (TRIM) the free space of the filesystem containing `path`.
@@ -2899,14 +2840,13 @@ impl Vfs {
     /// `Ok(0)` (nothing to do).
     pub fn trim(path: &str) -> KernelResult<u64> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, _relative) = find_mount(&mut vfs, &path)?;
+        let (fs, _id, opts, _relative) = resolve_mount(&path)?;
         // A read-only mount has no business mutating the device; treat it as a
         // no-op rather than letting the filesystem attempt discards.
-        if mp.options.read_only {
+        if opts.read_only {
             return Ok(0);
         }
-        mp.fs.trim()
+        fs.lock().trim()
     }
 
     /// Discard (TRIM) the free space of the filesystem backed by `device`.
@@ -2919,37 +2859,56 @@ impl Vfs {
     /// device — fstrim needs the free-space metadata of a live mount, so an
     /// unmounted device cannot be trimmed this way.
     pub fn trim_device(device: &str) -> KernelResult<u64> {
-        let mut vfs = VFS.lock();
-        for mp in vfs.mounts.iter_mut() {
-            if mp.fs.device_name() == Some(device) {
-                if mp.options.read_only {
+        // Clone the matching per-mount handle under a brief global lock, then
+        // trim it lock-free.  `device_name` does not re-enter the VFS, so the
+        // brief per-fs lock taken during the scan is safe.
+        let found = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .find(|mp| mp.fs.lock().device_name() == Some(device))
+                .map(|mp| (Arc::clone(&mp.fs), mp.options.read_only))
+        };
+        match found {
+            Some((fs, read_only)) => {
+                if read_only {
                     return Ok(0);
                 }
-                return mp.fs.trim();
+                fs.lock().trim()
             }
+            None => Err(KernelError::NotFound),
         }
-        Err(KernelError::NotFound)
     }
 
     /// List all mount points with their filesystem info.
     ///
     /// Returns `(mount_path, FsInfo)` for each mounted filesystem.
     pub fn mount_info() -> KernelResult<Vec<(String, FsInfo)>> {
-        let mut vfs = VFS.lock();
+        // Snapshot (path, handle) pairs under a brief global lock, then query
+        // each filesystem lock-free — `statvfs` on a stacked mount may itself
+        // re-enter the VFS, so it must not run under the global lock.
+        let mounts: Vec<(String, Arc<Mutex<Box<dyn FileSystem>>>)> = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs)))
+                .collect()
+        };
         let mut result = Vec::new();
-        for mp in vfs.mounts.iter_mut() {
+        for (path, fs) in mounts {
+            let mut guard = fs.lock();
             // statvfs may fail for virtual filesystems or misconfigured
             // mounts.  Log the error but still include the mount in the
             // list with zeroed stats so df/mount show it exists.
-            let info = match mp.fs.statvfs() {
+            let info = match guard.statvfs() {
                 Ok(i) => i,
                 Err(e) => {
                     crate::serial_println!(
                         "[vfs] mount_info: statvfs failed for '{}' ({}): {:?}",
-                        mp.path, mp.fs.fs_type(), e
+                        path, guard.fs_type(), e
                     );
                     FsInfo {
-                        fs_type: String::from(mp.fs.fs_type()),
+                        fs_type: String::from(guard.fs_type()),
                         volume_label: String::new(),
                         block_size: 0,
                         total_blocks: 0,
@@ -2961,7 +2920,7 @@ impl Vfs {
                     }
                 }
             };
-            result.push((mp.path.clone(), info));
+            result.push((path, info));
         }
         Ok(result)
     }
@@ -3154,10 +3113,15 @@ impl Vfs {
     /// Ensures that all pending writes are committed to stable storage.
     /// Analogous to POSIX `sync()`.
     pub fn sync() -> KernelResult<()> {
-        let mut vfs = VFS.lock();
+        // Snapshot the handles under a brief global lock, then sync each
+        // lock-free (a stacked filesystem's sync may re-enter the VFS).
+        let handles: Vec<Arc<Mutex<Box<dyn FileSystem>>>> = {
+            let vfs = VFS.lock();
+            vfs.mounts.iter().map(|mp| Arc::clone(&mp.fs)).collect()
+        };
         let mut last_err: Option<KernelError> = None;
-        for mp in vfs.mounts.iter_mut() {
-            if let Err(e) = mp.fs.sync() {
+        for fs in handles {
+            if let Err(e) = fs.lock().sync() {
                 last_err = Some(e);
             }
         }
@@ -3170,9 +3134,8 @@ impl Vfs {
     /// Flush a specific filesystem (the one that `path` resolves to).
     pub fn sync_path(path: &str) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, _relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.sync()
+        let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
+        fs.lock().sync()
     }
 
     /// Set the volume label of the filesystem containing `path`.
@@ -3182,9 +3145,8 @@ impl Vfs {
     pub fn set_volume_label(path: &str, label: &str) -> KernelResult<()> {
         check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        let mut vfs = VFS.lock();
-        let (mp, _relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.set_volume_label(label)
+        let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
+        fs.lock().set_volume_label(label)
     }
 
     // ----- Atomic file operations -----
@@ -3741,15 +3703,19 @@ fn mount_matches(mount_path: &str, path: &str) -> bool {
 /// without the per-mutation `metadata` lookup, so the write/truncate/remove
 /// hot paths pay almost nothing.  Returns `None` for `ino == 0` (no stable
 /// identity, never cacheable).
-fn cache_identity(mp: &mut MountPoint, relative: &str) -> Option<(u64, u64)> {
+fn cache_identity(
+    fs: &mut Box<dyn FileSystem>,
+    fs_id: u64,
+    relative: &str,
+) -> Option<(u64, u64)> {
     if !crate::mm::page_cache::is_populated() {
         return None;
     }
-    let ino = mp.fs.metadata(relative).ok()?.ino;
+    let ino = fs.metadata(relative).ok()?.ino;
     if ino == 0 {
         return None;
     }
-    Some((mp.fs_id, ino))
+    Some((fs_id, ino))
 }
 
 fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a mut MountPoint, &'p str)> {
@@ -3787,6 +3753,31 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
     // SAFETY: We checked `best_idx` is Some and within bounds.
     let mp = &mut vfs.mounts[idx];
     Ok((mp, relative))
+}
+
+/// Resolve `path` to its owning mount, returning a cloned *per-mount*
+/// filesystem handle plus the mount's stable id, options and the
+/// mount-relative path — **without holding the global VFS lock afterwards**.
+///
+/// This is the lock-discipline foundation (design-decisions §43) that lets
+/// the VFS dispatch filesystem operations without serializing all I/O on a
+/// single global mutex, and that lets stacked filesystems (the overlay)
+/// re-enter the VFS to read their backing layers without deadlocking: the
+/// global lock is held only long enough to look up the mount table and clone
+/// the `Arc`, then released.  The caller locks the returned per-mount handle
+/// to perform the actual operation — a *different* lock from the global one
+/// and from any lower-layer mount's lock, so reentrancy is safe.
+fn resolve_mount(
+    path: &str,
+) -> KernelResult<(Arc<Mutex<Box<dyn FileSystem>>>, u64, MountOptions, String)> {
+    let mut vfs = VFS.lock();
+    let (mp, relative) = find_mount(&mut vfs, path)?;
+    Ok((
+        Arc::clone(&mp.fs),
+        mp.fs_id,
+        mp.options,
+        String::from(relative),
+    ))
 }
 
 /// Check that the mount for `path` allows writes.

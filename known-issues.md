@@ -2067,6 +2067,17 @@ then have `apply_root` (or the cwd-join layer) treat relative paths as
 rooted-after-join. Track alongside the mount-namespace/`pivot_root` work deferred
 in §42.
 
+**Update 2026-06-30 (increment 5):** Part (a)'s blocker is removed. The
+`fs::overlay::OverlayFs` VFS mount adapter now exists and works — but only after
+fixing a foundational VFS issue: the global VFS lock was held across every
+filesystem method call, so mounting an overlay (whose methods re-enter the VFS to
+read their backing layers) deadlocked on boot. The VFS now uses a **per-mount
+lock** (`Arc<Mutex<Box<dyn FileSystem>>>` + `resolve_mount`; design-decisions
+§43), so stacked filesystems mount cleanly (overlay self-test 13 passes). **Still
+open for TD32:** wiring `oci run`/`container create` to actually mount an
+`OverlayFs` at the container rootfs and point `root_path` at that mountpoint
+instead of `lower` (increment 6), plus part (b) cwd jailing.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

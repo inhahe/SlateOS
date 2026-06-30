@@ -919,6 +919,93 @@ pub fn count() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// VFS adapter — mount an overlay into the path tree
+// ---------------------------------------------------------------------------
+
+/// A [`FileSystem`](crate::fs::vfs::FileSystem) adapter that exposes an
+/// existing overlay (by ID) at a VFS mount point.
+///
+/// This gives the otherwise ID-addressed overlay engine *path
+/// transparency*: once mounted at, say, `/containers/<id>/rootfs`, normal
+/// path resolution under that prefix routes through the overlay, so reads
+/// see the merged lower+upper view and writes copy-up into the upper layer.
+/// This is what a container rootfs jail needs for real copy-on-write
+/// isolation (the jail re-anchors absolute paths under the mount point;
+/// see `ipc::namespace` and known-issues TD32).
+///
+/// The adapter holds only the `OverlayId`; the overlay's lifetime is
+/// managed independently via [`create`]/[`destroy`].  Unmounting the VFS
+/// mount does not destroy the overlay, and vice versa — the caller is
+/// responsible for ordering teardown (unmount before destroy).
+pub struct OverlayFs {
+    id: OverlayId,
+}
+
+impl OverlayFs {
+    /// Wrap an existing overlay so it can be mounted into the VFS.
+    ///
+    /// Returns `NotFound` if no overlay with this ID exists.
+    pub fn new(id: OverlayId) -> KernelResult<Self> {
+        // Validate the overlay exists up front so a bad ID fails at mount
+        // time rather than on the first path operation.
+        let inner = OVERLAYS.lock();
+        if !inner.mounts.contains_key(&id) {
+            return Err(KernelError::NotFound);
+        }
+        drop(inner);
+        Ok(Self { id })
+    }
+
+    /// The wrapped overlay's ID.
+    #[must_use]
+    pub fn id(&self) -> OverlayId {
+        self.id
+    }
+}
+
+impl crate::fs::vfs::FileSystem for OverlayFs {
+    fn fs_type(&self) -> &'static str {
+        "overlay"
+    }
+
+    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+        readdir(self.id, path)
+    }
+
+    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+        read_file(self.id, path)
+    }
+
+    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+        stat(self.id, path)
+    }
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        metadata(self.id, path)
+    }
+
+    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+        write_file(self.id, path, data)
+    }
+
+    fn remove(&mut self, path: &str) -> KernelResult<()> {
+        remove(self.id, path)
+    }
+
+    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+        mkdir(self.id, path)
+    }
+
+    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+        rmdir(self.id, path)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+        rename(self.id, from, to)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1188,10 +1275,59 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[overlay]   commit: OK (applied {} changes)", applied);
     }
 
+    // --- Test 13: VFS mount adapter (path-transparent overlay) ---
+    {
+        let mount_path = "/mnt/ovl-cow-test";
+
+        // Wrap the live overlay and mount it into the path tree.
+        let ovl_fs = OverlayFs::new(id)?;
+        Vfs::mount(mount_path, alloc::boxed::Box::new(ovl_fs))?;
+
+        // Read through a normal VFS path → merged view (lower layer).
+        let via_vfs = Vfs::read_file(&alloc::format!("{}/file_a.txt", mount_path))?;
+        if via_vfs != b"lower content A" {
+            serial_println!("[overlay]   ERROR: VFS-mounted read mismatch");
+            let _ = Vfs::unmount(mount_path);
+            let _ = Vfs::remove_recursive(test_base);
+            destroy(id).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // Write through a normal VFS path → copy-up into the upper layer.
+        Vfs::write_file(&alloc::format!("{}/vfs_new.txt", mount_path), b"via vfs")?;
+        let back = Vfs::read_file(&alloc::format!("{}/vfs_new.txt", mount_path))?;
+        if back != b"via vfs" {
+            serial_println!("[overlay]   ERROR: VFS-mounted write/read mismatch");
+            let _ = Vfs::unmount(mount_path);
+            let _ = Vfs::remove_recursive(test_base);
+            destroy(id).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // The write landed in the upper layer (copy-on-write), not lower.
+        if which_layer(id, "vfs_new.txt")? != Layer::Upper {
+            serial_println!("[overlay]   ERROR: VFS write did not go to upper layer");
+            let _ = Vfs::unmount(mount_path);
+            let _ = Vfs::remove_recursive(test_base);
+            destroy(id).ok();
+            return Err(KernelError::InternalError);
+        }
+        if Vfs::exists(&alloc::format!("{}/vfs_new.txt", lower)) {
+            serial_println!("[overlay]   ERROR: VFS write leaked into lower layer");
+            let _ = Vfs::unmount(mount_path);
+            let _ = Vfs::remove_recursive(test_base);
+            destroy(id).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        Vfs::unmount(mount_path)?;
+        serial_println!("[overlay]   VFS mount adapter (CoW routing): OK");
+    }
+
     // --- Cleanup ---
     destroy(id)?;
     let _ = Vfs::remove_recursive(test_base);
 
-    serial_println!("[overlay] Self-test passed (12 tests).");
+    serial_println!("[overlay] Self-test passed (13 tests).");
     Ok(())
 }

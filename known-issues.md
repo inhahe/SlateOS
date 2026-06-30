@@ -14,7 +14,28 @@ work that should be done now."
 
 ## Active Bugs
 
-### B-PAGECACHE-COHERENCE. Read-only page cache has no invalidation wired to filesystem mutations (stale-data + inode-reuse) — OPEN (sub-task 4)
+### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
+
+**Resolution (2026-06-30):** the two correctness gaps below are now
+closed. `mm::page_cache::invalidate_identity(fs_id, ino)` is wired into
+the VFS mutation paths — `Vfs::write_at`, `Vfs::write_file`,
+`Vfs::truncate`, `Vfs::remove`, and replacing same-mount `Vfs::rename`
+— via the `cache_identity()` helper, which captures the file's
+`(fs_id, ino)` under the held VFS lock (gated on a single relaxed
+`is_populated()` atomic so the write path pays ~nothing when nothing is
+cached). `remove` and the replacing-rename capture identity *before* the
+inode is freed, closing the inode-reuse hole; the others capture after
+the content change. Verified by boot self-test check 8 (is_populated +
+invalidate_identity) and a green BOOT_OK.
+
+**Still pending (performance, not correctness — §36 sub-task 4 tail):**
+de-double-cache the page cache against the block buffer cache
+(`fs/cache.rs`) so a page does not live in both. Tracked as a follow-up;
+not a bug.
+
+The original write-up (now resolved for the correctness parts):
+
+
 
 **Where:** `kernel/src/mm/page_cache.rs` (the cache) + the VFS/handle
 write/truncate/unlink/rename paths (`kernel/src/fs/handle.rs`,

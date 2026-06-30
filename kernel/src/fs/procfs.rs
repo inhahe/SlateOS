@@ -13831,12 +13831,14 @@ pub fn self_test() -> KernelResult<()> {
                 cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
                 io_weight: 100, pids_max: 0, pids_current: 0,
                 processes: Vec::new(), created_ns: 0,
+                kernel_id: crate::cgroup::ROOT_CGROUP,
             },
             Cgroup {
                 path: String::from("/app.slice"),
                 cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
                 io_weight: 100, pids_max: 0, pids_current: 1,
                 processes: alloc::vec![42u32], created_ns: 0,
+                kernel_id: crate::cgroup::ROOT_CGROUP,
             },
         ];
         let assigned = render_cgroup(42, &groups);

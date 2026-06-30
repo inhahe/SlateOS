@@ -1021,6 +1021,15 @@ pub fn spawn_with_affinity(
         return Err(KernelError::InvalidArgument);
     }
 
+    // Cgroup inheritance (Q14 / design-decisions §39): a newly spawned
+    // task joins the *creating* task's resource control group, mirroring
+    // Linux fork/clone semantics (the child inherits the parent's cgroup).
+    // Captured before the no-interrupts critical section below because
+    // `current_task_cgroup` takes the SCHED lock via try_lock and we must
+    // not nest it inside the SCHED.lock() held there.  Defaults to
+    // ROOT_CGROUP during early boot / lock contention, which is correct.
+    let inherit_cgroup = current_task_cgroup();
+
     // Disable interrupts for the entire task-creation + SCHED-insertion
     // critical section.  Task::new_kernel() allocates a kernel stack
     // (holding the kstack ALLOCATOR spinlock) and physical frames
@@ -1034,6 +1043,7 @@ pub fn spawn_with_affinity(
     let (id, prio, target_cpu) = cpu::without_interrupts(|| {
         let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
         new_task.cpu_affinity = affinity_mask;
+        new_task.cgroup_id = inherit_cgroup;
         new_task.ready_since_tick = crate::apic::tick_count();
         let id = new_task.id;
         let prio = new_task.priority;
@@ -1250,6 +1260,63 @@ pub fn set_task_net_ns(
     } else {
         Err(KernelError::InvalidArgument)
     }
+}
+
+/// Move a specific task into a resource control group.
+///
+/// This is the single authoritative process→cgroup assignment path
+/// (Q14 / design-decisions §39): it updates the task's `cgroup_id` so
+/// the frame-allocator charging and scheduler CPU-charging hooks bill
+/// the right group, **and** keeps the cgroup's per-group task counts
+/// consistent by detaching from the old group and attaching to the new
+/// one.  Callers must therefore use this instead of calling
+/// [`crate::cgroup::attach_task`] / [`crate::cgroup::detach_task`]
+/// directly, or the counts double.
+///
+/// The target group is validated first: if `new_cgroup` does not exist,
+/// the task is left untouched.  The `SCHED` lock is released before the
+/// cgroup table is touched, so the lock ordering is strictly
+/// `SCHED` → cgroup `TABLE` (never the reverse), avoiding deadlock with
+/// the timer-tick charging path (which only `try_lock`s the cgroup
+/// table).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `new_cgroup` doesn't exist or
+///   the task doesn't exist.
+pub fn set_task_cgroup(
+    task_id: TaskId,
+    new_cgroup: crate::cgroup::CgroupId,
+) -> KernelResult<()> {
+    // Validate the target group exists before mutating anything, so a
+    // bad cgroup id can never leave a task pointing at a dead group.
+    if !crate::cgroup::exists(new_cgroup) {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Swap the task's cgroup under the SCHED lock, capturing the old id.
+    let old_cgroup = {
+        let mut state = SCHED.lock();
+        let task = state
+            .tasks
+            .get_mut(&task_id)
+            .ok_or(KernelError::InvalidArgument)?;
+        let old = task.cgroup_id;
+        task.cgroup_id = new_cgroup;
+        old
+    };
+
+    // Keep per-group task counts consistent (outside the SCHED lock).
+    if old_cgroup != new_cgroup {
+        // detach/attach failures only mean a stale count for a group
+        // that is being torn down concurrently — never a correctness
+        // hazard for the task itself, which already points at the new
+        // group.  Ignore them rather than unwinding the assignment.
+        let _ = crate::cgroup::detach_task(old_cgroup);
+        let _ = crate::cgroup::attach_task(new_cgroup);
+    }
+
+    Ok(())
 }
 
 /// Block the current task and yield to the next runnable task.

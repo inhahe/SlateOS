@@ -68,6 +68,34 @@ pub struct Cgroup {
     pub pids_current: u32,        // Current PID count.
     pub processes: Vec<u32>,      // Assigned PIDs.
     pub created_ns: u64,
+    /// Backing in-kernel resource controller group
+    /// (`crate::cgroup::CgroupId`).
+    ///
+    /// This is the enforcement engine (Q14 / design-decisions §39): the
+    /// cgroupfs entry is the cgroup-v2 *frontend*, and writes to it are
+    /// pushed through to this kernel group — `memory_max` →
+    /// `cgroup::set_mem_limit`, process assignment → `set_task_cgroup`.
+    /// The root group "/" maps to `cgroup::ROOT_CGROUP` (0).
+    pub kernel_id: crate::cgroup::CgroupId,
+}
+
+/// Bytes per physical frame (16 KiB).  Memory limits in cgroup-v2 are
+/// expressed in bytes; the in-kernel memory controller charges in whole
+/// frames, so byte limits are converted by rounding **up** to the next
+/// frame (a limit of 1 byte still permits one frame).
+const FRAME_BYTES: u64 = 16 * 1024;
+
+/// Derive the parent path of a cgroup path.
+///
+/// `"/app/sub"` → `"/app"`, `"/app"` → `"/"`, `"/"` → `"/"`.  Used to
+/// locate the parent's kernel cgroup when creating a child so the kernel
+/// hierarchy mirrors the cgroupfs path hierarchy (hierarchical limits).
+fn parent_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/",
+        Some(idx) => &trimmed[..idx],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +140,8 @@ pub fn init_defaults() {
                 path: String::from("/"), cpu_weight: 100, cpu_max_us: 0,
                 memory_max: 0, memory_current: 0, io_weight: 100,
                 pids_max: 0, pids_current: 0, processes: Vec::new(), created_ns: now,
+                // The cgroupfs root mirrors the kernel root cgroup.
+                kernel_id: crate::cgroup::ROOT_CGROUP,
             },
         ],
         total_created: 1,
@@ -136,11 +166,24 @@ pub fn create_group(path: &str) -> KernelResult<()> {
     with_state(|state| {
         if state.groups.len() >= MAX_CGROUPS { return Err(KernelError::ResourceExhausted); }
         if state.groups.iter().any(|g| g.path == path) { return Err(KernelError::AlreadyExists); }
+
+        // Create the backing kernel cgroup under the parent's kernel
+        // group so the kernel hierarchy mirrors the cgroupfs path tree
+        // (hierarchical limits walk up the kernel parent chain).  An
+        // unknown parent path falls back to the kernel root.
+        let parent_kernel_id = {
+            let pp = parent_path(path);
+            state.groups.iter().find(|g| g.path == pp)
+                .map_or(crate::cgroup::ROOT_CGROUP, |g| g.kernel_id)
+        };
+        let kernel_id = crate::cgroup::create(parent_kernel_id)?;
+
         let now = crate::hpet::elapsed_ns();
         state.groups.push(Cgroup {
             path: String::from(path), cpu_weight: 100, cpu_max_us: 0,
             memory_max: 0, memory_current: 0, io_weight: 100,
             pids_max: 0, pids_current: 0, processes: Vec::new(), created_ns: now,
+            kernel_id,
         });
         state.total_created += 1;
         Ok(())
@@ -151,9 +194,24 @@ pub fn create_group(path: &str) -> KernelResult<()> {
 pub fn delete_group(path: &str) -> KernelResult<()> {
     with_state(|state| {
         if path == "/" { return Err(KernelError::PermissionDenied); }
+        // Capture the backing kernel group before removing the frontend
+        // entry so we can release it too.
+        let kernel_id = state.groups.iter()
+            .find(|g| g.path == path)
+            .map(|g| g.kernel_id);
         let before = state.groups.len();
         state.groups.retain(|g| g.path != path);
         if state.groups.len() == before { return Err(KernelError::NotFound); }
+
+        // Release the backing kernel cgroup.  This is best-effort: the
+        // kernel controller refuses to delete a group that still has
+        // tasks or child groups, whereas the cgroupfs frontend has
+        // looser semantics.  A failure here only leaks one of the 256
+        // kernel cgroup slots until reboot, never a correctness hazard,
+        // so we don't fail the frontend delete on it.
+        if let Some(id) = kernel_id {
+            let _ = crate::cgroup::delete(id);
+        }
         state.total_deleted += 1;
         Ok(())
     })
@@ -175,7 +233,15 @@ pub fn set_memory_max(path: &str, bytes: u64) -> KernelResult<()> {
     with_state(|state| {
         let g = state.groups.iter_mut().find(|g| g.path == path).ok_or(KernelError::NotFound)?;
         g.memory_max = bytes;
+        let kernel_id = g.kernel_id;
         state.total_limit_changes += 1;
+
+        // Push the limit through to the enforcement engine.  cgroup-v2
+        // expresses the limit in bytes; the kernel memory controller
+        // charges whole 16 KiB frames, so round up.  `bytes == 0` means
+        // "unlimited" in both models → 0 frames.
+        let frames = if bytes == 0 { 0 } else { bytes.div_ceil(FRAME_BYTES) };
+        crate::cgroup::set_mem_limit(kernel_id, crate::cgroup::MemLimit::frames(frames))?;
         Ok(())
     })
 }
@@ -198,8 +264,19 @@ pub fn add_pid(path: &str, pid: u32) -> KernelResult<()> {
             return Err(KernelError::ResourceExhausted);
         }
         if g.processes.contains(&pid) { return Err(KernelError::AlreadyExists); }
+        let kernel_id = g.kernel_id;
         g.processes.push(pid);
         g.pids_current += 1;
+
+        // Assign the task to the backing kernel cgroup so its memory and
+        // CPU usage are billed to (and limited by) this group — the
+        // `cgroup.procs` → enforcement wiring.  Best-effort: a PID with
+        // no live scheduler task (e.g. the synthetic PIDs used by the
+        // self-test, or a process that just exited) yields
+        // `InvalidArgument` from `set_task_cgroup`, which is not a
+        // failure of the frontend assignment — the cgroupfs bookkeeping
+        // still records the intended membership.
+        let _ = crate::sched::set_task_cgroup(u64::from(pid), kernel_id);
         Ok(())
     })
 }
@@ -212,6 +289,11 @@ pub fn remove_pid(path: &str, pid: u32) -> KernelResult<()> {
         g.processes.retain(|&p| p != pid);
         if g.processes.len() == before { return Err(KernelError::NotFound); }
         g.pids_current -= 1;
+
+        // Return the task to the root cgroup (symmetric with `add_pid`).
+        // Best-effort for the same reason: a synthetic or already-exited
+        // PID has no task to move.
+        let _ = crate::sched::set_task_cgroup(u64::from(pid), crate::cgroup::ROOT_CGROUP);
         Ok(())
     })
 }

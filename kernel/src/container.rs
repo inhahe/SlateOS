@@ -659,7 +659,14 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     let _ = crate::pidns::alloc_pid(pid_ns, global_pid);
     let _ = crate::userns::attach_process(user_ns);
     let _ = crate::netns::attach_process(net_ns);
-    let _ = crate::cgroup::attach_task(cgroup_id);
+
+    // Assign the task to the container's cgroup.  `set_task_cgroup` both
+    // sets the task's `cgroup_id` (so the frame allocator and scheduler
+    // bill the container's group — the assignment that was previously
+    // missing, D-CGROUP-TASK-UNASSIGNED) and maintains the group's task
+    // count; it supersedes a bare `cgroup::attach_task`, which only
+    // bumped the counter without ever pointing the task at the group.
+    let _ = crate::sched::set_task_cgroup(global_pid, cgroup_id);
 
     // Set the task's net_ns field so syscall handlers automatically use
     // this container's network namespace for socket operations.
@@ -670,7 +677,7 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 
 /// Unregister a process from a container.
 pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id) = with_table(|table| {
+    let (pid_ns, user_ns, net_ns) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -680,7 +687,6 @@ pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
             table.containers[idx].pid_ns,
             table.containers[idx].user_ns,
             table.containers[idx].net_ns,
-            table.containers[idx].cgroup_id,
         ))
     })?;
 
@@ -688,7 +694,12 @@ pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     let _ = crate::pidns::free_pid(pid_ns, global_pid);
     let _ = crate::userns::detach_process(user_ns);
     let _ = crate::netns::detach_process(net_ns);
-    let _ = crate::cgroup::detach_task(cgroup_id);
+
+    // Move the task back to the root cgroup.  `set_task_cgroup` detaches
+    // it from the container's group (decrementing that group's task
+    // count) and re-points it at the root — the symmetric counterpart of
+    // the `set_task_cgroup` in `add_process`.
+    let _ = crate::sched::set_task_cgroup(global_pid, crate::cgroup::ROOT_CGROUP);
 
     // Reset the task's net_ns to root so any remaining socket operations
     // revert to the host namespace.

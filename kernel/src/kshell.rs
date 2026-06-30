@@ -67611,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]
+            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
                 return;
             };
 
@@ -67753,6 +67753,11 @@ fn cmd_oci(args: &str) {
             // process (a guest path resolved under the container jail). When
             // unset, the image's `WorkingDir` config is used, else `/`.
             let mut workdir: Option<&str> = None;
+            // Docker `--user`/`-u uid[:gid]`: numeric user/group the init
+            // process runs as. When unset, the image's `User` config is used,
+            // else root (0:0). Only numeric ids are supported (a name has no
+            // /etc/passwd to resolve against in this minimal runtime).
+            let mut user: Option<&str> = None;
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
@@ -67902,6 +67907,14 @@ fn cmd_oci(args: &str) {
                                     spec
                                 );
                             }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    "--user" | "-u" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            user = Some(spec);
                             i = i.saturating_add(2);
                         } else {
                             i = i.saturating_add(1);
@@ -68254,6 +68267,36 @@ fn cmd_oci(args: &str) {
                                             Some(wd.clone())
                                         }
                                     });
+                                // Effective user identity: CLI `--user`/`-u`
+                                // wins, else the image's `User` config, else
+                                // none (init stays root). Only numeric
+                                // `uid[:gid]` is accepted — a username has no
+                                // /etc/passwd to resolve against here, so it is
+                                // warned and ignored. When `:gid` is omitted the
+                                // gid defaults to 0 (matching Docker's behavior
+                                // for a uid with no passwd entry).
+                                let user_spec: Option<alloc::string::String> =
+                                    user.map(alloc::string::String::from).or_else(|| {
+                                        let u = &image.config.user;
+                                        if u.is_empty() { None } else { Some(u.clone()) }
+                                    });
+                                let effective_uid_gid: Option<(u32, u32)> =
+                                    user_spec.as_deref().and_then(|s| {
+                                        let mut segs = s.splitn(2, ':');
+                                        let uid_s = segs.next().unwrap_or("");
+                                        let gid_s = segs.next();
+                                        match (uid_s.parse::<u32>(), gid_s.map(str::parse::<u32>)) {
+                                            (Ok(uid), None) => Some((uid, 0)),
+                                            (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
+                                            _ => {
+                                                crate::console_println!(
+                                                    "[oci] Ignoring user '{}': expected numeric uid[:gid]",
+                                                    s
+                                                );
+                                                None
+                                            }
+                                        }
+                                    });
                                 let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
                                     .argv(&argv_refs)
                                     .envp(&envp_refs)
@@ -68261,6 +68304,10 @@ fn cmd_oci(args: &str) {
                                 if let Some(wd) = effective_workdir.as_deref() {
                                     opts = opts.cwd(wd.as_bytes());
                                     crate::console_println!("  WorkDir:      {}", wd);
+                                }
+                                if let Some((uid, gid)) = effective_uid_gid {
+                                    opts = opts.uid_gid(uid, gid);
+                                    crate::console_println!("  User:         {}:{}", uid, gid);
                                 }
                                 match crate::container::run(ct_id, &elf, &opts) {
                                     Ok(pid) => {
@@ -68321,8 +68368,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

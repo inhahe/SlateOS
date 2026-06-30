@@ -274,6 +274,16 @@ pub struct SpawnOptions<'a> {
     /// the container jail).  Bytes, not `&str`: a path may contain any byte
     /// except `/` and NUL.  A malformed value is ignored (child stays at `/`).
     pub cwd: Option<&'a [u8]>,
+    /// Initial user/group identity `(uid, gid)` for the child process.
+    ///
+    /// `None` (the default) leaves the child at the inherited credentials
+    /// (root for a kernel-spawned init).  When set, the child's
+    /// [`ProcessCredentials`](crate::proc::pcb::ProcessCredentials) are
+    /// replaced with `ProcessCredentials::new(uid, gid)` at spawn time.  Used
+    /// to honor a container image's `User` config / the Docker `--user`/`-u
+    /// uid[:gid]` flag.  Supplementary groups are not set (empty), matching a
+    /// fresh numeric-id login.
+    pub uid_gid: Option<(u32, u32)>,
 }
 
 impl<'a> SpawnOptions<'a> {
@@ -290,7 +300,20 @@ impl<'a> SpawnOptions<'a> {
             envp: &[],
             exe_path: None,
             cwd: None,
+            uid_gid: None,
         }
+    }
+
+    /// Set the initial user/group identity for the child (`(uid, gid)`).
+    ///
+    /// Honors a container image's `User` config / the Docker `--user`/`-u`
+    /// flag. Supplementary groups are not set. Passing a `(uid, gid)` of
+    /// `(0, 0)` is equivalent to leaving the child as root.
+    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
+    #[must_use]
+    pub fn uid_gid(mut self, uid: u32, gid: u32) -> Self {
+        self.uid_gid = Some((uid, gid));
+        self
     }
 
     /// Set the initial working directory for the child (absolute path bytes).
@@ -858,6 +881,20 @@ fn spawn_process_inner(
         if let Err(e) = pcb::set_cwd(pid, dir.to_vec()) {
             serial_println!(
                 "[spawn] Ignoring invalid initial cwd for process {}: {:?}",
+                pid, e,
+            );
+        }
+    }
+
+    // Apply the initial user/group identity if one was requested (honors a
+    // container image's `User` config / the Docker `--user`/`-u` flag). The
+    // child's credentials are replaced with a fresh numeric identity (no
+    // supplementary groups). A failure here is logged but never fails the
+    // spawn — the child simply keeps the inherited (root) credentials.
+    if let Some((uid, gid)) = options.uid_gid {
+        if let Err(e) = pcb::set_credentials(pid, pcb::ProcessCredentials::new(uid, gid)) {
+            serial_println!(
+                "[spawn] Ignoring invalid initial uid/gid for process {}: {:?}",
                 pid, e,
             );
         }
@@ -1890,6 +1927,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
     test_spawn_with_cwd()?;
+    test_spawn_with_uid_gid()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
@@ -2197,6 +2235,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -2330,6 +2369,7 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2455,6 +2495,7 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
             envp,
             exe_path: None,
             cwd: None,
+            uid_gid: None,
         };
 
         let result = match spawn_process(exe_elf, &options) {
@@ -2554,6 +2595,7 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2642,6 +2684,7 @@ pub fn self_test_linux_sa_restart() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2757,6 +2800,7 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2873,6 +2917,7 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -2987,6 +3032,7 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3101,6 +3147,7 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3212,6 +3259,7 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3326,6 +3374,7 @@ pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3436,6 +3485,7 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3523,6 +3573,7 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3614,6 +3665,7 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3736,6 +3788,7 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3853,6 +3906,7 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -3955,6 +4009,7 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4103,6 +4158,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4214,6 +4270,7 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4321,6 +4378,7 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4440,6 +4498,7 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4554,6 +4613,7 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4664,6 +4724,7 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -4784,6 +4845,7 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
             envp,
             exe_path: None,
             cwd: None,
+            uid_gid: None,
         };
         spawn_process(&elf_img, &options)
     };
@@ -4898,6 +4960,7 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
             envp,
             exe_path: None,
             cwd: None,
+            uid_gid: None,
         };
         spawn_process(&elf_img, &options)
     };
@@ -5024,6 +5087,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             envp,
             exe_path: None,
             cwd: None,
+            uid_gid: None,
         };
 
         let result = match spawn_process(launcher_elf, &options) {
@@ -5130,6 +5194,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let nofollow_result = spawn_process(&elf_nofollow, &options);
@@ -5212,6 +5277,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         envp,
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let (state_d, exit_d) = match spawn_process(&elf_argv, &options) {
@@ -5383,6 +5449,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_HELLO.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5548,6 +5615,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_STDIO.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5771,6 +5839,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_FULL.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -5987,6 +6056,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_PT.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6186,6 +6256,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_SIG.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6381,6 +6452,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_FAULT.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6578,6 +6650,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_SIGQUEUE.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6779,6 +6852,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_FORKEXEC.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -6976,6 +7050,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_PIPE.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7198,6 +7273,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_REDIR.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7377,6 +7453,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_REDIRIN.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7537,6 +7614,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7718,6 +7796,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -7907,6 +7986,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8082,6 +8162,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8288,6 +8369,7 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8498,6 +8580,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8676,6 +8759,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8833,6 +8917,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -8987,6 +9072,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9144,6 +9230,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9305,6 +9392,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9470,6 +9558,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9627,6 +9716,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9784,6 +9874,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -9939,6 +10030,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10086,6 +10178,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10233,6 +10326,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_DASH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10420,6 +10514,7 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
         envp,
         exe_path: Some(DST_MAKE.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&exe_elf, &options) {
@@ -10635,6 +10730,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         envp: cc_envp,
         exe_path: Some(DST_TCC.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let cc_result = match spawn_process(&tcc_elf, &cc_options) {
@@ -10727,6 +10823,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         envp: run_envp,
         exe_path: Some(OBJ_PATH.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     // Open a fresh capture file for the compiled program's fd 1.
@@ -11008,6 +11105,7 @@ fn spawn_reap_tcc(
         envp: cc_envp,
         exe_path: Some(b"/bin/tcc"),
         cwd: None,
+        uid_gid: None,
     };
 
     let cc_result = match spawn_process(tcc_elf, &cc_options) {
@@ -11110,6 +11208,7 @@ fn run_dynamic_capture(
         envp: run_envp,
         exe_path: Some(prog_path.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let capture_handle = match handle::open(
@@ -11718,6 +11817,7 @@ int main(void){\n\
         envp,
         exe_path: Some(DST_MAKE.as_bytes()),
         cwd: None,
+        uid_gid: None,
     };
 
     let result = match spawn_process(&make_elf, &options) {
@@ -12035,6 +12135,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
         envp: &[],
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -12915,6 +13016,61 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
     pcb::destroy(result2.pid);
 
     serial_println!("[spawn]   Spawn with initial cwd (valid + invalid): OK");
+    Ok(())
+}
+
+/// Test: an initial `(uid, gid)` is applied to the child's credentials, and a
+/// child with no `uid_gid` keeps the default root credentials.
+fn test_spawn_with_uid_gid() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    // Explicit non-root identity is applied.
+    let options = SpawnOptions::new("spawn-test-uid").uid_gid(1000, 1001);
+    let result = spawn_process(&elf_data, &options)?;
+    match pcb::get_credentials(result.pid) {
+        Some(creds) if creds.uid == 1000 && creds.gid == 1001 => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: expected uid/gid 1000/1001, got {:?}",
+                other.map(|c| (c.uid, c.gid))
+            );
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    // No uid_gid → child keeps the default root (uid 0) credentials.
+    let dflt = SpawnOptions::new("spawn-test-uid-default");
+    let result2 = spawn_process(&elf_data, &dflt)?;
+    match pcb::get_credentials(result2.pid) {
+        Some(creds) if creds.uid == 0 => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: default child should be root (uid 0), got {:?}",
+                other.map(|c| (c.uid, c.gid))
+            );
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result2.task_id);
+            pcb::destroy(result2.pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result2.task_id);
+    pcb::destroy(result2.pid);
+
+    serial_println!("[spawn]   Spawn with initial uid/gid (explicit + default): OK");
     Ok(())
 }
 

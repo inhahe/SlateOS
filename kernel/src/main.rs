@@ -4007,6 +4007,7 @@ extern "C" fn kernel_main() -> ! {
         // may not exist; /proc/1/exe therefore reports NotFound.
         exe_path: None,
         cwd: None,
+        uid_gid: None,
     };
     match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
         Ok(result) => {

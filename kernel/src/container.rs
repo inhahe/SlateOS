@@ -1482,6 +1482,29 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
     })
 }
 
+/// List the global PIDs of the processes currently tracked in a container
+/// (Docker `top`).
+///
+/// Returns the container's live process set in registration order — the init
+/// process first (it is registered by [`run`] before any `exec`-ed children),
+/// followed by processes added via [`add_process`]/[`add_process_task`].  A
+/// process is removed from this set when it exits (see [`remove_process`]),
+/// so the list reflects only currently-tracked PIDs; callers that want each
+/// process's name/state look them up via the process table (which may race a
+/// concurrent exit, in which case the lookup simply returns `None`).
+///
+/// `None` if the container id is invalid or its slot is inactive.
+#[must_use]
+pub fn pids(id: ContainerId) -> Option<Vec<u64>> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        Some(table.containers[idx].pids.clone())
+    })
+}
+
 /// Check if a container exists.
 #[must_use]
 pub fn exists(id: ContainerId) -> bool {
@@ -2226,6 +2249,38 @@ pub fn self_test() {
     }
     serial_println!("[container]   init-exit auto-stop + exit code (notify_init_exit): OK");
 
+    // Test 19f: pids() reports a container's tracked process set (Docker
+    // `top`), in registration order, and reflects add/remove.  We use
+    // synthetic PIDs with no backing scheduler task — add_process_task pushes
+    // the PID into the container's list regardless, and the namespace/cgroup
+    // attaches simply no-op for a non-existent task.
+    {
+        let ct_top = create(&ContainerConfig::new("test-top-ct")).expect("create");
+        assert_eq!(pids(ct_top), Some(Vec::new()), "fresh container has no pids");
+
+        add_process(ct_top, 70001).expect("add 70001");
+        add_process(ct_top, 70002).expect("add 70002");
+        assert_eq!(
+            pids(ct_top),
+            Some(alloc::vec![70001, 70002]),
+            "pids() must report tracked PIDs in registration order",
+        );
+
+        remove_process(ct_top, 70001).expect("remove 70001");
+        assert_eq!(
+            pids(ct_top),
+            Some(alloc::vec![70002]),
+            "pids() must drop a removed process",
+        );
+
+        // Invalid id yields None, distinct from an empty list.
+        assert_eq!(pids(MAX_CONTAINERS as ContainerId), None);
+
+        delete(ct_top).expect("delete top container");
+        assert_eq!(pids(ct_top), None, "deleted container reports no pids");
+    }
+    serial_println!("[container]   process listing (pids/top): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2325,5 +2380,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (24 tests)");
+    serial_println!("[container] Self-test PASSED (25 tests)");
 }

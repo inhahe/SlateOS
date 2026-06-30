@@ -67318,6 +67318,41 @@ fn cmd_container(args: &str) {
                 crate::console_println!("  Label:      {}={}", k, v);
             }
         }
+        "top" | "ps-in" => {
+            // container top <id>  —  list the processes running inside a
+            // container (Docker `top`), with each process's live state and
+            // name resolved from the process table.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container top <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(pids) = container::pids(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            if pids.is_empty() {
+                crate::console_println!("Container {} has no running processes.", id);
+                return;
+            }
+            crate::console_println!("=== Container {} processes ({}) ===", id, pids.len());
+            crate::console_println!("{:<8} {:<10} {}", "PID", "State", "Name");
+            for pid in pids {
+                // The process may exit between the snapshot and the lookup;
+                // show "(gone)" rather than dropping the row so the count
+                // still matches the header.
+                let state = match crate::proc::pcb::state(pid) {
+                    Some(s) => alloc::format!("{:?}", s),
+                    None => alloc::string::String::from("(gone)"),
+                };
+                let name = crate::proc::pcb::name(pid)
+                    .unwrap_or_else(|| alloc::string::String::from("(gone)"));
+                crate::console_println!("{:<8} {:<10} {}", pid, state, name);
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67465,7 +67500,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67475,6 +67510,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container stop ID                        — mark as stopped");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container info ID                        — detailed inspection");
+            crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");

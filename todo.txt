@@ -64,39 +64,19 @@
 ##   wired into main.rs alongside the other post-VFS Linux self-tests.
 
 ## ============================================================================
-## ACTIVE (2026-06-24): C-lite unified read-only page cache (Q5/Q12 / design-decisions §23, §36)
+## DONE (2026-06-30): C-lite unified read-only page cache (Q5/Q12 / design-decisions §23, §36)
 ## ============================================================================
-## STATUS CHANGE 2026-06-24: operator selected option E for Q12 — build this NOW.
-##   The §23 "implement LATER, not now" hold is LIFTED; the trigger is considered
-##   fired. Implementation plan + sub-task order recorded in design-decisions §36.
-##   Sub-tasks: (1) confirm stable VFS file-identity precursor (FileMeta.ino now
-##   populated for ext4/FAT/memfs — verify all backends), (2) host-testable
-##   read-only page-cache structure keyed by (file-identity, page-offset) ->
-##   refcounted frame, (3) VmaKind::FileBacked fault-path sources pages from the
-##   cache, (4) lifecycle/eviction/buffer-cache coherence. Start with (2) (zero
-##   boot-risk) before wiring the boot-critical fault path (3).
-## WHAT: a unified *read-only* page cache so a file's pages are cached once and
-##   shared (read-only) across every process that maps/reads them. Two payoffs:
-##   (1) shared-library/.text dedup — N procs mapping the same .so share one set
-##   of physical frames; (2) de-double-caching between the block buffer cache
-##   (fs/cache.rs) and per-mapping copies. Deliberately OMITS the writable
-##   MAP_SHARED path (dirty tracking / msync / write coherence) — that half stays
-##   declined (ENOSYS) per §22/§23.
-## DECISION: operator adopted C-lite (Q5), but said implement LATER, not now.
-## TRIGGER (when to build it): the first concrete consumer of cross-process
-##   read-only page sharing appears — in practice the DYNAMIC LINKER wanting
-##   shared-library .text dedup (multiple processes mapping the same .so). A
-##   secondary trigger is measured double-caching cost once the block buffer
-##   cache and file-backed mappings are both heavily exercised.
-## PRECURSOR (must land first): stable VFS file identity. A page cache is keyed by
-##   (file-identity, offset), but FileMeta.ino is 0 for memfs and FAT today, so
-##   two mappings of "the same file" can't be recognized. Implement stable
-##   inode/file-identity in fs/vfs.rs as the first sub-task when the trigger fires.
-## WHERE: fs/vfs.rs (identity precursor), fs/cache.rs (unify/front the cache),
-##   mm/vma.rs (VmaKind::FileBacked fault path sources pages from the cache),
-##   syscall/linux.rs (linux_file_mmap). B's FileBacked fault-path shape is the
-##   foundation; C-lite only changes each page's SOURCE (shared cache frame vs
-##   per-mapping read_at) and marks shared frames read-only/refcounted.
+## DELIVERED: file identity (FileMeta.ino) + mm::page_cache store (refcount §37) +
+##   FileBacked fault-path integration (shared RO frames + CoW on private write) +
+##   VFS coherence invalidation + memory-pressure shrinker. Boot-verified (two
+##   clean BOOT_OK; shrinker freed 54 idle frames under real critical pressure, no
+##   fault). Commits: f6003260c (shrinker), 0c6b8caaa, b6e336af0. The writable
+##   MAP_SHARED path stays declined (ENOSYS) per §22/§23 — by design.
+## REMAINING (operator-gated, NOT blocking): de-double-cache the page cache against
+##   the block buffer cache (fs/cache.rs) so a file's data lives in exactly one
+##   place. This is an FS-data-path architectural fork -> queued as open-questions.md
+##   Q13 (options A page-cache-primary / B read-through+drop-behind / C status quo).
+##   §36 is otherwise treated as delivered.
 
 ## ============================================================================
 ## DEFERRED (2026-06-14): ptrace(2) behind the Process+DEBUG capability (Q6 / design-decisions §24)

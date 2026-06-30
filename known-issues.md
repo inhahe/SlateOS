@@ -240,6 +240,71 @@ usage stays bounded.
 limitation` in `pthread_detach`'s doc comment; promoted to tracked tech
 debt while implementing per-thread TSD).
 
+### D-CRT-INIT-ARRAY. `__libc_start_main` never runs `.init_array`/`.preinit_array` constructors (and `.fini_array` destructors) — TECH DEBT
+
+**Where:** `posix/src/crt.rs`. `__libc_start_main` (~line 442) ignores its
+`_init`/`_fini` arguments and calls `main` directly after fd/arg/environ/
+signal setup. `__libc_csu_init` (~line 717) is a no-op stub whose comment
+says "we don't have a .init_array processing loop yet". The userspace
+linker scripts (`userspace/*/linker.ld`, `services/*/linker.ld`) merge
+everything into one PT_LOAD via `*(.data .data.*)` and do **not** define
+`.preinit_array`/`.init_array`/`.fini_array` output sections or the
+`__init_array_start`/`__init_array_end` (etc.) boundary symbols.
+
+**Effect:** C programs using `__attribute__((constructor))`/`destructor`
+and **C++ programs with non-trivial static/global constructors** will not
+have those run. This is a hard blocker for real C/C++ ports (gcc, CPython
+extensions, anything linking a C++ runtime that relies on static init).
+It does **not** affect current Rust userspace programs — Rust does not
+emit `.init_array` constructors — which is why nothing has surfaced it.
+
+**Proper fix (two parts, must land together):**
+1. *Linker scripts:* in every userspace/service `linker.ld`, add (before
+   `/DISCARD/`) output sections:
+   ```
+   .preinit_array ALIGN(8) : {
+       PROVIDE_HIDDEN(__preinit_array_start = .);
+       KEEP(*(.preinit_array))
+       PROVIDE_HIDDEN(__preinit_array_end = .);
+   } :load
+   .init_array ALIGN(8) : {
+       PROVIDE_HIDDEN(__init_array_start = .);
+       KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) .init_array))
+       PROVIDE_HIDDEN(__init_array_end = .);
+   } :load
+   .fini_array ALIGN(8) : {
+       PROVIDE_HIDDEN(__fini_array_start = .);
+       KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) .fini_array))
+       PROVIDE_HIDDEN(__fini_array_end = .);
+   } :load
+   ```
+   (Must be `:load` so they land in the single RWX PT_LOAD the kernel ELF
+   loader maps; `KEEP` so `--gc-sections` doesn't drop them.)
+2. *crt:* extract a host-testable helper
+   `run_init_array(start: *const Option<extern "C" fn()>, end: ...)` that
+   walks `[start, end)` calling each non-null entry in order, plus a
+   reverse-order variant for fini. In `__libc_start_main`, behind
+   `#[cfg(target_os = "none")]`, declare the linker symbols
+   (`extern "C" { static __preinit_array_start: ...; ... }`), run preinit
+   then init arrays **after** environ/signal init and **before** `main`,
+   and register a fini pass via `atexit` (or call it from `exit`). The
+   walk helper itself is unit-testable on the host with a synthetic array.
+
+**Why deferred:** this changes the startup path of **every** userspace
+program (high blast radius — a bad boundary symbol or stray array walk
+crashes all programs at boot), the boundary symbols only exist once the
+linker scripts are updated, and there is **no current consumer** to
+validate against (Rust programs leave the arrays empty, so the walk is a
+no-op and proves nothing). The correct time to land this is when bringing
+up the first C/C++ target program that relies on constructors, so it can
+be validated end-to-end with a QEMU boot test of that program. Landing it
+blind now is pure risk with no payoff. Tracked here so it's ready to
+implement (full design above) the moment a consumer appears.
+
+**Discovered/documented:** 2026-06-30 (stale `__libc_csu_init` stub
+comment promoted to tracked tech debt while auditing the posix startup
+path after wiring `pthread_atfork` into `fork()`).
+
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 
 **Where:** `kernel/src/idt.rs` page-fault handler (~line 1787). After

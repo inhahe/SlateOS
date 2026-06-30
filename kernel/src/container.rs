@@ -1435,6 +1435,128 @@ pub fn copy_from_container(
     crate::fs::vfs::Vfs::read_file(&host_path)
 }
 
+/// Upper bound on the number of filesystem objects packed into a single
+/// [`export_rootfs`] archive.  Bounds memory/time against a pathological or
+/// adversarially-deep rootfs so the traversal can never run unbounded.
+const MAX_EXPORT_ENTRIES: usize = 65_536;
+
+/// Export a container's filesystem as an uncompressed `ustar` tar archive
+/// (Docker `container export`).
+///
+/// Walks the container's rootfs subtree iteratively (an explicit work stack,
+/// never kernel-stack recursion) and packs every directory, regular file and
+/// symlink into the archive with names **relative to the rootfs root**, so the
+/// result unpacks to the same layout under any target directory.  Permissions,
+/// owner uid/gid and mtime are preserved from the source metadata where the
+/// underlying filesystem tracks them, with conventional defaults otherwise.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive or
+///   has no rootfs configured (nothing to export).
+/// - [`KernelError::ResourceExhausted`] if the subtree exceeds
+///   [`MAX_EXPORT_ENTRIES`] objects.
+/// - Any VFS error encountered while reading the tree.
+pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
+    let root_path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        let rp = table.containers[idx].root_path.clone();
+        if rp.is_empty() {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(rp)
+    })?;
+    let base = String::from(root_path.trim_end_matches('/'));
+
+    use crate::fs::tar::{EntryKind, TarWriteEntry};
+    use crate::fs::vfs::{EntryType, Vfs};
+
+    let mut entries: Vec<TarWriteEntry> = Vec::new();
+    // Explicit work stack of (host_path, archive_rel) directories still to
+    // visit; an iterative walk avoids unbounded kernel-stack recursion on a
+    // deeply-nested rootfs.
+    let mut dirs: Vec<(String, String)> = alloc::vec![(base, String::new())];
+    while let Some((host_dir, rel_dir)) = dirs.pop() {
+        let listing = Vfs::readdir(&host_dir)?;
+        for de in listing {
+            if de.name == "." || de.name == ".." {
+                continue;
+            }
+            if entries.len() >= MAX_EXPORT_ENTRIES {
+                return Err(KernelError::ResourceExhausted);
+            }
+            let host_child = alloc::format!("{host_dir}/{}", de.name);
+            let rel_child = if rel_dir.is_empty() {
+                de.name.clone()
+            } else {
+                alloc::format!("{rel_dir}/{}", de.name)
+            };
+            // Best-effort metadata for permissions/owner/mtime; fall back to
+            // conventional defaults when the FS doesn't track them or the
+            // entry can't be stat'd (e.g. a dangling symlink).
+            let meta = Vfs::metadata(&host_child).ok();
+            let (mode, uid, gid, mtime) = meta
+                .as_ref()
+                .map(|m| {
+                    (
+                        u32::from(m.permissions),
+                        m.uid,
+                        m.gid,
+                        m.modified_ns.checked_div(1_000_000_000).unwrap_or(0),
+                    )
+                })
+                .unwrap_or((0, 0, 0, 0));
+            match de.entry_type {
+                EntryType::Directory => {
+                    entries.push(TarWriteEntry {
+                        name: alloc::format!("{rel_child}/"),
+                        data: Vec::new(),
+                        kind: EntryKind::Directory,
+                        link_target: String::new(),
+                        mode: if mode == 0 { 0o755 } else { mode },
+                        uid,
+                        gid,
+                        mtime,
+                    });
+                    dirs.push((host_child, rel_child));
+                }
+                EntryType::File => {
+                    let data = Vfs::read_file(&host_child)?;
+                    entries.push(TarWriteEntry {
+                        name: rel_child,
+                        data,
+                        kind: EntryKind::File,
+                        link_target: String::new(),
+                        mode: if mode == 0 { 0o644 } else { mode },
+                        uid,
+                        gid,
+                        mtime,
+                    });
+                }
+                EntryType::Symlink => {
+                    let target = Vfs::readlink(&host_child).unwrap_or_default();
+                    entries.push(TarWriteEntry {
+                        name: rel_child,
+                        data: Vec::new(),
+                        kind: EntryKind::Symlink,
+                        link_target: target,
+                        mode: if mode == 0 { 0o777 } else { mode },
+                        uid,
+                        gid,
+                        mtime,
+                    });
+                }
+                EntryType::VolumeLabel => {
+                    // FAT volume labels have no portable tar representation.
+                }
+            }
+        }
+    }
+    Ok(crate::fs::tar::create(&entries))
+}
+
 /// Set a container's filesystem root (rootfs) before it is run.
 ///
 /// `root` is an absolute host path (e.g. the container's extracted/overlay
@@ -3123,6 +3245,69 @@ pub fn self_test() {
     }
     serial_println!("[container]   cp (copy_to/from_container): OK");
 
+    // Test 19o: export_rootfs() walks a container's rootfs and packs it into a
+    // ustar tar archive (Docker `container export`), preserving the tree layout
+    // with names relative to the rootfs root.  A rootfs-less container has
+    // nothing to export and is rejected.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // No-rootfs container: export is rejected.
+        let ct_norf = create(&ContainerConfig::new("test-export-norootfs")).expect("create");
+        assert!(export_rootfs(ct_norf).is_err(), "no rootfs => no export");
+        delete(ct_norf).expect("delete no-rootfs export container");
+
+        // Build a small rootfs under /tmp: a top-level file and a subdir file.
+        let root = "/tmp/exp-root";
+        let sub = "/tmp/exp-root/sub";
+        Vfs::mkdir(root).expect("mkdir export root");
+        Vfs::mkdir(sub).expect("mkdir export subdir");
+        let top_payload = b"top-level file";
+        let nested_payload = b"nested file body";
+        Vfs::write_file("/tmp/exp-root/top.txt", top_payload).expect("write top.txt");
+        Vfs::write_file("/tmp/exp-root/sub/hello.txt", nested_payload).expect("write hello.txt");
+
+        let ct_exp = create(&ContainerConfig::new("test-export-ct")).expect("create");
+        set_root_path(ct_exp, root).expect("set export rootfs");
+
+        let archive = export_rootfs(ct_exp).expect("export rootfs");
+        let parsed = crate::fs::tar::parse(&archive).expect("parse exported tar");
+
+        // The subdir directory entry is present (name ends with '/').
+        assert!(
+            parsed.iter().any(|e| e.name == "sub/"
+                && e.kind == crate::fs::tar::EntryKind::Directory),
+            "exported archive must contain the 'sub/' directory entry",
+        );
+        // Both files are present with their original bytes, at relative paths.
+        let top = parsed
+            .iter()
+            .find(|e| e.name == "top.txt")
+            .expect("top.txt in archive");
+        assert_eq!(
+            crate::fs::tar::entry_data(&archive, top).expect("top data"),
+            top_payload,
+            "top.txt bytes must survive export",
+        );
+        let nested = parsed
+            .iter()
+            .find(|e| e.name == "sub/hello.txt")
+            .expect("sub/hello.txt in archive");
+        assert_eq!(
+            crate::fs::tar::entry_data(&archive, nested).expect("nested data"),
+            nested_payload,
+            "sub/hello.txt bytes must survive export",
+        );
+
+        // Cleanup.
+        delete(ct_exp).expect("delete export container");
+        let _ = Vfs::remove("/tmp/exp-root/sub/hello.txt");
+        let _ = Vfs::remove("/tmp/exp-root/top.txt");
+        let _ = Vfs::rmdir("/tmp/exp-root/sub");
+        let _ = Vfs::rmdir("/tmp/exp-root");
+    }
+    serial_println!("[container]   export (rootfs -> tar): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3247,5 +3432,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (34 tests)");
+    serial_println!("[container] Self-test PASSED (35 tests)");
 }

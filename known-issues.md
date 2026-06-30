@@ -2243,6 +2243,18 @@ the rootfs as the `/` mount (the `pivot_root` target), read-only volumes
 (`-v …:ro`), and tmpfs/named-volume types — all straightforward extensions on
 the same table.
 
+**Update 2026-06-30 (increment 10): `-v` CLI flag — DONE.** The volume
+mechanism now reaches end-to-end from the shell: `oci run <dir> -v
+/srv/data:/data` (also `--volume`, repeatable) parses each spec on the first
+`:` (Docker order), validates both sides are absolute, and installs the bind
+mount via `add_volume_mount` while the container is still in Created state —
+before the init process launches. Usage/help strings updated. Container
+self-tests 18/19 were also made deterministic this session (synthetic
+never-scheduled PID instead of a real init process that could exit mid-test and
+clear its namespace — see B-CONTAINER-JAIL-TESTRACE). Build clean, boot-test
+green ("Self-test PASSED (19 tests)"). The TD32 remainder above (read-only
+volumes, mount-tree/`pivot_root`, tmpfs) is unchanged.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

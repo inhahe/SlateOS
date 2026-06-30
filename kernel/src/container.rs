@@ -1505,6 +1505,38 @@ pub fn pids(id: ContainerId) -> Option<Vec<u64>> {
     })
 }
 
+/// Rename a container (Docker `rename`).
+///
+/// Replaces the container's human-readable name. The new name is truncated to
+/// [`MAX_NAME_LEN`] bytes (matching [`ContainerConfig::new`]); an empty name is
+/// rejected. Names are not required to be unique (consistent with [`create`],
+/// which does not enforce uniqueness either), so callers wanting Docker's
+/// unique-name guarantee must check beforehand.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive
+///   or `new_name` is empty.
+pub fn rename(id: ContainerId, new_name: &str) -> KernelResult<()> {
+    if new_name.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let truncated = if new_name.len() > MAX_NAME_LEN {
+        new_name.get(..MAX_NAME_LEN).unwrap_or("")
+    } else {
+        new_name
+    };
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].name.clear();
+        table.containers[idx].name.push_str(truncated);
+        Ok(())
+    })
+}
+
 /// Update a container's live resource limits (Docker `update`).
 ///
 /// Applies new CPU and/or memory limits to the container's cgroup without
@@ -2357,6 +2389,34 @@ pub fn self_test() {
     }
     serial_println!("[container]   live resource update (update_resources): OK");
 
+    // Test 19h: rename() replaces a container's name, truncates to
+    // MAX_NAME_LEN, and rejects an empty name / invalid id (Docker `rename`).
+    {
+        let ct_rn = create(&ContainerConfig::new("old-name")).expect("create");
+        assert_eq!(info(ct_rn).unwrap().name, "old-name");
+
+        rename(ct_rn, "new-name").expect("rename");
+        assert_eq!(info(ct_rn).unwrap().name, "new-name", "name must update");
+
+        // Empty name is rejected and leaves the old name intact.
+        assert!(rename(ct_rn, "").is_err(), "empty name must be rejected");
+        assert_eq!(info(ct_rn).unwrap().name, "new-name");
+
+        // Over-long name is truncated to MAX_NAME_LEN bytes.
+        let long: alloc::string::String = core::iter::repeat('x').take(MAX_NAME_LEN + 10).collect();
+        rename(ct_rn, &long).expect("rename long");
+        assert_eq!(
+            info(ct_rn).unwrap().name.len(), MAX_NAME_LEN,
+            "name must be truncated to MAX_NAME_LEN",
+        );
+
+        // Invalid id is rejected.
+        assert!(rename(MAX_CONTAINERS as ContainerId, "x").is_err());
+
+        delete(ct_rn).expect("delete renamed container");
+    }
+    serial_println!("[container]   rename (rename): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2456,5 +2516,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (26 tests)");
+    serial_println!("[container] Self-test PASSED (27 tests)");
 }

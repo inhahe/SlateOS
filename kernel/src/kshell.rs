@@ -67045,17 +67045,73 @@ fn cmd_container(args: &str) {
 
     match cmd {
         "" | "list" | "ls" => {
+            // Optional Docker-style `--filter label=KEY` (label exists) or
+            // `--filter label=KEY=VALUE` (label equals value); repeatable, and
+            // a container must match ALL filters (Docker AND semantics).
+            // `(key, Some(value))` requires an exact value; `(key, None)` only
+            // requires the key to be present.
+            let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> =
+                alloc::vec::Vec::new();
+            let mut fi = 1;
+            while fi < parts.len() {
+                match parts.get(fi) {
+                    Some(&"--filter") | Some(&"-f") => {
+                        if let Some(&spec) = parts.get(fi.saturating_add(1)) {
+                            if let Some(lbl) = spec.strip_prefix("label=") {
+                                match lbl.split_once('=') {
+                                    Some((k, v)) if !k.is_empty() => {
+                                        label_filters.push((k, Some(v)));
+                                    }
+                                    None if !lbl.is_empty() => {
+                                        label_filters.push((lbl, None));
+                                    }
+                                    _ => crate::console_println!(
+                                        "[container] Ignoring filter '{}': expected label=KEY[=VALUE]",
+                                        spec
+                                    ),
+                                }
+                            } else {
+                                crate::console_println!(
+                                    "[container] Unsupported filter '{}' (only label= is supported)",
+                                    spec
+                                );
+                            }
+                            fi = fi.saturating_add(2);
+                        } else {
+                            fi = fi.saturating_add(1);
+                        }
+                    }
+                    _ => fi = fi.saturating_add(1),
+                }
+            }
+
             let all = container::list();
             if all.is_empty() {
                 crate::console_println!("No containers.");
                 return;
             }
-            crate::console_println!("=== Containers ({}) ===", all.len());
+            // When filtering, a container matches only if every filter is
+            // satisfied by its labels (fetched via info()).
+            let matches = |id: container::ContainerId| -> bool {
+                if label_filters.is_empty() {
+                    return true;
+                }
+                let Some(ci) = container::info(id) else { return false };
+                container::labels_match(&ci.labels, &label_filters)
+            };
+
+            let shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
+                all.iter().filter(|(id, _, _)| matches(*id)).collect();
+            if shown.is_empty() {
+                crate::console_println!("No containers match the filter.");
+                return;
+            }
+            crate::console_println!("=== Containers ({}) ===", shown.len());
             crate::console_println!(
                 "{:<5} {:<20} {:<10}",
                 "ID", "Name", "State"
             );
-            for (id, name, state) in &all {
+            for (id, name, state) in &shown {
                 crate::console_println!("{:<5} {:<20} {:<10}", id, name, state);
             }
         }
@@ -67372,7 +67428,7 @@ fn cmd_container(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|test]");
-            crate::console_println!("  container                                — list containers");
+            crate::console_println!("  container [list] [--filter label=K[=V]]  — list containers (optionally filtered by label)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");

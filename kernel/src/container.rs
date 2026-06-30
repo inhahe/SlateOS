@@ -1449,6 +1449,25 @@ pub fn list() -> Vec<(ContainerId, String, ContainerState)> {
     })
 }
 
+/// Test whether a container's labels satisfy a set of Docker-style label
+/// filters (`docker ps --filter label=...`).
+///
+/// Each filter is `(key, want)`:
+/// - `(key, Some(value))` matches only if a label with that exact key and
+///   value is present.
+/// - `(key, None)` matches if a label with that key is present (any value).
+///
+/// Returns `true` iff **every** filter is satisfied (Docker AND semantics);
+/// an empty filter set always matches.
+#[must_use]
+pub fn labels_match(labels: &[(String, String)], filters: &[(&str, Option<&str>)]) -> bool {
+    filters.iter().all(|(k, want)| {
+        labels
+            .iter()
+            .any(|(lk, lv)| lk == k && want.is_none_or(|w| lv == w))
+    })
+}
+
 /// Get the namespace IDs for a container (for process spawning).
 #[must_use]
 #[allow(dead_code)] // Future: used by process spawn to set up namespace context.
@@ -2033,9 +2052,35 @@ pub fn self_test() {
             got.iter().any(|(k, v)| k == "tier" && v == "frontend"),
             "info must preserve label values",
         );
+
+        // labels_match: Docker `--filter label=...` AND semantics.
+        // got = [("role","api"), ("tier","frontend")].
+        assert!(labels_match(&got, &[]), "empty filter matches anything");
+        assert!(labels_match(&got, &[("tier", None)]), "key-only match");
+        assert!(
+            labels_match(&got, &[("tier", Some("frontend"))]),
+            "key=value match",
+        );
+        assert!(
+            !labels_match(&got, &[("tier", Some("backend"))]),
+            "wrong value must not match",
+        );
+        assert!(
+            !labels_match(&got, &[("missing", None)]),
+            "absent key must not match",
+        );
+        assert!(
+            labels_match(&got, &[("role", Some("api")), ("tier", None)]),
+            "all filters satisfied (AND) must match",
+        );
+        assert!(
+            !labels_match(&got, &[("role", Some("api")), ("tier", Some("backend"))]),
+            "one failing filter must fail the AND",
+        );
+
         delete(ct_lbl).expect("delete labeled container");
     }
-    serial_println!("[container]   metadata labels (--label): OK");
+    serial_println!("[container]   metadata labels (--label) + filter: OK");
 
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,

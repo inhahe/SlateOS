@@ -1670,13 +1670,23 @@ impl Vfs {
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = Self::resolve_follow(path)?;
+        Self::readdir_at_resolved(&path, offset, count)
+    }
 
+    /// Like [`readdir_at`](Self::readdir_at) but on an **already-resolved**
+    /// host path (see [`read_at_resolved`](Self::read_at_resolved)) — used by
+    /// directory file handles, which store the resolved path.
+    pub fn readdir_at_resolved(
+        path: &str,
+        offset: usize,
+        count: usize,
+    ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let submount_names: Vec<String> = {
             let vfs = VFS.lock();
-            Self::submount_children(&vfs, &path)
+            Self::submount_children(&vfs, path)
         };
 
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         let mut entries = fs.lock().readdir(&relative)?;
 
         // Inject submount directories.
@@ -1700,8 +1710,15 @@ impl Vfs {
     /// Read a file's contents.
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        let result = Self::read_file_routed(&path);
+        Self::read_file_resolved(&path)
+    }
+
+    /// Like [`read_file`](Self::read_file) but on an **already-resolved** host
+    /// path (see [`read_at_resolved`](Self::read_at_resolved) for why handle-
+    /// backed I/O must skip re-translation).
+    pub fn read_file_resolved(path: &str) -> KernelResult<Vec<u8>> {
+        check_file_tags(path)?;
+        let result = Self::read_file_routed(path);
         // inotify IN_ACCESS: emit an Accessed event after a successful read,
         // but only when some watch actually requested ACCESS (a lock-free
         // gate).  The read path is high-frequency, so without an ACCESS watch
@@ -1710,7 +1727,7 @@ impl Vfs {
         if result.is_ok()
             && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
         {
-            super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
+            super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         result
     }
@@ -1747,29 +1764,41 @@ impl Vfs {
     /// Get metadata for a path.
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::stat_resolved(&path)
+    }
+
+    /// Like [`stat`](Self::stat) but on an **already-resolved** host path (see
+    /// [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn stat_resolved(path: &str) -> KernelResult<DirEntry> {
+        check_file_tags(path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().stat(&relative)
     }
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        check_writable(&path)?;
+        Self::write_file_resolved(&path, data)
+    }
+
+    /// Like [`write_file`](Self::write_file) but on an **already-resolved**
+    /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn write_file_resolved(path: &str, data: &[u8]) -> KernelResult<()> {
+        check_file_tags(path)?;
+        check_writable(path)?;
         // Intercept: let pre-operation handlers approve/deny before proceeding.
         // Called before VFS lock to avoid deadlock (interceptors must not call VFS).
-        super::intercept::pre_write(&path)?;
+        super::intercept::pre_write(path)?;
         // Quota: check whether this write would exceed the user's quota.
         // uid 0 is the default until per-process identity is wired up.
-        enforce_quota_write(&path, data.len() as u64)?;
+        enforce_quota_write(path, data.len() as u64)?;
         // Auto-version: save the old content before overwriting.
         // Called before taking the VFS lock to avoid deadlock (record_version
         // reads the file through VFS internally).  TOCTOU between read and
         // write is acceptable — version history is best-effort.
-        super::history::try_auto_record(&path);
+        super::history::try_auto_record(path);
         let cache_inval = {
-            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
             guard.write_file(&relative, data)?;
             // Coherence: a full overwrite replaces the file's contents — drop
@@ -1783,12 +1812,12 @@ impl Vfs {
         super::quota::charge_bytes(0, 0, data.len() as u64);
         // Writing may create a new file — invalidate negative cache entries
         // that claimed this path didn't exist.
-        VFS_DCACHE.lock().invalidate_negative_prefix(&path);
+        VFS_DCACHE.lock().invalidate_negative_prefix(path);
         // Notify, index, and journal after releasing VFS lock (avoids holding both locks).
-        super::notify::emit_modified(&path);
-        super::index::on_file_changed(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
-        super::audit::log_ok(super::audit::AuditOp::Write, 0, &path);
+        super::notify::emit_modified(path);
+        super::index::on_file_changed(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::audit::log_ok(super::audit::AuditOp::Write, 0, path);
         Ok(())
     }
 
@@ -2084,15 +2113,30 @@ impl Vfs {
     /// Read a range of bytes from a file.
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        let result = Self::read_at_routed(&path, offset, len);
+        Self::read_at_resolved(&path, offset, len)
+    }
+
+    /// Like [`read_at`](Self::read_at) but on an **already-resolved** host
+    /// path — one previously produced by [`resolve_follow`](Self::resolve_follow)
+    /// (e.g. the path stored in an open file handle).
+    ///
+    /// Skips namespace/jail re-translation and symlink re-following: the input
+    /// is the final canonical host path, so re-running `resolve_follow` would be
+    /// wrong for a *jailed* process (its per-process chroot prefix would be
+    /// applied a second time, escaping the file the fd actually refers to).
+    /// Open file descriptors hold a resolved reference (Unix semantics — an fd
+    /// is immune to later chroot/rename/symlink changes), so handle-backed I/O
+    /// must use this entry point, never the path-based [`read_at`](Self::read_at).
+    pub fn read_at_resolved(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        check_file_tags(path)?;
+        let result = Self::read_at_routed(path, offset, len);
         // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
         // The gate keeps this off the read hot path when no watch wants it —
         // the reason ACCESS was historically not emitted here at all.
         if result.is_ok()
             && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
         {
-            super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
+            super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         result
     }
@@ -2192,21 +2236,34 @@ impl Vfs {
     /// layer).
     pub fn read_at_uncached(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::read_at_uncached_resolved(&path, offset, len)
+    }
+
+    /// Like [`read_at_uncached`](Self::read_at_uncached) but on an
+    /// **already-resolved** host path (see
+    /// [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn read_at_uncached_resolved(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        check_file_tags(path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().read_at(&relative, offset, len)
     }
 
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
-        check_writable(&path)?;
+        Self::write_at_resolved(&path, offset, data)
+    }
+
+    /// Like [`write_at`](Self::write_at) but on an **already-resolved** host
+    /// path (see [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn write_at_resolved(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        check_file_tags(path)?;
+        check_writable(path)?;
         // Intercept and quota checks on partial writes.
-        super::intercept::pre_write(&path)?;
-        enforce_quota_write(&path, data.len() as u64)?;
+        super::intercept::pre_write(path)?;
+        enforce_quota_write(path, data.len() as u64)?;
         let cache_inval = {
-            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
             guard.write_at(&relative, offset, data)?;
             // Coherence: drop any cached pages of this file so a later mapper
@@ -2217,8 +2274,8 @@ impl Vfs {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
         super::quota::charge_bytes(0, 0, data.len() as u64);
-        super::notify::emit_modified(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -2241,9 +2298,15 @@ impl Vfs {
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
+        Self::truncate_resolved(&path, size)
+    }
+
+    /// Like [`truncate`](Self::truncate) but on an **already-resolved** host
+    /// path (see [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn truncate_resolved(path: &str, size: u64) -> KernelResult<()> {
+        check_writable(path)?;
         let cache_inval = {
-            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
             guard.truncate(&relative, size)?;
             // Coherence: truncation changes (or zeroes the tail of) the file's
@@ -2253,8 +2316,8 @@ impl Vfs {
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
-        super::notify::emit_modified(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -2540,7 +2603,13 @@ impl Vfs {
     /// Get rich metadata for a path.
     pub fn metadata(path: &str) -> KernelResult<FileMeta> {
         let path = Self::resolve_follow(path)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::metadata_resolved(&path)
+    }
+
+    /// Like [`metadata`](Self::metadata) but on an **already-resolved** host
+    /// path (see [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn metadata_resolved(path: &str) -> KernelResult<FileMeta> {
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().metadata(&relative)
     }
 
@@ -2567,7 +2636,13 @@ impl Vfs {
     /// resolved* object that lacks a stable inode yields `Ok(None)`.
     pub fn file_identity(path: &str) -> KernelResult<Option<FileId>> {
         let path = Self::resolve_follow(path)?;
-        let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+        Self::file_identity_resolved(&path)
+    }
+
+    /// Like [`file_identity`](Self::file_identity) but on an **already-resolved**
+    /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
+    pub fn file_identity_resolved(path: &str) -> KernelResult<Option<FileId>> {
+        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let ino = fs.lock().metadata(&relative)?.ino;
         // ino == 0 ⇒ filesystem has no stable per-object identity ⇒ not
         // cacheable.  Returning None (not an error) lets the caller degrade
@@ -3248,6 +3323,18 @@ impl Vfs {
     /// Returns `WouldBlock` if the lock cannot be acquired (non-blocking).
     pub fn flock(path: &str, owner: u64, lock_type: LockType) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        Self::flock_resolved(&path, owner, lock_type)
+    }
+
+    /// Acquire an advisory lock on an already-resolved host path.
+    ///
+    /// Like [`flock_resolved`](Self::flock_resolved) for `read_at_resolved`:
+    /// handle-backed callers already hold a resolved host path (captured at
+    /// `open`), so they must NOT re-run namespace translation — doing so would
+    /// re-apply the chroot jail prefix a second time (double-jail) and key the
+    /// lock on the wrong path. This worker operates directly on `path`.
+    pub fn flock_resolved(path: &str, owner: u64, lock_type: LockType) -> KernelResult<()> {
+        let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
         // Find or create the entry for this path.
@@ -3311,6 +3398,16 @@ impl Vfs {
     /// If the owner doesn't hold a lock on the path, this is a no-op.
     pub fn funlock(path: &str, owner: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        Self::funlock_resolved(&path, owner)
+    }
+
+    /// Release an advisory lock on an already-resolved host path.
+    ///
+    /// Worker for [`funlock`](Self::funlock); handle-backed callers pass the
+    /// resolved host path directly to avoid double-jailing (see
+    /// [`flock_resolved`](Self::flock_resolved)).
+    pub fn funlock_resolved(path: &str, owner: u64) -> KernelResult<()> {
+        let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
         if let Some(idx) = table.iter().position(|e| e.path == path) {
@@ -3344,6 +3441,16 @@ impl Vfs {
     /// describing the current lock state.
     pub fn lock_query(path: &str) -> KernelResult<Option<(LockType, usize)>> {
         let path = Self::resolve_follow(path)?;
+        Self::lock_query_resolved(&path)
+    }
+
+    /// Query the lock state of an already-resolved host path.
+    ///
+    /// Worker for [`lock_query`](Self::lock_query); handle-backed callers pass
+    /// the resolved host path directly to avoid double-jailing (see
+    /// [`flock_resolved`](Self::flock_resolved)).
+    pub fn lock_query_resolved(path: &str) -> KernelResult<Option<(LockType, usize)>> {
+        let path = path.to_string();
         let table = LOCK_TABLE.lock();
 
         if let Some(entry) = table.iter().find(|e| e.path == path) {

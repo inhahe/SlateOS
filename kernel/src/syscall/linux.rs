@@ -39650,14 +39650,17 @@ fn sys_flock(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(linux_errno_for(e)),
     };
 
+    // `handle_path` returns the resolved host path captured at open, so use
+    // the _resolved workers — re-resolving here would double-apply a chroot
+    // jail prefix and key the lock on the wrong path.
     match lock_type {
-        Some(lt) => match crate::fs::Vfs::flock(&path, handle, lt) {
+        Some(lt) => match crate::fs::Vfs::flock_resolved(&path, handle, lt) {
             Ok(()) => SyscallResult::ok(0),
             // EWOULDBLOCK == EAGAIN on Linux (same errno value).
             Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
             Err(e) => linux_err(linux_errno_for(e)),
         },
-        None => match crate::fs::Vfs::funlock(&path, handle) {
+        None => match crate::fs::Vfs::funlock_resolved(&path, handle) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(linux_errno_for(e)),
         },

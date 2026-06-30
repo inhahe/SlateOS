@@ -881,6 +881,26 @@ fn test_process_root() -> KernelResult<()> {
     // Relative paths are left for the cwd layer (not jailed here).
     assert_eq!(resolve_path_for(pid, "rel/path")?, "rel/path");
 
+    // --- Non-idempotency guard (double-jail regression) ---
+    //
+    // `apply_root` blindly prefixes the jail root, so resolving a path that is
+    // ALREADY anchored under the jail root re-prefixes it (double-jail).  This
+    // is by design — the namespace layer assumes its input is a *guest* path.
+    // It is precisely why every handle-backed VFS op (read_at, write_at, …)
+    // must call the `_resolved` worker on the host path captured at open()
+    // rather than re-running `resolve_follow`.  This assertion pins the
+    // behaviour so a future refactor that accidentally makes handle ops
+    // re-resolve will be caught here.
+    let once = resolve_path_for(pid, "/bin/sh")?;
+    assert_eq!(once, "/containers/c1/rootfs/bin/sh");
+    let twice = resolve_path_for(pid, &once)?;
+    assert_eq!(
+        twice,
+        "/containers/c1/rootfs/containers/c1/rootfs/bin/sh",
+        "re-resolving an already-jailed path must double-jail (handle ops \
+         must therefore use the _resolved workers, not re-resolve)",
+    );
+
     // A root that normalizes to "/" clears the jail.
     set_root(pid, "/")?;
     assert!(get_root(pid).is_none());

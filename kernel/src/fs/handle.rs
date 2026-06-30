@@ -242,7 +242,7 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
     // Note: Vfs::stat() also checks file tags internally, but our
     // explicit check above handles the CREATE case (file doesn't
     // exist yet, so stat is never called — we still need the check).
-    let stat_result = crate::fs::Vfs::stat(&norm);
+    let stat_result = crate::fs::Vfs::stat_resolved(&norm);
 
     match stat_result {
         Ok(entry) => {
@@ -279,7 +279,7 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
                 if !flags.is_writable() {
                     return Err(KernelError::InvalidArgument);
                 }
-                crate::fs::Vfs::truncate(&norm, 0)?;
+                crate::fs::Vfs::truncate_resolved(&norm, 0)?;
                 size = 0;
             }
 
@@ -314,7 +314,7 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
 
             // Create an empty file.  write_file already emits IN_CREATE; the
             // IN_OPEN below follows it, matching Linux's O_CREAT open order.
-            crate::fs::Vfs::write_file(&norm, &[])?;
+            crate::fs::Vfs::write_file_resolved(&norm, &[])?;
 
             let handle = allocate_handle(norm.clone(), 0, 0, flags)?;
             crate::fs::notify::emit_opened(&norm);
@@ -358,7 +358,9 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // Using the handle ID as the owner (consistent with how flock
         // syscalls pass owner IDs).  Best-effort: ignore errors from
         // lock release.
-        let _ = crate::fs::Vfs::funlock(p, handle);
+        // `p` is the resolved host path captured at open; use the _resolved
+        // worker so we don't re-apply namespace translation (double-jail).
+        let _ = crate::fs::Vfs::funlock_resolved(p, handle);
 
         // inotify IN_CLOSE_WRITE / IN_CLOSE_NOWRITE on the final close of the
         // open file description.  Directory handles report the close too and
@@ -397,7 +399,7 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
 
     // Read via VFS.  Currently reads the whole file — the default
     // `read_at` in the FileSystem trait slices the result.
-    let data = crate::fs::Vfs::read_at(&file.path, file.offset, buf.len())?;
+    let data = crate::fs::Vfs::read_at_resolved(&file.path, file.offset, buf.len())?;
     let copy_len = data.len().min(buf.len());
 
     if let Some(dest) = buf.get_mut(..copy_len) {
@@ -492,7 +494,7 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
     };
 
     // Write via VFS.
-    crate::fs::Vfs::write_at(&file.path, write_offset, data)?;
+    crate::fs::Vfs::write_at_resolved(&file.path, write_offset, data)?;
 
     let written = data.len();
 
@@ -541,7 +543,7 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
     if offset >= file.size {
         return Ok(0);
     }
-    let data = crate::fs::Vfs::read_at(&file.path, offset, buf.len())?;
+    let data = crate::fs::Vfs::read_at_resolved(&file.path, offset, buf.len())?;
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -581,7 +583,7 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
     if buf.is_empty() || offset >= size {
         return Ok(0);
     }
-    let data = crate::fs::Vfs::read_at_uncached(&path, offset, buf.len())?;
+    let data = crate::fs::Vfs::read_at_uncached_resolved(&path, offset, buf.len())?;
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -618,7 +620,7 @@ pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
     if data.is_empty() {
         return Ok(0);
     }
-    crate::fs::Vfs::write_at(&file.path, offset, data)?;
+    crate::fs::Vfs::write_at_resolved(&file.path, offset, data)?;
     let written = data.len();
     let new_end = offset.saturating_add(written as u64);
     if new_end > file.size {
@@ -662,7 +664,7 @@ pub fn read_dir_at(
     };
 
     let start = usize::try_from(cursor).map_err(|_| KernelError::InvalidArgument)?;
-    let (entries, _total) = crate::fs::Vfs::readdir_at(&path, start, max_entries)?;
+    let (entries, _total) = crate::fs::Vfs::readdir_at_resolved(&path, start, max_entries)?;
     Ok((cursor, entries))
 }
 
@@ -756,7 +758,7 @@ pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
 
     // metadata() follows symlinks, but an open handle already refers to
     // the resolved target, so this returns the correct underlying object.
-    crate::fs::Vfs::metadata(&file.path)
+    crate::fs::Vfs::metadata_resolved(&file.path)
 }
 
 /// Returns whether an open handle refers to a directory.
@@ -791,7 +793,7 @@ pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
         return Err(KernelError::PermissionDenied);
     }
 
-    crate::fs::Vfs::truncate(&file.path, size)?;
+    crate::fs::Vfs::truncate_resolved(&file.path, size)?;
 
     file.size = size;
     // Clamp offset: if the cursor was beyond the new EOF, move it back.
@@ -886,7 +888,7 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         file.path.clone()
     };
-    crate::fs::Vfs::file_identity(&path)
+    crate::fs::Vfs::file_identity_resolved(&path)
 }
 
 /// Get the current number of open file handles (for diagnostics).

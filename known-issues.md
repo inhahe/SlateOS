@@ -2094,6 +2094,31 @@ absolute-path read isolation and now CoW write isolation are both in place; the
 remaining gap is jailing a container process's *cwd* so relative resolution is
 contained, alongside the mount-namespace/`pivot_root` work deferred in §42.
 
+**Update 2026-06-30 (increment 7): double-jail bug in fd-backed I/O — FIXED.**
+While preparing part (b) we discovered that *all* fd-backed file I/O was broken
+for jailed (container) processes — a regression that increment 6's CoW mount
+would have exposed the moment a container actually opened a file. Root cause:
+`namespace::apply_root` is intentionally **non-idempotent** (it blindly prefixes
+the jail root, assuming a *guest* path), but `handle::open()` stored the
+*already-resolved host path* in the file handle (`file.path`), and every
+subsequent handle op (`Vfs::read_at(&file.path)`, `write_at`, `truncate`,
+`metadata`, `readdir_at`, `file_identity`, `flock`/`funlock`, …) called
+`resolve_follow` *again* → re-applied the jail prefix → double-jailed to a path
+that doesn't exist. For a jailed process even `open()` failed (its internal
+`stat`/`truncate`/`write_file` re-jailed). Non-jailed processes were unaffected
+only because `resolve_follow` is idempotent on already-resolved non-jailed paths.
+**Fix (design-decisions §44):** every path-based `Vfs` method is split into a
+thin wrapper (`resolve_follow` → call worker) plus a `*_resolved` worker that
+operates on an already-resolved host path *without* re-translating. Handle-backed
+ops call the `*_resolved` worker directly (an open fd holds a resolved reference —
+Unix semantics, immune to later chroot/rename/symlink changes). Split methods:
+`read_at`, `read_file`, `stat`, `write_file`, `write_at`, `truncate`, `metadata`,
+`read_at_uncached`, `readdir_at`, `file_identity`, `flock`, `funlock`,
+`lock_query`. A non-idempotency guard was added to
+`namespace::test_process_root` (re-resolving an already-jailed path must
+double-jail) to pin the invariant so a future refactor that makes handle ops
+re-resolve is caught at boot. Build clean, clippy delta zero, boot-test green.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

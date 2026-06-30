@@ -1,4 +1,5 @@
-//! Read-only file page cache ("C-lite") — shared, refcounted file pages.
+//! Read-only file page cache ("C-lite") — shared file pages via the frame
+//! allocator's per-frame refcount.
 //!
 //! This module is the storage core of the C-lite read-only page cache decided
 //! in design-decisions §23/§36.  Its job is to cache a file's pages **once** and
@@ -15,6 +16,26 @@
 //! (`MAP_PRIVATE`) writer copies-on-write to a fresh anonymous frame; the cached
 //! frame it copied from is never mutated.
 //!
+//! ## Refcount model (design-decisions §37)
+//!
+//! Page lifetime rides the **frame allocator's existing per-frame refcount**
+//! ([`crate::mm::frame::refcount`] / [`crate::mm::frame::ref_inc`] /
+//! [`crate::mm::frame::free_frame`]) — the very mechanism CoW already uses — not
+//! a separate mapper count inside the cache.  Concretely:
+//!
+//! - A resident [`CacheEntry`] holds **exactly one** frame reference (the entry's
+//!   presence in the map *is* that reference; a freshly allocated frame starts at
+//!   refcount 1).
+//! - [`get_or_fill`] / [`lookup`] return a frame with **one additional reference
+//!   already added on the caller's behalf** (so eviction cannot free it out from
+//!   under a caller that is about to map it).  The caller either maps it — after
+//!   which the standard `free_frame` teardown owns that reference — or, if it
+//!   never maps it, hands it back to [`release`].
+//! - Process unmap / exit frees mapped frames through the **standard
+//!   `free_frame` path with no changes**: it decrements and only returns the
+//!   frame to the allocator at refcount 0.
+//! - "Is this page actively mapped?" is `frame::refcount(frame) > 1`.
+//!
 //! ## Keying
 //!
 //! Pages are keyed by [`PageKey`] = ([`FileId`], page index), where the page
@@ -24,27 +45,14 @@
 //! `file_identity` (FAT, ISO9660, pseudo-filesystems) must fall back to the
 //! per-mapping read path and never enter this cache.
 //!
-//! ## Reference counting & lifetime
-//!
-//! Each [`CacheEntry`] carries a `refcount` of live references (one per mapping
-//! or held lookup).  A reference is acquired by [`get_or_fill`] / [`lookup`] and
-//! released by [`release`].  **Each successful acquire must be paired with
-//! exactly one release** — [`CachedPage`] is a plain descriptor and does *not*
-//! auto-release on drop, because the reference must outlive the mapping (the
-//! page table holds the frame until the VMA is torn down, at which point the
-//! unmap path releases).
-//!
-//! An entry stays resident at `refcount == 0` (that is the caching benefit: the
-//! next mapper gets a hit).  Such idle entries are reclaimable — [`invalidate`]
-//! and eviction (a later sub-task) drop them and free the frame.
-//!
 //! ## Lock ordering
 //!
-//! Frame allocation ([`crate::mm::frame::alloc_frame`]) and freeing take the
-//! frame-allocator lock.  We **never** hold the page-cache lock across those
-//! calls: `get_or_fill` allocates and fills the new frame with the cache lock
-//! *dropped*, then re-acquires it to insert (handling the race where another
-//! CPU inserted the same page meanwhile).
+//! The cache lock is taken **before** the frame-allocator lock (cache →
+//! allocator).  We hold the cache lock across the cheap `ref_inc` /
+//! `frame::refcount` calls (this closes the evict-vs-map race, since eviction
+//! also takes the cache lock first), but **never** across the expensive
+//! `alloc_frame` + fill on a miss — that runs with the cache lock dropped and a
+//! re-lock resolves the fill race.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -64,35 +72,19 @@ use crate::mm::page_table;
 
 /// Cache key: a stable file identity plus the 16 KiB page index within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PageKey {
+struct PageKey {
     /// Stable system-wide file identity (`(fs_id, ino)`).
-    pub file: FileId,
+    file: FileId,
     /// Page index = `file_offset / FRAME_SIZE`.
-    pub page_index: u64,
+    page_index: u64,
 }
 
-/// A resident cached page: the physical frame plus its live-reference count.
+/// A resident cached page.  The entry's presence holds exactly one reference on
+/// `frame` (see the module-level refcount model).
 #[derive(Debug)]
 struct CacheEntry {
     /// The physical frame holding this page's bytes (zero-padded past EOF).
     frame: PhysFrame,
-    /// Number of live references (mappings / held lookups).  May be 0 while the
-    /// page stays resident for reuse.
-    refcount: u64,
-}
-
-/// A handle to a cached page returned by [`get_or_fill`] / [`lookup`].
-///
-/// This is a plain copyable *descriptor*, not an owning guard: copying it does
-/// **not** bump the refcount, and dropping it does **not** release.  The caller
-/// owns exactly one logical reference per successful acquire and must hand the
-/// key back to [`release`] when the mapping that holds the frame goes away.
-#[derive(Debug, Clone, Copy)]
-pub struct CachedPage {
-    /// The shared, read-only physical frame.  Map it read-only; never write it.
-    pub frame: PhysFrame,
-    /// The key identifying this page (pass to [`release`] / [`invalidate`]).
-    pub key: PageKey,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,9 +114,9 @@ pub struct PageCacheStats {
     pub inserts: u64,
     /// Misses that lost the fill race and freed their just-filled frame.
     pub races_lost: u64,
-    /// Reference releases.
+    /// Caller references dropped via [`release`].
     pub releases: u64,
-    /// Entries evicted/invalidated (frame freed).
+    /// Entries evicted/invalidated (cache reference dropped).
     pub evictions: u64,
     /// Entries currently resident.
     pub resident: u64,
@@ -149,7 +141,7 @@ pub fn stats() -> PageCacheStats {
 // Core API
 // ---------------------------------------------------------------------------
 
-/// Compute the page key for a file offset, validating divisibility.
+/// Compute the page key for a file offset, validating frame alignment.
 fn key_for(file: FileId, file_offset: u64) -> KernelResult<PageKey> {
     // Offsets handed to the cache must be frame-aligned (the fault path always
     // faults whole 16 KiB pages).  Reject anything else rather than silently
@@ -167,21 +159,26 @@ fn key_for(file: FileId, file_offset: u64) -> KernelResult<PageKey> {
 
 /// Acquire a reference to a cached page if it is already resident.
 ///
-/// On a hit, the entry's refcount is incremented and a [`CachedPage`] returned;
-/// the caller must later [`release`] it.  On a miss, returns `Ok(None)` (the
-/// caller can then [`get_or_fill`]).  Frame-misaligned offsets are an error.
+/// On a hit, adds one reference to the frame on the caller's behalf and returns
+/// it; the caller must either map it (after which `free_frame` teardown owns the
+/// reference) or hand it back to [`release`].  On a miss, returns `Ok(None)`.
 ///
 /// # Errors
 ///
-/// Returns [`KernelError::InvalidArgument`] if `file_offset` is not a multiple
-/// of [`FRAME_SIZE`].
-pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<CachedPage>> {
+/// [`KernelError::InvalidArgument`] for a frame-misaligned offset, or a
+/// frame-allocator error from the reference bump.
+pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<PhysFrame>> {
     let key = key_for(file, file_offset)?;
-    let mut cache = PAGE_CACHE.lock();
-    if let Some(entry) = cache.get_mut(&key) {
-        entry.refcount = entry.refcount.saturating_add(1);
+    let cache = PAGE_CACHE.lock();
+    if let Some(entry) = cache.get(&key) {
+        let frame = entry.frame;
+        // SAFETY: the entry is resident ⇒ `frame` is an allocated frame from the
+        // frame allocator with refcount ≥ 1.  We hold the cache lock, and
+        // eviction also takes the cache lock first, so the frame cannot be freed
+        // concurrently between this check and the reference bump.
+        unsafe { frame::ref_inc(frame)? };
         STAT_HITS.fetch_add(1, Ordering::Relaxed);
-        return Ok(Some(CachedPage { frame: entry.frame, key }));
+        return Ok(Some(frame));
     }
     Ok(None)
 }
@@ -189,42 +186,49 @@ pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<CachedPage>
 /// Acquire a reference to the page for `(file, file_offset)`, filling it from
 /// the backing store on a miss.
 ///
-/// On a hit, increments the refcount and returns the shared frame.  On a miss,
-/// allocates and zeroes a fresh frame, invokes `fill` to populate it (a short
-/// fill leaves the tail zero, matching demand-paging EOF semantics), then
-/// inserts it — racing CPUs are resolved so only one frame survives per key.
+/// Returns a frame with **one reference added for the caller** (see the
+/// module-level refcount model).  On a hit, the shared resident frame is bumped
+/// and returned.  On a miss, a fresh frame is allocated, zeroed, populated by
+/// `fill` (a short fill leaves the tail zero, matching demand-paging EOF
+/// semantics), inserted, and returned with the caller's reference; racing CPUs
+/// are resolved so only one frame survives per key.
 ///
-/// `fill` receives the full `FRAME_SIZE`-byte, already-zeroed page buffer and
-/// should write the file's bytes for this page into it.
+/// `fill` receives the full `FRAME_SIZE`-byte, already-zeroed page buffer.
 ///
-/// The returned [`CachedPage`] holds one reference; pair it with [`release`].
+/// The caller owns one reference: map the frame (teardown then owns it) or call
+/// [`release`].
 ///
 /// # Errors
 ///
 /// - [`KernelError::InvalidArgument`] for a misaligned offset.
 /// - Whatever `fill` returns on a read error (the just-allocated frame is freed
 ///   before propagating).
-/// - Frame-allocation / HHDM errors.
-pub fn get_or_fill<F>(file: FileId, file_offset: u64, fill: F) -> KernelResult<CachedPage>
+/// - Frame-allocation / HHDM / reference-bump errors.
+pub fn get_or_fill<F>(file: FileId, file_offset: u64, fill: F) -> KernelResult<PhysFrame>
 where
     F: FnOnce(&mut [u8]) -> KernelResult<()>,
 {
     let key = key_for(file, file_offset)?;
 
-    // Fast path: already resident.
+    // Fast path: already resident.  Bump under the cache lock (closes the
+    // evict-vs-map race; eviction also locks the cache first).
     {
-        let mut cache = PAGE_CACHE.lock();
-        if let Some(entry) = cache.get_mut(&key) {
-            entry.refcount = entry.refcount.saturating_add(1);
+        let cache = PAGE_CACHE.lock();
+        if let Some(entry) = cache.get(&key) {
+            let frame = entry.frame;
+            // SAFETY: resident entry ⇒ allocated frame, refcount ≥ 1; cache lock
+            // held so eviction cannot free it concurrently.
+            unsafe { frame::ref_inc(frame)? };
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
-            return Ok(CachedPage { frame: entry.frame, key });
+            return Ok(frame);
         }
     }
 
     STAT_MISSES.fetch_add(1, Ordering::Relaxed);
 
-    // Allocate + fill the new frame with the cache lock dropped (frame alloc
-    // takes the allocator lock; never nest it under the cache lock).
+    // Allocate + fill the new frame with the cache lock dropped (alloc_frame is
+    // expensive; never nest it under the cache lock).  A fresh frame has
+    // refcount 1 — that becomes the cache's reference once inserted.
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
     let new_frame = frame::alloc_frame()?;
 
@@ -239,79 +243,111 @@ where
     };
     if let Err(e) = fill(buf) {
         // Fill failed — free the frame we never published.
-        // SAFETY: `new_frame` was just allocated and never mapped/shared.
+        // SAFETY: `new_frame` was just allocated (refcount 1) and never mapped or
+        // shared; free_frame returns it to the allocator.
         let _ = unsafe { frame::free_frame(new_frame) };
         return Err(e);
     }
 
     // Re-acquire and insert, resolving the fill race.
     let mut cache = PAGE_CACHE.lock();
-    if let Some(entry) = cache.get_mut(&key) {
+    if let Some(entry) = cache.get(&key) {
         // Another CPU filled this page first; adopt theirs and discard ours.
-        entry.refcount = entry.refcount.saturating_add(1);
-        let winner = CachedPage { frame: entry.frame, key };
+        let winner = entry.frame;
+        // SAFETY: resident entry ⇒ allocated frame; cache lock held.
+        unsafe { frame::ref_inc(winner)? };
         drop(cache);
         STAT_RACES_LOST.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: `new_frame` was never mapped or published to the cache.
+        // SAFETY: `new_frame` (refcount 1) was never mapped or published.
         let _ = unsafe { frame::free_frame(new_frame) };
         return Ok(winner);
     }
-    cache.insert(key, CacheEntry { frame: new_frame, refcount: 1 });
+    // We win the race.  `new_frame` carries refcount 1 (the cache's reference);
+    // bump once more for the caller's returned reference (→ 2).
+    // SAFETY: `new_frame` is a freshly allocated, valid frame; cache lock held.
+    unsafe { frame::ref_inc(new_frame)? };
+    cache.insert(key, CacheEntry { frame: new_frame });
     STAT_INSERTS.fetch_add(1, Ordering::Relaxed);
-    Ok(CachedPage { frame: new_frame, key })
+    Ok(new_frame)
 }
 
-/// Release one reference previously acquired via [`get_or_fill`] / [`lookup`].
+/// Drop one caller reference obtained from [`get_or_fill`] / [`lookup`] that was
+/// **never mapped** (e.g. the fault path failed to install the PTE).
 ///
-/// Decrements the entry's refcount (saturating at 0).  The entry stays resident
-/// at refcount 0 for reuse; it is only freed by [`invalidate`] / eviction.  A
-/// release for an already-evicted key is a harmless no-op.
-pub fn release(key: PageKey) {
+/// This decrements the frame's refcount via `free_frame`; if the cache entry and
+/// all other mappers still hold references the frame survives, otherwise it is
+/// returned to the allocator.  Do **not** call this for a reference you handed to
+/// `map_frame` — that one is owned by the page table and freed on teardown.
+pub fn release(frame: PhysFrame) {
+    STAT_RELEASES.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `frame` came from get_or_fill/lookup, which added a reference for
+    // the caller; dropping exactly that reference is balanced.
+    let _ = unsafe { frame::free_frame(frame) };
+}
+
+/// Remove a page from the cache index and drop the cache's single reference.
+///
+/// Returns `true` if the page was resident.  Used for **coherence** (the file
+/// changed): the page is always removed from the index so future mappers do not
+/// see stale bytes.  If live mappers still reference the frame it survives for
+/// them (their references keep it alive); otherwise it is freed.
+pub fn invalidate(file: FileId, file_offset: u64) -> bool {
+    let key = match key_for(file, file_offset) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
     let mut cache = PAGE_CACHE.lock();
-    if let Some(entry) = cache.get_mut(&key) {
-        entry.refcount = entry.refcount.saturating_sub(1);
-        STAT_RELEASES.fetch_add(1, Ordering::Relaxed);
+    if let Some(entry) = cache.remove(&key) {
+        let frame = entry.frame;
+        drop(cache);
+        STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: removing the index entry drops the cache's one reference;
+        // free_frame decrements it.  Any live mappers keep the frame alive.
+        let _ = unsafe { frame::free_frame(frame) };
+        return true;
     }
+    false
 }
 
-/// Drop a single resident page **only if it has no live references**, freeing
-/// its frame.  Returns `true` if it was removed.
+/// Evict a page **only if the cache holds the sole reference** (no live mappers).
 ///
-/// Used for coherence (the file changed) and as the eviction primitive.  An
-/// entry with `refcount > 0` is left in place (live mappings still point at the
-/// frame) and `false` is returned — the caller must not remove a page out from
-/// under a live mapping.
-pub fn invalidate(key: PageKey) -> bool {
+/// Returns `true` if it was evicted.  This is the reclaim primitive: it never
+/// reduces dedup for an actively-shared page (a page with `refcount > 1` is
+/// left resident).
+pub fn try_evict(file: FileId, file_offset: u64) -> bool {
+    let key = match key_for(file, file_offset) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
     let mut cache = PAGE_CACHE.lock();
-    let should_remove = matches!(cache.get(&key), Some(e) if e.refcount == 0);
-    if should_remove {
-        if let Some(entry) = cache.remove(&key) {
+    if let Some(entry) = cache.get(&key) {
+        let frame = entry.frame;
+        // refcount() takes the allocator lock; cache → allocator ordering holds.
+        if frame::refcount(frame) <= 1 {
+            cache.remove(&key);
             drop(cache);
             STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: refcount was 0 ⇒ no mapping references this frame, so it
-            // is safe to return it to the allocator.
-            let _ = unsafe { frame::free_frame(entry.frame) };
+            // SAFETY: refcount ≤ 1 ⇒ only the cache references this frame, so
+            // dropping that reference frees it with no live mapping left behind.
+            let _ = unsafe { frame::free_frame(frame) };
             return true;
         }
     }
     false
 }
 
-/// Invalidate all idle (refcount 0) pages of a file, freeing their frames.
+/// Invalidate every cached page of a file, dropping the cache's reference on
+/// each (coherence: the file was unlinked / truncated / rewritten).
 ///
-/// Returns the number of pages removed.  Pages with live references are left
-/// resident.  Used when a file is unlinked/truncated/rewritten so its stale
-/// cached pages are not served to future mappers.
+/// Returns the number of pages removed.  Frames with live mappers survive for
+/// them; unreferenced frames are freed.
 pub fn invalidate_file(file: FileId) -> usize {
     let mut cache = PAGE_CACHE.lock();
-    // Collect the idle keys for this file (BTreeMap range over the page index).
     let lo = PageKey { file, page_index: 0 };
     let hi = PageKey { file, page_index: u64::MAX };
     let mut victims = alloc::vec::Vec::new();
-    for (k, entry) in cache.range(lo..=hi) {
-        if entry.refcount == 0 {
-            victims.push(*k);
-        }
+    for (k, _entry) in cache.range(lo..=hi) {
+        victims.push(*k);
     }
     let mut frames = alloc::vec::Vec::with_capacity(victims.len());
     for k in &victims {
@@ -323,28 +359,34 @@ pub fn invalidate_file(file: FileId) -> usize {
     let removed = frames.len();
     for f in frames {
         STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: each frame had refcount 0 ⇒ no live mapping references it.
+        // SAFETY: dropping the cache's one reference per entry; live mappers (if
+        // any) keep their frame alive, otherwise it is freed.
         let _ = unsafe { frame::free_frame(f) };
     }
     removed
 }
 
-/// Test/diagnostic helper: the current refcount of a key, or `None` if absent.
+/// Test/diagnostic helper: is a page currently resident in the cache index?
 #[must_use]
-pub fn refcount_of(key: PageKey) -> Option<u64> {
-    PAGE_CACHE.lock().get(&key).map(|e| e.refcount)
+pub fn is_resident(file: FileId, file_offset: u64) -> bool {
+    let Ok(key) = key_for(file, file_offset) else {
+        return false;
+    };
+    PAGE_CACHE.lock().contains_key(&key)
 }
 
 // ---------------------------------------------------------------------------
 // Boot self-test
 // ---------------------------------------------------------------------------
 
-/// Boot self-test for the read-only page cache (design-decisions §23/§36).
+/// Boot self-test for the read-only page cache (design-decisions §23/§36/§37).
 ///
 /// `#[cfg(test)]` unit tests do not run on the bare-metal target, so the cache
 /// is exercised here against the real frame allocator during boot.  Validates
-/// hit/miss sharing, single-fill, content correctness, refcounting, key
-/// distinctness, race-free idempotence, and reclaim.
+/// the frame-refcount sharing model: miss-fill + content, hit sharing + single
+/// fill, per-caller reference bumps, distinct-key isolation, misaligned
+/// rejection, refcount-aware eviction, forced invalidation, and reclaim — and
+/// that no frame is leaked afterward.
 ///
 /// # Errors
 ///
@@ -372,12 +414,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // Run the body, always cleaning up the cache entries we created.
     let result = (|| -> KernelResult<()> {
-        // (1) First acquire is a miss: allocates, fills, refcount 1.
+        // (1) Miss: allocates, fills, returns a frame with refcount 2
+        //     (cache's reference + this caller's reference).
         let mut fill_calls = 0u32;
-        let p0 = get_or_fill(file_a, 0, |buf| {
+        let f0 = get_or_fill(file_a, 0, |buf| {
             fill_calls = fill_calls.saturating_add(1);
-            // Slice pattern avoids panicking index ops; a FRAME_SIZE buffer
-            // always has ≥3 bytes, so this always matches.
             if let [b0, b1, .., last] = buf {
                 *b0 = 0xAB;
                 *b1 = 0xCD;
@@ -389,45 +430,43 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[page_cache]   FAIL: expected 1 fill, got {fill_calls}");
             return Err(KernelError::InternalError);
         }
-        if refcount_of(p0.key) != Some(1) {
-            serial_println!("[page_cache]   FAIL: refcount after miss != 1");
+        if frame::refcount(f0) != 2 {
+            serial_println!("[page_cache]   FAIL: refcount after miss != 2 (cache+caller)");
             return Err(KernelError::InternalError);
         }
-        if read_byte(p0.frame, 0) != 0xAB || read_byte(p0.frame, 1) != 0xCD {
+        if read_byte(f0, 0) != 0xAB || read_byte(f0, 1) != 0xCD {
             serial_println!("[page_cache]   FAIL: filled content mismatch");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[page_cache]   miss fills + content correct: OK");
+        serial_println!("[page_cache]   miss fills + content + refcount: OK");
 
-        // (2) Second acquire of the same page is a hit: same frame, no new fill,
-        //     refcount 2.
-        let p1 = get_or_fill(file_a, 0, |_buf| {
-            // Must NOT be called on a hit.
-            fill_calls = fill_calls.saturating_add(1);
+        // (2) Hit: same frame, no new fill, refcount 3 (cache + two callers).
+        let f1 = get_or_fill(file_a, 0, |_buf| {
+            fill_calls = fill_calls.saturating_add(1); // must NOT run on a hit
             Ok(())
         })?;
         if fill_calls != 1 {
             serial_println!("[page_cache]   FAIL: hit re-filled the page");
             return Err(KernelError::InternalError);
         }
-        if p1.frame != p0.frame {
+        if f1 != f0 {
             serial_println!("[page_cache]   FAIL: hit returned a different frame");
             return Err(KernelError::InternalError);
         }
-        if refcount_of(p0.key) != Some(2) {
-            serial_println!("[page_cache]   FAIL: refcount after hit != 2");
+        if frame::refcount(f0) != 3 {
+            serial_println!("[page_cache]   FAIL: refcount after hit != 3");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[page_cache]   hit shares frame, single fill: OK");
+        serial_println!("[page_cache]   hit shares frame, single fill, refcount: OK");
 
         // (3) A different page index of the same file is a distinct frame.
-        let p2 = get_or_fill(file_a, FRAME_SIZE as u64, |buf| {
+        let f2 = get_or_fill(file_a, FRAME_SIZE as u64, |buf| {
             if let [b0, ..] = buf {
                 *b0 = 0x11;
             }
             Ok(())
         })?;
-        if p2.frame == p0.frame {
+        if f2 == f0 {
             serial_println!("[page_cache]   FAIL: distinct page shares a frame");
             return Err(KernelError::InternalError);
         }
@@ -440,48 +479,58 @@ pub fn self_test() -> KernelResult<()> {
         }
         serial_println!("[page_cache]   misaligned offset rejected: OK");
 
-        // (5) Release drops refcount; entry stays resident at 0; invalidate then
-        //     reclaims it.
-        release(p0.key); // 2 -> 1
-        release(p1.key); // 1 -> 0
-        if refcount_of(p0.key) != Some(0) {
-            serial_println!("[page_cache]   FAIL: refcount after releases != 0");
+        // (5) Release the two caller references on page 0 (3 → 1 = cache only),
+        //     then try_evict reclaims it (no live mappers).
+        release(f0); // 3 -> 2
+        release(f1); // 2 -> 1 (cache only)
+        if frame::refcount(f0) != 1 {
+            serial_println!("[page_cache]   FAIL: refcount after releases != 1");
             return Err(KernelError::InternalError);
         }
-        // invalidate must refuse while p2 (different key) is irrelevant; p0 has
-        // refcount 0 so it is removed.
-        if !invalidate(p0.key) {
-            serial_println!("[page_cache]   FAIL: invalidate(refcount 0) did not remove");
+        if !try_evict(file_a, 0) {
+            serial_println!("[page_cache]   FAIL: try_evict(sole reference) did not evict");
             return Err(KernelError::InternalError);
         }
-        if refcount_of(p0.key).is_some() {
-            serial_println!("[page_cache]   FAIL: entry still resident after invalidate");
+        if is_resident(file_a, 0) {
+            serial_println!("[page_cache]   FAIL: page still resident after eviction");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[page_cache]   release + reclaim: OK");
+        serial_println!("[page_cache]   release + refcount-aware eviction: OK");
 
-        // (6) invalidate refuses to evict a page with live references.
+        // (6) try_evict refuses a page with a live mapper (caller reference held).
         let live = get_or_fill(file_b, 0, |buf| {
             if let [b0, ..] = buf {
                 *b0 = 0x22;
             }
             Ok(())
         })?;
-        if invalidate(live.key) {
-            serial_println!("[page_cache]   FAIL: invalidate evicted a live page");
+        if try_evict(file_b, 0) {
+            serial_println!("[page_cache]   FAIL: try_evict evicted a referenced page");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[page_cache]   invalidate spares live page: OK");
+        // But forced invalidate (coherence) removes it from the index; the
+        // caller's reference keeps the frame alive until released.
+        if !invalidate(file_b, 0) {
+            serial_println!("[page_cache]   FAIL: invalidate did not remove resident page");
+            return Err(KernelError::InternalError);
+        }
+        if is_resident(file_b, 0) {
+            serial_println!("[page_cache]   FAIL: page resident after invalidate");
+            return Err(KernelError::InternalError);
+        }
+        if frame::refcount(live) != 1 {
+            serial_println!("[page_cache]   FAIL: caller ref not preserved across invalidate");
+            return Err(KernelError::InternalError);
+        }
+        release(live); // drop the last reference → frame freed
+        serial_println!("[page_cache]   try_evict spares + invalidate forces: OK");
 
-        // Clean up everything we still hold: p2 (file_a) and live (file_b).
-        release(p2.key);
-        release(live.key);
+        // Clean up the still-resident distinct page (f2): drop the caller ref,
+        // then invalidate_file reclaims the cache's reference.
+        release(f2);
         let n_a = invalidate_file(file_a);
-        let n_b = invalidate_file(file_b);
-        if n_a != 1 || n_b != 1 {
-            serial_println!(
-                "[page_cache]   FAIL: invalidate_file removed {n_a}/{n_b}, expected 1/1"
-            );
+        if n_a != 1 {
+            serial_println!("[page_cache]   FAIL: invalidate_file removed {n_a}, expected 1");
             return Err(KernelError::InternalError);
         }
         serial_println!("[page_cache]   invalidate_file reclaims idle pages: OK");
@@ -489,16 +538,14 @@ pub fn self_test() -> KernelResult<()> {
         Ok(())
     })();
 
-    // Defensive cleanup: if the body bailed early, make sure no synthetic test
-    // entries linger in the live cache.  (Idle ones are freed; live ones can't
-    // be — but the test only leaves them on an assertion failure path.)
+    // Defensive cleanup: if the body bailed early, drop any synthetic entries so
+    // they do not linger in the live cache.
     let _ = invalidate_file(file_a);
     let _ = invalidate_file(file_b);
 
     result?;
 
-    // The cache must be empty again (every synthetic entry reclaimed) and the
-    // counters must reflect the run: at least one hit and one miss occurred.
+    // The cache must be empty again and counters must reflect the run.
     let s = stats();
     if s.misses < 1 || s.hits < 1 {
         serial_println!(

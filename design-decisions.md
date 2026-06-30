@@ -2621,6 +2621,19 @@ the block buffer cache). **Writable `MAP_SHARED` writeback stays declined
 4. **Lifecycle.** Refcount on map/unmap/exit; eviction policy; coherence with the
    block buffer cache so a file's pages live in one place.
 
+**Status (2026-06-30).** Sub-tasks 1–4 (the correctness slice) are **done**:
+1. file identity (`FileId{fs_id,ino}` + `Vfs::file_identity`, commit 80cbbaa54);
+2. the read-only `mm::page_cache` store (commits b18e45bfa, ad78a2b5c, model §37);
+3. fault-path integration — whole-frame, frame-aligned `MAP_PRIVATE` FileBacked
+   faults source shared read-only frames from the cache and CoW-copy on a private
+   write; boot exercised it ~2158× with cross-process `FileId` sharing observed;
+4. coherence — `invalidate_identity` wired into `write_at`/`write_file`/`truncate`/
+   `remove`/replacing-rename (closes stale-data + inode-reuse, B-PAGECACHE-COHERENCE).
+**Remaining (performance, not correctness):** de-double-cache the page cache
+against the block buffer cache (`fs/cache.rs`) so a page lives in one place;
+and shared-cache-page reclaim under memory pressure (currently cache frames are
+pinned resident — not registered with the swap clock/rmap — see `resolve_file_cached`).
+
 **Rationale.** The §23-recorded Pareto-optimal slice: the cheap, reversible,
 high-value read-only half that captures the memory-saving win for the common
 shared-library case without the writable-shared hairiness §22/§23 declined.

@@ -2629,10 +2629,15 @@ the block buffer cache). **Writable `MAP_SHARED` writeback stays declined
    write; boot exercised it ~2158× with cross-process `FileId` sharing observed;
 4. coherence — `invalidate_identity` wired into `write_at`/`write_file`/`truncate`/
    `remove`/replacing-rename (closes stale-data + inode-reuse, B-PAGECACHE-COHERENCE).
+Shared-cache-page reclaim under memory pressure is also **done** (commit
+f6003260c): `mm::page_cache::shrink(PressureLevel)` evicts idle cache frames
+(refcount ≤ 1, no live mapper) proportional to pressure and is registered with
+`mm::pressure` by `init()`; it fired under real critical pressure during boot
+(freed 49 then 5 frames) with a clean BOOT_OK. Cache frames remain unregistered
+with the swap clock/rmap by design (clean file pages reclaimed via the shrinker,
+not swap — see `resolve_file_cached`).
 **Remaining (performance, not correctness):** de-double-cache the page cache
-against the block buffer cache (`fs/cache.rs`) so a page lives in one place;
-and shared-cache-page reclaim under memory pressure (currently cache frames are
-pinned resident — not registered with the swap clock/rmap — see `resolve_file_cached`).
+against the block buffer cache (`fs/cache.rs`) so a page lives in one place.
 
 **Rationale.** The §23-recorded Pareto-optimal slice: the cheap, reversible,
 high-value read-only half that captures the memory-saving win for the common

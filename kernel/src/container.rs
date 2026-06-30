@@ -124,6 +124,10 @@ pub struct ContainerConfig {
     pub cpu_quota: u64,
     /// Memory limit in frames (0 = unlimited).
     pub mem_limit: u64,
+    /// When `true`, the container's root filesystem is mounted read-only
+    /// (Docker `--read-only`): writes that resolve into the rootfs (i.e. not
+    /// into a writable volume) are denied with `EROFS`.
+    pub read_only_root: bool,
     /// I/O ops limit per period (0 = unlimited).
     pub io_ops_limit: u64,
     /// I/O bytes limit per period (0 = unlimited).
@@ -169,6 +173,12 @@ impl ContainerConfig {
     /// Set memory limit in frames.
     pub fn memory(mut self, frames: u64) -> Self {
         self.mem_limit = frames;
+        self
+    }
+
+    /// Mark the container's root filesystem as read-only (Docker `--read-only`).
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only_root = read_only;
         self
     }
 
@@ -255,6 +265,12 @@ struct Container {
     /// container rootfs.  A `read_only` volume rejects writes with `EROFS`.
     /// Empty for a container with no volumes.
     volumes: Vec<VolumeSpec>,
+    /// When `true`, the container's root filesystem is read-only (Docker
+    /// `--read-only`): writes resolving into the rootfs are denied with
+    /// `EROFS`, while writable (`:rw`) volumes remain writable.  Installed on
+    /// each process launched by [`run`] via
+    /// [`crate::ipc::namespace::set_root_read_only`].
+    read_only_root: bool,
     /// The container's own IPv4 address inside its network namespace, captured
     /// from [`ContainerConfig::net_ip`] at create time.  `None` when no
     /// network was configured.  Needed as the *target* of published-port NAT
@@ -284,6 +300,7 @@ impl Container {
             root_path: String::new(),
             rootfs_mount: String::new(),
             volumes: Vec::new(),
+            read_only_root: false,
             container_ip: None,
             published_ports: Vec::new(),
         }
@@ -328,6 +345,8 @@ pub struct ContainerInfo {
     pub rootfs_mount: String,
     /// Volume (bind) mounts as `(guest_prefix, host_target, read_only)`.
     pub volumes: Vec<VolumeSpec>,
+    /// Whether the container's root filesystem is read-only (`--read-only`).
+    pub read_only_root: bool,
     /// The container's own IPv4 address, or `None` if no network configured.
     pub container_ip: Option<[u8; 4]>,
     /// Published ports as `(proto, host_port, container_port)`.
@@ -592,6 +611,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         // Record the container's own IP so published-port NAT rules know
         // where to forward (the `-p host:container` target).
         ct.container_ip = config.net_ip;
+        ct.read_only_root = config.read_only_root;
         ct.published_ports.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -775,7 +795,7 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 /// [`run`] always uses this entry point with both ids from the spawn
 /// result.
 pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes) =
+    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes, read_only_root) =
         with_table(|table| {
             let idx = id as usize;
             if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -789,6 +809,7 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
                 table.containers[idx].cgroup_id,
                 table.containers[idx].root_path.clone(),
                 table.containers[idx].volumes.clone(),
+                table.containers[idx].read_only_root,
             ))
         })?;
 
@@ -829,6 +850,15 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
         let _ = crate::ipc::namespace::add_volume(
             pid, guest_prefix, host_target, *read_only,
         );
+    }
+
+    // Apply the read-only-root flag (Docker `--read-only`).  Only meaningful
+    // for a jailed process: without a chroot root there is no container rootfs
+    // to make read-only, so skip it when `root_path` is empty (matching the
+    // `set_root` gate above).  Writable (`:rw`) volumes installed just above
+    // still permit writes through the read-only rootfs.
+    if read_only_root && !root_path.is_empty() {
+        crate::ipc::namespace::set_root_read_only(pid, true);
     }
 
     Ok(())
@@ -1049,6 +1079,38 @@ pub fn set_root_path(id: ContainerId, root: &str) -> KernelResult<()> {
     })
 }
 
+/// Mark a container's root filesystem read-only (Docker `--read-only`) before
+/// it is run.
+///
+/// When set, writes by the container's processes that resolve into the
+/// container rootfs (i.e. not into a writable `:rw` volume) are denied with
+/// `EROFS`.  The flag is installed on every process launched by [`run`] via
+/// [`crate::ipc::namespace::set_root_read_only`].  Read-only enforcement only
+/// applies if the container also has a rootfs ([`set_root_path`]); without a
+/// jail there is no container rootfs to protect.
+///
+/// Like [`set_root_path`], this only takes effect while the container is still
+/// in [`Created`](ContainerState::Created) state — a running container's
+/// already-jailed processes would not be retroactively affected.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist or is not
+///   in `Created` state.
+pub fn set_read_only_root(id: ContainerId, read_only: bool) -> KernelResult<()> {
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].read_only_root = read_only;
+        Ok(())
+    })
+}
+
 /// Record the VFS mountpoint of the container's overlay rootfs.
 ///
 /// Stored so that [`delete`] can unmount the per-container `OverlayFs`
@@ -1240,6 +1302,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             root_path: ct.root_path.clone(),
             rootfs_mount: ct.rootfs_mount.clone(),
             volumes: ct.volumes.clone(),
+            read_only_root: ct.read_only_root,
             container_ip: ct.container_ip,
             published_ports: ct.published_ports.clone(),
         })
@@ -1725,6 +1788,66 @@ pub fn self_test() {
     }
     serial_println!("[container]   Volume (bind) mounts for init process: OK");
 
+    // Test 19b: read-only ROOT (Docker `--read-only`).  A container created
+    // with `read_only_root` set marks its jailed init process's rootfs
+    // read-only: writes into the rootfs are denied (EROFS), while writes into
+    // a writable (`:rw`) volume still succeed and reads/path resolution are
+    // unaffected.  Uses a synthetic, never-scheduled PID for determinism (same
+    // reasoning as Test 19).
+    {
+        const RO_PID: u64 = 88892;
+
+        let ro_cfg = ContainerConfig::new("test-ro-root").read_only(true);
+        assert!(ro_cfg.read_only_root, "builder must set read_only_root");
+        let ct_ro = create(&ro_cfg).expect("create ro-root container");
+        assert!(
+            info(ct_ro).unwrap().read_only_root,
+            "ContainerInfo must report read_only_root",
+        );
+        set_root_path(ct_ro, "/containers/test-ro/rootfs").expect("set rootfs");
+        // A writable volume punches a hole through the read-only root.
+        add_volume_mount(ct_ro, "/srv/rw", "/scratch", false)
+            .expect("add rw volume");
+
+        add_process(ct_ro, RO_PID).expect("register ro process");
+
+        // Writes into the read-only rootfs are denied.
+        assert!(
+            crate::ipc::namespace::check_writable_for(RO_PID, "/etc/hosts")
+                .is_err(),
+            "write into a --read-only rootfs must be denied",
+        );
+        assert!(
+            crate::ipc::namespace::check_writable_for(RO_PID, "/bin/sh")
+                .is_err(),
+            "write into a --read-only rootfs must be denied",
+        );
+        // The writable volume still permits writes (rw hole through RO root).
+        assert!(
+            crate::ipc::namespace::check_writable_for(RO_PID, "/scratch/tmp")
+                .is_ok(),
+            "writable volume must remain writable under --read-only root",
+        );
+        // Reads / path resolution are unaffected by the read-only flag.
+        assert_eq!(
+            crate::ipc::namespace::resolve_path_for(RO_PID, "/bin/sh")
+                .expect("resolve under ro root"),
+            "/containers/test-ro/rootfs/bin/sh",
+        );
+
+        // Teardown clears the per-process read-only-root flag (PID-reuse).
+        remove_process(ct_ro, RO_PID).expect("deregister ro process");
+        assert!(
+            !crate::ipc::namespace::is_root_read_only(RO_PID),
+            "read-only-root flag must be cleared after deregistering",
+        );
+        // Toggling the flag is rejected once the container is no longer Created.
+        stop(ct_ro).expect("stop ro container");
+        assert!(set_read_only_root(ct_ro, false).is_err());
+        delete(ct_ro).expect("delete ro container");
+    }
+    serial_println!("[container]   Read-only root (--read-only) for init process: OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -1824,5 +1947,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (20 tests)");
+    serial_println!("[container] Self-test PASSED (21 tests)");
 }

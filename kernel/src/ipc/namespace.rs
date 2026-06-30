@@ -50,7 +50,7 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
@@ -183,6 +183,21 @@ struct VolumeMount {
 /// normalized against the guest root `/` before any volume is considered.
 static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> =
     Mutex::new(BTreeMap::new());
+
+/// Set of processes whose container **root filesystem** is read-only.
+///
+/// This is the Docker `--read-only` mechanism: the container rootfs is
+/// mounted read-only, so any write that resolves into the rootfs (i.e. does
+/// *not* land in a writable volume) is denied with `EROFS`.  Writable (`:rw`)
+/// volumes punch holes through this: a write into a writable volume's subtree
+/// is still permitted, exactly as Docker allows `-v ...:rw` mounts to remain
+/// writable inside a `--read-only` container.  Read-only (`:ro`) volumes stay
+/// read-only as before.
+///
+/// Only meaningful for a *jailed* process (one with a `PROCESS_ROOT`): without
+/// a chroot root there is no container rootfs to make read-only, so the flag
+/// is ignored.  A process absent from this set has a writable rootfs.
+static PROCESS_ROOT_RO: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -413,6 +428,7 @@ pub fn detach(process_id: u64) {
     // inherit them.
     PROCESS_ROOT.lock().remove(&process_id);
     PROCESS_MOUNTS.lock().remove(&process_id);
+    PROCESS_ROOT_RO.lock().remove(&process_id);
 }
 
 /// Query which namespace a process belongs to.
@@ -453,6 +469,31 @@ pub fn set_root(process_id: u64, root: &str) -> KernelResult<()> {
 /// Idempotent: clearing a process that has no root is a no-op.
 pub fn clear_root(process_id: u64) {
     PROCESS_ROOT.lock().remove(&process_id);
+    PROCESS_ROOT_RO.lock().remove(&process_id);
+}
+
+/// Mark (or unmark) a process's container root filesystem as read-only.
+///
+/// This is the Docker `--read-only` mechanism.  When set, any write that
+/// resolves into the container rootfs — i.e. does not land in a writable
+/// volume — is denied with `EROFS` (see [`check_writable_for`]).  Writable
+/// (`:rw`) volumes remain writable; read-only (`:ro`) volumes remain
+/// read-only.  Only meaningful for a jailed process; a process with no
+/// chroot root ignores the flag (its rootfs is the host root).
+///
+/// `read_only == false` clears the flag (rootfs becomes writable again).
+pub fn set_root_read_only(process_id: u64, read_only: bool) {
+    let mut set = PROCESS_ROOT_RO.lock();
+    if read_only {
+        set.insert(process_id);
+    } else {
+        set.remove(&process_id);
+    }
+}
+
+/// Query whether a process's container root filesystem is read-only.
+pub fn is_root_read_only(process_id: u64) -> bool {
+    PROCESS_ROOT_RO.lock().contains(&process_id)
 }
 
 /// Query a process's filesystem root, if any.
@@ -626,8 +667,9 @@ pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
 /// write-side companion to [`resolve_path`]: read/stat operations call
 /// `resolve_path`, while mutating operations (open-for-write, mkdir, rmdir,
 /// unlink, rename, symlink, link, truncate, chmod, xattr writes) additionally
-/// call this. For processes with no read-only volumes — every non-container
-/// process, and containers without `:ro` mounts — this is a cheap `Ok(())`.
+/// call this. For processes with no read-only volumes and a writable rootfs —
+/// every non-container process, and writable containers without `:ro` mounts —
+/// this is a cheap `Ok(())`.
 pub fn check_writable(path: &str) -> KernelResult<()> {
     let task_id = crate::sched::current_task_id();
     let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
@@ -639,21 +681,31 @@ pub fn check_writable(path: &str) -> KernelResult<()> {
 ///
 /// Mirrors the volume-matching pipeline of [`resolve_path_for`]: it applies
 /// the same step-1 namespace translation and `..`-clamping normalization, then
-/// finds the longest-matching volume prefix. If that volume is read-only the
-/// write is denied. Read-only enforcement only applies to *jailed* processes
-/// (volumes re-anchor paths only within a chroot root); an unjailed process
-/// has no volume re-anchoring and is always writable here.
+/// finds the longest-matching volume prefix and decides as follows:
+///
+/// - matched a read-only (`:ro`) volume → denied (`EROFS`);
+/// - matched a writable (`:rw`) volume → allowed (even under a read-only root);
+/// - matched no volume (path is in the container rootfs) → denied if the
+///   rootfs is read-only (`--read-only`), allowed otherwise.
+///
+/// Read-only enforcement only applies to *jailed* processes (volumes and the
+/// read-only-root flag only take effect within a chroot root); an unjailed
+/// process has no volume re-anchoring and is always writable here.
 pub fn check_writable_for(process_id: u64, path: &str) -> KernelResult<()> {
-    // Fast path: a process with no volumes can have no read-only mount.
     let volumes = {
         let mounts = PROCESS_MOUNTS.lock();
-        match mounts.get(&process_id) {
-            Some(list) if !list.is_empty() => list.clone(),
-            _ => return Ok(()),
-        }
+        mounts.get(&process_id).cloned().unwrap_or_default()
     };
-    // Volumes only re-anchor paths within a chroot jail; without a root there
-    // is no volume in effect, so nothing is read-only-gated.
+    let root_ro = PROCESS_ROOT_RO.lock().contains(&process_id);
+    // Fast path: a process with no read-only volumes and a writable rootfs has
+    // nothing gated — every non-container process, and writable containers
+    // without `:ro` mounts, take this cheap exit.
+    if volumes.is_empty() && !root_ro {
+        return Ok(());
+    }
+    // Volumes and the read-only-root flag only apply within a chroot jail;
+    // without a root there is no container rootfs and no re-anchored volumes,
+    // so nothing is read-only-gated.
     if PROCESS_ROOT.lock().get(&process_id).is_none() {
         return Ok(());
     }
@@ -688,8 +740,16 @@ pub fn check_writable_for(process_id: u64, path: &str) -> KernelResult<()> {
         }
     }
     match best {
+        // A read-only (`:ro`) volume always denies writes.
         Some(v) if v.read_only => Err(KernelError::ReadOnlyFilesystem),
-        _ => Ok(()),
+        // A writable (`:rw`) volume always permits writes, even when the
+        // container rootfs is read-only — this is the Docker behaviour where
+        // `-v ...:rw` punches a writable hole through a `--read-only` root.
+        Some(_) => Ok(()),
+        // No volume matched: the path lives in the container rootfs.  Deny if
+        // the rootfs was mounted read-only (`--read-only`), allow otherwise.
+        None if root_ro => Err(KernelError::ReadOnlyFilesystem),
+        None => Ok(()),
     }
 }
 
@@ -1378,6 +1438,28 @@ fn test_volume_mounts() -> KernelResult<()> {
     // Re-adding the same guest prefix as read-write clears the read-only flag.
     add_volume(pid, "/ro", "/host/ro-target", false)?;
     assert!(check_writable_for(pid, "/ro/file").is_ok());
+
+    // Read-only ROOT (Docker `--read-only`): mark the rootfs read-only and
+    // verify writes into the rootfs are denied while writable volumes still
+    // permit writes (a `:rw` volume punches a hole through the RO root).
+    assert!(!is_root_read_only(pid));
+    set_root_read_only(pid, true);
+    assert!(is_root_read_only(pid));
+    // Rootfs path now denied.
+    assert!(check_writable_for(pid, "/bin/sh").is_err());
+    assert!(check_writable_for(pid, "/etc/hosts").is_err());
+    // Writable volume still permits writes through the read-only root.
+    assert!(check_writable_for(pid, "/data/file").is_ok());
+    assert!(check_writable_for(pid, "/ro/file").is_ok());
+    // A read-only volume under a read-only root is of course still denied.
+    add_volume(pid, "/ro", "/host/ro-target", true)?;
+    assert!(check_writable_for(pid, "/ro/file").is_err());
+    // Clearing the read-only-root flag restores rootfs writability.
+    set_root_read_only(pid, false);
+    assert!(!is_root_read_only(pid));
+    assert!(check_writable_for(pid, "/bin/sh").is_ok());
+    // Reset the /ro volume back to writable for the no-op-after-detach check.
+    add_volume(pid, "/ro", "/host/ro-target", false)?;
 
     // A volume at the guest root is rejected (that is `set_root`'s job).
     assert!(add_volume(pid, "/", "/whatever", false).is_err());

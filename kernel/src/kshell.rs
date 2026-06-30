@@ -67611,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [-m SIZE] [--cpus N]
+            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]");
                 return;
             };
 
@@ -67745,6 +67745,10 @@ fn cmd_oci(args: &str) {
             // container cgroup at create time (Step 4 below).
             let mut mem_frames: Option<u64> = None;
             let mut cpu_percent: Option<u64> = None;
+            // Docker `--read-only`: mount the container rootfs read-only so
+            // writes that don't land in a writable (`:rw`) volume are denied
+            // with EROFS. Applied to the container at create time (Step 4).
+            let mut read_only_root = false;
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
@@ -67876,6 +67880,11 @@ fn cmd_oci(args: &str) {
                         } else {
                             i = i.saturating_add(1);
                         }
+                    }
+                    "--read-only" => {
+                        // Flag (no argument): make the container rootfs RO.
+                        read_only_root = true;
+                        i = i.saturating_add(1);
                     }
                     "--name" | "-n" => {
                         if let Some(&n) = parts.get(i.saturating_add(1)) {
@@ -68101,6 +68110,17 @@ fn cmd_oci(args: &str) {
                             "[oci] Warning: could not set rootfs jail: {:?}", e
                         );
                     }
+                    // Apply Docker `--read-only`: mark the container rootfs
+                    // read-only (Created state). Writable `:rw` volumes below
+                    // still punch writable holes through it.
+                    if read_only_root {
+                        match crate::container::set_read_only_root(ct_id, true) {
+                            Ok(()) => crate::console_println!("  Root FS:      read-only"),
+                            Err(e) => crate::console_println!(
+                                "[oci] Warning: could not set read-only root: {:?}", e
+                            ),
+                        }
+                    }
                     // If we mounted an overlay, record it on the container so
                     // `container delete` unmounts the adapter on teardown.
                     if mounted_overlay {
@@ -68263,8 +68283,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

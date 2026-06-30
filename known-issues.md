@@ -2373,6 +2373,28 @@ The TD32 mount remainder (a true longest-prefix mount-tree subsuming the rootfs
 as the `/` mount / `pivot_root` target, `--read-only` root, and tmpfs/named-
 volume types) is still open.
 
+**Update 2026-06-30 (increment 16): read-only root (`--read-only`) — DONE.**
+Docker `--read-only` now makes the whole container rootfs non-writable while
+writable (`:rw`) volumes still punch writable holes through it. A per-process
+flag set `PROCESS_ROOT_RO` in `namespace.rs` (set via `set_root_read_only(pid,
+ro)` / queried via `is_root_read_only`, cleared on `detach`/`clear_root` for
+PID-reuse safety) feeds the same `check_writable_for` decision used for `:ro`
+volumes: longest-prefix volume match first (a `:ro` volume → EROFS, a `:rw`
+volume → allowed), and when *no* volume matches the path lives in the rootfs, so
+it is denied iff the root is read-only. The fast-path `Ok(())` no-op now also
+requires a writable root, so non-container processes and writable containers are
+still zero-cost. `ContainerConfig` gained a `read_only_root` field + `.read_only(bool)`
+builder; the flag rides through `create` → `add_process_task`, which calls
+`set_root_read_only(pid, true)` after installing volumes (only when a chroot root
+exists). Post-create `container::set_read_only_root(id, ro)` (Created-state-gated,
+like `set_root_path`) mirrors the volume setter; `ContainerInfo` reports it. CLI:
+`oci run … --read-only` (a bare flag) prints `Root FS: read-only`. Covered by
+`namespace::test_volume_mounts` (read-only-root block: rootfs denied, `:rw`
+volume still writable, flag-clear restores writability) and container self-test
+19b (now 21 tests total). The TD32 mount remainder is now just the true
+longest-prefix mount-tree subsuming the rootfs as the `/` mount (`pivot_root`
+target) and tmpfs/named-volume types.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

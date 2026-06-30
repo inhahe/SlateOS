@@ -49,6 +49,7 @@ pub mod mempool;
 pub mod memtype;
 pub mod migrate_type;
 pub mod page_age;
+pub mod page_cache;
 pub mod oom;
 pub mod page_table;
 pub mod pcid;

@@ -1231,6 +1231,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::vfs::file_identity_self_test() {
         serial_println!("WARNING: VFS file-identity self-test failed: {:?}", e);
     }
+    // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
+    if let Err(e) = mm::page_cache::self_test() {
+        serial_println!("WARNING: page-cache self-test failed: {:?}", e);
+    }
     // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
     if let Err(e) = fs::fat::format_self_test() {
         serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);

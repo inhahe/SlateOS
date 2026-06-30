@@ -480,6 +480,60 @@ impl ImageConfig {
     }
 }
 
+/// Extract the key (bytes before the first `=`) of an environment entry.
+///
+/// Returns the whole entry if there is no `=`. Used to deduplicate
+/// environment variables by key when merging override sources.
+#[must_use]
+pub fn env_entry_key(entry: &[u8]) -> &[u8] {
+    match entry.iter().position(|&b| b == b'=') {
+        Some(eq) => entry.get(..eq).unwrap_or(entry),
+        None => entry,
+    }
+}
+
+/// Outcome of parsing a Docker-style `--env-file`.
+pub struct EnvFileParse {
+    /// Valid `KEY=value` entries, in file order, as raw bytes (env values
+    /// may contain non-UTF-8 data, which must not be corrupted).
+    pub entries: Vec<Vec<u8>>,
+    /// 1-based line numbers that were rejected (no `=` or empty key), so
+    /// the caller can report them. Blank and `#`-comment lines are *not*
+    /// reported — they are silently skipped per Docker semantics.
+    pub rejected_lines: Vec<usize>,
+}
+
+/// Parse the contents of a Docker-style `--env-file` into environment
+/// entries.
+///
+/// Each line is treated as raw bytes (`KEY=value`). Blank lines and lines
+/// whose first non-whitespace byte is `#` are ignored. A line without `=`
+/// or with an empty key is rejected (its 1-based line number is recorded
+/// in [`EnvFileParse::rejected_lines`]) — unlike Docker, a bare `KEY`
+/// cannot inherit a value because a container has no host environment.
+/// Surrounding ASCII whitespace is trimmed from each line.
+#[must_use]
+pub fn parse_env_file(bytes: &[u8]) -> EnvFileParse {
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    let mut rejected_lines: Vec<usize> = Vec::new();
+    for (n, raw) in bytes.split(|&b| b == b'\n').enumerate() {
+        let line = raw.trim_ascii();
+        if line.is_empty() || line.first() == Some(&b'#') {
+            continue;
+        }
+        match line.iter().position(|&b| b == b'=') {
+            Some(eq) if !line.get(..eq).unwrap_or(&[]).trim_ascii().is_empty() => {
+                entries.push(line.to_vec());
+            }
+            _ => rejected_lines.push(n.saturating_add(1)),
+        }
+    }
+    EnvFileParse {
+        entries,
+        rejected_lines,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Digest verification
 // ---------------------------------------------------------------------------
@@ -928,6 +982,43 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[oci]   entrypoint/cmd override: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (9 tests)");
+    // Test 10: Docker --env-file parsing (parse_env_file) and key extraction.
+    {
+        // Valid entries, a blank line, a comment, leading/trailing whitespace,
+        // a value containing '=', a bare key (rejected), and an empty key
+        // (rejected). Uses raw bytes including a non-UTF-8 value byte (0xFF).
+        let mut file: Vec<u8> = Vec::new();
+        file.extend_from_slice(b"# comment line\n");
+        file.extend_from_slice(b"FOO=bar\n");
+        file.extend_from_slice(b"  BAZ = qux \n"); // trimmed to "BAZ = qux"
+        file.extend_from_slice(b"\n"); // blank
+        file.extend_from_slice(b"URL=http://x/?a=1&b=2\n"); // '=' in value
+        file.extend_from_slice(b"BARE\n"); // rejected (no '=')
+        file.extend_from_slice(b"=novalue\n"); // rejected (empty key)
+        file.extend_from_slice(b"R="); // key R, value is one raw byte:
+        file.push(0xFF); // non-UTF-8 value byte preserved verbatim (no newline)
+
+        let parsed = parse_env_file(&file);
+        // FOO, "BAZ = qux", URL, R=<0xFF>  → 4 accepted.
+        assert_eq!(parsed.entries.len(), 4, "four valid entries");
+        assert_eq!(parsed.entries.first().map(Vec::as_slice), Some(&b"FOO=bar"[..]));
+        assert_eq!(parsed.entries.get(1).map(Vec::as_slice), Some(&b"BAZ = qux"[..]));
+        assert_eq!(
+            parsed.entries.get(2).map(Vec::as_slice),
+            Some(&b"URL=http://x/?a=1&b=2"[..])
+        );
+        // Last entry preserves the raw 0xFF byte (no UTF-8 corruption).
+        assert_eq!(parsed.entries.get(3).map(|e| e.last().copied()), Some(Some(0xFF)));
+        // Bare key on line 6 and empty key on line 7 were rejected.
+        assert_eq!(parsed.rejected_lines, alloc::vec![6, 7]);
+
+        // env_entry_key: bytes before first '='; whole entry if none.
+        assert_eq!(env_entry_key(b"FOO=bar"), b"FOO");
+        assert_eq!(env_entry_key(b"URL=a=b"), b"URL");
+        assert_eq!(env_entry_key(b"NOEQ"), b"NOEQ");
+        serial_println!("[oci]   env-file parse + key extraction: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (10 tests)");
     Ok(())
 }

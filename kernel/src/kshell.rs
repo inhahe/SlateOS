@@ -67611,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]
+            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -67739,6 +67739,12 @@ fn cmd_oci(args: &str) {
             // override the image's declared ENV (Docker semantics) and are
             // merged at launch (see the env construction below).
             let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+            // `KEY=value` entries read from `--env-file FILE`. Stored as raw
+            // bytes (env values may contain non-UTF-8 data, which we must not
+            // corrupt) and owned because they come from file contents, not
+            // from `parts`. Precedence: image ENV < env-file < CLI `-e`.
+            let mut env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                alloc::vec::Vec::new();
             // Resource limits from `--memory`/`-m <size>` (bytes, with optional
             // k/m/g suffix → 16 KiB frames) and `--cpus <N[.M]>` (fractional
             // cores → percent of one core, e.g. 1.5 → 150%). Applied to the
@@ -67821,6 +67827,31 @@ fn cmd_oci(args: &str) {
                                 crate::console_println!(
                                     "[oci] Ignoring env '{}': expected KEY=value", spec
                                 );
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    "--env-file" => {
+                        if let Some(&path) = parts.get(i.saturating_add(1)) {
+                            match crate::fs::vfs::Vfs::read_file(path) {
+                                Ok(bytes) => {
+                                    // Parse KEY=value lines as raw bytes (see
+                                    // `oci::parse_env_file`). Report rejected
+                                    // lines but keep the valid entries.
+                                    let parsed = oci::parse_env_file(&bytes);
+                                    for n in &parsed.rejected_lines {
+                                        crate::console_println!(
+                                            "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
+                                            path, n
+                                        );
+                                    }
+                                    env_file_entries.extend(parsed.entries);
+                                }
+                                Err(e) => crate::console_println!(
+                                    "[oci] Could not read env-file '{}': {:?}", path, e
+                                ),
                             }
                             i = i.saturating_add(2);
                         } else {
@@ -68290,24 +68321,33 @@ fn cmd_oci(args: &str) {
                                     command.iter().map(|s| s.as_bytes().to_vec()).collect();
                                 let argv_refs: alloc::vec::Vec<&[u8]> =
                                     argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                // Merge `-e KEY=value` overrides with the image's
-                                // declared ENV using Docker semantics: a `-e` entry
-                                // wins over an image ENV entry with the same key, and
-                                // the merged set has no duplicate keys. We add all the
-                                // CLI `-e` entries first, then append each image ENV
-                                // entry only if its key isn't already overridden.
+                                // Merge environment entries using Docker
+                                // precedence: CLI `-e` > `--env-file` > image
+                                // ENV, with no duplicate keys. Keys are the
+                                // bytes before the first `=` (whole entry if
+                                // none). We add CLI `-e` first, then env-file
+                                // entries whose key isn't already set, then
+                                // image ENV entries whose key isn't already set.
                                 let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
                                     alloc::vec::Vec::new();
                                 for spec in &extra_env {
                                     envp_owned.push(spec.as_bytes().to_vec());
                                 }
+                                for entry in &env_file_entries {
+                                    let key = oci::env_entry_key(entry);
+                                    let already = envp_owned
+                                        .iter()
+                                        .any(|e| oci::env_entry_key(e) == key);
+                                    if !already {
+                                        envp_owned.push(entry.clone());
+                                    }
+                                }
                                 for entry in &image.config.env {
-                                    let key = entry.split_once('=')
-                                        .map_or(entry.as_str(), |(k, _)| k);
-                                    let overridden = extra_env.iter().any(|e| {
-                                        e.split_once('=').map_or(*e, |(k, _)| k) == key
-                                    });
-                                    if !overridden {
+                                    let key = oci::env_entry_key(entry.as_bytes());
+                                    let already = envp_owned
+                                        .iter()
+                                        .any(|e| oci::env_entry_key(e) == key);
+                                    if !already {
                                         envp_owned.push(entry.as_bytes().to_vec());
                                     }
                                 }
@@ -68427,7 +68467,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

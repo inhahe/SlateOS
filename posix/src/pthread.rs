@@ -48,8 +48,13 @@
 //!
 //! ## Limitations
 //!
-//! - Thread-specific data (TSD) uses a **global** array, not per-thread
-//!   storage.  Proper TLS requires kernel support for the FS/GS segment.
+//! - Thread-specific data (TSD) is **per-thread**: keyed on the kernel
+//!   task ID (`SYS_TASK_ID`), each thread gets its own value array, and
+//!   key destructors run at thread exit (`pthread_exit` / return from the
+//!   start routine) for up to `PTHREAD_DESTRUCTOR_ITERATIONS` rounds.
+//!   This is a table-keyed-by-tid implementation rather than FS/GS-based
+//!   TLS, which is correct (proper per-thread semantics) but does an
+//!   O(active-threads) slot lookup per access.
 //! - Detached thread stacks are leaked (no cleanup notification).
 //! - `pthread_cancel` accepted but never actually cancels a thread.
 //! - Mutex is a spinlock (no futex-based blocking).
@@ -60,7 +65,7 @@
 
 use crate::errno;
 use crate::syscall;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// Opaque pthread_t type — holds the kernel task ID.
 pub type PthreadT = u64;
@@ -241,8 +246,15 @@ fn take_thread_info(task_id: u64) -> Option<ThreadInfo> {
 // The trampoline:
 //   1. Pops arg into RDI (first C argument register)
 //   2. Pops start_routine into RSI
-//   3. Calls start_routine(arg)
-//   4. Issues SYS_THREAD_EXIT with the return value
+//   3. Swaps them so RDI = start_routine, RSI = arg
+//   4. Calls `__pthread_thread_start(start_routine, arg)`, which runs the
+//      routine, executes TSD destructors, and issues SYS_THREAD_EXIT.
+//
+// Routing the return path through a Rust entry (rather than the old
+// inline `call start_routine; SYS_THREAD_EXIT`) is what lets us run
+// pthread-key destructors when a thread returns normally — POSIX
+// requires that returning from the start routine behave exactly like
+// `pthread_exit(return_value)`.
 //
 // Stack alignment: after two pops RSP is 16-byte aligned (the mmap'd
 // stack top is page-aligned), so the CALL satisfies the SysV ABI
@@ -252,18 +264,31 @@ core::arch::global_asm!(
     ".global _pthread_trampoline",
     ".type _pthread_trampoline, @function",
     "_pthread_trampoline:",
-    "    pop rdi",      // rdi = arg
-    "    pop rsi",      // rsi = start_routine
-    "    call rsi",     // rax = start_routine(arg)
-    "    mov rdi, rax", // exit value = return value
-    "    mov eax, 511", // SYS_THREAD_EXIT
-    "    syscall",
-    "    ud2", // unreachable
+    "    pop rdi",                  // rdi = arg
+    "    pop rsi",                  // rsi = start_routine
+    "    xchg rdi, rsi",            // rdi = start_routine, rsi = arg
+    "    call __pthread_thread_start", // never returns
+    "    ud2",                      // unreachable
 );
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn _pthread_trampoline();
+}
+
+/// Rust entry point for a newly created thread (called by the assembly
+/// trampoline).  Runs the user start routine, then exits via
+/// [`pthread_exit`] so that thread-specific-data destructors run before
+/// the kernel tears the thread down.  Returning from `start` is, per
+/// POSIX, equivalent to `pthread_exit(start(arg))`.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __pthread_thread_start(
+    start: extern "C" fn(*mut u8) -> *mut u8,
+    arg: *mut u8,
+) -> ! {
+    let ret = start(arg);
+    pthread_exit(ret);
 }
 
 // ---------------------------------------------------------------------------
@@ -424,10 +449,14 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
 
 /// Terminate the calling thread.
 ///
-/// Issues `SYS_THREAD_EXIT` with the specified return value.
+/// Runs any registered thread-specific-data destructors for the calling
+/// thread, then issues `SYS_THREAD_EXIT` with the specified return value.
 /// If this is the last thread in the process, the process exits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
+    // POSIX: run key destructors and release this thread's TSD storage
+    // before the kernel reclaims the thread.
+    tsd_thread_cleanup(pthread_self());
     let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
     loop {
@@ -683,66 +712,265 @@ pub type PthreadKeyT = u32;
 /// Maximum number of TSD keys.
 const MAX_KEYS: usize = 64;
 
-/// Thread-specific data values.
+/// Maximum number of threads that can hold TSD storage simultaneously.
+/// Matches [`MAX_THREADS`] — every tracked thread can have its own row.
+const MAX_TSD_THREADS: usize = MAX_THREADS;
+
+/// POSIX `_POSIX_THREAD_DESTRUCTOR_ITERATIONS`: the number of times the
+/// destructor sweep is repeated at thread exit so that destructors which
+/// re-set a key (re-arming TSD) eventually drain.
+const PTHREAD_DESTRUCTOR_ITERATIONS: usize = 4;
+
+/// One thread's thread-specific-data values.
 ///
-/// **Limitation**: This is a global array shared by all threads.
-/// Proper per-thread TSD requires kernel TLS support (FS/GS segment
-/// setup per thread).
-static mut TSD_VALUES: [*mut u8; MAX_KEYS] = [core::ptr::null_mut(); MAX_KEYS];
+/// `task_id == 0` marks the slot free.  Real userspace task IDs are
+/// always non-zero (0 is the kernel/idle task), and the host-test build's
+/// `SYS_TASK_ID` stub returns a fixed non-zero sentinel, so 0 is a safe
+/// "empty" marker on both targets.
+#[derive(Clone, Copy)]
+struct TsdSlot {
+    task_id: u64,
+    values: [*mut u8; MAX_KEYS],
+}
+
+impl TsdSlot {
+    const EMPTY: Self = Self {
+        task_id: 0,
+        values: [core::ptr::null_mut(); MAX_KEYS],
+    };
+}
+
+/// Per-thread TSD value table, keyed by kernel task ID.
+static mut TSD_TABLE: [TsdSlot; MAX_TSD_THREADS] = [TsdSlot::EMPTY; MAX_TSD_THREADS];
+
+/// Per-key destructors (run at thread exit on non-null values).
+static mut TSD_DESTRUCTORS: [Option<extern "C" fn(*mut u8)>; MAX_KEYS] = [None; MAX_KEYS];
+
 /// Next key index to allocate.
 static mut TSD_NEXT_KEY: u32 = 0;
+
+/// Guards every TSD static (`TSD_TABLE`, `TSD_DESTRUCTORS`, `TSD_NEXT_KEY`).
+/// TSD is touched concurrently by all running threads, so a real lock is
+/// required — the "single-creator convention" used by the thread table
+/// does not hold here.
+static TSD_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Acquire [`TSD_LOCK`] (spin; the critical sections are tiny — a handful
+/// of array writes — and never span a destructor call or a syscall).
+#[inline]
+fn tsd_lock() {
+    while TSD_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+/// Release [`TSD_LOCK`].
+#[inline]
+fn tsd_unlock() {
+    TSD_LOCK.store(false, Ordering::Release);
+}
+
+/// Find the table index for `task_id`, optionally allocating a free slot.
+///
+/// Caller must hold [`TSD_LOCK`].  Returns `None` if `task_id` is the
+/// reserved 0 marker, if the thread has no slot and `create` is false, or
+/// if `create` is true but the table is full.
+fn tsd_slot_index(task_id: u64, create: bool) -> Option<usize> {
+    if task_id == 0 {
+        return None;
+    }
+    // SAFETY: caller holds TSD_LOCK, so no concurrent mutation.
+    let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
+    for (i, slot) in table.iter().enumerate() {
+        if slot.task_id == task_id {
+            return Some(i);
+        }
+    }
+    if !create {
+        return None;
+    }
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.task_id == 0 {
+            *slot = TsdSlot::EMPTY;
+            slot.task_id = task_id;
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Run TSD key destructors for `task_id` and free its slot.
+///
+/// Called from [`pthread_exit`] (and therefore from the trampoline's
+/// normal-return path).  Destructors are invoked **without** holding
+/// [`TSD_LOCK`] so a destructor may legally call `pthread_setspecific`
+/// again; the sweep is repeated up to [`PTHREAD_DESTRUCTOR_ITERATIONS`]
+/// times to drain values that destructors re-arm.
+fn tsd_thread_cleanup(task_id: u64) {
+    if task_id == 0 {
+        return;
+    }
+    for _ in 0..PTHREAD_DESTRUCTOR_ITERATIONS {
+        let mut ran_any = false;
+        for key in 0..MAX_KEYS {
+            // Read-and-clear the value and read its destructor under the
+            // lock; run the destructor outside the lock.
+            tsd_lock();
+            let pair = {
+                // SAFETY: lock held.
+                let dtor = unsafe { &*core::ptr::addr_of!(TSD_DESTRUCTORS) }
+                    .get(key)
+                    .copied()
+                    .flatten();
+                match tsd_slot_index(task_id, false) {
+                    Some(idx) => {
+                        // SAFETY: lock held; idx in range.
+                        let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
+                        let val = table
+                            .get_mut(idx)
+                            .and_then(|s| s.values.get_mut(key))
+                            .map_or(core::ptr::null_mut(), |v| {
+                                let old = *v;
+                                *v = core::ptr::null_mut();
+                                old
+                            });
+                        (val, dtor)
+                    }
+                    None => (core::ptr::null_mut(), dtor),
+                }
+            };
+            tsd_unlock();
+
+            if let (false, Some(dtor)) = (pair.0.is_null(), pair.1) {
+                dtor(pair.0);
+                ran_any = true;
+            }
+        }
+        if !ran_any {
+            break;
+        }
+    }
+    // Release the slot entirely.
+    tsd_lock();
+    if let Some(idx) = tsd_slot_index(task_id, false) {
+        // SAFETY: lock held; idx in range.
+        let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
+        if let Some(slot) = table.get_mut(idx) {
+            *slot = TsdSlot::EMPTY;
+        }
+    }
+    tsd_unlock();
+}
 
 /// Create a thread-specific data key.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_key_create(
     key: *mut PthreadKeyT,
-    _destructor: Option<extern "C" fn(*mut u8)>,
+    destructor: Option<extern "C" fn(*mut u8)>,
 ) -> i32 {
     if key.is_null() {
         return errno::EFAULT;
     }
-    let next = unsafe { core::ptr::addr_of_mut!(TSD_NEXT_KEY).read() };
+    tsd_lock();
+    // SAFETY: TSD_LOCK held.
+    let next = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
     if next as usize >= MAX_KEYS {
+        tsd_unlock();
         return errno::EAGAIN;
     }
+    // SAFETY: TSD_LOCK held; next < MAX_KEYS.
+    unsafe {
+        if let Some(slot) = (&mut *core::ptr::addr_of_mut!(TSD_DESTRUCTORS)).get_mut(next as usize)
+        {
+            *slot = destructor;
+        }
+        core::ptr::addr_of_mut!(TSD_NEXT_KEY).write(next.wrapping_add(1));
+    }
+    tsd_unlock();
+    // SAFETY: caller guarantees `key` points to a valid PthreadKeyT.
     unsafe {
         *key = next;
-        core::ptr::addr_of_mut!(TSD_NEXT_KEY).write(next.wrapping_add(1));
     }
     0
 }
 
-/// Get thread-specific data.
+/// Get thread-specific data for the calling thread.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
-    let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_ref() };
-    let Some(vals) = vals else {
-        return core::ptr::null_mut();
+    let task_id = pthread_self();
+    tsd_lock();
+    let val = match tsd_slot_index(task_id, false) {
+        // SAFETY: TSD_LOCK held; idx in range.
+        Some(idx) => unsafe { &*core::ptr::addr_of!(TSD_TABLE) }
+            .get(idx)
+            .and_then(|s| s.values.get(key as usize))
+            .copied()
+            .unwrap_or(core::ptr::null_mut()),
+        None => core::ptr::null_mut(),
     };
-    vals.get(key as usize)
-        .copied()
-        .unwrap_or(core::ptr::null_mut())
+    tsd_unlock();
+    val
 }
 
-/// Set thread-specific data.
+/// Set thread-specific data for the calling thread.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -> i32 {
-    let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_mut() };
-    let Some(vals) = vals else {
+    if key as usize >= MAX_KEYS {
         return errno::EINVAL;
-    };
-    if let Some(slot) = vals.get_mut(key as usize) {
-        *slot = value;
-        0
-    } else {
-        errno::EINVAL
     }
+    let task_id = pthread_self();
+    tsd_lock();
+    // Reject keys that were never created.
+    // SAFETY: TSD_LOCK held.
+    let next = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
+    if key >= next {
+        tsd_unlock();
+        return errno::EINVAL;
+    }
+    let rc = match tsd_slot_index(task_id, true) {
+        Some(idx) => {
+            // SAFETY: TSD_LOCK held; idx in range.
+            let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
+            if let Some(slot) = table.get_mut(idx).and_then(|s| s.values.get_mut(key as usize)) {
+                *slot = value;
+                0
+            } else {
+                errno::EINVAL
+            }
+        }
+        // Table full (more concurrent TSD-using threads than slots).
+        None => errno::ENOMEM,
+    };
+    tsd_unlock();
+    rc
 }
 
 /// Delete a thread-specific data key.
+///
+/// Clears the key's destructor so it won't run on subsequent thread
+/// exits.  Existing per-thread values for the key are left in place
+/// (POSIX leaves their fate unspecified) but become inert without a
+/// destructor; the key index itself is not reclaimed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_key_delete(_key: PthreadKeyT) -> i32 {
-    0 // No-op: we don't reclaim key indices.
+pub extern "C" fn pthread_key_delete(key: PthreadKeyT) -> i32 {
+    if key as usize >= MAX_KEYS {
+        return errno::EINVAL;
+    }
+    tsd_lock();
+    // SAFETY: TSD_LOCK held; key < MAX_KEYS.  Clearing the destructor of a
+    // never-allocated in-range key is harmless (it was already None), so
+    // we don't gate on TSD_NEXT_KEY — that keeps the result independent of
+    // how many keys happen to have been created.
+    unsafe {
+        if let Some(slot) = (&mut *core::ptr::addr_of_mut!(TSD_DESTRUCTORS)).get_mut(key as usize) {
+            *slot = None;
+        }
+    }
+    tsd_unlock();
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -3605,8 +3833,15 @@ mod tests {
     // Thread-specific data (TSD)
     // =======================================================================
 
+    // The host-test build's SYS_TASK_ID stub returns a single fixed value,
+    // so every cargo-test thread maps to the *same* TSD slot.  Tests that
+    // mutate that shared slot (set values, run cleanup) must not run
+    // concurrently or they clobber each other's keys.  Serialize them.
+    static TSD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn tsd_create_set_get() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut key: PthreadKeyT = 0;
         assert_eq!(unsafe { pthread_key_create(&mut key, None) }, 0);
 
@@ -3644,6 +3879,92 @@ mod tests {
     fn tsd_setspecific_invalid_key() {
         let ret = unsafe { pthread_setspecific(9999, core::ptr::null_mut()) };
         assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn tsd_setspecific_unallocated_key_returns_einval() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // An in-range key that was never returned by pthread_key_create.
+        // TSD_NEXT_KEY only ever grows, so picking the highest index is a
+        // safe "definitely not allocated yet" choice regardless of how many
+        // keys other tests created — unless the suite has exhausted all 64
+        // keys, in which case the call legitimately succeeds.
+        let next = {
+            tsd_lock();
+            let n = unsafe { core::ptr::addr_of!(TSD_NEXT_KEY).read() };
+            tsd_unlock();
+            n
+        };
+        if (next as usize) < MAX_KEYS {
+            let high = (MAX_KEYS as u32).wrapping_sub(1);
+            assert_eq!(
+                unsafe { pthread_setspecific(high, core::ptr::null_mut()) },
+                errno::EINVAL
+            );
+        }
+    }
+
+    static TSD_DTOR_CALLS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    static TSD_DTOR_LAST: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn tsd_record_dtor(val: *mut u8) {
+        TSD_DTOR_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        TSD_DTOR_LAST.store(val as usize, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn tsd_cleanup_runs_destructor_and_clears_value() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        TSD_DTOR_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+        TSD_DTOR_LAST.store(0, core::sync::atomic::Ordering::SeqCst);
+
+        let mut key: PthreadKeyT = 0;
+        assert_eq!(
+            unsafe { pthread_key_create(&mut key, Some(tsd_record_dtor)) },
+            0
+        );
+
+        let val = 0xABu8;
+        let val_ptr = core::ptr::addr_of!(val) as *mut u8;
+        assert_eq!(unsafe { pthread_setspecific(key, val_ptr) }, 0);
+        assert_eq!(unsafe { pthread_getspecific(key) }, val_ptr);
+
+        // Simulate thread exit for the calling (host) thread.
+        tsd_thread_cleanup(pthread_self());
+
+        // Destructor ran exactly once with the stored pointer, and the
+        // value is now cleared (slot freed).
+        assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            TSD_DTOR_LAST.load(core::sync::atomic::Ordering::SeqCst),
+            val_ptr as usize
+        );
+        assert!(unsafe { pthread_getspecific(key) }.is_null());
+
+        // Deleting the key clears its destructor: a later cleanup must not
+        // re-invoke it even if a value is present.
+        assert_eq!(pthread_key_delete(key), 0);
+        assert_eq!(unsafe { pthread_setspecific(key, val_ptr) }, 0);
+        tsd_thread_cleanup(pthread_self());
+        assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tsd_cleanup_null_value_skips_destructor() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        TSD_DTOR_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+
+        let mut key: PthreadKeyT = 0;
+        assert_eq!(
+            unsafe { pthread_key_create(&mut key, Some(tsd_record_dtor)) },
+            0
+        );
+        // Never set a value (stays null) → destructor must not run.
+        tsd_thread_cleanup(pthread_self());
+        assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 0);
+        let _ = pthread_key_delete(key);
     }
 
     // =======================================================================

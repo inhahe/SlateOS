@@ -67613,9 +67613,6 @@ fn cmd_oci(args: &str) {
 
             match crate::container::create(&cfg) {
                 Ok(ct_id) => {
-                    // Start the container.
-                    let _ = crate::container::start(ct_id);
-
                     crate::console_println!();
                     crate::console_println!("=== Container Created ===");
                     crate::console_println!("  Container ID: {}", ct_id);
@@ -67644,9 +67641,97 @@ fn cmd_oci(args: &str) {
                         crate::console_println!("  Net NS:       {}", ns.2);
                     }
 
+                    // Jail the container to its extracted rootfs (must happen
+                    // while still in Created state, before `run`).  The init
+                    // process then resolves `/bin/sh`, `/lib/...`, etc.
+                    // against the image's filesystem instead of the host.
+                    if let Err(e) = crate::container::set_root_path(ct_id, &rootfs_lower) {
+                        crate::console_println!(
+                            "[oci] Warning: could not set rootfs jail: {:?}", e
+                        );
+                    }
+
+                    // Launch the image's entrypoint/cmd as the container's
+                    // init process, jailed to the rootfs.  `command[0]` is the
+                    // executable; it is read from the host *inside* the rootfs
+                    // (the kernel loads the image before the jail takes effect),
+                    // then the running process resolves its own syscalls against
+                    // the jail.
+                    let launched = if command.is_empty() {
+                        crate::console_println!(
+                            "[oci] Image declares no entrypoint/cmd; not launching an init process."
+                        );
+                        false
+                    } else {
+                        // Guest-visible exe path (absolute within the rootfs).
+                        let exe_rel = command.first().map(alloc::string::String::as_str)
+                            .unwrap_or("");
+                        let exe_guest = if exe_rel.starts_with('/') {
+                            alloc::string::String::from(exe_rel)
+                        } else {
+                            alloc::format!("/{}", exe_rel)
+                        };
+                        // Host path to read the ELF from (rootfs + guest path).
+                        let exe_host = alloc::format!("{}{}", rootfs_lower, exe_guest);
+
+                        match crate::fs::vfs::Vfs::read_file(&exe_host) {
+                            Ok(elf) => {
+                                let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                                    command.iter().map(|s| s.as_bytes().to_vec()).collect();
+                                let argv_refs: alloc::vec::Vec<&[u8]> =
+                                    argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+                                let envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                                    image.config.env.iter()
+                                        .map(|s| s.as_bytes().to_vec()).collect();
+                                let envp_refs: alloc::vec::Vec<&[u8]> =
+                                    envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+                                let opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
+                                    .argv(&argv_refs)
+                                    .envp(&envp_refs)
+                                    .exe_path(exe_guest.as_bytes());
+                                match crate::container::run(ct_id, &elf, &opts) {
+                                    Ok(pid) => {
+                                        crate::console_println!(
+                                            "  Init PID:     {} ({})", pid, exe_guest
+                                        );
+                                        true
+                                    }
+                                    Err(e) => {
+                                        crate::console_println!(
+                                            "[oci] Failed to launch init process: {:?}", e
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::console_println!(
+                                    "[oci] Could not read entrypoint '{}' (host {}): {:?}",
+                                    exe_guest, exe_host, e
+                                );
+                                false
+                            }
+                        }
+                    };
+
                     crate::console_println!();
-                    crate::console_println!("Use 'container exec {}' to run commands in this container.", ct_id);
-                    crate::console_println!("Use 'container stop {}' then 'container delete {}' to clean up.", ct_id, ct_id);
+                    if launched {
+                        crate::console_println!(
+                            "Container {} is running. Use 'container info {}' to inspect.",
+                            ct_id, ct_id
+                        );
+                    } else {
+                        // No init process launched — fall back to the manual
+                        // model so the user can still exec into the container.
+                        let _ = crate::container::start(ct_id);
+                        crate::console_println!(
+                            "Use 'container exec {}' to run commands in this container.", ct_id
+                        );
+                    }
+                    crate::console_println!(
+                        "Use 'container stop {}' then 'container delete {}' to clean up.",
+                        ct_id, ct_id
+                    );
                 }
                 Err(e) => {
                     crate::console_println!("[oci] Container creation failed: {:?}", e);

@@ -184,6 +184,14 @@ memory-limited cgroup, faults in N pages, and asserts the cgroup's
 the frame allocator the sole charging authority; verifying it surfaced
 that the *current task* is never in a non-root cgroup at runtime).
 
+**Blocked on:** open-questions.md **Q14** — the proper fix depends on an
+architectural decision, because there are *two* disconnected cgroup
+subsystems (`kernel/src/cgroup.rs`, which enforces but has no task
+assignment, and `fs::cgroupfs`, which configures but does not enforce).
+Which layer owns process→cgroup assignment, and whether to unify them,
+is an operator call. The fork/clone/spawn cgroup *inheritance* part is
+clearly correct but inert until an assignment path exists.
+
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 
 **Where:** `kernel/src/idt.rs` page-fault handler (~line 1787). After

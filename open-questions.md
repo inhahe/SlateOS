@@ -75,9 +75,84 @@ paths under `kernel/src/fs/` and `fs/`.
 
 ---
 
+## Q14 — Two disconnected cgroup subsystems: which is authoritative, and how do they connect?
+
+**Status:** OPEN
+
+**Background.** While fixing B-CGROUP-DBLCHARGE I found the OS has **two
+independent cgroup implementations that do not talk to each other**:
+
+1. **`kernel/src/cgroup.rs`** — the in-kernel resource controller. It has the
+   real *enforcement* hooks: the physical frame allocator charges a task's
+   cgroup on every `alloc_frame`/`alloc_frame_zeroed` (recording the owner in
+   the per-frame `FRAME_CGROUP` array, uncharging on `free_frame`), plus
+   `io_charge` and PID accounting. It reads the *current task's* group via
+   `sched::current_task_cgroup()` → `Task::cgroup_id`.
+2. **`fs::cgroupfs`** (`kernel/src/fs/cgroupfs.rs`) — the user-facing cgroup-v2
+   filesystem (5 controllers, hierarchical groups, `memory.max`, PID limits,
+   per-group process assignment, `cgrp` kshell command, `/proc/cgroupfs`,
+   8 self-tests). Marked `[x]` in `roadmap.md` (line 949).
+
+The disconnect: `fs::cgroupfs` has **no** reference to `mem_charge`,
+`alloc_frame`, `Task::cgroup_id`, or `sched::*cgroup*` — it is a configuration/
+accounting surface with **no enforcement**. Conversely `kernel/src/cgroup.rs`
+**enforces** but has **no task-assignment path** — every `Task` is constructed
+with `cgroup_id = ROOT_CGROUP` and (after I removed a speculative setter)
+nothing ever changes it, and `fork`/`thread_clone`/`spawn` don't inherit it. Net
+effect: **neither system actually constrains a real process's memory.**
+`cgroupfs` limits are cosmetic; the kernel controller is dormant
+(D-CGROUP-TASK-UNASSIGNED in `known-issues.md`).
+
+**Question.** What is the intended architecture, and which layer owns
+process→cgroup assignment and limit enforcement?
+
+**Options.**
+- **(A) `cgroupfs` as the frontend, `kernel/src/cgroup.rs` as the engine.** Wire
+  `cgroupfs` writes through to the kernel controller: `memory.max` →
+  `cgroup::set_mem_limit`, `cgroup.procs` assignment → set the task's
+  `cgroup_id`; and have `fork`/`clone`/`spawn` inherit the parent's `cgroup_id`.
+  *Pro:* one enforcement engine (the proven frame-allocator charging), a
+  standard cgroup-v2 UX on top; both subsystems keep their current roles. *Con:*
+  must reconcile the two group-ID spaces (cgroupfs groups vs. `cgroup.rs`
+  `CgroupId`, capped at 256) and map all 5 controllers; moderate integration.
+- **(B) Collapse onto one.** Delete/absorb one implementation. Either make
+  `cgroupfs` a thin VFS view over `kernel/src/cgroup.rs` state (drop cgroupfs's
+  parallel bookkeeping), or move enforcement into cgroupfs and retire
+  `kernel/src/cgroup.rs`. *Pro:* eliminates the duplication entirely; one source
+  of truth. *Con:* biggest blast radius; risks regressing whichever subsystem's
+  self-tests; `kernel/src/cgroup.rs` is on the allocator hot path so its data
+  layout (per-frame `u8` owner array) must be preserved regardless.
+- **(C) Containers drive `kernel/src/cgroup.rs` directly, leave `cgroupfs`
+  standalone.** Wire `container.rs` (which already creates a `cgroup.rs` group
+  per container in `Container::cgroup_id`) to assign its tasks + inherit on
+  fork; treat `cgroupfs` as an independent, separately-scoped feature. *Pro:*
+  smallest change to make real memory limits work (containers are the concrete
+  consumer). *Con:* leaves the two cgroup systems permanently parallel — two
+  ways to express "a cgroup," confusing long-term.
+
+**Claude's recommendation.** (A). The frame-allocator charging in
+`kernel/src/cgroup.rs` is the correct, hot-path-proven enforcement engine, and
+cgroup-v2 (`cgroupfs`) is the right user-facing model — they should be two ends
+of *one* pipe, not two pipes. The only autonomous, clearly-correct increment I'd
+make without an operator call is having `fork`/`clone`/`spawn` **inherit** the
+parent's `cgroup_id` (universal cgroup semantics; inert while all tasks are root,
+harmless otherwise) — but even that is pointless until an assignment path exists,
+which is the design fork above. I have **not** implemented any of this; I logged
+the gap and moved to the next unblocked roadmap task.
+
+**Where it bites.** `kernel/src/cgroup.rs` (`set_mem_limit`, `mem_charge`,
+`current_task_cgroup`), `kernel/src/fs/cgroupfs.rs` (controller writes, process
+assignment), `kernel/src/sched/task.rs` (`cgroup_id` field + 3 constructors all
+defaulting to `ROOT_CGROUP`), `kernel/src/sched/mod.rs` (would need a
+lock-taking `set_task_cgroup` setter), `kernel/src/container.rs`
+(`Container::cgroup_id`), and the task-creation paths in
+`kernel/src/proc/{fork,thread,thread_clone,spawn}.rs` (cgroup inheritance).
+
+---
+
 All earlier deferred operator decisions (Q1–Q12) have been resolved — see the
 "Recently resolved" list below and `design-decisions.md` for full rationale. New
-decisions should be appended above this line as `## Q14 …`.
+decisions should be appended above this line as `## Q15 …`.
 
 ---
 

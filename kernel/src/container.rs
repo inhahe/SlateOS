@@ -1557,6 +1557,119 @@ pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
     Ok(crate::fs::tar::create(&entries))
 }
 
+/// Idempotently create every prefix directory of `rel` underneath `base`.
+///
+/// `base/<comp1>`, `base/<comp1>/<comp2>`, … are each `mkdir`'d in order
+/// (already-exists is ignored), so a later file write into a deep path never
+/// fails for a missing parent regardless of the source tar's entry ordering.
+/// Empty and `.` components are skipped; callers must have already rejected
+/// `..` components.
+fn ensure_dir_path(base: &str, rel: &str) {
+    let mut acc = String::from(base);
+    for comp in rel.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        acc.push('/');
+        acc.push_str(comp);
+        // Already-exists is the expected steady state; any real error here
+        // (e.g. a parent that is a file) surfaces later as a write failure.
+        let _ = crate::fs::vfs::Vfs::mkdir(&acc);
+    }
+}
+
+/// Import a tar archive into a fresh container's rootfs (Docker `import`).
+///
+/// Parses `archive` as a `ustar` tar, extracts every directory, regular file
+/// and symlink into `dest_dir` on the host VFS (creating parent directories as
+/// needed, independent of the archive's entry ordering), then creates a new
+/// container named `name` whose rootfs is `dest_dir`.  Archive member names are
+/// taken relative to `dest_dir`; any name containing a `..` component is
+/// rejected as a jail-escape attempt.  Returns the new container's id.
+///
+/// The archive is parsed (and validated) *before* any container state is
+/// created, so a malformed tar fails without leaving a half-built container.
+/// If the rootfs cannot be attached after creation, the container is rolled
+/// back so no orphan is left behind.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `dest_dir` is empty/contains NUL, an
+///   archive name escapes the destination, or `name` is invalid.
+/// - Any tar-parse or VFS error encountered while extracting.
+pub fn import_rootfs(
+    name: &str,
+    archive: &[u8],
+    dest_dir: &str,
+) -> KernelResult<ContainerId> {
+    if dest_dir.is_empty() || dest_dir.contains('\0') {
+        return Err(KernelError::InvalidArgument);
+    }
+    let base = dest_dir.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Parse (and thereby validate) the archive before mutating any state, so a
+    // malformed tar fails cleanly without a half-built container or rootfs.
+    let entries = crate::fs::tar::parse(archive)?;
+
+    // Validate every member name up front (reject `..` escapes) before writing
+    // anything to disk.
+    for entry in &entries {
+        let rel = entry.name.trim_start_matches('/');
+        if rel.split('/').any(|c| c == "..") {
+            return Err(KernelError::InvalidArgument);
+        }
+    }
+
+    use crate::fs::tar::EntryKind;
+    use crate::fs::vfs::Vfs;
+
+    // Create the destination root (idempotent).
+    let _ = Vfs::mkdir(base);
+
+    for entry in &entries {
+        let rel = entry.name.trim_start_matches('/');
+        if rel.is_empty() || rel == "." {
+            continue;
+        }
+        let dest = alloc::format!("{base}/{rel}");
+        match entry.kind {
+            EntryKind::Directory => {
+                let rel_dir = rel.trim_end_matches('/');
+                ensure_dir_path(base, rel_dir);
+            }
+            EntryKind::File => {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    ensure_dir_path(base, parent);
+                }
+                let data = crate::fs::tar::entry_data(archive, entry)?;
+                Vfs::write_file(&dest, data)?;
+            }
+            EntryKind::Symlink => {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    ensure_dir_path(base, parent);
+                }
+                // A pre-existing symlink/file at this path is tolerated; the
+                // archive's view wins where it can be applied.
+                let _ = Vfs::symlink(&dest, &entry.link_target);
+            }
+            EntryKind::Other(_) => {
+                // Devices, FIFOs, hardlinks, etc. have no rootfs analogue here.
+            }
+        }
+    }
+
+    // Materialise the container and attach the freshly-populated rootfs.  Roll
+    // back the container if the rootfs can't be attached, leaving no orphan.
+    let id = create(&ContainerConfig::new(name))?;
+    if let Err(e) = set_root_path(id, base) {
+        let _ = delete(id);
+        return Err(e);
+    }
+    Ok(id)
+}
+
 /// Set a container's filesystem root (rootfs) before it is run.
 ///
 /// `root` is an absolute host path (e.g. the container's extracted/overlay
@@ -3308,6 +3421,92 @@ pub fn self_test() {
     }
     serial_println!("[container]   export (rootfs -> tar): OK");
 
+    // Test 19p: import_rootfs() extracts a tar archive into a new container's
+    // rootfs (Docker `import`), creating parent directories regardless of entry
+    // order, rejecting `..` jail-escape names, and rolling forward to a usable
+    // container whose root_path points at the extracted tree.
+    {
+        use crate::fs::tar::{EntryKind, TarWriteEntry};
+        use crate::fs::vfs::Vfs;
+
+        // Build an archive with a nested file whose directory entry comes AFTER
+        // the file, to prove import creates parents independent of ordering.
+        let archive = crate::fs::tar::create(&[
+            TarWriteEntry {
+                name: String::from("d/a.txt"),
+                data: alloc::vec![b'A'; 3],
+                kind: EntryKind::File,
+                link_target: String::new(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+            TarWriteEntry {
+                name: String::from("d/"),
+                data: Vec::new(),
+                kind: EntryKind::Directory,
+                link_target: String::new(),
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+            TarWriteEntry {
+                name: String::from("b.txt"),
+                data: alloc::vec![b'B'; 3],
+                kind: EntryKind::File,
+                link_target: String::new(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+        ]);
+
+        let id = import_rootfs("test-import-ct", &archive, "/tmp/imp-root")
+            .expect("import archive into container");
+        // Extracted files exist with the right bytes, including the nested one.
+        assert_eq!(
+            Vfs::read_file("/tmp/imp-root/b.txt").expect("read b.txt"),
+            alloc::vec![b'B'; 3],
+        );
+        assert_eq!(
+            Vfs::read_file("/tmp/imp-root/d/a.txt").expect("read d/a.txt"),
+            alloc::vec![b'A'; 3],
+        );
+        // The new container is configured with the extracted rootfs.
+        let ci = info(id).expect("imported container exists");
+        assert_eq!(ci.root_path, "/tmp/imp-root", "rootfs must be attached");
+
+        // A `..` member name is rejected as a jail escape and leaves no
+        // container behind.
+        let n_before = active_count();
+        let evil = crate::fs::tar::create(&[TarWriteEntry {
+            name: String::from("../evil.txt"),
+            data: alloc::vec![b'x'; 1],
+            kind: EntryKind::File,
+            link_target: String::new(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+        }]);
+        assert!(
+            import_rootfs("test-import-evil", &evil, "/tmp/imp-evil").is_err(),
+            "`..` archive names must be rejected",
+        );
+        assert_eq!(active_count(), n_before, "rejected import leaks no container");
+
+        // Cleanup.
+        delete(id).expect("delete imported container");
+        let _ = Vfs::remove("/tmp/imp-root/b.txt");
+        let _ = Vfs::remove("/tmp/imp-root/d/a.txt");
+        let _ = Vfs::rmdir("/tmp/imp-root/d");
+        let _ = Vfs::rmdir("/tmp/imp-root");
+    }
+    serial_println!("[container]   import (tar -> rootfs): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3432,5 +3631,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (35 tests)");
+    serial_println!("[container] Self-test PASSED (36 tests)");
 }

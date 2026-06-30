@@ -67546,6 +67546,24 @@ fn cmd_container(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "kill" => {
+            // container kill <id>  (Docker `kill`): force-terminate the
+            // container by killing all its processes; the init's exit
+            // auto-stops the container with exit code 137.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container kill <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::kill(id) {
+                Ok(0) => crate::console_println!("Container {}: no running processes to kill", id),
+                Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67693,7 +67711,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|stats|update|rename|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|exec|info|top|stats|update|rename|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67701,6 +67719,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");
+            crate::console_println!("  container kill ID                        — force-kill all container processes");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");

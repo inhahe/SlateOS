@@ -1537,6 +1537,42 @@ pub fn rename(id: ContainerId, new_name: &str) -> KernelResult<()> {
     })
 }
 
+/// Forcibly terminate a container by killing all of its tracked processes
+/// (Docker `kill`).
+///
+/// Each process is killed (all of its threads are marked dead and the process
+/// is zombified). The container's init process exiting trips the automatic
+/// [`notify_init_exit`] transition, so the container moves to `Stopped` and
+/// records a SIGKILL-style exit code (128 + SIGKILL = 137, matching Docker's
+/// "Exited (137)"). Remaining (non-init) processes are killed too so the
+/// container does not leak orphans into the host's init.
+///
+/// Best-effort: a process that has already exited (no live threads) is simply
+/// skipped. Returns the number of processes that actually had threads killed.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive.
+pub fn kill(id: ContainerId) -> KernelResult<usize> {
+    // Snapshot the tracked PIDs (init first) under the table lock, then do the
+    // killing outside it — kill_process_threads touches the process/scheduler
+    // tables and trips notify_init_exit (which re-takes the container table),
+    // so it must not run while we hold the table lock.
+    let process_ids = pids(id).ok_or(KernelError::InvalidArgument)?;
+    let mut killed = 0usize;
+    for pid in process_ids {
+        // Record a SIGKILL-style exit code before the process zombifies so
+        // notify_init_exit reports "Exited (137)". Ignore the error: a process
+        // that already vanished simply has no exit code to set, and the kill
+        // below will no-op for it.
+        let _ = crate::proc::pcb::set_exit_code(pid, 137);
+        if crate::proc::thread::kill_process_threads(pid) > 0 {
+            killed = killed.saturating_add(1);
+        }
+    }
+    Ok(killed)
+}
+
 /// Update a container's live resource limits (Docker `update`).
 ///
 /// Applies new CPU and/or memory limits to the container's cgroup without
@@ -2417,6 +2453,31 @@ pub fn self_test() {
     }
     serial_println!("[container]   rename (rename): OK");
 
+    // Test 19i: kill() rejects an invalid id and is a no-op (0 killed) on a
+    // container with no tracked processes (Docker `kill`).  The real kill of
+    // live processes is exercised by the run/exec integration path, not here
+    // (the self-test uses synthetic never-scheduled PIDs).
+    {
+        // Invalid id is rejected.
+        assert!(kill(MAX_CONTAINERS as ContainerId).is_err());
+
+        // A freshly-created container has no processes: nothing to kill.
+        let ct_k = create(&ContainerConfig::new("test-kill-ct")).expect("create");
+        assert_eq!(kill(ct_k).expect("kill empty"), 0, "no processes to kill");
+
+        // Synthetic tracked PIDs with no backing threads: kill is a no-op for
+        // each (kill_process_threads finds no threads), so 0 are killed.
+        add_process(ct_k, 71001).expect("add 71001");
+        add_process(ct_k, 71002).expect("add 71002");
+        assert_eq!(
+            kill(ct_k).expect("kill synthetic"), 0,
+            "synthetic PIDs have no threads to kill",
+        );
+
+        delete(ct_k).expect("delete kill container");
+    }
+    serial_println!("[container]   kill (kill): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2516,5 +2577,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (27 tests)");
+    serial_println!("[container] Self-test PASSED (28 tests)");
 }

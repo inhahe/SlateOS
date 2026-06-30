@@ -2255,6 +2255,19 @@ clear its namespace — see B-CONTAINER-JAIL-TESTRACE). Build clean, boot-test
 green ("Self-test PASSED (19 tests)"). The TD32 remainder above (read-only
 volumes, mount-tree/`pivot_root`, tmpfs) is unchanged.
 
+**Update 2026-06-30 (increment 11): port publishing (`-p`) — DONE.** Docker
+`-p host:container[/proto]` port publishing landed, reusing the existing
+`net::nat` port-forward table. `Container` gained `container_ip` (captured from
+the configured network IP) and `published_ports`; `add_port_publish` records
+publish intents (Created-only, requires a network IP, rejects port 0, last-
+writer-wins, capped at `MAX_PUBLISHED_PORTS`); `run()` installs them as NAT
+rules forwarding host traffic to the container IP inside its netns; `stop()`
+flushes them and `delete()` clears the intents. CLI: `oci run -p
+8080:80[/udp]` (repeatable). Container self-test 20 covers the lifecycle
+deterministically (forwards are per-netns, not per-PID). This is orthogonal to
+the rootfs/volume mount-namespace scope; the TD32 mount remainder (read-only
+volumes, mount-tree/`pivot_root`, tmpfs) is still open.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

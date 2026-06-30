@@ -67365,6 +67365,75 @@ fn cmd_container(args: &str) {
                 crate::console_println!("{:<8} {:<10} {}", pid, state, name);
             }
         }
+        "stats" => {
+            // container stats <id>  —  live resource usage from the
+            // container's cgroup (Docker `stats`): CPU ticks, memory, I/O,
+            // PIDs, and throttle counts.  Memory/I/O byte figures are stored
+            // as 16 KiB frame counts; we surface both frames and MiB.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container stats <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(ci) = container::info(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            let Some(cg) = crate::cgroup::stats(ci.cgroup_id) else {
+                crate::console_println!(
+                    "Container {} has no cgroup stats (cgroup {} inactive)",
+                    id, ci.cgroup_id
+                );
+                return;
+            };
+            // 16 KiB per frame: MiB = frames / 64 (1024 KiB / 16 KiB).
+            let frames_to_mib = |frames: u64| frames / 64;
+            crate::console_println!("=== Container {} stats ({}) ===", id, ci.name);
+            crate::console_println!("  Tasks:      {}", cg.nr_tasks);
+            // CPU.
+            if cg.cpu_quota > 0 {
+                crate::console_println!(
+                    "  CPU:        {} / {} ticks this period (throttled {}x)",
+                    cg.cpu_used, cg.cpu_quota, cg.cpu_throttle_count
+                );
+            } else {
+                crate::console_println!(
+                    "  CPU:        {} ticks this period (unlimited)",
+                    cg.cpu_used
+                );
+            }
+            // Memory.
+            if cg.mem_limit > 0 {
+                crate::console_println!(
+                    "  Memory:     {} / {} frames ({} / {} MiB), peak {} frames",
+                    cg.mem_usage, cg.mem_limit,
+                    frames_to_mib(cg.mem_usage), frames_to_mib(cg.mem_limit),
+                    cg.mem_peak
+                );
+            } else {
+                crate::console_println!(
+                    "  Memory:     {} frames ({} MiB) of unlimited, peak {} frames",
+                    cg.mem_usage, frames_to_mib(cg.mem_usage), cg.mem_peak
+                );
+            }
+            // I/O (bytes stored as frame counts).
+            let io_limited = cg.io_ops_limit > 0 || cg.io_bytes_limit > 0;
+            if io_limited {
+                crate::console_println!(
+                    "  I/O:        {} ops, {} frames ({} MiB) this period (throttled {}x)",
+                    cg.io_ops_used, cg.io_bytes_used,
+                    frames_to_mib(cg.io_bytes_used), cg.io_throttle_count
+                );
+            } else {
+                crate::console_println!(
+                    "  I/O:        {} ops, {} frames ({} MiB) this period (unlimited)",
+                    cg.io_ops_used, cg.io_bytes_used, frames_to_mib(cg.io_bytes_used)
+                );
+            }
+        }
         "rootfs" => {
             // container rootfs <id> <host-path>
             //
@@ -67512,7 +67581,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|exec|info|top|stats|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67523,6 +67592,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
+            crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");

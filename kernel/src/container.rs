@@ -345,6 +345,16 @@ struct Container {
     /// "paused" as a sub-state of running); freezing is orthogonal to the
     /// Created/Running/Stopped lifecycle.
     frozen: bool,
+    /// Host VFS path of the init binary last launched via [`run_path`], saved
+    /// so the container can be re-launched (Docker `restart`).  Empty until the
+    /// container has been run via [`run_path`] (a bare [`run`] with raw ELF
+    /// bytes records no path and so cannot be restarted).
+    init_exe_path: String,
+    /// Extra arguments (after the binary path) of the init command last
+    /// launched via [`run_path`], replayed verbatim on [`restart`].  These
+    /// originate from the shell command line (already UTF-8), so they are
+    /// stored as `String`s.
+    init_args: Vec<String>,
 }
 
 impl Container {
@@ -370,6 +380,8 @@ impl Container {
             labels: Vec::new(),
             exit_code: None,
             frozen: false,
+            init_exe_path: String::new(),
+            init_args: Vec::new(),
         }
     }
 }
@@ -699,6 +711,10 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.exit_code = None;
         // A fresh container is never frozen (clears a stale flag on reuse).
         ct.frozen = false;
+        // A fresh container has no recorded launch spec (clears stale values
+        // from a reused slot).
+        ct.init_exe_path.clear();
+        ct.init_args.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -1201,6 +1217,129 @@ pub fn run(
     );
 
     Ok(result.pid)
+}
+
+/// Launch a container's init process from a host VFS path, recording the
+/// launch spec so the container can later be restarted (Docker `restart`).
+///
+/// This is the path-based counterpart to [`run`]: it reads the ELF image from
+/// the host VFS at `vfs_path`, builds the argv (`argv[0]` = `vfs_path`, then
+/// `extra_args`), spawns the init process via [`run`], and — on success —
+/// stores `vfs_path` and `extra_args` on the container so [`restart`] can
+/// replay the exact same command.  Callers that already have ELF bytes in hand
+/// and do not need restartability can use [`run`] directly.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not in
+///   `Created` state, or `vfs_path` cannot be read from the VFS.
+/// - Any error from [`run`]/`spawn_process` (invalid ELF, out of memory).
+pub fn run_path(
+    id: ContainerId,
+    vfs_path: &str,
+    extra_args: &[&str],
+) -> KernelResult<u64> {
+    // Read the ELF image from the host VFS.  A read failure (missing file,
+    // permission, I/O) maps to InvalidArgument — the caller passed a bad path.
+    let elf = crate::fs::vfs::Vfs::read_file(vfs_path)
+        .map_err(|_| KernelError::InvalidArgument)?;
+
+    // Build argv: argv[0] is the binary path, then the extra args.  Own the
+    // byte buffers, then borrow them for SpawnOptions.
+    let argv_owned: Vec<Vec<u8>> = core::iter::once(vfs_path.as_bytes().to_vec())
+        .chain(extra_args.iter().map(|s| s.as_bytes().to_vec()))
+        .collect();
+    let argv_refs: Vec<&[u8]> = argv_owned.iter().map(Vec::as_slice).collect();
+
+    let opts = crate::proc::spawn::SpawnOptions::new(vfs_path)
+        .argv(&argv_refs)
+        .exe_path(vfs_path.as_bytes());
+
+    let pid = run(id, &elf, &opts)?;
+
+    // Record the launch spec for restart.  run() already verified the
+    // container, so the slot is valid here; still guard defensively.
+    with_table(|table| {
+        let idx = id as usize;
+        if idx < MAX_CONTAINERS && table.containers[idx].active {
+            table.containers[idx].init_exe_path.clear();
+            table.containers[idx].init_exe_path.push_str(vfs_path);
+            table.containers[idx].init_args =
+                extra_args.iter().map(|s| String::from(*s)).collect();
+        }
+    });
+
+    Ok(pid)
+}
+
+/// Restart a container by re-launching its recorded init command (Docker
+/// `restart`).
+///
+/// Re-runs the exact command last launched via [`run_path`]: if the container
+/// is still running it is first force-killed and stopped, then the container is
+/// reset to a fresh `Created` state (init PID and process list cleared, exit
+/// code and freeze flag reset — its namespaces, cgroup, rootfs, volumes,
+/// published ports, and labels are *preserved*), and the stored command is
+/// launched again via [`run_path`].
+///
+/// Returns the global PID of the newly-launched init process.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist or has no
+///   recorded launch spec (it was never run via [`run_path`], so there is
+///   nothing to replay).
+/// - Any error from [`run_path`] (the binary vanished from the VFS, OOM, …).
+pub fn restart(id: ContainerId) -> KernelResult<u64> {
+    // Fetch the stored launch spec and current state under the table lock.  A
+    // container with no recorded path was never run via run_path and cannot be
+    // restarted.
+    let (exe_path, args, is_running) = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        let ct = &table.containers[idx];
+        if ct.init_exe_path.is_empty() {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok((
+            ct.init_exe_path.clone(),
+            ct.init_args.clone(),
+            ct.state == ContainerState::Running,
+        ))
+    })?;
+
+    // If still running, force-kill the live processes (best-effort) and stop
+    // the container so its published-port forwards are flushed.  kill()/stop()
+    // both take the table lock internally, so they must run outside the
+    // snapshot above.
+    if is_running {
+        let _ = kill(id);
+        let _ = stop(id);
+    }
+
+    // Reset the container to a fresh Created state, preserving its
+    // configuration (namespaces, cgroup, rootfs, volumes, ports, labels) but
+    // clearing the previous run's process bookkeeping.  Done under the table
+    // lock; run_path()'s internal run() requires the Created state.
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        let ct = &mut table.containers[idx];
+        ct.state = ContainerState::Created;
+        ct.init_pid = None;
+        ct.pids.clear();
+        ct.exit_code = None;
+        ct.frozen = false;
+        Ok(())
+    })?;
+
+    // Replay the recorded command.  Borrow the owned arg strings as &str.
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_path(id, &exe_path, &arg_refs)
 }
 
 /// Set a container's filesystem root (rootfs) before it is run.
@@ -2761,6 +2900,65 @@ pub fn self_test() {
     }
     serial_println!("[container]   pause/unpause (freezer): OK");
 
+    // Test 19m: restart() replays a container's recorded launch command
+    // (Docker `restart`).  run_path() records the host VFS path + args; restart
+    // resets the container to Created and re-launches, producing a fresh init
+    // PID while preserving the container's configuration.  A container that was
+    // never run via run_path() has no spec and cannot be restarted.
+    {
+        static RHELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        // restart with no recorded spec is rejected.
+        let ct_nr = create(&ContainerConfig::new("test-norestart-ct")).expect("create");
+        assert!(
+            restart(ct_nr).is_err(),
+            "restart with no recorded launch spec must fail",
+        );
+        // Invalid id is rejected too.
+        assert!(restart(MAX_CONTAINERS as ContainerId).is_err());
+        delete(ct_nr).expect("delete norestart container");
+
+        // Stage the init ELF in the VFS so run_path can read it back.
+        let elf_path = "/tmp/restart-init.elf";
+        crate::fs::vfs::Vfs::write_file(elf_path, RHELLO_ELF).expect("stage init elf");
+
+        let ct_rs = create(&ContainerConfig::new("test-restart-ct").memory(4096))
+            .expect("create restart container");
+        let pid1 = run_path(ct_rs, elf_path, &[]).expect("run_path initial launch");
+        assert_eq!(
+            info(ct_rs).unwrap().init_pid, Some(pid1),
+            "initial launch records init pid",
+        );
+
+        // Restart replays the stored command, yielding a fresh init PID.
+        let pid2 = restart(ct_rs).expect("restart");
+        assert_ne!(pid1, pid2, "restart must spawn a fresh init process");
+        assert_eq!(
+            info(ct_rs).unwrap().init_pid, Some(pid2),
+            "restart records the new init pid",
+        );
+
+        // Teardown: pid1 was force-killed by restart() and is no longer tracked
+        // (the reset cleared the pid list); reap its process record.  pid2 is
+        // the live init still tracked by the container.
+        crate::proc::thread::kill_process_threads(pid1);
+        crate::proc::pcb::destroy(pid1);
+        if let Some(init_task) = crate::proc::pcb::get_threads(pid2)
+            .and_then(|t| t.first().copied())
+        {
+            let _ = remove_process_task(ct_rs, pid2, init_task);
+        }
+        crate::proc::thread::kill_process_threads(pid2);
+        crate::proc::pcb::destroy(pid2);
+
+        stop(ct_rs).ok();
+        delete(ct_rs).expect("delete restart container");
+        let _ = crate::fs::vfs::Vfs::remove("/tmp/restart-init.elf");
+    }
+    serial_println!("[container]   restart (run_path/restart): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -2860,5 +3058,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (31 tests)");
+    serial_println!("[container] Self-test PASSED (32 tests)");
 }

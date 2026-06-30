@@ -67727,35 +67727,36 @@ fn cmd_container(args: &str) {
                 return;
             };
 
-            // Load the ELF image from the VFS.
-            let elf = match crate::fs::vfs::Vfs::read_file(path) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    crate::console_println!("Failed to read '{}': {:?}", path, e);
-                    return;
-                }
-            };
-
-            // Build argv: argv[0] = the binary path, then any extra args.
-            // Own the byte buffers, then borrow them for SpawnOptions.
-            let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> = core::iter::once(path)
-                .chain(parts.iter().skip(3).copied())
-                .map(|s| s.as_bytes().to_vec())
-                .collect();
-            let argv_refs: alloc::vec::Vec<&[u8]> =
-                argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-
-            let opts = crate::proc::spawn::SpawnOptions::new(path)
-                .argv(&argv_refs)
-                .exe_path(path.as_bytes());
-
-            match container::run(id, &elf, &opts) {
+            // Delegate to run_path: it reads the ELF from the host VFS, builds
+            // argv (argv[0] = path, then extra args), launches the init
+            // process, and records the launch spec so the container can later
+            // be restarted (`container restart`).
+            let extra_args: alloc::vec::Vec<&str> = parts.iter().skip(3).copied().collect();
+            match container::run_path(id, path, &extra_args) {
                 Ok(pid) => {
                     crate::console_println!(
-                        "Container {} running: init pid={} ({} bytes ELF: {})",
-                        id, pid, elf.len(), path
+                        "Container {} running: init pid={} (ELF: {})",
+                        id, pid, path
                     );
                 }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "restart" => {
+            // container restart <id>  (Docker `restart`): re-launch the
+            // container's recorded init command (from the last `run`).
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container restart <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::restart(id) {
+                Ok(pid) => crate::console_println!(
+                    "Container {} restarted: init pid={}", id, pid
+                ),
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
@@ -67820,12 +67821,13 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|start|stop|kill|pause|unpause|exec|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|exec|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
+            crate::console_println!("  container restart ID                     — re-launch the recorded init command");
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");
             crate::console_println!("  container kill ID                        — force-kill all container processes");

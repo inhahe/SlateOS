@@ -2453,17 +2453,156 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
 // pthread_atfork
 // ---------------------------------------------------------------------------
 
-/// Register handlers to be called before/after fork.
+/// Maximum number of `pthread_atfork` handler triplets we can register.
 ///
-/// Since our OS doesn't have fork() yet, this is a stub that accepts
-/// handlers but never calls them.  Returns 0 (success) always.
+/// glibc uses an unbounded linked list, but in a `no_std` staticlib we
+/// avoid the allocator on this path and use a fixed table.  Real programs
+/// register a handful of these (one per library that holds locks across
+/// fork), so 32 is comfortably more than enough.
+const MAX_ATFORK_HANDLERS: usize = 32;
+
+/// One `pthread_atfork` registration: a `(prepare, parent, child)` triplet.
+#[derive(Clone, Copy)]
+struct AtforkEntry {
+    prepare: Option<extern "C" fn()>,
+    parent: Option<extern "C" fn()>,
+    child: Option<extern "C" fn()>,
+}
+
+impl AtforkEntry {
+    const EMPTY: Self = Self {
+        prepare: None,
+        parent: None,
+        child: None,
+    };
+}
+
+/// Registered atfork handlers, in registration order (index 0 first).
+static mut ATFORK_HANDLERS: [AtforkEntry; MAX_ATFORK_HANDLERS] =
+    [AtforkEntry::EMPTY; MAX_ATFORK_HANDLERS];
+/// Number of valid entries in [`ATFORK_HANDLERS`].
+static mut ATFORK_COUNT: usize = 0;
+/// Spinlock guarding [`ATFORK_HANDLERS`] / [`ATFORK_COUNT`].
+static ATFORK_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Acquire [`ATFORK_LOCK`].
+#[inline]
+fn atfork_lock() {
+    while ATFORK_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+/// Release [`ATFORK_LOCK`].
+#[inline]
+fn atfork_unlock() {
+    ATFORK_LOCK.store(false, Ordering::Release);
+}
+
+/// Register handlers to be called around `fork()`.
+///
+/// Per POSIX, `prepare` is called in the parent before the fork (in LIFO
+/// order of registration), `parent` is called in the parent after the
+/// fork (FIFO order), and `child` is called in the child after the fork
+/// (FIFO order).  Any handler may be `NULL`/`None` to skip that phase.
+///
+/// Returns 0 on success, or `ENOMEM` if the handler table is full.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_atfork(
-    _prepare: Option<extern "C" fn()>,
-    _parent: Option<extern "C" fn()>,
-    _child: Option<extern "C" fn()>,
+    prepare: Option<extern "C" fn()>,
+    parent: Option<extern "C" fn()>,
+    child: Option<extern "C" fn()>,
 ) -> i32 {
-    0
+    atfork_lock();
+    let count = unsafe { ATFORK_COUNT };
+    if count >= MAX_ATFORK_HANDLERS {
+        atfork_unlock();
+        return errno::ENOMEM;
+    }
+    // SAFETY: lock held, so no concurrent mutation; `count` is in range
+    // (checked above).
+    let table = unsafe { &mut *core::ptr::addr_of_mut!(ATFORK_HANDLERS) };
+    if let Some(slot) = table.get_mut(count) {
+        *slot = AtforkEntry {
+            prepare,
+            parent,
+            child,
+        };
+        // SAFETY: lock held.
+        unsafe {
+            ATFORK_COUNT = count.wrapping_add(1);
+        }
+        atfork_unlock();
+        0
+    } else {
+        atfork_unlock();
+        errno::ENOMEM
+    }
+}
+
+/// Snapshot the registered handlers into a caller-provided buffer.
+///
+/// Copies the function pointers out under the lock so the actual handler
+/// calls happen with the lock released (a handler must not deadlock if it
+/// touches pthread state, and could in principle call `pthread_atfork`).
+/// Returns the number of entries copied.
+fn atfork_snapshot(out: &mut [AtforkEntry; MAX_ATFORK_HANDLERS]) -> usize {
+    atfork_lock();
+    let count = unsafe { ATFORK_COUNT };
+    // SAFETY: lock held; no concurrent mutation.
+    let table = unsafe { &*core::ptr::addr_of!(ATFORK_HANDLERS) };
+    for (dst, src) in out.iter_mut().zip(table.iter()).take(count) {
+        *dst = *src;
+    }
+    atfork_unlock();
+    count.min(MAX_ATFORK_HANDLERS)
+}
+
+/// Run the `prepare` handlers in LIFO order, in the parent before a fork.
+///
+/// Called by `fork()`/`vfork()` immediately before issuing the fork
+/// syscall.
+pub(crate) fn atfork_run_prepare() {
+    let mut snap = [AtforkEntry::EMPTY; MAX_ATFORK_HANDLERS];
+    let count = atfork_snapshot(&mut snap);
+    // LIFO: last registered runs first.
+    let mut i = count;
+    while i > 0 {
+        i = i.wrapping_sub(1);
+        if let Some(f) = snap.get(i).and_then(|e| e.prepare) {
+            f();
+        }
+    }
+}
+
+/// Run the `parent` handlers in FIFO order, in the parent after a fork.
+///
+/// Called by `fork()` in the parent (and, per glibc behaviour, also after
+/// a failed fork so locks acquired by `prepare` handlers are released).
+pub(crate) fn atfork_run_parent() {
+    let mut snap = [AtforkEntry::EMPTY; MAX_ATFORK_HANDLERS];
+    let count = atfork_snapshot(&mut snap);
+    for e in snap.iter().take(count) {
+        if let Some(f) = e.parent {
+            f();
+        }
+    }
+}
+
+/// Run the `child` handlers in FIFO order, in the child after a fork.
+///
+/// Called by `fork()` in the child process.
+pub(crate) fn atfork_run_child() {
+    let mut snap = [AtforkEntry::EMPTY; MAX_ATFORK_HANDLERS];
+    let count = atfork_snapshot(&mut snap);
+    for e in snap.iter().take(count) {
+        if let Some(f) = e.child {
+            f();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4056,6 +4195,115 @@ mod tests {
         tsd_thread_cleanup(pthread_self());
         assert_eq!(TSD_DTOR_CALLS.load(core::sync::atomic::Ordering::SeqCst), 0);
         let _ = pthread_key_delete(key);
+    }
+
+    // =======================================================================
+    // pthread_atfork
+    // =======================================================================
+
+    // The atfork table is process-global; serialize these tests so the
+    // shared static isn't mutated concurrently by parallel test threads.
+    static ATFORK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Records the order in which handlers fire.
+    static ATFORK_SEQ: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+    fn atfork_seq_push(v: i32) {
+        ATFORK_SEQ
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(v);
+    }
+    fn atfork_seq_take() -> Vec<i32> {
+        let mut g = ATFORK_SEQ.lock().unwrap_or_else(|e| e.into_inner());
+        core::mem::take(&mut *g)
+    }
+
+    fn atfork_reset() {
+        atfork_seq_take();
+        super::atfork_lock();
+        // SAFETY: lock held; clearing the table for a clean test slate.
+        unsafe {
+            super::ATFORK_COUNT = 0;
+            let t = &mut *core::ptr::addr_of_mut!(super::ATFORK_HANDLERS);
+            for e in t.iter_mut() {
+                *e = super::AtforkEntry::EMPTY;
+            }
+        }
+        super::atfork_unlock();
+    }
+
+    extern "C" fn prep1() {
+        atfork_seq_push(11);
+    }
+    extern "C" fn prep2() {
+        atfork_seq_push(12);
+    }
+    extern "C" fn parent1() {
+        atfork_seq_push(21);
+    }
+    extern "C" fn parent2() {
+        atfork_seq_push(22);
+    }
+    extern "C" fn child1() {
+        atfork_seq_push(31);
+    }
+    extern "C" fn child2() {
+        atfork_seq_push(32);
+    }
+
+    #[test]
+    fn atfork_prepare_lifo_parent_and_child_fifo() {
+        let _g = ATFORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        atfork_reset();
+
+        assert_eq!(pthread_atfork(Some(prep1), Some(parent1), Some(child1)), 0);
+        assert_eq!(pthread_atfork(Some(prep2), Some(parent2), Some(child2)), 0);
+
+        // prepare runs LIFO: second-registered first.
+        atfork_run_prepare();
+        assert_eq!(atfork_seq_take(), vec![12, 11]);
+
+        // parent runs FIFO: registration order.
+        atfork_run_parent();
+        assert_eq!(atfork_seq_take(), vec![21, 22]);
+
+        // child runs FIFO: registration order.
+        atfork_run_child();
+        assert_eq!(atfork_seq_take(), vec![31, 32]);
+
+        atfork_reset();
+    }
+
+    #[test]
+    fn atfork_null_handlers_are_skipped() {
+        let _g = ATFORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        atfork_reset();
+
+        // Only a prepare handler; parent/child are None.
+        assert_eq!(pthread_atfork(Some(prep1), None, None), 0);
+        atfork_run_prepare();
+        assert_eq!(atfork_seq_take(), vec![11]);
+        // Running parent/child with no registered handlers does nothing.
+        atfork_run_parent();
+        atfork_run_child();
+        assert!(atfork_seq_take().is_empty());
+
+        atfork_reset();
+    }
+
+    #[test]
+    fn atfork_table_full_returns_enomem() {
+        let _g = ATFORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        atfork_reset();
+
+        // Fill the table exactly.
+        for _ in 0..super::MAX_ATFORK_HANDLERS {
+            assert_eq!(pthread_atfork(Some(prep1), None, None), 0);
+        }
+        // One more must fail with ENOMEM.
+        assert_eq!(pthread_atfork(Some(prep1), None, None), errno::ENOMEM);
+
+        atfork_reset();
     }
 
     // =======================================================================

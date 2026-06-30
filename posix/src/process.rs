@@ -428,6 +428,11 @@ pub extern "C" fn waitid(
 /// translated kernel error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fork() -> PidT {
+    // POSIX: run pthread_atfork `prepare` handlers (LIFO) in the parent
+    // before the fork so any locks they guard are held across the clone,
+    // leaving child/parent state consistent.
+    crate::pthread::atfork_run_prepare();
+
     // SYS_PROCESS_FORK is frame-handled in the kernel: it reads the
     // caller's saved register frame to build the child's resume state.
     // The parent returns here with the child PID (> 0); the child
@@ -436,7 +441,18 @@ pub extern "C" fn fork() -> PidT {
     let ret = syscall0(SYS_PROCESS_FORK);
     // `translate` returns the PID/0 unchanged on success, or sets errno
     // and returns -1 on a negative kernel error code.
-    errno::translate(ret) as PidT
+    let pid = errno::translate(ret) as PidT;
+
+    if pid == 0 {
+        // Child: run `child` handlers (FIFO) to re-init locks/state.
+        crate::pthread::atfork_run_child();
+    } else {
+        // Parent (pid > 0) or failure (pid < 0): run `parent` handlers
+        // (FIFO).  We run them even on failure so locks acquired by the
+        // `prepare` handlers are released — matching glibc behaviour.
+        crate::pthread::atfork_run_parent();
+    }
+    pid
 }
 
 // execve is implemented in spawn.rs with real ELF loading.

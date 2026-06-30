@@ -128,6 +128,11 @@ pub struct ContainerConfig {
     /// (Docker `--read-only`): writes that resolve into the rootfs (i.e. not
     /// into a writable volume) are denied with `EROFS`.
     pub read_only_root: bool,
+    /// UTS hostname for the container (Docker `--hostname`). Empty means no
+    /// override — the container's init process sees the global system
+    /// hostname. When set, the init process's `uname(2)`/`gethostname(2)`
+    /// report this name instead.
+    pub hostname: String,
     /// I/O ops limit per period (0 = unlimited).
     pub io_ops_limit: u64,
     /// I/O bytes limit per period (0 = unlimited).
@@ -179,6 +184,17 @@ impl ContainerConfig {
     /// Mark the container's root filesystem as read-only (Docker `--read-only`).
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only_root = read_only;
+        self
+    }
+
+    /// Set the container's UTS hostname (Docker `--hostname`).
+    ///
+    /// An empty string leaves the container with the global system hostname.
+    /// A name longer than 64 bytes (the UTS field width) is truncated.
+    #[must_use]
+    pub fn hostname(mut self, name: &str) -> Self {
+        let name = if name.len() > 64 { name.get(..64).unwrap_or("") } else { name };
+        self.hostname = String::from(name);
         self
     }
 
@@ -271,6 +287,12 @@ struct Container {
     /// each process launched by [`run`] via
     /// [`crate::ipc::namespace::set_root_read_only`].
     read_only_root: bool,
+    /// UTS hostname for the container (Docker `--hostname`).  Empty means the
+    /// container's processes see the global system hostname.  When set, each
+    /// process launched by [`run`] is given this hostname via
+    /// [`crate::ipc::namespace::set_hostname`], so `uname(2)`/`gethostname(2)`
+    /// inside the container report it.
+    hostname: String,
     /// The container's own IPv4 address inside its network namespace, captured
     /// from [`ContainerConfig::net_ip`] at create time.  `None` when no
     /// network was configured.  Needed as the *target* of published-port NAT
@@ -301,6 +323,7 @@ impl Container {
             rootfs_mount: String::new(),
             volumes: Vec::new(),
             read_only_root: false,
+            hostname: String::new(),
             container_ip: None,
             published_ports: Vec::new(),
         }
@@ -347,6 +370,9 @@ pub struct ContainerInfo {
     pub volumes: Vec<VolumeSpec>,
     /// Whether the container's root filesystem is read-only (`--read-only`).
     pub read_only_root: bool,
+    /// The container's UTS hostname (`--hostname`), or empty if it sees the
+    /// global system hostname.
+    pub hostname: String,
     /// The container's own IPv4 address, or `None` if no network configured.
     pub container_ip: Option<[u8; 4]>,
     /// Published ports as `(proto, host_port, container_port)`.
@@ -612,6 +638,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         // where to forward (the `-p host:container` target).
         ct.container_ip = config.net_ip;
         ct.read_only_root = config.read_only_root;
+        ct.hostname = config.hostname.clone();
         ct.published_ports.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -795,7 +822,7 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 /// [`run`] always uses this entry point with both ids from the spawn
 /// result.
 pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes, read_only_root) =
+    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes, read_only_root, hostname) =
         with_table(|table| {
             let idx = id as usize;
             if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -810,6 +837,7 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
                 table.containers[idx].root_path.clone(),
                 table.containers[idx].volumes.clone(),
                 table.containers[idx].read_only_root,
+                table.containers[idx].hostname.clone(),
             ))
         })?;
 
@@ -859,6 +887,16 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
     // still permit writes through the read-only rootfs.
     if read_only_root && !root_path.is_empty() {
         crate::ipc::namespace::set_root_read_only(pid, true);
+    }
+
+    // Apply the container's UTS hostname (Docker `--hostname`), if set.  Unlike
+    // the chroot/volume/read-only state this is independent of the rootfs jail
+    // (a container can override its hostname without a rootfs), so it is keyed
+    // only on a non-empty hostname.  A malformed name (rejected by
+    // `set_hostname`) is skipped — the value is validated at config time, so
+    // this is purely defensive.
+    if !hostname.is_empty() {
+        let _ = crate::ipc::namespace::set_hostname(pid, &hostname);
     }
 
     Ok(())
@@ -915,6 +953,11 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     // volumes configured.
     crate::ipc::namespace::clear_root(pid);
     crate::ipc::namespace::clear_mounts(pid);
+
+    // Drop the per-process UTS hostname override (keyed on the global PID),
+    // symmetric with the `set_hostname` call in `add_process_task`.
+    // Idempotent if the container had no hostname configured.
+    crate::ipc::namespace::clear_hostname(pid);
 
     Ok(())
 }
@@ -1111,6 +1154,40 @@ pub fn set_read_only_root(id: ContainerId, read_only: bool) -> KernelResult<()> 
     })
 }
 
+/// Set the container's UTS hostname (Docker `--hostname`).
+///
+/// When non-empty, every process launched by [`run`] is given this hostname
+/// via [`crate::ipc::namespace::set_hostname`], so `uname(2)`/`gethostname(2)`
+/// inside the container report it instead of the global system hostname.
+/// Passing an empty string clears the override (the container sees the global
+/// hostname).  Unlike the read-only-root flag this is independent of the
+/// rootfs jail.
+///
+/// Like [`set_root_path`], this only takes effect while the container is still
+/// in [`Created`](ContainerState::Created) state.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist, is not in
+///   `Created` state, or `name` is longer than 64 bytes (the UTS field width)
+///   or contains a NUL byte.
+pub fn set_hostname(id: ContainerId, name: &str) -> KernelResult<()> {
+    if name.len() > 64 || name.as_bytes().contains(&0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].hostname = String::from(name);
+        Ok(())
+    })
+}
+
 /// Record the VFS mountpoint of the container's overlay rootfs.
 ///
 /// Stored so that [`delete`] can unmount the per-container `OverlayFs`
@@ -1303,6 +1380,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             rootfs_mount: ct.rootfs_mount.clone(),
             volumes: ct.volumes.clone(),
             read_only_root: ct.read_only_root,
+            hostname: ct.hostname.clone(),
             container_ip: ct.container_ip,
             published_ports: ct.published_ports.clone(),
         })
@@ -1864,6 +1942,41 @@ pub fn self_test() {
     }
     serial_println!("[container]   Read-only root (--read-only) for init process: OK");
 
+    // Test 19c: UTS hostname (Docker `--hostname`).  A container created with a
+    // hostname gives its registered processes that name via the per-process UTS
+    // override, independent of any rootfs jail.  Uses a synthetic, never-
+    // scheduled PID for determinism (same reasoning as Test 19).
+    {
+        const HN_PID: u64 = 88893;
+
+        let hn_cfg = ContainerConfig::new("test-hostname-ct").hostname("web-01");
+        assert_eq!(hn_cfg.hostname, "web-01", "builder must set hostname");
+        let ct_hn = create(&hn_cfg).expect("create hostname container");
+        assert_eq!(
+            info(ct_hn).unwrap().hostname, "web-01",
+            "ContainerInfo must report hostname",
+        );
+        // No rootfs jail set — hostname applies regardless of chroot.
+        add_process(ct_hn, HN_PID).expect("register hostname process");
+        assert_eq!(
+            crate::ipc::namespace::hostname_for(HN_PID).as_deref(),
+            Some("web-01"),
+            "registered process must see the container hostname",
+        );
+
+        // Teardown clears the per-process hostname override (PID-reuse safety).
+        remove_process(ct_hn, HN_PID).expect("deregister hostname process");
+        assert!(
+            crate::ipc::namespace::hostname_for(HN_PID).is_none(),
+            "hostname override must be cleared after deregistering",
+        );
+        // Setting the hostname is rejected once the container is past Created.
+        stop(ct_hn).expect("stop hostname container");
+        assert!(set_hostname(ct_hn, "late").is_err());
+        delete(ct_hn).expect("delete hostname container");
+    }
+    serial_println!("[container]   UTS hostname (--hostname) for init process: OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -1963,5 +2076,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (21 tests)");
+    serial_println!("[container] Self-test PASSED (22 tests)");
 }

@@ -42888,7 +42888,13 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // domainname via `setdomainname("", 0)`, the corresponding
     // field is emitted as zero bytes (empty C string), exactly
     // as Linux's `newuname` would.
-    let nodename = crate::fs::nameservice::get_hostname();
+    // A process inside a container with a `--hostname` override (a per-process
+    // UTS hostname) sees that name; otherwise it falls back to the global
+    // system hostname.  This models a per-container UTS namespace.
+    let task_id = crate::sched::current_task_id();
+    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    let nodename = crate::ipc::namespace::hostname_for(process_id)
+        .unwrap_or_else(crate::fs::nameservice::get_hostname);
     fill(&mut buf, 1, nodename.as_bytes());
     fill(&mut buf, 2, b"6.6.0-slateos");              // release
     fill(&mut buf, 3, b"#1 SMP");                   // version

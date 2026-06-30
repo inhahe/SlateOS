@@ -199,6 +199,23 @@ static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> =
 /// is ignored.  A process absent from this set has a writable rootfs.
 static PROCESS_ROOT_RO: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
+/// Per-process UTS hostname override (the Docker `--hostname` mechanism).
+///
+/// A process present in this map sees the stored hostname from `uname(2)` /
+/// `gethostname(2)` instead of the global system hostname.  This models a
+/// per-container UTS namespace: a container's init process is given the
+/// container hostname, so a Linux program inside the container reads it
+/// rather than the host's name.  Absent → the process sees the global
+/// hostname (`nameservice::get_hostname`).
+///
+/// Like the other per-process namespace maps it is keyed by PID and cleared
+/// in [`detach`], so a later process reusing the PID does not inherit a stale
+/// hostname.  (Child processes do not currently inherit it automatically —
+/// the same limitation as `PROCESS_ROOT`; container children are expected to
+/// be registered via the container layer.)
+static PROCESS_HOSTNAME: Mutex<BTreeMap<u64, String>> =
+    Mutex::new(BTreeMap::new());
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -429,6 +446,7 @@ pub fn detach(process_id: u64) {
     PROCESS_ROOT.lock().remove(&process_id);
     PROCESS_MOUNTS.lock().remove(&process_id);
     PROCESS_ROOT_RO.lock().remove(&process_id);
+    PROCESS_HOSTNAME.lock().remove(&process_id);
 }
 
 /// Query which namespace a process belongs to.
@@ -494,6 +512,40 @@ pub fn set_root_read_only(process_id: u64, read_only: bool) {
 /// Query whether a process's container root filesystem is read-only.
 pub fn is_root_read_only(process_id: u64) -> bool {
     PROCESS_ROOT_RO.lock().contains(&process_id)
+}
+
+/// Set a process's UTS hostname override (the Docker `--hostname` mechanism).
+///
+/// After this call, `uname(2)`/`gethostname(2)` from the process (and any
+/// process the container layer registers with the same hostname) report
+/// `name` instead of the global system hostname.
+///
+/// # Errors
+///
+/// - `InvalidArgument` if `name` is empty, longer than 64 bytes (the
+///   `__NEW_UTS_LEN` field width), or contains a NUL byte.
+pub fn set_hostname(process_id: u64, name: &str) -> KernelResult<()> {
+    if name.is_empty() || name.len() > 64 || name.as_bytes().contains(&0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    PROCESS_HOSTNAME.lock().insert(process_id, String::from(name));
+    Ok(())
+}
+
+/// Query a process's UTS hostname override, if any.
+///
+/// Returns `None` when the process has no override and should see the global
+/// system hostname.
+#[must_use]
+pub fn hostname_for(process_id: u64) -> Option<String> {
+    PROCESS_HOSTNAME.lock().get(&process_id).cloned()
+}
+
+/// Clear a process's UTS hostname override (return it to the global hostname).
+///
+/// Idempotent: clearing a process with no override is a no-op.
+pub fn clear_hostname(process_id: u64) {
+    PROCESS_HOSTNAME.lock().remove(&process_id);
 }
 
 /// Query a process's filesystem root, if any.
@@ -1055,8 +1107,46 @@ pub fn self_test() -> KernelResult<()> {
     test_process_attach_detach()?;
     test_process_root()?;
     test_volume_mounts()?;
+    test_hostname()?;
 
     serial_println!("[namespace] All self-tests PASSED");
+    Ok(())
+}
+
+/// Test the per-process UTS hostname override (Docker `--hostname`).
+fn test_hostname() -> KernelResult<()> {
+    // A synthetic, never-scheduled PID so there is no live process to clear
+    // the override mid-test (mirrors test_process_root / test_volume_mounts).
+    const PID: u64 = 77_777;
+
+    // No override by default.
+    assert!(hostname_for(PID).is_none());
+
+    // Set and read back.
+    set_hostname(PID, "web-01")?;
+    assert_eq!(hostname_for(PID).as_deref(), Some("web-01"));
+
+    // Replace.
+    set_hostname(PID, "db-02")?;
+    assert_eq!(hostname_for(PID).as_deref(), Some("db-02"));
+
+    // Invalid names are rejected and leave the prior value intact.
+    assert!(set_hostname(PID, "").is_err());
+    let too_long = "x".repeat(65);
+    assert!(set_hostname(PID, &too_long).is_err());
+    assert!(set_hostname(PID, "a\0b").is_err());
+    assert_eq!(hostname_for(PID).as_deref(), Some("db-02"));
+
+    // Clear returns to the global hostname.
+    clear_hostname(PID);
+    assert!(hostname_for(PID).is_none());
+
+    // detach() must also drop the override (PID-reuse safety).
+    set_hostname(PID, "ephemeral")?;
+    detach(PID);
+    assert!(hostname_for(PID).is_none());
+
+    serial_println!("[namespace]   Per-process hostname (--hostname): OK");
     Ok(())
 }
 

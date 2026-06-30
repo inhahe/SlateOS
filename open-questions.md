@@ -150,9 +150,73 @@ lock-taking `set_task_cgroup` setter), `kernel/src/container.rs`
 
 ---
 
+## Q15 — Which large initiative comes next? (roadmap is otherwise complete)
+
+**Status:** OPEN
+
+**Background.** The operator's last directive (Q12 — the C-lite read-only page
+cache) is **delivered**, and a sweep of `roadmap.md` shows every tracked item is
+`[x]`/`[-]`-complete *except four unchecked entries*, all of them large:
+
+1. **TCP/IP stack → userspace service** (`roadmap.md` line 1125). The full
+   network stack (IPv4/IPv6, TCP/UDP/DNS/DHCP/DHCPv6/SLAAC/MLD/firewall, ~80
+   self-tests) is feature-complete but **kernel-resident**; the design calls for
+   moving it into a userspace daemon.
+2. **GPU acceleration** (line 4601) — currently a software rasterizer. Also the
+   long-term home for hardware video encode (per resolved **Q10**).
+3. **H.264/VP9 fullscreen-capture encoder** (line 4605) — **operator-deferred by
+   Q10** (do hardware-encode via the GPU driver long-term; no software codec /
+   stub meanwhile). *Not a candidate until (2) lands.*
+4. **Port Docker / a container runtime** (line 5293) — a giant *external* port;
+   per the standing rule it needs explicit operator go-ahead on prerequisites.
+
+Separately, two design questions are already **OPEN and gating** bounded follow-up
+work: **Q13** (de-double-cache the page cache vs. buffer cache) and **Q14** (wire
+the two disconnected cgroup subsystems together). Both are smaller than the four
+initiatives above but need an operator call before I implement them.
+
+**Question.** What should the next focus be?
+
+**Options.**
+- **(A) Answer Q13 + Q14 first, then I execute them.** *Pro:* bounded, retires
+  real tech-debt (memory wasted on double-cached file data; cgroup limits that
+  currently enforce nothing), no multi-day architectural commitment; I can finish
+  both quickly once the direction is chosen. *Con:* incremental, not a headline
+  feature.
+- **(B) TCP/IP stack → userspace.** *Pro:* directly advances the core microkernel
+  principle (services in userspace), fully internal (no external deps), the stack
+  is already feature-complete so it's a *migration* not new functionality. *Con:*
+  real architectural fork — IPC vs. syscall socket ABI, whether the NIC driver
+  moves too, performance vs. the current in-kernel fast paths; costly to reverse.
+- **(C) GPU acceleration.** *Pro:* unblocks both faster compositing and the
+  deferred hardware video encoder (Q10). *Con:* the largest/longest effort; needs
+  real GPU-driver work (command submission, memory management) that's a project
+  in itself.
+- **(D) Docker / container runtime port.** *Pro:* big capability headline. *Con:*
+  giant external port; explicitly gated on operator go-ahead and on prerequisites
+  (the cgroup enforcement gap from Q14 is one of them).
+
+**Claude's recommendation.** **(A)** as the immediate next step — answering Q13
+and Q14 lets me deliver bounded, debt-reducing work right away without gambling
+days on an architectural fork. For the next *large* initiative after that, **(B)
+TCP/IP → userspace** is the most design-coherent: it's internal, the stack is
+already complete (lowering risk), and it's squarely on the microkernel roadmap.
+(C) and (D) are bigger and have harder prerequisites. Meanwhile I have **stopped
+the autonomous loop** — the safe, bounded, host-testable work in reach this
+session (pthread_atfork → fork(), daemon() real fork, .init_array gap tracked) is
+done and committed, the posix suite is green, and every remaining path needs one
+of the decisions above.
+
+**Where it bites.** (A) Q13/Q14 — see those entries. (B) the whole `net/` +
+kernel socket-syscall layer and a new userspace netstack service. (C)
+`gui/gpu/`, `gui/compositor/`. (D) `kernel/src/container.rs`, `pkg/`, plus a
+large external dependency.
+
+---
+
 All earlier deferred operator decisions (Q1–Q12) have been resolved — see the
 "Recently resolved" list below and `design-decisions.md` for full rationale. New
-decisions should be appended above this line as `## Q15 …`.
+decisions should be appended above this line as `## Q16 …`.
 
 ---
 

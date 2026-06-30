@@ -4844,19 +4844,20 @@ fn resolve_subpaged_fault(
 
     let newly = base16 == 0;
     let phys_frame = if newly {
-        // Enforce cgroup memory limits before allocating (as the fast path).
-        if crate::cgroup::try_charge_current_mem(1).is_err() {
-            return false;
-        }
+        // Cgroup memory limits are enforced inside `alloc_frame_zeroed`
+        // (it charges the current task's cgroup per allocated frame and
+        // returns `OutOfMemory` when over budget) and the matching
+        // uncharge happens in `free_frame` via the per-frame `FRAME_CGROUP`
+        // record.  No manual charge/uncharge here — that double-charged
+        // (manual + allocator) but uncharged only once at free, leaking
+        // one frame's worth of cgroup accounting per faulted page
+        // (B-CGROUP-DBLCHARGE).
         match frame::alloc_frame_zeroed() {
             Ok(f) => {
                 base16 = f.addr();
                 f
             }
-            Err(_) => {
-                crate::cgroup::uncharge_current_mem(1);
-                return false;
-            }
+            Err(_) => return false,
         }
     } else {
         match PhysFrame::from_addr(base16) {
@@ -4894,8 +4895,8 @@ fn resolve_subpaged_fault(
         if let Some((handle, file_off)) = fill.file {
             if crate::fs::handle::read_at(handle, file_off, buf).is_err() {
                 if newly && !mapped_any {
-                    crate::cgroup::uncharge_current_mem(1);
                     // SAFETY: freshly allocated, not mapped anywhere yet.
+                    // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
                     let _ = unsafe { frame::free_frame(phys_frame) };
                 }
                 return false;
@@ -4916,8 +4917,8 @@ fn resolve_subpaged_fault(
             Ok(_) => mapped_any = true,
             Err(_) => {
                 if newly && !mapped_any {
-                    crate::cgroup::uncharge_current_mem(1);
                     // SAFETY: freshly allocated, not mapped anywhere yet.
+                    // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
                     let _ = unsafe { frame::free_frame(phys_frame) };
                 }
                 return false;
@@ -4929,8 +4930,8 @@ fn resolve_subpaged_fault(
         // Nothing to map (all covered subpages were already present, or none
         // were covered).  Release a frame we allocated speculatively.
         if newly {
-            crate::cgroup::uncharge_current_mem(1);
             // SAFETY: freshly allocated, never mapped.
+            // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
             let _ = unsafe { frame::free_frame(phys_frame) };
         }
         return false;
@@ -5169,24 +5170,19 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
 
     let virt = VirtAddr::new(frame_base);
 
-    // Enforce cgroup memory limits before allocating.
-    //
-    // If this process belongs to a cgroup with a memory limit, charge
-    // one frame before allocation.  The charge is released when the
-    // frame is freed (via the per-frame cgroup tracking in frame.rs).
-    // If the group is over its limit, reject the fault — the process
-    // will receive SIGSEGV (or our equivalent structured exception).
-    if crate::cgroup::try_charge_current_mem(1).is_err() {
-        return false;
-    }
-
+    // Cgroup memory limits are enforced inside `alloc_frame` (it charges
+    // the current task's cgroup per allocated frame and returns
+    // `OutOfMemory` when the group is over its limit), and the matching
+    // uncharge happens in `free_frame` via the per-frame `FRAME_CGROUP`
+    // record.  We therefore do NOT pre-charge manually: doing so
+    // double-charged (manual + allocator) while `free_frame` uncharged
+    // only once, leaking one frame's worth of cgroup accounting per
+    // faulted page (B-CGROUP-DBLCHARGE).  Over the limit → `alloc_frame`
+    // returns Err and the fault is rejected (SIGSEGV / structured
+    // exception).
     let phys_frame = match frame::alloc_frame() {
         Ok(f) => f,
-        Err(_) => {
-            // Alloc failed — uncharge the frame we pre-charged.
-            crate::cgroup::uncharge_current_mem(1);
-            return false;
-        }
+        Err(_) => return false,
     };
 
     // Zero the frame via HHDM.
@@ -5213,8 +5209,8 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
             core::slice::from_raw_parts_mut(phys_frame.to_virt(hhdm) as *mut u8, FRAME_SIZE)
         };
         if crate::fs::handle::read_at(handle, page_file_off, buf).is_err() {
-            // Read failed — release the cgroup charge and free the frame.
-            crate::cgroup::uncharge_current_mem(1);
+            // Read failed — free the frame.  `free_frame` uncharges the
+            // cgroup via the per-frame `FRAME_CGROUP` record.
             // SAFETY: `phys_frame` was just allocated and is not mapped.
             let _ = unsafe { frame::free_frame(phys_frame) };
             return false;

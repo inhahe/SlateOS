@@ -185,8 +185,29 @@ fn charge_cgroup_alloc(frame_addr: u64, count: u64) -> KernelResult<()> {
         return Ok(());
     }
 
-    let cgroup_id = crate::sched::current_task_cgroup();
+    charge_cgroup_alloc_to(frame_addr, count, crate::sched::current_task_cgroup())
+}
 
+/// Charge `count` frames starting at `frame_addr` to an *explicit* cgroup
+/// and record that cgroup id in the per-frame array, so the matching
+/// uncharge (`uncharge_cgroup_free`, invoked by `free_frame`) hits the
+/// same group even if a different task frees the frame.
+///
+/// Charging the root cgroup is a no-op (root is unlimited).  Returns
+/// `Err(OutOfMemory)` if the group would exceed its memory limit (no
+/// per-frame record is made in that case, so nothing must be uncharged).
+///
+/// Split out from [`charge_cgroup_alloc`] so the frame-allocator
+/// self-test can exercise the charge+record / uncharge+clear round-trip
+/// against a known cgroup *without* an ambient "current task": kmain
+/// self-tests run with no scheduled task, so `current_task_cgroup()`
+/// always resolves to root and the charge would otherwise no-op.
+#[inline]
+fn charge_cgroup_alloc_to(
+    frame_addr: u64,
+    count: u64,
+    cgroup_id: crate::cgroup::CgroupId,
+) -> KernelResult<()> {
     // Root cgroup has no limit — skip the charge.
     if cgroup_id == crate::cgroup::ROOT_CGROUP {
         return Ok(());
@@ -1238,6 +1259,17 @@ pub fn refill_zero_pool() -> usize {
             Err(_) => break, // Low memory — stop refilling.
         };
 
+        // A frame parked in the zero pool is *free inventory*, not memory
+        // owned by the (background) refilling task.  `alloc_frame` charged
+        // the refiller's cgroup and recorded it as the per-frame owner;
+        // undo that here so the pooled frame is uncharged with no recorded
+        // owner.  The charge that matters is applied to the *consumer* when
+        // `alloc_frame_zeroed` pops the frame (and is balanced by
+        // `free_frame`'s uncharge).  Without this, pool frames would be
+        // charged to the refiller *and* the consumer (B-CGROUP-DBLCHARGE).
+        // Both calls fast-exit when cgroup memory limits are inactive.
+        uncharge_cgroup_free(frame.addr(), 1);
+
         // Zero the frame outside any lock using non-temporal stores.
         // OPT: Non-temporal (streaming) stores bypass the cache, avoiding
         // pollution of this CPU's L1/L2 with zeros that won't be used by
@@ -1809,7 +1841,27 @@ pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
         if let Some(phys) = pool.pop() {
             drop(pool); // Release lock before atomic increment.
             ZERO_POOL_HITS.fetch_add(1, Ordering::Relaxed);
-            return PhysFrame::from_addr(phys).ok_or(KernelError::InternalError);
+            let frame = PhysFrame::from_addr(phys).ok_or(KernelError::InternalError)?;
+
+            // Cgroup memory limit enforcement.  The pool was refilled by
+            // a background task (whose cgroup was charged at refill, but
+            // for the root cgroup that is a no-op and records no per-frame
+            // owner), so the charge that actually matters — and that pairs
+            // with `free_frame`'s `uncharge_cgroup_free` via the per-frame
+            // `FRAME_CGROUP` record — must happen here, against the task
+            // *consuming* the frame.  Without this, pool-sourced frames
+            // escape cgroup accounting entirely (the limit is not enforced
+            // and the page is never uncharged at free).  Fast-exits when no
+            // cgroup memory limits are active (the common case).
+            if let Err(e) = charge_cgroup_alloc(frame.addr(), 1) {
+                // Over limit — return the frame to the allocator and
+                // propagate the error (mirrors `alloc_frame`).
+                // SAFETY: frame was just popped from the zero pool and is
+                // exclusively ours; it is still zeroed.
+                let _ = unsafe { free_frame(frame) };
+                return Err(e);
+            }
+            return Ok(frame);
         }
     }
 
@@ -2922,6 +2974,145 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         serial_println!("[mm]   Cgroup limit enforcement: OK");
     } else {
         serial_println!("[mm]   Cgroup limit enforcement: SKIP (no cgroup slots)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Cgroup per-frame charge/record + uncharge/clear round-trip
+    //          (regression guard for B-CGROUP-DBLCHARGE)
+    // -----------------------------------------------------------------------
+    // The frame allocator owns cgroup memory accounting end-to-end: every
+    // alloc path calls `charge_cgroup_alloc` exactly once (charging the
+    // owning cgroup and recording its id in the per-frame array) and
+    // `free_frame` calls `uncharge_cgroup_free` exactly once (uncharging
+    // the recorded cgroup and clearing the record).  B-CGROUP-DBLCHARGE was
+    // a *second*, manual charge in the demand-fault paths that the single
+    // free-time uncharge could not balance — a +1 leak per faulted page.
+    // The fix removed the manual charge so these primitives are the sole
+    // accounting authority; this test pins their exactly-once semantics.
+    //
+    // We drive the primitives with an *explicit* cgroup (via
+    // `charge_cgroup_alloc_to`) rather than the ambient "current task":
+    // kmain self-tests run with no scheduled task, so `current_task_cgroup`
+    // always resolves to root and every allocator charge would no-op.  The
+    // explicit-cgroup helper runs the identical charge+record /
+    // uncharge+clear code the live alloc/free paths use.
+    let test_cg_id3 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
+    if let Ok(cg_id) = test_cg_id3 {
+        let _ = crate::cgroup::set_mem_limit(
+            cg_id,
+            crate::cgroup::MemLimit { max_frames: 1000 },
+        );
+
+        // A real, owned frame whose physical index lies within the
+        // per-frame cgroup tracking array.  (alloc_frame charges the
+        // *current* cgroup, which is root here, so it adds nothing to cg_id.)
+        match alloc_frame() {
+            Ok(fr) => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let idx = (fr.addr() / FRAME_SIZE as u64) as usize;
+                let base =
+                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+
+                // Charge once → usage +1 and frame tagged with cg_id.
+                let charge_ok = charge_cgroup_alloc_to(fr.addr(), 1, cg_id).is_ok();
+                let u_charged =
+                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+                let tag_after_charge = u32::from(get_frame_cgroup(idx));
+
+                // Uncharge once → usage back to base and tag cleared.
+                uncharge_cgroup_free(fr.addr(), 1);
+                let u_uncharged =
+                    crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+                let tag_after_uncharge = u32::from(get_frame_cgroup(idx));
+
+                // SAFETY: frame was just allocated, is not mapped, and its
+                // per-frame cgroup record is already cleared (so free_frame's
+                // uncharge is a no-op for it).
+                let _ = unsafe { free_frame(fr) };
+
+                assert!(charge_ok, "charge_cgroup_alloc_to should succeed within limit");
+                assert_eq!(u_charged, base.saturating_add(1), "charge must add exactly +1");
+                assert_eq!(tag_after_charge, cg_id, "charge must record the cgroup id");
+                assert_eq!(u_uncharged, base, "uncharge must subtract exactly -1");
+                assert_eq!(
+                    tag_after_uncharge, 0,
+                    "uncharge must clear the per-frame record"
+                );
+                serial_println!(
+                    "[mm]   Cgroup charge/uncharge round-trip (no double-charge): OK"
+                );
+            }
+            Err(_) => {
+                serial_println!(
+                    "[mm]   Cgroup charge/uncharge round-trip: SKIP (alloc failed)"
+                );
+            }
+        }
+
+        let _ = crate::cgroup::delete(cg_id);
+    } else {
+        serial_println!(
+            "[mm]   Cgroup charge/uncharge round-trip: SKIP (no cgroup slots)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: Over-limit charge must leave the per-frame record untouched
+    // -----------------------------------------------------------------------
+    // When `charge_cgroup_alloc_to` is rejected for exceeding the limit it
+    // must make NO per-frame record (it charges before recording and bails
+    // on the charge error), so the matching free performs no spurious
+    // uncharge.  Otherwise an over-limit demand fault would corrupt
+    // accounting.
+    let test_cg_id4 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
+    if let Ok(cg_id) = test_cg_id4 {
+        let _ = crate::cgroup::set_mem_limit(
+            cg_id,
+            crate::cgroup::MemLimit { max_frames: 1 },
+        );
+        // Consume the entire limit directly (independent of any frame).
+        let filled = crate::cgroup::mem_charge(cg_id, 1).is_ok();
+        match alloc_frame() {
+            Ok(fr) if filled => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let idx = (fr.addr() / FRAME_SIZE as u64) as usize;
+                let tag_before = get_frame_cgroup(idx);
+                // Group is at its limit → this charge must be rejected.
+                let over = charge_cgroup_alloc_to(fr.addr(), 1, cg_id);
+                let tag_after = get_frame_cgroup(idx);
+
+                crate::cgroup::mem_uncharge(cg_id, 1);
+                // SAFETY: frame was just allocated and is not mapped.
+                let _ = unsafe { free_frame(fr) };
+
+                assert!(over.is_err(), "over-limit charge must be rejected");
+                assert_eq!(
+                    tag_after, tag_before,
+                    "rejected charge must not alter the per-frame record"
+                );
+                serial_println!("[mm]   Cgroup over-limit charge leaves no record: OK");
+            }
+            Ok(fr) => {
+                // SAFETY: frame was just allocated and is not mapped.
+                let _ = unsafe { free_frame(fr) };
+                serial_println!(
+                    "[mm]   Cgroup over-limit charge: SKIP (limit charge failed)"
+                );
+            }
+            Err(_) => {
+                if filled {
+                    crate::cgroup::mem_uncharge(cg_id, 1);
+                }
+                serial_println!(
+                    "[mm]   Cgroup over-limit charge: SKIP (alloc failed)"
+                );
+            }
+        }
+        let _ = crate::cgroup::delete(cg_id);
+    } else {
+        serial_println!(
+            "[mm]   Cgroup over-limit charge: SKIP (no cgroup slots)"
+        );
     }
 
     // Restore original state.

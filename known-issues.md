@@ -97,7 +97,7 @@ read-mostly mmap workloads the boot path exercises.
 **Discovered/created:** 2026-06-30 (completing sub-task 3 without
 sub-task 4's coherence wiring).
 
-### B-CGROUP-DBLCHARGE. Demand-fault paths double-charge cgroup memory (manual `try_charge_current_mem` + `alloc_frame`'s internal charge) — OPEN
+### B-CGROUP-DBLCHARGE. Demand-fault paths double-charge cgroup memory (manual `try_charge_current_mem` + `alloc_frame`'s internal charge) — FIXED (2026-06-30)
 
 **Where:** `kernel/src/proc/pcb.rs` — `try_resolve_fault` demand-paging
 paths. The whole-frame anon/file fast path (and the subpage path) call
@@ -132,6 +132,57 @@ Verify against the cgroup memory-limit self-test after the change.
 FileBacked fault path (the cached-hit branch correctly needs *no*
 manual charge, which surfaced the existing double-charge on the miss
 branch).
+
+**Fixed:** 2026-06-30. Removed the manual `try_charge_current_mem(1)` /
+`uncharge_current_mem(1)` bookkeeping from both demand-fault paths in
+`kernel/src/proc/pcb.rs` (subpage and whole-frame); the frame allocator
+now owns cgroup memory accounting end-to-end. `alloc_frame` /
+`alloc_frame_zeroed` already charge the current task's cgroup and honor
+its limit (returning `Err(OutOfMemory)`, which the fault paths now
+propagate as a rejected fault), so the deleted manual pre-check did not
+weaken limit enforcement. Also closed two latent charge holes on the
+zero-pool path: `alloc_frame_zeroed`'s pool-pop fast path now charges
+the consumer, and `refill_zero_pool` uncharges frames it parks in the
+pool (pooled frames are uncharged free inventory; the charge lands when
+a consumer pops one). Regression guard: `mm::frame` self-tests 12
+("charge/uncharge round-trip — no double-charge") and 13 ("over-limit
+charge leaves no record"), which drive the real `charge_cgroup_alloc_to`
+/ `uncharge_cgroup_free` primitives against an explicit test cgroup
+(kmain self-tests run with no scheduled task, so the ambient
+current-task cgroup is always root). Both pass in QEMU; the existing
+cgroup charge/uncharge and limit-enforcement self-tests (10/11) still
+pass.
+
+### D-CGROUP-TASK-UNASSIGNED. No path assigns a non-root cgroup to a task — cgroup memory controller is dormant for real workloads — TECH DEBT
+
+**Where:** `kernel/src/sched/task.rs` (every `Task` is constructed with
+`cgroup_id: crate::cgroup::ROOT_CGROUP` at lines ~852/934/1077) and
+`kernel/src/container.rs` (a container creates a cgroup and stores it in
+`Container::cgroup_id`, but nothing copies that onto the container's
+tasks). After removing the speculative `sched::set_task_cgroup` (added
+only for a test, then made unnecessary), there is now **no** code path
+that ever sets `task.cgroup_id` to anything other than root, and
+`fork`/`spawn` do not propagate a parent's cgroup.
+
+**Effect:** `current_task_cgroup()` always returns `ROOT_CGROUP` for real
+tasks, so `charge_cgroup_alloc` fast-exits (root is unlimited) and the
+per-cgroup memory limit / accounting (`cgroup::set_mem_limit`,
+`mem_charge`, the per-frame `FRAME_CGROUP` array) is never exercised by
+actual workloads — only by self-tests that charge an explicit cgroup.
+The controller is correct but unreachable: container memory limits do
+not actually constrain memory.
+
+**Proper fix:** wire container creation/enter to assign the container's
+`cgroup_id` to its tasks (a `sched` setter that takes the scheduler lock
+and sets `task.cgroup_id`), and have `fork`/`thread_clone`/`spawn`
+inherit the parent task's `cgroup_id` so children stay in the group.
+Then add an integration test that spawns a process under a
+memory-limited cgroup, faults in N pages, and asserts the cgroup's
+`mem_usage == N` (end-to-end no-double-charge / limit-enforcement).
+
+**Discovered:** 2026-06-30 while fixing B-CGROUP-DBLCHARGE (the fix made
+the frame allocator the sole charging authority; verifying it surfaced
+that the *current task* is never in a non-root cgroup at runtime).
 
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 

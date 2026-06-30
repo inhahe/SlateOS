@@ -1002,20 +1002,21 @@ pub fn try_charge_current_io(frames: u64) -> bool {
 
 /// Check whether the current task's cgroup allows allocating `count`
 /// frames.  Charges them if allowed.
-#[allow(dead_code)] // Public API for page fault handler integration (proc zone).
-///
-/// This is the integration point for the memory controller: the page
-/// fault handler (demand paging, stack growth) calls this before
-/// allocating physical frames.  If the task's cgroup is over its memory
-/// limit, the charge is rejected and the fault handler should fail with
-/// OOM (or trigger reclamation within the group).
 ///
 /// Returns `Ok(())` if the charge was accepted (within limits or the
 /// group has no memory limit).  Returns `Err(OutOfMemory)` if the
 /// group's limit would be exceeded.
 ///
-/// The caller should call [`mem_uncharge`] when the frame is later
-/// freed (e.g., on process exit, munmap, swap-out).
+/// NOTE: the demand-paging fault paths do **not** use this directly.
+/// Physical-frame cgroup accounting is owned end-to-end by the frame
+/// allocator (`alloc_frame`/`alloc_frame_zeroed` charge the current
+/// task's cgroup and record the owner per frame; `free_frame` uncharges
+/// via that record).  Calling this *in addition* to allocating a frame
+/// double-charges — that was the cause of B-CGROUP-DBLCHARGE.  This
+/// helper is retained as a standalone counter API for a caller that needs
+/// to reserve cgroup memory budget without an immediate frame allocation;
+/// such a caller must pair it with [`uncharge_current_mem`].
+#[allow(dead_code)] // Standalone counter API; frame allocator owns per-frame charging.
 pub fn try_charge_current_mem(count: u64) -> KernelResult<()> {
     let cgroup_id = current_task_cgroup();
     mem_charge(cgroup_id, count)

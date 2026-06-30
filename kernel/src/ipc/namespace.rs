@@ -130,6 +130,21 @@ static NS_TABLE: Mutex<BTreeMap<NamespaceId, Namespace>> =
 static PROCESS_NS: Mutex<BTreeMap<u64, NamespaceId>> =
     Mutex::new(BTreeMap::new());
 
+/// Per-process filesystem root (chroot).
+///
+/// Maps ProcessId (u64) → an absolute, normalized host path prefix that
+/// the process's view of the filesystem is rooted at (e.g. a container's
+/// overlay rootfs `/containers/<id>/rootfs`).  Processes absent from this
+/// table see the host root `/` (no jail).
+///
+/// This is distinct from `PROCESS_NS` Bind/Hide rules: those remap paths
+/// *within* the guest's view, whereas the root re-anchors that whole view
+/// onto a host subtree and **clamps `..`** so a guest absolute path can
+/// never escape above its root (the security-critical difference from a
+/// plain prefix Bind rule).  See `apply_root` / `normalize_jailed`.
+static PROCESS_ROOT: Mutex<BTreeMap<u64, String>> =
+    Mutex::new(BTreeMap::new());
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -353,12 +368,57 @@ pub fn detach(process_id: u64) {
             ns.refcount = ns.refcount.saturating_sub(1);
         }
     }
+
+    // Also drop any filesystem-root jail this process held, so a later
+    // process that happens to reuse the same PID does not inherit it.
+    PROCESS_ROOT.lock().remove(&process_id);
 }
 
 /// Query which namespace a process belongs to.
 pub fn query(process_id: u64) -> NamespaceId {
     let pns = PROCESS_NS.lock();
     pns.get(&process_id).copied().unwrap_or(ROOT_NAMESPACE)
+}
+
+/// Set a process's filesystem root (chroot/pivot_root).
+///
+/// After this call, every absolute path the process resolves is
+/// normalized within the jail (with `..` clamped at the jail root, so it
+/// cannot escape) and then re-anchored under `root`.  For example, with
+/// `root = "/containers/c1/rootfs"`, the guest path `/bin/sh` resolves to
+/// the host path `/containers/c1/rootfs/bin/sh`, and `/../etc/passwd`
+/// resolves to `/containers/c1/rootfs/etc/passwd` (the `..` is clamped).
+///
+/// `root` must be an absolute path.  It is normalized before storage, so
+/// trailing slashes and `.`/`..` components are collapsed.  Setting a root
+/// that normalizes to `/` is equivalent to clearing the jail (a no-op
+/// root), so the process returns to the host root.
+pub fn set_root(process_id: u64, root: &str) -> KernelResult<()> {
+    validate_prefix(root)?;
+    let normalized = normalize_jailed(root);
+    if normalized == "/" {
+        // A root of "/" means "no jail" — clear any existing root rather
+        // than storing a prefix that would double leading slashes.
+        PROCESS_ROOT.lock().remove(&process_id);
+        return Ok(());
+    }
+    PROCESS_ROOT.lock().insert(process_id, normalized);
+    Ok(())
+}
+
+/// Clear a process's filesystem root, returning it to the host root.
+///
+/// Called when a jailed process exits or is removed from its container.
+/// Idempotent: clearing a process that has no root is a no-op.
+pub fn clear_root(process_id: u64) {
+    PROCESS_ROOT.lock().remove(&process_id);
+}
+
+/// Query a process's filesystem root, if any.
+///
+/// Returns `None` if the process is not jailed (sees the host root).
+pub fn get_root(process_id: u64) -> Option<String> {
+    PROCESS_ROOT.lock().get(&process_id).cloned()
 }
 
 /// Resolve a path through the current process's namespace.
@@ -387,27 +447,36 @@ pub fn resolve_path(path: &str) -> KernelResult<String> {
 /// other processes (e.g., for `execve` path lookup in the child's
 /// namespace context).
 pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
+    // Step 1: apply Bind/Hide rules in the guest's path space.
     let ns_id = {
         let pns = PROCESS_NS.lock();
         pns.get(&process_id).copied().unwrap_or(ROOT_NAMESPACE)
     };
 
-    if ns_id == ROOT_NAMESPACE {
-        // Fast path: no namespace rules, return as-is.
-        return Ok(String::from(path));
-    }
-
-    let table = NS_TABLE.lock();
-    let ns = match table.get(&ns_id) {
-        Some(ns) => ns,
-        None => {
-            // Namespace was destroyed but process still references it.
-            // Fall back to root namespace behavior.
-            return Ok(String::from(path));
+    let translated = if ns_id == ROOT_NAMESPACE {
+        // No namespace rules, pass through.
+        String::from(path)
+    } else {
+        let table = NS_TABLE.lock();
+        match table.get(&ns_id) {
+            Some(ns) => apply_rules(&ns.rules, path)?,
+            None => {
+                // Namespace was destroyed but process still references it.
+                // Fall back to root namespace behavior.
+                String::from(path)
+            }
         }
     };
 
-    apply_rules(&ns.rules, path)
+    // Step 2: re-anchor the (guest) path under the process's filesystem
+    // root, if it has one.  This is the chroot/pivot_root step — the guest
+    // view from step 1 is physically rooted on a host subtree, with `..`
+    // clamped so the jail cannot be escaped.
+    let root = { PROCESS_ROOT.lock().get(&process_id).cloned() };
+    match root {
+        Some(r) => Ok(apply_root(&r, &translated)),
+        None => Ok(translated),
+    }
 }
 
 /// Get the number of active namespaces (for diagnostics).
@@ -505,6 +574,71 @@ fn strip_prefix_match<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     None
 }
 
+/// Re-anchor a guest path under a filesystem root (chroot).
+///
+/// `root` is an already-normalized absolute host prefix without a trailing
+/// slash (e.g. `/containers/c1/rootfs`).  `path` is the guest path to jail.
+///
+/// Only absolute guest paths are jailed.  Relative paths are returned
+/// unchanged: they are resolved against the process's current working
+/// directory by a higher layer, and that cwd is itself within the jail, so
+/// the eventual absolute path stays contained.  (Until per-process cwd is
+/// jailed end-to-end, relative-path containment depends on that layer —
+/// see known-issues.)
+///
+/// Absolute paths are first normalized *within the jail*: `.` components
+/// are dropped and `..` is clamped at the jail root (a `..` at the top is a
+/// no-op, exactly like Linux chroot), so the result can never reference a
+/// host path above `root`.  The normalized guest path is then prefixed with
+/// `root`.
+fn apply_root(root: &str, path: &str) -> String {
+    if !path.starts_with('/') {
+        return String::from(path);
+    }
+    let normalized = normalize_jailed(path);
+    if normalized == "/" {
+        // Guest root maps to the jail root itself.
+        return String::from(root);
+    }
+    let mut result = String::with_capacity(
+        root.len().saturating_add(normalized.len()),
+    );
+    result.push_str(root);
+    result.push_str(&normalized);
+    result
+}
+
+/// Normalize an absolute path, clamping `..` so it cannot rise above `/`.
+///
+/// Returns a canonical absolute path with no `.`/`..`/empty components and
+/// no trailing slash (except the bare root `/`).  Unlike a generic
+/// normalizer, a `..` with nothing left to pop is silently ignored rather
+/// than ascending — this is what makes the result safe to use as a jailed
+/// path (a guest cannot climb out of its root with `..`).
+fn normalize_jailed(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            // Empty (leading/duplicate slash) and "." carry no movement.
+            "" | "." => {}
+            // Clamp at root: popping an empty stack stays at root.
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() {
+        return String::from("/");
+    }
+    let mut result = String::new();
+    for comp in &stack {
+        result.push('/');
+        result.push_str(comp);
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -519,6 +653,7 @@ pub fn self_test() -> KernelResult<()> {
     test_path_boundary_matching()?;
     test_clone_namespace()?;
     test_process_attach_detach()?;
+    test_process_root()?;
 
     serial_println!("[namespace] All self-tests PASSED");
     Ok(())
@@ -695,5 +830,82 @@ fn test_process_attach_detach() -> KernelResult<()> {
     destroy(ns)?;
 
     serial_println!("[namespace]   Process attach/detach: OK");
+    Ok(())
+}
+
+fn test_process_root() -> KernelResult<()> {
+    // Use a PID unlikely to collide with a live process.
+    let pid: u64 = 88888;
+
+    // Helpers below assume this PID starts un-jailed.
+    clear_root(pid);
+    assert!(get_root(pid).is_none());
+
+    // No root: paths pass through unchanged.
+    assert_eq!(resolve_path_for(pid, "/bin/sh")?, "/bin/sh");
+
+    // Jail the process to a container rootfs.
+    set_root(pid, "/containers/c1/rootfs")?;
+    assert_eq!(
+        get_root(pid).as_deref(),
+        Some("/containers/c1/rootfs"),
+    );
+
+    // Absolute paths are re-anchored under the root.
+    assert_eq!(
+        resolve_path_for(pid, "/bin/sh")?,
+        "/containers/c1/rootfs/bin/sh",
+    );
+    // Guest root maps to the jail root itself.
+    assert_eq!(resolve_path_for(pid, "/")?, "/containers/c1/rootfs");
+    // `.` and duplicate slashes collapse.
+    assert_eq!(
+        resolve_path_for(pid, "/./bin//sh")?,
+        "/containers/c1/rootfs/bin/sh",
+    );
+
+    // `..` is clamped at the jail root — no escape.
+    assert_eq!(
+        resolve_path_for(pid, "/../etc/passwd")?,
+        "/containers/c1/rootfs/etc/passwd",
+    );
+    assert_eq!(
+        resolve_path_for(pid, "/a/../../b")?,
+        "/containers/c1/rootfs/b",
+    );
+    assert_eq!(
+        resolve_path_for(pid, "/../../../..")?,
+        "/containers/c1/rootfs",
+    );
+
+    // Relative paths are left for the cwd layer (not jailed here).
+    assert_eq!(resolve_path_for(pid, "rel/path")?, "rel/path");
+
+    // A root that normalizes to "/" clears the jail.
+    set_root(pid, "/")?;
+    assert!(get_root(pid).is_none());
+    assert_eq!(resolve_path_for(pid, "/bin/sh")?, "/bin/sh");
+
+    // Trailing slashes and `.`/`..` in the root are normalized away.
+    set_root(pid, "/containers/c2/./rootfs/")?;
+    assert_eq!(
+        get_root(pid).as_deref(),
+        Some("/containers/c2/rootfs"),
+    );
+    assert_eq!(
+        resolve_path_for(pid, "/bin/sh")?,
+        "/containers/c2/rootfs/bin/sh",
+    );
+
+    // detach() must drop the jail (PID reuse safety).
+    detach(pid);
+    assert!(get_root(pid).is_none());
+    assert_eq!(resolve_path_for(pid, "/bin/sh")?, "/bin/sh");
+
+    // A non-absolute root is rejected.
+    assert!(set_root(pid, "relative/root").is_err());
+    assert!(set_root(pid, "").is_err());
+
+    serial_println!("[namespace]   Process filesystem root (chroot): OK");
     Ok(())
 }

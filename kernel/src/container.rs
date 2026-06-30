@@ -2054,6 +2054,38 @@ pub fn list() -> Vec<(ContainerId, String, ContainerState)> {
     })
 }
 
+/// Remove all terminal (stopped/failed) containers (Docker `container
+/// prune`).
+///
+/// Deletes every container in the [`Stopped`](ContainerState::Stopped) or
+/// [`Failed`](ContainerState::Failed) state, freeing each one's namespaces,
+/// cgroup, and rootfs mount (see [`delete`]).  `Created` containers are
+/// *preserved* — a freshly created container is typically about to be run, so
+/// sweeping it would be surprising — as are `Running` (and paused) containers.
+///
+/// Returns the number of containers actually removed.  A container whose
+/// [`delete`] fails (e.g. it transitioned to `Running` between the snapshot and
+/// the delete) is skipped and not counted.
+pub fn prune() -> usize {
+    // Snapshot the terminal container ids first, then delete each — delete()
+    // takes the table lock internally, so it must not run while we hold a
+    // borrow from list().
+    let victims: Vec<ContainerId> = list()
+        .into_iter()
+        .filter(|(_, _, st)| {
+            matches!(st, ContainerState::Stopped | ContainerState::Failed)
+        })
+        .map(|(id, _, _)| id)
+        .collect();
+    let mut removed = 0usize;
+    for id in victims {
+        if delete(id).is_ok() {
+            removed = removed.saturating_add(1);
+        }
+    }
+    removed
+}
+
 /// Parse a container state name (as printed by [`ContainerState`]'s
 /// `Display`) into the corresponding variant, for `docker ps --filter
 /// status=...`. Returns `None` for an unrecognised name.
@@ -3190,5 +3222,30 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (33 tests)");
+    // prune(): remove all Stopped/Failed containers, preserve Created/Running.
+    // Runs with active_count()==0 so it can't touch any earlier test fixtures.
+    {
+        let p1 = create(&ContainerConfig::new("prune-a")).expect("create prune-a");
+        let p2 = create(&ContainerConfig::new("prune-b")).expect("create prune-b");
+        let p3 = create(&ContainerConfig::new("prune-c")).expect("create prune-c");
+        // Bring p1 and p2 to Stopped; leave p3 in Created.
+        start(p1).expect("start prune-a");
+        stop(p1).expect("stop prune-a");
+        start(p2).expect("start prune-b");
+        stop(p2).expect("stop prune-b");
+        assert_eq!(active_count(), 3);
+        let removed = prune();
+        assert_eq!(removed, 2, "prune must remove exactly the two stopped");
+        assert!(info(p1).is_none(), "stopped prune-a must be gone");
+        assert!(info(p2).is_none(), "stopped prune-b must be gone");
+        assert!(info(p3).is_some(), "created prune-c must be preserved");
+        assert_eq!(active_count(), 1);
+        // A second prune with nothing terminal removes nothing.
+        assert_eq!(prune(), 0, "prune with no terminal containers is a no-op");
+        delete(p3).expect("cleanup prune-c");
+        assert_eq!(active_count(), 0);
+    }
+    serial_println!("[container]   prune (remove stopped): OK");
+
+    serial_println!("[container] Self-test PASSED (34 tests)");
 }

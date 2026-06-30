@@ -67867,11 +67867,18 @@ fn cmd_container(args: &str) {
             let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
             crate::console_println!("[exec] Exited container {} namespace", id);
         }
+        "prune" => {
+            // container prune  (Docker `container prune`): remove all stopped
+            // containers (Stopped/Failed).  Created and running containers are
+            // preserved.
+            let removed = container::prune();
+            crate::console_println!("Removed {} stopped container(s)", removed);
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|exec|cp|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
@@ -67883,6 +67890,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container kill ID                        — force-kill all container processes");
             crate::console_println!("  container pause ID                       — freeze (suspend all threads)");
             crate::console_println!("  container unpause ID                     — thaw (resume all threads)");
+            crate::console_println!("  container prune                          — remove all stopped containers");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container cp <src> <dest>                — copy file host<->rootfs (one side ID:/path)");
             crate::console_println!("  container info ID                        — detailed inspection");

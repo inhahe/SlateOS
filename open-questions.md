@@ -23,7 +23,61 @@ Format for each entry:
 
 ---
 
-No further open questions remain. All deferred operator decisions (Q1–Q12) have been resolved — see the "Recently resolved" list below and `design-decisions.md` for full rationale. New decisions that genuinely need the operator should be appended above this line as `## Q13 …`.
+## Q13 — De-double-cache the read-only page cache against the block buffer cache (§36 sub-task 4 tail)
+
+**Status:** OPEN
+
+**Background.** The §36 C-lite read-only page cache is functionally complete:
+file identity, the `mm::page_cache` store (refcount model §37), fault-path
+integration (shared RO frames + CoW on private write), VFS coherence
+invalidation, and a memory-pressure shrinker — all boot-verified (two clean
+BOOT_OK boots; the shrinker fired under real critical pressure, freeing 54 idle
+frames with no fault). The one remaining §36 item is **performance, not
+correctness**: a file's data can currently live in memory *twice*.
+
+**Question.** How should file *data* I/O be cached so a page lives in exactly
+one place? Today `mm::page_cache::get_or_fill` fills a 16 KiB page via
+`fs::handle::read_at` → VFS → (for ext4/FAT) the **block buffer cache**
+(`fs/cache.rs`, 512 B sectors). So an mmap'd file page is cached as 32 sectors
+in the buffer cache *and* as one 16 KiB page in the page cache.
+
+**Options.**
+- **(A) Page-cache-primary (Linux-like).** Make the page cache the single cache
+  for regular-file data; the buffer cache caches only filesystem *metadata*
+  (superblock, bitmaps, inode tables, directory blocks). File `read`/`write`
+  and mmap all go through the page cache. *Pro:* the canonical, proven design;
+  truly one copy; unifies `read(2)` and mmap coherence for free. *Con:* large
+  refactor of the ext4/FAT data read/write paths; must route metadata vs. data
+  correctly per filesystem; biggest blast radius.
+- **(B) Read-through + drop-behind.** Keep the buffer cache as the device cache,
+  but have the page-cache fill path mark the sectors it consumed as
+  immediately-evictable (or bypass the buffer cache for whole-page file reads),
+  so the data isn't pinned in both. *Pro:* small, localized; no FS-path
+  refactor. *Con:* doesn't truly unify — a concurrent `read(2)` still
+  re-populates the buffer cache; coherence between `read(2)` and mmap still
+  relies on the §36 invalidation hooks, not a shared frame.
+- **(C) Leave as-is (status quo).** Accept the double-caching; the page cache is
+  small relative to the buffer cache and the win is bounded. *Pro:* zero risk,
+  ships now. *Con:* memory wasted on hot mmap'd files; not the §36 end-state.
+
+**Claude's recommendation.** (A) is the correct long-term end-state, but it is a
+real FS-data-path refactor with genuine tradeoffs, so it deserves an operator
+call before I commit to it (it changes how every filesystem reads file data). If
+the operator wants an incremental win first, (B) is a safe stepping stone that
+(A) can later subsume. Meanwhile I am treating §36 as *delivered* (correctness +
+eviction) and moving on to the next unblocked roadmap task; this optimization is
+not gating anything.
+
+**Where it bites.** `kernel/src/mm/page_cache.rs` (`get_or_fill` fill path),
+`kernel/src/fs/cache.rs` (buffer cache), `kernel/src/fs/handle.rs` /
+`kernel/src/fs/vfs.rs` (`read_at` routing), and the ext4/FAT data read/write
+paths under `kernel/src/fs/` and `fs/`.
+
+---
+
+All earlier deferred operator decisions (Q1–Q12) have been resolved — see the
+"Recently resolved" list below and `design-decisions.md` for full rationale. New
+decisions should be appended above this line as `## Q14 …`.
 
 ---
 

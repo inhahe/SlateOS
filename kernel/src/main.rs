@@ -1235,6 +1235,9 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = mm::page_cache::self_test() {
         serial_println!("WARNING: page-cache self-test failed: {:?}", e);
     }
+    // Register the page-cache shrinker so idle cached pages are reclaimed under
+    // memory pressure instead of pinning frames resident without bound (§36).
+    mm::page_cache::init();
     // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
     if let Err(e) = fs::fat::format_self_test() {
         serial_println!("WARNING: FAT mkfs/format self-test failed: {:?}", e);

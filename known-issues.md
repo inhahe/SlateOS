@@ -28,6 +28,21 @@ inode is freed, closing the inode-reuse hole; the others capture after
 the content change. Verified by boot self-test check 8 (is_populated +
 invalidate_identity) and a green BOOT_OK.
 
+**Shrinker (sub-task 4 eviction) landed 2026-06-30.**
+`mm::page_cache::shrink(PressureLevel)` evicts *idle* cached pages
+(refcount ≤ 1, i.e. no live mapper) proportional to the pressure level
+(Low 25% / Medium 50% / Critical 90%), registered with `mm::pressure`
+by `mm::page_cache::init()` (called from `kernel_main`). Verified by
+boot self-test check 9 (shrink spares live, evicts idle) *and* by the
+shrinker actually firing under real critical pressure during boot —
+serial shows `[pressure] page_cache freed 49 objects (level=critical)`
+then `freed 5 objects`, with BOOT_OK reached cleanly. Freeing 54 frames
+under live pressure with no fault is a strong exercise of the
+freed-while-mapped hypothesis: a mapped cache page always has
+refcount ≥ 2 (cache entry + each PTE; `map_frame` does not bump
+refcount, so the `get_or_fill` caller ref *becomes* the PTE ref), so
+the shrinker's `refcount <= 1` gate never selects a mapped frame.
+
 **Still pending (performance, not correctness — §36 sub-task 4 tail):**
 de-double-cache the page cache against the block buffer cache
 (`fs/cache.rs`) so a page does not live in both. Tracked as a follow-up;
@@ -117,6 +132,49 @@ Verify against the cgroup memory-limit self-test after the change.
 FileBacked fault path (the cached-hit branch correctly needs *no*
 manual charge, which surfaced the existing double-charge on the miss
 branch).
+
+### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
+
+**Where:** `kernel/src/idt.rs` page-fault handler (~line 1787). After
+`mm::fault::resolve()` (kernel-VMA demand paging) declines a user
+address, the user-fault resolver chain (swap-in →
+`proc::pcb::try_resolve_fault`/CoW → stack growth) is entered **only**
+when `error & 4` (CPL3, ring-3 access). A *kernel-mode* (ring-0) write
+to a **present, read-only** user page (`error == 0x3`) therefore skips
+CoW resolution and falls straight through to "FATAL: Unrecoverable
+kernel page fault. Halting."
+
+**Why it matters now:** the read-only page cache (§36) maps writable
+`MAP_PRIVATE` file pages **RO + COW** on first fault (so writes copy out
+of the shared frame), whereas the old private path mapped them
+**writable** directly. Any kernel path that writes through a user
+pointer into such a page *without first calling*
+`mm::user::validate_user_write` (which breaks CoW eagerly at a safe
+point, mirroring Linux `get_user_pages(FOLL_WRITE)`) would now trip a
+ring-0 write fault on a COW page and halt. With pre-validation, the
+correct kernel paths never hit this, which is why two full boots
+(BOOT_OK, shrinker exercised under critical pressure) are clean.
+
+**Status:** a prior-session boot showed a one-off
+`EXCEPTION: Page Fault (#PF) ... error=0x3` at a USER_MMAP address
+(`0x6000213450`) consistent with this scenario, but it has **not**
+reproduced against the current source (two deterministic green boots).
+Most likely it was a transient intermediate-edit state, not the
+committed code. Left as a WATCH rather than a fix because the obvious
+"route ring-0 user-address faults to `try_resolve_fault`" hardening
+risks lock re-entrancy/deadlock (the faulting kernel code may already
+hold the VMA/process locks the resolver takes) — exactly what
+pre-validation exists to avoid.
+
+**Proper fix if it recurs:** identify the specific kernel write path
+that reaches a user COW page without pre-validating and make it call
+`validate_user_write` (the architecturally-correct point to break CoW),
+rather than weakening the fault handler. Only if a path genuinely cannot
+pre-validate should the handler route ring-0 user-address faults to the
+resolver, and then only with a fault-fixup/exception-table mechanism so
+an unresolvable access returns `-EFAULT` instead of halting.
+
+**Discovered:** 2026-06-30 (page-cache §36 sub-task 4 review).
 
 ### B-COMPACT1. Memory-compaction self-test (`collect_private_frames`) panicked non-deterministically across boots — FIXED 2026-06-16
 

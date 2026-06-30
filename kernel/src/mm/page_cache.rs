@@ -407,6 +407,78 @@ pub fn invalidate_identity(fs_id: u64, ino: u64) {
     let _ = invalidate_file(FileId { fs_id, ino });
 }
 
+/// Memory-pressure shrinker: evict **idle** cached pages (those with no live
+/// mapper, i.e. `refcount <= 1`) proportional to the pressure level.
+///
+/// Registered with [`crate::mm::pressure`] by [`init`].  Actively-shared pages
+/// (`refcount > 1`) are never evicted — dropping them would not free the frame
+/// anyway (a mapper still holds it) and would only force a re-fill on the next
+/// fault.  Returns the number of pages evicted.
+///
+/// Holding the cache lock across the per-entry `frame::refcount` probe is the
+/// established cache → allocator ordering; pressure events are rare, so the
+/// `O(n)` sweep under the lock is acceptable.
+pub fn shrink(level: crate::mm::pressure::PressureLevel) -> usize {
+    use crate::mm::pressure::PressureLevel;
+    let pct: usize = match level {
+        PressureLevel::None => return 0,
+        PressureLevel::Low => 25,
+        PressureLevel::Medium => 50,
+        PressureLevel::Critical => 90,
+    };
+
+    let mut frames = alloc::vec::Vec::new();
+    {
+        let mut cache = PAGE_CACHE.lock();
+        let total = cache.len();
+        if total == 0 {
+            return 0;
+        }
+        // Ceil(total * pct / 100); saturating/checked keep the arithmetic lints
+        // satisfied (100 is a nonzero constant, so checked_div never fails).
+        let target = total
+            .saturating_mul(pct)
+            .saturating_add(99)
+            .checked_div(100)
+            .unwrap_or(total);
+
+        let mut victims = alloc::vec::Vec::new();
+        for (k, entry) in cache.iter() {
+            if victims.len() >= target {
+                break;
+            }
+            // refcount() takes the allocator lock; cache → allocator ordering.
+            if frame::refcount(entry.frame) <= 1 {
+                victims.push(*k);
+            }
+        }
+        for k in &victims {
+            if let Some(entry) = cache.remove(k) {
+                frames.push(entry.frame);
+            }
+        }
+        RESIDENT_COUNT.fetch_sub(frames.len(), Ordering::Relaxed);
+    }
+
+    let freed = frames.len();
+    for f in frames {
+        STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: each removed entry held the cache's sole reference (refcount
+        // was ≤ 1 under the lock, and no get_or_fill/lookup can bump it without
+        // first taking the cache lock we held); free_frame returns it.
+        let _ = unsafe { frame::free_frame(f) };
+    }
+    freed
+}
+
+/// Register the page-cache shrinker with the memory-pressure subsystem.
+///
+/// Call once at boot (after `mm::pressure` is available) so the cache trims its
+/// idle pages under memory pressure instead of growing without bound.
+pub fn init() {
+    let _ = crate::mm::pressure::register_shrinker("page_cache", shrink);
+}
+
 /// Test/diagnostic helper: is a page currently resident in the cache index?
 #[must_use]
 pub fn is_resident(file: FileId, file_offset: u64) -> bool {
@@ -443,6 +515,8 @@ pub fn self_test() -> KernelResult<()> {
     // mounts, which start at 1, so these can't clash with a live cache entry).
     let file_a = FileId { fs_id: 0, ino: 0xC0DE_0001 };
     let file_b = FileId { fs_id: 0, ino: 0xC0DE_0002 };
+    let file_c = FileId { fs_id: 0, ino: 0xC0DE_0003 };
+    let file_d = FileId { fs_id: 0, ino: 0xC0DE_0004 };
 
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 
@@ -578,7 +652,6 @@ pub fn self_test() -> KernelResult<()> {
 
         // (8) is_populated tracks residency; invalidate_identity (the VFS
         //     coherence hook) drops a file's pages by (fs_id, ino).
-        let file_c = FileId { fs_id: 0, ino: 0xC0DE_0003 };
         let fc = get_or_fill(file_c, 0, |buf| {
             if let [b0, ..] = buf {
                 *b0 = 0x33;
@@ -599,6 +672,38 @@ pub fn self_test() -> KernelResult<()> {
         invalidate_identity(0, 0);
         serial_println!("[page_cache]   is_populated + invalidate_identity: OK");
 
+        // (9) shrinker evicts idle pages (no live mapper) but spares pages that
+        //     still have a caller reference (a live mapping).
+        let idle = get_or_fill(file_d, 0, |buf| {
+            if let [b0, ..] = buf {
+                *b0 = 0x44;
+            }
+            Ok(())
+        })?;
+        release(idle); // now cache holds the sole reference (idle)
+        let live = get_or_fill(file_d, FRAME_SIZE as u64, |buf| {
+            if let [b0, ..] = buf {
+                *b0 = 0x55;
+            }
+            Ok(())
+        })?; // caller reference retained ⇒ refcount 2 (a "mapped" page)
+        let freed = shrink(crate::mm::pressure::PressureLevel::Critical);
+        if freed == 0 {
+            serial_println!("[page_cache]   FAIL: shrink freed nothing");
+            return Err(KernelError::InternalError);
+        }
+        if is_resident(file_d, 0) {
+            serial_println!("[page_cache]   FAIL: shrink left an idle page resident");
+            return Err(KernelError::InternalError);
+        }
+        if !is_resident(file_d, FRAME_SIZE as u64) {
+            serial_println!("[page_cache]   FAIL: shrink evicted a live (mapped) page");
+            return Err(KernelError::InternalError);
+        }
+        release(live); // drop the caller ref
+        let _ = invalidate_file(file_d);
+        serial_println!("[page_cache]   shrink spares live, evicts idle: OK");
+
         Ok(())
     })();
 
@@ -606,6 +711,8 @@ pub fn self_test() -> KernelResult<()> {
     // they do not linger in the live cache.
     let _ = invalidate_file(file_a);
     let _ = invalidate_file(file_b);
+    let _ = invalidate_file(file_c);
+    let _ = invalidate_file(file_d);
 
     result?;
 

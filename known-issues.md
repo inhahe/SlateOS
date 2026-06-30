@@ -14,6 +14,53 @@ work that should be done now."
 
 ## Active Bugs
 
+### B-PAGECACHE-COHERENCE. Read-only page cache has no invalidation wired to filesystem mutations (stale-data + inode-reuse) — OPEN (sub-task 4)
+
+**Where:** `kernel/src/mm/page_cache.rs` (the cache) + the VFS/handle
+write/truncate/unlink/rename paths (`kernel/src/fs/handle.rs`,
+`kernel/src/fs/vfs.rs`, and the relevant syscall translators in
+`kernel/src/syscall/linux.rs`).
+
+**What it is:** sub-task 3 (commit wiring the FileBacked fault path to
+`page_cache::get_or_fill`) populates the cache from mmap faults but does
+**not** yet invalidate cached pages when the backing file changes. Two
+correctness gaps result:
+
+1. **Stale data after write/truncate.** If process A `mmap`s a file
+   (pages enter the cache) and process B `write(2)`s or `ftruncate(2)`s
+   that same file, A keeps seeing the *old* bytes through its mapping
+   (and any later mmap of the file gets the cached stale page). The
+   cache is read-only by design (writable MAP_SHARED writeback stays
+   ENOSYS, §23), but read-side coherence with `write(2)` is still
+   required and is missing.
+
+2. **Inode-number reuse.** The cache key is `FileId { fs_id, ino }`.
+   `fs_id` is monotonic per-mount (never reused), but `ino` **can** be
+   reused within a mount after `unlink`. If file X (ino 53) is cached,
+   unlinked, and a new file Y reuses ino 53, a fault on Y would be
+   served X's stale pages. (`fs_id` prevents *cross-mount* collisions
+   only.)
+
+**Effect:** wrong file contents observed through a file mapping after a
+concurrent write/truncate, or after unlink+recreate reuses an inode.
+Not hit on the boot path (programs mmap read-only shared objects they
+don't concurrently rewrite), which is why boot is green — but it is a
+real correctness bug for general workloads.
+
+**Proper fix (sub-task 4):** wire cache invalidation to FS mutations:
+`page_cache::invalidate_file(file_id)` (or a page-range invalidate) on
+`write`/`pwrite` that extends/overwrites a regular file, on `truncate`/
+`ftruncate`, and on `unlink`/`rename` that drops/replaces an inode.
+Resolve the `FileId` cheaply at the mutation site (the handle/path is
+already known). Keep it cheap when nothing is cached (the
+BTreeMap-range invalidate already returns 0 fast for an absent file).
+Also de-double-cache against the block buffer cache (`fs/cache.rs`) per
+§36 sub-task 4. Until this lands, the page cache is only safe for the
+read-mostly mmap workloads the boot path exercises.
+
+**Discovered/created:** 2026-06-30 (completing sub-task 3 without
+sub-task 4's coherence wiring).
+
 ### B-CGROUP-DBLCHARGE. Demand-fault paths double-charge cgroup memory (manual `try_charge_current_mem` + `alloc_frame`'s internal charge) — OPEN
 
 **Where:** `kernel/src/proc/pcb.rs` — `try_resolve_fault` demand-paging

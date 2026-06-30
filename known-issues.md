@@ -14,6 +14,44 @@ work that should be done now."
 
 ## Active Bugs
 
+### B-ACCT-LARGEST. `accounting` self-test "Largest RSS" assumed test-only isolation, panicking when a live process held >50 RSS frames — FIXED 2026-06-30
+
+**Where:** `kernel/src/mm/accounting.rs`, self-test "Largest RSS"
+section (was ~line 507). The test charged two fake PML4s (a=20, b=50)
+then asserted `largest_rss().pml4_phys == pml4_b`. But `largest_rss()`
+scans the **global** accounting table, which during a live boot also
+contains *real* process address spaces. Whenever a concurrent real
+process happened to hold >50 frames at that instant, `largest` was that
+real PML4 (e.g. `0x1DFE0000`, not the fake `0xBEEF0000`), so the
+`assert_eq!` panicked and **hard-halted the whole boot**, masking every
+self-test after it. A load-dependent flake: it passed on light boots
+and failed under heavier ones.
+
+**Fix:** the assertion was false-isolation; replaced with invariants
+that hold deterministically even with real entries present:
+(1) among the test's own entries, `query` confirms b (50) outranks
+a (20); (2) `largest_rss().rss_frames >= 50` — i.e. it returns a true
+global upper bound — instead of asserting it equals a specific fake
+PML4. Verified: clean build + green boot self-test.
+
+### B-PTHREAD-YIELDBUDGET. `/bin/pthread` self-test (4 threads × 40 000 mutex ops) can exceed the 262 144-yield exit budget under heavy boot load — WATCH (non-fatal)
+
+**Where:** boot integration self-test that spawns `/bin/pthread`. The
+harness waits for the child to exit within a fixed yield budget
+(262 144 yields). On a heavy boot (observed once at ~229 s wall vs. the
+normal 161–192 s), the child was still `state=Running` when the budget
+expired and the harness logged "process did not exit within 262144
+yields (state=Running)". This is a **non-fatal warning** — it does not
+panic or fail the boot, and the same test passed on the immediately
+preceding and following boots.
+
+**Assessment:** a timing flake, not a correctness bug. The mutex/futex
+hot loop was not touched by the surrounding container/VFS work, and the
+failure is purely budget-vs-wall-clock under contention. **Proper fix
+(deferred):** make the harness wait on an actual exit signal / longer
+adaptive budget rather than a fixed yield count, so a slow-but-correct
+run isn't misreported. Tracked here until the harness is reworked.
+
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 
 **Resolution (2026-06-30):** the two correctness gaps below are now
@@ -2118,6 +2156,33 @@ Unix semantics, immune to later chroot/rename/symlink changes). Split methods:
 `namespace::test_process_root` (re-resolving an already-jailed path must
 double-jail) to pin the invariant so a future refactor that makes handle ops
 re-resolve is caught at boot. Build clean, clippy delta zero, boot-test green.
+
+**Update 2026-06-30 (increment 8): part (b) cwd / relative-path containment —
+DONE.** TD32 part (b) is closed. Relative paths are canonicalized against the
+per-process cwd in the syscall layer *before* the VFS jails them, so containment
+hinges entirely on cwd (and dirfd base paths) being stored as **guest** paths.
+`chdir` already stored a guest cwd, but three sites stored/used the *resolved
+host* path and so leaked the jail location (`getcwd`) and double-jailed relative
+resolution: (1) `fchdir` stored `handle_path` (host) as cwd; (2) `sys_openat`
+with a real dirfd built `host_dir + rel` then re-jailed it (and its directory
+type-check `stat(&host)` re-jailed → ENOENT for every relative `*at` from a
+jailed process); (3) `resolve_at_path` (the shared `*at` resolver:
+fstatat/unlinkat/fchownat/…) had the identical defect. **Fix
+(design-decisions §45):** added `namespace::unjail_path_for(pid, host) → guest`
+(exact inverse of `apply_root`: strips the jail-root prefix; no-op when
+unjailed). `fchdir` now stores the un-jailed guest cwd. A new shared helper
+`dirfd_to_guest_dir(dirfd)` resolves a real dirfd to its *guest* directory path,
+doing the directory-type check with `stat_resolved` (no re-jail); both
+`sys_openat` and `resolve_at_path` use it, so the combined path is jailed
+exactly once. Round-trip regression assertions
+(`unjail(resolve(guest)) == normalized guest`, unjailed no-op, out-of-jail
+defensive passthrough) added to `namespace::test_process_root`. **Limitation:**
+`unjail_path_for` reverses only the chroot layer, not namespace Bind/Hide
+remapping — the container runtime never combines Bind rules with a chroot jail,
+so the reversal is exact for the container case (documented on the function and
+in §45). With parts (a) [CoW, inc 6] and (b) [this] done, TD32's remaining scope
+is the broader mount-namespace/`pivot_root` work deferred in §42 (a separate,
+larger feature, not a containment gap).
 
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 

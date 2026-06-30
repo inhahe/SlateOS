@@ -479,6 +479,51 @@ pub fn resolve_path_for(process_id: u64, path: &str) -> KernelResult<String> {
     }
 }
 
+/// Reverse of [`apply_root`]: recover the guest path from a resolved host
+/// path for a specific process.
+///
+/// Given a host path that was produced by jailing a guest path under the
+/// process's filesystem root, strip the root prefix to return the guest
+/// view.  Used by `fchdir`, which derives the new cwd from an open dirfd's
+/// resolved *host* path but must store cwd as a *guest* path — otherwise
+/// `getcwd` would leak the jail's host location and a subsequent relative
+/// path would be canonicalized against the host cwd and then jailed a
+/// second time (double-jail).  See TD32 part (b) / design-decisions §45.
+///
+/// Behaviour:
+/// - **Unjailed process** (no root): the host path *is* the guest path —
+///   returned unchanged.
+/// - `host == root`: maps back to the guest root `/`.
+/// - `host` within `root` (at a path boundary): the suffix (which begins
+///   with `/`) is the guest path.
+/// - `host` not within `root` (unexpected — a dirfd the process opened is
+///   always within its jail): returned unchanged as a best-effort fallback.
+///
+/// **Limitation:** this reverses only the chroot (`apply_root`) layer, not
+/// any namespace Bind/Hide remapping from step 1 of `resolve_path_for`.
+/// The container runtime isolates with the chroot jail alone (no Bind rules
+/// on a jailed process), so the reversal is exact for that use case.  A
+/// process that combined Bind rules *and* a chroot jail and then called
+/// `fchdir` would get the post-Bind guest path; recovering the pre-Bind
+/// path would require storing the original guest path on the open handle.
+pub fn unjail_path_for(process_id: u64, host: &str) -> String {
+    let root = match PROCESS_ROOT.lock().get(&process_id).cloned() {
+        Some(r) => r,
+        None => return String::from(host),
+    };
+    if host == root {
+        return String::from("/");
+    }
+    if let Some(suffix) = host.strip_prefix(&root) {
+        if suffix.starts_with('/') {
+            return String::from(suffix);
+        }
+    }
+    // Host path is not within this process's root — unexpected; return
+    // unchanged rather than fabricate a guest path.
+    String::from(host)
+}
+
 /// Get the number of active namespaces (for diagnostics).
 pub fn active_count() -> usize {
     NS_TABLE.lock().len()
@@ -843,6 +888,8 @@ fn test_process_root() -> KernelResult<()> {
 
     // No root: paths pass through unchanged.
     assert_eq!(resolve_path_for(pid, "/bin/sh")?, "/bin/sh");
+    // unjail is a no-op for an unjailed process (host path == guest path).
+    assert_eq!(unjail_path_for(pid, "/bin/sh"), "/bin/sh");
 
     // Jail the process to a container rootfs.
     set_root(pid, "/containers/c1/rootfs")?;
@@ -900,6 +947,22 @@ fn test_process_root() -> KernelResult<()> {
         "re-resolving an already-jailed path must double-jail (handle ops \
          must therefore use the _resolved workers, not re-resolve)",
     );
+
+    // --- unjail_path_for round-trip (fchdir / *at dirfd guest-cwd) ---
+    //
+    // fchdir and the *at-with-dirfd syscalls derive a path from an open
+    // dirfd's *resolved host* path but must store/feed a *guest* path, so
+    // they call `unjail_path_for` to strip the jail root.  Verify it is the
+    // exact inverse of `apply_root` for the jailed pid (root is
+    // "/containers/c1/rootfs" here).
+    assert_eq!(unjail_path_for(pid, &once), "/bin/sh");
+    assert_eq!(unjail_path_for(pid, "/containers/c1/rootfs"), "/");
+    // Round-trip: unjail(resolve(guest)) recovers the normalized guest path.
+    let g = resolve_path_for(pid, "/a/b/../c")?;
+    assert_eq!(g, "/containers/c1/rootfs/a/c");
+    assert_eq!(unjail_path_for(pid, &g), "/a/c");
+    // A host path not within the jail is returned unchanged (defensive).
+    assert_eq!(unjail_path_for(pid, "/elsewhere/x"), "/elsewhere/x");
 
     // A root that normalizes to "/" clears the jail.
     set_root(pid, "/")?;

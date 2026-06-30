@@ -5411,6 +5411,49 @@ fn sys_open(args: &SyscallArgs) -> SyscallResult {
     open_common(args.arg0, 0, args.arg1 as u32)
 }
 
+/// Resolve a real (non-`AT_FDCWD`) directory `dirfd` to its **guest**
+/// directory path, verifying the backing object is still a directory.
+///
+/// `fs::handle::handle_path` returns the dirfd's *resolved host* path (it
+/// was jailed through the process's chroot at open time).  Both the
+/// directory-type check and the eventual relative-path open must avoid
+/// re-applying the jail (double-jail — see TD32):
+///   - the type check uses [`Vfs::stat_resolved`](crate::fs::Vfs::stat_resolved)
+///     on the host path (no re-translation), and
+///   - the returned path is converted back to the *guest* view via
+///     [`namespace::unjail_path_for`](crate::ipc::namespace::unjail_path_for),
+///     so a caller that joins a relative component and feeds the result back
+///     to the VFS gets it jailed exactly once.
+///
+/// For an unjailed process the guest path equals the host path, so this is
+/// transparent.  Returns a ready-to-return error `SyscallResult` on failure
+/// (EBADF / ENOTDIR / ENOENT), matching the `*at` family contract.
+fn dirfd_to_guest_dir(dirfd: i32) -> Result<alloc::string::String, SyscallResult> {
+    let entry = lookup_caller_fd(dirfd)?;
+    if entry.kind != HandleKind::File {
+        return Err(linux_err(errno::ENOTDIR));
+    }
+    let host_path = match crate::fs::handle::handle_path(entry.raw_handle) {
+        Ok(p) => p,
+        Err(e) => return Err(linux_err(linux_errno_for(e))),
+    };
+    // Directory-type check on the already-resolved host path — _resolved so
+    // we don't re-jail (handle_path is the final resolved path).
+    match crate::fs::Vfs::stat_resolved(&host_path) {
+        Ok(st) if st.entry_type == crate::fs::EntryType::Directory => {}
+        Ok(_) => return Err(linux_err(errno::ENOTDIR)),
+        Err(KernelError::NotFound) => return Err(linux_err(errno::ENOENT)),
+        Err(e) => return Err(linux_err(linux_errno_for(e))),
+    }
+    // lookup_caller_fd succeeded, so caller_pid is Some; the None arm only
+    // covers the (unreachable here) kernel-context case.
+    let guest = match caller_pid() {
+        Some(p) => crate::ipc::namespace::unjail_path_for(p, &host_path),
+        None => host_path,
+    };
+    Ok(guest)
+}
+
 /// `openat(dirfd, path, flags, mode)` — opens a path relative to `dirfd`.
 ///
 /// Resolution rules (matches Linux):
@@ -5460,27 +5503,13 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ENOENT);
     }
 
-    // Relative path: resolve dirfd to a VFS path and prepend.
-    let entry = match lookup_caller_fd(dirfd) {
-        Ok(e) => e,
+    // Relative path: resolve dirfd to its guest directory path and prepend.
+    // Using the guest path (not the resolved host path) means the combined
+    // path is jailed exactly once by the eventual open — see TD32 part (b).
+    let dir_path = match dirfd_to_guest_dir(dirfd) {
+        Ok(p) => p,
         Err(r) => return r,
     };
-    if entry.kind != HandleKind::File {
-        return linux_err(errno::ENOTDIR);
-    }
-    let dir_path = match crate::fs::handle::handle_path(entry.raw_handle) {
-        Ok(p) => p,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    match crate::fs::Vfs::stat(&dir_path) {
-        Ok(stat_entry) => {
-            if stat_entry.entry_type != crate::fs::EntryType::Directory {
-                return linux_err(errno::ENOTDIR);
-            }
-        }
-        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
-        Err(e) => return linux_err(linux_errno_for(e)),
-    }
 
     // Read the full relative path from userspace.
     const MAX_REL: usize = 4096;
@@ -19136,21 +19165,10 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
             return Err(linux_err(errno::ENOENT));
         }
         if first != b'/' {
-            // Relative path: resolve dirfd to a directory path and prepend.
-            let entry = lookup_caller_fd(dirfd)?;
-            if entry.kind != HandleKind::File {
-                return Err(linux_err(errno::ENOTDIR));
-            }
-            let dir_path = match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return Err(linux_err(linux_errno_for(e))),
-            };
-            match crate::fs::Vfs::stat(&dir_path) {
-                Ok(st) if st.entry_type == crate::fs::EntryType::Directory => {}
-                Ok(_) => return Err(linux_err(errno::ENOTDIR)),
-                Err(KernelError::NotFound) => return Err(linux_err(errno::ENOENT)),
-                Err(e) => return Err(linux_err(linux_errno_for(e))),
-            }
+            // Relative path: resolve dirfd to its guest directory path and
+            // prepend.  Using the guest view (not the resolved host path)
+            // keeps the combined path jailed exactly once — see TD32 part (b).
+            let dir_path = dirfd_to_guest_dir(dirfd)?;
             let rel = match read_user_cstr(path_ptr, MAX_PATH) {
                 Ok(b) => b,
                 Err(e) => return Err(linux_err(e)),
@@ -39571,7 +39589,14 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    let new_cwd: alloc::vec::Vec<u8> = path.into_bytes();
+    // `handle_path` returns the *resolved host* path (it went through the
+    // chroot jail at open time).  cwd must be stored as a *guest* path,
+    // however: getcwd must not leak the jail's host location, and a later
+    // relative path is canonicalized against cwd and then jailed — storing a
+    // host cwd would double-jail it.  Reverse the chroot layer to recover the
+    // guest view (a no-op for unjailed processes).  See TD32 part (b).
+    let guest_path = crate::ipc::namespace::unjail_path_for(pid, &path);
+    let new_cwd: alloc::vec::Vec<u8> = guest_path.into_bytes();
     match pcb::set_cwd(pid, new_cwd) {
         Ok(()) => SyscallResult::ok(0),
         Err(_) => linux_err(errno::EINVAL),

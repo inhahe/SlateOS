@@ -3589,7 +3589,7 @@ const COMMANDS: &[&str] = &[
     "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt", "usagetime", "utime", "voicecontrol", "vctl", "devpair", "dpair", "notifgroup", "ngroup", "playmedia", "pmedia", "kbmacro", "macro", "sysresource", "sres", "faceunlock", "face",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
-    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "dhcpv6", "dhcp6", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "drvmon", "du",
+    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "dhcpv6", "dhcp6", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dk", "dmesg", "dns", "docker", "dpkg", "drvmon", "du",
     "echo", "elog", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fontmgr", "fonts", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
@@ -5476,6 +5476,7 @@ fn dispatch(line: &str) {
         "netns" => cmd_netns(args),
         "container" => cmd_container(args),
         "oci" => cmd_oci(args),
+        "docker" | "dk" => cmd_docker(args),
         "scfilter" | "seccomp" => cmd_scfilter(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
@@ -67381,6 +67382,120 @@ fn cmd_container(args: &str) {
     }
 }
 
+/// `docker` (alias `dk`) — Docker-CLI-compatible front-end.
+///
+/// This is a thin translation layer over the native `oci` (image) and
+/// `container` (lifecycle) commands so that operators with Docker muscle
+/// memory can drive SlateOS containers with familiar verbs. Each Docker
+/// subcommand is rewritten to the equivalent native command and dispatched:
+///
+///   docker run <image-dir> [flags...]   → oci run <image-dir> [flags...]
+///   docker create <image-dir> [flags..] → oci create <image-dir> [flags...]
+///   docker ps [-a]                       → container list (all states)
+///   docker start <id>                    → container start <id>
+///   docker stop <id>                     → container stop <id>
+///   docker rm <id>                       → container delete <id>
+///   docker inspect <id>                  → container info <id>
+///   docker exec <id> <command...>        → container exec <id> <command...>
+///   docker images <dir>                  → oci inspect <dir>
+///
+/// `docker ps` lists every container regardless of state (SlateOS has no
+/// separate "running-only" index; `-a`/`--all` is accepted and ignored
+/// because the listing already shows all states).
+fn cmd_docker(args: &str) {
+    let trimmed = args.trim_start();
+    // Split off the first whitespace-delimited token (the Docker subcommand)
+    // and keep the remainder verbatim so quoting/spacing in arguments to the
+    // delegated command is preserved.
+    let (sub, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((s, r)) => (s, r.trim_start()),
+        None => (trimmed, ""),
+    };
+
+    match sub {
+        // Image-backed lifecycle: delegate straight to the OCI runner, which
+        // already understands -v/-p/-e/--name/--net.
+        "run" | "create" => {
+            let mut delegated = alloc::string::String::from(sub);
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
+        // `docker ps` / `docker ps -a`: our listing always shows every
+        // container, so the `-a`/`--all` flag is a no-op we accept silently.
+        "ps" => cmd_container("list"),
+        "start" => {
+            let mut delegated = alloc::string::String::from("start");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        "stop" => {
+            let mut delegated = alloc::string::String::from("stop");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        "rm" => {
+            let mut delegated = alloc::string::String::from("delete");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        "inspect" => {
+            let mut delegated = alloc::string::String::from("info");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        "exec" => {
+            let mut delegated = alloc::string::String::from("exec");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        // SlateOS has no image registry/store keyed by name — images are
+        // referenced by their on-disk OCI layout directory. `docker images`
+        // therefore inspects a directory rather than listing a registry.
+        "images" | "image" => {
+            let mut delegated = alloc::string::String::from("inspect");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
+        "version" => {
+            crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
+        }
+        _ => {
+            crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V]");
+            crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
+            crate::console_println!("  docker ps [-a]                         — list containers (all states)");
+            crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
+            crate::console_println!("  docker inspect <id>                    — detailed container info");
+            crate::console_println!("  docker exec <id> <command...>          — run a command in the container NS");
+            crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
+            crate::console_println!();
+            crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
+            crate::console_println!("Alias: dk");
+        }
+    }
+}
+
 /// `oci` — OCI container image management.
 ///
 /// Subcommands:
@@ -70461,7 +70576,7 @@ fn is_builtin(name: &str) -> bool {
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
         | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "dashboard" | "dhcpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
-        | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "docker" | "dk" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

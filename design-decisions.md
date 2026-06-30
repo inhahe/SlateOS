@@ -2713,3 +2713,133 @@ frame shared across mismatched file offsets.
 `kernel/src/proc/pcb.rs` (`try_resolve_fault` whole-frame `FileBacked` path),
 `kernel/src/mm/frame.rs` (`ref_inc`/`free_frame`, unchanged), the CoW handler in
 `kernel/src/mm/cow.rs` (unchanged — already copies on write for refcount > 1).
+
+## 38. De-double-cache file data (Q13) — page-cache-primary (option A): the page cache is the single cache for regular-file data; the buffer cache caches only filesystem metadata
+
+**Date:** 2026-06-30
+
+**Decided by:** Operator (this was `open-questions.md` Q13; the operator chose
+option **A**). The operator's words: *"Q13: A."* Claude recommended A as the
+correct long-term end-state. (Q12=§36's one remaining performance item.)
+
+**The decision.** File *data* I/O is cached in exactly **one** place: the
+**page cache** (`mm::page_cache`, 16 KiB pages). The block buffer cache
+(`fs/cache.rs`, 512 B sectors) is demoted to caching only filesystem
+**metadata** — superblock, block/inode bitmaps, inode tables, directory blocks,
+journal — never regular-file data pages. Regular-file `read(2)`/`write(2)` **and**
+mmap all source/sink their data through the page cache, which unifies `read(2)`
+and mmap coherence for free (one shared frame, no separate invalidation needed
+for the read path). Today (status quo before this change) a mmap'd file page is
+cached as 32 sectors in the buffer cache *and* as one 16 KiB page in the page
+cache — this change removes that double-caching.
+
+**Alternatives considered (from Q13).**
+- **(B) Read-through + drop-behind (rejected).** Keep the buffer cache as the
+  device cache but mark the sectors the page-cache fill consumed as immediately
+  evictable / bypass the buffer cache for whole-page file reads. *Pro:* small,
+  localized, no FS-path refactor. *Con:* doesn't truly unify — a concurrent
+  `read(2)` re-populates the buffer cache; read/mmap coherence still leans on the
+  §36 invalidation hooks rather than a genuinely shared frame. A stepping-stone
+  that A subsumes, so going straight to A avoids throwaway work.
+- **(C) Leave as-is (rejected).** Accept the double-caching. *Pro:* zero risk.
+  *Con:* memory wasted on hot mmap'd files; not the §36 end-state.
+
+**Rationale.** Option A is the canonical, proven (Linux-like) design: truly one
+copy of a file's data, and `read(2)`/mmap coherence falls out of the shared
+frame for free. The cost is a real FS-data-path refactor (route metadata vs.
+data correctly per filesystem) — the largest blast radius of the three — but it
+is the correct end-state and the operator picked it directly, so there is no
+reason to build B first as a throwaway.
+
+**Where it bites.** `kernel/src/mm/page_cache.rs` (`get_or_fill` fill path),
+`kernel/src/fs/cache.rs` (buffer cache — restrict to metadata),
+`kernel/src/fs/handle.rs` / `kernel/src/fs/vfs.rs` (`read_at`/`write_at`
+routing through the page cache), and the ext4/FAT data read/write paths under
+`kernel/src/fs/` and `fs/` (route data through the page cache, metadata through
+the buffer cache).
+
+## 39. Connect the two cgroup subsystems (Q14) — cgroupfs as the frontend, `kernel/src/cgroup.rs` as the enforcement engine (option A)
+
+**Date:** 2026-06-30
+
+**Decided by:** Operator (this was `open-questions.md` Q14; the operator chose
+option **A**). The operator's words: *"Q14: A."* Claude recommended A.
+
+**Background.** The OS had two independent cgroup implementations that did not
+talk to each other: `kernel/src/cgroup.rs` (the in-kernel resource controller —
+the real *enforcement* hooks: the frame allocator charges a task's cgroup on
+every `alloc_frame`/`alloc_frame_zeroed` via the per-frame `FRAME_CGROUP` owner
+array, plus `io_charge` and PID accounting, reading the current task's group via
+`sched::current_task_cgroup()` → `Task::cgroup_id`), and `fs::cgroupfs` (the
+user-facing cgroup-v2 filesystem — 5 controllers, hierarchical groups,
+`memory.max`, PID limits, per-group process assignment, but **no enforcement**).
+Net effect before this change: neither system actually constrains a real
+process's memory (cgroupfs limits cosmetic; the kernel controller dormant —
+D-CGROUP-TASK-UNASSIGNED).
+
+**The decision.** Wire the two ends into **one pipe**: `fs::cgroupfs` is the
+cgroup-v2 **frontend**, `kernel/src/cgroup.rs` is the **enforcement engine**.
+Concretely:
+- `cgroupfs` controller writes flow through to the kernel controller:
+  `memory.max` → `cgroup::set_mem_limit`, and `cgroup.procs` assignment sets the
+  target task's `cgroup_id`.
+- `fork`/`clone`/`spawn` **inherit** the parent's `cgroup_id` (universal cgroup
+  semantics).
+- The two group-ID spaces (cgroupfs groups vs. `cgroup.rs` `CgroupId`, capped at
+  256) are reconciled, and the 5 controllers mapped through.
+
+**Alternatives considered (from Q14).**
+- **(B) Collapse onto one (rejected).** Delete/absorb one implementation. *Pro:*
+  eliminates duplication entirely. *Con:* biggest blast radius; risks regressing
+  whichever subsystem's self-tests; `cgroup.rs` is on the allocator hot path so
+  its per-frame `u8` owner array must be preserved regardless — so the "collapse"
+  saving is smaller than it looks.
+- **(C) Containers drive `cgroup.rs` directly, leave cgroupfs standalone
+  (rejected).** *Pro:* smallest change to make container memory limits real.
+  *Con:* leaves two permanently-parallel ways to express "a cgroup" — confusing
+  long-term.
+
+**Rationale.** The frame-allocator charging in `cgroup.rs` is the correct,
+hot-path-proven enforcement engine, and cgroup-v2 (`cgroupfs`) is the right
+user-facing model — they should be two ends of *one* pipe, not two pipes. A also
+keeps both subsystems in their current roles (lowest regression risk to the
+existing self-tests) while finally making limits real.
+
+**Where it bites.** `kernel/src/cgroup.rs` (`set_mem_limit`, `mem_charge`,
+`current_task_cgroup`), `kernel/src/fs/cgroupfs.rs` (controller writes, process
+assignment), `kernel/src/sched/task.rs` (`cgroup_id` field + 3 constructors,
+all defaulting to `ROOT_CGROUP`), `kernel/src/sched/mod.rs` (a lock-taking
+`set_task_cgroup` setter), `kernel/src/container.rs` (`Container::cgroup_id`),
+and the task-creation paths in `kernel/src/proc/{fork,thread,thread_clone,spawn}.rs`
+(cgroup inheritance).
+
+## 40. Next focus after Q13/Q14 (Q15) — execute Q13 + Q14 (option A), then a large initiative; C (GPU accel) or D (Docker port) in operator-indifferent order
+
+**Date:** 2026-06-30
+
+**Decided by:** Operator (this was `open-questions.md` Q15; the operator chose
+option **A**, then C-or-D). The operator's words: *"Q15: A, then do C or D. I'm
+not sure which is better to do first between C and D. I guess it doesn't matter
+because it all has to be done anyway and nobody can use the OS yet."* Claude
+recommended A as the immediate next step (and had recommended B as the next large
+initiative; the operator instead directed C or D).
+
+**The decision.** Immediate next step: **(A)** — execute the now-resolved Q13
+(page-cache-primary, §38) and Q14 (connect the cgroup subsystems, §39). After
+that, proceed to a large initiative: either **(C) GPU acceleration** or **(D)
+Docker / container-runtime port**, in whichever order — the operator is
+explicitly indifferent ("it all has to be done anyway"). **This is the explicit
+operator go-ahead the standing rule required for the Docker/container-runtime
+port (a giant external port).** Option (B) TCP/IP→userspace, which Claude had
+recommended as the next *large* initiative, was not selected as the immediate
+follow-on; it remains valid future work but C and D come first.
+
+**Alternatives considered (from Q15).** (B) TCP/IP stack → userspace (Claude's
+recommended next large initiative — internal, stack already feature-complete, on
+the microkernel roadmap); the operator chose C/D instead. C and D are the two
+selected; the operator left their relative order open.
+
+**Where it bites.** (A) §38 (Q13) + §39 (Q14). (C) `gui/gpu/`,
+`gui/compositor/`. (D) `kernel/src/container.rs`, `pkg/`, plus a large external
+dependency — and Q14's cgroup-enforcement gap was a stated prerequisite, now
+being closed by §39.

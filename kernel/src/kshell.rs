@@ -67611,7 +67611,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
@@ -67711,13 +67711,13 @@ fn cmd_oci(args: &str) {
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
             //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]
+            //                      [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [COMMAND [ARG...]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -67758,6 +67758,16 @@ fn cmd_oci(args: &str) {
             // else root (0:0). Only numeric ids are supported (a name has no
             // /etc/passwd to resolve against in this minimal runtime).
             let mut user: Option<&str> = None;
+            // Docker `--entrypoint EXE`: override the image's ENTRYPOINT. An
+            // empty value (`--entrypoint ""`) clears it (CMD then becomes the
+            // whole command line), matching Docker.
+            let mut entrypoint_override: Option<&str> = None;
+            // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
+            // after the image dir override the image's CMD (the ENTRYPOINT is
+            // kept unless --entrypoint is also given). The first non-option
+            // token starts the command; everything after it is taken literally
+            // (no further option parsing), matching Docker's argument model.
+            let mut cmd_override: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
             let mut i = 2;
             while i < parts.len() {
                 match parts[i] {
@@ -67946,7 +67956,28 @@ fn cmd_oci(args: &str) {
                             i = i.saturating_add(1);
                         }
                     }
-                    _ => { i = i.saturating_add(1); }
+                    "--entrypoint" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            entrypoint_override = Some(spec);
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    tok if tok.starts_with('-') => {
+                        // Unknown option: skip it (and don't consume a value,
+                        // since we don't know its arity).
+                        i = i.saturating_add(1);
+                    }
+                    _ => {
+                        // First positional token after the image dir: this and
+                        // every remaining token form the CMD override. Stop
+                        // option parsing (Docker treats the rest literally).
+                        if let Some(rest) = parts.get(i..) {
+                            cmd_override.extend_from_slice(rest);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -68113,8 +68144,16 @@ fn cmd_oci(args: &str) {
                     }
                     crate::console_println!("  Rootfs:       {}", jail_root);
 
-                    // Show image runtime config.
-                    let command = image.config.command();
+                    // Compute the effective command (what the init process
+                    // actually runs), applying Docker's ENTRYPOINT/CMD override
+                    // rules: `--entrypoint` replaces (or, with "", clears) the
+                    // image ENTRYPOINT and drops its default CMD; trailing
+                    // `IMAGE CMD...` tokens replace the image CMD. See
+                    // `ImageConfig::effective_command`.
+                    let command: alloc::vec::Vec<alloc::string::String> =
+                        image.config.effective_command(entrypoint_override, &cmd_override);
+
+                    // Show the effective runtime config.
                     if !command.is_empty() {
                         let cmd_str: alloc::string::String = command.join(" ");
                         crate::console_println!("  Command:      {}", cmd_str);
@@ -68368,8 +68407,8 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]]");
-            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user)");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [COMMAND [ARG...]]");
+            crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

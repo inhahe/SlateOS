@@ -444,6 +444,40 @@ impl ImageConfig {
         args.extend(self.cmd.iter().cloned());
         args
     }
+
+    /// Build the effective command line applying Docker's ENTRYPOINT/CMD
+    /// override rules, returning `ENTRYPOINT ++ CMD`.
+    ///
+    /// * `entrypoint_override`:
+    ///   - `None` keeps the image's ENTRYPOINT.
+    ///   - `Some("")` clears the ENTRYPOINT (`docker run --entrypoint ""`).
+    ///   - `Some(exe)` replaces the ENTRYPOINT with a single token.
+    ///
+    ///   In addition, supplying *any* `--entrypoint` (even an empty one) drops
+    ///   the image's default CMD — only `cmd_override` can then supply a CMD,
+    ///   matching Docker.
+    /// * `cmd_override`:
+    ///   - empty keeps the image's CMD (unless cleared by `--entrypoint`).
+    ///   - non-empty replaces the CMD entirely (the trailing `IMAGE CMD...`
+    ///     tokens), while the ENTRYPOINT is preserved.
+    #[must_use]
+    pub fn effective_command(
+        &self,
+        entrypoint_override: Option<&str>,
+        cmd_override: &[&str],
+    ) -> Vec<String> {
+        let mut command: Vec<String> = match entrypoint_override {
+            Some("") => Vec::new(),
+            Some(ep) => alloc::vec![String::from(ep)],
+            None => self.entrypoint.clone(),
+        };
+        if !cmd_override.is_empty() {
+            command.extend(cmd_override.iter().map(|s| String::from(*s)));
+        } else if entrypoint_override.is_none() {
+            command.extend(self.cmd.iter().cloned());
+        }
+        command
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +887,47 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[oci]   minimal config: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (8 tests)");
+    // Test 9: Docker ENTRYPOINT/CMD override rules (effective_command).
+    {
+        let config_json = r#"{
+            "architecture": "amd64",
+            "os": "linux",
+            "config": {
+                "Entrypoint": ["/entry.sh"],
+                "Cmd": ["serve", "--port", "80"]
+            }
+        }"#;
+        let config = ImageConfig::parse(config_json.as_bytes())?;
+
+        // No overrides → ENTRYPOINT ++ CMD (matches command()).
+        let dflt = config.effective_command(None, &[]);
+        assert_eq!(dflt, config.command());
+        assert_eq!(dflt, alloc::vec!["/entry.sh", "serve", "--port", "80"]);
+
+        // Trailing CMD override replaces CMD, keeps ENTRYPOINT.
+        let cmd_ov = config.effective_command(None, &["ls", "-la"]);
+        assert_eq!(cmd_ov, alloc::vec!["/entry.sh", "ls", "-la"]);
+
+        // --entrypoint replaces ENTRYPOINT and drops the default CMD.
+        let ep_ov = config.effective_command(Some("/bin/sh"), &[]);
+        assert_eq!(ep_ov, alloc::vec!["/bin/sh"]);
+
+        // --entrypoint + trailing args: new ENTRYPOINT + args as CMD.
+        let ep_cmd = config.effective_command(Some("/bin/sh"), &["-c", "echo hi"]);
+        assert_eq!(ep_cmd, alloc::vec!["/bin/sh", "-c", "echo hi"]);
+
+        // --entrypoint "" clears ENTRYPOINT; trailing args become the whole
+        // command line.
+        let ep_clear = config.effective_command(Some(""), &["/usr/bin/env"]);
+        assert_eq!(ep_clear, alloc::vec!["/usr/bin/env"]);
+
+        // --entrypoint "" with no trailing args → empty command.
+        let ep_clear_empty = config.effective_command(Some(""), &[]);
+        assert!(ep_clear_empty.is_empty());
+
+        serial_println!("[oci]   entrypoint/cmd override: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (9 tests)");
     Ok(())
 }

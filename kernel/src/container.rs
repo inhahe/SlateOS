@@ -1670,6 +1670,31 @@ pub fn import_rootfs(
     Ok(id)
 }
 
+/// Snapshot a container's current rootfs into a new, independent container
+/// (Docker `commit`).
+///
+/// Captures the source container's filesystem as a tar archive (via
+/// [`export_rootfs`]) and re-extracts it into `dest_dir` as the rootfs of a
+/// freshly-created container named `new_name` (via [`import_rootfs`]).  The
+/// result is a deep, point-in-time copy: subsequent writes to either the source
+/// or the new container's rootfs do not affect the other.  Unlike Docker, this
+/// produces a runnable container rather than a separate image — our container
+/// model has no standalone image store, so the snapshot *is* a new container.
+///
+/// The source may be in any state; its filesystem is read, not modified.
+///
+/// # Errors
+/// - Any error from [`export_rootfs`] (e.g. source invalid or rootfs-less).
+/// - Any error from [`import_rootfs`] (e.g. invalid `dest_dir`/`new_name`).
+pub fn commit(
+    src_id: ContainerId,
+    new_name: &str,
+    dest_dir: &str,
+) -> KernelResult<ContainerId> {
+    let archive = export_rootfs(src_id)?;
+    import_rootfs(new_name, &archive, dest_dir)
+}
+
 /// Set a container's filesystem root (rootfs) before it is run.
 ///
 /// `root` is an absolute host path (e.g. the container's extracted/overlay
@@ -3507,6 +3532,50 @@ pub fn self_test() {
     }
     serial_println!("[container]   import (tar -> rootfs): OK");
 
+    // Test 19q: commit() snapshots a container's rootfs into a new, independent
+    // container (Docker `commit`).  The copy is deep — mutating the source after
+    // the commit does not change the snapshot.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Source rootfs with a single file.
+        let src_root = "/tmp/commit-src";
+        Vfs::mkdir(src_root).expect("mkdir commit src");
+        Vfs::write_file("/tmp/commit-src/data.txt", b"original")
+            .expect("write src data");
+        let src = create(&ContainerConfig::new("test-commit-src")).expect("create src");
+        set_root_path(src, src_root).expect("set src rootfs");
+
+        // Commit into a new container with its own rootfs.
+        let snap = commit(src, "test-commit-snap", "/tmp/commit-dst")
+            .expect("commit snapshot");
+        let ci = info(snap).expect("snapshot container exists");
+        assert_eq!(ci.root_path, "/tmp/commit-dst", "snapshot rootfs attached");
+        assert_eq!(
+            Vfs::read_file("/tmp/commit-dst/data.txt").expect("read snapshot data"),
+            b"original",
+            "snapshot must capture the source bytes",
+        );
+
+        // Mutating the source after the commit must not affect the snapshot.
+        Vfs::write_file("/tmp/commit-src/data.txt", b"CHANGED")
+            .expect("rewrite src data");
+        assert_eq!(
+            Vfs::read_file("/tmp/commit-dst/data.txt").expect("re-read snapshot"),
+            b"original",
+            "snapshot must be independent of later source writes",
+        );
+
+        // Cleanup.
+        delete(snap).expect("delete snapshot container");
+        delete(src).expect("delete src container");
+        let _ = Vfs::remove("/tmp/commit-src/data.txt");
+        let _ = Vfs::remove("/tmp/commit-dst/data.txt");
+        let _ = Vfs::rmdir("/tmp/commit-src");
+        let _ = Vfs::rmdir("/tmp/commit-dst");
+    }
+    serial_println!("[container]   commit (snapshot rootfs): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3631,5 +3700,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (36 tests)");
+    serial_println!("[container] Self-test PASSED (37 tests)");
 }

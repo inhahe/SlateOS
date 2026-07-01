@@ -47,9 +47,14 @@
 //!
 //! ## Performance
 //!
-//! The cgroup table is behind a single `spin::Mutex`.  This is acceptable
-//! because mutations (create/delete/attach) are rare; the hot path
-//! (`cpu_charge`) uses per-group atomics outside the lock.
+//! The cgroup table is behind a single tracked [`crate::sync::Mutex`]
+//! (named `CGROUP`).  This is acceptable because mutations
+//! (create/delete/attach) are rare; the hot path (`cpu_charge`) uses
+//! per-group atomics outside the lock.  Using the tracked mutex (rather
+//! than a raw `spin::Mutex`) puts the TABLE lock under lockdep order
+//! validation and the spinlock stall detector — important because the
+//! spawn/reap path acquires this lock while the scheduler (`SCHED`) lock
+//! is in play, and an AB-BA inversion there would otherwise be invisible.
 //!
 //! ## References
 //!
@@ -58,7 +63,7 @@
 //!   kernel enforce them" (line 594)
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -384,7 +389,7 @@ impl CgroupTable {
     }
 }
 
-static TABLE: Mutex<CgroupTable> = Mutex::new(CgroupTable::new());
+static TABLE: Mutex<CgroupTable> = Mutex::named(CgroupTable::new(), b"CGROUP");
 
 // ---------------------------------------------------------------------------
 // Public API: lifecycle
@@ -1183,7 +1188,7 @@ pub fn self_test() {
     // Those try_lock calls are safe at runtime, but during the self-test
     // we hold TABLE via TABLE.lock() calls (set_mem_limit, stats, etc.)
     // and a timer firing mid-test would see try_lock fail and return,
-    // yet the spin::Mutex::lock() in the self-test path can never
+    // yet the TABLE.lock() in the self-test path can never
     // progress on a uniprocessor while the interrupt handler is active.
     crate::cpu::without_interrupts(|| {
         self_test_inner();

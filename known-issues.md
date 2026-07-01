@@ -364,6 +364,32 @@ watchdog called for above is now **implemented and boot-validated**.
   Q20 hardware NMI detector. The new `dump_held_locks` helper is exercised by a
   lockdep self-test (Test 6). This meaningfully narrows blind spot (2) without
   touching the shared boot harness or waiting on the operator.
+  **CGROUP TABLE lock brought under observability — 2026-07-01** (`cgroup.rs`).
+  The cgroup `TABLE` lock — the single lock most implicated in the hang (TD31:
+  adding attach/detach TABLE traffic to spawn/reap made the ~5% hang
+  near-deterministic) — was a **raw `spin::Mutex`**, so it was invisible to both
+  lockdep and the stall detector. Converted it to a tracked
+  `crate::sync::Mutex::named(…, b"CGROUP")`. Zero behavioural change (only
+  `lock()`/`try_lock()` were used, both drop-in), but now: (a) a TABLE-side
+  deadlock produces a `SPINLOCK STALL` dump instead of silence, and (b) lockdep
+  tracks TABLE for order validation and contention stats. Cost is negligible —
+  cgroup mutations are rare and off every hot path. Verified BOOT_OK 185 s, no
+  new lockdep violation, cgroup self-test still green.
+  **NOT yet converted: `SCHED` (sched/mod.rs:255) is also a raw `spin::Mutex`.**
+  For lockdep to detect the *suspected* SCHED↔CGROUP AB-BA it needs **both** locks
+  tracked, so the edge is still not recorded. But converting SCHED is a separate,
+  **benchmark-gated** decision: SCHED is the hottest lock in the kernel (acquired
+  on every context switch / timer tick / spawn / reap), and `crate::sync::Mutex`
+  adds a lockdep held-stack push + edge scan on every acquire — a real
+  context-switch-latency risk against the <5 µs target. On a **single-CPU** boot a
+  classic two-CPU AB-BA is impossible anyway; the realizable single-CPU deadlock
+  is an ISR acquiring a lock held by the interrupted code (the timer-tick cgroup
+  path already uses `TABLE.try_lock` precisely to avoid this) or a recursive
+  self-acquire — neither of which needs the AB-BA edge to be caught, only the
+  stall detector, which now covers TABLE. So the pragmatic call is: **let the
+  TABLE stall detector probe the next recurrence** before paying to instrument
+  SCHED. If a recurrence stays silent (SCHED-side spin), revisit converting SCHED
+  behind a benchmark and possibly a debug-only lockdep-on-SCHED build.
 
 **Recurrence 2026-07-01 (embedded-DNS work, same signature).** During the
 boot test for the container embedded-DNS increment, one run hung with no

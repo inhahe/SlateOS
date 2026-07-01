@@ -597,9 +597,15 @@ const PID_FILES: &[&str] = &[
 ///
 /// These mirror Linux's magic links inside `/proc/<pid>/`:
 /// - `cwd`  → the process's current working directory.
-/// - `root` → the process's filesystem root (always `/` here; we have no
-///   per-process `chroot` / mount namespaces yet, so every process shares
-///   the global VFS root).
+/// - `root` → the process's filesystem root, reported as `/`.  A process
+///   sees its *own* root as `/` regardless of any container jail (a jailed
+///   container process's root prefix is invisible to it — that is the point
+///   of the jail), so `/` is correct from the process's own perspective,
+///   matching what Linux reports for `/proc/self/root` inside a container.
+///   (We do not resolve another process's root *as seen by the caller* — a
+///   host process reading a container's `/proc/<pid>/root` still gets `/`
+///   rather than the container's host-side rootfs path; a minor fidelity gap
+///   that never leaks the host mount topology.)
 /// - `exe`  → the resolved absolute path of the executable image,
 ///   captured at spawn/`exec` time (empty until the process has loaded a
 ///   binary, in which case the link reports `NotFound`).

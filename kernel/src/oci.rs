@@ -1662,6 +1662,65 @@ fn ctx_rel(context_dir: &str, full: &str) -> String {
     archive_norm(full.strip_prefix(&prefix).unwrap_or(full))
 }
 
+/// Whether a COPY/ADD source token contains a glob metacharacter (`*`, `?`,
+/// or `[`) and therefore needs wildcard expansion against the source tree.
+fn has_glob_meta(s: &str) -> bool {
+    s.bytes().any(|b| matches!(b, b'*' | b'?' | b'['))
+}
+
+/// Expand a wildcard COPY/ADD source pattern against `src_dir`, returning the
+/// matching entries as paths relative to `src_dir`, sorted for deterministic
+/// layer output.  Matching is component-by-component per Docker's
+/// `filepath.Match` semantics (`*`/`?` never cross `/`); a literal component
+/// must exist.  Returns an empty vec when nothing matches.
+fn expand_glob(src_dir: &str, pattern: &str) -> Vec<String> {
+    use crate::fs::vfs::Vfs;
+    let base_dir = src_dir.trim_end_matches('/');
+    // Each candidate is a path relative to `src_dir`; "" denotes `src_dir`.
+    let mut current: Vec<String> = alloc::vec![String::new()];
+    for comp in pattern.split('/').filter(|c| !c.is_empty()) {
+        let mut next: Vec<String> = Vec::new();
+        for rel in &current {
+            let dir_abs = if rel.is_empty() {
+                String::from(base_dir)
+            } else {
+                format!("{base_dir}/{rel}")
+            };
+            if has_glob_meta(comp) {
+                let Ok(entries) = Vfs::readdir(&dir_abs) else {
+                    continue;
+                };
+                for de in entries {
+                    if de.name == "." || de.name == ".." {
+                        continue;
+                    }
+                    if glob_match(comp, &de.name) {
+                        next.push(if rel.is_empty() {
+                            de.name.clone()
+                        } else {
+                            format!("{rel}/{}", de.name)
+                        });
+                    }
+                }
+            } else {
+                // Literal component — accept only if the path exists.
+                let child = if rel.is_empty() {
+                    String::from(comp)
+                } else {
+                    format!("{rel}/{comp}")
+                };
+                if Vfs::metadata(&format!("{base_dir}/{child}")).is_ok() {
+                    next.push(child);
+                }
+            }
+        }
+        current = next;
+    }
+    current.sort();
+    current.dedup();
+    current
+}
+
 /// Collect files for a single COPY/ADD source into `files`, computing each
 /// entry's archive-relative destination path per Docker's COPY semantics and
 /// skipping context files excluded by `.dockerignore` (`ignore`).
@@ -2475,7 +2534,6 @@ fn build_one_stage_inner(
                     format!("{}/{}", wd.trim_end_matches('/'), dest_raw)
                 };
                 let src_count = toks.len().saturating_sub(1);
-                let single = src_count == 1;
                 let mut files: Vec<LayerFile> = Vec::new();
                 // For `--from`, copy from the referenced rootfs with no
                 // `.dockerignore` filtering (that only applies to the context).
@@ -2487,11 +2545,30 @@ fn build_one_stage_inner(
                     ),
                     None => (String::from(context_dir), ignore),
                 };
+                // Expand any wildcard sources against the source tree (Docker
+                // `filepath.Match`); a literal source passes through unchanged.
+                // A wildcard that matches nothing is an error (missing source).
+                let mut effective_srcs: Vec<String> = Vec::new();
+                for src in toks.iter().take(src_count) {
+                    if has_glob_meta(src) {
+                        let matches = expand_glob(&src_dir, src.trim_start_matches('/'));
+                        if matches.is_empty() {
+                            return Err(BuildError::CopySourceMissing { src: src.clone() });
+                        }
+                        effective_srcs.extend(matches);
+                    } else {
+                        effective_srcs.push(src.clone());
+                    }
+                }
+                // `single` (rename-to-dest semantics) is keyed off the *expanded*
+                // source count: a wildcard matching several files forces the
+                // dest to be treated as a directory.
+                let single = effective_srcs.len() == 1;
                 // ADD (but not COPY) auto-extracts a local tar archive (plain or
                 // gzip) into the destination directory — a `--from` reference
                 // disables this (Docker treats it as a plain copy).
                 let add_extract = instr_up == "ADD" && from_ref.is_none();
-                for src in toks.iter().take(src_count) {
+                for src in &effective_srcs {
                     if add_extract {
                         let full = normalize_path_join(&src_dir, src);
                         if let Ok(bytes) = Vfs::read_file(&full) {
@@ -3505,7 +3582,56 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   WORKDIR creates image directory: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (18 tests)");
+    // Test 19: COPY/ADD wildcard source matching (Docker `filepath.Match`) —
+    // `*` expands to matching context entries; a non-matching glob errors.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_glob_ctx";
+        let img = "/tmp/oci_glob_img";
+        let ext = "/tmp/oci_glob_ext";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/package.json"), b"pkg")?;
+        Vfs::write_file(&format!("{ctx}/package-lock.json"), b"lock")?;
+        Vfs::write_file(&format!("{ctx}/readme.md"), b"readme")?;
+
+        // `COPY package*.json /app/` matches the two JSON files but not the
+        // markdown; the trailing-slash dest keeps their basenames.
+        let df = b"FROM scratch\nCOPY package*.json /app/\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] glob build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let gi = load_image(img)?;
+        let _ = Vfs::mkdir(ext);
+        for layer in &gi.manifest.layers {
+            extract_layer(img, layer, ext)?;
+        }
+        assert_eq!(Vfs::read_file(&format!("{ext}/app/package.json"))?, b"pkg");
+        assert_eq!(Vfs::read_file(&format!("{ext}/app/package-lock.json"))?, b"lock");
+        assert!(
+            Vfs::read_file(&format!("{ext}/app/readme.md")).is_err(),
+            "glob must not pull in non-matching files"
+        );
+        let _ = Vfs::remove_recursive(ext);
+        cleanup_image_dir(img);
+
+        // A wildcard that matches nothing is a build error (missing source).
+        let df_none = b"FROM scratch\nCOPY nomatch*.zip /app/\n";
+        match build_image(df_none, ctx, img) {
+            Err(BuildError::CopySourceMissing { .. }) => {}
+            other => panic!("expected CopySourceMissing for empty glob, ok={}", other.is_ok()),
+        }
+        cleanup_image_dir(img);
+
+        let _ = Vfs::remove(&format!("{ctx}/package.json"));
+        let _ = Vfs::remove(&format!("{ctx}/package-lock.json"));
+        let _ = Vfs::remove(&format!("{ctx}/readme.md"));
+        let _ = Vfs::rmdir(ctx);
+        serial_println!("[oci]   COPY/ADD wildcard source matching: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (19 tests)");
     Ok(())
 }
 

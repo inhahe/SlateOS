@@ -1642,11 +1642,12 @@ fn collect_copy_src(
     single_source: bool,
     ignore: &[(bool, String)],
     chmod: Option<u32>,
-    chown: (u32, u32),
+    chown: Option<(u32, u32)>,
     files: &mut Vec<LayerFile>,
     line: usize,
 ) -> Result<(), BuildError> {
     use crate::fs::vfs::{normalize_path, EntryType, Vfs};
+    let (cuid, cgid) = chown.unwrap_or((0, 0));
     // Normalise the joined path so `.`/`..`/double-slash in a COPY source
     // (notably `COPY . /dest`) resolve to a real context path.
     let ctx = normalize_path(&format!(
@@ -1690,8 +1691,8 @@ fn collect_copy_src(
                 path: target,
                 data,
                 mode: chmod.unwrap_or_else(|| file_mode(&meta)),
-                uid: chown.0,
-                gid: chown.1,
+                uid: cuid,
+                gid: cgid,
             });
         }
         EntryType::Directory => {
@@ -1730,8 +1731,8 @@ fn collect_copy_src(
                                 path: archive_norm(&child_dest),
                                 data,
                                 mode: chmod.unwrap_or_else(|| file_mode(&cmeta)),
-                                uid: chown.0,
-                                gid: chown.1,
+                                uid: cuid,
+                                gid: cgid,
                             });
                         }
                         // Symlinks/other kinds are skipped (documented limitation).
@@ -1746,6 +1747,86 @@ fn collect_copy_src(
                 msg: format!("COPY/ADD source is not a regular file or directory: {src}"),
             });
         }
+    }
+    Ok(())
+}
+
+/// Join a directory and a (possibly `.`/`..`-laden) relative path, normalising
+/// the result — the same rule [`collect_copy_src`] applies to a COPY source.
+fn normalize_path_join(dir: &str, rel: &str) -> String {
+    crate::fs::vfs::normalize_path(&format!(
+        "{}/{}",
+        dir.trim_end_matches('/'),
+        rel.trim_start_matches('/')
+    ))
+}
+
+/// If `data` is a tar archive (plain, or gzip-compressed), return the
+/// uncompressed tar bytes; otherwise `None`.  Used by `ADD` auto-extraction.
+fn as_tar_bytes(data: &[u8]) -> Option<Vec<u8>> {
+    // gzip magic 0x1f 0x8b.
+    let is_gzip = data.first() == Some(&0x1f) && data.get(1) == Some(&0x8b);
+    let tar = if is_gzip {
+        crate::fs::compress::gunzip(data).ok()?
+    } else {
+        data.to_vec()
+    };
+    // POSIX ustar magic sits at offset 257.
+    if tar.get(257..262) == Some(b"ustar".as_ref()) {
+        Some(tar)
+    } else {
+        None
+    }
+}
+
+/// Extract every regular file of a tar archive into `dest` (a directory), as
+/// layer files.  Mirrors Docker's `ADD <local-tar>` unpacking.  `chmod`/`chown`
+/// override the archive's own mode/owner when supplied; otherwise the archive's
+/// metadata is preserved.
+fn add_tar_into(
+    tar: &[u8],
+    dest: &str,
+    chmod: Option<u32>,
+    chown: Option<(u32, u32)>,
+    files: &mut Vec<LayerFile>,
+    line: usize,
+) -> Result<(), BuildError> {
+    let dest_norm = archive_norm(dest);
+    let entries = crate::fs::tar::parse(tar).map_err(BuildError::Kernel)?;
+    for e in &entries {
+        // Only regular files carry data; directories are synthesised by
+        // build_layer_tar and symlinks are a documented copy limitation.
+        if !matches!(e.kind, crate::fs::tar::EntryKind::File) {
+            continue;
+        }
+        let name = e.name.trim_start_matches('/');
+        if name.is_empty() {
+            continue;
+        }
+        let target = if dest_norm.is_empty() {
+            archive_norm(name)
+        } else {
+            archive_norm(&format!("{dest_norm}/{name}"))
+        };
+        if target.is_empty() {
+            continue;
+        }
+        if files.len() >= MAX_COPY_FILES {
+            return Err(BuildError::Parse {
+                line,
+                msg: String::from("ADD tar extracted too many files"),
+            });
+        }
+        let data_end = e.data_offset.saturating_add(e.size as usize);
+        let data = tar.get(e.data_offset..data_end).unwrap_or(&[]).to_vec();
+        let (uid, gid) = chown.unwrap_or((e.uid, e.gid));
+        files.push(LayerFile {
+            path: target,
+            data,
+            mode: chmod.unwrap_or(e.mode),
+            uid,
+            gid,
+        });
     }
     Ok(())
 }
@@ -2299,14 +2380,14 @@ fn build_one_stage_inner(
                 // `--chown=<uid>[:<gid>]` sets the owner (numeric only — name
                 // resolution needs the stage's /etc/passwd, unsupported).  A
                 // bare uid uses that value for the gid too, matching Docker.
-                let chown: (u32, u32) = match toks.iter().find_map(|t| t.strip_prefix("--chown=")) {
+                let chown: Option<(u32, u32)> = match toks.iter().find_map(|t| t.strip_prefix("--chown=")) {
                     Some(spec) => {
                         let (us, gs) = match spec.split_once(':') {
                             Some((u, g)) => (u, g),
                             None => (spec, spec),
                         };
                         match (us.parse::<u32>(), gs.parse::<u32>()) {
-                            (Ok(u), Ok(g)) => (u, g),
+                            (Ok(u), Ok(g)) => Some((u, g)),
                             _ => {
                                 return Err(BuildError::Parse {
                                     line,
@@ -2317,7 +2398,7 @@ fn build_one_stage_inner(
                             }
                         }
                     }
-                    None => (0, 0),
+                    None => None,
                 };
                 // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
                 toks.retain(|t| !t.starts_with("--"));
@@ -2341,7 +2422,20 @@ fn build_one_stage_inner(
                     ),
                     None => (String::from(context_dir), ignore),
                 };
+                // ADD (but not COPY) auto-extracts a local tar archive (plain or
+                // gzip) into the destination directory — a `--from` reference
+                // disables this (Docker treats it as a plain copy).
+                let add_extract = instr_up == "ADD" && from_ref.is_none();
                 for src in toks.iter().take(src_count) {
+                    if add_extract {
+                        let full = normalize_path_join(&src_dir, src);
+                        if let Ok(bytes) = Vfs::read_file(&full) {
+                            if let Some(tar) = as_tar_bytes(&bytes) {
+                                add_tar_into(&tar, &dest_path, chmod, chown, &mut files, line)?;
+                                continue;
+                            }
+                        }
+                    }
                     collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, chown, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
@@ -3199,7 +3293,80 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   COPY --chmod / --chown: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (16 tests)");
+    // Test 17: ADD auto-extracts a local tar archive (plain + gzip), while
+    // COPY of the same archive copies it verbatim.
+    {
+        use crate::fs::tar::{EntryKind, TarWriteEntry};
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_addtar_ctx";
+        let img = "/tmp/oci_addtar_img";
+        let ext = "/tmp/oci_addtar_ext";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+
+        // Author a small tar with a file and a nested file.
+        let bundle = crate::fs::tar::create(&[
+            TarWriteEntry {
+                name: String::from("a.txt"),
+                data: b"alpha".to_vec(),
+                kind: EntryKind::File,
+                link_target: String::new(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+            TarWriteEntry {
+                name: String::from("sub/b.txt"),
+                data: b"bravo".to_vec(),
+                kind: EntryKind::File,
+                link_target: String::new(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+        ]);
+        Vfs::write_file(&format!("{ctx}/bundle.tar"), &bundle)?;
+        let gz = crate::fs::compress::gzip(&bundle);
+        Vfs::write_file(&format!("{ctx}/bundle.tgz"), &gz)?;
+
+        // ADD unpacks both the plain and gzip archives; COPY keeps it whole.
+        let df = b"FROM scratch\nADD bundle.tar /opt\nADD bundle.tgz /gzp\nCOPY bundle.tar /raw/bundle.tar\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] ADD-tar build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let ai = load_image(img)?;
+        let _ = Vfs::mkdir(ext);
+        for layer in &ai.manifest.layers {
+            extract_layer(img, layer, ext)?;
+        }
+        // ADD extracted the archive contents into /opt and /gzp.
+        assert_eq!(Vfs::read_file(&format!("{ext}/opt/a.txt"))?, b"alpha");
+        assert_eq!(Vfs::read_file(&format!("{ext}/opt/sub/b.txt"))?, b"bravo");
+        assert_eq!(Vfs::read_file(&format!("{ext}/gzp/a.txt"))?, b"alpha");
+        // ADD did not leave the archive file itself behind.
+        assert!(
+            Vfs::read_file(&format!("{ext}/opt/bundle.tar")).is_err(),
+            "ADD tar must not leave the archive file"
+        );
+        // COPY of the same archive copied it verbatim (no extraction).
+        assert_eq!(Vfs::read_file(&format!("{ext}/raw/bundle.tar"))?, bundle);
+        assert!(
+            Vfs::read_file(&format!("{ext}/raw/a.txt")).is_err(),
+            "COPY must not extract the archive"
+        );
+
+        let _ = Vfs::remove_recursive(ext);
+        let _ = Vfs::remove(&format!("{ctx}/bundle.tar"));
+        let _ = Vfs::remove(&format!("{ctx}/bundle.tgz"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   ADD local-tar auto-extraction: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (17 tests)");
     Ok(())
 }
 

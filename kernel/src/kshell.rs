@@ -68184,61 +68184,70 @@ fn cmd_container(args: &str) {
             }
         }
         "exec" => {
-            // container exec <id> <command...>
-            // Temporarily enters the container's network namespace and executes
-            // the specified kshell command, then restores the original namespace.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container exec <id> <command...>");
+            // container exec [-d] <id> <command> [args...]
+            //
+            // Launches <command> as a *real process* inside the running
+            // container: the ELF is read from the container's rootfs and the
+            // process is bound into the container's cgroup + PID/user/network
+            // namespaces + rootfs jail (the kernel side of `docker exec`, via
+            // container::exec_path).  Foreground (default): block until it
+            // exits and print the status.  `-d`: detached — print the pid and
+            // return immediately.
+            //
+            // (This replaces the old net-namespace-switch facade that merely
+            // re-ran a *kshell builtin* in the container's net namespace; it now
+            // runs a genuine guest process — see D-CONTAINER-EXEC-WAIT.)
+            let mut idx = 1usize;
+            let detached = parts.get(idx).copied() == Some("-d");
+            if detached {
+                idx = idx.saturating_add(1);
+            }
+            let Some(id_str) = parts.get(idx) else {
+                crate::console_println!("Usage: container exec [-d] <id> <command> [args...]");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 crate::console_println!("Invalid container ID");
                 return;
             };
-            // Get the command to execute (everything after the ID).
-            let cmd_offset = args.find(id_str).unwrap_or(0);
-            let after_id = &args[cmd_offset..].trim_start();
-            let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
-            if after_id.is_empty() {
-                crate::console_println!("Usage: container exec <id> <command...>");
-                return;
-            }
 
-            // Look up container namespace.
-            let Some((_, _, net_ns)) = container::namespace_ids(id) else {
-                crate::console_println!("Container {} not found", id);
+            // Everything after the id is argv (argv[0] = the guest executable
+            // path resolved under the container's rootfs).
+            let cmd_tokens = parts.get(idx.saturating_add(1)..).unwrap_or(&[]);
+            let argv: alloc::vec::Vec<&[u8]> =
+                cmd_tokens.iter().map(|s| s.as_bytes()).collect();
+            let Some(&guest_cmd) = argv.first() else {
+                crate::console_println!("Usage: container exec [-d] <id> <command> [args...]");
                 return;
             };
 
-            // Verify container is running.
-            let Some(ci) = container::info(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            if !matches!(ci.state, container::ContainerState::Running) {
-                crate::console_println!("Container {} is not running (state: {:?})", id, ci.state);
-                return;
+            match container::exec_path(id, guest_cmd, &argv) {
+                Ok(spawned) => {
+                    if detached {
+                        crate::console_println!(
+                            "[exec] container {} pid {} (detached)", id, spawned.pid
+                        );
+                    } else {
+                        match container::wait_process(spawned.pid) {
+                            Ok(code) => crate::console_println!(
+                                "[exec] container {} pid {} exited with status {}",
+                                id, spawned.pid, code
+                            ),
+                            Err(e) => crate::console_println!(
+                                "[exec] wait failed for pid {}: {:?}", spawned.pid, e
+                            ),
+                        }
+                        // Unregister the finished process from container
+                        // bookkeeping (drops the pid entry + decrements
+                        // namespace refcounts; the cgroup task count is released
+                        // automatically when the dead task is reaped).
+                        let _ = container::remove_process_task(
+                            id, spawned.pid, spawned.task_id,
+                        );
+                    }
+                }
+                Err(e) => crate::console_println!("[exec] failed: {:?}", e),
             }
-
-            // Save current namespace and switch to container's.
-            let task_id = crate::sched::current_task_id();
-            let orig_ns = crate::sched::current_task_net_ns();
-
-            if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
-                crate::console_println!("Failed to enter namespace: {:?}", e);
-                return;
-            }
-
-            crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
-
-            // Execute the command within the container's namespace context.
-            // This uses the normal kshell dispatch, so DNS, TCP, UDP operations
-            // will all use the container's network namespace.
-            execute(after_id);
-
-            // Restore original namespace.
-            let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
-            crate::console_println!("[exec] Exited container {} namespace", id);
         }
         "prune" => {
             // container prune  (Docker `container prune`): remove all stopped
@@ -68615,7 +68624,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container unpause ID [ID...]             — thaw (resume all threads)");
             crate::console_println!("  container prune                          — remove all stopped containers");
             crate::console_println!("  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks");
-            crate::console_println!("  container exec ID <command>              — run command in container NS");
+            crate::console_println!("  container exec [-d] ID <command> [args]  — run a real process in the container (foreground: waits + prints exit status; -d: detached)");
             crate::console_println!("  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)");
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");

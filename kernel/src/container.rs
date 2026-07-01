@@ -3261,6 +3261,173 @@ pub fn wait(id: ContainerId) -> KernelResult<WaitOutcome> {
     }
 }
 
+/// Block the calling task until an arbitrary spawned process `pid` exits, then
+/// reap it and return its exit code.
+///
+/// This generalises the block-on-exit mechanism proven by [`wait`] (which is
+/// specialised to a container's *init* process) to any kernel-spawned
+/// (parent-0) process — the primitive [`exec_path`] builds on to run a command
+/// inside a container in the foreground and capture its exit status. It is the
+/// missing "synchronous waitpid/join from kernel task context" that
+/// known-issues.md D-CONTAINER-EXEC-WAIT called out as blocking real
+/// `docker exec` and healthchecks.
+///
+/// The wait is delivered via the same [`pcb::set_wait_task`] slot `wait4` and
+/// [`wait`] use: when `pid`'s last thread exits, `remove_thread` takes the
+/// registered wait-task and the scheduler unblocks this caller. The loop is
+/// lost-wakeup-safe two ways, identical to [`wait`]: (1) it re-checks the
+/// process state *after* registering the wake, and (2) the scheduler's sticky
+/// `pending_wake` flag makes a wake delivered between the re-check and
+/// `block_current` short-circuit the next block.
+///
+/// On observing the zombie, the caller reads its recorded exit code and reaps
+/// it (`try_reap`), so an exec'd non-init process does not linger as a zombie
+/// with no reaping owner.
+///
+/// # Concurrency
+/// As with [`wait`], only one waiter per process is supported (the
+/// `set_wait_task` slot is single-valued). `exec` is driven from the single
+/// interactive shell task, so this is not exercised concurrently.
+///
+/// # Errors
+/// Returns [`KernelError::NoSuchProcess`] if `pid` does not name a live or
+/// zombie process at entry (already reaped / never existed), or any error from
+/// registering the wait.
+pub fn wait_process(pid: u64) -> KernelResult<i32> {
+    use crate::proc::pcb::{self, ProcessState};
+
+    // The process must currently exist (still running or a zombie awaiting
+    // reap). A pid that is already gone has no retrievable exit code.
+    if pcb::state(pid).is_none() {
+        return Err(KernelError::NoSuchProcess);
+    }
+
+    let task_id = crate::sched::current_task_id();
+    loop {
+        // Register to be woken when `pid` zombifies BEFORE re-checking its
+        // state — this closes the register-before-exit race (an exit between
+        // the check and the register would otherwise be missed).
+        match pcb::set_wait_task(pid, task_id) {
+            Ok(()) => {}
+            // Reaped/removed between the entry check and here — nothing to
+            // wait on; surface it rather than blocking forever.
+            Err(KernelError::NoSuchProcess) => return Err(KernelError::NoSuchProcess),
+            Err(e) => return Err(e),
+        }
+
+        match pcb::state(pid) {
+            None => return Err(KernelError::NoSuchProcess),
+            Some(ProcessState::Zombie) => {
+                let code = pcb::exit_code(pid).unwrap_or(0);
+                // Reap the zombie so it does not linger. Reap against its real
+                // parent (0 for the kernel-spawned exec case). Best-effort: if
+                // it was already reaped elsewhere the exit code is still valid.
+                let parent = pcb::parent(pid).unwrap_or(0);
+                let _ = pcb::try_reap(parent, pid);
+                return Ok(code);
+            }
+            // Still running: park until the exit wake fires, then loop to
+            // re-register and re-check.
+            Some(_) => crate::sched::block_current(),
+        }
+    }
+}
+
+/// A process launched into a running container by [`exec_path`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExecSpawn {
+    /// Global PID of the launched process.
+    pub pid: u64,
+    /// Initial-thread task id (for teardown / cgroup accounting).
+    pub task_id: u64,
+}
+
+/// Launch a command as a real process inside an already-running container
+/// (the kernel-side of `docker exec`).
+///
+/// Unlike the old net-namespace-switch facade (which ran a *kshell builtin* in
+/// the container's network namespace), this reads the target ELF from the
+/// container's rootfs, spawns it as a genuine process, and binds it into the
+/// container's cgroup + PID/user/network namespaces + rootfs jail via
+/// [`add_process_task`] — exactly the wiring [`run`] uses for the init process,
+/// minus flipping container state or recording an `init_pid`. The returned
+/// process is enqueued but has not executed yet (so the namespace binding is in
+/// place before its first instruction, same guarantee as [`run`]).
+///
+/// The caller drives the foreground/detached policy: [`wait_process`] blocks on
+/// the returned pid for a foreground exec and returns its exit code; a detached
+/// exec returns immediately with the pid.
+///
+/// `guest_cmd` is the absolute path of the executable *inside* the container
+/// (resolved under the rootfs via [`resolve_in_rootfs`], so `..` cannot escape
+/// the jail). `argv` is the full argument vector (argv[0] conventionally the
+/// program name); it is passed straight to the spawned process.
+///
+/// Stdio is left at the spawn default (the console), so a foreground exec's
+/// output appears live on the shell's console — better UX than the deferred
+/// capture-file readback [`run`] uses for background `logs`.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container is invalid/inactive, not
+///   in `Running` state, has no rootfs configured, or `guest_cmd` is unsafe
+///   (escapes the jail / not valid UTF-8).
+/// - [`KernelError::NotFound`] if the executable does not exist in the rootfs.
+/// - Any error from [`spawn_process`](crate::proc::spawn::spawn_process)
+///   (invalid ELF, out of memory) or from [`add_process_task`].
+pub fn exec_path(
+    id: ContainerId,
+    guest_cmd: &[u8],
+    argv: &[&[u8]],
+) -> KernelResult<ExecSpawn> {
+    // 1. Container must exist and be running.
+    let (running, root_path) = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok((
+            table.containers[idx].state == ContainerState::Running,
+            table.containers[idx].root_path.clone(),
+        ))
+    })?;
+    if !running {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // 2. Resolve the guest command under the rootfs and read the ELF bytes.
+    //    The command path is supplied by the container CLI as a str; require
+    //    valid UTF-8 (general paths are bytes, but a command name is text).
+    let guest_str =
+        core::str::from_utf8(guest_cmd).map_err(|_| KernelError::InvalidArgument)?;
+    let host_path = resolve_in_rootfs(&root_path, guest_str)?;
+    let elf = crate::fs::vfs::Vfs::read_file(&host_path)
+        .map_err(|_| KernelError::NotFound)?;
+
+    // 3. Spawn the process (enqueued, not yet run) with the requested argv and
+    //    an `exe_path` of the *guest* command (backs /proc/<pid>/exe). ABI is
+    //    auto-detected from the ELF markers, matching `run`.
+    let mut opts = crate::proc::spawn::SpawnOptions::new(guest_str);
+    opts.argv = argv;
+    opts.exe_path = Some(guest_cmd);
+    let result = crate::proc::spawn::spawn_process(&elf, &opts)?;
+
+    // 4. Bind it into the container. On failure, tear the spawn down so a
+    //    failed exec leaks nothing (same rollback as `run`).
+    if let Err(e) = add_process_task(id, result.pid, result.task_id) {
+        crate::proc::thread::kill_process_threads(result.pid);
+        crate::proc::pcb::destroy(result.pid);
+        return Err(e);
+    }
+
+    serial_println!(
+        "[container] exec id={} '{}': pid={} task={} entry={:#x}",
+        id, guest_str, result.pid, result.task_id, result.entry_point
+    );
+
+    Ok(ExecSpawn { pid: result.pid, task_id: result.task_id })
+}
+
 /// Rename a container (Docker `rename`).
 ///
 /// Replaces the container's human-readable name. The new name is truncated to
@@ -4485,6 +4652,115 @@ pub fn self_test() {
         delete(ct_bw).expect("delete blockwait container");
     }
     serial_println!("[container]   blocking wait (wait): OK");
+
+    // Test 19k2b: exec_path launches a *real* process inside a Running container
+    // and wait_process captures its exit status (Docker `docker exec`
+    // end-to-end — D-CONTAINER-EXEC-WAIT).  Unlike Test 17 (which registers a
+    // real task but never lets it run, to keep the spawn deterministic), this
+    // deliberately runs the process to completion: the exec'd `hello` prints one
+    // line and exits 0.  The B-CONTAINER-JAIL-TESTRACE hang came from tearing a
+    // *running* task down concurrently with its own exit; that race is closed
+    // here by construction — we only reap after observing the zombie (the task's
+    // own teardown has already finished), so nothing races it.
+    {
+        // A real, compiled userspace ELF staged into the container's rootfs.
+        static EHELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        // wait_process on a pid that never existed → NoSuchProcess.
+        assert!(
+            matches!(wait_process(0xDEAD_BEEF), Err(KernelError::NoSuchProcess)),
+            "wait_process on a bogus pid must report NoSuchProcess",
+        );
+
+        // Build a rootfs under /tmp and stage the exec target at /bin/hello.
+        let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_exec_root");
+        let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_exec_root/bin");
+        crate::fs::vfs::Vfs::write_file("/tmp/ct_exec_root/bin/hello", EHELLO_ELF)
+            .expect("stage exec hello");
+
+        let ct_ex = create(&ContainerConfig::new("test-exec-ct").memory(8192))
+            .expect("create exec container");
+        set_root_path(ct_ex, "/tmp/ct_exec_root").expect("set exec rootfs");
+
+        // exec on a Created (not-yet-Running) container is rejected.
+        assert!(
+            matches!(
+                exec_path(ct_ex, b"/bin/hello", &[b"/bin/hello"]),
+                Err(KernelError::InvalidArgument)
+            ),
+            "exec on a non-running container must fail",
+        );
+
+        // Bring it up as a bare Running container (no init) to exec into.
+        start(ct_ex).expect("start exec container");
+
+        // A missing binary in the rootfs → NotFound.
+        assert!(
+            matches!(
+                exec_path(ct_ex, b"/bin/nope", &[b"/bin/nope"]),
+                Err(KernelError::NotFound)
+            ),
+            "exec of an absent binary must report NotFound",
+        );
+
+        let cg_ex = cgroup(ct_ex).expect("exec container cgroup");
+
+        // Launch the real process (argv[0] = the guest command path).
+        let spawned = exec_path(ct_ex, b"/bin/hello", &[b"/bin/hello"])
+            .expect("exec hello into container");
+
+        // Billed to the container cgroup while alive.
+        assert_eq!(
+            crate::cgroup::stats(cg_ex).map(|s| s.nr_tasks),
+            Some(1),
+            "exec'd process must be billed to the container cgroup",
+        );
+
+        // Let it run to completion.  Single-CPU: yield so the scheduler picks
+        // the exec'd task.  Bounded so a stuck process degrades to a test
+        // failure, never a boot hang.
+        let mut zombified = false;
+        for _ in 0..100_000u32 {
+            match crate::proc::pcb::state(spawned.pid) {
+                Some(crate::proc::pcb::ProcessState::Zombie) | None => {
+                    zombified = true;
+                    break;
+                }
+                _ => crate::sched::yield_now(),
+            }
+        }
+        assert!(zombified, "exec'd hello did not exit within the yield budget");
+
+        // wait_process now takes the already-zombie fast path (no parking of the
+        // boot thread): it reads and reaps the exit code.  hello exits 0.
+        let code = wait_process(spawned.pid).expect("wait_process on exec'd hello");
+        assert_eq!(code, 0, "hello exits with status 0");
+
+        // Reaped → the process record is gone.
+        assert!(
+            crate::proc::pcb::state(spawned.pid).is_none(),
+            "reaped process must no longer exist",
+        );
+
+        // Force the dead task through reap so the cgroup auto-detach runs, then
+        // the container cgroup is empty again (proves teardown accounting is
+        // robust to a process that simply exits — see reap_dead_tasks).
+        crate::sched::reap_dead_tasks();
+        assert_eq!(
+            crate::cgroup::stats(cg_ex).map(|s| s.nr_tasks),
+            Some(0),
+            "cgroup must be empty after the exec'd task is reaped",
+        );
+
+        // Unregister the (now-gone) pid from container bookkeeping and clean up.
+        let _ = remove_process_task(ct_ex, spawned.pid, spawned.task_id);
+        stop(ct_ex).ok();
+        delete(ct_ex).expect("delete exec container");
+        let _ = crate::fs::vfs::Vfs::remove("/tmp/ct_exec_root/bin/hello");
+    }
+    serial_println!("[container]   exec + wait (exec_path/wait_process): OK");
 
     // Test 19k3: diff() reports overlay upper-layer changes (Docker `diff`) —
     // added (upper-only), changed (copied-up/both), and deleted (whiteout)

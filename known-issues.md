@@ -703,67 +703,63 @@ host loopback, exactly as before named networks existed.
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
 IPAM feature, increments 60–61).
 
-### D-CONTAINER-EXEC-WAIT. `container exec` is a net_ns-switch facade, not a real in-container process; healthchecks are blocked on a synchronous wait/join primitive — TECH DEBT
+### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — MECHANISM LANDED (only healthchecks remain)
 
-**Where:** `container exec` handler in `kernel/src/kshell.rs`
-(cmd_container, "exec" arm, ~line 68148). It temporarily sets the shell
-task's `net_ns` to the container's and runs a *kshell builtin* in that
-namespace, then restores. It does **not** spawn the target binary inside
-the container's rootfs + PID/user namespaces + cgroup, and it cannot run
-an arbitrary container ELF or capture its exit code. The machinery to
-spawn *into* an existing container exists (`container::add_process_task`
-binds any pid/task into a container's namespaces/rootfs/cgroup/volumes —
-this is how `run` works), but the shell's process-launch path (`cmd_run`)
-is fully detached: it spawns and returns without waiting, and there is no
-synchronous waitpid/join primitive wired into kshell to block until a
-child exits and read its exit code. An exec'd non-init process would also
-zombie without a reaping owner.
+**Status (2026-07-01): steps 1–3 done and boot-validated.** `container
+exec` is no longer a net_ns-switch facade — it launches a genuine process
+inside the container and (foreground) blocks until it exits, printing the
+exit status. Only step 4 (healthchecks) remains, tracked below.
 
-**Impact / what's blocked:**
-- A *real* `docker exec` (run a container binary, foreground, capture exit
-  code) cannot be built until a blocking wait/join primitive is available
-  from kshell task context.
-- `HEALTHCHECK` support is blocked on the same primitive: a healthcheck
-  probe must run the image's health command inside the container on a
-  timer and read its exit code (0=healthy) to drive healthy/unhealthy
-  state. The `oci` image-config parser (`kernel/src/oci.rs`
-  `ImageConfig`) also does not yet capture the `Healthcheck` field.
+**What landed:**
+1. `container::wait_process(pid) -> KernelResult<i32>`
+   (`kernel/src/container.rs`): the generalised block-on-exit primitive.
+   Parks the caller on an arbitrary spawned global pid via
+   `pcb::set_wait_task` + `sched::block_current`, woken by the
+   zombie-transition path (`remove_thread` hands back the registered
+   wait-task). Lost-wakeup-safe (re-check after register + scheduler
+   `pending_wake`). On zombie it reads `pcb::exit_code(pid)` and reaps via
+   `pcb::try_reap`, so an exec'd non-init child never lingers unreaped.
+2. `container::exec_path(id, guest_cmd, argv) -> KernelResult<ExecSpawn>`:
+   resolves `guest_cmd` under the container rootfs (`resolve_in_rootfs`,
+   `..` cannot escape), reads the ELF, `spawn_process`es it, and
+   `add_process_task`s it into the container's cgroup + PID/user/network
+   namespaces + rootfs jail (the `run` wiring, minus flipping state /
+   recording `init_pid`). Rolls the spawn back on bind failure. Stdio is
+   left at the console default (foreground output appears live).
+3. Shell `container exec [-d] <id> <cmd> [args...]`
+   (`kernel/src/kshell.rs`, cmd_container "exec" arm): builds argv from the
+   tokens, calls `exec_path`; foreground → `wait_process` + print exit
+   status + `remove_process_task` cleanup; `-d` → print pid and return.
 
-**Progress (2026-07-01):** The block-on-exit mechanism is now proven from
-kshell task context. `container::wait(id)` (Docker `wait`,
-`kernel/src/container.rs`) parks the shell task on the container's init
-pid via `pcb::set_wait_task` + `sched::block_current` and is woken by the
-zombie-transition path (`remove_thread` hands back the registered
-wait-task; `notify_init_exit` has already recorded the exit code). It is
-lost-wakeup-safe (re-check after register + scheduler `pending_wake`).
-This validates step 1's mechanism; what remains for *exec* is generalising
-it to an arbitrary spawned pid (return `pcb::exit_code(pid)` + reap),
-rather than reading the container's recorded init exit code.
+**Root-cause fix bundled in:** cgroup task-count accounting was previously
+decremented **only** by an explicit `set_task_cgroup`/`remove_process_task`
+while the task was still alive; a task that simply *exited* while assigned
+to a non-root cgroup left a stale `nr_tasks` count forever (the task is
+gone from the scheduler table before anyone can move it back to root).
+`sched::reap_dead_tasks` now auto-detaches a reaped task from its cgroup
+(skipping the root group; `detach_task` is saturating so a
+detach-then-die can't underflow). This makes teardown accounting robust
+for *any* exiting task, not just exec'd ones.
 
-**Proper fix:**
-1. Generalise the proven block-on-exit mechanism into a `wait_pid`-style
-   wrapper: given an arbitrary spawned global pid, park the caller until
-   that process reaches zombie, then return its `pcb::exit_code(pid)` and
-   reap it. (`container::wait` already demonstrates the park/wake half; the
-   remaining piece is reaping a non-init child and reading its own exit
-   code rather than the container's.)
-2. Add `container::exec_path(id, guest_cmd, argv) -> KernelResult<u64>`
-   that reads the ELF from the container's rootfs (`root_path + guest_cmd`),
-   `spawn_process`es it, and `add_process_task`s it into the container
-   (without flipping state or setting `init_pid`). Redirect its stdio to a
-   capture file as `run` does.
-3. Rework the shell `container exec` to use (2)+(1): spawn the real
-   process, block for exit, print the exit code. Keep a `-d`/detached mode
-   that returns the pid immediately.
-4. Then add healthchecks: parse `Healthcheck` in `oci::ImageConfig`, store
-   the probe (test/interval/timeout/retries/start_period) on the
-   container, and drive periodic probes via `hrtimer::schedule_ns` →
-   `workqueue::submit` → `exec_path` + wait, tracking
-   starting/healthy/unhealthy and surfacing it in `inspect`/`ps`.
+**Validation:** boot self-test `[container]   exec + wait
+(exec_path/wait_process): OK` — creates a Running container with a real
+rootfs, stages `/bin/hello`, execs it, yields until it zombifies, and
+asserts: exit code 0 captured, process reaped (`pcb::state` is `None`),
+cgroup billed +1 while alive then 0 after reap, plus the error paths
+(exec on a non-Running container → InvalidArgument, missing binary →
+NotFound, `wait_process(bogus)` → NoSuchProcess). BOOT_OK, hello's stdout
+observed once in the serial log.
+
+**Still pending — step 4 (healthchecks):** parse `Healthcheck` in
+`oci::ImageConfig` (`kernel/src/oci.rs` — not yet captured), store the
+probe (test/interval/timeout/retries/start_period) on the container, and
+drive periodic probes via `hrtimer::schedule_ns` → `workqueue::submit` →
+`exec_path` + `wait_process`, tracking starting/healthy/unhealthy and
+surfacing it in `inspect`/`ps`. The wait/exec primitives it needs are now
+in place; only the OCI parse + probe scheduler remain.
 
 **Discovered/documented:** 2026-07-01 (while surveying the next container
-increment after `docker network`; the current `exec` facade and the
-detached `cmd_run` path were confirmed by reading both).
+increment after `docker network`). Mechanism landed same day.
 
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 

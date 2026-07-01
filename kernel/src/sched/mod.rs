@@ -3007,11 +3007,31 @@ pub fn reap_dead_tasks() -> usize {
     for id in dead_ids {
         let mut state = SCHED.lock();
         if let Some(mut task) = state.tasks.remove(&id) {
+            // Capture the cgroup before dropping the task so we can
+            // decrement its task count below.
+            let task_cgroup = task.cgroup_id;
+
             // Drop the lock before freeing the stack (free_order
             // acquires the frame allocator lock — safe since our lock
             // ordering is SCHED → frame allocator, and we just dropped
             // SCHED).
             drop(state);
+
+            // Decrement the task's cgroup count on the definitive teardown
+            // path.  cgroup accounting is otherwise only decremented by an
+            // explicit `set_task_cgroup`/`remove_process_task` while the task
+            // is still alive; without this a task that simply *exits* while
+            // assigned to a non-root cgroup (e.g. a `container exec` process
+            // that runs to completion, or any container init) would leave a
+            // stale `nr_tasks` count forever, since the task is gone from the
+            // table before anyone can move it back to root.  Skipping the
+            // root group avoids churning the root count for ordinary kernel
+            // tasks.  detach_task is saturating, so a double-detach (task was
+            // already moved back to root before dying — cgroup_id would then
+            // be ROOT and skipped anyway) can never underflow.
+            if task_cgroup != crate::cgroup::ROOT_CGROUP {
+                let _ = crate::cgroup::detach_task(task_cgroup);
+            }
 
             // Final canary check — if the task overflowed before dying,
             // log a warning (the task is already dead so we can't halt,

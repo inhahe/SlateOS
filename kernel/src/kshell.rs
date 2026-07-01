@@ -67181,14 +67181,15 @@ fn cmd_container(args: &str) {
 
             let mut shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
                 all.iter().filter(|(id, name, state)| matches(*id, name, *state)).collect();
-            // `-n N`/`-l`: keep only the N most-recently-created (by creation
-            // sequence, descending — newest first, like Docker `ps -n`).
+            // Order newest-first by creation sequence (Docker `ps` lists the
+            // most recently created container at the top). `-n N`/`-l` then
+            // keeps only the first N of that order.
+            shown.sort_by(|a, b| {
+                let sa = container::info(a.0).map_or(0, |ci| ci.created_seq);
+                let sb = container::info(b.0).map_or(0, |ci| ci.created_seq);
+                sb.cmp(&sa)
+            });
             if let Some(n) = limit {
-                shown.sort_by(|a, b| {
-                    let sa = container::info(a.0).map_or(0, |ci| ci.created_seq);
-                    let sb = container::info(b.0).map_or(0, |ci| ci.created_seq);
-                    sb.cmp(&sa)
-                });
                 shown.truncate(n);
             }
             if shown.is_empty() {

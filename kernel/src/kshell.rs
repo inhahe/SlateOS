@@ -68928,7 +68928,9 @@ pub fn cli_resource_parser_self_test() {
 ///   docker rm <id>                       → container delete <id>
 ///   docker inspect <id>                  → container info <id>
 ///   docker exec <id> <command...>        → container exec <id> <command...>
-///   docker images <dir>                  → oci inspect <dir>
+///   docker images                        → oci images (list the named store)
+///   docker tag <dir|ref> <ref>           → oci tag (import a dir or re-tag)
+///   docker rmi <ref>                      → oci rmi (remove a store tag)
 ///
 /// `docker ps` lists every container regardless of state (SlateOS has no
 /// separate "running-only" index; `-a`/`--all` is accepted and ignored
@@ -68979,11 +68981,19 @@ fn cmd_docker(args: &str) {
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
         | "diff" | "rename" | "update" | "prune" | "cp" | "commit" | "export"
         | "import" | "volume" | "network" | "system" => delegate(sub),
-        // SlateOS has no image registry/store keyed by name — images are
-        // referenced by their on-disk OCI layout directory. `docker images`
-        // therefore inspects a directory rather than listing a registry.
+        // Named image store (`/var/lib/images`): `docker images` lists tagged
+        // images, `docker tag` adds/imports a reference, `docker rmi` removes
+        // one — all backed by the store in `oci.rs`.
         "images" | "image" => {
-            let mut delegated = alloc::string::String::from("inspect");
+            let mut delegated = alloc::string::String::from("images");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
+        "tag" | "rmi" => {
+            let mut delegated = alloc::string::String::from(sub);
             if !rest.is_empty() {
                 delegated.push(' ');
                 delegated.push_str(rest);
@@ -69026,7 +69036,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <build|history|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
+            crate::console_println!("Usage: docker <build|history|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|tag|rmi|version> ...");
             crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
@@ -69049,7 +69059,9 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker save <image-dir> <out-tar>      — bundle an OCI image into a tar");
             crate::console_println!("  docker load <in-tar> <dest-dir>        — restore a saved image tar into a dir");
             crate::console_println!("  docker system df|prune                 — disk usage / reclaim stopped containers+networks");
-            crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
+            crate::console_println!("  docker images                          — list tagged images in the named store");
+            crate::console_println!("  docker tag <dir|ref> <ref>             — import an image dir or re-tag an existing ref");
+            crate::console_println!("  docker rmi <ref>                       — remove a tag from the named store (GCs blobs)");
             crate::console_println!("  docker history <image-dir>             — show image build history (created-by + size)");
             crate::console_println!();
             crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
@@ -70320,6 +70332,62 @@ fn cmd_oci(args: &str) {
                 }
             }
         }
+        // Named image store — `docker tag`/`images`/`rmi` by name:tag.
+        "tag" => {
+            // Two forms:
+            //   oci tag <image-dir> <name:tag>   — import a built dir + tag it
+            //   oci tag <src-ref>   <name:tag>    — add a second tag (both in store)
+            let (Some(&a), Some(&b)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
+                return;
+            };
+            // A source that looks like a path (has a `/` or exists as a dir) is
+            // imported; otherwise it is treated as an existing store reference.
+            let is_dir = crate::fs::vfs::Vfs::metadata(a)
+                .map(|m| m.entry_type == crate::fs::vfs::EntryType::Directory)
+                .unwrap_or(false);
+            if is_dir {
+                match oci::store_tag_from_dir(a, b) {
+                    Ok(digest) => crate::console_println!("Tagged {} -> {} ({})", a, b, digest),
+                    Err(e) => crate::console_println!("tag failed: {:?}", e),
+                }
+            } else {
+                match oci::store_add_tag(a, b) {
+                    Ok(()) => crate::console_println!("Tagged {} -> {}", a, b),
+                    Err(e) => crate::console_println!("tag failed: {:?}", e),
+                }
+            }
+        }
+        "images" | "image" | "ls" => {
+            match oci::store_list() {
+                Ok(imgs) if imgs.is_empty() => {
+                    crate::console_println!("No images in store ({}).", oci::STORE_DIR);
+                }
+                Ok(imgs) => {
+                    crate::console_println!("{:<28} {:<20} {:>10}", "REPOSITORY:TAG", "DIGEST", "SIZE");
+                    for im in imgs {
+                        // Show the short (12-hex) digest, Docker-style.
+                        let short = im
+                            .digest
+                            .split_once(':')
+                            .map(|(_, hex)| hex.get(..12).unwrap_or(hex))
+                            .unwrap_or(&im.digest);
+                        crate::console_println!("{:<28} {:<20} {:>10}", im.reference, short, im.size);
+                    }
+                }
+                Err(e) => crate::console_println!("images failed: {:?}", e),
+            }
+        }
+        "rmi" => {
+            let Some(&reference) = parts.get(1) else {
+                crate::console_println!("Usage: oci rmi <name:tag>");
+                return;
+            };
+            match oci::store_remove(reference) {
+                Ok(()) => crate::console_println!("Untagged: {}", reference),
+                Err(e) => crate::console_println!("rmi failed: {:?}", e),
+            }
+        }
         "test" => {
             match oci::self_test() {
                 Ok(()) => crate::console_println!("OCI self-test passed."),
@@ -70327,7 +70395,7 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|history|run|build|save|load|test]");
+            crate::console_println!("Usage: oci [inspect|layers|history|run|build|tag|images|rmi|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
             crate::console_println!("  oci history <dir>  — show build history (per-step created-by + size)");

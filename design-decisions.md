@@ -3620,3 +3620,50 @@ surface as the rest of `oci.rs`. (4) `BuildError` is a distinct type from
 `BuildError` + Dockerfile helpers, self-tests 11–12); `kernel/src/kshell.rs`
 (`oci build` arm + `docker build` shim delegate + help/usage). Follow-up: `RUN`
 support arrives with Q17's `container exec`.
+
+## 51. Named image store — a single shared OCI layout at `/var/lib/images` keyed by `ref.name` annotations, with blob GC on `rmi`
+
+**Date:** 2026-07-01
+**Decided by:** Claude (operator-approved scope) — within the operator-approved
+Docker/container-runtime port (Q15). No operator fork: this is the
+obviously-correct Docker-parity default, and the on-disk internals are
+reversible.
+
+Until now SlateOS had no image *store* keyed by name: `oci run`/`FROM`/`docker
+images` all operated on an on-disk OCI layout **directory path**. That works but
+diverges from Docker, where images are referenced by `name:tag`. The store adds
+that name→image mapping.
+
+**Design.** A single OCI image layout lives at `/var/lib/images`. Its
+`index.json` holds one manifest descriptor **per tag**, each carrying an
+`org.opencontainers.image.ref.name` annotation — the real OCI multi-image
+pattern (the same layout a registry pull populates). All tags share one
+content-addressed `blobs/sha256/` pool, so identical layers across images are
+stored once.
+
+**Operations (`oci.rs`).** `store_tag_from_dir(dir, ref)` imports a built image
+directory into the store (copies its blobs, adds/replaces the tag);
+`store_add_tag(src, dst)` re-tags an existing ref with no blob recopy (`docker
+tag`); `store_resolve(ref)` → manifest digest; `store_list()` → rows for `docker
+images`; `store_remove(ref)` drops a tag and **garbage-collects** every blob no
+longer reachable from a surviving manifest (walk each remaining manifest → keep
+its manifest+config+layer hexes → delete the rest). `normalize_ref` defaults a
+bare name to `:latest` and leaves `@digest` refs untouched.
+
+**Key tradeoff — shared layout + GC vs. per-image directories.** Alternative
+(b): keep every image in its own directory and make the "store" just a
+name→directory map. Chose the **shared single-layout** approach: it is what
+Docker/registries actually do, gives free cross-image layer dedup, and keeps a
+single `oci-layout`/`index.json` to reason about. The cost is that deletion is
+no longer "rm -rf a directory" — it must reference-count blobs across all
+remaining tags (the GC pass). That GC is the one piece of real complexity, and
+it is covered by self-test 20 (two tags sharing blobs: removing the first GCs
+nothing; removing the last GCs everything).
+
+**Where it bites.** `kernel/src/oci.rs` (`STORE_DIR`, `StoredImage`/`StoreEntry`,
+`normalize_ref`, `store_read_index`/`store_write_index`, `copy_all_blobs`,
+`store_tag_from_dir`/`store_add_tag`/`store_resolve`/`store_list`/`store_remove`,
+`collect_manifest_blob_hexes`, self-test 20); `kernel/src/kshell.rs` (`oci
+tag`/`images`/`rmi` arms + `docker` shim routes for `images`/`tag`/`rmi`).
+Follow-up: teach `FROM name:tag` and `oci/docker run name:tag` to resolve via
+`store_resolve` and load from the store's multi-manifest layout.

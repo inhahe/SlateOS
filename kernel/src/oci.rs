@@ -1277,6 +1277,308 @@ fn finish_image(
 }
 
 // ---------------------------------------------------------------------------
+// Named image store (`docker images` / `tag` / `rmi`)
+// ---------------------------------------------------------------------------
+
+/// Root of the local named-image store — a single OCI layout whose
+/// `index.json` holds one annotated manifest descriptor per `name:tag`
+/// (`org.opencontainers.image.ref.name`).  Mirrors Docker's local image store
+/// so `build -t name:tag`, `images`, `tag`, and `rmi` work by name rather than
+/// by on-disk directory path.
+pub const STORE_DIR: &str = "/var/lib/images";
+
+/// OCI annotation key that carries an image's `name:tag` reference.
+const ANNOTATION_REF_NAME: &str = "org.opencontainers.image.ref.name";
+
+/// One tagged image in the store (a row of `docker images`).
+pub struct StoredImage {
+    /// The `name:tag` reference.
+    pub reference: String,
+    /// The manifest digest (`sha256:…`).
+    pub digest: String,
+    /// The manifest blob size in bytes.
+    pub size: u64,
+}
+
+/// A parsed store index entry: a manifest descriptor plus its `ref.name`.
+struct StoreEntry {
+    media_type: String,
+    digest: String,
+    size: u64,
+    os: String,
+    architecture: String,
+    reference: String,
+}
+
+/// Normalise an image reference to `name:tag`, defaulting the tag to `latest`.
+/// A digest-form reference (`name@sha256:…`) is returned unchanged; a `:` that
+/// is part of a `registry:port` host (i.e. followed by a `/`) is not mistaken
+/// for a tag separator.
+fn normalize_ref(reference: &str) -> String {
+    let reference = reference.trim();
+    if reference.contains('@') {
+        return String::from(reference);
+    }
+    match reference.rsplit_once(':') {
+        Some((_, tag)) if !tag.is_empty() && !tag.contains('/') => String::from(reference),
+        _ => format!("{reference}:latest"),
+    }
+}
+
+/// Read and parse the store `index.json` into entries (empty if absent).
+fn store_read_index() -> KernelResult<Vec<StoreEntry>> {
+    use crate::fs::Vfs;
+    let data = match Vfs::read_file(&format!("{STORE_DIR}/index.json")) {
+        Ok(d) => d,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let root = json::parse(&data)?;
+    let Some(manifests) = root.get_array("manifests") else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for e in manifests {
+        let Some(digest) = e.get_str("digest") else {
+            continue;
+        };
+        let media_type = e.get_str("mediaType").unwrap_or(MEDIA_TYPE_MANIFEST);
+        let size = e.get_i64("size").unwrap_or(0).max(0) as u64;
+        let (os, architecture) = match e.get("platform") {
+            Some(p) => (
+                String::from(p.get_str("os").unwrap_or("linux")),
+                String::from(p.get_str("architecture").unwrap_or("amd64")),
+            ),
+            None => (String::from("linux"), String::from("amd64")),
+        };
+        let reference = e
+            .get("annotations")
+            .and_then(|a| a.get_str(ANNOTATION_REF_NAME))
+            .map(String::from)
+            .unwrap_or_default();
+        out.push(StoreEntry {
+            media_type: String::from(media_type),
+            digest: String::from(digest),
+            size,
+            os,
+            architecture,
+            reference,
+        });
+    }
+    Ok(out)
+}
+
+/// Serialise `entries` to the store `index.json` (and refresh the `oci-layout`
+/// marker).
+fn store_write_index(entries: &[StoreEntry]) -> KernelResult<()> {
+    use crate::fs::Vfs;
+    let mut index = String::from("{\"schemaVersion\":2,\"mediaType\":");
+    push_json_string(&mut index, MEDIA_TYPE_INDEX);
+    index.push_str(",\"manifests\":[");
+    for (i, e) in entries.iter().enumerate() {
+        if i != 0 {
+            index.push(',');
+        }
+        index.push_str("{\"mediaType\":");
+        push_json_string(&mut index, &e.media_type);
+        index.push_str(",\"digest\":");
+        push_json_string(&mut index, &e.digest);
+        index.push_str(",\"size\":");
+        index.push_str(&format!("{}", e.size));
+        index.push_str(",\"platform\":{\"architecture\":");
+        push_json_string(&mut index, &e.architecture);
+        index.push_str(",\"os\":");
+        push_json_string(&mut index, &e.os);
+        index.push_str("},\"annotations\":{");
+        push_json_string(&mut index, ANNOTATION_REF_NAME);
+        index.push(':');
+        push_json_string(&mut index, &e.reference);
+        index.push_str("}}");
+    }
+    index.push_str("]}");
+    Vfs::write_file(&format!("{STORE_DIR}/index.json"), index.as_bytes())?;
+    Vfs::write_file(
+        &format!("{STORE_DIR}/oci-layout"),
+        b"{\"imageLayoutVersion\":\"1.0.0\"}",
+    )?;
+    Ok(())
+}
+
+/// Copy every blob under `src/blobs/sha256` into `dst/blobs/sha256`
+/// (content-addressed, so identical names are simply re-written).
+fn copy_all_blobs(src: &str, dst: &str) -> KernelResult<()> {
+    use crate::fs::vfs::{EntryType, Vfs};
+    let src_blobs = format!("{}/blobs/sha256", src.trim_end_matches('/'));
+    let dst_blobs = format!("{}/blobs/sha256", dst.trim_end_matches('/'));
+    for de in Vfs::readdir(&src_blobs)? {
+        if de.name == "." || de.name == ".." || de.entry_type != EntryType::File {
+            continue;
+        }
+        let data = Vfs::read_file(&format!("{src_blobs}/{}", de.name))?;
+        Vfs::write_file(&format!("{dst_blobs}/{}", de.name), &data)?;
+    }
+    Ok(())
+}
+
+/// Copy the image at `src_image_dir` into the store and tag it `reference`
+/// (`name`, defaulting the tag to `latest`).  Any prior tag with the same
+/// reference is replaced.  Returns the tagged manifest digest.
+///
+/// # Errors
+/// The source directory must be a valid OCI layout; propagates VFS errors.
+pub fn store_tag_from_dir(src_image_dir: &str, reference: &str) -> KernelResult<String> {
+    use crate::fs::Vfs;
+    let reference = normalize_ref(reference);
+    create_layout_skeleton(STORE_DIR);
+
+    let src = src_image_dir.trim_end_matches('/');
+    let src_index = Vfs::read_file(&format!("{src}/index.json"))?;
+    let idx = ImageIndex::parse(&src_index)?;
+    let man = idx.find_manifest_for_host().ok_or(KernelError::NotFound)?;
+    let media_type = if man.media_type.is_empty() {
+        String::from(MEDIA_TYPE_MANIFEST)
+    } else {
+        man.media_type.clone()
+    };
+    let digest = man.digest.clone();
+    let size = man.size;
+
+    copy_all_blobs(src, STORE_DIR)?;
+
+    let mut entries = store_read_index()?;
+    entries.retain(|e| e.reference != reference);
+    entries.push(StoreEntry {
+        media_type,
+        digest: digest.clone(),
+        size,
+        os: String::from("linux"),
+        architecture: String::from("amd64"),
+        reference,
+    });
+    store_write_index(&entries)?;
+    Ok(digest)
+}
+
+/// Add a second `reference` pointing at the same manifest as an existing
+/// `source` reference (`docker tag src dst`), without recopying blobs.
+///
+/// # Errors
+/// `NotFound` if `source` is not a tagged image in the store.
+pub fn store_add_tag(source: &str, reference: &str) -> KernelResult<()> {
+    let source = normalize_ref(source);
+    let reference = normalize_ref(reference);
+    let mut entries = store_read_index()?;
+    let src = entries
+        .iter()
+        .find(|e| e.reference == source)
+        .ok_or(KernelError::NotFound)?;
+    let new = StoreEntry {
+        media_type: src.media_type.clone(),
+        digest: src.digest.clone(),
+        size: src.size,
+        os: src.os.clone(),
+        architecture: src.architecture.clone(),
+        reference: reference.clone(),
+    };
+    entries.retain(|e| e.reference != reference);
+    entries.push(new);
+    store_write_index(&entries)
+}
+
+/// Resolve `reference` (`name:tag`, default tag `latest`) to its manifest
+/// digest in the store.
+///
+/// # Errors
+/// `NotFound` if no tag matches.
+pub fn store_resolve(reference: &str) -> KernelResult<String> {
+    let reference = normalize_ref(reference);
+    store_read_index()?
+        .into_iter()
+        .find(|e| e.reference == reference)
+        .map(|e| e.digest)
+        .ok_or(KernelError::NotFound)
+}
+
+/// List all tagged images in the store (rows of `docker images`).
+///
+/// # Errors
+/// Propagates a malformed-index parse error.
+pub fn store_list() -> KernelResult<Vec<StoredImage>> {
+    Ok(store_read_index()?
+        .into_iter()
+        .map(|e| StoredImage {
+            reference: e.reference,
+            digest: e.digest,
+            size: e.size,
+        })
+        .collect())
+}
+
+/// Remove the `reference` tag from the store, garbage-collecting any blob no
+/// longer reachable from a remaining manifest.
+///
+/// # Errors
+/// `NotFound` if the tag is absent.
+pub fn store_remove(reference: &str) -> KernelResult<()> {
+    use crate::fs::vfs::{EntryType, Vfs};
+    let reference = normalize_ref(reference);
+    let mut entries = store_read_index()?;
+    let before = entries.len();
+    entries.retain(|e| e.reference != reference);
+    if entries.len() == before {
+        return Err(KernelError::NotFound);
+    }
+    store_write_index(&entries)?;
+
+    // GC: keep every blob reachable from a surviving manifest (the manifest
+    // blob itself + its config + layers); delete the rest.
+    let mut keep: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
+    for e in &entries {
+        let Some((_, hex)) = e.digest.split_once(':') else {
+            continue;
+        };
+        keep.insert(String::from(hex));
+        if let Ok(data) = Vfs::read_file(&format!("{STORE_DIR}/blobs/sha256/{hex}")) {
+            collect_manifest_blob_hexes(&data, &mut keep);
+        }
+    }
+    let blobs = format!("{STORE_DIR}/blobs/sha256");
+    if let Ok(list) = Vfs::readdir(&blobs) {
+        for de in list {
+            if de.name == "." || de.name == ".." || de.entry_type != EntryType::File {
+                continue;
+            }
+            if !keep.contains(&de.name) {
+                let _ = Vfs::remove(&format!("{blobs}/{}", de.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Add the config + layer blob hex digests referenced by a manifest JSON blob
+/// to `keep` (used by the store GC).
+fn collect_manifest_blob_hexes(
+    manifest_json: &[u8],
+    keep: &mut alloc::collections::BTreeSet<String>,
+) {
+    let Ok(root) = json::parse(manifest_json) else {
+        return;
+    };
+    if let Some(d) = root.get("config").and_then(|c| c.get_str("digest")) {
+        if let Some((_, hex)) = d.split_once(':') {
+            keep.insert(String::from(hex));
+        }
+    }
+    if let Some(layers) = root.get_array("layers") {
+        for l in layers {
+            if let Some((_, hex)) = l.get_str("digest").and_then(|d| d.split_once(':')) {
+                keep.insert(String::from(hex));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dockerfile builder (`docker build` / `oci build`)
 // ---------------------------------------------------------------------------
 
@@ -3631,7 +3933,78 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   COPY/ADD wildcard source matching: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (19 tests)");
+    // Test 20: named image store — tag a built image into the store, list and
+    // resolve it by reference, add a second tag, then remove one tag and verify
+    // the surviving tag (and its blobs) remain while the removed tag is gone.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_store_ctx";
+        let img = "/tmp/oci_store_img";
+        cleanup_image_dir(img);
+        // Start from a clean store so counts are deterministic.
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/app.txt"), b"store-payload")?;
+
+        let df = b"FROM scratch\nCOPY app.txt /app.txt\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] store build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+
+        // Tag the built image into the store as `demo:v1`.
+        let digest = store_tag_from_dir(img, "demo:v1")?;
+        assert!(digest.starts_with("sha256:"), "manifest digest must be sha256");
+
+        // `latest` default: `store_resolve("demo")` == `demo:v1`? No — different
+        // tags. Resolve the explicit tag we set.
+        assert_eq!(store_resolve("demo:v1")?, digest, "resolve demo:v1");
+
+        // List shows exactly the one reference.
+        let listed = store_list()?;
+        assert_eq!(listed.len(), 1, "store must hold one tag, got {}", listed.len());
+        assert_eq!(listed.first().map(|s| s.reference.as_str()), Some("demo:v1"));
+
+        // Add a second tag (no blob recopy) pointing at the same manifest.
+        store_add_tag("demo:v1", "demo:latest")?;
+        assert_eq!(store_resolve("demo:latest")?, digest, "second tag resolves");
+        assert_eq!(store_list()?.len(), 2, "two tags after add");
+
+        // Blob count before removal.
+        let blobs_dir = format!("{STORE_DIR}/blobs/sha256");
+        let blob_count = |dir: &str| -> usize {
+            Vfs::readdir(dir)
+                .map(|l| l.iter().filter(|d| d.name != "." && d.name != "..").count())
+                .unwrap_or(0)
+        };
+        let before_blobs = blob_count(&blobs_dir);
+        assert!(before_blobs > 0, "store must have blobs");
+
+        // Remove one tag: the other still points at the same manifest, so no
+        // blob should be GC'd.
+        store_remove("demo:v1")?;
+        assert!(store_resolve("demo:v1").is_err(), "removed tag is gone");
+        assert_eq!(store_resolve("demo:latest")?, digest, "surviving tag intact");
+        assert_eq!(store_list()?.len(), 1, "one tag remains");
+        assert_eq!(
+            blob_count(&blobs_dir),
+            before_blobs,
+            "shared blobs must survive while another tag references them"
+        );
+
+        // Remove the last tag: now every blob is unreachable and GC'd.
+        store_remove("demo:latest")?;
+        assert!(store_list()?.is_empty(), "store empty after last removal");
+        assert_eq!(blob_count(&blobs_dir), 0, "all blobs GC'd after last tag removed");
+
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   named image store tag/list/resolve/rmi+GC: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (20 tests)");
     Ok(())
 }
 

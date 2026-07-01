@@ -5313,8 +5313,11 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     overrides, **multi-stage builds** (`FROM … AS <name>`, `FROM <stage>`
     inheritance, `COPY --from=<stage|index|image>`, `--target <stage>`),
     and OCI config
-    `history[]` recording surfaced via `oci`/`docker history`). Remaining:
-    real `container exec` / Dockerfile
+    `history[]` recording surfaced via `oci`/`docker history`), plus a
+    **named image store** at `/var/lib/images` (single shared OCI layout keyed
+    by `ref.name` annotations: `oci`/`docker` `tag`/`images`/`rmi` with
+    content-addressed blob dedup + reference-counted blob GC on removal).
+    Remaining: real `container exec` / Dockerfile
     `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)
     — gated on operator decision Q17 (see open-questions.md).
 

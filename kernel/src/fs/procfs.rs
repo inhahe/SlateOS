@@ -582,6 +582,7 @@ const PID_FILES: &[&str] = &[
     "environ",
     "auxv",
     "mountinfo",
+    "mounts",
     "cgroup",
     "cpuset",
     "oom_score",
@@ -891,17 +892,66 @@ fn gen_config() -> Vec<u8> {
 /// so whitespace in a mount point does not corrupt the space-separated
 /// layout for `getmntent`/`mount(8)`.
 fn gen_mounts() -> Vec<u8> {
-    let mounts = crate::fs::Vfs::mounts_full();
-    let mut s = String::with_capacity(256);
+    // Reading `/proc/mounts` from inside a container must show the container's
+    // own mounts, not the host's global table (same info-leak/correctness
+    // reasoning as `/proc/<pid>/mountinfo`). Resolve the caller's view.
+    let global = crate::fs::Vfs::mounts_full();
+    if let Some(view) =
+        crate::ipc::namespace::mount_view_for(crate::sched::current_task_id())
+    {
+        return render_container_mounts(&view, &global);
+    }
+    render_global_mounts(&global)
+}
 
-    for (path, fs_type, options) in &mounts {
+/// Render the global VFS mount table in the `/proc/mounts` line format
+/// (`source mount_point fstype options 0 0`).
+fn render_global_mounts(
+    mounts: &[(String, String, crate::fs::vfs::MountOptions)],
+) -> Vec<u8> {
+    let mut s = String::with_capacity(256);
+    for (path, fs_type, options) in mounts {
         let opts = options.to_string();
         let mount_point = mangle_mount_field(path);
         let fstype = mangle_mount_field(fs_type);
         s.push_str(&format!("none {mount_point} {fstype} {opts} 0 0\n"));
     }
-
     s.into_bytes()
+}
+
+/// Render a *container* process's own mount view in the `/proc/mounts` line
+/// format.  Companion to [`render_container_mountinfo`]: same view (rootfs at
+/// guest `/`, then each volume/tmpfs), fstype resolved from the backing host
+/// mount, `source` hidden (`none`) so host paths are not leaked, and the
+/// `rw`/`ro` option taken from the container's own read-only view.
+fn render_container_mounts(
+    view: &[crate::ipc::namespace::MountViewEntry],
+    global: &[(String, String, crate::fs::vfs::MountOptions)],
+) -> Vec<u8> {
+    let mut s = String::with_capacity(view.len().saturating_mul(64).max(16));
+    for entry in view {
+        let mount_point = mangle_mount_field(&entry.guest_path);
+        let fstype = mangle_mount_field(fstype_for_host_path(&entry.host_target, global));
+        let opts = if entry.read_only { "ro" } else { "rw" };
+        s.push_str(&format!("none {mount_point} {fstype} {opts} 0 0\n"));
+    }
+    s.into_bytes()
+}
+
+/// `/proc/<pid>/mounts` — the per-process view of [`gen_mounts`].
+///
+/// Linux exposes `/proc/<pid>/mounts` (and `/proc/self/mounts`) as the
+/// mount-namespace-local table; ours mirrors that so a container process reads
+/// its own mounts.  Gated on process existence like the other per-PID files.
+fn gen_pid_mounts(task_id: u64) -> KernelResult<Vec<u8>> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let global = crate::fs::Vfs::mounts_full();
+    if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
+        return Ok(render_container_mounts(&view, &global));
+    }
+    Ok(render_global_mounts(&global))
 }
 
 /// `/proc/stat` — system-wide kernel/scheduler statistics in Linux format.
@@ -3419,6 +3469,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "environ" => gen_pid_environ(task_id),
         "auxv" => gen_pid_auxv(task_id),
         "mountinfo" => gen_pid_mountinfo(task_id),
+        "mounts" => gen_pid_mounts(task_id),
         "cgroup" => gen_pid_cgroup(task_id),
         "cpuset" => gen_pid_cpuset(task_id),
         "oom_score" => gen_pid_oom_score(task_id),
@@ -13974,6 +14025,34 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   container mountinfo render: {} lines OK", lines.len());
+
+        // The `/proc/mounts` line format for the same container view:
+        // `none <mount_point> <fstype> <opts> 0 0`, source hidden.
+        let mounts_rendered = render_container_mounts(&view, &global);
+        let mounts_text = core::str::from_utf8(&mounts_rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        let mounts_lines: Vec<&str> = mounts_text.lines().collect();
+        let mounts_expected = [
+            "none / overlay ro 0 0",
+            "none /logs ext4 ro 0 0",
+            "none /tmp tmpfs rw 0 0",
+        ];
+        if mounts_lines.len() != mounts_expected.len() {
+            serial_println!(
+                "[procfs]   FAIL: container mounts {} lines, expected {}",
+                mounts_lines.len(), mounts_expected.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        for (got, want) in mounts_lines.iter().zip(mounts_expected.iter()) {
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: container mounts {:?} != {:?}", got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   container mounts render: {} lines OK", mounts_lines.len());
     }
 
     // --- /proc/<pid>/cgroup rendering ---

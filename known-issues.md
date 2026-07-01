@@ -2967,11 +2967,16 @@ resolving each entry's *fstype* from the real host mount backing its
 `host_target` (`fstype_for_host_path` longest-prefix match: overlay for the
 rootfs, tmpfs/memfs for `--tmpfs`, the host fs for binds) while reporting the
 `source` field as `none` so host backing paths are **not** leaked into the
-container. Covered by a procfs self-test (container view: RO rootfs→overlay, RO
-bind→ext4, RW tmpfs→tmpfs; plus `mount_path_covers` boundary safety so `/data`
-doesn't cover `/database`). Build/clippy clean, boot-test green. Note this is
-*introspection* only — real in-container `mount`/`umount`/`pivot_root` syscalls
-mutating a per-container mount table remain the deferred mount-namespace piece.
+container. The same container-aware rendering was applied to the `/proc/mounts`
+line format (`render_container_mounts`): the global `/proc/mounts` now resolves
+the *caller's* view (`current_task_id`), and a new per-PID `/proc/<pid>/mounts`
+(hence `/proc/self/mounts`) file mirrors Linux's mount-namespace-local table.
+Covered by procfs self-tests (container view for both `mountinfo` and `mounts`:
+RO rootfs→overlay, RO bind→ext4, RW tmpfs→tmpfs; plus `mount_path_covers`
+boundary safety so `/data` doesn't cover `/database`). Build/clippy clean,
+boot-test green. Note this is *introspection* only — real in-container
+`mount`/`umount`/`pivot_root` syscalls mutating a per-container mount table
+remain the deferred mount-namespace piece.
 
 ### TD33. Container `logs` capture works only for Linux-ABI container inits — ACCEPTED LIMITATION 2026-06-30
 

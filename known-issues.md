@@ -237,6 +237,20 @@ watchdog called for above is now **implemented and boot-validated**.
   **zero** `[liveness]` output (silent when healthy). Next time the hang
   reproduces in a boot test, the serial log will name the lost thread and its
   state — turning this heisenbug into a directly-diagnosable one.
+- *On-demand dump added:* the same task-table dump is now reachable
+  interactively via the kshell `taskdump` command (aliases `hungcheck`/
+  `dumptasks`; `sched::dump_task_table()`), for capturing state when a system
+  feels wedged at a prompt — the window where the boot-scoped watchdog is
+  disarmed. try_lock-only, safe on a partially-hung system, output to serial.
+- *Reproduction attempt 2026-07-01 (negative):* ran `scripts/hang-repro-loop.sh`
+  for 16 consecutive boots (15-boot batch + 1 validation) with the instrument
+  armed — **all reached BOOT_OK, zero `[liveness]` fires, no catch.** Consistent
+  with the ~5% rate (P(0 catches in 16 boots) ≈ 44%), so this neither reproduces
+  nor disproves the bug; it just confirms the instrument is silent on healthy
+  boots and does not itself destabilise boot. The watchdog stays permanently
+  armed for the boot window, so any future reproduction (in CI or ad-hoc boots)
+  will be captured automatically. Not running further blind repro batches — they
+  produce no artifact — until the bug surfaces on its own.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

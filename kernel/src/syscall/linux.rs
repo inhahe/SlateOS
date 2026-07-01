@@ -5232,9 +5232,13 @@ fn try_open_alsa_control(path: &[u8], flags: u32) -> Option<SyscallResult> {
 /// being the new fd or an errno); `None` when it is not, so the caller falls
 /// through to the normal VFS open.
 ///
-/// Recognised today (the first DRM device, index 0):
+/// Recognised today (the primary DRM device — the active-scanout GPU):
 ///   * `/dev/dri/card0`       — full KMS authority
 ///   * `/dev/dri/renderD128`  — render-only node (no modeset authority)
+///
+/// Both nodes bind to [`crate::drm::primary_device`] — the two faces of the
+/// same GPU — so on a machine with a real GPU (virtio-gpu) the render node
+/// targets that GPU rather than a fallback dumb framebuffer.
 fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
     let render_node = match path {
         b"/dev/dri/card0" => false,
@@ -5247,6 +5251,7 @@ fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
     if crate::drm::device_count() == 0 {
         return Some(linux_err(errno::ENODEV));
     }
+    let device = crate::drm::primary_device();
 
     // A real caller is required — kernel context has no fd table to install
     // into.  Return EBADF the same way the VFS path does for kernel context.
@@ -5255,9 +5260,10 @@ fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
         None => return Some(linux_err(errno::EBADF)),
     };
 
-    // Create the per-open client instance (device index 0) and register it as
-    // a per-process IPC resource so exit-cleanup and fork-sharing see it.
-    let handle = crate::drm::card_fd::create(0, render_node);
+    // Create the per-open client instance (bound to the primary GPU) and
+    // register it as a per-process IPC resource so exit-cleanup and
+    // fork-sharing see it.
+    let handle = crate::drm::card_fd::create(device, render_node);
     pcb::register_ipc_handle(pid, crate::cap::ResourceType::Drm, handle.raw());
 
     let status_flags = flags & oflags::O_NONBLOCK;

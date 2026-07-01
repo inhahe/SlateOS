@@ -659,6 +659,18 @@ pub fn device_count() -> usize {
     DEVICES.lock().count
 }
 
+/// Index of the primary display device — the GPU that owns the active scanout.
+///
+/// When a hardware GPU (virtio-gpu) is present it is promoted to primary over
+/// a fallback dumb framebuffer (limine-fb), so this is the device a
+/// `/dev/dri/card0` / `renderD128` client should be bound to (matching Linux,
+/// where the primary and render nodes are two faces of the *same* GPU).  Zero
+/// when no device is registered (callers must gate on [`device_count`]).
+#[must_use]
+pub fn primary_device() -> usize {
+    DEVICES.lock().primary
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------

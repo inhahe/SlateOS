@@ -1471,7 +1471,23 @@ fn collect_copy_src(
     Ok(())
 }
 
-/// Build an OCI image from a Dockerfile.
+/// Build an OCI image from a Dockerfile (no `--build-arg` overrides).
+///
+/// Convenience wrapper over [`build_image_with_args`] with an empty override
+/// set.  See that function for the full instruction and error documentation.
+///
+/// # Errors
+/// Returns [`BuildError`] on a malformed/unsupported instruction, a missing
+/// COPY source, a `RUN`, or an underlying VFS failure.
+pub fn build_image(
+    dockerfile: &[u8],
+    context_dir: &str,
+    dest_dir: &str,
+) -> Result<Descriptor, BuildError> {
+    build_image_with_args(dockerfile, context_dir, dest_dir, &[])
+}
+
+/// Build an OCI image from a Dockerfile, honouring `--build-arg` overrides.
 ///
 /// Supports every Dockerfile instruction except `RUN` (which needs the
 /// operator-gated in-container exec — see open-questions.md Q17): `FROM`
@@ -1481,13 +1497,19 @@ fn collect_copy_src(
 /// `${VAR:-default}` expansion).  The result is written to `dest_dir` as a
 /// standard OCI image loadable by [`load_image`].
 ///
+/// `build_args` are `(name, value)` pairs from `--build-arg`.  As in Docker,
+/// an override only takes effect for a `name` that the Dockerfile declares via
+/// `ARG` (undeclared overrides are ignored), and it supersedes that `ARG`'s
+/// default.
+///
 /// # Errors
 /// Returns [`BuildError`] on a malformed/unsupported instruction, a missing
 /// COPY source, a `RUN`, or an underlying VFS failure.
-pub fn build_image(
+pub fn build_image_with_args(
     dockerfile: &[u8],
     context_dir: &str,
     dest_dir: &str,
+    build_args: &[(String, String)],
 ) -> Result<Descriptor, BuildError> {
     use crate::fs::Vfs;
 
@@ -1536,7 +1558,14 @@ pub fn build_image(
                 None => (String::from(expanded.trim()), String::new()),
             };
             if !name.is_empty() {
-                vars.push((name, default));
+                // A `--build-arg NAME=value` override supersedes the default,
+                // but only for a NAME the Dockerfile actually declares (here).
+                let value = build_args
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| *k == name)
+                    .map_or(default, |(_, v)| v.clone());
+                vars.push((name, value));
             }
             continue;
         }
@@ -2169,6 +2198,24 @@ CMD ["--serve"]
         assert!(child.config.env.iter().any(|e| e == "PATH=/usr/bin"), "inherited env");
         assert!(child.config.env.iter().any(|e| e == "EXTRA=1"), "new env");
         assert_eq!(child.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
+
+        // --build-arg overrides an ARG default (only for a declared ARG).
+        let img3 = "/tmp/oci_build_img3";
+        cleanup_image_dir(img3);
+        let df3 = b"FROM scratch\nARG TARGET=default\nWORKDIR /${TARGET}\nLABEL built=${TARGET}\n";
+        let args = alloc::vec![
+            (String::from("TARGET"), String::from("prod")),
+            // Undeclared override must be ignored (no ARG NOPE in the file).
+            (String::from("NOPE"), String::from("x")),
+        ];
+        build_image_with_args(df3, ctx, img3, &args).map_err(|e| {
+            serial_println!("[oci] build-arg build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let ba = load_image(img3)?;
+        assert_eq!(ba.config.working_dir, "/prod", "--build-arg overrode ARG default");
+        assert!(ba.config.labels.iter().any(|(k, v)| k == "built" && v == "prod"));
+        cleanup_image_dir(img3);
 
         // Clean up.
         let _ = Vfs::remove(&format!("{ext}/srv/app/run.sh"));

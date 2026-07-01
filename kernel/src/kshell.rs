@@ -69017,7 +69017,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <build|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
-            crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir>   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
+            crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -70184,21 +70184,53 @@ fn cmd_oci(args: &str) {
             }
         }
         "build" => {
-            // oci build <dockerfile> <context-dir> <dest-image-dir>  (Docker
-            // `build`): parse a Dockerfile and author an OCI image directory.
-            // Every instruction except RUN is supported (RUN needs the
-            // operator-gated in-container exec — see open-questions.md Q17);
-            // build_image reports a precise diagnostic in that case.
+            // oci build <dockerfile> <context-dir> <dest-image-dir>
+            //           [--build-arg KEY=VALUE ...]   (Docker `build`)
+            // Parse a Dockerfile and author an OCI image directory. Every
+            // instruction except RUN is supported (RUN needs the operator-gated
+            // in-container exec — see open-questions.md Q17); build_image
+            // reports a precise diagnostic in that case.
+            let mut positional: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+            let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
+                alloc::vec::Vec::new();
+            let mut i = 1usize;
+            while let Some(&tok) = parts.get(i) {
+                if tok == "--build-arg" {
+                    if let Some(&kv) = parts.get(i.saturating_add(1)) {
+                        // KEY=VALUE; a bare KEY takes the ambient value "" here
+                        // (the builder only applies it to a declared ARG).
+                        let (k, v) = match kv.split_once('=') {
+                            Some((k, v)) => (k, v),
+                            None => (kv, ""),
+                        };
+                        if k.is_empty() {
+                            crate::console_println!("[oci] Ignoring --build-arg '{}': empty key", kv);
+                        } else {
+                            build_args.push((
+                                alloc::string::String::from(k),
+                                alloc::string::String::from(v),
+                            ));
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        crate::console_println!("[oci] --build-arg needs KEY=VALUE");
+                        i = i.saturating_add(1);
+                    }
+                } else {
+                    positional.push(tok);
+                    i = i.saturating_add(1);
+                }
+            }
             let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
-                (parts.get(1), parts.get(2), parts.get(3))
+                (positional.first(), positional.get(1), positional.get(2))
             else {
                 crate::console_println!(
-                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir>"
+                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [--build-arg KEY=VALUE ...]"
                 );
                 return;
             };
             match crate::fs::vfs::Vfs::read_file(dockerfile) {
-                Ok(df) => match oci::build_image(&df, ctx, dest) {
+                Ok(df) => match oci::build_image_with_args(&df, ctx, dest, &build_args) {
                     Ok(desc) => crate::console_println!(
                         "Built image -> {} (manifest {}, {} bytes)",
                         dest, desc.digest, desc.size
@@ -70220,7 +70252,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|build|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
+            crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");

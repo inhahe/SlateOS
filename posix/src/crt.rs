@@ -156,6 +156,160 @@ pub extern "C" fn quick_exit(status: i32) -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// ELF constructors / destructors (.preinit_array / .init_array / .fini_array)
+// ---------------------------------------------------------------------------
+//
+// The System V ABI runs global constructors listed in `.preinit_array` and
+// `.init_array` before `main`, and destructors in `.fini_array` at process
+// exit.  C programs using `__attribute__((constructor))`/`destructor` and
+// C++ programs with non-trivial static/global constructors depend on this.
+//
+// The linker delimits each array with a pair of boundary symbols
+// (`__init_array_start`/`__init_array_end`, etc.).  For lld's default
+// executable layout these symbols only exist when the program actually has
+// a corresponding input section; the explicit userspace/service linker
+// scripts define them (empty) unconditionally.  We therefore reference the
+// boundary symbols as **weak** externals (declared weak via a `.weak`
+// assembly directive — see below): absent → null → the walk below is
+// skipped, so pure-Rust programs (which emit no constructors) are
+// completely unaffected.
+
+/// A single entry in an ELF `.init_array` / `.fini_array` section.
+///
+/// Each entry is a nullable function pointer.  Some toolchains pad these
+/// arrays with NULL entries, so the walkers skip nulls rather than assume a
+/// dense array.
+pub type InitArrayEntry = Option<extern "C" fn()>;
+
+/// Walk `[start, end)` in ascending order, invoking each non-null entry.
+///
+/// Used for `.preinit_array` and `.init_array` — constructors run in
+/// ascending address order per the System V ABI.  A null `start`/`end`
+/// (an absent array) is treated as empty.
+///
+/// # Safety
+///
+/// If non-null, `start` and `end` must bound one valid array of
+/// `InitArrayEntry` with `start <= end`, and every entry must be either
+/// null or a callable `extern "C" fn()` pointer.
+// Present on the hand-rolled crt path (target_os="none", used by
+// `services/` and any future C crt0) and on the host test build; the
+// slateos userspace target (os=linux) uses Rust std's own startup.
+#[cfg(any(target_os = "none", test))]
+unsafe fn run_init_array(start: *const InitArrayEntry, end: *const InitArrayEntry) {
+    if start.is_null() || end.is_null() {
+        return;
+    }
+    let mut p = start;
+    while p < end {
+        // SAFETY: p is within [start, end); the caller guarantees the range
+        // is a valid array of entries.
+        if let Some(f) = unsafe { *p } {
+            f();
+        }
+        // SAFETY: p < end, so p.add(1) stays within [start, end].
+        p = unsafe { p.add(1) };
+    }
+}
+
+/// Walk `[start, end)` in descending order, invoking each non-null entry.
+///
+/// Used for `.fini_array` — destructors run in the reverse of constructor
+/// order per the ELF spec.  Same null-bounds handling as
+/// [`run_init_array`].
+///
+/// # Safety
+///
+/// Same contract as [`run_init_array`].
+#[cfg(any(target_os = "none", test))]
+unsafe fn run_fini_array(start: *const InitArrayEntry, end: *const InitArrayEntry) {
+    if start.is_null() || end.is_null() {
+        return;
+    }
+    let mut p = end;
+    while p > start {
+        // SAFETY: p > start, so p.sub(1) stays within [start, end).
+        p = unsafe { p.sub(1) };
+        // SAFETY: p is within [start, end); the caller guarantees validity.
+        if let Some(f) = unsafe { *p } {
+            f();
+        }
+    }
+}
+
+// References to the linker-provided array boundary symbols.  Only their
+// *addresses* are meaningful; the declared element type just makes
+// `addr_of!` yield a `*const InitArrayEntry` directly.
+//
+// The boundary symbols are declared **weak** at the assembly level via the
+// `.weak` directive below (the same mechanism as C's
+// `__attribute__((weak))` extern — no nightly `feature(linkage)` needed, so
+// this builds on the stable toolchain the kernel/boot path uses).  A weak
+// *undefined* symbol resolves to address 0 at link time instead of erroring,
+// so pure-Rust programs (which emit no `.init_array`, and whose default lld
+// layout therefore synthesises none of these symbols) link cleanly and the
+// startup walk below sees null bounds → no-op.  When a program actually has
+// constructors — or an explicit linker script provides the bounds — the weak
+// reference binds to the real definition.
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    static __preinit_array_start: InitArrayEntry;
+    static __preinit_array_end: InitArrayEntry;
+    static __init_array_start: InitArrayEntry;
+    static __init_array_end: InitArrayEntry;
+    static __fini_array_start: InitArrayEntry;
+    static __fini_array_end: InitArrayEntry;
+}
+
+// Declare the boundary symbols weak so undefined references resolve to null
+// rather than failing the link.  Assembly `.weak` works on stable Rust,
+// unlike the `#[linkage = "extern_weak"]` attribute (nightly-only).
+#[cfg(target_os = "none")]
+global_asm!(
+    ".weak __preinit_array_start",
+    ".weak __preinit_array_end",
+    ".weak __init_array_start",
+    ".weak __init_array_end",
+    ".weak __fini_array_start",
+    ".weak __fini_array_end",
+);
+
+/// Run the program's `.preinit_array` then `.init_array` constructors.
+///
+/// Called from `__libc_start_main` after environ/signal setup and before
+/// `main`.  A no-op for programs without constructors.
+#[cfg(target_os = "none")]
+fn run_constructors() {
+    // SAFETY: the boundary symbols bound a valid (possibly empty/null)
+    // constructor array; `run_init_array` skips a null/empty range.
+    unsafe {
+        run_init_array(
+            core::ptr::addr_of!(__preinit_array_start),
+            core::ptr::addr_of!(__preinit_array_end),
+        );
+        run_init_array(
+            core::ptr::addr_of!(__init_array_start),
+            core::ptr::addr_of!(__init_array_end),
+        );
+    }
+}
+
+/// Run the program's `.fini_array` destructors (reverse order).
+///
+/// Registered with `atexit` during startup so it fires at normal exit.
+#[cfg(target_os = "none")]
+extern "C" fn run_destructors() {
+    // SAFETY: the boundary symbols bound a valid (possibly empty/null)
+    // destructor array; `run_fini_array` skips a null/empty range.
+    unsafe {
+        run_fini_array(
+            core::ptr::addr_of!(__fini_array_start),
+            core::ptr::addr_of!(__fini_array_end),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kernel argument retrieval (SYS_PROCESS_GET_ARGS)
 // ---------------------------------------------------------------------------
 
@@ -523,6 +677,21 @@ pub unsafe extern "C" fn __libc_start_main(
     // Until this runs the kernel applies signal default actions itself.
     crate::signal::init_signals();
 
+    // Run ELF global constructors (.preinit_array then .init_array) and
+    // arrange for destructors (.fini_array) to run at exit.  Constructors
+    // must run after environ/signal setup (they may call getenv, install
+    // handlers, etc.) but before main.  For pure-Rust programs the arrays
+    // are empty (weak boundary symbols are null), so this is a no-op.
+    //
+    // `run_destructors` is registered *before* main runs, so exit()'s LIFO
+    // atexit order fires it after any handler main registers — matching the
+    // conventional libc ordering (destructors after atexit handlers).
+    #[cfg(target_os = "none")]
+    {
+        run_constructors();
+        let _ = atexit(run_destructors);
+    }
+
     // Call main.
     let ret = main(actual_argc, actual_argv, unsafe {
         crate::environ::environ.cast()
@@ -715,8 +884,11 @@ pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
 /// link compatibility.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_csu_init() {
-    // No-op: we don't have a .init_array processing loop yet.
-    // Static constructors (if any) would be called here.
+    // No-op link-compat symbol.  Our startup does NOT route through
+    // __libc_csu_init; `__libc_start_main` walks `.preinit_array`/
+    // `.init_array` directly (see `run_constructors`).  Kept only so
+    // programs that reference this glibc symbol still link.  Doing the walk
+    // here too would run every constructor twice.
 }
 
 /// GCC CRT: global destructor finalization.
@@ -726,7 +898,9 @@ pub extern "C" fn __libc_csu_init() {
 /// exist for link compatibility.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_csu_fini() {
-    // No-op: destructors are handled by atexit/__cxa_finalize.
+    // No-op link-compat symbol.  `.fini_array` destructors are run at exit
+    // via `run_destructors` (registered with atexit in `__libc_start_main`),
+    // and C++ static destructors via __cxa_finalize.
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,6 +1369,81 @@ mod tests {
     fn test_dso_handle_exists() {
         // __dso_handle just needs to exist; value doesn't matter.
         let _ = __dso_handle;
+    }
+
+    // -- .init_array / .fini_array walkers --
+    //
+    // These record invocation order into a shared buffer, so they must not
+    // run concurrently; a Mutex serialises them across cargo's parallel
+    // test threads.
+
+    static INIT_ARRAY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CALL_ORDER: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    fn record(id: usize) {
+        CALL_ORDER.lock().expect("test lock poisoned").push(id);
+    }
+    extern "C" fn ctor1() {
+        record(1);
+    }
+    extern "C" fn ctor2() {
+        record(2);
+    }
+    extern "C" fn ctor3() {
+        record(3);
+    }
+
+    fn take_order() -> Vec<usize> {
+        core::mem::take(&mut *CALL_ORDER.lock().expect("test lock poisoned"))
+    }
+
+    #[test]
+    fn test_init_array_forward_skips_nulls() {
+        let _guard = INIT_ARRAY_TEST_LOCK.lock().expect("test lock poisoned");
+        take_order();
+        let arr: [InitArrayEntry; 5] = [Some(ctor1), None, Some(ctor2), None, Some(ctor3)];
+        // SAFETY: arr bounds a valid array of entries.
+        unsafe {
+            run_init_array(arr.as_ptr(), arr.as_ptr().add(arr.len()));
+        }
+        assert_eq!(take_order(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_fini_array_runs_reverse() {
+        let _guard = INIT_ARRAY_TEST_LOCK.lock().expect("test lock poisoned");
+        take_order();
+        let arr: [InitArrayEntry; 3] = [Some(ctor1), Some(ctor2), Some(ctor3)];
+        // SAFETY: arr bounds a valid array of entries.
+        unsafe {
+            run_fini_array(arr.as_ptr(), arr.as_ptr().add(arr.len()));
+        }
+        assert_eq!(take_order(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn test_init_array_null_bounds_noop() {
+        let _guard = INIT_ARRAY_TEST_LOCK.lock().expect("test lock poisoned");
+        take_order();
+        // SAFETY: null bounds are the documented "absent array" case.
+        unsafe {
+            run_init_array(core::ptr::null(), core::ptr::null());
+            run_fini_array(core::ptr::null(), core::ptr::null());
+        }
+        assert!(take_order().is_empty());
+    }
+
+    #[test]
+    fn test_init_array_empty_noop() {
+        let _guard = INIT_ARRAY_TEST_LOCK.lock().expect("test lock poisoned");
+        take_order();
+        let arr: [InitArrayEntry; 0] = [];
+        // SAFETY: start == end is a valid empty range.
+        unsafe {
+            run_init_array(arr.as_ptr(), arr.as_ptr());
+            run_fini_array(arr.as_ptr(), arr.as_ptr());
+        }
+        assert!(take_order().is_empty());
     }
 
     // -- getauxval --

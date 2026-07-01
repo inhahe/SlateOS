@@ -614,70 +614,61 @@ usage stays bounded.
 limitation` in `pthread_detach`'s doc comment; promoted to tracked tech
 debt while implementing per-thread TSD).
 
-### D-CRT-INIT-ARRAY. `__libc_start_main` never runs `.init_array`/`.preinit_array` constructors (and `.fini_array` destructors) — TECH DEBT
+### D-CRT-INIT-ARRAY. `.init_array`/`.preinit_array` constructor + `.fini_array` destructor support — MECHANISM LANDED (end-to-end C/C++ validation pending a consumer)
 
-**Where:** `posix/src/crt.rs`. `__libc_start_main` (~line 442) ignores its
-`_init`/`_fini` arguments and calls `main` directly after fd/arg/environ/
-signal setup. `__libc_csu_init` (~line 717) is a no-op stub whose comment
-says "we don't have a .init_array processing loop yet". The userspace
-linker scripts (`userspace/*/linker.ld`, `services/*/linker.ld`) merge
-everything into one PT_LOAD via `*(.data .data.*)` and do **not** define
-`.preinit_array`/`.init_array`/`.fini_array` output sections or the
-`__init_array_start`/`__init_array_end` (etc.) boundary symbols.
+**Status (2026-07-01):** The constructor/destructor machinery is now
+**implemented and host-tested**. What remains is purely *validating it
+against a real C/C++ program that emits constructors* — no such program
+exists in-tree yet, so the mechanism has only been proven to be a correct
+no-op for the (all-Rust) programs that currently run.
 
-**Effect:** C programs using `__attribute__((constructor))`/`destructor`
-and **C++ programs with non-trivial static/global constructors** will not
-have those run. This is a hard blocker for real C/C++ ports (gcc, CPython
-extensions, anything linking a C++ runtime that relies on static init).
-It does **not** affect current Rust userspace programs — Rust does not
-emit `.init_array` constructors — which is why nothing has surfaced it.
+**What landed:**
+- *crt (`posix/src/crt.rs`):* host-testable walkers `run_init_array(start,
+  end)` (ascending, skips nulls) and `run_fini_array(start, end)`
+  (descending), gated `#[cfg(any(target_os = "none", test))]`. Weak
+  boundary externs (`__preinit_array_start/end`, `__init_array_start/end`,
+  `__fini_array_start/end`) declared weak via a `.weak` **assembly
+  directive** (`global_asm!`) rather than the nightly-only
+  `#[linkage = "extern_weak"]` attribute — the kernel/boot build uses the
+  **stable** toolchain, so a nightly `feature(...)` gate in posix breaks
+  `bash scripts/boot-test.sh` (`E0554: #![feature] may not be used on the
+  stable release channel`). A weak *undefined* symbol resolves to null at
+  link time, so pure-Rust programs (no `.init_array`, no boundary symbols
+  synthesised by lld's default layout) link cleanly and the startup walk
+  sees null bounds → no-op. `run_constructors()` (preinit then init) is
+  called from `__libc_start_main` after environ/signal init and before
+  `main`; `run_destructors()` is registered via `atexit` so it fires
+  LIFO-correct at normal exit. All `#[cfg(target_os = "none")]`, so the
+  slateos userspace target (os=linux, uses Rust std's own startup) is
+  untouched. Four host unit tests cover forward/skip-null, reverse order,
+  null-bounds no-op, and empty-array no-op.
+- *Linker scripts:* `.preinit_array`/`.init_array`/`.fini_array` output
+  sections with `PROVIDE_HIDDEN` boundary symbols added to
+  `services/{hello,init,ticker}/linker.ld` and
+  `userspace/{coreutils,sha256sum,shell}/linker.ld` (`:load` so they land
+  in the mapped PT_LOAD; `KEEP` so `--gc-sections` keeps them). NOTE: these
+  6 scripts are currently **vestigial** — `kernel/build.rs` no longer
+  passes `-T` for them and no per-crate build.rs applies them — so they're
+  updated for correctness/future-proofing but do not yet feed a live link.
 
-**Proper fix (two parts, must land together):**
-1. *Linker scripts:* in every userspace/service `linker.ld`, add (before
-   `/DISCARD/`) output sections:
-   ```
-   .preinit_array ALIGN(8) : {
-       PROVIDE_HIDDEN(__preinit_array_start = .);
-       KEEP(*(.preinit_array))
-       PROVIDE_HIDDEN(__preinit_array_end = .);
-   } :load
-   .init_array ALIGN(8) : {
-       PROVIDE_HIDDEN(__init_array_start = .);
-       KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) .init_array))
-       PROVIDE_HIDDEN(__init_array_end = .);
-   } :load
-   .fini_array ALIGN(8) : {
-       PROVIDE_HIDDEN(__fini_array_start = .);
-       KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) .fini_array))
-       PROVIDE_HIDDEN(__fini_array_end = .);
-   } :load
-   ```
-   (Must be `:load` so they land in the single RWX PT_LOAD the kernel ELF
-   loader maps; `KEEP` so `--gc-sections` doesn't drop them.)
-2. *crt:* extract a host-testable helper
-   `run_init_array(start: *const Option<extern "C" fn()>, end: ...)` that
-   walks `[start, end)` calling each non-null entry in order, plus a
-   reverse-order variant for fini. In `__libc_start_main`, behind
-   `#[cfg(target_os = "none")]`, declare the linker symbols
-   (`extern "C" { static __preinit_array_start: ...; ... }`), run preinit
-   then init arrays **after** environ/signal init and **before** `main`,
-   and register a fini pass via `atexit` (or call it from `exit`). The
-   walk helper itself is unit-testable on the host with a synthetic array.
+**Validated:** `cargo build -p posix` (stable, unknown-none) clean; all 6
+programs whose linker scripts changed build+link clean; posix host tests
+19992 passed (incl. the 4 init/fini tests); `bash scripts/boot-test.sh`
+→ BOOT_OK (zero regression — the walk is a no-op for everything currently
+running).
 
-**Why deferred:** this changes the startup path of **every** userspace
-program (high blast radius — a bad boundary symbol or stray array walk
-crashes all programs at boot), the boundary symbols only exist once the
-linker scripts are updated, and there is **no current consumer** to
-validate against (Rust programs leave the arrays empty, so the walk is a
-no-op and proves nothing). The correct time to land this is when bringing
-up the first C/C++ target program that relies on constructors, so it can
-be validated end-to-end with a QEMU boot test of that program. Landing it
-blind now is pure risk with no payoff. Tracked here so it's ready to
-implement (full design above) the moment a consumer appears.
+**Still pending (why not fully closed):** no in-tree C/C++ program emits
+constructors, so the *non-null* path has never executed on real hardware/
+QEMU. When the first such consumer lands it additionally needs either
+(a) a C crt0 + `__libc_start_main` exported on slateos, or (b) a
+posix-linking Rust program that actually emits `.init_array` — at which
+point the boundary symbols become non-null and the walk should be
+end-to-end boot-tested against that program. Until then this entry stays
+open to flag that the constructor path is *implemented but unproven under
+load*.
 
-**Discovered/documented:** 2026-06-30 (stale `__libc_csu_init` stub
-comment promoted to tracked tech debt while auditing the posix startup
-path after wiring `pthread_atfork` into `fork()`).
+**Discovered/documented:** 2026-06-30; mechanism implemented + host-tested
+2026-07-01.
 
 ### D-CNET-L2BRIDGE. User-defined container networks provide IPAM but no shared layer-2 bridge (peers can't reach each other directly) — TECH DEBT
 

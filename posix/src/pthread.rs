@@ -227,6 +227,10 @@ impl ThreadSlot {
 }
 
 /// Read-only snapshot of a tracked thread's metadata.
+// Only consumed by `find_thread_info` (the `pthread_getattr_np` helper),
+// which is itself `target_os="none"`-gated; carry the same gate so the
+// host/slateos builds don't see it as dead code.
+#[cfg(target_os = "none")]
 #[derive(Clone, Copy)]
 struct ThreadInfo {
     stack_base: usize,

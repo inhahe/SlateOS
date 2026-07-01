@@ -220,8 +220,6 @@ impl TarHeader {
 
 #[cfg(unix)]
 fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
-    use std::os::unix::fs::MetadataExt;
-
     let mut out: Box<dyn Write> = match archive_file {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
@@ -307,9 +305,6 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
             }
         }
     }
-
-    // Silence unused-import warning when no files are dirs/files.
-    let _ = MetadataExt::mode;
 
     for path_str in files {
         let path = Path::new(path_str);

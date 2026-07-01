@@ -130,6 +130,28 @@ in addition to reworking the harness to wait on a real exit signal. No code
 change made this session (the observation came from unrelated container-CLI
 boot tests); logged here so the intermittent total hang isn't forgotten.
 
+**Search narrowed 2026-07-01 (negative result):** audited the core futex
+wait/wake primitive for the "lost wakeup when a waker runs before the waiter
+parks" hypothesis and found it **sound** — not the bug. `futex_wait_bitset`
+enqueues the `Waiter` under `FUTEX_TABLE`, drops that lock, then calls
+`sched::block_current()`; the classic window between "dropped the futex lock"
+and "parked" is closed by the scheduler's `pending_wake` flag: `sched::wake`
+(mod.rs ~L1388) and `sched::try_wake` (ISR path, ~L1436) both set
+`task.pending_wake = true` when the target is *not yet* `Blocked`, and
+`block_current` (~L1373) consumes that flag and returns **without** parking. So
+a `futex_wake` (or timer/ISR wake) that races ahead of the park cannot be lost.
+The `register-then-recheck` signal-waiter dance likewise closes the
+signal-vs-enqueue window for user tasks. **Conclusion:** stop looking at the
+futex primitive; the intermittent total hang is in the surrounding ring-3
+`clone`/CoW-fault/thread-teardown-reap machinery (the last serial activity on
+the total-hang run was in the glibc `clone` CoW region — `[cow] Cloned address
+space`, page-cache faults for the glibc text inode — not inside a futex wait).
+Next candidates to instrument: (a) the CoW page-fault handler taking a lock the
+reaper/`clone` path also takes (frame-alloc vs. address-space vs. page-table
+lock ordering), and (b) `on_thread_exit`/`reap_dead_tasks` racing a thread that
+is mid-`clone`. A lock-order tracer around the address-space + frame-alloc +
+SCHED locks during a `clone`-heavy boot is the tool to build next.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

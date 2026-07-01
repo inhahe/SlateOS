@@ -69,8 +69,30 @@ self-test now passes the previously-deadlocking "Largest RSS" step; no
 **Limitation / follow-up:** the guard covers *involuntary* preemption only.
 Voluntarily yielding/blocking (`yield_now`/`block`) while holding a tracked
 spinlock is still a caller bug and is not guarded (there is no such call site
-today). A cheap hardening would be a one-shot warning in the voluntary-switch
-path when `preempt_count(cpu) > 0`.
+today). **Done (2026-07-01):** added a one-shot warning in `schedule_inner`'s
+voluntary-switch path when `preempt_count(cpu) > 0` (commit `49c92d346`);
+it stayed silent across all boots, confirming no offending call site exists.
+Also added (commit `ebd5c4b21`) a lockdep instant SELF-DEADLOCK diagnostic when
+the *same* lock instance is re-acquired on one CPU — fires immediately instead
+of waiting ~30s for the stall detector, now reliable because tracked mutexes no
+longer carry stale per-CPU held-stack entries across a context switch.
+
+**Raw `spin::Mutex` audit (2026-07-01):** the preempt-disable fix protects only
+`crate::sync::Mutex`; a *raw* `spin::Mutex` (250+ call sites, mostly procfs/sysfs
+leaf backends) held across a preemptible path and contended by a higher-priority
+task is the same latent deadlock class — and is *invisible* to both lockdep and
+the stall detector. Audited the only plausibly-dangerous category, the blocking
+IPC primitives (`futex`, `pipe`, `stream_socket`, `semaphore`, `eventfd`,
+`epoll`, `timerfd`, `signalfd`): **all clean** — every one follows the correct
+enqueue-waiter → `drop(table)` → `block_current()` discipline (e.g.
+`futex.rs:340-379` scopes the table lock in a block that closes before the park).
+The remaining raw-`spin::Mutex` uses are short snapshot copies where the
+held-across-preempt window is a handful of instructions and cross-priority
+contention is implausible. **Proper systemic fix (deferred tech-debt):** migrate
+kernel-internal raw `spin::Mutex` to `crate::sync::Mutex` so *all* kernel
+spinlocks disable preemption and get lockdep coverage — gated on first checking
+the lockdep class-table capacity (a 250-lock bulk migration could overflow it),
+so it needs a capacity bump or a per-class opt-in rather than a blind sweep.
 
 ### B-ACCT-LARGEST. `accounting` self-test "Largest RSS" assumed test-only isolation, panicking when a live process held >50 RSS frames — FIXED 2026-06-30
 

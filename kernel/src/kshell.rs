@@ -69337,7 +69337,7 @@ fn cmd_oci(args: &str) {
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -69350,6 +69350,9 @@ fn cmd_oci(args: &str) {
             // `--network NAME`: attach to a user-defined network, drawing a
             // conflict-free IP from its IPAM (Docker `docker run --network`).
             let mut net_name: Option<&str> = None;
+            // `--network-alias NAME` (repeatable): extra embedded-DNS names the
+            // container answers to on its network, alongside its name/hostname.
+            let mut net_aliases: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
             // Volume mounts as (host_target, guest_prefix, read_only) triples
             // from `-v host:guest` (Docker order). The host target is either an
             // absolute host path (bind mount) or a named volume's backing path
@@ -69694,6 +69697,16 @@ fn cmd_oci(args: &str) {
                             i = i.saturating_add(1);
                         }
                     }
+                    "--network-alias" => {
+                        if let Some(&al) = parts.get(i.saturating_add(1)) {
+                            if !al.is_empty() {
+                                net_aliases.push(al);
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--entrypoint" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
                             entrypoint_override = Some(spec);
@@ -70004,6 +70017,11 @@ fn cmd_oci(args: &str) {
                                 && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name)
                             {
                                 names.push(cinfo.hostname.as_str());
+                            }
+                            // Explicit --network-alias names (register_dns_names
+                            // de-duplicates case-insensitively).
+                            for &al in &net_aliases {
+                                names.push(al);
                             }
                             if !names.is_empty() {
                                 if let Err(e) =
@@ -70688,7 +70706,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

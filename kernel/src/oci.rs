@@ -753,6 +753,353 @@ pub fn extract_layer(
 }
 
 // ---------------------------------------------------------------------------
+// Image authoring (writer) — the ungated foundation for `docker build`
+// ---------------------------------------------------------------------------
+
+/// A single file to place into a built image layer.
+///
+/// `path` is the archive-relative path (no leading `/`); parent directories are
+/// synthesised automatically.  `mode` is the POSIX permission bits.
+pub struct LayerFile {
+    /// Archive-relative path, e.g. `"bin/hello"`.
+    pub path: String,
+    /// File contents.
+    pub data: Vec<u8>,
+    /// POSIX permission bits (e.g. `0o755`).
+    pub mode: u32,
+}
+
+/// One layer of a built image — an ordered set of files.
+pub struct BuildLayer {
+    /// Files contained in this layer (bottom-to-top layer order is the order
+    /// of layers in [`ImageSpec::layers`]).
+    pub files: Vec<LayerFile>,
+}
+
+/// A complete specification for authoring an OCI image on disk.
+///
+/// Mirrors the fields [`ImageConfig`] parses back, so an image written with
+/// [`write_image`] round-trips through [`load_image`] with byte-identical
+/// metadata.  This is the output target of a Dockerfile builder (`docker
+/// build`): each instruction mutates the config or appends a layer.
+pub struct ImageSpec {
+    /// CPU architecture (e.g. `"amd64"`).
+    pub architecture: String,
+    /// Operating system (e.g. `"linux"`).
+    pub os: String,
+    /// `KEY=VALUE` environment entries (Dockerfile `ENV`).
+    pub env: Vec<String>,
+    /// Default command (Dockerfile `CMD`).
+    pub cmd: Vec<String>,
+    /// Entrypoint (Dockerfile `ENTRYPOINT`).
+    pub entrypoint: Vec<String>,
+    /// Working directory (Dockerfile `WORKDIR`).
+    pub working_dir: String,
+    /// User (Dockerfile `USER`).
+    pub user: String,
+    /// Exposed ports like `"8080/tcp"` (Dockerfile `EXPOSE`).
+    pub exposed_ports: Vec<String>,
+    /// Labels (Dockerfile `LABEL`).
+    pub labels: Vec<(String, String)>,
+    /// Layers, bottom-to-top (Dockerfile `COPY`/`ADD` produce these).
+    pub layers: Vec<BuildLayer>,
+}
+
+impl ImageSpec {
+    /// A minimal linux/amd64 spec with no config and no layers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            architecture: String::from("amd64"),
+            os: String::from("linux"),
+            env: Vec::new(),
+            cmd: Vec::new(),
+            entrypoint: Vec::new(),
+            working_dir: String::new(),
+            user: String::new(),
+            exposed_ports: Vec::new(),
+            labels: Vec::new(),
+            layers: Vec::new(),
+        }
+    }
+}
+
+impl Default for ImageSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Lowercase-hex encode a byte slice.
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
+    for &b in bytes {
+        let hi = b >> 4;
+        let lo = b & 0x0F;
+        s.push(char::from(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 }));
+        s.push(char::from(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 }));
+    }
+    s
+}
+
+/// Compute the `sha256:<hex>` digest string of `data`.
+fn sha256_digest(data: &[u8]) -> String {
+    format!("sha256:{}", hex_lower(&crate::crypto::sha256(data)))
+}
+
+/// Append `s` as a JSON string literal (with surrounding quotes and escaping)
+/// to `out`.  Escapes `"`, `\`, and the JSON-mandatory control characters; other
+/// bytes are emitted as-is (our parser is byte-oriented, so non-ASCII passes
+/// through unchanged).
+fn push_json_string(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Render a `["a","b",...]` JSON array of strings.
+fn json_string_array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        push_json_string(&mut out, item);
+    }
+    out.push(']');
+    out
+}
+
+/// All unique parent-directory prefixes of `path` (archive-relative), shallow to
+/// deep — e.g. `"a/b/c"` → `["a", "a/b"]`.
+fn parent_prefixes(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    // Every component except the last is a directory prefix.
+    let dir_count = comps.len().saturating_sub(1);
+    for comp in comps.into_iter().take(dir_count) {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(comp);
+        out.push(acc.clone());
+    }
+    out
+}
+
+/// Build one layer's *uncompressed* tar bytes from its files, synthesising the
+/// directory entries every file's parents need (deduplicated, shallow-first).
+fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
+    use crate::fs::tar::{EntryKind, TarWriteEntry};
+    use alloc::collections::BTreeSet;
+
+    // Collect all directory prefixes across all files, deduplicated and ordered
+    // shallow→deep (BTreeSet gives lexicographic order; a parent always sorts
+    // before its children because it is a prefix ending at a `/` boundary).
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    for f in &layer.files {
+        for d in parent_prefixes(&f.path) {
+            dirs.insert(d);
+        }
+    }
+
+    let mut entries: Vec<TarWriteEntry> = Vec::new();
+    for d in dirs {
+        entries.push(TarWriteEntry {
+            name: format!("{d}/"),
+            data: Vec::new(),
+            kind: EntryKind::Directory,
+            link_target: String::new(),
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+        });
+    }
+    for f in &layer.files {
+        entries.push(TarWriteEntry {
+            name: f.path.clone(),
+            data: f.data.clone(),
+            kind: EntryKind::File,
+            link_target: String::new(),
+            mode: f.mode,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+        });
+    }
+    crate::fs::tar::create(&entries)
+}
+
+/// Serialise the image config JSON (the blob [`ImageConfig::parse`] reads back).
+fn build_config_json(spec: &ImageSpec, diff_ids: &[String]) -> String {
+    let mut out = String::from("{");
+    out.push_str("\"architecture\":");
+    push_json_string(&mut out, &spec.architecture);
+    out.push_str(",\"os\":");
+    push_json_string(&mut out, &spec.os);
+    out.push_str(",\"config\":{");
+    out.push_str("\"Env\":");
+    out.push_str(&json_string_array(&spec.env));
+    out.push_str(",\"Cmd\":");
+    out.push_str(&json_string_array(&spec.cmd));
+    out.push_str(",\"Entrypoint\":");
+    out.push_str(&json_string_array(&spec.entrypoint));
+    out.push_str(",\"WorkingDir\":");
+    push_json_string(&mut out, &spec.working_dir);
+    out.push_str(",\"User\":");
+    push_json_string(&mut out, &spec.user);
+    out.push_str(",\"ExposedPorts\":{");
+    for (i, p) in spec.exposed_ports.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        push_json_string(&mut out, p);
+        out.push_str(":{}");
+    }
+    out.push_str("},\"Labels\":{");
+    for (i, (k, v)) in spec.labels.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        push_json_string(&mut out, k);
+        out.push(':');
+        push_json_string(&mut out, v);
+    }
+    out.push_str("}},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":");
+    out.push_str(&json_string_array(diff_ids));
+    out.push_str("}}");
+    out
+}
+
+/// Render a blob descriptor object `{"mediaType":..,"digest":..,"size":N}`.
+fn descriptor_json(media_type: &str, digest: &str, size: u64) -> String {
+    let mut out = String::from("{\"mediaType\":");
+    push_json_string(&mut out, media_type);
+    out.push_str(",\"digest\":");
+    push_json_string(&mut out, digest);
+    out.push_str(",\"size\":");
+    out.push_str(&format!("{size}"));
+    out.push('}');
+    out
+}
+
+/// Write a blob into `image_dir/blobs/sha256/<hex>`; returns its `Descriptor`.
+fn write_blob(image_dir: &str, media_type: &str, data: &[u8]) -> KernelResult<Descriptor> {
+    let digest = sha256_digest(data);
+    let (_, hex) = digest.split_once(':').ok_or(KernelError::InternalError)?;
+    let path = format!("{image_dir}/blobs/sha256/{hex}");
+    crate::fs::Vfs::write_file(&path, data)?;
+    Ok(Descriptor {
+        media_type: String::from(media_type),
+        digest,
+        size: data.len() as u64,
+    })
+}
+
+/// Author a complete OCI image directory from `spec`.
+///
+/// Writes uncompressed→gzipped layer blobs (with correct content digests and
+/// uncompressed-tar `diff_id`s), the image config, the manifest, `index.json`
+/// and `oci-layout`, all in standard OCI layout under `dest_dir`.  The result is
+/// immediately loadable by [`load_image`] and runnable by the container runtime,
+/// so this is the build target for a Dockerfile builder.
+///
+/// Returns the manifest [`Descriptor`] (as referenced by `index.json`).
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `dest_dir` is empty or contains NUL.
+/// - Any VFS error while creating directories or writing blobs.
+pub fn write_image(dest_dir: &str, spec: &ImageSpec) -> KernelResult<Descriptor> {
+    if dest_dir.is_empty() || dest_dir.contains('\0') {
+        return Err(KernelError::InvalidArgument);
+    }
+    let dest = dest_dir.trim_end_matches('/');
+    if dest.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    if spec.layers.len() > MAX_LAYERS {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    use crate::fs::Vfs;
+    // Create the layout skeleton (idempotent).
+    let _ = Vfs::mkdir(dest);
+    let _ = Vfs::mkdir(&format!("{dest}/blobs"));
+    let _ = Vfs::mkdir(&format!("{dest}/blobs/sha256"));
+
+    // Layers: tar → diff_id (uncompressed) → gzip → blob digest.
+    let mut layer_descs: Vec<Descriptor> = Vec::with_capacity(spec.layers.len());
+    let mut diff_ids: Vec<String> = Vec::with_capacity(spec.layers.len());
+    for layer in &spec.layers {
+        let tar = build_layer_tar(layer);
+        diff_ids.push(sha256_digest(&tar));
+        let gz = crate::fs::compress::gzip(&tar);
+        layer_descs.push(write_blob(dest, MEDIA_TYPE_LAYER_GZIP, &gz)?);
+    }
+
+    // Config blob.
+    let config_json = build_config_json(spec, &diff_ids);
+    let config_desc = write_blob(dest, MEDIA_TYPE_CONFIG, config_json.as_bytes())?;
+
+    // Manifest blob.
+    let mut manifest = String::from("{\"schemaVersion\":2,\"mediaType\":");
+    push_json_string(&mut manifest, MEDIA_TYPE_MANIFEST);
+    manifest.push_str(",\"config\":");
+    manifest.push_str(&descriptor_json(
+        &config_desc.media_type,
+        &config_desc.digest,
+        config_desc.size,
+    ));
+    manifest.push_str(",\"layers\":[");
+    for (i, d) in layer_descs.iter().enumerate() {
+        if i != 0 {
+            manifest.push(',');
+        }
+        manifest.push_str(&descriptor_json(&d.media_type, &d.digest, d.size));
+    }
+    manifest.push_str("]}");
+    let manifest_desc = write_blob(dest, MEDIA_TYPE_MANIFEST, manifest.as_bytes())?;
+
+    // index.json (references the manifest, with a platform).
+    let mut index = String::from("{\"schemaVersion\":2,\"mediaType\":");
+    push_json_string(&mut index, MEDIA_TYPE_INDEX);
+    index.push_str(",\"manifests\":[{\"mediaType\":");
+    push_json_string(&mut index, &manifest_desc.media_type);
+    index.push_str(",\"digest\":");
+    push_json_string(&mut index, &manifest_desc.digest);
+    index.push_str(",\"size\":");
+    index.push_str(&format!("{}", manifest_desc.size));
+    index.push_str(",\"platform\":{\"architecture\":");
+    push_json_string(&mut index, &spec.architecture);
+    index.push_str(",\"os\":");
+    push_json_string(&mut index, &spec.os);
+    index.push_str("}}]}");
+    Vfs::write_file(&format!("{dest}/index.json"), index.as_bytes())?;
+
+    // oci-layout marker.
+    Vfs::write_file(
+        &format!("{dest}/oci-layout"),
+        format!("{{\"imageLayoutVersion\":\"{OCI_LAYOUT_VERSION}\"}}").as_bytes(),
+    )?;
+
+    Ok(manifest_desc)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1019,6 +1366,95 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[oci]   env-file parse + key extraction: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (10 tests)");
+    // Test 11: write_image → load_image round-trip (image authoring).
+    {
+        use crate::fs::Vfs;
+        let dir = "/tmp/oci_wr_test";
+        // Best-effort clean slate.
+        cleanup_image_dir(dir);
+
+        let mut spec = ImageSpec::new();
+        spec.env.push(String::from("PATH=/usr/bin:/bin"));
+        spec.env.push(String::from("APP=demo"));
+        spec.cmd.push(String::from("/bin/hello"));
+        spec.entrypoint.push(String::from("/entry.sh"));
+        spec.working_dir = String::from("/app");
+        spec.user = String::from("nobody");
+        spec.exposed_ports.push(String::from("8080/tcp"));
+        spec.labels.push((String::from("version"), String::from("1.0")));
+        // Two layers: one file each.
+        spec.layers.push(BuildLayer {
+            files: alloc::vec![LayerFile {
+                path: String::from("entry.sh"),
+                data: b"#!/bin/sh\necho base\n".to_vec(),
+                mode: 0o755,
+            }],
+        });
+        spec.layers.push(BuildLayer {
+            files: alloc::vec![LayerFile {
+                path: String::from("bin/hello"),
+                data: b"hello-binary-contents".to_vec(),
+                mode: 0o755,
+            }],
+        });
+
+        let manifest_desc = write_image(dir, &spec)?;
+        assert_eq!(manifest_desc.media_type, MEDIA_TYPE_MANIFEST);
+        assert!(manifest_desc.digest.starts_with("sha256:"));
+
+        // Load it back and verify metadata survives the round-trip.
+        let image = load_image(dir)?;
+        assert_eq!(image.config.architecture, "amd64");
+        assert_eq!(image.config.os, "linux");
+        assert_eq!(image.config.env.len(), 2);
+        assert_eq!(image.config.env[0], "PATH=/usr/bin:/bin");
+        assert_eq!(image.config.cmd, alloc::vec![String::from("/bin/hello")]);
+        assert_eq!(image.config.entrypoint, alloc::vec![String::from("/entry.sh")]);
+        assert_eq!(image.config.working_dir, "/app");
+        assert_eq!(image.config.user, "nobody");
+        assert_eq!(image.config.exposed_ports.len(), 1);
+        assert_eq!(image.config.exposed_ports[0], "8080/tcp");
+        assert_eq!(image.config.labels.len(), 1);
+        assert_eq!(image.config.diff_ids.len(), 2);
+        assert_eq!(image.manifest.layers.len(), 2);
+
+        // Extract layer 1 and confirm the file content survived tar+gzip+digest.
+        let layer1 = image.manifest.layers.get(1)
+            .ok_or(KernelError::InvalidArgument)?;
+        let extract_dir = "/tmp/oci_wr_extract";
+        let _ = Vfs::mkdir(extract_dir);
+        extract_layer(dir, layer1, extract_dir)?;
+        let hello = Vfs::read_file(&format!("{extract_dir}/bin/hello"))?;
+        assert_eq!(hello, b"hello-binary-contents");
+
+        // Clean up.
+        let _ = Vfs::remove(&format!("{extract_dir}/bin/hello"));
+        let _ = Vfs::rmdir(&format!("{extract_dir}/bin"));
+        let _ = Vfs::rmdir(extract_dir);
+        cleanup_image_dir(dir);
+        serial_println!("[oci]   write_image round-trip: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (11 tests)");
     Ok(())
+}
+
+/// Best-effort recursive removal of an OCI image directory written by
+/// [`write_image`] (layout skeleton + blobs).  Used only by the self-test.
+fn cleanup_image_dir(dir: &str) {
+    use crate::fs::Vfs;
+    let sha_dir = format!("{dir}/blobs/sha256");
+    if let Ok(entries) = Vfs::readdir(&sha_dir) {
+        for de in entries {
+            if de.name == "." || de.name == ".." {
+                continue;
+            }
+            let _ = Vfs::remove(&format!("{sha_dir}/{}", de.name));
+        }
+    }
+    let _ = Vfs::rmdir(&sha_dir);
+    let _ = Vfs::rmdir(&format!("{dir}/blobs"));
+    let _ = Vfs::remove(&format!("{dir}/index.json"));
+    let _ = Vfs::remove(&format!("{dir}/oci-layout"));
+    let _ = Vfs::rmdir(dir);
 }

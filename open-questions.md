@@ -65,6 +65,15 @@ Format for each entry:
   `exec(id, argv) -> KernelResult<i32>` that enters the container's ns+cgroup,
   spawns, and joins via `set_wait_task`), and the `healthcheck` feature that would
   consume it. See `known-issues.md` D-CONTAINER-EXEC-WAIT.
+- **Also gates `docker build`'s `RUN`.** The one remaining big Docker-port
+  capstone is `docker build` (Dockerfile → OCI image). Its non-`RUN`
+  instructions (FROM/COPY/ADD/ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/ARG)
+  are fully ungated and buildable now (they need an OCI image *writer* —
+  uncompressed-tar layer blobs + sha256 digests + config/manifest/index JSON —
+  which `oci.rs` does not yet have). But `RUN <cmd>` executes a command inside
+  the in-progress image's rootfs, which is *the same* rootfs-binary exec this
+  question is about. So resolving Q17 also unblocks `RUN`; until then a builder
+  would have to reject `RUN` with a clear "requires exec (Q17)" message.
 - **Status** — `OPEN` (deferred; not blocking — other container/roadmap
   increments continue).
 

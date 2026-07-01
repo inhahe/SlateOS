@@ -447,6 +447,30 @@ pub fn allocate(name: &str, container_id: Option<u32>) -> KernelResult<Lease> {
     Err(KernelError::ResourceExhausted)
 }
 
+/// Attach (or change) the owning container of an already-allocated address.
+///
+/// Used by the run path, which reserves an address with no owner *before* the
+/// container id is known (the container is created after the IP is chosen so
+/// the interface can be configured), then binds ownership once the id exists.
+/// Binding the owner is what lets [`release_container`] reclaim the lease when
+/// the container is deleted.
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the network is not registered or the address
+///   is not currently allocated.
+pub fn set_allocation_owner(name: &str, ip: [u8; 4], owner: u32) -> KernelResult<()> {
+    let mut table = TABLE.lock();
+    let idx = table.position(name).ok_or(KernelError::NotFound)?;
+    let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
+    let alloc = n
+        .allocations
+        .iter_mut()
+        .find(|a| a.ip == ip)
+        .ok_or(KernelError::NotFound)?;
+    alloc.owner = Some(owner);
+    Ok(())
+}
+
 /// Release a specific address from a network.
 ///
 /// # Errors
@@ -603,6 +627,23 @@ pub fn self_test() {
     remove("st-net-def").expect("remove default network");
     assert_eq!(count(), base, "registry returns to baseline after default net");
     serial_println!("[cnetwork]   default-subnet create: OK");
+
+    // set_allocation_owner: reserve with no owner (as the run path does), then
+    // bind an owner so container-scoped release can reclaim it.
+    create_with_subnet("st-net-own", [10, 50, 0, 0], 24, None).expect("create own-net");
+    let lease = allocate("st-net-own", None).expect("reserve unowned");
+    assert_eq!(lease.ip, [10, 50, 0, 2], "reserved first host address");
+    // An unowned lease is not reclaimed by container-scoped release.
+    assert_eq!(release_container(42), 0, "no address owned by container 42 yet");
+    set_allocation_owner("st-net-own", lease.ip, 42).expect("bind owner");
+    assert!(
+        set_allocation_owner("st-net-own", [10, 50, 0, 99], 42).is_err(),
+        "binding an unallocated address errors",
+    );
+    assert_eq!(release_container(42), 1, "owner binding lets release reclaim it");
+    remove("st-net-own").expect("remove own-net");
+    assert_eq!(count(), base, "registry returns to baseline after own net");
+    serial_println!("[cnetwork]   set_allocation_owner (run-path reservation): OK");
 
     serial_println!("[cnetwork] Self-test PASSED");
 }

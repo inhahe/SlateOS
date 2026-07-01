@@ -1380,6 +1380,12 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Flush NAT entries and port-forward rules before tearing down namespace.
     crate::net::nat::flush_namespace(net_ns);
     crate::net::nat::flush_port_forwards(net_ns);
+    // Release any user-defined-network IP leases owned by this container so the
+    // address returns to its network's IPAM pool (Docker frees a container's
+    // network endpoints on removal). Idempotent: a container with no `--network`
+    // lease owns nothing, so this is a no-op. `release_container` takes its own
+    // lock, so it runs outside the container table lock.
+    let _ = crate::cnetwork::release_container(id);
     let _ = crate::cgroup::delete(cgroup_id);
     let _ = crate::netns::delete(net_ns);
     let _ = crate::userns::delete(user_ns);

@@ -69021,7 +69021,7 @@ fn cmd_oci(args: &str) {
             }
         }
         "run" | "create" => {
-            // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
+            // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME]
             //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
             //   where src is an absolute host path (bind mount) or a bare name
             //   (named volume, created on demand under VOLUMES_ROOT)
@@ -69031,7 +69031,7 @@ fn cmd_oci(args: &str) {
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -69040,6 +69040,10 @@ fn cmd_oci(args: &str) {
             let mut net_ip: Option<[u8; 4]> = None;
             let mut net_gw: Option<[u8; 4]> = None;
             let mut net_dns: Option<[u8; 4]> = None;
+            let mut net_mask: Option<[u8; 4]> = None;
+            // `--network NAME`: attach to a user-defined network, drawing a
+            // conflict-free IP from its IPAM (Docker `docker run --network`).
+            let mut net_name: Option<&str> = None;
             // Volume mounts as (host_target, guest_prefix, read_only) triples
             // from `-v host:guest` (Docker order). The host target is either an
             // absolute host path (bind mount) or a named volume's backing path
@@ -69376,6 +69380,14 @@ fn cmd_oci(args: &str) {
                             i = i.saturating_add(1);
                         }
                     }
+                    "--network" => {
+                        if let Some(&nn) = parts.get(i.saturating_add(1)) {
+                            net_name = Some(nn);
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
                     "--entrypoint" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
                             entrypoint_override = Some(spec);
@@ -69568,13 +69580,44 @@ fn cmd_oci(args: &str) {
                 }
             };
 
+            // Step 3.5: if `--network NAME` was given (and no explicit `--net`
+            // IP), draw a conflict-free address from that network's IPAM. The
+            // reservation is unowned until the container id exists (below); we
+            // stash `(name, ip)` so ownership can be bound after create and so a
+            // failed create can release the reservation rather than leak it.
+            let mut network_lease: Option<(&str, [u8; 4])> = None;
+            if let Some(nn) = net_name {
+                if net_ip.is_some() {
+                    crate::console_println!(
+                        "[oci] --network {} ignored: explicit --net IP already given", nn
+                    );
+                } else {
+                    match crate::cnetwork::allocate(nn, None) {
+                        Ok(lease) => {
+                            net_ip = Some(lease.ip);
+                            net_gw = Some(lease.gateway);
+                            net_mask = Some(lease.netmask);
+                            network_lease = Some((nn, lease.ip));
+                        }
+                        Err(e) => {
+                            crate::console_println!(
+                                "[oci] Cannot allocate IP from network '{}': {:?}", nn, e
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Step 4: Create container.
             let mut cfg = crate::container::ContainerConfig::new(image_name);
             cfg.net_ip = net_ip;
             cfg.net_gateway = net_gw;
             cfg.net_dns = net_dns;
             if net_ip.is_some() {
-                cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+                // Prefer the network's mask (from IPAM); fall back to /24 for a
+                // bare `--net IP`.
+                cfg.net_mask = net_mask.or(Some([255, 255, 255, 0]));
             }
             // Apply optional resource limits (--memory / --cpus). 0 = unlimited
             // is the cgroup default, so we only override when a flag was given.
@@ -69623,6 +69666,19 @@ fn cmd_oci(args: &str) {
                     }
                     for (k, v) in &cfg.labels {
                         crate::console_println!("  Label:        {}={}", k, v);
+                    }
+                    // Bind the reserved network address to this container so its
+                    // lease is reclaimed when the container is deleted. The
+                    // reservation was made unowned above (before the id existed).
+                    if let Some((nn, ip)) = network_lease {
+                        match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
+                            Ok(()) => crate::console_println!(
+                                "  Network:      {} (ip {})", nn, fmt_ipv4(ip)
+                            ),
+                            Err(e) => crate::console_println!(
+                                "[oci] Warning: could not bind network '{}' owner: {:?}", nn, e
+                            ),
+                        }
                     }
 
                     // Determine the container's jail root.  Prefer the merged
@@ -69926,6 +69982,11 @@ fn cmd_oci(args: &str) {
                     );
                 }
                 Err(e) => {
+                    // Release the network reservation made before create so a
+                    // failed run does not leak an IP.
+                    if let Some((nn, ip)) = network_lease {
+                        let _ = crate::cnetwork::release(nn, ip);
+                    }
                     crate::console_println!("[oci] Container creation failed: {:?}", e);
                 }
             }
@@ -69940,7 +70001,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

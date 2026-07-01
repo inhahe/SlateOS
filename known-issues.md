@@ -421,6 +421,89 @@ implement (full design above) the moment a consumer appears.
 comment promoted to tracked tech debt while auditing the posix startup
 path after wiring `pthread_atfork` into `fork()`).
 
+### D-CNET-L2BRIDGE. User-defined container networks provide IPAM but no shared layer-2 bridge (peers can't reach each other directly) — TECH DEBT
+
+**Where:** `kernel/src/cnetwork.rs` (registry + IPAM) and the `oci run
+--network NAME` wiring in `kernel/src/kshell.rs` (cmd_oci run). Each
+container still gets its existing per-netns veth-to-host link
+(`setup_container_veth` in `kernel/src/container.rs`), so it has host and
+external connectivity via NAT, but two containers attached to the *same*
+named network are not on a shared broadcast domain and cannot address each
+other directly by their allocated IPs.
+
+**What works today:** named networks with subnet/gateway, conflict-free
+IPAM allocation (`allocate`/`release`/`release_container`), the full
+`docker network` CLI (create/ls/inspect/rm/prune), `--network NAME`
+drawing an address at run, and lease reclamation on container delete.
+`inspect` reports only what is real (subnet, gateway, leased addresses) —
+it does not claim inter-container reachability.
+
+**Proper fix:** stand up one `net::bridge` instance per named network and
+attach each member container's veth host-end as a bridge port, then pump
+frames between `net::veth::poll_all` and the bridge FDB so same-network
+peers forward at L2. This needs: (1) a bridge handle stored on each
+`Network`, created lazily on first attach and deleted on last detach; (2)
+mapping a veth host-end to a bridge port id (the bridge currently
+addresses ports by `u8` id — needs a veth↔port registration path); (3)
+frame plumbing so a frame egressing one member's veth host-end is
+forwarded by the bridge to the destination member's veth host-end (today
+veth host-ends terminate at the host stack, not a bridge). Until then,
+same-host inter-container connectivity must go through published ports +
+host loopback, exactly as before named networks existed.
+
+**Discovered/documented:** 2026-07-01 (while landing the `docker network`
+IPAM feature, increments 60–61).
+
+### D-CONTAINER-EXEC-WAIT. `container exec` is a net_ns-switch facade, not a real in-container process; healthchecks are blocked on a synchronous wait/join primitive — TECH DEBT
+
+**Where:** `container exec` handler in `kernel/src/kshell.rs`
+(cmd_container, "exec" arm, ~line 68148). It temporarily sets the shell
+task's `net_ns` to the container's and runs a *kshell builtin* in that
+namespace, then restores. It does **not** spawn the target binary inside
+the container's rootfs + PID/user namespaces + cgroup, and it cannot run
+an arbitrary container ELF or capture its exit code. The machinery to
+spawn *into* an existing container exists (`container::add_process_task`
+binds any pid/task into a container's namespaces/rootfs/cgroup/volumes —
+this is how `run` works), but the shell's process-launch path (`cmd_run`)
+is fully detached: it spawns and returns without waiting, and there is no
+synchronous waitpid/join primitive wired into kshell to block until a
+child exits and read its exit code. An exec'd non-init process would also
+zombie without a reaping owner.
+
+**Impact / what's blocked:**
+- A *real* `docker exec` (run a container binary, foreground, capture exit
+  code) cannot be built until a blocking wait/join primitive is available
+  from kshell task context.
+- `HEALTHCHECK` support is blocked on the same primitive: a healthcheck
+  probe must run the image's health command inside the container on a
+  timer and read its exit code (0=healthy) to drive healthy/unhealthy
+  state. The `oci` image-config parser (`kernel/src/oci.rs`
+  `ImageConfig`) also does not yet capture the `Healthcheck` field.
+
+**Proper fix:**
+1. Add a blocking wait primitive usable from kshell task context: given a
+   spawned global pid, sleep the caller until that process reaches zombie,
+   then return its `pcb::exit_code(pid)` and reap it (the plumbing exists —
+   `pcb::set_wait_task`/`take_wait_task`/`exit_code` and the zombie
+   transition path — it needs a safe kshell-facing wrapper).
+2. Add `container::exec_path(id, guest_cmd, argv) -> KernelResult<u64>`
+   that reads the ELF from the container's rootfs (`root_path + guest_cmd`),
+   `spawn_process`es it, and `add_process_task`s it into the container
+   (without flipping state or setting `init_pid`). Redirect its stdio to a
+   capture file as `run` does.
+3. Rework the shell `container exec` to use (2)+(1): spawn the real
+   process, block for exit, print the exit code. Keep a `-d`/detached mode
+   that returns the pid immediately.
+4. Then add healthchecks: parse `Healthcheck` in `oci::ImageConfig`, store
+   the probe (test/interval/timeout/retries/start_period) on the
+   container, and drive periodic probes via `hrtimer::schedule_ns` →
+   `workqueue::submit` → `exec_path` + wait, tracking
+   starting/healthy/unhealthy and surfacing it in `inspect`/`ps`.
+
+**Discovered/documented:** 2026-07-01 (while surveying the next container
+increment after `docker network`; the current `exec` facade and the
+detached `cmd_run` path were confirmed by reading both).
+
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 
 **Where:** `kernel/src/idt.rs` page-fault handler (~line 1787). After

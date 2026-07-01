@@ -5303,7 +5303,12 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
   - [-] Port Docker (or equivalent container runtime) — in progress. Native
     `container`/`ct` runtime + `oci` image tooling + a `docker`/`dk` compat
     shim. Shipped: OCI image load/inspect/layers/extract, overlay rootfs,
-    volumes, user-defined networks + IPAM, port publishing, resource limits
+    volumes, user-defined networks + IPAM + **shared L2 bridge** (one
+    `net::bridge` per network, veth host-ends switched at L2 so same-network
+    peers reach each other directly) + **embedded DNS** (container
+    name/hostname/`--network-alias` → peer IP, network-scoped and
+    case-insensitive, consulted by the in-container resolver before any
+    upstream query — 127.0.0.11 semantics), port publishing, resource limits
     (mem/cpu via cgroups), restart/`--rm` policies, `run`/`create`/`start`/
     `stop`/`kill`/`pause`/`ps`/`rm`/`inspect`/`logs`/`events`/`stats`/`top`/
     `port`/`wait`/`diff`/`rename`/`update`/`prune`/`cp`/`commit`/`export`/
@@ -5341,9 +5346,14 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     `container commit`, which clones a container; `docker commit` stages a
     standalone layout in a temp dir then imports it into the store under the
     given `name:tag`.
-    Remaining: real `container exec` / Dockerfile
-    `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)
-    — gated on operator decision Q17 (see open-questions.md).
+    Real in-container `container exec` (spawns a genuine process in the
+    container's namespaces + cgroup and, foreground, blocks on its exit via
+    `wait_process`) and image `HEALTHCHECK` (parsed from OCI config, driven by
+    a non-blocking hrtimer→workqueue supervisor, surfaced in `inspect`/`ps`)
+    both shipped. Remaining: Dockerfile `RUN` execution (still gated on
+    operator decision Q17, see open-questions.md) and runtime `network
+    connect/disconnect` (gated on the single-vs-multi-network model decision
+    Q19).
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

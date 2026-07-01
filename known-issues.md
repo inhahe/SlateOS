@@ -269,44 +269,45 @@ current-task cgroup is always root). Both pass in QEMU; the existing
 cgroup charge/uncharge and limit-enforcement self-tests (10/11) still
 pass.
 
-### D-CGROUP-TASK-UNASSIGNED. No path assigns a non-root cgroup to a task — cgroup memory controller is dormant for real workloads — TECH DEBT
+### D-CGROUP-TASK-UNASSIGNED. Cgroup memory controller now reachable for real workloads — RESOLVED (2026-07-01)
 
-**Where:** `kernel/src/sched/task.rs` (every `Task` is constructed with
-`cgroup_id: crate::cgroup::ROOT_CGROUP` at lines ~852/934/1077) and
-`kernel/src/container.rs` (a container creates a cgroup and stores it in
-`Container::cgroup_id`, but nothing copies that onto the container's
-tasks). After removing the speculative `sched::set_task_cgroup` (added
-only for a test, then made unnecessary), there is now **no** code path
-that ever sets `task.cgroup_id` to anything other than root, and
-`fork`/`spawn` do not propagate a parent's cgroup.
+**Original problem:** every `Task` was constructed with
+`cgroup_id: ROOT_CGROUP` and no path ever set it to anything else, so
+`current_task_cgroup()` always returned root, `charge_cgroup_alloc`
+fast-exited, and the per-cgroup memory limit / accounting was never
+exercised by real workloads — only by self-tests charging an explicit
+cgroup. Container memory limits did not actually constrain memory.
 
-**Effect:** `current_task_cgroup()` always returns `ROOT_CGROUP` for real
-tasks, so `charge_cgroup_alloc` fast-exits (root is unlimited) and the
-per-cgroup memory limit / accounting (`cgroup::set_mem_limit`,
-`mem_charge`, the per-frame `FRAME_CGROUP` array) is never exercised by
-actual workloads — only by self-tests that charge an explicit cgroup.
-The controller is correct but unreachable: container memory limits do
-not actually constrain memory.
+**Resolution (Q14, operator option A):**
+1. **Assignment path** — `sched::set_task_cgroup(task_id, cgroup)`
+   (`kernel/src/sched/mod.rs:1287`) is the single authoritative
+   process→cgroup assignment: it swaps `task.cgroup_id` under the SCHED
+   lock and keeps the cgroup `nr_tasks` counts consistent (detach old,
+   attach new) with a strict SCHED→cgroup-TABLE lock order.
+   `container.rs` `add_process_task` (line ~1543) calls it to move a
+   container's task into the container's cgroup, and `remove` (line
+   ~1640) moves it back to root.
+2. **Inheritance path** — `sched::spawn` (`mod.rs:1031/1046`) captures
+   `current_task_cgroup()` before the task-creation critical section and
+   copies it onto the new task, so `fork` (routes through
+   `thread::spawn`→`sched::spawn`), `thread_clone`, and `spawn_user`
+   (also `→sched::spawn`) all inherit the creating task's cgroup — Linux
+   fork/clone semantics. Recorded in design-decisions §39.
+3. **End-to-end test** — `cgroup_e2e_test_task` in `kernel/src/main.rs`
+   runs as a live scheduler task (so `current_task_cgroup()` resolves to
+   a real task, unlike the no-task kmain self-tests): it creates a
+   memory-limited child cgroup, joins it via `set_task_cgroup`, allocates
+   N=32 frames through the ordinary `alloc_frame` path (into a stack
+   array — no heap growth to perturb the count), and asserts the group's
+   `mem_usage` rose by exactly N; then frees them and asserts usage
+   returns to baseline (uncharge follows the per-frame `FRAME_CGROUP`
+   record, so it debits the right group even after the task rejoins root).
+   Prints `[cgroup-e2e] PASS`/`FAIL` on the boot serial log.
 
-**Proper fix:** wire container creation/enter to assign the container's
-`cgroup_id` to its tasks (a `sched` setter that takes the scheduler lock
-and sets `task.cgroup_id`), and have `fork`/`thread_clone`/`spawn`
-inherit the parent task's `cgroup_id` so children stay in the group.
-Then add an integration test that spawns a process under a
-memory-limited cgroup, faults in N pages, and asserts the cgroup's
-`mem_usage == N` (end-to-end no-double-charge / limit-enforcement).
-
-**Discovered:** 2026-06-30 while fixing B-CGROUP-DBLCHARGE (the fix made
-the frame allocator the sole charging authority; verifying it surfaced
-that the *current task* is never in a non-root cgroup at runtime).
-
-**Blocked on:** open-questions.md **Q14** — the proper fix depends on an
-architectural decision, because there are *two* disconnected cgroup
-subsystems (`kernel/src/cgroup.rs`, which enforces but has no task
-assignment, and `fs::cgroupfs`, which configures but does not enforce).
-Which layer owns process→cgroup assignment, and whether to unify them,
-is an operator call. The fork/clone/spawn cgroup *inheritance* part is
-clearly correct but inert until an assignment path exists.
+**Discovered:** 2026-06-30 while fixing B-CGROUP-DBLCHARGE. **Resolved:**
+2026-07-01 once Q14 settled which layer owns process→cgroup assignment
+(`kernel/src/cgroup.rs` enforces + owns assignment via `set_task_cgroup`;
+`fs::cgroupfs` remains the config frontend).
 
 ### D-PTHREAD-DETACH-LEAK. Detached pthread stacks are never freed (64 KiB leaked per detached thread) — TECH DEBT
 

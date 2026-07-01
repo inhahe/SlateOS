@@ -3904,6 +3904,46 @@ extern "C" fn kernel_main() -> ! {
     // Security posture summary — one consolidated view of active protections.
     print_security_posture();
 
+    // End-to-end cgroup memory-charging test.  Runs as a live scheduler
+    // task (not an inline kmain self-test) so `current_task_cgroup()`
+    // resolves to a real task and the ambient frame-allocator charging
+    // path is exercised — the piece D-CGROUP-TASK-UNASSIGNED said was
+    // untestable in the no-task kmain self-test context.  Spawned and
+    // awaited *before* BOOT_OK so its PASS/FAIL line lands on the serial
+    // log before the boot harness tears QEMU down.
+    {
+        let e2e_pml4 = mm::page_table::active_pml4_phys();
+        match sched::spawn(
+            b"cgroup-e2e",
+            sched::task::DEFAULT_PRIORITY,
+            cgroup_e2e_test_task,
+            0,
+            e2e_pml4,
+        ) {
+            Ok(tid) => {
+                serial_println!("[boot] cgroup e2e test task spawned (tid={})", tid);
+                // Bounded wait: yield until the task signals completion.
+                // Capped so a hung test can never wedge boot — if the cap
+                // is hit we log a warning and proceed (the boot still
+                // succeeds; the test result is simply absent).
+                let mut spins: u32 = 0;
+                while !CGROUP_E2E_DONE.load(core::sync::atomic::Ordering::Acquire) {
+                    sched::yield_now();
+                    spins = spins.saturating_add(1);
+                    if spins >= 2_000_000 {
+                        serial_println!(
+                            "[boot] WARNING: cgroup e2e task did not finish in time"
+                        );
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                serial_println!("[boot] WARNING: failed to spawn cgroup e2e task: {:?}", e);
+            }
+        }
+    }
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.
@@ -4068,6 +4108,114 @@ extern "C" fn deferred_bench_task(_arg: u64) {
     mm::heap::enable_poison();
     serial_println!("BENCH_OK");
 }
+
+/// End-to-end verification that the live frame allocator charges the
+/// **current task's** cgroup on alloc and uncharges on free.
+///
+/// This closes the loop left open by `D-CGROUP-TASK-UNASSIGNED`: the
+/// existing frame-allocator self-tests exercise `charge_cgroup_alloc_to`
+/// with an *explicit* cgroup because kmain self-tests run with no
+/// scheduled task (`current_task_cgroup()` returns root). Running here,
+/// as a genuine scheduler task, lets us assign *this* task to a
+/// memory-limited cgroup and confirm that the ordinary `alloc_frame`
+/// path bills that group.
+///
+/// Protocol: create a limited child cgroup, join it, allocate N frames
+/// via the live path (into a stack array — no heap growth to perturb the
+/// count), leave the cgroup, and assert the group's `mem_usage` rose by
+/// exactly N. Then free the frames and assert usage returns to baseline
+/// (uncharge follows the per-frame record, independent of which cgroup
+/// the freeing task is in).
+extern "C" fn cgroup_e2e_test_task(_arg: u64) {
+    const N: usize = 32;
+
+    let cg = match cgroup::create(cgroup::ROOT_CGROUP) {
+        Ok(id) => id,
+        Err(e) => {
+            serial_println!("[cgroup-e2e] SKIP: cgroup create failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Limit comfortably above N so the test's own allocations succeed;
+    // over-limit rejection is covered by the frame-allocator self-tests.
+    if let Err(e) = cgroup::set_mem_limit(cg, cgroup::MemLimit::frames((N as u64).saturating_mul(4)))
+    {
+        serial_println!("[cgroup-e2e] SKIP: set_mem_limit failed: {:?}", e);
+        let _ = cgroup::delete(cg);
+        return;
+    }
+
+    let task_id = sched::current_task_id();
+    let base = cgroup::stats(cg).map_or(0, |s| s.mem_usage);
+
+    // Join the memory-limited cgroup. From here, every alloc_frame on this
+    // task charges `cg` via the ambient `current_task_cgroup()` path.
+    if let Err(e) = sched::set_task_cgroup(task_id, cg) {
+        serial_println!("[cgroup-e2e] SKIP: set_task_cgroup failed: {:?}", e);
+        let _ = cgroup::delete(cg);
+        return;
+    }
+
+    // Allocate N frames. Stack array (no heap) so nothing else on this task
+    // allocates — and therefore charges the cgroup — between join and measure.
+    let mut frames: [Option<mm::frame::PhysFrame>; N] = [None; N];
+    let mut allocated = 0usize;
+    for slot in frames.iter_mut() {
+        match mm::frame::alloc_frame() {
+            Ok(f) => {
+                *slot = Some(f);
+                allocated = allocated.saturating_add(1);
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Leave the cgroup *before* any allocating operation (serial print, etc.)
+    // so stray allocations don't inflate the measured usage.
+    let _ = sched::set_task_cgroup(task_id, cgroup::ROOT_CGROUP);
+
+    let after_alloc = cgroup::stats(cg).map_or(0, |s| s.mem_usage);
+
+    // Free everything. Uncharge follows the per-frame FRAME_CGROUP record,
+    // so it debits `cg` correctly even though this task is now back in root.
+    for slot in frames.iter_mut() {
+        if let Some(f) = slot.take() {
+            // SAFETY: each frame came from alloc_frame just above and is
+            // freed exactly once (the slot is take()n so no double free).
+            let _ = unsafe { mm::frame::free_frame(f) };
+        }
+    }
+
+    let after_free = cgroup::stats(cg).map_or(0, |s| s.mem_usage);
+
+    let charged = after_alloc.saturating_sub(base);
+    let ok = allocated == N && charged == N as u64 && after_free == base;
+    if ok {
+        serial_println!(
+            "[cgroup-e2e] PASS: alloc_frame charged {} frames to cgroup {} (usage {}->{}->{}), uncharge balanced",
+            charged, cg, base, after_alloc, after_free
+        );
+    } else {
+        serial_println!(
+            "[cgroup-e2e] FAIL: allocated={} charged={} (want {}) base={} after_free={}",
+            allocated, charged, N, base, after_free
+        );
+    }
+
+    let _ = cgroup::delete(cg);
+
+    // Signal kmain (which is blocked in a bounded yield loop before it
+    // prints BOOT_OK) that the test has finished and its result is on the
+    // serial log.
+    CGROUP_E2E_DONE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Set true by [`cgroup_e2e_test_task`] when the end-to-end cgroup test
+/// completes, so kmain can wait for its serial output before the boot
+/// harness observes `BOOT_OK` and tears down QEMU.
+static CGROUP_E2E_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Idle loop

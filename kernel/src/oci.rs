@@ -1630,12 +1630,14 @@ fn ctx_rel(context_dir: &str, full: &str) -> String {
 /// Collect files for a single COPY/ADD source into `files`, computing each
 /// entry's archive-relative destination path per Docker's COPY semantics and
 /// skipping context files excluded by `.dockerignore` (`ignore`).
+#[allow(clippy::too_many_arguments)]
 fn collect_copy_src(
     context_dir: &str,
     src: &str,
     dest: &str,
     single_source: bool,
     ignore: &[(bool, String)],
+    chmod: Option<u32>,
     files: &mut Vec<LayerFile>,
     line: usize,
 ) -> Result<(), BuildError> {
@@ -1679,7 +1681,7 @@ fn collect_copy_src(
                 });
             }
             let data = Vfs::read_file(&ctx)?;
-            files.push(LayerFile { path: target, data, mode: file_mode(&meta) });
+            files.push(LayerFile { path: target, data, mode: chmod.unwrap_or_else(|| file_mode(&meta)) });
         }
         EntryType::Directory => {
             // Docker copies the *contents* of a directory source into dest.
@@ -1716,7 +1718,7 @@ fn collect_copy_src(
                             files.push(LayerFile {
                                 path: archive_norm(&child_dest),
                                 data,
-                                mode: file_mode(&cmeta),
+                                mode: chmod.unwrap_or_else(|| file_mode(&cmeta)),
                             });
                         }
                         // Symlinks/other kinds are skipped (documented limitation).
@@ -2268,6 +2270,19 @@ fn build_one_stage_inner(
                 let from_ref: Option<String> = toks
                     .iter()
                     .find_map(|t| t.strip_prefix("--from=").map(String::from));
+                // `--chmod=<octal>` overrides the copied files' permission bits.
+                let chmod: Option<u32> = match toks.iter().find_map(|t| t.strip_prefix("--chmod=")) {
+                    Some(m) => match u32::from_str_radix(m.trim_start_matches("0o"), 8) {
+                        Ok(v) => Some(v),
+                        Err(_) => {
+                            return Err(BuildError::Parse {
+                                line,
+                                msg: format!("COPY/ADD --chmod is not a valid octal mode: {m}"),
+                            });
+                        }
+                    },
+                    None => None,
+                };
                 // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
                 toks.retain(|t| !t.starts_with("--"));
                 if toks.len() < 2 {
@@ -2291,7 +2306,7 @@ fn build_one_stage_inner(
                     None => (String::from(context_dir), ignore),
                 };
                 for src in toks.iter().take(src_count) {
-                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, &mut files, line)?;
+                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
             }
@@ -3110,7 +3125,39 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   multi-stage builds (FROM..AS / COPY --from / --target): OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (15 tests)");
+    // Test 16: COPY --chmod=<octal> overrides the copied file's mode bits.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_chmod_ctx";
+        let img = "/tmp/oci_chmod_img";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/run.sh"), b"#!/bin/sh\n")?;
+
+        let df = b"FROM scratch\nCOPY --chmod=0600 run.sh /run.sh\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] chmod build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let ci = load_image(img)?;
+        let layer = ci.manifest.layers.first().ok_or(KernelError::InternalError)?;
+        let bp = layer.blob_path().ok_or(KernelError::InvalidArgument)?;
+        let blob = Vfs::read_file(&format!("{img}/{bp}"))?;
+        let tar = crate::fs::compress::gunzip(&blob)?;
+        let entries = crate::fs::tar::parse(&tar)?;
+        let run = entries
+            .iter()
+            .find(|e| e.name.trim_start_matches('/') == "run.sh")
+            .ok_or(KernelError::InternalError)?;
+        assert_eq!(run.mode & 0o777, 0o600, "--chmod=0600 applied to run.sh");
+
+        let _ = Vfs::remove(&format!("{ctx}/run.sh"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   COPY --chmod: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (16 tests)");
     Ok(())
 }
 

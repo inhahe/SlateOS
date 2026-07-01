@@ -68694,7 +68694,7 @@ fn cmd_oci(args: &str) {
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -68732,6 +68732,12 @@ fn cmd_oci(args: &str) {
             // writes that don't land in a writable (`:rw`) volume are denied
             // with EROFS. Applied to the container at create time (Step 4).
             let mut read_only_root = false;
+            // Docker `--restart POLICY`: auto-restart policy for the init
+            // process (no|always|unless-stopped|on-failure[:N]). Applied to the
+            // container config at create time.
+            let mut restart_policy: Option<crate::container::RestartPolicy> = None;
+            // Docker `--rm`: auto-delete the container when its init exits.
+            let mut auto_remove = false;
             // Docker `--workdir`/`-w`: initial working directory of the init
             // process (a guest path resolved under the container jail). When
             // unset, the image's `WorkingDir` config is used, else `/`.
@@ -68926,6 +68932,25 @@ fn cmd_oci(args: &str) {
                         // Flag (no argument): make the container rootfs RO.
                         read_only_root = true;
                         i = i.saturating_add(1);
+                    }
+                    "--rm" => {
+                        // Flag (no argument): auto-remove on init exit.
+                        auto_remove = true;
+                        i = i.saturating_add(1);
+                    }
+                    "--restart" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            match crate::container::parse_restart_policy(spec) {
+                                Some(p) => restart_policy = Some(p),
+                                None => crate::console_println!(
+                                    "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
+                                    spec
+                                ),
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
                     }
                     "--workdir" | "-w" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
@@ -69200,6 +69225,13 @@ fn cmd_oci(args: &str) {
             for (k, v) in &labels {
                 cfg = cfg.label(k, v);
             }
+            // Apply optional lifecycle automation (--restart / --rm). Note
+            // --read-only is applied post-create via set_read_only_root below,
+            // not here.
+            if let Some(policy) = restart_policy {
+                cfg.restart_policy = policy;
+            }
+            cfg.auto_remove = auto_remove;
 
             match crate::container::create(&cfg) {
                 Ok(ct_id) => {
@@ -69209,6 +69241,12 @@ fn cmd_oci(args: &str) {
                     crate::console_println!("  Name:         {}", image_name);
                     if !cfg.hostname.is_empty() {
                         crate::console_println!("  Hostname:     {}", cfg.hostname);
+                    }
+                    if cfg.restart_policy != crate::container::RestartPolicy::No {
+                        crate::console_println!("  Restart:      {}", cfg.restart_policy);
+                    }
+                    if cfg.auto_remove {
+                        crate::console_println!("  AutoRemove:   yes (--rm)");
                     }
                     for (k, v) in &cfg.labels {
                         crate::console_println!("  Label:        {}={}", k, v);

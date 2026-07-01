@@ -23,50 +23,50 @@ Format for each entry:
 
 ---
 
-## Q16 `container diff` baseline semantics — OPEN
+## Q17 real `container exec` semantics — replace the netns-debug facade? — OPEN
 
-- **Question** — What should Docker-style `container diff` (list filesystem
-  changes since the container's "base") compare against, given our container
-  model supports two rootfs kinds?
-- **Context** — Two kinds of container rootfs exist today:
-  1. **Overlay-backed** (created via `oci run`): a real overlayfs with a
-     read-only lower (the image layers) and a writable upper. Docker's diff is
-     *defined* here — Added/Changed = entries in the upper, Deleted = whiteouts.
-     `kernel/src/fs/overlay.rs` already tracks `whiteouts` and the upper dir, so
-     this is computable cleanly **iff** the container records its `OverlayId`.
-  2. **Plain bind-rootfs** (created via `container create` + `container rootfs
-     <dir>`): a chroot to a plain host directory with no lower/upper distinction.
-     There is no natural "base" to diff against.
+- **Question** — Docker's `docker exec <ctr> <cmd>` runs a **new program from
+  the container's own rootfs** inside the running container's namespaces (PID,
+  mount, net, user) and cgroup. Our current `container exec` (kshell ~68148) is a
+  *different* thing: it switches into the container's **network namespace** and
+  runs a **kshell builtin** there — a handy network-debugging facade, not a
+  rootfs-binary launcher. Do we (a) replace the facade with real Docker-style
+  exec, (b) keep the facade and add real exec under a new verb, or (c) keep the
+  facade only?
+- **Context / why it's an operator call** — This changes the behavior of an
+  **existing, already-shipped command**. The netns-debug facade is genuinely
+  useful (run `ip`/`ping`/socket builtins inside a container's network sandbox
+  without a rootfs binary present) and real exec would *lose* that unless kept
+  separately. It's user-visible, so it shouldn't be swapped unilaterally.
 - **Options**
-  - **A. Overlay-only diff.** Implement `diff` only for overlay-backed
-    containers (enumerate upper + whiteouts, classify A/C/D); return
-    `NotSupported` for plain bind-rootfs containers. *Pro:* matches Docker
-    semantics exactly, no band-aid, cheap (no rootfs walk). *Con:* needs the
-    container to record its `OverlayId` (today it only stores `rootfs_mount`, a
-    path); `diff` is unavailable for the common plain-rootfs path.
-  - **B. Point-in-time baseline.** Capture a manifest (path → size/mtime, or a
-    content hash) of the rootfs when the container first `start()`s, and diff the
-    live tree against it. *Pro:* works for every container regardless of rootfs
-    kind. *Con:* not Docker's semantics (baseline is "first start", not "image"),
-    adds a full rootfs walk + a stored per-container manifest on the start hot
-    path, and a large rootfs makes start() expensive.
-  - **C. Both.** Overlay diff when an overlay is present, fall back to a
-    point-in-time baseline otherwise. *Pro:* always available, exact where it can
-    be. *Con:* two code paths and two different meanings of "diff" under one
-    command — potentially confusing.
-- **Claude's recommendation** — **A** (overlay-only), as the only option that is
-  a *proper* (non-band-aid) implementation matching Docker. It requires a small
-  plumbing change: record the `OverlayId` on the `Container` struct at
-  `oci run` time. In the meantime `container diff` is simply not implemented;
-  all other `container` subcommands (export/import/commit/prune/rm -f/…) are
-  done and don't depend on this.
-- **Where it bites** — `kernel/src/container.rs` (`Container` struct would gain
-  an `overlay_id: Option<OverlayId>` field set on the `oci run` path; a new
-  `diff(id)` fn), `kernel/src/fs/overlay.rs` (would need an `upper_entries(id)`
-  enumerator + expose `whiteouts`), `kernel/src/oci.rs` (overlay creation site),
-  `kernel/src/kshell.rs` (`container diff` arm).
-- **Status** — `OPEN` (deferred; not blocking — other container increments
-  continue).
+  - **A. Replace.** `container exec <id> <path> [args…]` spawns the rootfs binary
+    in the container's namespaces+cgroup, reaping its exit code (reuse the proven
+    `set_wait_task`→`block_current` join used by `container::wait`). *Pro:*
+    matches Docker exactly; the single obvious meaning of "exec". *Con:* deletes
+    the netns-debug facility; a foreground-blocking exec self-test risks tripping
+    the documented flaky glibc-spawn/COW hang (B-PTHREAD-YIELDBUDGET family) in
+    the boot test.
+  - **B. Both, distinct verbs.** Keep `container exec` = netns-debug facade; add
+    `container run-in <id> <path> [args…]` (or `exec --rootfs`) for the real
+    rootfs-binary exec. *Pro:* no capability lost, Docker parity gained. *Con:*
+    two verbs, and `exec` then diverges from Docker's meaning (confusing for
+    Docker users; the `docker` delegate would have to map `exec`→`run-in`).
+  - **C. Keep facade only.** *Pro:* zero risk, no new spawn/join surface. *Con:*
+    no real exec — a visible gap vs Docker; `healthcheck`/`exec`-dependent
+    features can't be built on it.
+- **Claude's recommendation** — **B** short-term shading into **A** long-term:
+  add real rootfs exec under an unambiguous verb now (no capability lost, testable
+  in isolation), and once the glibc-spawn flakiness is root-caused, make the
+  `docker exec` delegate route to the real path so Docker users get Docker
+  semantics while `container exec` keeps the netns-debug meaning for our own
+  tooling. In the meantime neither `exec` behavior changes, so nothing is blocked.
+- **Where it bites** — `kernel/src/kshell.rs` (`container exec` arm ~68148 + a new
+  arm / `docker` delegate map), `kernel/src/container.rs` (a new
+  `exec(id, argv) -> KernelResult<i32>` that enters the container's ns+cgroup,
+  spawns, and joins via `set_wait_task`), and the `healthcheck` feature that would
+  consume it. See `known-issues.md` D-CONTAINER-EXEC-WAIT.
+- **Status** — `OPEN` (deferred; not blocking — other container/roadmap
+  increments continue).
 
 ---
 
@@ -144,5 +144,14 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   execute Q13 + Q14 first, then a large initiative — C (GPU accel) or D (Docker /
   container-runtime port) in operator-indifferent order; this is the explicit
   go-ahead for the Docker port (§40).
+- Q16 `container diff` baseline semantics — resolved 2026-07-01, **Claude
+  autonomous (operator-approved Docker-port scope)**: implemented **option A**
+  (overlay-only diff). `Container` now records its `OverlayId` at `oci run` time;
+  `container::diff(id)` enumerates the overlay upper (Added/Changed via
+  `which_layer`) + whiteouts (Deleted), sorted; plain bind-rootfs containers
+  return `InvalidArgument` ("no overlay rootfs"). No band-aid, matches Docker.
+  Where: `kernel/src/container.rs`, `kernel/src/fs/overlay.rs` (`upper_path`/
+  `whiteouts`), `kernel/src/kshell.rs` (`container diff` arm). See
+  `design-decisions.md` §41.
 
 ---

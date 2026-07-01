@@ -306,6 +306,20 @@ watchdog called for above is now **implemented and boot-validated**.
   the watchdog remains useful only for the idle-hang variant; the busy/BSP-dead
   variant (which this 2026-07-01 catch appears to be) still escapes it.
 
+**Recurrence 2026-07-01 (embedded-DNS work, same signature).** During the
+boot test for the container embedded-DNS increment, one run hung with no
+BOOT_OK in 480 s; serial stopped mid-line at `[thread] Spawned thread (t`
+immediately after `[cow] Cloned address space: parent=… -> child=…` and
+`[sched] Spawned task 144` for a ring-3 clone (pid 177), with a burst of
+page-cache faults for a glibc text inode just before — the exact
+clone/CoW/thread-spawn signature documented above, and **no** watchdog dump
+(BSP-stuck blind spot). The **immediately following** boot of the identical
+binary reached BOOT_OK at 177 s with every self-test passing (including the
+new `[cnetwork]   embedded DNS resolve: OK`). Confirms again the hang is in
+the ring-3 `clone`/CoW-fault/thread-spawn path and is independent of the
+touched code (this session changed only `cnetwork.rs`/`kshell.rs`, neither
+on the boot spawn path). No new fix this session; datapoint logged.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

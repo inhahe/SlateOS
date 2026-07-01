@@ -68831,6 +68831,12 @@ fn cmd_container_network(parts: &[&str]) {
                             }
                         }
                     }
+                    if !n.dns_names.is_empty() {
+                        crate::console_println!("DNS names:");
+                        for (nm, ip) in &n.dns_names {
+                            crate::console_println!("  {} -> {}", nm, fmt_ipv4(*ip));
+                        }
+                    }
                 }
                 None => crate::console_println!("Network '{}' not found", name),
             }
@@ -68839,10 +68845,23 @@ fn cmd_container_network(parts: &[&str]) {
             let n = crate::cnetwork::prune();
             crate::console_println!("Removed {} network(s)", n);
         }
+        "resolve" | "lookup" => {
+            // container network resolve NET NAME — Docker embedded-DNS query.
+            let (Some(&net), Some(&query)) = (parts.get(2), parts.get(3)) else {
+                crate::console_println!("Usage: container network resolve NET NAME");
+                return;
+            };
+            match crate::cnetwork::resolve(net, query) {
+                Some(ip) => crate::console_println!("{} -> {}", query, fmt_ipv4(ip)),
+                None => crate::console_println!(
+                    "{}: name does not resolve on network '{}'", query, net
+                ),
+            }
+        }
         other => {
             crate::console_println!("Unknown network action '{}'", other);
             crate::console_println!(
-                "Usage: container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP]"
+                "Usage: container network <create|ls|rm|inspect|prune|resolve> NAME [--subnet CIDR] [--gateway IP]"
             );
         }
     }
@@ -69971,6 +69990,31 @@ fn cmd_oci(args: &str) {
                             Err(e) => crate::console_println!(
                                 "[oci] Warning: could not bind network '{}' owner: {:?}", nn, e
                             ),
+                        }
+                        // Register the container's DNS names on the network so
+                        // same-network peers can resolve it by name (Docker
+                        // embedded DNS): the container name plus its hostname
+                        // (when set and distinct). Non-fatal on failure.
+                        if let Some(cinfo) = crate::container::info(ct_id) {
+                            let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                            if !cinfo.name.is_empty() {
+                                names.push(cinfo.name.as_str());
+                            }
+                            if !cinfo.hostname.is_empty()
+                                && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name)
+                            {
+                                names.push(cinfo.hostname.as_str());
+                            }
+                            if !names.is_empty() {
+                                if let Err(e) =
+                                    crate::cnetwork::register_dns_names(nn, ct_id, &names)
+                                {
+                                    crate::console_println!(
+                                        "[oci] Warning: could not register DNS names on '{}': {:?}",
+                                        nn, e
+                                    );
+                                }
+                            }
                         }
                         // Attach the container's host-side veth to the network's
                         // shared L2 bridge so same-network peers can reach it

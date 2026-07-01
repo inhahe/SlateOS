@@ -80,6 +80,12 @@ struct Allocation {
     /// [`release_container`] detach the veth from the bridge (and tear the
     /// bridge down when its last member leaves). `None` until attached.
     veth_pair: Option<usize>,
+    /// DNS names this address answers to within the network (Docker embedded
+    /// DNS): the container's name, its hostname, and any `--network-alias`
+    /// values. Populated by [`register_dns_names`] at run time; empty until
+    /// then. Lookups ([`resolve`]) are case-insensitive per DNS semantics, so
+    /// the stored form is the caller's original casing but matched loosely.
+    names: Vec<String>,
 }
 
 /// A registered container network.
@@ -110,6 +116,9 @@ pub struct NetworkInfo {
     pub gateway: [u8; 4],
     /// Allocated `(ip, owner_container_id)` pairs.
     pub allocations: Vec<([u8; 4], Option<u32>)>,
+    /// Embedded-DNS `(name, ip)` entries: every registered container name /
+    /// hostname / alias and the address it resolves to on this network.
+    pub dns_names: Vec<(String, [u8; 4])>,
 }
 
 /// The result of allocating an address on a network — everything a caller
@@ -381,6 +390,11 @@ fn network_to_info(n: &Network) -> NetworkInfo {
         prefix_len: n.prefix_len,
         gateway: n.gateway,
         allocations: n.allocations.iter().map(|a| (a.ip, a.owner)).collect(),
+        dns_names: n
+            .allocations
+            .iter()
+            .flat_map(|a| a.names.iter().map(move |nm| (nm.clone(), a.ip)))
+            .collect(),
     }
 }
 
@@ -445,7 +459,12 @@ pub fn allocate(name: &str, container_id: Option<u32>) -> KernelResult<Lease> {
         let taken = candidate == gw
             || n.allocations.iter().any(|a| ip_to_u32(a.ip) == candidate);
         if !taken {
-            n.allocations.push(Allocation { ip, owner: container_id, veth_pair: None });
+            n.allocations.push(Allocation {
+                ip,
+                owner: container_id,
+                veth_pair: None,
+                names: Vec::new(),
+            });
             return Ok(Lease {
                 ip,
                 gateway: n.gateway,
@@ -480,6 +499,81 @@ pub fn set_allocation_owner(name: &str, ip: [u8; 4], owner: u32) -> KernelResult
         .ok_or(KernelError::NotFound)?;
     alloc.owner = Some(owner);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Embedded DNS: name → address resolution within a network
+// ---------------------------------------------------------------------------
+
+/// Register the DNS names a container answers to on a network (Docker embedded
+/// DNS). Records the container's name, hostname, and any `--network-alias`
+/// values on its owned allocation(s) so same-network peers can resolve it by
+/// name via [`resolve`].
+///
+/// Names are appended to whatever is already registered, de-duplicated
+/// case-insensitively; empty names are ignored. Called from the run path after
+/// [`set_allocation_owner`] has bound the container id to its lease.
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the network is not registered, or the
+///   container owns no allocation on it (nothing to attach the names to).
+pub fn register_dns_names(name: &str, container_id: u32, names: &[&str]) -> KernelResult<()> {
+    let mut table = TABLE.lock();
+    let idx = table.position(name).ok_or(KernelError::NotFound)?;
+    let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
+
+    let mut bound = false;
+    for a in n.allocations.iter_mut() {
+        if a.owner == Some(container_id) {
+            for &candidate in names {
+                if candidate.is_empty() {
+                    continue;
+                }
+                let dup = a
+                    .names
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(candidate));
+                if !dup {
+                    a.names.push(candidate.into());
+                }
+            }
+            bound = true;
+        }
+    }
+    if bound {
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
+    }
+}
+
+/// Resolve a DNS name to an address within a network (Docker embedded DNS).
+///
+/// Matches `query` case-insensitively against every allocation's registered
+/// names (container name, hostname, network aliases). Returns the first
+/// matching address, or `None` if the network is unknown or no allocation
+/// answers to that name.
+///
+/// Resolution is scoped to a single network: a name only resolves for peers on
+/// the *same* named network, mirroring Docker's per-network embedded resolver.
+#[must_use]
+pub fn resolve(network: &str, query: &str) -> Option<[u8; 4]> {
+    if query.is_empty() {
+        return None;
+    }
+    let table = TABLE.lock();
+    let idx = table.position(network)?;
+    let n = table.networks.get(idx)?;
+    for a in &n.allocations {
+        if a
+            .names
+            .iter()
+            .any(|nm| nm.eq_ignore_ascii_case(query))
+        {
+            return Some(a.ip);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -842,6 +936,56 @@ pub fn self_test() {
         remove("st-l2").expect("remove st-l2");
         assert_eq!(count(), base, "registry back to baseline after L2 test");
         serial_println!("[cnetwork]   L2 bridge lifecycle: OK");
+    }
+
+    // Embedded DNS: name → address resolution within a network.
+    {
+        create_with_subnet("st-dns", [10, 44, 0, 0], 24, None)
+            .expect("create st-dns");
+        let web = allocate("st-dns", None).expect("web lease").ip;
+        let db = allocate("st-dns", None).expect("db lease").ip;
+        set_allocation_owner("st-dns", web, 201).expect("bind web owner");
+        set_allocation_owner("st-dns", db, 202).expect("bind db owner");
+
+        // Before registration nothing resolves.
+        assert!(resolve("st-dns", "web").is_none(), "unregistered name must not resolve");
+
+        // Register the container name plus a hostname alias for web; a bare
+        // container name for db.
+        register_dns_names("st-dns", 201, &["web", "web.local"]).expect("register web names");
+        register_dns_names("st-dns", 202, &["db"]).expect("register db names");
+
+        // Exact and case-insensitive lookups both resolve to the right address.
+        assert_eq!(resolve("st-dns", "web"), Some(web), "web resolves");
+        assert_eq!(resolve("st-dns", "WEB"), Some(web), "resolution is case-insensitive");
+        assert_eq!(resolve("st-dns", "web.local"), Some(web), "alias resolves");
+        assert_eq!(resolve("st-dns", "db"), Some(db), "db resolves");
+        assert!(resolve("st-dns", "missing").is_none(), "unknown name does not resolve");
+        // Names are scoped to the network: a name on st-dns must not resolve on
+        // an unrelated (nonexistent) network.
+        assert!(resolve("st-net-a", "web").is_none(), "names are network-scoped");
+
+        // Duplicate registration (any casing) does not double-list.
+        register_dns_names("st-dns", 201, &["WEB", ""]).expect("dup register");
+        let info = inspect("st-dns").expect("inspect st-dns");
+        let web_entries = info.dns_names.iter().filter(|(_, ip)| *ip == web).count();
+        assert_eq!(web_entries, 2, "web keeps exactly its two distinct names");
+
+        // Registration must fail for a container with no lease on the network.
+        assert!(
+            register_dns_names("st-dns", 999, &["ghost"]).is_err(),
+            "registering names for a non-member must fail",
+        );
+
+        // Releasing a container drops its DNS names too.
+        assert_eq!(release_container(201), 1, "web lease freed");
+        assert!(resolve("st-dns", "web").is_none(), "names gone after release");
+        assert_eq!(resolve("st-dns", "db"), Some(db), "db still resolves");
+
+        assert_eq!(release_container(202), 1, "db lease freed");
+        remove("st-dns").expect("remove st-dns");
+        assert_eq!(count(), base, "registry back to baseline after DNS test");
+        serial_println!("[cnetwork]   embedded DNS resolve: OK");
     }
 
     serial_println!("[cnetwork] Self-test PASSED");

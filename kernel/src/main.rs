@@ -3618,6 +3618,13 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // virtio-gpu DRM driver-specific uAPI ABI self-test (3D/virgl foundation
+    // for the Vulkan/OpenGL Mesa port).
+    if let Err(e) = drm::virtgpu_uapi::self_test() {
+        serial_println!("FATAL: virtio-gpu DRM uAPI ABI self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+
     // DRM card client-instance lifecycle self-test (the /dev/dri fd family).
     if let Err(e) = drm::card_fd::self_test() {
         serial_println!("FATAL: DRM card client self-test failed: {:?}", e);

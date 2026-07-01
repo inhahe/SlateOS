@@ -4579,7 +4579,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Display query syscalls (connector status, mode enumeration, CRTC info)
   - [x] Cursor syscalls (SYS_DRM_CURSOR_SET, SYS_DRM_CURSOR_MOVE)
   - [x] Atomic commit syscall (SYS_DRM_ATOMIC_COMMIT with serialized state buffer)
-- [ ] Vulkan loader and basic GPU command submission
+- [-] Vulkan loader and basic GPU command submission
+  - [x] virtio-gpu DRM driver-specific uAPI ABI layer (`kernel/src/drm/virtgpu_uapi.rs`): byte-exact `virtgpu_drm.h` struct mirrors + `DRM_IOCTL_VIRTGPU_*` numbers + `VIRTGPU_PARAM_*`/capset/blob/context-param constants + GETPARAM policy + exhaustive self-test. Pure ABI (no device state/unsafe), mirroring the DRM/KMS `uapi.rs` shim. Foundation for routing render-node ioctls (GETPARAM/GET_CAPS/RESOURCE_CREATE/CONTEXT_INIT/EXECBUFFER/TRANSFER_*/WAIT/MAP) into the virtio-gpu driver's 3D/virgl path.
 - [ ] OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
 

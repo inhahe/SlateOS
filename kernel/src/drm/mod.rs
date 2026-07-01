@@ -78,6 +78,7 @@ pub mod card_fd;
 pub mod syscall;
 #[allow(dead_code)]
 pub mod uapi;
+pub mod virtgpu_uapi;
 
 extern crate alloc;
 

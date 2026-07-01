@@ -68931,6 +68931,8 @@ pub fn cli_resource_parser_self_test() {
 ///   docker images                        → oci images (list the named store)
 ///   docker tag <dir|ref> <ref>           → oci tag (import a dir or re-tag)
 ///   docker rmi <ref>                      → oci rmi (remove a store tag)
+///   docker commit <id> <name:tag>        → author a new image from a
+///                                          container's changes, tag it in the store
 ///
 /// `docker ps` lists every container regardless of state (SlateOS has no
 /// separate "running-only" index; `-a`/`--all` is accepted and ignored
@@ -68979,8 +68981,41 @@ fn cmd_docker(args: &str) {
         // 1:1 passthroughs — the Docker and native subcommand names match.
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
-        | "diff" | "rename" | "update" | "prune" | "cp" | "commit" | "export"
+        | "diff" | "rename" | "update" | "prune" | "cp" | "export"
         | "import" | "volume" | "network" | "system" => delegate(sub),
+        // `docker commit <container> <name:tag>` authors a *new image* from the
+        // container's filesystem changes and tags it into the store — image
+        // production, distinct from the native `container commit` (which clones
+        // a container). We stage a standalone OCI layout in a temp dir, import
+        // it into the store under the given ref, then discard the temp dir
+        // (Docker's commit has no dest-dir artifact).
+        "commit" => {
+            let mut it = rest.split_whitespace();
+            let (Some(id_str), Some(reference)) = (it.next(), it.next()) else {
+                crate::console_println!("Usage: docker commit <container-id> <name:tag>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let tmp = "/tmp/oci-commit-tmp";
+            // Best-effort clean of a stale temp layout from a prior commit.
+            let _ = crate::fs::vfs::Vfs::remove_recursive(tmp);
+            match crate::container::commit_image(id, tmp) {
+                Ok(digest) => {
+                    match crate::oci::store_tag_from_dir(tmp, reference) {
+                        Ok(_) => crate::console_println!(
+                            "Committed container {} as {} ({})", id, reference, digest
+                        ),
+                        Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                    }
+                    // Blobs are now copied into the store; drop the staging dir.
+                    let _ = crate::fs::vfs::Vfs::remove_recursive(tmp);
+                }
+                Err(e) => crate::console_println!("commit failed: {:?}", e),
+            }
+        }
         // Named image store (`/var/lib/images`): `docker images` lists tagged
         // images, `docker tag` adds/imports a reference, `docker rmi` removes
         // one — all backed by the store in `oci.rs`.
@@ -69801,6 +69836,10 @@ fn cmd_oci(args: &str) {
 
             // Step 4: Create container.
             let mut cfg = crate::container::ContainerConfig::new(image_name);
+            // Record the image the container came from (dir path or store
+            // `name:tag` ref) so `oci commit` / `docker commit` can later
+            // author a new image layered on this base.
+            cfg.image_source = String::from(*dir);
             cfg.net_ip = net_ip;
             cfg.net_gateway = net_gw;
             cfg.net_dns = net_dns;
@@ -70469,6 +70508,34 @@ fn cmd_oci(args: &str) {
                 Err(e) => crate::console_println!("rmi failed: {:?}", e),
             }
         }
+        "commit" => {
+            // oci commit <container-id> <dest-dir> [name:tag]  (Docker
+            // `commit`): author a new OCI image from a container's filesystem
+            // changes (its overlay upper layer + whiteouts), layered on the
+            // base image the container was created from. The image is written
+            // as a standalone OCI layout at <dest-dir>; an optional trailing
+            // `name:tag` also tags it into the image store.
+            let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match crate::container::commit_image(id, dest_dir) {
+                Ok(digest) => {
+                    crate::console_println!("Committed container {} -> image {} ({})", id, dest_dir, digest);
+                    if let Some(&reference) = parts.get(3) {
+                        match oci::store_tag_from_dir(dest_dir, reference) {
+                            Ok(d) => crate::console_println!("Tagged {} -> {} ({})", dest_dir, reference, d),
+                            Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                        }
+                    }
+                }
+                Err(e) => crate::console_println!("commit failed: {:?}", e),
+            }
+        }
         "test" => {
             match oci::self_test() {
                 Ok(()) => crate::console_println!("OCI self-test passed."),
@@ -70476,13 +70543,14 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|history|run|build|tag|images|rmi|save|load|test]");
+            crate::console_println!("Usage: oci [inspect|layers|history|run|build|commit|tag|images|rmi|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
             crate::console_println!("  oci history <dir>  — show build history (per-step created-by + size)");
             crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
+            crate::console_println!("  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)");
             crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");

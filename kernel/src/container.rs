@@ -280,6 +280,13 @@ pub struct ContainerConfig {
     /// restart takes precedence (a container that is going to restart is not
     /// removed). Defaults to `false`.
     pub auto_remove: bool,
+    /// The image the container was created from — either an OCI-layout
+    /// directory path or a `name:tag` store reference (as passed to `oci run`).
+    /// Empty when the container was created directly from a bind rootfs (no
+    /// image). Recorded so `oci commit` / `docker commit` can carry the base
+    /// image's config and layers forward when authoring a new image from the
+    /// container's filesystem changes.
+    pub image_source: String,
 }
 
 
@@ -336,6 +343,14 @@ impl ContainerConfig {
     #[must_use]
     pub fn auto_remove(mut self, auto_remove: bool) -> Self {
         self.auto_remove = auto_remove;
+        self
+    }
+
+    /// Record the image the container was created from (OCI-layout dir path or
+    /// `name:tag` store reference), used later by `oci commit`/`docker commit`.
+    #[must_use]
+    pub fn image_source(mut self, source: &str) -> Self {
+        self.image_source = String::from(source);
         self
     }
 
@@ -537,6 +552,11 @@ struct Container {
     /// order listings by creation time (Docker `ps -n`/`-l`). Slots are reused,
     /// so this — not the slot id — is the true creation order.
     created_seq: u64,
+    /// The image the container was created from — an OCI-layout directory path
+    /// or a `name:tag` store reference (from [`ContainerConfig::image_source`]).
+    /// Empty for a container created from a bind rootfs (no image). Recorded so
+    /// `oci commit`/`docker commit` can carry the base image forward.
+    image_source: String,
 }
 
 impl Container {
@@ -571,6 +591,7 @@ impl Container {
             user_stopped: false,
             auto_remove: false,
             created_seq: 0,
+            image_source: String::new(),
         }
     }
 }
@@ -1075,6 +1096,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.restart_count = 0;
         ct.user_stopped = false;
         ct.auto_remove = config.auto_remove;
+        ct.image_source = config.image_source.clone();
         // Stamp the creation sequence so listings can order by creation time.
         ct.created_seq = table.next_seq;
         table.next_seq = table.next_seq.saturating_add(1);
@@ -2829,6 +2851,58 @@ pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
 
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// Author a new OCI image from a container's filesystem changes (Docker
+/// `commit`).
+///
+/// Captures the container's overlay **upper** (writable) layer — the files it
+/// added or changed since it started — plus its whiteouts (deletions), and
+/// layers them on top of the container's base image (recorded at `oci run`
+/// time in [`ContainerConfig::image_source`]). The base image's runtime config
+/// (Env/Cmd/Entrypoint/…) and existing layers are carried forward verbatim; a
+/// `commit`-style history entry is appended. The result is written as a
+/// standalone OCI layout at `dest_dir`; the caller may then tag it into the
+/// image store. Returns the new image's manifest digest (`"sha256:…"`).
+///
+/// This is **image production** (a new image from a container's writes) and is
+/// distinct from [`commit`] (which clones a running container into a new
+/// container). Only the `docker commit` / `oci commit` shell path routes here.
+///
+/// # Errors
+///
+/// - [`KernelError::NotFound`] if the container id is invalid/inactive.
+/// - [`KernelError::InvalidArgument`] if the container has no overlay (jailed
+///   directly at a plain directory — no writable layer to capture) or was not
+///   created from an image (empty `image_source`, so there is no base to
+///   extend).
+/// - Propagates overlay/VFS/OCI errors.
+pub fn commit_image(id: ContainerId, dest_dir: &str) -> KernelResult<String> {
+    // Resolve the container's overlay id and base-image source under the lock.
+    let (overlay_id, image_source) = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        Some((
+            table.containers[idx].overlay_id,
+            table.containers[idx].image_source.clone(),
+        ))
+    })
+    .ok_or(KernelError::NotFound)?;
+
+    let Some(ov_id) = overlay_id else {
+        return Err(KernelError::InvalidArgument);
+    };
+    if image_source.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let upper = crate::fs::overlay::upper_path(ov_id)?;
+    let whiteouts = crate::fs::overlay::whiteouts(ov_id)?;
+
+    let desc = crate::oci::commit_image(&image_source, &upper, &whiteouts, dest_dir)?;
+    Ok(desc.digest)
 }
 
 /// Add a volume (bind) mount to a container before it is run — the Docker

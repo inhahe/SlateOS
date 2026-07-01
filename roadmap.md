@@ -5323,7 +5323,18 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     (auto-tag the built image into the store), and `save`/`load`
     (`save name:tag` exports a single-image tar via `store_export_ref`;
     `load` imports annotated manifests back into the store by `ref.name`) —
-    all via `oci::resolve_image_source` (dir-or-reference).
+    all via `oci::resolve_image_source` (dir-or-reference). **`commit`**
+    (`oci commit <ctr> <dest-dir> [name:tag]` / `docker commit <ctr> name:tag`):
+    authors a *new image* from a running container's filesystem changes —
+    captures the container's overlay upper layer (added/changed files) plus
+    whiteouts (deletions) as one new layer on top of the base image the
+    container was created from (tracked via `ContainerConfig::image_source`,
+    stamped at `oci run` time), carrying the base config (Env/Cmd/Entrypoint/…)
+    and layers forward verbatim and appending a COMMIT `history[]` entry
+    (`oci::commit_image` → `container::commit_image`). Distinct from the native
+    `container commit`, which clones a container; `docker commit` stages a
+    standalone layout in a temp dir then imports it into the store under the
+    given `name:tag`.
     Remaining: real `container exec` / Dockerfile
     `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)
     — gated on operator decision Q17 (see open-questions.md).

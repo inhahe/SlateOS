@@ -3689,3 +3689,45 @@ store import when omitted). The index (de)serialisers were generalised to a
 `dir` parameter (`serialize_index`/`write_index_at`/`read_index_at`) so the same
 code writes the store index and per-export indices. Covered by self-test 22
 (build → tag → export → wipe store → import → resolve + extract original bytes).
+
+**Follow-up 3 — `commit`: author an image from a container's changes (done,
+same day).** `docker commit <container> [repo:tag]` produces a *new image* from
+a running container's filesystem changes. This is distinct from the existing
+native `container commit`, which *clones a container* (snapshots one container's
+rootfs into a second independent container). Both semantics are legitimate and
+useful, so rather than repurpose the shipped `container commit`, the image-
+production path got its own verb and the two are kept separate:
+
+- **`oci commit <container-id> <dest-dir> [name:tag]`** and **`docker commit
+  <container-id> <name:tag>`** → image production (`oci::commit_image` →
+  `container::commit_image`). Captures the container's overlay **upper** layer
+  (added/changed files, walked iteratively via VFS `readdir`/`metadata`/
+  `read_file`) plus its **whiteouts** (deletions, emitted as OCI `.wh.<base>`
+  empty-file markers) as **one new layer** stacked on top of the base image the
+  container was created from. The base image's config (Env/Cmd/Entrypoint/
+  WORKDIR/USER/… and `onbuild`) and existing layers are carried forward verbatim
+  (blobs copied by digest, descriptors + diff_ids reused), and a
+  `#(nop) COMMIT` `history[]` entry is appended. Written as a standalone OCI
+  layout at `dest_dir`; `docker commit` additionally stages that layout in a
+  temp dir and imports it into the store under the given `name:tag`, then
+  discards the temp dir (Docker's `commit` leaves no dir artifact).
+- **`container commit <src-id> <new-name> <rootfs-dir>`** → unchanged
+  (container clone).
+
+To recover the base image at commit time, the container now records the image
+it was created from: `ContainerConfig::image_source` (an OCI-layout dir path or
+a `name:tag` store reference) is stamped at `oci run` time and stored on the
+`Container`; `container::commit_image` reads it back and resolves it via
+`oci::resolve_image_source` (dir-or-reference). A container created from a bind
+rootfs (no image) or with no overlay is rejected with `InvalidArgument` — there
+is no base to extend / no writable layer to capture. Covered by self-test 23
+(build base with Cmd/Env → synthesise an overlay upper + a whiteout →
+`commit_image` → assert base-layer carried + exactly one commit layer +
+Cmd/Env preserved + COMMIT history entry + the commit layer's tar holds the
+added files and the `.wh.` marker).
+
+**Decided by:** Claude (operator-approved scope — the Docker/container-runtime
+port was green-lit by Q15). The `docker commit`→image-production vs. native
+`container commit`→clone split is a Docker-parity choice within that scope, not
+a genuine fork; both behaviours are retained under distinct verbs so nothing is
+lost. `RUN`/`HEALTHCHECK` (in-container rootfs exec) remain gated on Q17.

@@ -1713,6 +1713,159 @@ pub fn resolve_image_source(arg: &str) -> KernelResult<(String, OciImage)> {
     Ok((String::from(STORE_DIR), img))
 }
 
+/// Recursively collect the files and directories under `upper_dir` (a
+/// container's overlay scratch layer) into a [`BuildLayer`], appending OCI
+/// `.wh.`-prefixed whiteout markers for each deleted `whiteouts` path.  This is
+/// the new layer captured by `commit` — the container's filesystem changes
+/// relative to its read-only base image.
+fn overlay_to_build_layer(upper_dir: &str, whiteouts: &[String]) -> KernelResult<BuildLayer> {
+    use crate::fs::vfs::{EntryType, Vfs};
+    let root = upper_dir.trim_end_matches('/');
+    let mut dirs: Vec<LayerDir> = Vec::new();
+    let mut files: Vec<LayerFile> = Vec::new();
+
+    // Iterative DFS over the upper tree; `rel` is archive-relative (no slash).
+    let mut stack: Vec<String> = alloc::vec![String::new()];
+    while let Some(rel) = stack.pop() {
+        let abs = if rel.is_empty() {
+            String::from(root)
+        } else {
+            format!("{root}/{rel}")
+        };
+        for de in Vfs::readdir(&abs)? {
+            if de.name == "." || de.name == ".." {
+                continue;
+            }
+            let child_rel = if rel.is_empty() {
+                de.name.clone()
+            } else {
+                format!("{rel}/{}", de.name)
+            };
+            let child_abs = format!("{abs}/{}", de.name);
+            match de.entry_type {
+                EntryType::Directory => {
+                    let mode = Vfs::metadata(&child_abs)
+                        .map(|m| u32::from(m.permissions))
+                        .unwrap_or(0o755);
+                    dirs.push(LayerDir { path: child_rel.clone(), mode });
+                    stack.push(child_rel);
+                }
+                EntryType::File => {
+                    let meta = Vfs::metadata(&child_abs)?;
+                    let data = Vfs::read_file(&child_abs)?;
+                    files.push(LayerFile {
+                        path: child_rel,
+                        data,
+                        mode: u32::from(meta.permissions),
+                        uid: 0,
+                        gid: 0,
+                    });
+                }
+                // Symlinks/other kinds are skipped (a documented `commit`
+                // limitation, mirroring the COPY/ADD symlink handling).
+                _ => {}
+            }
+        }
+    }
+
+    // OCI whiteouts: a deleted path `a/b/c` is recorded as an empty file
+    // `a/b/.wh.c` so a consumer hides the corresponding lower-layer entry.
+    for w in whiteouts {
+        let norm = w.trim_start_matches('/');
+        if norm.is_empty() {
+            continue;
+        }
+        let (parent, base) = match norm.rsplit_once('/') {
+            Some((p, b)) => (p, b),
+            None => ("", norm),
+        };
+        let wh_path = if parent.is_empty() {
+            format!(".wh.{base}")
+        } else {
+            format!("{parent}/.wh.{base}")
+        };
+        files.push(LayerFile {
+            path: wh_path,
+            data: Vec::new(),
+            mode: 0,
+            uid: 0,
+            gid: 0,
+        });
+    }
+
+    Ok(BuildLayer { dirs, files })
+}
+
+/// Author a new image = the `base` image (resolved from `base_source`, a dir or
+/// store reference) plus one new layer capturing a container's filesystem
+/// changes from its overlay `upper_dir` (added/changed files) and `whiteouts`
+/// (deletions).  The base config (Env/Cmd/Entrypoint/…) and layers are carried
+/// forward verbatim and a `commit`-style history entry is appended.  Written as
+/// a standalone OCI layout at `dest_dir`; returns the manifest descriptor.
+///
+/// This is the engine behind `oci commit` / `docker commit` — **image
+/// production** (a new image from a container's writes), distinct from the
+/// native `container commit`, which clones a container.
+///
+/// # Errors
+/// Propagates base-resolution and VFS/parse errors; `InvalidArgument` on a
+/// base layer/diff_id mismatch or if the layer count exceeds the OCI cap.
+pub fn commit_image(
+    base_source: &str,
+    upper_dir: &str,
+    whiteouts: &[String],
+    dest_dir: &str,
+) -> KernelResult<Descriptor> {
+    let (base_blob_dir, base) = resolve_image_source(base_source)?;
+
+    // Reconstruct the build spec from the base image's config so the committed
+    // image keeps the base's runtime metadata (Env/Cmd/Entrypoint/etc.).
+    let mut spec = ImageSpec::new();
+    spec.architecture = base.config.architecture.clone();
+    spec.os = base.config.os.clone();
+    spec.env = base.config.env.clone();
+    spec.cmd = base.config.cmd.clone();
+    spec.entrypoint = base.config.entrypoint.clone();
+    spec.working_dir = base.config.working_dir.clone();
+    spec.user = base.config.user.clone();
+    spec.exposed_ports = base.config.exposed_ports.clone();
+    spec.labels = base.config.labels.clone();
+    spec.volumes = base.config.volumes.clone();
+    spec.stop_signal = base.config.stop_signal.clone();
+    spec.shell = base.config.shell.clone();
+    spec.onbuild = base.config.onbuild.clone();
+    spec.history = base.config.history.clone();
+
+    create_layout_skeleton(dest_dir);
+
+    // Carry base layers forward verbatim (copy blobs, reuse descriptors+diff_ids).
+    let mut layer_descs = base.manifest.layers.clone();
+    let mut diff_ids = base.config.diff_ids.clone();
+    if layer_descs.len() != diff_ids.len() {
+        return Err(KernelError::InvalidArgument);
+    }
+    for d in &layer_descs {
+        copy_blob_by_digest(&base_blob_dir, dest_dir, &d.digest)?;
+    }
+
+    // Append the commit layer (the container's filesystem changes).
+    let layer = overlay_to_build_layer(upper_dir, whiteouts)?;
+    let tar = build_layer_tar(&layer);
+    diff_ids.push(sha256_digest(&tar));
+    let gz = crate::fs::compress::gzip(&tar);
+    layer_descs.push(write_blob(dest_dir, MEDIA_TYPE_LAYER_GZIP, &gz)?);
+
+    spec.history.push(HistoryEntry {
+        created_by: String::from("/bin/sh -c #(nop) COMMIT"),
+        empty_layer: false,
+    });
+
+    if layer_descs.len() > MAX_LAYERS {
+        return Err(KernelError::InvalidArgument);
+    }
+    finish_image(dest_dir, &spec, &layer_descs, &diff_ids)
+}
+
 // ---------------------------------------------------------------------------
 // Dockerfile builder (`docker build` / `oci build`)
 // ---------------------------------------------------------------------------
@@ -4257,7 +4410,101 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   store export/import round-trip (save/load): OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (22 tests)");
+    // Test 23: commit an image from a container's filesystem changes
+    // (`oci commit` / `docker commit`). Build a base image, synthesise an
+    // overlay upper tree (added file + nested file) plus a whiteout (a deleted
+    // base file), then `commit_image` and confirm the new image carries the
+    // base layer forward, adds exactly one commit layer, preserves the base
+    // config (Cmd/Env), records a COMMIT history entry, and that the commit
+    // layer contains the added files and a `.wh.` whiteout marker.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_ci_ctx";
+        let base = "/tmp/oci_ci_base";
+        let upper = "/tmp/oci_ci_upper";
+        let dest = "/tmp/oci_ci_dest";
+        cleanup_image_dir(base);
+        cleanup_image_dir(dest);
+        let _ = Vfs::remove_recursive(upper);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/base.txt"), b"base-content")?;
+
+        // Base image: one layer (base.txt), plus Cmd/Env to verify config carry.
+        let df = b"FROM scratch\nCOPY base.txt /base.txt\nENV FOO=bar\nCMD [\"/bin/sh\"]\n";
+        build_image(df, ctx, base).map_err(|e| {
+            serial_println!("[oci] commit base build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let base_img = load_image(base)?;
+        let base_layers = base_img.manifest.layers.len();
+        assert_eq!(base_layers, 1, "base image has one layer");
+
+        // Synthesise the container's overlay upper: a new top-level file and a
+        // nested file under a new subdirectory.
+        let _ = Vfs::mkdir(upper);
+        Vfs::write_file(&format!("{upper}/newfile.txt"), b"added-by-container")?;
+        let _ = Vfs::mkdir(&format!("{upper}/sub"));
+        Vfs::write_file(&format!("{upper}/sub/nested.txt"), b"nested")?;
+        // The container deleted base.txt → an OCI whiteout.
+        let whiteouts = alloc::vec![String::from("base.txt")];
+
+        let desc = commit_image(base, upper, &whiteouts, dest)?;
+        assert!(desc.digest.starts_with("sha256:"), "commit returns a digest");
+
+        // The committed image: base layers carried forward + one commit layer.
+        let committed = load_image(dest)?;
+        assert_eq!(
+            committed.manifest.layers.len(),
+            base_layers.saturating_add(1),
+            "committed image = base layers + one commit layer"
+        );
+        assert_eq!(
+            committed.config.diff_ids.len(),
+            base_layers.saturating_add(1),
+            "diff_ids grow with the new layer"
+        );
+        // Base runtime config preserved.
+        assert_eq!(committed.config.cmd, alloc::vec![String::from("/bin/sh")], "Cmd carried forward");
+        assert!(
+            committed.config.env.iter().any(|e| e == "FOO=bar"),
+            "Env carried forward"
+        );
+        // A COMMIT history entry was appended (last entry, non-empty layer).
+        let last_hist = committed.config.history.last().ok_or(KernelError::InternalError)?;
+        assert!(last_hist.created_by.contains("COMMIT"), "COMMIT history entry appended");
+        assert!(!last_hist.empty_layer, "commit layer is not an empty_layer");
+
+        // Inspect the commit layer (the top descriptor): decompress + parse and
+        // confirm it holds the added files and the whiteout marker.
+        let commit_layer = committed.manifest.layers.last().ok_or(KernelError::InternalError)?;
+        let blob = Vfs::read_file(&format!(
+            "{dest}/{}",
+            commit_layer.blob_path().ok_or(KernelError::InvalidArgument)?
+        ))?;
+        let tar = crate::fs::compress::gunzip(&blob)?;
+        let entries = crate::fs::tar::parse(&tar)?;
+        let has = |n: &str| entries.iter().any(|e| e.name.trim_start_matches('/') == n);
+        assert!(has("newfile.txt"), "commit layer holds the added file");
+        assert!(has("sub/nested.txt"), "commit layer holds the nested added file");
+        assert!(has(".wh.base.txt"), "commit layer holds the whiteout marker");
+
+        // The carried base layer blob must also be present in the new layout.
+        let base_layer = committed.manifest.layers.first().ok_or(KernelError::InternalError)?;
+        let base_blob = format!(
+            "{dest}/{}",
+            base_layer.blob_path().ok_or(KernelError::InvalidArgument)?
+        );
+        assert!(Vfs::metadata(&base_blob).is_ok(), "base layer blob carried into new layout");
+
+        let _ = Vfs::remove_recursive(upper);
+        let _ = Vfs::remove(&format!("{ctx}/base.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(base);
+        cleanup_image_dir(dest);
+        serial_println!("[oci]   commit image from container changes (commit): OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (23 tests)");
     Ok(())
 }
 

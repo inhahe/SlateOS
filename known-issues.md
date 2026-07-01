@@ -480,12 +480,24 @@ zombie without a reaping owner.
   state. The `oci` image-config parser (`kernel/src/oci.rs`
   `ImageConfig`) also does not yet capture the `Healthcheck` field.
 
+**Progress (2026-07-01):** The block-on-exit mechanism is now proven from
+kshell task context. `container::wait(id)` (Docker `wait`,
+`kernel/src/container.rs`) parks the shell task on the container's init
+pid via `pcb::set_wait_task` + `sched::block_current` and is woken by the
+zombie-transition path (`remove_thread` hands back the registered
+wait-task; `notify_init_exit` has already recorded the exit code). It is
+lost-wakeup-safe (re-check after register + scheduler `pending_wake`).
+This validates step 1's mechanism; what remains for *exec* is generalising
+it to an arbitrary spawned pid (return `pcb::exit_code(pid)` + reap),
+rather than reading the container's recorded init exit code.
+
 **Proper fix:**
-1. Add a blocking wait primitive usable from kshell task context: given a
-   spawned global pid, sleep the caller until that process reaches zombie,
-   then return its `pcb::exit_code(pid)` and reap it (the plumbing exists —
-   `pcb::set_wait_task`/`take_wait_task`/`exit_code` and the zombie
-   transition path — it needs a safe kshell-facing wrapper).
+1. Generalise the proven block-on-exit mechanism into a `wait_pid`-style
+   wrapper: given an arbitrary spawned global pid, park the caller until
+   that process reaches zombie, then return its `pcb::exit_code(pid)` and
+   reap it. (`container::wait` already demonstrates the park/wake half; the
+   remaining piece is reaping a non-init child and reading its own exit
+   code rather than the container's.)
 2. Add `container::exec_path(id, guest_cmd, argv) -> KernelResult<u64>`
    that reads the ELF from the container's rootfs (`root_path + guest_cmd`),
    `spawn_process`es it, and `add_process_task`s it into the container

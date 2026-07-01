@@ -703,12 +703,14 @@ host loopback, exactly as before named networks existed.
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
 IPAM feature, increments 60–61).
 
-### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — MECHANISM LANDED (only healthchecks remain)
+### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 
-**Status (2026-07-01): steps 1–3 done and boot-validated.** `container
+**Status (2026-07-01): steps 1–4 done and boot-validated.** `container
 exec` is no longer a net_ns-switch facade — it launches a genuine process
 inside the container and (foreground) blocks until it exits, printing the
-exit status. Only step 4 (healthchecks) remains, tracked below.
+exit status. Step 4 (healthchecks) now landed too: the OCI `Healthcheck`
+config is parsed, stored on the container, and driven by a periodic
+non-blocking supervisor that surfaces health in `inspect`/`ps`.
 
 **What landed:**
 1. `container::wait_process(pid) -> KernelResult<i32>`
@@ -750,16 +752,36 @@ cgroup billed +1 while alive then 0 after reap, plus the error paths
 NotFound, `wait_process(bogus)` → NoSuchProcess). BOOT_OK, hello's stdout
 observed once in the serial log.
 
-**Still pending — step 4 (healthchecks):** parse `Healthcheck` in
-`oci::ImageConfig` (`kernel/src/oci.rs` — not yet captured), store the
-probe (test/interval/timeout/retries/start_period) on the container, and
-drive periodic probes via `hrtimer::schedule_ns` → `workqueue::submit` →
-`exec_path` + `wait_process`, tracking starting/healthy/unhealthy and
-surfacing it in `inspect`/`ps`. The wait/exec primitives it needs are now
-in place; only the OCI parse + probe scheduler remain.
+**Step 4 (healthchecks) — landed:** `oci::HealthcheckConfig`
+(`kernel/src/oci.rs`) parses the OCI `Healthcheck` (test-token +
+interval/timeout/retries/start_period, CMD vs CMD-SHELL). Each container
+stores the probe plus its live health state
+(`health_status`/`health_fail_streak`/`health_started_ns` and the
+in-flight probe pid/task/deadline). The pure state machine
+`container::apply_probe_result` implements the Docker semantics
+(start-period grace does not count failures while `Starting`; a
+`retries`-long failure streak → `Unhealthy`; any pass → `Healthy` + reset
+streak) and is unit-covered by boot self-test `19k2h`.
+
+The probes are driven by a **non-blocking** supervisor: a persistent
+repeating `hrtimer` (250 ms tick, `start_health_monitor`, armed just
+before `BOOT_OK` so it can't perturb the hrtimer self-test's exact
+`pending_count` assertion) fires in ISR context, submits `health_tick_job`
+to the shared `workqueue`, and `health_tick` polls every container.
+Critically it **never blocks the single workqueue worker**: each probe is
+launched via `exec_path`, then *polled* for its zombie transition on
+subsequent ticks (never `wait_process`-blocked), reaped via the
+`wait_process` fast path once dead, scored via `apply_probe_result`, and a
+probe that overruns its timeout is `kill_process_threads`'d and scored as
+a failure. The tick uses snapshot-under-lock → act-outside-lock (exec /
+reap / kill / remove all take the table lock internally) → write-back.
+Health is surfaced in `inspect` (JSON `health` field + human Health line
+with failing streak) and `ps` (a `(healthy)`/`(unhealthy)`/`(health:
+starting)` sub-state on the status column). Boot self-test `19k2s` drives
+a real `/bin/hello` CMD probe deterministically to `Healthy`.
 
 **Discovered/documented:** 2026-07-01 (while surveying the next container
-increment after `docker network`). Mechanism landed same day.
+increment after `docker network`). All four steps landed same day.
 
 ### W-KERNEL-COW-WRITE. Kernel-mode write fault on a user COW page is not routed to the resolver — WATCH (not currently reproducible)
 

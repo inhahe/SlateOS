@@ -3955,6 +3955,13 @@ extern "C" fn kernel_main() -> ! {
         }
     }
 
+    // Arm the container healthcheck supervisor. Deferred to here — after every
+    // timer self-test (the hrtimer self-test asserts an exact `pending_count`,
+    // which a persistent repeating timer would break) — so it only goes live
+    // once the system is otherwise fully initialised. The periodic tick fires in
+    // ISR context and hands off to the (already-live) workqueue worker.
+    container::start_health_monitor();
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.

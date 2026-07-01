@@ -671,10 +671,32 @@ struct Container {
     /// count. Reset to 0 by any passing probe. Meaningful only while a
     /// healthcheck is configured.
     health_fail_streak: u32,
-    /// Wall-clock time (`hrtimer::now_ns`) the container's init last started,
-    /// stamped at [`run`]/restart time. Used by [`apply_probe_result`] to decide
-    /// whether a failing probe falls within the healthcheck start period.
+    /// Wall-clock time (`hrtimer::now_ns`) marking the start of the healthcheck
+    /// start-period grace, stamped when a runnable healthcheck is installed via
+    /// [`set_healthcheck`]. Used by [`apply_probe_result`] to decide whether a
+    /// failing probe falls within the start period.
     health_started_ns: u64,
+    /// Global PID of the currently in-flight healthcheck probe process, or
+    /// `None` when no probe is running. Set by the supervisor tick when it
+    /// launches a probe via [`exec_path`] and cleared when the probe completes
+    /// (or is reaped after a timeout kill).
+    health_probe_pid: Option<u64>,
+    /// Initial-thread task id of the in-flight probe (for
+    /// [`remove_process_task`] teardown). Meaningful only while
+    /// [`health_probe_pid`](Self::health_probe_pid) is `Some`.
+    health_probe_task: u64,
+    /// Deadline (`hrtimer::now_ns`) after which the in-flight probe is killed
+    /// for exceeding the healthcheck timeout. Meaningful only while a probe is
+    /// in flight.
+    health_probe_deadline_ns: u64,
+    /// Whether the in-flight probe was killed for exceeding its timeout. When
+    /// set, the probe's exit is scored as a failure regardless of the exit code
+    /// the kill produces.
+    health_probe_timed_out: bool,
+    /// Wall-clock time (`hrtimer::now_ns`) at which the next probe should be
+    /// launched. The supervisor tick launches a probe once `now >= next_due`
+    /// and re-arms it to `now + interval` after each probe completes.
+    health_next_due_ns: u64,
 }
 
 impl Container {
@@ -714,6 +736,11 @@ impl Container {
             health_status: HealthStatus::None,
             health_fail_streak: 0,
             health_started_ns: 0,
+            health_probe_pid: None,
+            health_probe_task: 0,
+            health_probe_deadline_ns: 0,
+            health_probe_timed_out: false,
+            health_next_due_ns: 0,
         }
     }
 }
@@ -3233,11 +3260,26 @@ pub fn set_healthcheck(
             return Err(KernelError::NotFound);
         }
         let ct = &mut table.containers[idx];
+        // Any previously in-flight probe is abandoned on reconfiguration; the
+        // supervisor keys new probes off the fresh config. (A live probe pid is
+        // left to exit on its own — it is not the container's init, so it will
+        // simply zombie-and-reap; the next tick will not poll it because the
+        // in-flight slot is cleared here.)
+        ct.health_probe_pid = None;
+        ct.health_probe_task = 0;
+        ct.health_probe_deadline_ns = 0;
+        ct.health_probe_timed_out = false;
+        // Probe as soon as the supervisor next ticks.
+        ct.health_next_due_ns = 0;
         match cfg {
             Some(hc) if hc.is_runnable() => {
                 ct.healthcheck = Some(hc);
                 ct.health_status = HealthStatus::Starting;
                 ct.health_fail_streak = 0;
+                // Stamp the start-period reference from the current time so a
+                // healthcheck installed after the container is already running
+                // still honours its start-period grace.
+                ct.health_started_ns = crate::hrtimer::now_ns();
             }
             _ => {
                 ct.healthcheck = None;
@@ -3262,6 +3304,261 @@ pub fn health_status(id: ContainerId) -> Option<HealthStatus> {
         }
         Some(table.containers[idx].health_status)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Healthcheck supervisor (Docker `HEALTHCHECK`)
+// ---------------------------------------------------------------------------
+//
+// The supervisor drives periodic probes for every running container that has a
+// runnable healthcheck.  It runs entirely non-blockingly on the *shared*
+// workqueue worker: a single repeating hrtimer fires in ISR context and submits
+// [`health_tick`] to the workqueue, which polls all containers.  Because one
+// worker drains the whole deferred-work FIFO, the tick must never block — a
+// blocking `wait_process` inside it would stall *all* deferred work for up to a
+// probe timeout.  Instead each probe is launched (via [`exec_path`]) and then
+// *polled*: subsequent ticks observe the probe process's zombie transition,
+// score the result with [`apply_probe_result`], and reap it.  A probe that
+// overruns its timeout is killed and scored as a failure.
+
+/// Base cadence of the healthcheck supervisor tick (250 ms).  This bounds the
+/// granularity at which per-container probe intervals are honoured; the actual
+/// probe period is the container's configured `Interval` (default 30 s), gated
+/// by `health_next_due_ns`.
+const HEALTH_TICK_INTERVAL_NS: u64 = 250_000_000;
+
+/// Guards one-time arming of the supervisor's repeating hrtimer.
+static HEALTH_MONITOR_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Arm the container healthcheck supervisor.
+///
+/// Schedules a single repeating hrtimer (every [`HEALTH_TICK_INTERVAL_NS`]) that
+/// drives [`health_tick`] on the workqueue.  Idempotent — arms at most once for
+/// the lifetime of the system (guarded by [`HEALTH_MONITOR_ARMED`]).  Must be
+/// called after both the hrtimer and the workqueue worker are initialised.
+pub fn start_health_monitor() {
+    use core::sync::atomic::Ordering;
+    // Arm exactly once.
+    if HEALTH_MONITOR_ARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let _ = crate::hrtimer::schedule_repeating(
+        HEALTH_TICK_INTERVAL_NS,
+        HEALTH_TICK_INTERVAL_NS,
+        health_timer_fire,
+        0,
+    );
+    serial_println!(
+        "[container] healthcheck supervisor armed ({} ms tick)",
+        HEALTH_TICK_INTERVAL_NS / 1_000_000
+    );
+}
+
+/// hrtimer ISR callback: hand the healthcheck poll off to the workqueue.
+///
+/// Runs in ISR context, so it does the minimum — submits [`health_tick_job`] to
+/// the workqueue (where exec/reap/kill are safe).  A full queue drops this tick
+/// (the next one will catch up); never blocks the ISR.
+fn health_timer_fire(_arg: u64) {
+    // Best-effort: if the queue is momentarily full, skip this tick.
+    let _ = crate::workqueue::submit(health_tick_job, 0);
+}
+
+/// Workqueue callback wrapper for [`health_tick`].
+fn health_tick_job(_arg: u64) {
+    health_tick();
+}
+
+/// Poll every container's healthcheck once (the supervisor's unit of work).
+///
+/// Non-blocking: for each running container with a runnable healthcheck, this
+/// launches a probe when one is due, polls an in-flight probe for completion,
+/// and kills a probe that overran its timeout.  Safe to call directly (the boot
+/// self-test does so deterministically) as well as from the workqueue.
+pub fn health_tick() {
+    let now = crate::hrtimer::now_ns();
+    for idx in 0..MAX_CONTAINERS {
+        health_tick_one(idx, now);
+    }
+}
+
+/// Snapshot of a container's healthcheck state, read under the table lock so the
+/// per-probe exec/poll/kill work below can run *without* holding it.
+struct HealthProbeState {
+    runnable: bool,
+    running: bool,
+    cfg: crate::oci::HealthcheckConfig,
+    status: HealthStatus,
+    streak: u32,
+    started_ns: u64,
+    probe_pid: Option<u64>,
+    probe_task: u64,
+    deadline_ns: u64,
+    timed_out: bool,
+    next_due_ns: u64,
+}
+
+/// Drive one container's healthcheck by a single step.
+///
+/// Reads a snapshot under the table lock, performs any exec/poll/kill work
+/// outside the lock (those helpers take the table lock themselves), then writes
+/// the resulting health state back.  The supervisor is single-threaded (one
+/// workqueue worker; the self-test calls this from one task), so no two steps
+/// for the same container overlap.
+#[allow(clippy::too_many_lines)]
+fn health_tick_one(idx: usize, now: u64) {
+    // --- Phase A: snapshot under the lock ---
+    let snap = with_table_ref(|table| {
+        let ct = table.containers.get(idx)?;
+        if !ct.active {
+            return None;
+        }
+        let runnable = ct.healthcheck.as_ref().is_some_and(|c| c.is_runnable());
+        // Nothing to do for a container with no healthcheck and no stray probe.
+        if !runnable && ct.health_probe_pid.is_none() {
+            return None;
+        }
+        Some(HealthProbeState {
+            runnable,
+            running: ct.state == ContainerState::Running,
+            cfg: ct.healthcheck.clone().unwrap_or_default(),
+            status: ct.health_status,
+            streak: ct.health_fail_streak,
+            started_ns: ct.health_started_ns,
+            probe_pid: ct.health_probe_pid,
+            probe_task: ct.health_probe_task,
+            deadline_ns: ct.health_probe_deadline_ns,
+            timed_out: ct.health_probe_timed_out,
+            next_due_ns: ct.health_next_due_ns,
+        })
+    });
+    let Some(snap) = snap else { return };
+
+    let Ok(cid) = ContainerId::try_from(idx) else { return };
+
+    // Mutable working copy of the fields we may change.
+    let mut status = snap.status;
+    let mut streak = snap.streak;
+    let mut probe_pid = snap.probe_pid;
+    let mut probe_task = snap.probe_task;
+    let mut deadline_ns = snap.deadline_ns;
+    let mut timed_out = snap.timed_out;
+    let mut next_due_ns = snap.next_due_ns;
+
+    // --- Phase B: act outside the lock ---
+    if let Some(pid) = probe_pid {
+        // A probe is in flight: poll it.
+        match crate::proc::pcb::state(pid) {
+            None | Some(crate::proc::pcb::ProcessState::Zombie) => {
+                // Finished. Reap it (fast path — already a zombie, no blocking)
+                // and score the result. A timed-out probe is always a failure.
+                let reaped = wait_process(pid);
+                let code = if timed_out {
+                    1
+                } else {
+                    reaped.unwrap_or(1)
+                };
+                let (s, k) = apply_probe_result(
+                    status, streak, snap.started_ns, now, &snap.cfg, code,
+                );
+                status = s;
+                streak = k;
+                // Unbind the probe process from the container.
+                let _ = remove_process_task(cid, pid, probe_task);
+                probe_pid = None;
+                probe_task = 0;
+                timed_out = false;
+                next_due_ns = now.saturating_add(snap.cfg.effective_interval_ns());
+            }
+            Some(_) => {
+                // Still running: enforce the per-probe timeout.
+                if now >= deadline_ns && !timed_out {
+                    crate::proc::thread::kill_process_threads(pid);
+                    timed_out = true;
+                    // Leave it in flight; a later tick reaps the zombie and
+                    // scores the failure.
+                }
+            }
+        }
+    } else if snap.runnable && snap.running && now >= next_due_ns {
+        // No probe in flight and one is due: launch it.
+        match health_launch_probe(cid, &snap.cfg) {
+            Ok(spawn) => {
+                probe_pid = Some(spawn.pid);
+                probe_task = spawn.task_id;
+                deadline_ns = now.saturating_add(snap.cfg.effective_timeout_ns());
+                timed_out = false;
+            }
+            Err(_) => {
+                // Could not even launch the probe (binary missing, OOM): score
+                // it as a failure and try again next interval.
+                let (s, k) = apply_probe_result(
+                    status, streak, snap.started_ns, now, &snap.cfg, 1,
+                );
+                status = s;
+                streak = k;
+                next_due_ns = now.saturating_add(snap.cfg.effective_interval_ns());
+            }
+        }
+    } else if !snap.running {
+        // Container stopped while a probe was outstanding: tear it down.
+        if let Some(pid) = probe_pid {
+            crate::proc::thread::kill_process_threads(pid);
+            let _ = wait_process(pid);
+            let _ = remove_process_task(cid, pid, probe_task);
+            probe_pid = None;
+            probe_task = 0;
+            timed_out = false;
+        }
+    }
+
+    // --- Phase C: write the results back under the lock ---
+    with_table(|table| {
+        let Some(ct) = table.containers.get_mut(idx) else { return };
+        if !ct.active {
+            return;
+        }
+        ct.health_status = status;
+        ct.health_fail_streak = streak;
+        ct.health_probe_pid = probe_pid;
+        ct.health_probe_task = probe_task;
+        ct.health_probe_deadline_ns = deadline_ns;
+        ct.health_probe_timed_out = timed_out;
+        ct.health_next_due_ns = next_due_ns;
+    });
+}
+
+/// Launch a single healthcheck probe process inside a running container.
+///
+/// Builds the probe argv from the healthcheck config — a `CMD` probe execs its
+/// argv directly, a `CMD-SHELL` probe execs `/bin/sh -c "<cmdline>"` — and hands
+/// off to [`exec_path`], which binds the process into the container's namespaces
+/// and cgroup.  Returns the spawned process's pid/task.
+fn health_launch_probe(
+    id: ContainerId,
+    cfg: &crate::oci::HealthcheckConfig,
+) -> KernelResult<ExecSpawn> {
+    // Build owned argv byte-vectors, then a slice-of-slices for exec_path.
+    let argv_owned: Vec<Vec<u8>> = if cfg.is_shell() {
+        let cmdline = cfg
+            .probe_args()
+            .first()
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default();
+        alloc::vec![b"/bin/sh".to_vec(), b"-c".to_vec(), cmdline]
+    } else {
+        cfg.probe_args().iter().map(|s| s.as_bytes().to_vec()).collect()
+    };
+    let guest_cmd: &[u8] = argv_owned
+        .first()
+        .map(Vec::as_slice)
+        .ok_or(KernelError::InvalidArgument)?;
+    let argv_refs: Vec<&[u8]> = argv_owned.iter().map(Vec::as_slice).collect();
+    exec_path(id, guest_cmd, &argv_refs)
 }
 
 /// List the global PIDs of the processes currently tracked in a container
@@ -5017,6 +5314,72 @@ pub fn self_test() {
         delete(cth).expect("delete health");
     }
     serial_println!("[container]   healthcheck state machine (apply_probe_result): OK");
+
+    // Test 19k2s: live healthcheck supervisor (health_tick) drives a real probe
+    // to Healthy.  Deterministic: we call health_tick() directly (the periodic
+    // hrtimer is not armed until after this self-test), yielding between ticks so
+    // the probe process gets CPU.
+    {
+        // A real, compiled userspace ELF that exits 0 — the probe target.
+        static EHELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+        // Stage the probe target (exits 0) in a fresh rootfs.
+        let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_health_root");
+        let _ = crate::fs::vfs::Vfs::mkdir("/tmp/ct_health_root/bin");
+        crate::fs::vfs::Vfs::write_file("/tmp/ct_health_root/bin/hello", EHELLO_ELF)
+            .expect("stage health probe hello");
+
+        let cth2 = create(&ContainerConfig::new("test-health-live").memory(8192))
+            .expect("create health-live container");
+        set_root_path(cth2, "/tmp/ct_health_root").expect("set health rootfs");
+        start(cth2).expect("start health container");
+
+        // A fast-interval, generous-timeout, single-retry CMD probe.
+        let hc = crate::oci::HealthcheckConfig {
+            test: alloc::vec![
+                alloc::string::String::from("CMD"),
+                alloc::string::String::from("/bin/hello"),
+            ],
+            interval_ns: 1_000_000,
+            timeout_ns: 10_000_000_000,
+            start_period_ns: 0,
+            retries: 1,
+        };
+        set_healthcheck(cth2, Some(hc)).expect("install live healthcheck");
+        assert_eq!(health_status(cth2), Some(HealthStatus::Starting));
+
+        // Drive the supervisor: launch, poll, reap → Healthy. Bounded so a
+        // stuck probe degrades to a test failure, never a boot hang.
+        let mut healthy = false;
+        for _ in 0..200_000u32 {
+            health_tick();
+            if health_status(cth2) == Some(HealthStatus::Healthy) {
+                healthy = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        assert!(healthy, "live healthcheck did not reach Healthy within budget");
+
+        // The probe was reaped and unbound: force any Dead task through reap and
+        // confirm the container cgroup is empty (no probe-process leak).
+        crate::sched::reap_dead_tasks();
+        let cg2 = cgroup(cth2).expect("health container cgroup");
+        assert_eq!(
+            crate::cgroup::stats(cg2).map(|s| s.nr_tasks),
+            Some(0),
+            "healthcheck probe must not leak a task in the container cgroup",
+        );
+
+        // Clear the check, tear down.
+        set_healthcheck(cth2, None).expect("clear live healthcheck");
+        assert_eq!(health_status(cth2), Some(HealthStatus::None));
+        stop(cth2).ok();
+        delete(cth2).expect("delete health-live container");
+        let _ = crate::fs::vfs::Vfs::remove("/tmp/ct_health_root/bin/hello");
+    }
+    serial_println!("[container]   live healthcheck supervisor (health_tick): OK");
 
     // Test 19k3: diff() reports overlay upper-layer changes (Docker `diff`) —
     // added (upper-only), changed (copied-up/both), and deleted (whiteout)

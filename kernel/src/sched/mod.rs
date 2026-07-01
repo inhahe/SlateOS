@@ -4251,6 +4251,29 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     let current_id = load_current_task();
     let cpu = current_cpu_id();
 
+    // Hardening: a voluntary yield/block while holding a tracked spinlock is a
+    // caller bug — the lock is about to be carried across a context switch,
+    // exactly the hazard PREEMPT_DISABLE_COUNT exists to prevent for the
+    // *involuntary* path (which is why involuntary preemption is deferred
+    // while the count is non-zero and can never reach here holding a lock).
+    // The voluntary path can't be transparently deferred, so instead we flag
+    // it loudly (one-shot) so the offending call site gets fixed. No such call
+    // site exists today; this catches future regressions instantly instead of
+    // as an intermittent single-CPU deadlock.
+    if matches!(kind, SwitchKind::Voluntary) && preempt_count(cpu) > 0 {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            crate::serial_println!(
+                "[sched] *** BUG: voluntary context switch (task {}, cpu {}) while \
+                 holding {} tracked spinlock(s). A spinlock must never be held across \
+                 a yield/block — fix the call site. (one-shot warning)",
+                current_id,
+                cpu,
+                preempt_count(cpu),
+            );
+        }
+    }
+
     // Data extracted under the single lock acquisition for the switch.
     let old_ctx_ptr: *mut Context;
     let new_ctx_ptr: *const Context;

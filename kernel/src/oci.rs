@@ -345,6 +345,14 @@ pub struct ImageConfig {
     pub user: String,
     /// Labels (key-value metadata).
     pub labels: Vec<(String, String)>,
+    /// Volume mount points (keys from `Volumes`).
+    pub volumes: Vec<String>,
+    /// Stop signal (`StopSignal`), e.g. `"SIGTERM"`.
+    pub stop_signal: String,
+    /// Shell prefix for shell-form commands (`Shell`).
+    pub shell: Vec<String>,
+    /// Deferred `ONBUILD` triggers (`OnBuild`).
+    pub onbuild: Vec<String>,
     /// Layer diff-ids (sha256 of uncompressed tar, in layer order).
     pub diff_ids: Vec<String>,
     /// Build history (OCI config `history[]`), oldest first.
@@ -408,6 +416,22 @@ impl ImageConfig {
             _ => Vec::new(),
         };
 
+        // Volume mount points (object keys, like ExposedPorts).
+        let volumes = match cfg.and_then(|c| c.get("Volumes")) {
+            Some(JsonValue::Object(entries)) => {
+                entries.iter().map(|(k, _)| k.clone()).collect()
+            }
+            _ => Vec::new(),
+        };
+
+        // Stop signal, shell prefix, and ONBUILD triggers.
+        let stop_signal = cfg
+            .and_then(|c| c.get_str("StopSignal"))
+            .unwrap_or("")
+            .into();
+        let shell = Self::parse_string_array(cfg.and_then(|c| c.get_array("Shell")));
+        let onbuild = Self::parse_string_array(cfg.and_then(|c| c.get_array("OnBuild")));
+
         // Rootfs diff-ids.
         let rootfs = root.get("rootfs");
         let diff_ids = Self::parse_string_array(
@@ -436,6 +460,10 @@ impl ImageConfig {
             exposed_ports,
             user,
             labels,
+            volumes,
+            stop_signal,
+            shell,
+            onbuild,
             diff_ids,
             history,
         })
@@ -831,6 +859,15 @@ pub struct ImageSpec {
     pub exposed_ports: Vec<String>,
     /// Labels (Dockerfile `LABEL`).
     pub labels: Vec<(String, String)>,
+    /// Mount-point volumes like `"/data"` (Dockerfile `VOLUME`).
+    pub volumes: Vec<String>,
+    /// Stop signal, e.g. `"SIGTERM"` (Dockerfile `STOPSIGNAL`).
+    pub stop_signal: String,
+    /// Shell prefix for shell-form commands (Dockerfile `SHELL`); empty means
+    /// the default `["/bin/sh","-c"]`.
+    pub shell: Vec<String>,
+    /// Deferred `ONBUILD` trigger instructions (stored verbatim).
+    pub onbuild: Vec<String>,
     /// Layers, bottom-to-top (Dockerfile `COPY`/`ADD` produce these).
     pub layers: Vec<BuildLayer>,
     /// Build history (OCI config `history[]`), oldest first.  Entries with
@@ -852,6 +889,10 @@ impl ImageSpec {
             user: String::new(),
             exposed_ports: Vec::new(),
             labels: Vec::new(),
+            volumes: Vec::new(),
+            stop_signal: String::new(),
+            shell: Vec::new(),
+            onbuild: Vec::new(),
             layers: Vec::new(),
             history: Vec::new(),
         }
@@ -1013,7 +1054,36 @@ fn build_config_json(spec: &ImageSpec, diff_ids: &[String]) -> String {
         out.push(':');
         push_json_string(&mut out, v);
     }
-    out.push_str("}},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":");
+    out.push('}'); // close Labels
+    // VOLUME → Volumes object (keyed by mount path, empty-object values).
+    if !spec.volumes.is_empty() {
+        out.push_str(",\"Volumes\":{");
+        for (i, v) in spec.volumes.iter().enumerate() {
+            if i != 0 {
+                out.push(',');
+            }
+            push_json_string(&mut out, v);
+            out.push_str(":{}");
+        }
+        out.push('}');
+    }
+    // STOPSIGNAL → StopSignal string.
+    if !spec.stop_signal.is_empty() {
+        out.push_str(",\"StopSignal\":");
+        push_json_string(&mut out, &spec.stop_signal);
+    }
+    // SHELL → Shell array.
+    if !spec.shell.is_empty() {
+        out.push_str(",\"Shell\":");
+        out.push_str(&json_string_array(&spec.shell));
+    }
+    // ONBUILD → OnBuild array.
+    if !spec.onbuild.is_empty() {
+        out.push_str(",\"OnBuild\":");
+        out.push_str(&json_string_array(&spec.onbuild));
+    }
+    out.push('}'); // close config
+    out.push_str(",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":");
     out.push_str(&json_string_array(diff_ids));
     out.push('}');
     // Build history (optional; emitted only when the builder recorded steps).
@@ -1379,8 +1449,9 @@ fn expand_vars(input: &str, vars: &[(String, String)]) -> String {
 }
 
 /// Parse a CMD/ENTRYPOINT argument: JSON exec-form `["a","b"]` verbatim, else
-/// shell-form wrapped as `["/bin/sh","-c","<rest>"]` (matching Docker).
-fn parse_cmd_form(rest: &str) -> Vec<String> {
+/// shell-form wrapped as `<shell> "<rest>"` (matching Docker). `shell` is the
+/// active `SHELL` prefix (empty → the default `["/bin/sh","-c"]`).
+fn parse_cmd_form(rest: &str, shell: &[String]) -> Vec<String> {
     let t = rest.trim();
     if t.starts_with('[') {
         if let Ok(v) = json::parse_str(t) {
@@ -1406,8 +1477,30 @@ fn parse_cmd_form(rest: &str) -> Vec<String> {
     if t.is_empty() {
         Vec::new()
     } else {
-        alloc::vec![String::from("/bin/sh"), String::from("-c"), String::from(t)]
+        let mut v: Vec<String> = if shell.is_empty() {
+            alloc::vec![String::from("/bin/sh"), String::from("-c")]
+        } else {
+            shell.to_vec()
+        };
+        v.push(String::from(t));
+        v
     }
+}
+
+/// Parse a JSON string-array argument (`SHELL`, exec-form only). Returns `None`
+/// if the value is not a well-formed `["a","b",...]` array of strings.
+fn parse_json_str_array(rest: &str) -> Option<Vec<String>> {
+    let t = rest.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let v = json::parse_str(t).ok()?;
+    let arr = v.as_array()?;
+    let mut items = Vec::with_capacity(arr.len());
+    for e in arr {
+        items.push(String::from(e.as_str()?));
+    }
+    Some(items)
 }
 
 /// Normalise a Dockerfile destination/path into an archive-relative path
@@ -1774,6 +1867,11 @@ pub fn build_image_with_args(
                     spec.user = base.config.user.clone();
                     spec.exposed_ports = base.config.exposed_ports.clone();
                     spec.labels = base.config.labels.clone();
+                    // Volumes/StopSignal/Shell are inherited config; ONBUILD
+                    // triggers are NOT (Docker fires + clears them on build).
+                    spec.volumes = base.config.volumes.clone();
+                    spec.stop_signal = base.config.stop_signal.clone();
+                    spec.shell = base.config.shell.clone();
                     // Seed vars with the inherited ENV so `${VAR}` sees them.
                     for e in &base.config.env {
                         if let Some((k, v)) = e.split_once('=') {
@@ -1797,10 +1895,10 @@ pub fn build_image_with_args(
             }
             "RUN" => return Err(BuildError::RunUnsupported { line }),
             "CMD" => {
-                spec.cmd = parse_cmd_form(rest_raw);
+                spec.cmd = parse_cmd_form(rest_raw, &spec.shell);
             }
             "ENTRYPOINT" => {
-                spec.entrypoint = parse_cmd_form(rest_raw);
+                spec.entrypoint = parse_cmd_form(rest_raw, &spec.shell);
             }
             "ENV" => {
                 let expanded = expand_vars(rest_raw, &vars);
@@ -1893,6 +1991,60 @@ pub fn build_image_with_args(
                     collect_copy_src(context_dir, src, &dest_path, single, &ignore, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
+            }
+            "VOLUME" => {
+                let expanded = expand_vars(rest_raw, &vars);
+                // Accept both the JSON exec form `["/a","/b"]` and the
+                // whitespace-separated shell form `VOLUME /a /b`.
+                let paths = parse_json_str_array(&expanded)
+                    .unwrap_or_else(|| tokenize(&expanded));
+                if paths.is_empty() {
+                    return Err(BuildError::Parse {
+                        line,
+                        msg: String::from("VOLUME requires at least one path"),
+                    });
+                }
+                for p in paths {
+                    if !spec.volumes.contains(&p) {
+                        spec.volumes.push(p);
+                    }
+                }
+            }
+            "STOPSIGNAL" => {
+                let expanded = expand_vars(rest_raw, &vars);
+                let sig = expanded.trim();
+                if sig.is_empty() {
+                    return Err(BuildError::Parse {
+                        line,
+                        msg: String::from("STOPSIGNAL requires a signal"),
+                    });
+                }
+                spec.stop_signal = String::from(sig);
+            }
+            "SHELL" => {
+                // Docker requires SHELL in JSON exec form.
+                let expanded = expand_vars(rest_raw, &vars);
+                match parse_json_str_array(&expanded) {
+                    Some(sh) if !sh.is_empty() => spec.shell = sh,
+                    _ => {
+                        return Err(BuildError::Parse {
+                            line,
+                            msg: String::from("SHELL requires a JSON array, e.g. [\"/bin/sh\",\"-c\"]"),
+                        });
+                    }
+                }
+            }
+            "ONBUILD" => {
+                // Store the trigger instruction verbatim (executed by a later
+                // build that uses this image as a base — not run now).
+                let trigger = rest_raw.trim();
+                if trigger.is_empty() {
+                    return Err(BuildError::Parse {
+                        line,
+                        msg: String::from("ONBUILD requires an instruction"),
+                    });
+                }
+                spec.onbuild.push(String::from(trigger));
             }
             "MAINTAINER" => {
                 // Deprecated; record as the conventional label.
@@ -2510,7 +2662,54 @@ CMD ["--serve"]
         serial_println!("[oci]   .dockerignore context filtering: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (13 tests)");
+    // Test 14: metadata instructions VOLUME / STOPSIGNAL / SHELL / ONBUILD.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_meta_ctx";
+        let img = "/tmp/oci_meta_img";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+
+        let df = br#"FROM scratch
+VOLUME /data /var/log
+VOLUME ["/cache"]
+STOPSIGNAL SIGINT
+SHELL ["/bin/bash","-c"]
+CMD echo hi
+ONBUILD RUN echo triggered
+"#;
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] metadata build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let m = load_image(img)?;
+        // VOLUME accepts both shell and JSON forms, accumulating paths.
+        assert!(m.config.volumes.iter().any(|v| v == "/data"));
+        assert!(m.config.volumes.iter().any(|v| v == "/var/log"));
+        assert!(m.config.volumes.iter().any(|v| v == "/cache"));
+        assert_eq!(m.config.stop_signal, "SIGINT");
+        assert_eq!(
+            m.config.shell,
+            alloc::vec![String::from("/bin/bash"), String::from("-c")]
+        );
+        // SHELL changes the shell-form CMD wrapping (bash instead of /bin/sh).
+        assert_eq!(
+            m.config.cmd,
+            alloc::vec![
+                String::from("/bin/bash"),
+                String::from("-c"),
+                String::from("echo hi")
+            ]
+        );
+        // ONBUILD stores its trigger verbatim (not executed now).
+        assert_eq!(m.config.onbuild, alloc::vec![String::from("RUN echo triggered")]);
+
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   metadata instructions (VOLUME/STOPSIGNAL/SHELL/ONBUILD): OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (14 tests)");
     Ok(())
 }
 

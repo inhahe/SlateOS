@@ -69109,6 +69109,23 @@ fn cmd_oci(args: &str) {
                             image.config.exposed_ports.join(", ");
                         crate::console_println!("  Ports:        {}", ports);
                     }
+                    if !image.config.volumes.is_empty() {
+                        let vols: alloc::string::String = image.config.volumes.join(", ");
+                        crate::console_println!("  Volumes:      {}", vols);
+                    }
+                    if !image.config.stop_signal.is_empty() {
+                        crate::console_println!("  StopSignal:   {}", image.config.stop_signal);
+                    }
+                    if !image.config.shell.is_empty() {
+                        let sh: alloc::string::String = image.config.shell.join(" ");
+                        crate::console_println!("  Shell:        {}", sh);
+                    }
+                    if !image.config.onbuild.is_empty() {
+                        crate::console_println!("  OnBuild:");
+                        for t in &image.config.onbuild {
+                            crate::console_println!("    {}", t);
+                        }
+                    }
                     if !image.config.labels.is_empty() {
                         crate::console_println!("  Labels:");
                         for (k, v) in &image.config.labels {

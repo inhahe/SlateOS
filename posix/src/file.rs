@@ -3249,26 +3249,41 @@ pub extern "C" fn splice(
     total as isize
 }
 
-/// Duplicate pipe content without consuming it.
+/// Duplicate pipe content from `fd_in` to `fd_out` WITHOUT consuming it.
 ///
-/// Returns -1 with `ENOSYS` after argument-domain validation.  Linux
-/// implements `tee` by sharing pipe-buffer pages between two pipes
-/// without copying — our pipe layer is a bounded byte-stream with no
-/// "peek without consume" primitive, so there is no userspace
-/// fallback that preserves `tee()`'s "leaves data in fd_in" guarantee.
-/// Programs that need tee must fall back to a
-/// pipe-into-buffer-into-two-pipes pattern.
+/// `tee(2)` copies up to `len` bytes of buffered data from the pipe read end
+/// `fd_in` into the pipe write end `fd_out`, leaving `fd_in`'s data intact so a
+/// subsequent `read`/`splice` on `fd_in` still sees it.  This is the classic
+/// "inspect a stream while passing it on" primitive (`cmd | tee | cmd2` built
+/// on real pipes).
 ///
-/// Validation order matches `fs/splice.c::do_tee` in Linux:
-/// 1. Reject unknown flag bits with `EINVAL`.
-/// 2. Reject negative fds with `EBADF` (cheap pre-check; `lookup_fd`
-///    would set the same errno but only after a hashmap probe).
-/// 3. Look up both fds — `EBADF` for either missing.
-/// 4. Both fds must refer to pipes — `EINVAL` otherwise.
-/// 5. After all validation, return `-1`/`ENOSYS` because we have no
-///    page-sharing primitive.  A `len == 0` call still validates and
-///    then returns `0` (Linux short-circuits before fd checks; we keep
-///    that behavior because zero-length tee is unobservable).
+/// Implemented on the OS target via two pipe primitives added for this purpose:
+/// `SYS_PIPE_PEEK` copies buffered bytes at a logical offset without advancing
+/// the read cursor, and `SYS_PIPE_WAIT_READABLE` blocks for data/EOF without
+/// consuming.  We peek successive offsets out of `fd_in` and write the copies
+/// into `fd_out`; `fd_in` is never drained.  `SPLICE_F_MOVE`/`_MORE`/`_GIFT`
+/// are advisory only (we copy rather than share pages).
+///
+/// Blocking semantics match Linux's `fs/splice.c::do_tee`:
+/// - Empty source with writers still attached: block until data arrives, unless
+///   `SPLICE_F_NONBLOCK` is set (then `-1`/`EAGAIN`).
+/// - Empty source with all writers closed (EOF): return `0`.
+/// - Full destination: a blocking write waits for space; with
+///   `SPLICE_F_NONBLOCK`, a `try_write` that can't place all bytes returns the
+///   partial count already duplicated.
+///
+/// Once any bytes are duplicated we return that count rather than continuing to
+/// block, so a short transfer is observable exactly as on Linux.
+///
+/// Validation order matches `do_tee`:
+/// 1. Unknown flag bits → `EINVAL`.
+/// 2. Negative fds → `EBADF` (cheap pre-check before the fdtable probe).
+/// 3. Missing fds → `EBADF`.
+/// 4. Either side not a pipe → `EINVAL`.
+/// 5. `len == 0` → `0` (a no-op that still passes validation).
+///
+/// The host build has no kernel pipe layer, so it returns `-1`/`ENOSYS` after
+/// the same validation (unit tests exercise the argument-domain checks).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tee(fd_in: Fd, fd_out: Fd, len: usize, flags: u32) -> isize {
     // 1. Unknown flag bits.  Checked first so callers that pass garbage
@@ -3306,9 +3321,111 @@ pub extern "C" fn tee(fd_in: Fd, fd_out: Fd, len: usize, flags: u32) -> isize {
         return 0;
     }
 
-    // Validated, but we have no page-sharing primitive.
-    errno::set_errno(errno::ENOSYS);
-    -1
+    #[cfg(target_os = "none")]
+    {
+        tee_transfer(in_entry.handle, out_entry.handle, len, flags)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // No kernel pipe layer in the host build.  Keep the historical
+        // ENOSYS terminal so host unit tests still assert the validation.
+        let _ = (&in_entry, &out_entry);
+        errno::set_errno(errno::ENOSYS);
+        -1
+    }
+}
+
+/// Core of `tee(2)` on the OS target: peek buffered bytes out of the source
+/// pipe (`in_handle`, a read end) and write copies into the destination pipe
+/// (`out_handle`, a write end) without consuming the source.  See [`tee`].
+#[cfg(target_os = "none")]
+fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isize {
+    let nonblock = flags & SPLICE_F_NONBLOCK != 0;
+    let mut buf = [0u8; 4096];
+    let mut total: usize = 0;
+    // Logical offset into the source's buffered data.  Advances only by bytes
+    // we've successfully duplicated, so a short destination write re-peeks the
+    // not-yet-copied tail on the next pass.
+    let mut offset: u64 = 0;
+
+    while total < len {
+        let chunk = (len - total).min(buf.len());
+        // Non-destructive copy of up to `chunk` bytes at `offset`.
+        let n = syscall4(
+            SYS_PIPE_PEEK,
+            in_handle,
+            offset,
+            buf.as_mut_ptr() as u64,
+            chunk as u64,
+        );
+        if n < 0 {
+            if total > 0 {
+                break;
+            }
+            return errno::translate(n) as isize;
+        }
+        if n == 0 {
+            // Nothing buffered at `offset`.
+            if total > 0 {
+                // Already duplicated something this call — report it.
+                break;
+            }
+            if nonblock {
+                errno::set_errno(errno::EAGAIN);
+                return -1;
+            }
+            // Block until the source has data or reaches EOF.
+            let ready = syscall1(SYS_PIPE_WAIT_READABLE, in_handle);
+            if ready < 0 {
+                return errno::translate(ready) as isize;
+            }
+            if ready == 0 {
+                // Writers all gone, buffer drained — 0 bytes to duplicate.
+                return 0;
+            }
+            // Data available now; re-peek from the same offset.
+            continue;
+        }
+
+        // Write every peeked byte into the destination.
+        let to_write = n as usize;
+        let mut written: usize = 0;
+        while written < to_write {
+            // SAFETY: written < to_write <= buf.len(), so the pointer stays
+            // inside `buf`.
+            let ptr = unsafe { buf.as_ptr().add(written) } as u64;
+            let remaining = (to_write - written) as u64;
+            let nw = if nonblock {
+                syscall3(SYS_PIPE_TRY_WRITE, out_handle, ptr, remaining)
+            } else {
+                syscall3(SYS_PIPE_WRITE, out_handle, ptr, remaining)
+            };
+            if nw < 0 {
+                // Destination error.  If we've made progress, return it so the
+                // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
+                // mid-tee).  Otherwise surface the error.
+                if total > 0 || written > 0 {
+                    return (total + written) as isize;
+                }
+                return errno::translate(nw) as isize;
+            }
+            if nw == 0 {
+                // No space and no error (nonblocking, full pipe) — stop.
+                break;
+            }
+            written += nw as usize;
+        }
+
+        total += written;
+        offset += written as u64;
+        if written < to_write {
+            // Couldn't place the whole peeked chunk (destination full under
+            // SPLICE_F_NONBLOCK) — stop with a short transfer.
+            break;
+        }
+    }
+
+    total as isize
 }
 
 /// Splice user pages into a pipe.
@@ -7488,10 +7605,11 @@ mod tests {
     }
 
     #[test]
-    fn test_tee_still_enosys() {
-        // tee has no userspace fallback that preserves "leave data in
-        // fd_in" semantics, so it remains ENOSYS for now — but only
-        // after argument validation passes.  Need two real pipe fds.
+    fn test_tee_host_enosys_after_validation() {
+        // The real tee() runs on the OS target via SYS_PIPE_PEEK /
+        // SYS_PIPE_WAIT_READABLE; the host build has no kernel pipe layer,
+        // so it returns ENOSYS — but only after argument validation passes.
+        // (End-to-end tee behaviour is covered by the kernel pipe self-test.)
         let mut pf1 = [0i32; 2];
         let mut pf2 = [0i32; 2];
         if crate::pipe::pipe(pf1.as_mut_ptr()) != 0 || crate::pipe::pipe(pf2.as_mut_ptr()) != 0 {

@@ -111,6 +111,7 @@ use super::number::{
     SYS_CHANNEL_RECV_TIMEOUT,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_WRITE_TIMEOUT,
+    SYS_PIPE_PEEK, SYS_PIPE_WAIT_READABLE,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
     SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
@@ -319,6 +320,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIPE_READABLE_BYTES as usize] = Some(handlers::sys_pipe_readable_bytes);
     handlers[SYS_PIPE_READ_TIMEOUT as usize] = Some(handlers::sys_pipe_read_timeout);
     handlers[SYS_PIPE_WRITE_TIMEOUT as usize] = Some(handlers::sys_pipe_write_timeout);
+    handlers[SYS_PIPE_PEEK as usize] = Some(handlers::sys_pipe_peek);
+    handlers[SYS_PIPE_WAIT_READABLE as usize] = Some(handlers::sys_pipe_wait_readable);
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);
     handlers[SYS_SHM_SIZE as usize] = Some(handlers::sys_shm_size);
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);

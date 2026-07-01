@@ -175,6 +175,11 @@ pub const SYS_PIPE_TRY_READ: u64 = 224;
 pub const SYS_PIPE_CLOSE: u64 = 225;
 pub const SYS_PIPE_POLL: u64 = 228;
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
+// Later pipe additions live in the free extension range (657+): the original
+// 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
+// buffered bytes without consuming, wait_readable blocks for data/EOF.
+pub const SYS_PIPE_PEEK: u64 = 657;
+pub const SYS_PIPE_WAIT_READABLE: u64 = 658;
 
 // Stream sockets (IPC range 300-310) — bidirectional byte streams backing
 // socketpair(AF_UNIX, SOCK_STREAM, ...).  Mirrors kernel/src/syscall/number.rs.

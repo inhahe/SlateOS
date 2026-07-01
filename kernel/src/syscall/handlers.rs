@@ -2242,6 +2242,63 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PIPE_PEEK` — copy buffered bytes out of a pipe without consuming them.
+///
+/// `arg0`: pipe handle (read end).
+/// `arg1`: byte offset into the buffered data.
+/// `arg2`: pointer to the caller's receive buffer.
+/// `arg3`: buffer capacity.
+///
+/// Returns: bytes copied (0 at or past end of buffered data). The pipe contents
+/// are left untouched — this is the non-destructive primitive behind `tee(2)`.
+pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    let offset = args.arg1;
+    let buf_ptr = args.arg2 as *mut u8;
+    let buf_cap = args.arg3 as usize;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let buf = if buf_cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
+        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
+    };
+
+    match pipe::peek_at(handle, offset, buf) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let copied = n as i64;
+            SyscallResult::ok(copied)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PIPE_WAIT_READABLE` — block until a pipe has data or reaches EOF.
+///
+/// `arg0`: pipe handle (read end).
+///
+/// Returns: 1 if data is available, 0 on EOF (write end closed, buffer drained).
+/// Consumes no bytes — the blocking-wait primitive `tee(2)` uses before peeking.
+pub fn sys_pipe_wait_readable(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    match pipe::wait_readable(handle) {
+        Ok(true) => SyscallResult::ok(1),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stream socket handlers (300–310) — socketpair backing
 // ---------------------------------------------------------------------------

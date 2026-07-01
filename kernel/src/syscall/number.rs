@@ -845,6 +845,36 @@ pub const SYS_PIPE_POLL: u64 = 228;
 /// Returns 0 if the pipe handle is invalid.
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
 
+// The pipe family's original contiguous block (220–229) is full — 230 begins
+// the shared-memory family — so these two later additions take numbers from the
+// free extension range (657+) while staying grouped with the pipe family here in
+// source. Syscall numbers are a flat namespace; contiguity per family is a
+// source-organization nicety, not an ABI requirement.
+
+/// `SYS_PIPE_PEEK` — copy buffered bytes out of a pipe WITHOUT consuming them.
+///
+/// `arg0`: pipe handle (read end).
+/// `arg1`: byte offset into the buffered data to start copying from.
+/// `arg2`: pointer to the caller's receive buffer.
+/// `arg3`: buffer capacity.
+///
+/// Returns: number of bytes copied (0 once `offset` is at or past the buffered
+/// length), or a negative error code. This is the primitive behind `tee(2)`:
+/// the caller peeks successive offsets and writes the copies into another pipe,
+/// leaving the source pipe's contents intact.
+pub const SYS_PIPE_PEEK: u64 = 657;
+
+/// `SYS_PIPE_WAIT_READABLE` — block until a pipe has data or hits EOF, without
+/// consuming any bytes.
+///
+/// `arg0`: pipe handle (read end).
+///
+/// Returns: 1 if data is now available to peek/read, 0 if the write end closed
+/// and no data remains (EOF), or a negative error code. This is the blocking
+/// primitive `tee(2)` uses to wait for input on an empty source before
+/// duplicating it.
+pub const SYS_PIPE_WAIT_READABLE: u64 = 658;
+
 /// Create a shared memory region.
 ///
 /// `arg0`: requested size in bytes (rounded up to frame boundary).

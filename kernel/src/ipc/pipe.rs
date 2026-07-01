@@ -1236,8 +1236,94 @@ pub fn self_test() -> KernelResult<()> {
     test_blocking_roundtrip()?;
     test_dup_refcount()?;
     test_capacity_roundtrip()?;
+    test_peek_nondestructive()?;
 
     serial_println!("[pipe] Pipe self-test PASSED");
+    Ok(())
+}
+
+/// Test the `tee(2)` primitives: `peek_at` copies buffered data without
+/// consuming it, and `wait_readable` reports data/EOF without draining.
+///
+/// 1. `peek_at(0)` returns the whole payload; a later offset returns the tail;
+///    an offset at/past the buffered length returns 0.
+/// 2. After peeking, a real `read` still returns every byte (non-destructive).
+/// 3. `peek_at` / `wait_readable` on a write-end handle → `InvalidHandle`.
+/// 4. `wait_readable` returns `Ok(true)` when data is buffered.
+/// 5. `wait_readable` returns `Ok(false)` once the writer closes with the
+///    buffer drained (EOF), without blocking.
+#[allow(clippy::cognitive_complexity)]
+fn test_peek_nondestructive() -> KernelResult<()> {
+    let (rh, wh) = create();
+    let payload = b"tee-peek-payload";
+    write(wh, payload)?;
+
+    // (1) Peek the whole payload at offset 0 — contents match, nothing consumed.
+    let mut buf = [0u8; 32];
+    let n = peek_at(rh, 0, &mut buf)?;
+    if n != payload.len() || &buf[..n] != payload {
+        serial_println!("[pipe]   FAIL: peek@0 wrong (n={})", n);
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+    // Peek from an interior offset — returns the tail only.
+    let mut tail = [0u8; 32];
+    let m = peek_at(rh, 4, &mut tail)?;
+    if m != payload.len() - 4 || tail[..m] != payload[4..] {
+        serial_println!("[pipe]   FAIL: peek@4 wrong (m={})", m);
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+    // Offset at/past the buffered length yields nothing.
+    if peek_at(rh, payload.len() as u64, &mut buf)? != 0
+        || peek_at(rh, payload.len() as u64 + 100, &mut buf)? != 0
+    {
+        serial_println!("[pipe]   FAIL: peek past end returned data");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (4) Data buffered → wait_readable returns true without blocking.
+    if !wait_readable(rh)? {
+        serial_println!("[pipe]   FAIL: wait_readable false with data buffered");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) A real read still sees every byte — peeks consumed nothing.
+    let r = read(rh, &mut buf)?;
+    if r != payload.len() || &buf[..r] != payload {
+        serial_println!("[pipe]   FAIL: read after peek lost data (r={})", r);
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (3) Peek / wait on the write end must be rejected.
+    if !matches!(peek_at(wh, 0, &mut buf), Err(KernelError::InvalidHandle))
+        || !matches!(wait_readable(wh), Err(KernelError::InvalidHandle))
+    {
+        serial_println!("[pipe]   FAIL: peek/wait on write end not rejected");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (5) Close the writer with the buffer drained → wait_readable = EOF (false),
+    //     and it returns immediately rather than parking.
+    close(wh);
+    if wait_readable(rh)? {
+        serial_println!("[pipe]   FAIL: wait_readable not EOF after writer close");
+        close(rh);
+        return Err(KernelError::InternalError);
+    }
+    close(rh);
+
+    serial_println!("[pipe]   peek/wait_readable (tee primitives): OK");
     Ok(())
 }
 

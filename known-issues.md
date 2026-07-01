@@ -750,19 +750,28 @@ collected per-frame but discarded), feeding `kernel/src/net/ethernet.rs`
 from the physical NIC arrive in the root namespace. Veth-delivered packets
 will carry a namespace context").
 
-**What this is (and is not).** It is **not** a plain bug that breaks
-containers today: the current model drains a container's *egress* frames
-off the host-side veth end (end A, in ROOT_NS) and processes them in ROOT_NS,
-which is exactly what lets **NAT masquerade** carry container→external
-traffic and what the L2 bridge (D-CNET-L2BRIDGE) uses for same-network peer
-switching. So container connectivity works. The debt is that the RX path is
-**not namespace-aware end to end** — the deepest layer already threads
-`ns_id` (`process_tcp_common`/`process_udp_common` take it; TCP/UDP lookups
-key on it), but the `ethernet→ip→transport` ingress chain forces ROOT_NS, and
-`ethernet::process_frame`'s `is_for_us` check compares against the *host*
-NIC MAC (`interface::mac()`) rather than the receiving namespace's interface
-MAC. This blocks a fuller model where the host holds interfaces in multiple
-namespaces and must deliver inbound unicast to the right per-ns stack.
+**What this is.** Partly a real correctness gap, partly a fuller-model
+enabler. `veth::poll_all` drains **both** ends of every pair and processes
+every frame in `ROOT_NS`:
+- *Container egress* (frames the container sent, drained off host-side end A)
+  processed in ROOT_NS is *correct/desirable* — it's what lets **NAT
+  masquerade** carry container→external traffic and what the L2 bridge
+  (D-CNET-L2BRIDGE) relies on. Container **client/outbound** works.
+- *Container ingress*, however, lands on **end B's** RX queue (e.g.
+  `bridge::forward` delivers to a peer via `send(out_pair, A, frame)`, which
+  enqueues on the peer's end B; end B is not bridged, so `poll_all` drains
+  it). Processing those in ROOT_NS means a **container server socket** — bound
+  in the container's ns — is never matched by the ROOT_NS TCP/UDP lookup, so
+  **inbound delivery to a container listening on a user-defined network does
+  not work.** That is a genuine functional gap, not just missing polish.
+
+The deepest layer already threads `ns_id`
+(`process_tcp_common`/`process_udp_common` take it; TCP/UDP lookups key on
+it), but the `ethernet→ip→transport` ingress chain forces ROOT_NS, and
+`ethernet::process_frame`'s `is_for_us` check compares against the *host* NIC
+MAC (`interface::mac()`) rather than the receiving namespace's interface MAC.
+Threading the drained endpoint's `ns_id` through the RX chain is what makes
+container-inbound delivery land in the right per-ns socket table.
 
 **Proper fix (design anticipated by the code, but multi-layer — do in a
 dedicated session):** thread `ns_id` as a parameter through the whole RX

@@ -1061,6 +1061,17 @@ fn setup_container_veth(net_ns: u32) -> KernelResult<crate::net::veth::VethPairI
         return Err(e);
     }
 
+    // Activate this namespace's ARP cache so neighbor learning/resolution on
+    // the container's user-defined network is isolated from the host and from
+    // other containers (rather than sharing the global cache, which could
+    // collide when two container networks reuse the same subnet/IP).
+    if let Err(e) = crate::net::arp::ns_init(net_ns) {
+        let _ = veth::set_up(pair_id, VethEndId::A, false);
+        let _ = veth::set_up(pair_id, VethEndId::B, false);
+        let _ = veth::destroy_pair(pair_id);
+        return Err(e);
+    }
+
     Ok(pair_id)
 }
 
@@ -1563,6 +1574,9 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     if let Some(pair_id) = veth_pair {
         let _ = crate::net::veth::destroy_pair(pair_id);
     }
+    // Tear down this namespace's ARP cache (idempotent; no-op if never
+    // initialized, e.g. a container created without networking).
+    crate::net::arp::ns_destroy(net_ns);
     // Flush NAT entries and port-forward rules before tearing down namespace.
     crate::net::nat::flush_namespace(net_ns);
     crate::net::nat::flush_port_forwards(net_ns);

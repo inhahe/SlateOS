@@ -814,15 +814,29 @@ Boot-validated: new `[veth]   test 11 (send_frame_ns veth egress): OK`
 leak into the veth — plus the RX-side `[udp]   Namespace isolation: OK` and
 full `[net] Network self-test PASSED`, no physical-NIC regression.
 
-**Residual limitation — shared ARP cache.** The ARP cache is still global
-(keyed on target IP only), not per-namespace. Two different container
-networks that reuse the same subnet/IP could collide; distinct
-container-network subnets avoid this in practice. Proper fix (future): key
-the ARP cache on `(ns_id, ip)` or maintain a per-ns cache. Not a blocker for
-the current single-user-defined-network container use.
+**Per-namespace ARP cache — RESOLVED (was: shared ARP cache).** The former
+residual (a single global ARP cache shared across all namespaces, so two
+container networks reusing a subnet/IP could collide) is now closed. The
+per-namespace ARP cache infrastructure that already existed (`NS_ARP`,
+`ns_init`/`ns_destroy`/`ns_lookup`/`ns_insert`/`ns_flush`) is now wired into
+the real paths:
+- `container::setup_container_veth` calls `arp::ns_init(net_ns)` (and
+  container removal calls `arp::ns_destroy(net_ns)`), so every networked
+  container gets its own active ARP cache.
+- `arp::process_arp` learns the sender's MAC into the *arrival* namespace's
+  cache via `ns_insert(ns_id, …)` (delegates to global for ROOT_NS) instead
+  of always `cache_insert` (global).
+- `arp::resolve_ns` reads/waits on `ns_lookup(ns_id, …)` instead of the
+  global `lookup`.
+Boot-validated by a new `[arp]   ns process_arp learns into ns cache: OK`
+(`[arp-ns] Per-namespace ARP self-test PASSED (4 tests)`), which asserts a
+reply arriving in a namespace is learned into that ns's cache and does NOT
+leak into the global cache. Root-namespace behavior is unchanged (still uses
+the global `ARP_CACHE`).
 
 **Discovered/analyzed:** 2026-07-01 (embedded-DNS work). **RX threading
-landed:** 2026-07-01. **TX egress landed:** 2026-07-01.
+landed:** 2026-07-01. **TX egress landed:** 2026-07-01. **Per-ns ARP cache
+wired:** 2026-07-01.
 
 ### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 

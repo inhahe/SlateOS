@@ -235,9 +235,10 @@ fn build_arp(
 pub fn process_arp(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let (operation, sender_mac, sender_ip, _target_mac, target_ip) = parse_arp(data)?;
 
-    // Always learn the sender's MAC from any ARP we see.
+    // Always learn the sender's MAC from any ARP we see, into the arrival
+    // namespace's cache (delegates to the global cache for ROOT_NS).
     if !sender_ip.is_unspecified() {
-        cache_insert(sender_ip, sender_mac);
+        ns_insert(ns_id, sender_ip, sender_mac);
     }
 
     match operation {
@@ -330,15 +331,17 @@ pub fn resolve(ip: Ipv4Addr) -> KernelResult<MacAddress> {
 /// request from `ns_id` and polls for a reply (blocking, with timeout).
 /// The poll loop drives [`net::poll`], which drains both the physical NIC
 /// and the veth/bridge fabric, so a container peer's reply — delivered
-/// back through the bridge — is learned into the cache here.
+/// back through the bridge — is learned into this namespace's cache here.
 ///
-/// Note: the ARP cache is currently shared across namespaces (a known
-/// limitation — see the send-path docs); resolution keys on the target IP
-/// only.  Distinct container-network subnets avoid collisions in practice.
+/// Resolution and learning are namespace-scoped: root uses the global
+/// `ARP_CACHE`; a container namespace uses its own `NS_ARP` cache (activated
+/// by `ns_init` at container-veth setup).  Two container networks that reuse
+/// the same subnet/IP therefore no longer collide.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn resolve_ns(ns_id: crate::netns::NetNsId, ip: Ipv4Addr) -> KernelResult<MacAddress> {
-    // Check cache first.
-    if let Some(mac) = lookup(ip) {
+    // Check the arrival namespace's cache first (delegates to the global
+    // cache for ROOT_NS).
+    if let Some(mac) = ns_lookup(ns_id, ip) {
         return Ok(mac);
     }
 
@@ -356,8 +359,8 @@ pub fn resolve_ns(ns_id: crate::netns::NetNsId, ip: Ipv4Addr) -> KernelResult<Ma
         // including the ARP reply.
         super::poll();
 
-        // Check if the reply arrived.
-        if let Some(mac) = lookup(ip) {
+        // Check if the reply arrived (learned into this namespace's cache).
+        if let Some(mac) = ns_lookup(ns_id, ip) {
             return Ok(mac);
         }
 
@@ -924,8 +927,63 @@ pub fn ns_self_test() -> KernelResult<()> {
     test_ns_arp_isolation()?;
     test_ns_arp_root_delegates()?;
     test_ns_arp_lifecycle()?;
+    test_ns_arp_process_learns_into_ns()?;
 
-    crate::serial_println!("[arp-ns] Per-namespace ARP self-test PASSED (3 tests)");
+    crate::serial_println!("[arp-ns] Per-namespace ARP self-test PASSED (4 tests)");
+    Ok(())
+}
+
+/// Test that `process_arp` learns a sender's MAC into the *arrival*
+/// namespace's cache — not the global cache — closing the D-CNET-NSRX
+/// residual: two container networks reusing an IP no longer collide.
+fn test_ns_arp_process_learns_into_ns() -> KernelResult<()> {
+    let ns = crate::netns::create()?;
+    ns_init(ns)?;
+    // Start from an empty global cache so a "not in global" assertion is
+    // meaningful.
+    flush_cache();
+
+    let sender_ip = Ipv4Addr([10, 42, 0, 7]);
+    let sender_mac = MacAddress([0x02, 0xDE, 0xAD, 0xBE, 0xEF, 0x01]);
+    let our_mac = MacAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+
+    // An ARP reply frame arriving in the container namespace.  (Reply, not
+    // request, so process_arp only learns and does not try to egress.)
+    let frame = build_arp(
+        ARP_REPLY,
+        &sender_mac,
+        sender_ip,
+        &our_mac,
+        Ipv4Addr([10, 42, 0, 1]),
+    );
+
+    process_arp(&frame, ns)?;
+
+    // Learned into the namespace cache…
+    match ns_lookup(ns, sender_ip) {
+        Some(m) if m.0 == sender_mac.0 => {}
+        other => {
+            crate::serial_println!(
+                "[arp]   FAIL: process_arp did not learn into ns cache: {:?}",
+                other.map(|m| m.0)
+            );
+            ns_destroy(ns);
+            crate::netns::delete(ns)?;
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // …and NOT into the global cache (no cross-namespace leak).
+    if lookup(sender_ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: ns ARP leaked into global cache");
+        ns_destroy(ns);
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    ns_destroy(ns);
+    crate::netns::delete(ns)?;
+    crate::serial_println!("[arp]   ns process_arp learns into ns cache: OK");
     Ok(())
 }
 

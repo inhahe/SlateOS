@@ -147,6 +147,12 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Total violations detected.
 static VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+/// Cap on recursive-self-acquire reports so a genuine bug can't flood serial.
+const MAX_RECURSIVE_REPORTS: u32 = 8;
+
+/// Count of recursive same-class acquire reports emitted (rate limit).
+static RECURSIVE_REPORTS: AtomicU32 = AtomicU32::new(0);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -210,8 +216,20 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     for i in 0..held.depth as usize {
         let held_class = held.stack[i];
         if held_class == class_idx {
-            // Re-entrant acquisition of same class — skip (might be
-            // recursive lock or nested lock of same type).
+            // Re-entrant acquisition of the SAME lock instance on the same
+            // CPU.  Because a lock class is keyed by the lock's address,
+            // held_class == class_idx means this exact non-reentrant
+            // `crate::sync::Mutex` is already held here — the about-to-run
+            // real acquire will spin forever (self-deadlock).  Report it
+            // immediately: this is a precise, located diagnostic that fires
+            // *before* the 30 s spinlock stall detector would.
+            //
+            // This is reliable now that tracked mutexes disable preemption
+            // while held (sched::PREEMPT_DISABLE_COUNT): a lock can no longer
+            // be held across a context switch or CPU migration, so the
+            // per-CPU held stack can't carry a stale entry from another task
+            // that would make a legitimate acquire look recursive.
+            report_recursive(class_idx, cpu);
             continue;
         }
 
@@ -600,6 +618,33 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
     );
 }
 
+/// Report a recursive acquisition of the same lock instance on one CPU.
+///
+/// This is an unconditional self-deadlock for a non-reentrant spinlock — the
+/// real acquire that follows will spin forever.  Emitting here gives an
+/// instant, precisely-located diagnostic instead of waiting ~30 s for the
+/// spinlock stall detector.  Rate-limited so a genuine bug can't flood serial.
+///
+/// Called with the per-CPU `IN_LOCKDEP` re-entrancy guard already set, so the
+/// `serial_println!` here cannot recurse back into lockdep.
+#[cold]
+#[inline(never)]
+fn report_recursive(class_idx: u16, cpu: usize) {
+    VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    let n = RECURSIVE_REPORTS.fetch_add(1, Ordering::Relaxed);
+    if n >= MAX_RECURSIVE_REPORTS {
+        return;
+    }
+    let name = class_name(class_idx);
+    serial_println!(
+        "[lockdep] *** SELF-DEADLOCK *** CPU {} is re-acquiring lock {:?} (class {}) \
+         it already holds. This non-reentrant spinlock will now spin forever — the \
+         acquire is a recursive self-deadlock (fix the call path).",
+        cpu, name, class_idx
+    );
+    dump_held_locks(cpu);
+}
+
 /// Get the name of a lock class for diagnostic output.
 fn class_name(idx: u16) -> &'static str {
     let idx = idx as usize;
@@ -718,6 +763,27 @@ pub fn self_test() {
     let held_after = unsafe { HELD[cpu].depth };
     assert_eq!(held_after, 0, "held stack empty after releases");
     serial_println!("[lockdep]   dump_held_locks: OK");
+
+    // Test 7: Recursive same-class acquire is reported as a self-deadlock.
+    // Uses fake addresses (no real spinlock), so acquiring lock_a twice while
+    // held only exercises the detector — it does not actually deadlock. The
+    // 'SELF-DEADLOCK' line printed below is INTENTIONAL, not a real event.
+    let v6 = VIOLATIONS.load(Ordering::Relaxed);
+    serial_println!(
+        "[lockdep]   (self-test) intentionally re-acquiring a held lock; the \
+         'SELF-DEADLOCK' line below is expected and not a real event:"
+    );
+    lock_acquire(lock_a, b"test-A");
+    lock_acquire(lock_a, b"test-A"); // recursive → should report + count.
+    let v7 = VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(v7, v6 + 1, "recursive same-class acquire should count one violation");
+    // Held stack now has [A, A]; two releases clear it.
+    lock_release(lock_a);
+    lock_release(lock_a);
+    // SAFETY: same CPU, after releases.
+    let held_rec = unsafe { HELD[cpu].depth };
+    assert_eq!(held_rec, 0, "held stack empty after recursive-test releases");
+    serial_println!("[lockdep]   Recursive self-deadlock detection: OK");
 
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);

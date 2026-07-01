@@ -77,7 +77,8 @@ Format for each entry:
   EXPOSE/LABEL/VOLUME/STOPSIGNAL/SHELL/ONBUILD, ARG with
   `${VAR}`/`$VAR`/`${VAR:-default}` expansion + `--build-arg` overrides,
   **multi-stage builds** (`FROM … AS <name>`, `FROM <stage>` base inheritance,
-  and `COPY --from=<stage-name|index|image-dir>` cross-stage copies), and
+  `COPY --from=<stage-name|index|image-dir>` cross-stage copies, and
+  `--target <stage>` to output an intermediate stage), and
   OCI config `history[]` recording (surfaced via `oci`/`docker history`).
   `RUN <cmd>` — which executes a command inside the in-progress image's rootfs,
   *the same* rootfs-binary exec this question is about — and `HEALTHCHECK`

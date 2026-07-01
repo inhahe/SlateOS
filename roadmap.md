@@ -5307,7 +5307,8 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     `.dockerignore` filtering, ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/
     VOLUME/STOPSIGNAL/SHELL/ONBUILD, ARG `${VAR}` expansion + `--build-arg`
     overrides, **multi-stage builds** (`FROM … AS <name>`, `FROM <stage>`
-    inheritance, `COPY --from=<stage|index|image>`), and OCI config
+    inheritance, `COPY --from=<stage|index|image>`, `--target <stage>`),
+    and OCI config
     `history[]` recording surfaced via `oci`/`docker history`). Remaining:
     real `container exec` / Dockerfile
     `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)

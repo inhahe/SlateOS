@@ -665,6 +665,156 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Lifecycle event log (Docker `container events`)
+// ---------------------------------------------------------------------------
+
+/// A container lifecycle event kind, mirroring Docker's event actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerEventKind {
+    /// Container created (`create`).
+    Create,
+    /// Container init started (`start`).
+    Start,
+    /// Init process exited (`die`), carrying the exit code.
+    Die,
+    /// Graceful stop request (`stop`).
+    Stop,
+    /// Forced kill (`kill`).
+    Kill,
+    /// Execution paused (`pause`).
+    Pause,
+    /// Execution resumed (`unpause`).
+    Unpause,
+    /// Container relaunched (`restart`) — manual restart or auto-restart.
+    Restart,
+    /// Container deleted (`destroy`).
+    Destroy,
+}
+
+impl ContainerEventKind {
+    /// Docker's lowercase action string for this event.
+    #[must_use]
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Start => "start",
+            Self::Die => "die",
+            Self::Stop => "stop",
+            Self::Kill => "kill",
+            Self::Pause => "pause",
+            Self::Unpause => "unpause",
+            Self::Restart => "restart",
+            Self::Destroy => "destroy",
+        }
+    }
+}
+
+impl core::fmt::Display for ContainerEventKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.action())
+    }
+}
+
+/// A recorded container lifecycle event (a snapshot copy handed to callers).
+#[derive(Debug, Clone)]
+pub struct ContainerEvent {
+    /// Monotonic per-boot event sequence number (1-based).
+    pub seq: u64,
+    /// Monotonic timestamp (nanoseconds since boot) from `hrtimer::now_ns`.
+    pub time_ns: u64,
+    /// Container id the event refers to.
+    pub id: ContainerId,
+    /// Container name at the time of the event.
+    pub name: String,
+    /// Event kind.
+    pub kind: ContainerEventKind,
+    /// Exit code for `die` events (`None` for all other kinds).
+    pub exit_code: Option<i32>,
+}
+
+/// Capacity of the lifecycle-event ring buffer.  Older events are dropped
+/// once this many newer events have accumulated — `container events` shows a
+/// bounded recent window, never an unbounded history.
+const EVENT_LOG_CAP: usize = 256;
+
+struct EventLog {
+    /// Ring buffer of recent events (front = oldest, back = newest).
+    events: alloc::collections::VecDeque<ContainerEvent>,
+    /// Monotonic sequence counter; the next event recorded gets `next_seq`.
+    next_seq: u64,
+}
+
+impl EventLog {
+    const fn new() -> Self {
+        Self {
+            events: alloc::collections::VecDeque::new(),
+            next_seq: 1,
+        }
+    }
+}
+
+static EVENT_LOG: Mutex<EventLog> = Mutex::new(EventLog::new());
+
+/// Record a container lifecycle event.
+///
+/// Cheap and lock-local: takes only the event-log lock (never the container
+/// table), so it is safe to call from within a `with_table` closure or from
+/// the process-exit path.  Drops the oldest event when the ring is full.
+fn record_event(
+    id: ContainerId,
+    name: &str,
+    kind: ContainerEventKind,
+    exit_code: Option<i32>,
+) {
+    let time_ns = crate::hrtimer::now_ns();
+    let mut log = EVENT_LOG.lock();
+    let seq = log.next_seq;
+    log.next_seq = log.next_seq.saturating_add(1);
+    if log.events.len() >= EVENT_LOG_CAP {
+        log.events.pop_front();
+    }
+    log.events.push_back(ContainerEvent {
+        seq,
+        time_ns,
+        id,
+        name: String::from(name),
+        kind,
+        exit_code,
+    });
+}
+
+/// Snapshot recent lifecycle events, oldest first.
+///
+/// - `since_seq`: only return events with `seq > since_seq` (pass 0 for all
+///   retained events).
+/// - `limit`: cap the result to the most recent `limit` matching events (pass
+///   0 for no cap).
+/// - `filter_id`: when `Some`, only events for that container id.
+///
+/// Returns owned copies so the caller never holds the event-log lock while
+/// formatting output.
+#[must_use]
+pub fn events_snapshot(
+    since_seq: u64,
+    limit: usize,
+    filter_id: Option<ContainerId>,
+) -> Vec<ContainerEvent> {
+    let log = EVENT_LOG.lock();
+    let mut out: Vec<ContainerEvent> = log
+        .events
+        .iter()
+        .filter(|e| e.seq > since_seq)
+        .filter(|e| filter_id.is_none_or(|fid| e.id == fid))
+        .cloned()
+        .collect();
+    if limit != 0 && out.len() > limit {
+        let drop = out.len().saturating_sub(limit);
+        out.drain(0..drop);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Public API: lifecycle
 // ---------------------------------------------------------------------------
 
@@ -903,7 +1053,9 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         config.name, slot, pid_ns, user_ns, net_ns, cgroup_id, veth_pair
     );
 
-    Ok(slot as ContainerId)
+    let new_id = slot as ContainerId;
+    record_event(new_id, &config.name, ContainerEventKind::Create, None);
+    Ok(new_id)
 }
 
 /// Mark a container as running.
@@ -915,7 +1067,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
 /// - [`KernelError::InvalidArgument`] if container doesn't exist.
 /// - [`KernelError::InvalidArgument`] if not in Created state.
 pub fn start(id: ContainerId) -> KernelResult<()> {
-    with_table(|table| {
+    let name = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -928,8 +1080,10 @@ pub fn start(id: ContainerId) -> KernelResult<()> {
         // remembered user stop and reset the auto-restart counter.
         table.containers[idx].user_stopped = false;
         table.containers[idx].restart_count = 0;
-        Ok(())
-    })
+        Ok(table.containers[idx].name.clone())
+    })?;
+    record_event(id, &name, ContainerEventKind::Start, None);
+    Ok(())
 }
 
 /// Mark a container as stopped.
@@ -940,7 +1094,7 @@ pub fn start(id: ContainerId) -> KernelResult<()> {
 ///
 /// - [`KernelError::InvalidArgument`] if container doesn't exist.
 pub fn stop(id: ContainerId) -> KernelResult<()> {
-    let net_ns = with_table(|table| {
+    let (net_ns, name) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -949,7 +1103,7 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
         // A graceful stop is a user request: remember it so the restart policy
         // is suppressed (Docker: restart is not honored after `docker stop`).
         table.containers[idx].user_stopped = true;
-        Ok(table.containers[idx].net_ns)
+        Ok((table.containers[idx].net_ns, table.containers[idx].name.clone()))
     })?;
     // A stopped container publishes no ports (Docker semantics): tear down its
     // host-port NAT forwards so a dead container can't keep receiving traffic.
@@ -957,6 +1111,7 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
     // restart could reinstall them.  Done outside the table lock (the NAT
     // table has its own lock).  Idempotent if the container had no forwards.
     crate::net::nat::flush_port_forwards(net_ns);
+    record_event(id, &name, ContainerEventKind::Stop, None);
     Ok(())
 }
 
@@ -984,6 +1139,7 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     let mut net_ns_to_flush = None;
     let mut restart_id: Option<ContainerId> = None;
     let mut remove_id: Option<ContainerId> = None;
+    let mut die_event: Option<(ContainerId, String)> = None;
     {
         let mut guard = TABLE.lock();
         let Some(table) = guard.as_mut() else {
@@ -999,6 +1155,9 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
                 // negative value indicates a crash (negated exception code).
                 ct.exit_code = Some(exit_code);
                 net_ns_to_flush = Some(ct.net_ns);
+                if let Ok(cid) = ContainerId::try_from(idx) {
+                    die_event = Some((cid, ct.name.clone()));
+                }
                 // Evaluate the restart policy.  When it calls for a restart we
                 // *schedule* it (below, via the workqueue) rather than spawning
                 // here — the process-exit path must not spawn (it can hold
@@ -1022,8 +1181,13 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
             }
         }
     }
-    // Outside the table lock: tear down the dead container's host-port NAT
-    // forwards (idempotent if it had none), mirroring `stop`.
+    // Outside the table lock: record the `die` event (Docker emits `die` with
+    // the exit code when a container's init exits) and tear down the dead
+    // container's host-port NAT forwards (idempotent if it had none), mirroring
+    // `stop`.
+    if let Some((cid, name)) = die_event {
+        record_event(cid, &name, ContainerEventKind::Die, Some(exit_code));
+    }
     if let Some(net_ns) = net_ns_to_flush {
         crate::net::nat::flush_port_forwards(net_ns);
     }
@@ -1186,6 +1350,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
 
     serial_println!("[container] Deleted '{}' (id={})", name, id);
 
+    record_event(id, &name, ContainerEventKind::Destroy, None);
     Ok(())
 }
 
@@ -1643,15 +1808,19 @@ fn run_with_abi(
         }
     }
 
+    let run_name = info(id).map_or(String::new(), |ci| ci.name);
     serial_println!(
         "[container] run id={} '{}': init pid={} task={} entry={:#x}",
         id,
-        info(id).map_or(String::new(), |ci| ci.name),
+        run_name,
         result.pid,
         result.task_id,
         result.entry_point
     );
 
+    // `run` flips the container to `Running` directly (without going through
+    // the public `start`), so emit the `start` lifecycle event here.
+    record_event(id, &run_name, ContainerEventKind::Start, None);
     Ok(result.pid)
 }
 
@@ -1837,8 +2006,14 @@ fn relaunch_recorded(id: ContainerId, reset_restart_count: bool) -> KernelResult
     })?;
 
     // Replay the recorded command.  Borrow the owned arg strings as &str.
+    // `run_path` -> `run` emits the `start` event; layer a `restart` event on
+    // top so `container events` shows the relaunch (Docker emits `restart` in
+    // addition to the underlying start).
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_path(id, &exe_path, &arg_refs)
+    let pid = run_path(id, &exe_path, &arg_refs)?;
+    let name = info(id).map_or(String::new(), |ci| ci.name);
+    record_event(id, &name, ContainerEventKind::Restart, None);
+    Ok(pid)
 }
 
 /// Resolve a container-relative path to its host VFS path under the container's
@@ -2762,6 +2937,11 @@ pub fn kill(id: ContainerId) -> KernelResult<usize> {
     // tables and trips notify_init_exit (which re-takes the container table),
     // so it must not run while we hold the table lock.
     let process_ids = pids(id).ok_or(KernelError::InvalidArgument)?;
+    // Capture the name before killing (the container stays active/named after a
+    // kill, but snapshot it now so the `kill` event is recorded even if a later
+    // reaper removes the container).  Docker emits `kill` in addition to the
+    // `die` that `notify_init_exit` records when the init process exits.
+    let name = info(id).map_or(String::new(), |ci| ci.name);
     let mut killed = 0usize;
     for pid in process_ids {
         // Record a SIGKILL-style exit code before the process zombifies so
@@ -2773,6 +2953,7 @@ pub fn kill(id: ContainerId) -> KernelResult<usize> {
             killed = killed.saturating_add(1);
         }
     }
+    record_event(id, &name, ContainerEventKind::Kill, None);
     Ok(killed)
 }
 
@@ -2796,7 +2977,7 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
     // Set the frozen flag and snapshot the tracked PIDs under the table lock,
     // then suspend threads outside it — `sched::suspend` takes the scheduler
     // lock, which must never be held under the container table lock.
-    let process_ids = with_table(|table| {
+    let (process_ids, name) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -2808,7 +2989,7 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].frozen = true;
-        Ok(table.containers[idx].pids.clone())
+        Ok((table.containers[idx].pids.clone(), table.containers[idx].name.clone()))
     })?;
 
     let mut suspended = 0usize;
@@ -2821,6 +3002,7 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
             }
         }
     }
+    record_event(id, &name, ContainerEventKind::Pause, None);
     Ok(suspended)
 }
 
@@ -2839,7 +3021,7 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
 /// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive
 ///   or is not currently frozen.
 pub fn unpause(id: ContainerId) -> KernelResult<usize> {
-    let process_ids = with_table(|table| {
+    let (process_ids, name) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -2848,7 +3030,7 @@ pub fn unpause(id: ContainerId) -> KernelResult<usize> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].frozen = false;
-        Ok(table.containers[idx].pids.clone())
+        Ok((table.containers[idx].pids.clone(), table.containers[idx].name.clone()))
     })?;
 
     let mut resumed = 0usize;
@@ -2861,6 +3043,7 @@ pub fn unpause(id: ContainerId) -> KernelResult<usize> {
             }
         }
     }
+    record_event(id, &name, ContainerEventKind::Unpause, None);
     Ok(resumed)
 }
 
@@ -4638,5 +4821,66 @@ pub fn self_test() {
     }
     serial_println!("[container]   creation sequence (monotonic ordering): OK");
 
-    serial_println!("[container] Self-test PASSED (44 tests)");
+    // Lifecycle event log (Docker `container events`): action strings, ordering,
+    // since/limit/filter semantics of `events_snapshot`.
+    {
+        // 45u: action() strings and Display match Docker's action names.
+        assert_eq!(ContainerEventKind::Create.action(), "create");
+        assert_eq!(ContainerEventKind::Start.action(), "start");
+        assert_eq!(ContainerEventKind::Die.action(), "die");
+        assert_eq!(ContainerEventKind::Stop.action(), "stop");
+        assert_eq!(ContainerEventKind::Kill.action(), "kill");
+        assert_eq!(ContainerEventKind::Pause.action(), "pause");
+        assert_eq!(ContainerEventKind::Unpause.action(), "unpause");
+        assert_eq!(ContainerEventKind::Restart.action(), "restart");
+        assert_eq!(ContainerEventKind::Destroy.action(), "destroy");
+        assert_eq!(
+            alloc::format!("{}", ContainerEventKind::Die),
+            "die",
+            "Display must match action()",
+        );
+
+        // Baseline: only inspect events we record from here on.
+        let base = events_snapshot(0, 0, None)
+            .last()
+            .map_or(0, |e| e.seq);
+
+        // Record a deterministic burst against synthetic ids.
+        let id_x: ContainerId = 30;
+        let id_y: ContainerId = 31;
+        record_event(id_x, "evt-x", ContainerEventKind::Create, None);
+        record_event(id_x, "evt-x", ContainerEventKind::Start, None);
+        record_event(id_y, "evt-y", ContainerEventKind::Create, None);
+        record_event(id_x, "evt-x", ContainerEventKind::Die, Some(7));
+
+        // since_seq returns exactly the four new events, oldest-first, with
+        // strictly increasing seqs.
+        let ours = events_snapshot(base, 0, None);
+        assert_eq!(ours.len(), 4, "since_seq must return the 4 new events");
+        assert_eq!(ours[0].kind, ContainerEventKind::Create);
+        assert_eq!(ours[1].kind, ContainerEventKind::Start);
+        assert_eq!(ours[3].kind, ContainerEventKind::Die);
+        assert_eq!(ours[3].exit_code, Some(7), "die must carry the exit code");
+        assert!(ours[0].exit_code.is_none(), "non-die events carry no exit code");
+        for w in ours.windows(2) {
+            assert!(w[1].seq > w[0].seq, "event seqs must strictly increase");
+            assert!(w[1].time_ns >= w[0].time_ns, "event times must be monotonic");
+        }
+
+        // limit keeps the most recent N.
+        let last_two = events_snapshot(base, 2, None);
+        assert_eq!(last_two.len(), 2, "limit must cap the result");
+        assert_eq!(last_two[1].kind, ContainerEventKind::Die, "limit keeps newest");
+
+        // filter_id restricts to one container.
+        let only_y = events_snapshot(base, 0, Some(id_y));
+        assert_eq!(only_y.len(), 1, "filter_id must restrict to one container");
+        assert_eq!(only_y[0].id, id_y);
+        assert_eq!(only_y[0].name, "evt-y");
+        let only_x = events_snapshot(base, 0, Some(id_x));
+        assert_eq!(only_x.len(), 3, "filter_id must return all of id_x's events");
+    }
+    serial_println!("[container]   lifecycle event log (events): OK");
+
+    serial_println!("[container] Self-test PASSED (52 tests)");
 }

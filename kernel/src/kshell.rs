@@ -68322,11 +68322,84 @@ fn cmd_container(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "events" => {
+            // container events [-n N] [--id ID]  (Docker `events`): print the
+            // recent container lifecycle event log (create/start/die/stop/kill/
+            // pause/unpause/restart/destroy), oldest first.  We record a bounded
+            // ring, so this is the recent window rather than the full history.
+            let mut limit: usize = 0; // 0 = all retained events
+            let mut filter_id: Option<u32> = None;
+            let mut ei = 1;
+            while ei < parts.len() {
+                match parts.get(ei) {
+                    Some(&"-n") | Some(&"--tail") => {
+                        match parts.get(ei.saturating_add(1)).and_then(|n| n.parse::<usize>().ok()) {
+                            Some(v) => {
+                                limit = v;
+                                ei = ei.saturating_add(2);
+                            }
+                            None => {
+                                crate::console_println!("container events: -n needs a numeric value");
+                                return;
+                            }
+                        }
+                    }
+                    Some(&"--id") | Some(&"-c") | Some(&"--container") => {
+                        match parts.get(ei.saturating_add(1)).and_then(|n| n.parse::<u32>().ok()) {
+                            Some(v) => {
+                                filter_id = Some(v);
+                                ei = ei.saturating_add(2);
+                            }
+                            None => {
+                                crate::console_println!("container events: --id needs a container ID");
+                                return;
+                            }
+                        }
+                    }
+                    Some(tok) => {
+                        // Bare token: treat as a container ID filter (Docker allows
+                        // `events --filter container=ID`; we accept the id directly).
+                        match tok.parse::<u32>() {
+                            Ok(v) => filter_id = Some(v),
+                            Err(_) => {
+                                crate::console_println!("container events: unknown argument '{}'", tok);
+                                return;
+                            }
+                        }
+                        ei = ei.saturating_add(1);
+                    }
+                    None => ei = ei.saturating_add(1),
+                }
+            }
+            let events = container::events_snapshot(0, limit, filter_id);
+            if events.is_empty() {
+                crate::console_println!("(no container events recorded)");
+            } else {
+                for e in &events {
+                    // Monotonic timestamp shown as seconds.milliseconds since boot
+                    // (we have no wall clock in this context; relative time is the
+                    // honest representation).
+                    let secs = e.time_ns / 1_000_000_000;
+                    let ms = (e.time_ns % 1_000_000_000) / 1_000_000;
+                    let action = e.kind.action();
+                    match e.exit_code {
+                        Some(code) => crate::console_println!(
+                            "{:>6}.{:03}s  container {:<8} id={} name={} (exit {})",
+                            secs, ms, action, e.id, e.name, code
+                        ),
+                        None => crate::console_println!(
+                            "{:>6}.{:03}s  container {:<8} id={} name={}",
+                            secs, ms, action, e.id, e.name
+                        ),
+                    }
+                }
+            }
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
@@ -68345,6 +68418,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");
             crate::console_println!("  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)");
+            crate::console_println!("  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)");
             crate::console_println!("  container info [--json] ID               — detailed inspection (--json: machine-readable)");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
@@ -68566,6 +68640,14 @@ fn cmd_docker(args: &str) {
         }
         "exec" => {
             let mut delegated = alloc::string::String::from("exec");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_container(&delegated);
+        }
+        "events" => {
+            let mut delegated = alloc::string::String::from("events");
             if !rest.is_empty() {
                 delegated.push(' ');
                 delegated.push_str(rest);

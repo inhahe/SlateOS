@@ -69027,7 +69027,7 @@ fn cmd_docker(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: docker <build|history|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
-            crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
+            crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -70259,6 +70259,7 @@ fn cmd_oci(args: &str) {
             let mut positional: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
             let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
                 alloc::vec::Vec::new();
+            let mut target: Option<&str> = None;
             let mut i = 1usize;
             while let Some(&tok) = parts.get(i) {
                 if tok == "--build-arg" {
@@ -70282,6 +70283,17 @@ fn cmd_oci(args: &str) {
                         crate::console_println!("[oci] --build-arg needs KEY=VALUE");
                         i = i.saturating_add(1);
                     }
+                } else if tok == "--target" {
+                    if let Some(&t) = parts.get(i.saturating_add(1)) {
+                        target = Some(t);
+                        i = i.saturating_add(2);
+                    } else {
+                        crate::console_println!("[oci] --target needs a stage name or index");
+                        i = i.saturating_add(1);
+                    }
+                } else if let Some(t) = tok.strip_prefix("--target=") {
+                    target = Some(t);
+                    i = i.saturating_add(1);
                 } else {
                     positional.push(tok);
                     i = i.saturating_add(1);
@@ -70291,12 +70303,12 @@ fn cmd_oci(args: &str) {
                 (positional.first(), positional.get(1), positional.get(2))
             else {
                 crate::console_println!(
-                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [--build-arg KEY=VALUE ...]"
+                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [--build-arg KEY=VALUE ...] [--target STAGE]"
                 );
                 return;
             };
             match crate::fs::vfs::Vfs::read_file(dockerfile) {
-                Ok(df) => match oci::build_image_with_args(&df, ctx, dest, &build_args) {
+                Ok(df) => match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
                     Ok(desc) => crate::console_println!(
                         "Built image -> {} (manifest {}, {} bytes)",
                         dest, desc.digest, desc.size
@@ -70319,7 +70331,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
             crate::console_println!("  oci history <dir>  — show build history (per-step created-by + size)");
-            crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
+            crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");

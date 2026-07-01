@@ -1775,6 +1775,27 @@ pub fn build_image_with_args(
     dest_dir: &str,
     build_args: &[(String, String)],
 ) -> Result<Descriptor, BuildError> {
+    build_image_targeted(dockerfile, context_dir, dest_dir, build_args, None)
+}
+
+/// Build an OCI image from a Dockerfile, optionally stopping at a named stage.
+///
+/// Identical to [`build_image_with_args`] but, when `target` is `Some`, builds
+/// only the stages up to and including the stage named (`FROM … AS <name>`) or
+/// indexed by `target`, and writes *that* stage's image to `dest_dir` — the
+/// `docker build --target <stage>` behaviour.  Stages after the target are not
+/// built.
+///
+/// # Errors
+/// Returns [`BuildError`] on a malformed/unsupported instruction, a missing
+/// COPY source, a `RUN`, an unknown `--target`, or an underlying VFS failure.
+pub fn build_image_targeted(
+    dockerfile: &[u8],
+    context_dir: &str,
+    dest_dir: &str,
+    build_args: &[(String, String)],
+    target: Option<&str>,
+) -> Result<Descriptor, BuildError> {
     use crate::fs::Vfs;
 
     if dest_dir.is_empty() || dest_dir.contains('\0') || context_dir.contains('\0') {
@@ -1817,16 +1838,37 @@ pub fn build_image_with_args(
         });
     }
 
-    // Build each stage in order.  Every stage but the last is materialised to a
-    // temporary OCI image directory so that a later `FROM <stage>` or
-    // `COPY --from=<stage>` can consume it; the last stage writes to `dest`.
+    let stage_count = stages.len();
+
+    // `--target` selects the output stage: build only 0..=target.  Resolve it
+    // by `AS` name first, then by 0-based index.
+    let last_idx = match target {
+        Some(t) => {
+            let by_name = stages.iter().position(|s| s.name.as_deref() == Some(t));
+            match by_name.or_else(|| t.parse::<usize>().ok().filter(|&n| n < stage_count)) {
+                Some(n) => n,
+                None => {
+                    return Err(BuildError::Parse {
+                        line: 0,
+                        msg: format!("build target stage not found: {t}"),
+                    });
+                }
+            }
+        }
+        None => stage_count.saturating_sub(1),
+    };
+
+    // Build each stage in order up to the target.  Every stage but the target
+    // is materialised to a temporary OCI image directory so that a later
+    // `FROM <stage>` or `COPY --from=<stage>` can consume it; the target stage
+    // writes to `dest`.
     let mut built: Vec<StageBuilt> = Vec::new();
     let mut temp_stage_dirs: Vec<String> = Vec::new();
-    let stage_count = stages.len();
     let mut final_desc: Option<Descriptor> = None;
 
-    for (i, stage) in stages.iter().enumerate() {
-        let is_last = i.saturating_add(1) == stage_count;
+    for i in 0..=last_idx {
+        let Some(stage) = stages.get(i) else { break };
+        let is_last = i == last_idx;
         let stage_dest = if is_last {
             String::from(dest)
         } else {
@@ -3035,6 +3077,29 @@ COPY --from=mid /extra.txt /extra.txt
             "COPY --from rootfs scratch removed"
         );
 
+        // `--target=builder` outputs the intermediate builder stage itself
+        // (its /out/app.txt), not the final stage — and stops before `mid`.
+        let timg = "/tmp/oci_ms_timg";
+        let text = "/tmp/oci_ms_text";
+        cleanup_image_dir(timg);
+        build_image_targeted(df, ctx, timg, &[], Some("builder")).map_err(|e| {
+            serial_println!("[oci] --target build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let tms = load_image(timg)?;
+        assert_eq!(tms.manifest.layers.len(), 1, "builder stage has 1 layer");
+        let _ = Vfs::mkdir(text);
+        for layer in &tms.manifest.layers {
+            extract_layer(timg, layer, text)?;
+        }
+        assert_eq!(Vfs::read_file(&format!("{text}/out/app.txt"))?, b"appdata");
+        // The `mid`/final stages must not have been built past the target.
+        assert!(Vfs::read_file(&format!("{text}/extra.txt")).is_err(), "target stops before mid");
+        let _ = Vfs::remove(&format!("{text}/out/app.txt"));
+        let _ = Vfs::rmdir(&format!("{text}/out"));
+        let _ = Vfs::rmdir(text);
+        cleanup_image_dir(timg);
+
         let _ = Vfs::remove(&format!("{ext}/app.txt"));
         let _ = Vfs::remove(&format!("{ext}/extra.txt"));
         let _ = Vfs::rmdir(ext);
@@ -3042,7 +3107,7 @@ COPY --from=mid /extra.txt /extra.txt
         let _ = Vfs::remove(&format!("{ctx}/extra.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
-        serial_println!("[oci]   multi-stage builds (FROM..AS / COPY --from): OK");
+        serial_println!("[oci]   multi-stage builds (FROM..AS / COPY --from / --target): OK");
     }
 
     serial_println!("[oci] Self-test PASSED (15 tests)");

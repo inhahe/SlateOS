@@ -740,6 +740,44 @@ switching work.
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
 IPAM feature, increments 60–61). **Resolved:** 2026-07-01.
 
+### D-CNET-NSRX. veth RX frames are dispatched in ROOT_NS, not the endpoint's namespace — TECH DEBT (analyzed, not a simple bug)
+
+**Where:** `kernel/src/net/veth.rs` (`poll_all`, ~L552 — the `_ns_id` is
+collected per-frame but discarded), feeding `kernel/src/net/ethernet.rs`
+(`process_frame`, no ns param) → `ipv4::process_ipv4`/`ipv6::process_ipv6`
+(no ns param) → `tcp::process_tcp`/`udp::process_udp` (hardcode
+`crate::netns::ROOT_NS`, see the explicit comment at `tcp.rs:3704` "Packets
+from the physical NIC arrive in the root namespace. Veth-delivered packets
+will carry a namespace context").
+
+**What this is (and is not).** It is **not** a plain bug that breaks
+containers today: the current model drains a container's *egress* frames
+off the host-side veth end (end A, in ROOT_NS) and processes them in ROOT_NS,
+which is exactly what lets **NAT masquerade** carry container→external
+traffic and what the L2 bridge (D-CNET-L2BRIDGE) uses for same-network peer
+switching. So container connectivity works. The debt is that the RX path is
+**not namespace-aware end to end** — the deepest layer already threads
+`ns_id` (`process_tcp_common`/`process_udp_common` take it; TCP/UDP lookups
+key on it), but the `ethernet→ip→transport` ingress chain forces ROOT_NS, and
+`ethernet::process_frame`'s `is_for_us` check compares against the *host*
+NIC MAC (`interface::mac()`) rather than the receiving namespace's interface
+MAC. This blocks a fuller model where the host holds interfaces in multiple
+namespaces and must deliver inbound unicast to the right per-ns stack.
+
+**Proper fix (design anticipated by the code, but multi-layer — do in a
+dedicated session):** thread `ns_id` as a parameter through the whole RX
+chain — `process_frame(data, ns_id)` → `process_ipv4/6(payload, ns_id)` →
+`process_arp(payload, ns_id)` → `process_tcp/udp(pkt, ns_id)` (pass it to the
+`_common` helpers instead of the hardcoded `ROOT_NS`) and `icmp`/`icmpv6`
+echo-reply routing; make `is_for_us` compare against the receiving ns's
+interface MAC (needs a new `interface::ns_mac(ns_id)` / veth-endpoint MAC
+lookup); update all ~12 `process_frame` call sites (physical-NIC path passes
+`ROOT_NS`, `veth::poll_all` passes the drained endpoint's `ns_id`). **Risk:**
+this is the core RX path of the *entire* net stack — a subtle error breaks
+the physical-NIC path that boot self-tests exercise, so it needs careful,
+incremental, boot-tested work with a fresh context budget, not a tail-end
+bolt-on. **Discovered/analyzed:** 2026-07-01 (during embedded-DNS work).
+
 ### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 
 **Status (2026-07-01): steps 1–4 done and boot-validated.** `container

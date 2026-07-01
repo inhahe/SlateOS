@@ -617,6 +617,58 @@ pub fn volume_count(process_id: u64) -> usize {
     PROCESS_MOUNTS.lock().get(&process_id).map_or(0, Vec::len)
 }
 
+/// A single entry in a jailed process's own mount view.
+///
+/// Used to render a container process's `/proc/<pid>/mountinfo` from *its*
+/// perspective (its rootfs jail and volumes) rather than leaking the host's
+/// global mount table.  The `host_target` is the resolved host path backing
+/// the mount, so the caller can look up the real filesystem type serving it.
+#[derive(Debug, Clone)]
+pub struct MountViewEntry {
+    /// Mount point as the *guest* sees it (`/` for the rootfs, the volume's
+    /// guest prefix otherwise).
+    pub guest_path: String,
+    /// Host path whose backing filesystem serves this mount.  For the rootfs
+    /// entry this is the jail root; for a volume it is the volume's host
+    /// target.  The caller resolves the fstype from the global mount table.
+    pub host_target: String,
+    /// `true` if writes into this mount are denied (`EROFS`): a `:ro` volume,
+    /// or any rootfs path under a `--read-only` container root.
+    pub read_only: bool,
+}
+
+/// Return a jailed (container) process's own filesystem mount view, or `None`
+/// if the process is not jailed (it sees the host's global mount table).
+///
+/// The first entry is always the container rootfs at guest `/` (read-only iff
+/// the container root is read-only), followed by each volume/tmpfs bind mount
+/// at its guest prefix, in insertion order.  This is the data behind a
+/// container process's `/proc/<pid>/mountinfo`: a process inside a container
+/// must see *its* mounts, not the host's, both for correctness and to avoid
+/// leaking the host mount topology into the container.
+#[must_use]
+pub fn mount_view_for(process_id: u64) -> Option<Vec<MountViewEntry>> {
+    let root = PROCESS_ROOT.lock().get(&process_id).cloned()?;
+    let root_ro = PROCESS_ROOT_RO.lock().contains(&process_id);
+    let mut view = Vec::new();
+    // The rootfs is the guest's `/`, backed by the jail root on the host.
+    view.push(MountViewEntry {
+        guest_path: String::from("/"),
+        host_target: root,
+        read_only: root_ro,
+    });
+    if let Some(list) = PROCESS_MOUNTS.lock().get(&process_id) {
+        for v in list {
+            view.push(MountViewEntry {
+                guest_path: v.guest_prefix.clone(),
+                host_target: v.host_target.clone(),
+                read_only: v.read_only,
+            });
+        }
+    }
+    Some(view)
+}
+
 /// Find the longest-matching volume for a (jail-normalized) guest path.
 ///
 /// Returns `(host_target, suffix)` where `suffix` is the remainder of the

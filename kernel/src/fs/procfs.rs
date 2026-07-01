@@ -2660,20 +2660,94 @@ fn render_mountinfo(mounts: &[(String, String, crate::fs::vfs::MountOptions)]) -
     text.into_bytes()
 }
 
+/// True iff mount point `mount_path` covers host path `host` — either an
+/// exact match or a proper parent directory (boundary-aware so `/data` does
+/// not spuriously cover `/database`).  The root mount `/` covers everything.
+fn mount_path_covers(mount_path: &str, host: &str) -> bool {
+    if mount_path == "/" {
+        return true;
+    }
+    if host == mount_path {
+        return true;
+    }
+    host.strip_prefix(mount_path)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Resolve the filesystem type serving host path `host` from the global mount
+/// table: the longest mount-point prefix that covers it wins.  Returns `none`
+/// if nothing covers it (unreachable in practice — `/` always covers).
+fn fstype_for_host_path<'a>(
+    host: &str,
+    global: &'a [(String, String, crate::fs::vfs::MountOptions)],
+) -> &'a str {
+    let mut best: Option<(&str, usize)> = None;
+    for (path, fs_type, _) in global {
+        if mount_path_covers(path, host) {
+            let len = path.len();
+            if best.is_none_or(|(_, best_len)| len > best_len) {
+                best = Some((fs_type.as_str(), len));
+            }
+        }
+    }
+    best.map_or("none", |(t, _)| t)
+}
+
+/// Render a *container* process's own mount view as `/proc/<pid>/mountinfo`.
+///
+/// A jailed process must see its container's mounts — the rootfs at `/` and
+/// each volume/tmpfs at its guest path — not the host's global mount table
+/// (which would both be wrong and leak the host mount topology into the
+/// container).  Each entry's filesystem type is resolved from the real host
+/// mount backing it ([`fstype_for_host_path`]); the `source` field is reported
+/// as `none` so host backing paths are not leaked into the container.  The
+/// read-only flag comes from the container's own view (a `:ro` volume, or any
+/// rootfs path under a `--read-only` root), so the `rw`/`ro` option matches
+/// what a write would actually do inside the container.
+fn render_container_mountinfo(
+    view: &[crate::ipc::namespace::MountViewEntry],
+    global: &[(String, String, crate::fs::vfs::MountOptions)],
+) -> Vec<u8> {
+    use core::fmt::Write as _;
+
+    const MOUNT_ID_BASE: usize = 20;
+    let root_id = MOUNT_ID_BASE;
+
+    let mut text = String::with_capacity(view.len().saturating_mul(96).max(16));
+    for (i, entry) in view.iter().enumerate() {
+        let mount_id = MOUNT_ID_BASE.saturating_add(i);
+        let minor = i.saturating_add(1);
+        let fstype = mangle_mount_field(fstype_for_host_path(&entry.host_target, global));
+        let mount_point = mangle_mount_field(&entry.guest_path);
+        let opts = if entry.read_only { "ro" } else { "rw" };
+        let _ = writeln!(
+            text,
+            "{mount_id} {root_id} 0:{minor} / {mount_point} {opts} - {fstype} none {opts}",
+        );
+    }
+    text.into_bytes()
+}
+
 /// `/proc/<pid>/mountinfo` — per-process mount table, Linux-format.
 ///
-/// Because we have no mount namespaces, this is the same global mount
-/// table for every process (the data behind `/proc/mounts`), rendered in
-/// the richer `mountinfo` layout that `findmnt`, glibc and systemd parse;
-/// see [`render_mountinfo`] for the exact format.  Gated on process
-/// existence so bare scheduler tasks (kernel threads with no PCB) return
-/// `NotFound`, matching every other process-only per-PID file.
+/// For an ordinary (unjailed) process this is the global mount table (the
+/// data behind `/proc/mounts`), rendered in the richer `mountinfo` layout that
+/// `findmnt`, glibc and systemd parse; see [`render_mountinfo`].  A **jailed
+/// (container) process** instead sees *its own* mount view — the container
+/// rootfs at `/` plus its volume/tmpfs mounts — via [`render_container_mountinfo`],
+/// so a process inside a container does not observe the host's mount topology.
+/// Gated on process existence so bare scheduler tasks (kernel threads with no
+/// PCB) return `NotFound`, matching every other process-only per-PID file.
 fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
     // Process-only file: a bare scheduler task has no process record.
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
     let mounts = crate::fs::Vfs::mounts_full();
+    // A container (jailed) process sees its own mount view, not the host's.
+    if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
+        return Ok(render_container_mountinfo(&view, &mounts));
+    }
     Ok(render_mountinfo(&mounts))
 }
 
@@ -13816,6 +13890,90 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   mountinfo render: {} mount lines OK", lines.len());
+    }
+
+    // --- /proc/<pid>/mountinfo for a container (jailed) process ---
+    // render_container_mountinfo maps a container's own mount view onto the
+    // mountinfo layout: the rootfs at guest `/`, then each volume/tmpfs at its
+    // guest path.  Each entry's fstype is resolved from the host mount backing
+    // it, the source is hidden (`none`), and the rw/ro flag comes from the
+    // container's own view.  This pins that a container sees ITS mounts, not
+    // the host's, and never leaks host backing paths.
+    {
+        use crate::fs::vfs::MountOptions;
+        use crate::ipc::namespace::MountViewEntry;
+        // Host mount table the container's targets resolve their fstype against:
+        // the rootfs overlay, the ext4 host root, and a tmpfs-backing memfs.
+        let global = [
+            (String::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (
+                String::from("/containers/c1/rootfs"),
+                String::from("overlay"),
+                MountOptions::defaults(),
+            ),
+            (
+                String::from("/var/lib/slate/tmpfs/1-0"),
+                String::from("tmpfs"),
+                MountOptions::defaults(),
+            ),
+        ];
+        // Container view: read-only rootfs, a read-only bind volume served by
+        // the ext4 host root, and a writable tmpfs.
+        let view = [
+            MountViewEntry {
+                guest_path: String::from("/"),
+                host_target: String::from("/containers/c1/rootfs"),
+                read_only: true,
+            },
+            MountViewEntry {
+                guest_path: String::from("/logs"),
+                host_target: String::from("/var/log/app"),
+                read_only: true,
+            },
+            MountViewEntry {
+                guest_path: String::from("/tmp"),
+                host_target: String::from("/var/lib/slate/tmpfs/1-0"),
+                read_only: false,
+            },
+        ];
+        let rendered = render_container_mountinfo(&view, &global);
+        let text = core::str::from_utf8(&rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        let lines: Vec<&str> = text.lines().collect();
+        let expected = [
+            // rootfs `/` → overlay, read-only, source hidden.
+            "20 20 0:1 / / ro - overlay none ro",
+            // /logs bind → served by the ext4 host root, read-only.
+            "21 20 0:2 / /logs ro - ext4 none ro",
+            // /tmp tmpfs → served by the memfs mount, writable.
+            "22 20 0:3 / /tmp rw - tmpfs none rw",
+        ];
+        if lines.len() != expected.len() {
+            serial_println!(
+                "[procfs]   FAIL: container mountinfo {} lines, expected {}",
+                lines.len(), expected.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        for (got, want) in lines.iter().zip(expected.iter()) {
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: container mountinfo {:?} != {:?}", got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Boundary safety: a `/data` mount must not be reported as covering
+        // `/database` (prefix without a path separator).
+        if mount_path_covers("/data", "/database") {
+            serial_println!("[procfs]   FAIL: /data must not cover /database");
+            return Err(KernelError::InternalError);
+        }
+        if !mount_path_covers("/data", "/data/x") || !mount_path_covers("/", "/anything") {
+            serial_println!("[procfs]   FAIL: mount_path_covers parent/root check");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   container mountinfo render: {} lines OK", lines.len());
     }
 
     // --- /proc/<pid>/cgroup rendering ---

@@ -2953,6 +2953,26 @@ mount remainder is therefore now just the true longest-prefix mount-tree
 subsuming the rootfs as the `/` mount (the `pivot_root` target) — the last
 structural piece, not a volume-type gap.
 
+**Update 2026-07-01 (increment 18): container-aware `/proc/<pid>/mountinfo` —
+DONE.** A container (jailed) process now sees *its own* mount view in
+`/proc/<pid>/mountinfo` instead of the host's global mount table. Previously
+`gen_pid_mountinfo` rendered `Vfs::mounts_full()` for every PID, so a process
+inside a container observed the entire host mount topology (an info leak) and
+none of its own rootfs/volumes/tmpfs (a correctness gap). Fix:
+`namespace::mount_view_for(pid)` returns `None` for an unjailed process (keep
+the global table) or the container's ordered view — the rootfs at guest `/`
+(read-only iff `--read-only`), then each volume/tmpfs at its guest prefix with
+its own `:ro`/`:rw` flag. `procfs::render_container_mountinfo` renders it,
+resolving each entry's *fstype* from the real host mount backing its
+`host_target` (`fstype_for_host_path` longest-prefix match: overlay for the
+rootfs, tmpfs/memfs for `--tmpfs`, the host fs for binds) while reporting the
+`source` field as `none` so host backing paths are **not** leaked into the
+container. Covered by a procfs self-test (container view: RO rootfs→overlay, RO
+bind→ext4, RW tmpfs→tmpfs; plus `mount_path_covers` boundary safety so `/data`
+doesn't cover `/database`). Build/clippy clean, boot-test green. Note this is
+*introspection* only — real in-container `mount`/`umount`/`pivot_root` syscalls
+mutating a per-container mount table remain the deferred mount-namespace piece.
+
 ### TD33. Container `logs` capture works only for Linux-ABI container inits — ACCEPTED LIMITATION 2026-06-30
 
 **Where:** `kernel/src/container.rs` (`redirect_output_to_capture`, called from

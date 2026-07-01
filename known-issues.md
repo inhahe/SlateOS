@@ -251,6 +251,60 @@ watchdog called for above is now **implemented and boot-validated**.
   armed for the boot window, so any future reproduction (in CI or ad-hoc boots)
   will be captured automatically. Not running further blind repro batches — they
   produce no artifact — until the bug surfaces on its own.
+- **Reproduced 2026-07-01 (the bug surfaced on its own) — BUT THE WATCHDOG DID
+  NOT FIRE, exposing a structural blind spot in the instrument.** A boot test
+  during the tee(2) session hung: no BOOT_OK within the 480 s timeout, ~470 s of
+  total serial silence. The hang point matches the family signature exactly — the
+  "REAL make-drives-tcc build (ring 3, Path Z)" stage: `/bin/tcc -c /cap-a.c -o
+  /cap-a.o` triggered `[cow] Cloned address space: parent=0x1bb83000 ->
+  child=0x119000`, task 176 / process 210 exec'd a PIE ELF (ld-linux
+  interpreter), then the last two lines were `[thread] Process 210 has no threads
+  left — now zombie` / `[sched] Task 176 exiting`, followed by dead silence. Log
+  preserved at `build/hang-catches/CAUGHT-2026-07-01-tee-session-nobootok.txt`
+  (5773 lines). The very next boot (`--no-build`, identical binary) reached
+  BOOT_OK in 206 s — confirming intermittency, as always. **The critical new
+  signal: no `[liveness] SYSTEM HANG` dump, no `[watchdog]` soft-lockup line —
+  nothing at all.** The watchdog *was* armed (armed at `main.rs:1341`, well before
+  this Path-Z stage; disarmed only at BOOT_OK, which was never reached), so
+  arming is not the gap. That leaves two structural blind spots, and the total
+  silence points hard at the second:
+  1. *Livelock (watchdog resets every interval):* if some non-idle task keeps
+     getting ticked (a busy-spin / lost-wakeup retry loop in ring-0 or ring-3),
+     `timer_tick` charges the tick to a non-idle context (`from_user ||
+     local_has_real_work`) and bumps `USEFUL_WORK_TICKS`, so `liveness_check`
+     (`sched/mod.rs:1738`) sees `current != previous`, resets `LIVENESS_STALL_COUNT`
+     to 0, and never reaches the 3-interval alert. The watchdog only catches an
+     *idle* hang (all CPUs parked in the idle task), not a *busy* one.
+  2. *BSP stopped ticking (watchdog never runs at all) — most likely here.* The
+     ENTIRE watchdog stack (`watchdog_check` + `liveness_check`) is driven from
+     `timer_tick` on **cpu == 0 only** (`sched/mod.rs:1955`, `:1972-1976`). If the
+     BSP itself wedges with interrupts disabled — a spin holding a raw `spin::Mutex`
+     with IF=0, or the LAPIC timer not re-armed — the BSP timer ISR never runs, so
+     neither watchdog ever executes and no diagnostic can print. The observed
+     **total** silence (not even the soft-lockup detector, which watches per-CPU
+     heartbeats and would fire within 15 s if the BSP were still ticking while an
+     AP froze) is the fingerprint of a dead BSP tick, i.e. blind spot (2).
+  **Proper fix (the real next build, deferred — larger than a one-liner):** make
+  the hung-system detector independent of the BSP timer tick. Two robust options,
+  either or both:
+  - *NMI-based hard-lockup detector (Linux `kernel/watchdog_hld.c` model):* arm a
+    LAPIC/HPET one-shot that delivers an **NMI**, which fires even with IF=0. The
+    NMI handler checks a per-CPU "I made progress" flag and, if a CPU (esp. the
+    BSP) has been stuck for N periods, dumps the task table from NMI context
+    (try_lock-only). This is the standard way to catch a CPU spinning with
+    interrupts off — exactly blind spot (2).
+  - *Cross-CPU liveness (cheap partial fix):* also call `liveness_check()` from an
+    **AP's** `timer_tick`, not just cpu 0, so a wedged BSP doesn't take the whole
+    watchdog down with it. Guard the shared stall counters for concurrent access
+    (they're already atomics; the one-shot disarm makes double-fire harmless).
+    Does not help if *all* CPUs stop ticking, but covers the single-BSP-stuck case
+    that this reproduction most likely is.
+  Also add a livelock guard for blind spot (1): track whether `USEFUL_WORK_TICKS`
+  advances *only* because the same task keeps being re-ticked (e.g. sample the
+  running tid alongside the counter; if the counter moves but the running-task set
+  hasn't changed across an interval, treat that as a stall too). Until this lands,
+  the watchdog remains useful only for the idle-hang variant; the busy/BSP-dead
+  variant (which this 2026-07-01 catch appears to be) still escapes it.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

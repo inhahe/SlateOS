@@ -68494,11 +68494,14 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "network" | "net" => {
+            cmd_container_network(&parts);
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|volume|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
@@ -68519,6 +68522,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)");
             crate::console_println!("  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)");
             crate::console_println!("  container volume <create|ls|rm|inspect|prune> NAME — manage named volumes (mount with -v NAME:/path)");
+            crate::console_println!("  container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP] — manage user-defined networks (IPAM)");
             crate::console_println!("  container info [--json] ID               — detailed inspection (--json: machine-readable)");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats [ID]                     — cgroup resource usage (no ID: table of all running)");
@@ -68529,6 +68533,170 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");
+        }
+    }
+}
+
+/// Format a four-octet IPv4 address as a dotted-quad string.
+fn fmt_ipv4(ip: [u8; 4]) -> alloc::string::String {
+    let [a, b, c, d] = ip;
+    alloc::format!("{a}.{b}.{c}.{d}")
+}
+
+/// `container network <create|ls|rm|inspect|prune>` — manage user-defined
+/// container networks with IPAM (Docker `docker network`). `parts` is the
+/// whitespace-split `container network ...` argv (so `parts[0]` == "network").
+fn cmd_container_network(parts: &[&str]) {
+    let action = parts.get(1).copied().unwrap_or("ls");
+    match action {
+        "ls" | "list" => {
+            let nets = crate::cnetwork::list();
+            if nets.is_empty() {
+                crate::console_println!("(no networks)");
+            } else {
+                crate::console_println!(
+                    "{:<20} {:<20} {:<16} {}", "NAME", "SUBNET", "GATEWAY", "IN-USE"
+                );
+                for n in &nets {
+                    let subnet = alloc::format!(
+                        "{}/{}", fmt_ipv4(n.network_addr), n.prefix_len
+                    );
+                    crate::console_println!(
+                        "{:<20} {:<20} {:<16} {}",
+                        n.name, subnet, fmt_ipv4(n.gateway), n.allocations.len()
+                    );
+                }
+            }
+        }
+        "create" => {
+            let Some(&name) = parts.get(2) else {
+                crate::console_println!(
+                    "Usage: container network create NAME [--subnet CIDR] [--gateway IP]"
+                );
+                return;
+            };
+            // Optional --subnet CIDR and --gateway IP flags.
+            let mut subnet: Option<([u8; 4], u8)> = None;
+            let mut gateway: Option<[u8; 4]> = None;
+            let mut j = 3usize;
+            while j < parts.len() {
+                match parts.get(j).copied() {
+                    Some("--subnet") => {
+                        match parts.get(j.saturating_add(1)).copied() {
+                            Some(cidr) => match crate::cnetwork::parse_cidr(cidr) {
+                                Ok(v) => subnet = Some(v),
+                                Err(_) => {
+                                    crate::console_println!(
+                                        "Invalid --subnet '{}' (want A.B.C.D/N)", cidr
+                                    );
+                                    return;
+                                }
+                            },
+                            None => {
+                                crate::console_println!("--subnet requires a CIDR argument");
+                                return;
+                            }
+                        }
+                        j = j.saturating_add(2);
+                    }
+                    Some("--gateway") => {
+                        match parts.get(j.saturating_add(1)).copied() {
+                            Some(ip) => match crate::cnetwork::parse_ipv4(ip) {
+                                Ok(v) => gateway = Some(v),
+                                Err(_) => {
+                                    crate::console_println!(
+                                        "Invalid --gateway '{}' (want A.B.C.D)", ip
+                                    );
+                                    return;
+                                }
+                            },
+                            None => {
+                                crate::console_println!("--gateway requires an IP argument");
+                                return;
+                            }
+                        }
+                        j = j.saturating_add(2);
+                    }
+                    Some(other) => {
+                        crate::console_println!("Unknown network create flag '{}'", other);
+                        return;
+                    }
+                    None => break,
+                }
+            }
+            let result = match subnet {
+                Some((net, pfx)) => {
+                    crate::cnetwork::create_with_subnet(name, net, pfx, gateway)
+                }
+                None if gateway.is_some() => {
+                    crate::console_println!("--gateway requires --subnet");
+                    return;
+                }
+                None => crate::cnetwork::create(name),
+            };
+            match result {
+                Ok(()) => match crate::cnetwork::inspect(name) {
+                    Some(n) => crate::console_println!(
+                        "{} ({}/{})", name, fmt_ipv4(n.network_addr), n.prefix_len
+                    ),
+                    None => crate::console_println!("{}", name),
+                },
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "rm" | "remove" | "delete" => {
+            if parts.len() < 3 {
+                crate::console_println!("Usage: container network rm NAME [NAME...]");
+                return;
+            }
+            for name in parts.iter().skip(2) {
+                match crate::cnetwork::remove(name) {
+                    Ok(()) => crate::console_println!("{}", name),
+                    Err(e) => crate::console_println!("{}: {:?}", name, e),
+                }
+            }
+        }
+        "inspect" => {
+            let Some(&name) = parts.get(2) else {
+                crate::console_println!("Usage: container network inspect NAME");
+                return;
+            };
+            match crate::cnetwork::inspect(name) {
+                Some(n) => {
+                    crate::console_println!("Name:       {}", name);
+                    crate::console_println!("Driver:     local");
+                    crate::console_println!(
+                        "Subnet:     {}/{}", fmt_ipv4(n.network_addr), n.prefix_len
+                    );
+                    crate::console_println!("Gateway:    {}", fmt_ipv4(n.gateway));
+                    if n.allocations.is_empty() {
+                        crate::console_println!("Containers: (none)");
+                    } else {
+                        crate::console_println!("Containers:");
+                        for (ip, owner) in &n.allocations {
+                            match owner {
+                                Some(id) => crate::console_println!(
+                                    "  {} -> container {}", fmt_ipv4(*ip), id
+                                ),
+                                None => crate::console_println!(
+                                    "  {} -> (reserved)", fmt_ipv4(*ip)
+                                ),
+                            }
+                        }
+                    }
+                }
+                None => crate::console_println!("Network '{}' not found", name),
+            }
+        }
+        "prune" => {
+            let n = crate::cnetwork::prune();
+            crate::console_println!("Removed {} network(s)", n);
+        }
+        other => {
+            crate::console_println!("Unknown network action '{}'", other);
+            crate::console_println!(
+                "Usage: container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP]"
+            );
         }
     }
 }
@@ -68727,7 +68895,7 @@ fn cmd_docker(args: &str) {
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
         | "rename" | "update" | "prune" | "cp" | "commit" | "export"
-        | "import" | "volume" => delegate(sub),
+        | "import" | "volume" | "network" => delegate(sub),
         // SlateOS has no image registry/store keyed by name — images are
         // referenced by their on-disk OCI layout directory. `docker images`
         // therefore inspects a directory rather than listing a registry.

@@ -173,6 +173,7 @@ mod vmguest;
 mod watchdog;
 #[allow(dead_code)]
 mod xhci;
+mod cnetwork;
 mod volume;
 mod watchpoint;
 mod wchan;
@@ -3453,6 +3454,8 @@ extern "C" fn kernel_main() -> ! {
     // Named-volume registry self-test (Docker `docker volume`). Runs after the
     // container self-test; exercises the registry against real backing dirs.
     volume::self_test();
+    // Container-network registry + IPAM self-test (Docker `docker network`).
+    cnetwork::self_test();
     // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
     kshell::cli_resource_parser_self_test();
 

@@ -69012,11 +69012,21 @@ fn cmd_docker(args: &str) {
             }
             cmd_oci(&delegated);
         }
+        // `docker history <image-dir>` shows an image's build history — an
+        // image operation, so it routes to `oci history`.
+        "history" => {
+            let mut delegated = alloc::string::String::from("history");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
         "version" => {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <build|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
+            crate::console_println!("Usage: docker <build|history|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
             crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
@@ -69040,6 +69050,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker load <in-tar> <dest-dir>        — restore a saved image tar into a dir");
             crate::console_println!("  docker system df|prune                 — disk usage / reclaim stopped containers+networks");
             crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
+            crate::console_println!("  docker history <image-dir>             — show image build history (created-by + size)");
             crate::console_println!();
             crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
             crate::console_println!("Alias: dk");
@@ -69126,6 +69137,44 @@ fn cmd_oci(args: &str) {
                         image.manifest.config.digest,
                         image.manifest.config.size
                     );
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "history" | "hist" => {
+            let Some(dir) = parts.get(1) else {
+                crate::console_println!("Usage: oci history <image-dir>");
+                return;
+            };
+            match oci::load_image(dir) {
+                Ok(image) => {
+                    if image.config.history.is_empty() {
+                        crate::console_println!(
+                            "No build history recorded in image config ({} layers)",
+                            image.manifest.layers.len()
+                        );
+                        return;
+                    }
+                    crate::console_println!("=== History ({} steps) ===",
+                        image.config.history.len());
+                    crate::console_println!("  {:>12}  CREATED BY", "SIZE");
+                    // Non-empty steps consume layers in order; empty steps are
+                    // metadata-only (0 bytes), matching `docker history`.
+                    let mut layer_idx = 0usize;
+                    for h in &image.config.history {
+                        let size = if h.empty_layer {
+                            0
+                        } else {
+                            let s = image
+                                .manifest
+                                .layers
+                                .get(layer_idx)
+                                .map_or(0, |l| l.size);
+                            layer_idx = layer_idx.saturating_add(1);
+                            s
+                        };
+                        crate::console_println!("  {:>12}  {}", size, h.created_by);
+                    }
                 }
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
@@ -70249,9 +70298,10 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|run|build|save|load|test]");
+            crate::console_println!("Usage: oci [inspect|layers|history|run|build|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+            crate::console_println!("  oci history <dir>  — show build history (per-step created-by + size)");
             crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");

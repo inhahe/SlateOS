@@ -347,6 +347,8 @@ pub struct ImageConfig {
     pub labels: Vec<(String, String)>,
     /// Layer diff-ids (sha256 of uncompressed tar, in layer order).
     pub diff_ids: Vec<String>,
+    /// Build history (OCI config `history[]`), oldest first.
+    pub history: Vec<HistoryEntry>,
 }
 
 impl ImageConfig {
@@ -412,6 +414,18 @@ impl ImageConfig {
             rootfs.and_then(|r| r.get_array("diff_ids")),
         );
 
+        // Build history (top-level `history[]`); optional.
+        let history = match root.get_array("history") {
+            Some(items) => items
+                .iter()
+                .map(|e| HistoryEntry {
+                    created_by: e.get_str("created_by").unwrap_or("").into(),
+                    empty_layer: matches!(e.get("empty_layer"), Some(JsonValue::Bool(true))),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         Ok(Self {
             architecture,
             os,
@@ -423,6 +437,7 @@ impl ImageConfig {
             user,
             labels,
             diff_ids,
+            history,
         })
     }
 
@@ -776,6 +791,21 @@ pub struct BuildLayer {
     pub files: Vec<LayerFile>,
 }
 
+/// One entry in an image's build history (OCI config `history[]`).
+///
+/// The OCI spec requires the number of `history` entries with
+/// `empty_layer == false` to equal the number of layers, in order; layer-less
+/// instructions (metadata-only, e.g. `ENV`/`LABEL`/`WORKDIR`) set
+/// `empty_layer = true`.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// The build step, conventionally the Dockerfile instruction text
+    /// (e.g. `"COPY app /srv/app"`), stored as OCI `created_by`.
+    pub created_by: String,
+    /// `true` for metadata-only steps that produce no filesystem layer.
+    pub empty_layer: bool,
+}
+
 /// A complete specification for authoring an OCI image on disk.
 ///
 /// Mirrors the fields [`ImageConfig`] parses back, so an image written with
@@ -803,6 +833,9 @@ pub struct ImageSpec {
     pub labels: Vec<(String, String)>,
     /// Layers, bottom-to-top (Dockerfile `COPY`/`ADD` produce these).
     pub layers: Vec<BuildLayer>,
+    /// Build history (OCI config `history[]`), oldest first.  Entries with
+    /// `empty_layer == false` correspond 1:1, in order, to `layers`.
+    pub history: Vec<HistoryEntry>,
 }
 
 impl ImageSpec {
@@ -820,6 +853,7 @@ impl ImageSpec {
             exposed_ports: Vec::new(),
             labels: Vec::new(),
             layers: Vec::new(),
+            history: Vec::new(),
         }
     }
 }
@@ -981,7 +1015,24 @@ fn build_config_json(spec: &ImageSpec, diff_ids: &[String]) -> String {
     }
     out.push_str("}},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":");
     out.push_str(&json_string_array(diff_ids));
-    out.push_str("}}");
+    out.push('}');
+    // Build history (optional; emitted only when the builder recorded steps).
+    if !spec.history.is_empty() {
+        out.push_str(",\"history\":[");
+        for (i, h) in spec.history.iter().enumerate() {
+            if i != 0 {
+                out.push(',');
+            }
+            out.push_str("{\"created_by\":");
+            push_json_string(&mut out, &h.created_by);
+            if h.empty_layer {
+                out.push_str(",\"empty_layer\":true");
+            }
+            out.push('}');
+        }
+        out.push(']');
+    }
+    out.push('}');
     out
 }
 
@@ -1731,6 +1782,9 @@ pub fn build_image_with_args(
                     }
                     base_layer_descs = base.manifest.layers.clone();
                     base_diff_ids = base.config.diff_ids.clone();
+                    // Carry the base image's build history forward so the
+                    // non-empty entries stay 1:1 with the inherited layers.
+                    spec.history = base.config.history.clone();
                     if base_layer_descs.len() != base_diff_ids.len() {
                         return Err(BuildError::Parse {
                             line,
@@ -1851,6 +1905,16 @@ pub fn build_image_with_args(
                     msg: format!("unsupported instruction: {other}"),
                 });
             }
+        }
+
+        // Record the build step. FROM contributes no entry of its own (it
+        // carries the base image's history); COPY/ADD produce a filesystem
+        // layer (non-empty), everything else is a metadata-only empty layer.
+        if instr_up != "FROM" {
+            spec.history.push(HistoryEntry {
+                created_by: logical.clone(),
+                empty_layer: !matches!(instr_up.as_str(), "COPY" | "ADD"),
+            });
         }
     }
 
@@ -2298,6 +2362,19 @@ CMD ["--serve"]
         assert_eq!(image.manifest.layers.len(), 2);
         assert_eq!(image.config.diff_ids.len(), 2);
 
+        // Build history: FROM/ARG contribute none; the 10 remaining steps each
+        // add an entry, with the two COPY steps non-empty (1:1 with layers).
+        assert_eq!(image.config.history.len(), 10, "history step count");
+        let non_empty: Vec<&HistoryEntry> =
+            image.config.history.iter().filter(|h| !h.empty_layer).collect();
+        assert_eq!(non_empty.len(), 2, "two layer-producing steps");
+        assert!(non_empty.first().is_some_and(|h| h.created_by.starts_with("COPY app")));
+        assert!(non_empty.get(1).is_some_and(|h| h.created_by.starts_with("COPY readme.txt")));
+        assert!(
+            image.config.history.iter().any(|h| h.empty_layer && h.created_by.starts_with("LABEL")),
+            "LABEL recorded as empty layer"
+        );
+
         // Extract both layers and verify the copied files survived.
         let _ = Vfs::mkdir(ext);
         for layer in &image.manifest.layers {
@@ -2326,6 +2403,14 @@ CMD ["--serve"]
         assert!(child.config.env.iter().any(|e| e == "PATH=/usr/bin"), "inherited env");
         assert!(child.config.env.iter().any(|e| e == "EXTRA=1"), "new env");
         assert_eq!(child.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
+        // History carried forward: base's 10 + ENV + COPY = 12; 3 non-empty
+        // entries stay 1:1 with the 3 layers.
+        assert_eq!(child.config.history.len(), 12, "base history carried forward");
+        assert_eq!(
+            child.config.history.iter().filter(|h| !h.empty_layer).count(),
+            3,
+            "non-empty history == layer count"
+        );
 
         // --build-arg overrides an ARG default (only for a declared ARG).
         let img3 = "/tmp/oci_build_img3";

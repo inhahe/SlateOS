@@ -225,8 +225,14 @@ fn build_arp(
 // ARP processing
 // ---------------------------------------------------------------------------
 
-/// Process an incoming ARP packet.
-pub fn process_arp(data: &[u8]) -> KernelResult<()> {
+/// Process an incoming ARP packet received in a given network namespace.
+///
+/// `ns_id` is the namespace the frame arrived in (`ROOT_NS` for the
+/// physical NIC).  The "is this a request for our IP?" check uses that
+/// namespace's interface address, and any reply is sourced from that
+/// namespace's address, so ARP for a container's IP is answered as the
+/// container rather than as the root host.
+pub fn process_arp(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let (operation, sender_mac, sender_ip, _target_mac, target_ip) = parse_arp(data)?;
 
     // Always learn the sender's MAC from any ARP we see.
@@ -236,11 +242,11 @@ pub fn process_arp(data: &[u8]) -> KernelResult<()> {
 
     match operation {
         ARP_REQUEST => {
-            // Is this a request for our IP?
-            let our_ip = interface::ip();
+            // Is this a request for our IP in this namespace?
+            let our_ip = interface::ns_ip(ns_id);
             if !our_ip.is_unspecified() && target_ip == our_ip {
                 // Send ARP reply.
-                send_reply(&sender_mac, sender_ip)?;
+                send_reply(&sender_mac, sender_ip, ns_id)?;
             }
         }
         ARP_REPLY => {
@@ -258,15 +264,30 @@ pub fn process_arp(data: &[u8]) -> KernelResult<()> {
     Ok(())
 }
 
-/// Send an ARP reply to the given target.
-fn send_reply(target_mac: &MacAddress, target_ip: Ipv4Addr) -> KernelResult<()> {
-    let our_mac = interface::mac();
-    let our_ip = interface::ip();
+/// Send an ARP reply to the given target from a namespace's interface.
+///
+/// The reply is sourced from `ns_id`'s MAC and IP address.  For the root
+/// namespace it egresses the physical NIC as before.  For a container
+/// namespace the reply must egress the veth endpoint rather than the
+/// physical NIC; container veth TX wiring is not yet in place (tracked as
+/// D-CNET-NSRX), so the reply is dropped rather than emitted on the
+/// physical LAN.  Once veth egress lands, this will send into the veth.
+fn send_reply(
+    target_mac: &MacAddress,
+    target_ip: Ipv4Addr,
+    ns_id: crate::netns::NetNsId,
+) -> KernelResult<()> {
+    let our_mac = interface::ns_mac(ns_id);
+    let our_ip = interface::ns_ip(ns_id);
 
     let arp_data = build_arp(ARP_REPLY, &our_mac, our_ip, target_mac, target_ip);
     let frame = ethernet::build_frame(target_mac, &our_mac, ETHERTYPE_ARP, &arp_data);
 
-    super::send_frame(&frame)?;
+    if ns_id == crate::netns::ROOT_NS {
+        super::send_frame(&frame)?;
+    }
+    // Non-root namespaces: reply intentionally not emitted on the physical
+    // NIC (it would be wrong-wire).  Awaits container veth TX wiring.
 
     Ok(())
 }

@@ -405,6 +405,25 @@ pub fn ns_info(ns_id: crate::netns::NetNsId) -> InterfaceInfo {
     }
 }
 
+/// Get the MAC address for a specific network namespace.
+///
+/// For the root namespace, returns the physical NIC's MAC.  For child
+/// namespaces, returns the MAC of the veth endpoint assigned to that
+/// namespace (the interface the namespace actually receives frames on),
+/// falling back to the physical NIC MAC if no veth endpoint is assigned.
+///
+/// Used by the RX path (`ethernet::process_frame`) to decide whether an
+/// incoming frame is addressed to the interface in a given namespace.
+pub fn ns_mac(ns_id: crate::netns::NetNsId) -> MacAddress {
+    if ns_id == crate::netns::ROOT_NS {
+        return mac();
+    }
+    super::veth::find_endpoint_for_ns(ns_id)
+        .and_then(|(pair_id, end_id)| super::veth::mac(pair_id, end_id))
+        .map(crate::virtio::net::MacAddress)
+        .unwrap_or_else(mac)
+}
+
 // ---------------------------------------------------------------------------
 // Interface statistics (lock-free atomic counters)
 // ---------------------------------------------------------------------------

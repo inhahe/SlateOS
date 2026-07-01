@@ -726,12 +726,17 @@ pub fn multicast_mac(ip: &Ipv6Addr) -> MacAddress {
 /// the reassembly module.  When all fragments have arrived, the
 /// reassembled datagram is dispatched to the appropriate transport handler.
 /// Unfragmented packets are dispatched directly.
-pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
+pub fn process_ipv6(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let packet = Ipv6Packet::parse(data)?;
 
     // Check if the packet is addressed to us (link-local, SLAAC global,
-    // multicast, or loopback).
-    let our_mac = interface::mac();
+    // multicast, or loopback).  The link-local address derives from the
+    // arrival interface's MAC (physical NIC in the root namespace, veth
+    // endpoint in a container namespace).  NDP/SLAAC state itself remains
+    // physical-NIC based — IPv6 addressing on container veth interfaces is
+    // future work; `ns_id` is threaded here so transport socket lookup is
+    // namespace-scoped like the IPv4 path.
+    let our_mac = interface::ns_mac(ns_id);
     let our_link_local = Ipv6Addr::from_mac_link_local(&our_mac);
 
     let is_for_us = packet.dst == our_link_local
@@ -758,6 +763,7 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
                 more_fragments,
                 identification,
                 packet.payload,
+                ns_id,
             );
         }
     }
@@ -768,7 +774,7 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
         return Ok(()); // Silently drop — firewall denied.
     }
 
-    dispatch_upper_layer(packet.upper_protocol, packet.src, packet.dst, packet.payload)
+    dispatch_upper_layer(packet.upper_protocol, packet.src, packet.dst, packet.payload, ns_id)
 }
 
 /// Dispatch a complete (reassembled or unfragmented) datagram to the
@@ -778,6 +784,7 @@ fn dispatch_upper_layer(
     src: Ipv6Addr,
     dst: Ipv6Addr,
     payload: &[u8],
+    ns_id: crate::netns::NetNsId,
 ) -> KernelResult<()> {
     // Build a minimal Ipv6Packet for handlers that need it.
     // The raw_header is empty since we don't have it for reassembled
@@ -799,8 +806,8 @@ fn dispatch_upper_layer(
 
     match protocol {
         NH_ICMPV6 => super::icmpv6::process_icmpv6(&fake_packet),
-        NH_UDP => super::udp::process_udp_v6(&fake_packet),
-        NH_TCP => super::tcp::process_tcp_v6(&fake_packet),
+        NH_UDP => super::udp::process_udp_v6(&fake_packet, ns_id),
+        NH_TCP => super::tcp::process_tcp_v6(&fake_packet, ns_id),
         _ => {
             // Unknown upper-layer protocol — silently drop.
             Ok(())
@@ -820,6 +827,7 @@ fn process_fragment(
     more_fragments: bool,
     identification: u32,
     fragment_data: &[u8],
+    ns_id: crate::netns::NetNsId,
 ) -> KernelResult<()> {
     if let Some(reassembled) = super::frag::add_fragment_v6(
         src,
@@ -844,6 +852,7 @@ fn process_fragment(
             reassembled.src,
             reassembled.dst,
             &reassembled.payload,
+            ns_id,
         )
     } else {
         Ok(())

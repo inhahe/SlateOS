@@ -3681,7 +3681,7 @@ fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
 /// Verifies the IPv4 pseudo-header checksum, wraps the source address
 /// in `IpAddr::V4`, and delegates to the shared TCP state machine.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
+pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
         return Ok(());
@@ -3701,9 +3701,9 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let remote_addr = IpAddr::V4(ip_packet.src);
     let ip_ecn_ce = ip_packet.ecn == ipv4::ECN_CE;
 
-    // Packets from the physical NIC arrive in the root namespace.
-    // Veth-delivered packets will carry a namespace context.
-    process_tcp_common(crate::netns::ROOT_NS, remote_addr, data, ip_ecn_ce)
+    // `ns_id` is the namespace the frame arrived in: ROOT_NS for the
+    // physical NIC, or a container namespace for veth-delivered frames.
+    process_tcp_common(ns_id, remote_addr, data, ip_ecn_ce)
 }
 
 /// Process an incoming TCP segment received via IPv6.
@@ -3714,7 +3714,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 /// ECN is extracted from the IPv6 traffic class field (low 2 bits,
 /// same encoding as IPv4).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
+pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
         return Ok(());
@@ -3735,8 +3735,8 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
     // IPv6 traffic class carries ECN in bits 0-1 (same encoding as IPv4).
     let ip_ecn_ce = (ip_packet.traffic_class & 0x03) == ipv4::ECN_CE;
 
-    // Packets from the physical NIC arrive in the root namespace.
-    process_tcp_common(crate::netns::ROOT_NS, remote_addr, data, ip_ecn_ce)
+    // `ns_id` is the arrival namespace (ROOT_NS for the physical NIC).
+    process_tcp_common(ns_id, remote_addr, data, ip_ecn_ce)
 }
 
 /// Shared TCP segment processing for both IPv4 and IPv6.

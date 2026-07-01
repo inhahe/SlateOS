@@ -805,7 +805,7 @@ pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> Kern
 
 /// Process an incoming UDP datagram extracted from an IPv4 packet.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
+pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < UDP_HEADER_SIZE {
         return Err(KernelError::InvalidArgument);
@@ -881,6 +881,16 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             continue;
         }
 
+        // Namespace scoping: a datagram arriving in namespace `ns_id` is
+        // delivered only to sockets bound in that namespace.  Frames from
+        // the physical NIC (ROOT_NS) may also reach namespace-bound
+        // sockets (mirrors the TCP listener/connection lookup rule), so a
+        // socket matches when it is in the arrival namespace or the frame
+        // arrived in the root namespace.
+        if ns_id != crate::netns::ROOT_NS && sock.ns_id != ns_id {
+            continue;
+        }
+
         // For multicast, check group membership.
         if is_mcast {
             let count = sock.mcast_count as usize;
@@ -943,7 +953,7 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 /// ports and length, and delivers to any socket bound to the destination
 /// port.  Unlike IPv4 UDP, a checksum of zero is invalid for IPv6.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
+pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < UDP_HEADER_SIZE {
         return Err(KernelError::InvalidArgument);
@@ -1006,6 +1016,14 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
     let mut delivered = false;
     for sock in sockets.iter_mut() {
         if !sock.active || sock.port != dst_port {
+            continue;
+        }
+
+        // Namespace scoping: mirror the IPv4 path — a datagram arriving in
+        // namespace `ns_id` is delivered only to sockets bound in that
+        // namespace, except frames from the physical NIC (ROOT_NS) which
+        // may also reach namespace-bound sockets.
+        if ns_id != crate::netns::ROOT_NS && sock.ns_id != ns_id {
             continue;
         }
 
@@ -1566,8 +1584,8 @@ fn test_v6_process_and_deliver() -> KernelResult<()> {
     let ip_pkt = ipv6::build_packet(src, dst, ipv6::NH_UDP, 64, &udp_seg);
     let parsed = Ipv6Packet::parse(&ip_pkt)?;
 
-    // Process — should deliver to our socket.
-    process_udp_v6(&parsed)?;
+    // Process — should deliver to our socket (root namespace).
+    process_udp_v6(&parsed, crate::netns::ROOT_NS)?;
 
     // Verify delivery.
     if rx_ready_v6(handle) != 1 {
@@ -1623,7 +1641,10 @@ fn test_v6_process_and_deliver() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 10: namespace isolation — same port can be bound in different namespaces.
+/// Test 10: namespace isolation — same port can be bound in different
+/// namespaces, and datagrams are delivered only to sockets in the arrival
+/// namespace (root being permissive).
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn test_namespace_isolation() -> KernelResult<()> {
     let ns0 = crate::netns::ROOT_NS;
     let ns1: NetNsId = 77; // Fake non-root namespace.
@@ -1647,6 +1668,60 @@ fn test_namespace_isolation() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+
+    // Delivery-level scoping: a datagram arriving in ns1 must reach only
+    // the socket bound in ns1, not the same-port socket in ns0.  A helper
+    // builds a valid UDP-over-IPv4 datagram for port 55580.
+    let build_dgram = |src: super::interface::Ipv4Addr,
+                       dst: super::interface::Ipv4Addr,
+                       src_port: u16| -> Vec<u8> {
+        let payload = b"ns-scoped";
+        let udp_len = UDP_HEADER_SIZE + payload.len();
+        let mut seg = Vec::with_capacity(udp_len);
+        seg.extend_from_slice(&src_port.to_be_bytes());
+        seg.extend_from_slice(&55580u16.to_be_bytes());
+        seg.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        seg.extend_from_slice(&0u16.to_be_bytes()); // Checksum placeholder.
+        seg.extend_from_slice(payload);
+        let cksum = ipv4::compute_transport_checksum(src, dst, PROTO_UDP, &seg);
+        seg[6] = (cksum >> 8) as u8;
+        seg[7] = cksum as u8;
+        ipv4::build_packet(src, dst, PROTO_UDP, &seg)
+    };
+
+    let src_ip = super::interface::Ipv4Addr([10, 0, 0, 1]);
+    let dst_ip = super::interface::Ipv4Addr([10, 0, 0, 2]);
+
+    // Arriving in ns1 → only h1 receives.
+    let pkt_ns1 = build_dgram(src_ip, dst_ip, 40001);
+    let parsed_ns1 = Ipv4Packet::parse(&pkt_ns1)?;
+    process_udp(&parsed_ns1, ns1)?;
+    if rx_ready(h1) != 1 || rx_ready(h0) != 0 {
+        crate::serial_println!(
+            "[udp]   FAIL: ns1 delivery — h1={}, h0={} (want 1, 0)",
+            rx_ready(h1), rx_ready(h0)
+        );
+        close(h0);
+        close(h1);
+        return Err(KernelError::InternalError);
+    }
+    let _ = recv(h1); // Drain.
+
+    // Arriving in the root namespace → permissive: reaches h0 (first
+    // matching socket by port).
+    let pkt_root = build_dgram(src_ip, dst_ip, 40002);
+    let parsed_root = Ipv4Packet::parse(&pkt_root)?;
+    process_udp(&parsed_root, ns0)?;
+    if rx_ready(h0) != 1 {
+        crate::serial_println!(
+            "[udp]   FAIL: root delivery — h0={} (want 1)",
+            rx_ready(h0)
+        );
+        close(h0);
+        close(h1);
+        return Err(KernelError::InternalError);
+    }
+    let _ = recv(h0); // Drain.
 
     close(h0);
     close(h1);

@@ -549,15 +549,15 @@ pub fn poll_all() {
     });
 
     // Process collected frames outside the lock.
-    for (frame, _ns_id) in &pending {
+    for (frame, ns_id) in &pending {
         // Record stats via the interface module.
         super::interface::record_rx(frame.len());
 
-        // Feed into the protocol stack.
-        // TODO: once per-namespace protocol dispatch exists, route
-        // frames to the correct namespace's stack.  For now, all
-        // frames go through the global protocol handlers.
-        if let Err(e) = super::ethernet::process_frame(frame) {
+        // Feed into the protocol stack in the endpoint's own network
+        // namespace so socket lookup and "addressed to us" checks are
+        // scoped correctly (a frame drained from a container-side veth
+        // endpoint is processed as that container's namespace, not root).
+        if let Err(e) = super::ethernet::process_frame(frame, *ns_id) {
             super::interface::record_rx_drop();
             crate::serial_println!("[veth] Error processing frame: {:?}", e);
         }

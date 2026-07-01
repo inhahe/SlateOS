@@ -701,8 +701,9 @@ pub fn forward(bridge_idx: usize) {
                         }
                         let _ = veth::send(out_pair, VethEndId::A, frame.clone());
                     }
-                    // … and to the host stack (gateway / external NAT).
-                    let _ = super::ethernet::process_frame(&frame);
+                    // … and to the host stack (gateway / external NAT),
+                    // which lives in the root namespace.
+                    let _ = super::ethernet::process_frame(&frame, crate::netns::ROOT_NS);
                     let mut bridges = BRIDGES.lock();
                     if let Some(b) = bridges.get_mut(bridge_idx) {
                         b.frames_flooded = b.frames_flooded.saturating_add(1);

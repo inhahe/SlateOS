@@ -98,7 +98,7 @@ pub fn poll() {
             Some(data) => {
                 pcap::capture_rx(&data);
                 interface::record_rx(data.len());
-                if let Err(e) = ethernet::process_frame(&data) {
+                if let Err(e) = ethernet::process_frame(&data, crate::netns::ROOT_NS) {
                     interface::record_rx_drop();
                     crate::serial_println!("[net] Error processing frame: {:?}", e);
                 }

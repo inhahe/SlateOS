@@ -457,8 +457,14 @@ fn is_subnet_broadcast(addr: Ipv4Addr, our_ip: Ipv4Addr, mask: Ipv4Addr) -> bool
 // IPv4 processing
 // ---------------------------------------------------------------------------
 
-/// Process an incoming IPv4 packet.
-pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
+/// Process an incoming IPv4 packet received in a given network namespace.
+///
+/// `ns_id` is the namespace the packet arrived in (`ROOT_NS` for the
+/// physical NIC, or a container namespace for veth-delivered frames).  It
+/// selects which interface's address is used for the "addressed to us"
+/// check and is threaded into the transport handlers so socket lookup is
+/// scoped to the correct namespace.
+pub fn process_ipv4(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let packet = Ipv4Packet::parse(data)?;
 
     // Reject packets with invalid source IPs — these violate protocol
@@ -469,8 +475,10 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     }
 
     // Check if the packet is addressed to us, is broadcast, or is
-    // multicast for a group we have joined.
-    let iface = interface::info();
+    // multicast for a group we have joined.  The interface identity is
+    // namespace-specific (the physical NIC in the root namespace, or the
+    // veth endpoint's address in a container namespace).
+    let iface = interface::ns_info(ns_id);
     let is_for_us = packet.dst == iface.ip
         || packet.dst.is_broadcast()
         || iface.ip.is_unspecified() // Accept all during DHCP.
@@ -491,7 +499,7 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     // transport header, so port-based rules won't match — they pass
     // through.  The reassembled datagram is not re-checked (the first
     // fragment's check is the authoritative decision).
-    if !super::firewall::check_inbound(packet.protocol, packet.src, packet.payload) {
+    if !super::firewall::check_inbound_ns(ns_id, packet.protocol, packet.src, packet.payload) {
         return Ok(()); // Silently dropped by firewall.
     }
 
@@ -509,15 +517,15 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
             // Reassembly complete — dispatch the full datagram.
             // Build a temporary Ipv4Packet-like struct to pass to
             // protocol handlers.
-            return dispatch_reassembled(&reassembled);
+            return dispatch_reassembled(&reassembled, ns_id);
         }
         return Ok(()); // Waiting for more fragments.
     }
 
     match packet.protocol {
-        PROTO_TCP => super::tcp::process_tcp(&packet),
-        PROTO_UDP => super::udp::process_udp(&packet),
-        PROTO_ICMP => super::icmp::process_icmp(&packet),
+        PROTO_TCP => super::tcp::process_tcp(&packet, ns_id),
+        PROTO_UDP => super::udp::process_udp(&packet, ns_id),
+        PROTO_ICMP => super::icmp::process_icmp(&packet, ns_id),
         super::igmp::PROTO_IGMP => super::igmp::process(&packet, packet.payload),
         _ => {
             // Unknown protocol — drop.
@@ -534,6 +542,7 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
 /// that need IP-level metadata (e.g., `process_tcp` uses `src`/`dst`).
 fn dispatch_reassembled(
     pkt: &super::frag::ReassembledPacket,
+    ns_id: crate::netns::NetNsId,
 ) -> KernelResult<()> {
     // Build a minimal fake raw header for handlers that reference it
     // (e.g., ICMP error generation).  20 bytes, all zeros except
@@ -563,9 +572,9 @@ fn dispatch_reassembled(
     };
 
     match pkt.protocol {
-        PROTO_TCP => super::tcp::process_tcp(&ip_pkt),
-        PROTO_UDP => super::udp::process_udp(&ip_pkt),
-        PROTO_ICMP => super::icmp::process_icmp(&ip_pkt),
+        PROTO_TCP => super::tcp::process_tcp(&ip_pkt, ns_id),
+        PROTO_UDP => super::udp::process_udp(&ip_pkt, ns_id),
+        PROTO_ICMP => super::icmp::process_icmp(&ip_pkt, ns_id),
         super::igmp::PROTO_IGMP => super::igmp::process(&ip_pkt, ip_pkt.payload),
         _ => Ok(()),
     }

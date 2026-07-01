@@ -554,8 +554,15 @@ fn time_exceeded_reason(code: u8) -> &'static str {
 // ICMP processing
 // ---------------------------------------------------------------------------
 
-/// Process an incoming ICMP packet.
-pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
+/// Process an incoming ICMP packet received in a given network namespace.
+///
+/// `ns_id` is the namespace the packet arrived in.  Echo replies are sent
+/// from that namespace's interface address (so a ping to a container's IP
+/// is answered from the container's namespace, not the root namespace).
+pub fn process_icmp(
+    ip_packet: &Ipv4Packet<'_>,
+    ns_id: crate::netns::NetNsId,
+) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < ICMP_HEADER_SIZE {
         return Ok(());
@@ -579,9 +586,9 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         }
         ICMP_ECHO_REQUEST => {
             // Reply to echo requests (respond to pings directed at us).
-            let our_ip = super::interface::ip();
+            let our_ip = super::interface::ns_ip(ns_id);
             if !our_ip.is_unspecified() {
-                send_echo_reply(ip_packet)?;
+                send_echo_reply(ip_packet, ns_id)?;
             }
         }
         ICMP_DEST_UNREACHABLE => {
@@ -700,7 +707,10 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
 
 /// Send an ICMP echo reply in response to a request.
 #[allow(clippy::arithmetic_side_effects)]
-fn send_echo_reply(request_ip: &Ipv4Packet<'_>) -> KernelResult<()> {
+fn send_echo_reply(
+    request_ip: &Ipv4Packet<'_>,
+    ns_id: crate::netns::NetNsId,
+) -> KernelResult<()> {
     let data = request_ip.payload;
     if data.len() < ICMP_HEADER_SIZE {
         return Ok(());
@@ -716,7 +726,8 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>) -> KernelResult<()> {
     reply[2] = (checksum >> 8) as u8;
     reply[3] = checksum as u8;
 
-    ipv4::send(request_ip.src, PROTO_ICMP, &reply)
+    // Reply from the namespace the request arrived in.
+    ipv4::send_ns(ns_id, request_ip.src, PROTO_ICMP, &reply)
 }
 
 // ---------------------------------------------------------------------------

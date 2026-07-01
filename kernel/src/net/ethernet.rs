@@ -81,18 +81,29 @@ pub fn build_frame(dst: &MacAddress, src: &MacAddress, ethertype: u16, payload: 
     frame
 }
 
-/// Process an incoming Ethernet frame.
+/// Process an incoming Ethernet frame received in a given network
+/// namespace.
 ///
-/// Dispatches to ARP or IPv4 based on EtherType.
-pub fn process_frame(data: &[u8]) -> KernelResult<()> {
+/// `ns_id` is the network namespace the frame arrived in: `ROOT_NS` for
+/// frames read off the physical NIC, or the veth endpoint's namespace
+/// for frames drained from a virtual ethernet pair (`veth::poll_all`).
+/// It is threaded down through the IPv4/IPv6/ARP handlers so that socket
+/// lookup and "is this addressed to us" checks are evaluated against the
+/// correct namespace's interface rather than always the root namespace.
+///
+/// Dispatches to ARP, IPv4, or IPv6 based on EtherType.
+pub fn process_frame(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let frame = EthernetFrame::parse(data)?;
 
     // Check if the frame is addressed to us, broadcast, or multicast.
     //
+    // The "us" MAC is namespace-specific: the physical NIC's MAC in the
+    // root namespace, or the veth endpoint's MAC in a container namespace.
+    //
     // IPv4 multicast (224.0.0.0/4) maps to Ethernet MAC addresses with
     // the prefix 01:00:5e (IEEE 802.3 §7.8).  The low bit of the first
     // octet being set indicates a multicast MAC (group address).
-    let our_mac = super::interface::mac();
+    let our_mac = super::interface::ns_mac(ns_id);
     let is_for_us = frame.dst.0 == our_mac.0
         || frame.dst.0 == BROADCAST_MAC.0
         || (frame.dst.0[0] & 0x01) != 0; // Multicast bit set.
@@ -102,9 +113,9 @@ pub fn process_frame(data: &[u8]) -> KernelResult<()> {
     }
 
     match frame.ethertype {
-        ETHERTYPE_ARP => super::arp::process_arp(frame.payload),
-        ETHERTYPE_IPV4 => super::ipv4::process_ipv4(frame.payload),
-        ETHERTYPE_IPV6 => super::ipv6::process_ipv6(frame.payload),
+        ETHERTYPE_ARP => super::arp::process_arp(frame.payload, ns_id),
+        ETHERTYPE_IPV4 => super::ipv4::process_ipv4(frame.payload, ns_id),
+        ETHERTYPE_IPV6 => super::ipv6::process_ipv6(frame.payload, ns_id),
         super::lldp::ETHERTYPE_LLDP => super::lldp::process_frame(&frame.src, frame.payload),
         _ => {
             // Unknown protocol — silently drop.

@@ -740,52 +740,65 @@ switching work.
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
 IPAM feature, increments 60–61). **Resolved:** 2026-07-01.
 
-### D-CNET-NSRX. veth RX frames are dispatched in ROOT_NS, not the endpoint's namespace — TECH DEBT (analyzed, not a simple bug)
+### D-CNET-NSRX. Per-namespace veth RX dispatch — RX chain threading DONE; container veth TX egress still missing
 
-**Where:** `kernel/src/net/veth.rs` (`poll_all`, ~L552 — the `_ns_id` is
-collected per-frame but discarded), feeding `kernel/src/net/ethernet.rs`
-(`process_frame`, no ns param) → `ipv4::process_ipv4`/`ipv6::process_ipv6`
-(no ns param) → `tcp::process_tcp`/`udp::process_udp` (hardcode
-`crate::netns::ROOT_NS`, see the explicit comment at `tcp.rs:3704` "Packets
-from the physical NIC arrive in the root namespace. Veth-delivered packets
-will carry a namespace context").
+**Status (2026-07-01): the RX-threading half is landed and boot-validated.**
+The whole ingress chain now carries the arrival namespace, so a container
+server socket bound in its own netns is matched by the per-ns socket lookup.
+What remains is the **TX (egress) half**: container sockets and ARP replies
+still have no path onto the veth, so container-inbound is not yet functional
+end-to-end.
 
-**What this is.** Partly a real correctness gap, partly a fuller-model
-enabler. `veth::poll_all` drains **both** ends of every pair and processes
-every frame in `ROOT_NS`:
-- *Container egress* (frames the container sent, drained off host-side end A)
-  processed in ROOT_NS is *correct/desirable* — it's what lets **NAT
-  masquerade** carry container→external traffic and what the L2 bridge
-  (D-CNET-L2BRIDGE) relies on. Container **client/outbound** works.
-- *Container ingress*, however, lands on **end B's** RX queue (e.g.
-  `bridge::forward` delivers to a peer via `send(out_pair, A, frame)`, which
-  enqueues on the peer's end B; end B is not bridged, so `poll_all` drains
-  it). Processing those in ROOT_NS means a **container server socket** — bound
-  in the container's ns — is never matched by the ROOT_NS TCP/UDP lookup, so
-  **inbound delivery to a container listening on a user-defined network does
-  not work.** That is a genuine functional gap, not just missing polish.
+**What landed (RX threading).** `ns_id` is threaded as a parameter through
+the entire RX chain:
+- `ethernet::process_frame(data, ns_id)` — `is_for_us` now compares against
+  the receiving namespace's interface MAC via the new
+  `interface::ns_mac(ns_id)` (physical NIC MAC in root; veth-endpoint MAC in a
+  container ns) instead of always the host NIC MAC.
+- `ipv4::process_ipv4(payload, ns_id)` — `is_for_us` uses `ns_info(ns_id)`;
+  inbound firewall uses `check_inbound_ns(ns_id, …)`; dispatches to
+  tcp/udp/icmp with `ns_id`; `dispatch_reassembled` threads it too.
+- `ipv6::process_ipv6(payload, ns_id)` — same shape (transport socket lookup
+  is ns-scoped; NDP/SLAAC stay physical-NIC based, IPv6 container addressing
+  is future work).
+- `arp::process_arp(payload, ns_id)` — the "request for our IP?" check and
+  reply source use `ns_ip`/`ns_mac`.
+- `tcp::process_tcp/_v6(pkt, ns_id)` — pass `ns_id` to `process_tcp_common`
+  instead of the old hardcoded `ROOT_NS`.
+- `udp::process_udp/_v6(pkt, ns_id)` — the delivery loop now filters by
+  `sock.ns_id` (root permissive, mirroring the TCP listener rule).
+- `icmp::process_icmp(pkt, ns_id)` — echo replies are sent from the arrival
+  namespace via `ipv4::send_ns`.
+- Call sites: `net::mod::poll` and `bridge::forward_all`'s host-stack flood
+  pass `ROOT_NS`; `veth::poll_all` passes each drained endpoint's own
+  `ns_id`.
 
-The deepest layer already threads `ns_id`
-(`process_tcp_common`/`process_udp_common` take it; TCP/UDP lookups key on
-it), but the `ethernet→ip→transport` ingress chain forces ROOT_NS, and
-`ethernet::process_frame`'s `is_for_us` check compares against the *host* NIC
-MAC (`interface::mac()`) rather than the receiving namespace's interface MAC.
-Threading the drained endpoint's `ns_id` through the RX chain is what makes
-container-inbound delivery land in the right per-ns socket table.
+Boot-validated: `[udp]   Namespace isolation: OK` (extended to cover
+delivery-level scoping — a datagram arriving in ns1 reaches only the ns1
+socket, root arrival is permissive), full `[net] Network self-test PASSED`,
+and the ARP ns tests — no physical-NIC regression.
 
-**Proper fix (design anticipated by the code, but multi-layer — do in a
-dedicated session):** thread `ns_id` as a parameter through the whole RX
-chain — `process_frame(data, ns_id)` → `process_ipv4/6(payload, ns_id)` →
-`process_arp(payload, ns_id)` → `process_tcp/udp(pkt, ns_id)` (pass it to the
-`_common` helpers instead of the hardcoded `ROOT_NS`) and `icmp`/`icmpv6`
-echo-reply routing; make `is_for_us` compare against the receiving ns's
-interface MAC (needs a new `interface::ns_mac(ns_id)` / veth-endpoint MAC
-lookup); update all ~12 `process_frame` call sites (physical-NIC path passes
-`ROOT_NS`, `veth::poll_all` passes the drained endpoint's `ns_id`). **Risk:**
-this is the core RX path of the *entire* net stack — a subtle error breaks
-the physical-NIC path that boot self-tests exercise, so it needs careful,
-incremental, boot-tested work with a fresh context budget, not a tail-end
-bolt-on. **Discovered/analyzed:** 2026-07-01 (during embedded-DNS work).
+**What remains (container veth TX egress) — the functional blocker.**
+`ipv4::send_ns` still builds the frame with `interface::mac()` and egresses
+via `super::send_frame` (the physical NIC) for *all* namespaces (see the
+comment at `ipv4.rs` ~L695 "physical NIC's MAC … shared across all
+namespaces"). So:
+- A container socket's outbound segment never enters the veth — it goes out
+  the host NIC with the host MAC. Container *ingress* delivery now lands in
+  the right socket, but the container cannot **reply** over its user-defined
+  network.
+- `arp::send_reply` deliberately **drops** replies for non-root namespaces
+  (rather than emit them wrong-wire on the physical NIC) pending this wiring.
+The proper fix: give the ns-aware send path a veth egress branch — when
+`ns_id != ROOT_NS` and the ns has a veth endpoint, build the frame with the
+veth endpoint's MAC and `veth::send(pair, B, frame)` (→ lands on host end A →
+`bridge::forward` switches to the peer / NAT) instead of `send_frame`. This
+also needs the container ns to have an assigned IP + connected route so
+`resolve_next_hop`/`is_for_us` line up. That's a self-contained TX increment;
+do it next to make container-inbound work end-to-end.
+
+**Discovered/analyzed:** 2026-07-01 (embedded-DNS work). **RX threading
+landed:** 2026-07-01.
 
 ### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 

@@ -152,6 +152,38 @@ lock ordering), and (b) `on_thread_exit`/`reap_dead_tasks` racing a thread that
 is mid-`clone`. A lock-order tracer around the address-space + frame-alloc +
 SCHED locks during a `clone`-heavy boot is the tool to build next.
 
+**Tooling reconnaissance 2026-07-01 (negative — narrows the fix, no code
+change).** Two findings that reshape what "instrument this" requires:
+1. *A lockdep validator already exists and is enabled at boot* (`kernel/src/lockdep.rs`,
+   `lockdep::init()` at `main.rs:3678`; `crate::sync::Mutex` auto-reports
+   acquire/release; `lockstats` kshell cmd). It flags an AB-BA cycle on **any**
+   boot where both orderings are ever observed — but **only for locks that use
+   the tracked `crate::sync::Mutex`.** The two prime suspects are **untracked raw
+   `spin::Mutex`**: the buddy frame allocator (`mm/frame.rs:813`
+   `static ALLOCATOR: Once<Mutex<BuddyAllocator>>`, `use spin::{Mutex, Once}`)
+   and the rmap table (`mm/rmap.rs:174` `static TABLE: Mutex<RmapTable>`,
+   `use spin::Mutex`). **That is exactly why the hanging runs produced no lockdep
+   report.** Migrating them to `crate::sync::Mutex` would let lockdep catch a
+   latent inversion deterministically — but the frame allocator is a
+   <1 µs-target hot path and lockdep adds ~50–200 ns/acquire, a >20% regression
+   on every `alloc_frame`/`free_frame`, so this can't just be left on in normal
+   builds. A `cfg(feature = "lockdep_mm")` gated migration is the proper form if
+   this route is taken.
+2. *Give-up-path instrumentation would not catch the TOTAL hang.* The yield-budget
+   "did not exit within N yields" give-up messages in `proc/spawn.rs` (~20 sites)
+   only fire when the driver task keeps running and merely the *child* is slow.
+   In the total-hang variant the serial log stops mid-clone with **no further
+   output at all** — the give-up line never prints, meaning the driver (or the
+   whole CPU) also stalled, consistent with a lock held forever by a stuck task.
+   So a state-dump *at the give-up* is useless here; catching this needs a
+   **timer-interrupt watchdog** that, on N seconds of no forward progress, dumps
+   every task's `(id, name, state, cpu, wait-reason)` from IRQ context (and must
+   itself take **no** contended lock — use `try_lock`/lock-free reads only). That
+   watchdog is the real next build; it's larger than a one-liner, hence deferred
+   rather than bolted on mid-turn. Until then the bug stays WATCH: it is rare,
+   does not affect the common boot (BOOT_OK is reached ~95%+ of runs), and is
+   fully documented here.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

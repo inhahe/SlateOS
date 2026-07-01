@@ -38,8 +38,8 @@ use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::{self, ProcessId, ProcessState};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
-use spin::Mutex;
 
 // ---------------------------------------------------------------------------
 // Thread → Process mapping
@@ -53,8 +53,13 @@ use spin::Mutex;
 /// during scheduling.
 ///
 /// Lock ordering: `THREAD_OWNERS` → `PROCESS_TABLE` → `SCHED`.
+///
+/// Tracked via [`crate::sync::Mutex`] (not raw `spin::Mutex`) so lockdep
+/// validates that ordering kernel-wide and the spinlock stall detector can
+/// name it if the exit/reap path ever wedges on it — this lock sits directly
+/// on the suspected spawn/kill/reap hang path.
 static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
-    Mutex::new(BTreeMap::new());
+    Mutex::named(BTreeMap::new(), b"THRDOWN");
 
 // ---------------------------------------------------------------------------
 // Thread exit values and join waiters
@@ -69,7 +74,7 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
 /// This is independent of process exit codes — each thread has its
 /// own exit value that another thread in the same process can retrieve.
 static THREAD_EXIT_VALUES: Mutex<BTreeMap<TaskId, i64>> =
-    Mutex::new(BTreeMap::new());
+    Mutex::named(BTreeMap::new(), b"THREXITV");
 
 /// Maps a thread being waited on → the task waiting on it.
 ///
@@ -77,7 +82,7 @@ static THREAD_EXIT_VALUES: Mutex<BTreeMap<TaskId, i64>> =
 /// registered here.  When `target_task` exits, the waiter is woken.
 /// Only one thread may join on a given target at a time.
 static THREAD_JOIN_WAITERS: Mutex<BTreeMap<TaskId, TaskId>> =
-    Mutex::new(BTreeMap::new());
+    Mutex::named(BTreeMap::new(), b"THRJOIN");
 
 // ---------------------------------------------------------------------------
 // Public API

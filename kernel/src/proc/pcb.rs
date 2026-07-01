@@ -25,8 +25,8 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
+use crate::sync::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
 
 // ---------------------------------------------------------------------------
 // Process ID
@@ -1424,8 +1424,14 @@ pub const LINUX_PR_TSC_SIGSEGV: u32 = 2;
 /// Global table of all processes.
 ///
 /// Lock ordering: `PROCESS_TABLE` → `SCHED`.
+///
+/// Tracked via [`crate::sync::Mutex`] (not raw `spin::Mutex`) so lockdep
+/// validates that ordering kernel-wide and the spinlock stall detector can
+/// name it if the exit/reap path wedges on it — this lock is on the suspected
+/// spawn/kill/reap hang path (`on_task_exit` → `get_crash_info`,
+/// `remove_thread`).
 static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
-    Mutex::new(BTreeMap::new());
+    Mutex::named(BTreeMap::new(), b"PROCTBL");
 
 // ---------------------------------------------------------------------------
 // Public API

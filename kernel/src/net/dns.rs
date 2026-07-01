@@ -1011,6 +1011,15 @@ fn skip_name(data: &[u8], mut offset: usize) -> KernelResult<usize> {
 /// Successful results are cached with the TTL from the DNS response.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
+    // Docker embedded DNS: if the caller is inside a container attached to a
+    // user-defined network, a peer's container name / hostname / alias resolves
+    // to that peer's address *before* any upstream query (127.0.0.11 semantics).
+    // The host namespace (0) skips this; a non-matching name falls through.
+    let caller_ns = crate::sched::current_task_net_ns();
+    if let Some(ip) = crate::container::resolve_dns(caller_ns, name) {
+        return Ok(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]));
+    }
+
     let mut current_name = String::from(name);
     let mut cname_out = None;
 

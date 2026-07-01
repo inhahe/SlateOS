@@ -4177,6 +4177,35 @@ pub fn list() -> Vec<(ContainerId, String, ContainerState)> {
     })
 }
 
+/// Resolve a DNS `query` on behalf of whatever container owns network
+/// namespace `net_ns` (Docker embedded DNS, seen from inside the container).
+///
+/// Maps `net_ns` → the owning container → its user-defined networks, then asks
+/// [`crate::cnetwork::resolve_for_container`] to match the name against the
+/// container's same-network peers. Returns `None` for the host namespace
+/// (`net_ns == 0`), an unmatched namespace, or a name that no attached network
+/// answers to — in every such case the caller falls through to ordinary DNS.
+///
+/// This is the hook the kernel resolver ([`crate::net::dns::resolve`]) consults
+/// *before* querying an upstream server, so a container can reach a peer by
+/// name on its shared network exactly as under Docker's 127.0.0.11 resolver.
+#[must_use]
+pub fn resolve_dns(net_ns: u32, query: &str) -> Option<[u8; 4]> {
+    // The host namespace (0) has no embedded resolver.
+    if net_ns == 0 || query.is_empty() {
+        return None;
+    }
+    let container_id = with_table_ref(|table| {
+        table
+            .containers
+            .iter()
+            .enumerate()
+            .find(|(_, ct)| ct.active && ct.net_ns == net_ns)
+            .map(|(i, _)| i as ContainerId)
+    })?;
+    crate::cnetwork::resolve_for_container(container_id, query)
+}
+
 /// Remove all terminal (stopped/failed) containers (Docker `container
 /// prune`).
 ///

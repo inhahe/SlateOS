@@ -564,13 +564,42 @@ pub fn resolve(network: &str, query: &str) -> Option<[u8; 4]> {
     let table = TABLE.lock();
     let idx = table.position(network)?;
     let n = table.networks.get(idx)?;
+    resolve_in(n, query)
+}
+
+/// Resolve `query` against one network's allocations (case-insensitive).
+fn resolve_in(n: &Network, query: &str) -> Option<[u8; 4]> {
     for a in &n.allocations {
-        if a
-            .names
-            .iter()
-            .any(|nm| nm.eq_ignore_ascii_case(query))
-        {
+        if a.names.iter().any(|nm| nm.eq_ignore_ascii_case(query)) {
             return Some(a.ip);
+        }
+    }
+    None
+}
+
+/// Resolve a DNS name on behalf of a container (Docker embedded DNS from the
+/// container's point of view).
+///
+/// Searches only the networks the container is actually attached to (owns an
+/// allocation on), in registration order, and returns the first address whose
+/// registered names match `query` case-insensitively. A container never
+/// resolves names on networks it is not a member of, mirroring Docker's
+/// per-network embedded resolver.
+///
+/// Returns `None` if the container is on no network, or no attached network
+/// answers to that name (the caller then falls through to normal DNS).
+#[must_use]
+pub fn resolve_for_container(container_id: u32, query: &str) -> Option<[u8; 4]> {
+    if query.is_empty() {
+        return None;
+    }
+    let table = TABLE.lock();
+    for n in &table.networks {
+        let is_member = n.allocations.iter().any(|a| a.owner == Some(container_id));
+        if is_member {
+            if let Some(ip) = resolve_in(n, query) {
+                return Some(ip);
+            }
         }
     }
     None
@@ -975,6 +1004,25 @@ pub fn self_test() {
         assert!(
             register_dns_names("st-dns", 999, &["ghost"]).is_err(),
             "registering names for a non-member must fail",
+        );
+
+        // Container-scoped resolution: a member resolves peer names on its own
+        // network but not names it is not a member of.
+        assert_eq!(
+            resolve_for_container(201, "db"), Some(db),
+            "member resolves a peer by name",
+        );
+        assert_eq!(
+            resolve_for_container(202, "web"), Some(web),
+            "the other member resolves too",
+        );
+        assert!(
+            resolve_for_container(999, "web").is_none(),
+            "a non-member container resolves nothing",
+        );
+        assert!(
+            resolve_for_container(201, "missing").is_none(),
+            "unknown name is unresolved for a member",
         );
 
         // Releasing a container drops its DNS names too.

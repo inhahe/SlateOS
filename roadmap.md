@@ -5303,7 +5303,8 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
   - [-] Port Docker (or equivalent container runtime) — in progress. Native
     `container`/`ct` runtime + `oci` image tooling + a `docker`/`dk` compat
     shim. Shipped: OCI image load/inspect/layers/extract, overlay rootfs,
-    volumes, user-defined networks + IPAM + **shared L2 bridge** (one
+    volumes (host bind, named, read-only `:ro`, and **tmpfs** `--tmpfs`),
+    user-defined networks + IPAM + **shared L2 bridge** (one
     `net::bridge` per network, veth host-ends switched at L2 so same-network
     peers reach each other directly) + **embedded DNS** (container
     name/hostname/`--network-alias` → peer IP, network-scoped and

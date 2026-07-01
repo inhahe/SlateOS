@@ -324,6 +324,97 @@ impl ImageManifest {
     }
 }
 
+/// Parsed OCI/Docker healthcheck configuration (`config.Healthcheck`).
+///
+/// Mirrors Docker's `HealthConfig`: a probe command plus timing/retry
+/// parameters.  `test[0]` is the *type* token:
+/// - `"NONE"` — explicitly disable any inherited healthcheck.
+/// - `"CMD"` — `test[1..]` is the argv to exec directly.
+/// - `"CMD-SHELL"` — `test[1]` is a single command line run via a shell.
+///
+/// Zero durations / retries mean "use the Docker default" (30s / 3), which the
+/// `effective_*` accessors apply.  Durations are nanoseconds, matching the OCI
+/// JSON encoding.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HealthcheckConfig {
+    /// The raw `Test` array, including the type token at index 0.
+    pub test: Vec<String>,
+    /// Probe interval (ns).  0 → default (30s).
+    pub interval_ns: u64,
+    /// Per-probe timeout (ns).  0 → default (30s).
+    pub timeout_ns: u64,
+    /// Grace period after container start before failures count (ns).  0 → none.
+    pub start_period_ns: u64,
+    /// Consecutive failures before the container is marked unhealthy.  0 →
+    /// default (3).
+    pub retries: u32,
+}
+
+impl HealthcheckConfig {
+    /// Docker default probe interval / timeout when unset: 30 seconds.
+    pub const DEFAULT_INTERVAL_NS: u64 = 30_000_000_000;
+    /// Docker default retry count when unset.
+    pub const DEFAULT_RETRIES: u32 = 3;
+
+    /// `true` if this healthcheck is explicitly disabled (`Test: ["NONE"]`).
+    #[must_use]
+    pub fn is_disabled(&self) -> bool {
+        matches!(self.test.first().map(String::as_str), Some("NONE"))
+    }
+
+    /// `true` if the probe is a shell command (`Test: ["CMD-SHELL", ...]`)
+    /// rather than a direct exec (`Test: ["CMD", ...]`).
+    #[must_use]
+    pub fn is_shell(&self) -> bool {
+        matches!(self.test.first().map(String::as_str), Some("CMD-SHELL"))
+    }
+
+    /// The probe arguments (everything after the type token).  For `CMD` this
+    /// is the argv; for `CMD-SHELL` it is a single-element slice holding the
+    /// shell command line.  Empty when disabled or malformed.
+    #[must_use]
+    pub fn probe_args(&self) -> &[String] {
+        self.test.get(1..).unwrap_or(&[])
+    }
+
+    /// `true` if a runnable probe command is present (a `CMD`/`CMD-SHELL` with
+    /// at least one argument).  Disabled or empty healthchecks return `false`.
+    #[must_use]
+    pub fn is_runnable(&self) -> bool {
+        !self.is_disabled() && !self.probe_args().is_empty()
+    }
+
+    /// Effective interval, applying the Docker default for an unset value.
+    #[must_use]
+    pub fn effective_interval_ns(&self) -> u64 {
+        if self.interval_ns == 0 {
+            Self::DEFAULT_INTERVAL_NS
+        } else {
+            self.interval_ns
+        }
+    }
+
+    /// Effective timeout, applying the Docker default for an unset value.
+    #[must_use]
+    pub fn effective_timeout_ns(&self) -> u64 {
+        if self.timeout_ns == 0 {
+            Self::DEFAULT_INTERVAL_NS
+        } else {
+            self.timeout_ns
+        }
+    }
+
+    /// Effective retry count, applying the Docker default for an unset value.
+    #[must_use]
+    pub fn effective_retries(&self) -> u32 {
+        if self.retries == 0 {
+            Self::DEFAULT_RETRIES
+        } else {
+            self.retries
+        }
+    }
+}
+
 /// Parsed OCI image configuration.
 #[derive(Debug, Clone)]
 pub struct ImageConfig {
@@ -357,6 +448,8 @@ pub struct ImageConfig {
     pub diff_ids: Vec<String>,
     /// Build history (OCI config `history[]`), oldest first.
     pub history: Vec<HistoryEntry>,
+    /// Container healthcheck (`config.Healthcheck`), if present.
+    pub healthcheck: Option<HealthcheckConfig>,
 }
 
 impl ImageConfig {
@@ -432,6 +525,30 @@ impl ImageConfig {
         let shell = Self::parse_string_array(cfg.and_then(|c| c.get_array("Shell")));
         let onbuild = Self::parse_string_array(cfg.and_then(|c| c.get_array("OnBuild")));
 
+        // Healthcheck (`config.Healthcheck`): a probe command plus timing.
+        // Present-but-empty is preserved (a `Test: ["NONE"]` disable is
+        // meaningful); absent → None.
+        let healthcheck = cfg.and_then(|c| c.get("Healthcheck")).map(|hc| {
+            let ns = |key: &str| -> u64 {
+                hc.get(key)
+                    .and_then(JsonValue::as_i64)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .unwrap_or(0)
+            };
+            let retries = hc
+                .get("Retries")
+                .and_then(JsonValue::as_i64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0);
+            HealthcheckConfig {
+                test: Self::parse_string_array(hc.get_array("Test")),
+                interval_ns: ns("Interval"),
+                timeout_ns: ns("Timeout"),
+                start_period_ns: ns("StartPeriod"),
+                retries,
+            }
+        });
+
         // Rootfs diff-ids.
         let rootfs = root.get("rootfs");
         let diff_ids = Self::parse_string_array(
@@ -466,6 +583,7 @@ impl ImageConfig {
             onbuild,
             diff_ids,
             history,
+            healthcheck,
         })
     }
 
@@ -3418,7 +3536,14 @@ pub fn self_test() -> KernelResult<()> {
                 "WorkingDir": "/app",
                 "User": "nobody",
                 "ExposedPorts": {"8080/tcp": {}, "443/tcp": {}},
-                "Labels": {"version": "1.0", "maintainer": "test@example.com"}
+                "Labels": {"version": "1.0", "maintainer": "test@example.com"},
+                "Healthcheck": {
+                    "Test": ["CMD", "/bin/health", "--check"],
+                    "Interval": 5000000000,
+                    "Timeout": 2000000000,
+                    "StartPeriod": 1000000000,
+                    "Retries": 4
+                }
             },
             "rootfs": {
                 "type": "layers",
@@ -3448,7 +3573,62 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(cmd.len(), 2);
         assert_eq!(cmd[0], "/docker-entrypoint.sh");
         assert_eq!(cmd[1], "/bin/sh");
+
+        // Healthcheck (CMD form) is parsed with its timing/retry fields.
+        let hc = config.healthcheck.as_ref().expect("healthcheck present");
+        assert!(!hc.is_disabled());
+        assert!(!hc.is_shell(), "CMD form is a direct exec, not a shell");
+        assert!(hc.is_runnable());
+        assert_eq!(hc.probe_args(), &["/bin/health", "--check"]);
+        assert_eq!(hc.interval_ns, 5_000_000_000);
+        assert_eq!(hc.timeout_ns, 2_000_000_000);
+        assert_eq!(hc.start_period_ns, 1_000_000_000);
+        assert_eq!(hc.retries, 4);
+        // Explicit values override the defaults.
+        assert_eq!(hc.effective_interval_ns(), 5_000_000_000);
+        assert_eq!(hc.effective_retries(), 4);
         serial_println!("[oci]   image config: OK");
+    }
+
+    // Test 5b: Healthcheck variants — CMD-SHELL, NONE (disable), and default
+    // application for a present-but-timing-less healthcheck.
+    {
+        // CMD-SHELL: a single shell command line; unset timings → defaults.
+        let shell_json = r#"{
+            "architecture": "amd64", "os": "linux",
+            "config": {
+                "Healthcheck": {
+                    "Test": ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
+                }
+            }
+        }"#;
+        let cfg = ImageConfig::parse(shell_json.as_bytes())?;
+        let hc = cfg.healthcheck.as_ref().expect("shell healthcheck present");
+        assert!(hc.is_shell());
+        assert!(hc.is_runnable());
+        assert_eq!(hc.probe_args(), &["curl -f http://localhost/ || exit 1"]);
+        // Unset → Docker defaults (30s interval/timeout, 3 retries).
+        assert_eq!(hc.interval_ns, 0);
+        assert_eq!(hc.effective_interval_ns(), HealthcheckConfig::DEFAULT_INTERVAL_NS);
+        assert_eq!(hc.effective_timeout_ns(), HealthcheckConfig::DEFAULT_INTERVAL_NS);
+        assert_eq!(hc.effective_retries(), HealthcheckConfig::DEFAULT_RETRIES);
+
+        // NONE: explicitly disabled — parsed but not runnable.
+        let none_json = r#"{
+            "architecture": "amd64", "os": "linux",
+            "config": {"Healthcheck": {"Test": ["NONE"]}}
+        }"#;
+        let cfg = ImageConfig::parse(none_json.as_bytes())?;
+        let hc = cfg.healthcheck.as_ref().expect("none healthcheck present");
+        assert!(hc.is_disabled());
+        assert!(!hc.is_runnable());
+        assert!(hc.probe_args().is_empty());
+
+        // Absent Healthcheck key → None.
+        let bare = r#"{"architecture": "amd64", "os": "linux", "config": {}}"#;
+        let cfg = ImageConfig::parse(bare.as_bytes())?;
+        assert!(cfg.healthcheck.is_none());
+        serial_println!("[oci]   healthcheck variants: OK");
     }
 
     // Test 6: Digest verification.

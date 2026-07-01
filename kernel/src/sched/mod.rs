@@ -4696,8 +4696,80 @@ pub fn self_test() -> KernelResult<()> {
     test_wait_time_tracking()?;
     test_stack_watermark()?;
     test_load_average()?;
+    test_liveness_watchdog()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// Test the system-wide liveness watchdog's arm/disarm/progress logic and
+/// smoke-test the task-table dumper.
+///
+/// Runs during boot *before* `liveness_arm()` is called in `kmain`, so the
+/// watchdog starts disarmed; the test leaves it disarmed again on exit so
+/// the real arm point is unaffected.  It verifies:
+///  * `note_useful_work()` advances the global progress counter,
+///  * `liveness_check()` is a no-op while disarmed (never touches the stall
+///    counter — the early-return guard),
+///  * `arm()`/`disarm()` toggle the armed flag and `arm()` clears the stall
+///    counter,
+///  * `dump_task_table()` runs to completion on the live task table without
+///    panicking or blocking (exercises the try_lock path + task iteration).
+fn test_liveness_watchdog() -> KernelResult<()> {
+    // Snapshot so we restore exactly on exit.
+    let saved_armed = LIVENESS_ARMED.load(Ordering::Relaxed);
+
+    // Start from a known disarmed state with a cleared stall counter.
+    LIVENESS_ARMED.store(false, Ordering::Relaxed);
+    LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+
+    // Progress counter must advance on note_useful_work().
+    let before = USEFUL_WORK_TICKS.load(Ordering::Relaxed);
+    note_useful_work();
+    let after = USEFUL_WORK_TICKS.load(Ordering::Relaxed);
+    if after == before {
+        serial_println!("[sched]   FAIL: note_useful_work did not advance counter");
+        return Err(KernelError::InternalError);
+    }
+
+    // While disarmed, liveness_check() must return immediately and never
+    // touch the stall counter — even across a "no progress" interval.
+    LIVENESS_LAST_WORK.store(USEFUL_WORK_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+    liveness_check(); // disarmed → early return
+    liveness_check();
+    if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+        serial_println!("[sched]   FAIL: disarmed liveness_check advanced stall counter");
+        return Err(KernelError::InternalError);
+    }
+
+    // arm() must set the flag and clear the stall counter.
+    LIVENESS_STALL_COUNT.store(5, Ordering::Relaxed); // dirty it first
+    liveness_arm();
+    if !LIVENESS_ARMED.load(Ordering::Relaxed) {
+        serial_println!("[sched]   FAIL: liveness_arm did not set the armed flag");
+        return Err(KernelError::InternalError);
+    }
+    if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+        serial_println!("[sched]   FAIL: liveness_arm did not clear the stall counter");
+        return Err(KernelError::InternalError);
+    }
+
+    // disarm() must clear the flag.
+    liveness_disarm();
+    if LIVENESS_ARMED.load(Ordering::Relaxed) {
+        serial_println!("[sched]   FAIL: liveness_disarm did not clear the armed flag");
+        return Err(KernelError::InternalError);
+    }
+
+    // Smoke-test the dumper on the live task table: must not panic or block.
+    // (Output goes to serial; at self-test time the table is small.)
+    dump_task_table();
+
+    // Restore the watchdog to its pre-test state (disarmed during boot).
+    LIVENESS_ARMED.store(saved_armed, Ordering::Relaxed);
+    LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+
+    serial_println!("[sched]   liveness watchdog: OK");
     Ok(())
 }
 

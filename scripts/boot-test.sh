@@ -251,6 +251,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
+    -device virtio-gpu-pci \
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
     -no-reboot \

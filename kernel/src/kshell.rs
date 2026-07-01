@@ -67509,14 +67509,17 @@ fn cmd_container(args: &str) {
             }
         }
         "update" => {
-            // container update <id> [--cpus N[.M]] [--memory SIZE]
+            // container update <id> [--cpus N[.M]] [--memory SIZE] [--restart POLICY]
             //
             // Docker `update`: change a running container's CPU and/or memory
             // limits in place (applied to its cgroup, affecting live
-            // processes). A value of 0 (`--cpus 0` / `--memory 0`) sets the
-            // corresponding limit to unlimited. At least one limit is required.
+            // processes), and/or its restart policy. A value of 0 (`--cpus 0` /
+            // `--memory 0`) sets the corresponding limit to unlimited. At least
+            // one field is required.
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container update <id> [--cpus N] [--memory SIZE]");
+                crate::console_println!(
+                    "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
+                );
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
@@ -67525,8 +67528,46 @@ fn cmd_container(args: &str) {
             };
             let mut cpu_percent: Option<u64> = None;
             let mut mem_frames: Option<u64> = None;
+            let mut restart: Option<container::RestartPolicy> = None;
             let mut i = 2;
             while let Some(&arg) = parts.get(i) {
+                // Accept both `--restart POLICY` (separate token) and
+                // `--restart=POLICY` (Docker's `=` form).
+                if let Some(val) = arg
+                    .strip_prefix("--restart=")
+                    .or_else(|| arg.strip_prefix("restart="))
+                {
+                    match container::parse_restart_policy(val) {
+                        Some(p) => restart = Some(p),
+                        None => {
+                            crate::console_println!(
+                                "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
+                                val
+                            );
+                            return;
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+                if arg == "--restart" {
+                    let Some(&val) = parts.get(i + 1) else {
+                        crate::console_println!("--restart requires a value");
+                        return;
+                    };
+                    match container::parse_restart_policy(val) {
+                        Some(p) => restart = Some(p),
+                        None => {
+                            crate::console_println!(
+                                "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
+                                val
+                            );
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
                 match arg {
                     "--cpus" => {
                         let Some(&val) = parts.get(i + 1) else {
@@ -67572,33 +67613,48 @@ fn cmd_container(args: &str) {
                     }
                 }
             }
-            if cpu_percent.is_none() && mem_frames.is_none() {
+            if cpu_percent.is_none() && mem_frames.is_none() && restart.is_none() {
                 crate::console_println!(
-                    "Usage: container update <id> [--cpus N] [--memory SIZE] (at least one)"
+                    "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY] (at least one)"
                 );
                 return;
             }
-            match container::update_resources(id, cpu_percent, mem_frames) {
-                Ok(()) => {
-                    if let Some(p) = cpu_percent {
-                        if p == 0 {
-                            crate::console_println!("Container {} CPU: unlimited", id);
-                        } else {
-                            crate::console_println!("Container {} CPU: {}%", id, p);
-                        }
-                    }
-                    if let Some(f) = mem_frames {
-                        if f == 0 {
-                            crate::console_println!("Container {} memory: unlimited", id);
-                        } else {
-                            crate::console_println!(
-                                "Container {} memory: {} frames ({} MiB)",
-                                id, f, f / 64
-                            );
-                        }
+            // Apply the restart-policy change first (it can't fail on a valid
+            // id and doesn't touch the cgroup), then the resource limits.
+            if let Some(policy) = restart {
+                match container::set_restart_policy(id, policy) {
+                    Ok(()) => crate::console_println!(
+                        "Container {} restart policy: {}", id, policy
+                    ),
+                    Err(e) => {
+                        crate::console_println!("Error: {:?}", e);
+                        return;
                     }
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            if cpu_percent.is_some() || mem_frames.is_some() {
+                match container::update_resources(id, cpu_percent, mem_frames) {
+                    Ok(()) => {
+                        if let Some(p) = cpu_percent {
+                            if p == 0 {
+                                crate::console_println!("Container {} CPU: unlimited", id);
+                            } else {
+                                crate::console_println!("Container {} CPU: {}%", id, p);
+                            }
+                        }
+                        if let Some(f) = mem_frames {
+                            if f == 0 {
+                                crate::console_println!("Container {} memory: unlimited", id);
+                            } else {
+                                crate::console_println!(
+                                    "Container {} memory: {} frames ({} MiB)",
+                                    id, f, f / 64
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
             }
         }
         "rename" => {
@@ -68156,7 +68212,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
-            crate::console_println!("  container update ID [--cpus N] [--memory SIZE] — change live CPU/memory limits");
+            crate::console_println!("  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy");
             crate::console_println!("  container rename ID <new-name>           — rename a container");
             crate::console_println!("  container port ID                        — list published port mappings");
             crate::console_println!("  container wait ID                        — block until container stops, print exit code");

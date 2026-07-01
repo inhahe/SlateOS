@@ -2643,6 +2643,28 @@ pub fn rename(id: ContainerId, new_name: &str) -> KernelResult<()> {
     })
 }
 
+/// Change a container's restart policy in place (Docker `update --restart`).
+///
+/// Takes effect the next time the container's init exits: [`notify_init_exit`]
+/// reads the current policy at that moment, so updating a running container
+/// re-arms (or disarms) its auto-restart without disturbing the live process.
+/// The restart counter is left untouched — switching to `on-failure:N` does not
+/// grant a fresh budget mid-flight; a manual `start`/`restart` still resets it.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive.
+pub fn set_restart_policy(id: ContainerId, policy: RestartPolicy) -> KernelResult<()> {
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].restart_policy = policy;
+        Ok(())
+    })
+}
+
 /// Forcibly terminate a container by killing all of its tracked processes
 /// (Docker `kill`).
 ///
@@ -4481,10 +4503,22 @@ pub fn self_test() {
         let inf = info(rp).expect("info restart-policy-ct");
         assert_eq!(inf.restart_policy, RestartPolicy::OnFailure(3));
         assert_eq!(inf.restart_count, 0);
+
+        // set_restart_policy updates it in place (Docker `update --restart`).
+        set_restart_policy(rp, RestartPolicy::Always).expect("set_restart_policy");
+        assert_eq!(
+            info(rp).expect("info after update").restart_policy,
+            RestartPolicy::Always,
+        );
+        assert!(
+            set_restart_policy(ContainerId::MAX, RestartPolicy::No).is_err(),
+            "set_restart_policy on a bogus id must fail",
+        );
+
         delete(rp).expect("cleanup restart-policy-ct");
         assert_eq!(active_count(), 0);
     }
-    serial_println!("[container]   restart policy (parse + decision table): OK");
+    serial_println!("[container]   restart policy (parse + decision table + update): OK");
 
-    serial_println!("[container] Self-test PASSED (41 tests)");
+    serial_println!("[container] Self-test PASSED (42 tests)");
 }

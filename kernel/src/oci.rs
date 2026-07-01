@@ -1381,18 +1381,126 @@ fn file_mode(meta: &crate::fs::vfs::FileMeta) -> u32 {
     if m == 0 { 0o644 } else { m }
 }
 
+/// Parse a `.dockerignore` file into ordered `(negated, pattern)` rules.
+/// Blank lines and `#` comments are skipped; a leading `!` negates (re-includes).
+fn parse_dockerignore(bytes: &[u8]) -> Vec<(bool, String)> {
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let text = core::str::from_utf8(bytes).unwrap_or("");
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw).trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (neg, pat) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, line),
+        };
+        let norm = archive_norm(pat);
+        if !norm.is_empty() {
+            out.push((neg, norm));
+        }
+    }
+    out
+}
+
+/// Glob match with Docker/`filepath.Match` semantics extended with `**`:
+/// `*` matches any run of non-`/`, `**` matches any run including `/`, `?`
+/// matches a single non-`/` char, everything else is literal.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = path.chars().collect();
+    glob_rec(&p, &t)
+}
+
+fn glob_rec(p: &[char], t: &[char]) -> bool {
+    let Some((&c, prest)) = p.split_first() else {
+        return t.is_empty();
+    };
+    match c {
+        '*' => {
+            if prest.first() == Some(&'*') {
+                // `**` — match any run, including `/`.
+                let prest2 = prest.get(1..).unwrap_or(&[]);
+                let mut i = 0usize;
+                loop {
+                    if glob_rec(prest2, t.get(i..).unwrap_or(&[])) {
+                        return true;
+                    }
+                    if i >= t.len() {
+                        return false;
+                    }
+                    i = i.saturating_add(1);
+                }
+            } else {
+                // `*` — match any run of non-`/`.
+                let mut i = 0usize;
+                loop {
+                    if glob_rec(prest, t.get(i..).unwrap_or(&[])) {
+                        return true;
+                    }
+                    match t.get(i) {
+                        None | Some('/') => return false,
+                        Some(_) => {}
+                    }
+                    i = i.saturating_add(1);
+                }
+            }
+        }
+        '?' => match t.split_first() {
+            Some((&tc, trest)) if tc != '/' => glob_rec(prest, trest),
+            _ => false,
+        },
+        lit => match t.split_first() {
+            Some((&tc, trest)) if tc == lit => glob_rec(prest, trest),
+            _ => false,
+        },
+    }
+}
+
+/// Whether `path` (context-relative) is excluded by `.dockerignore` `patterns`.
+/// A pattern matching any ancestor of `path` excludes it; rules apply in file
+/// order (last match wins), so a later `!rule` can re-include.
+fn path_ignored(patterns: &[(bool, String)], path: &str) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let mut candidates = parent_prefixes(path);
+    candidates.push(String::from(path));
+    let mut ignored = false;
+    for (neg, pat) in patterns {
+        if candidates.iter().any(|c| glob_match(pat, c)) {
+            ignored = !neg;
+        }
+    }
+    ignored
+}
+
+/// The path of `full` relative to `context_dir` (archive-normalised).
+fn ctx_rel(context_dir: &str, full: &str) -> String {
+    let prefix = format!("{}/", context_dir.trim_end_matches('/'));
+    archive_norm(full.strip_prefix(&prefix).unwrap_or(full))
+}
+
 /// Collect files for a single COPY/ADD source into `files`, computing each
-/// entry's archive-relative destination path per Docker's COPY semantics.
+/// entry's archive-relative destination path per Docker's COPY semantics and
+/// skipping context files excluded by `.dockerignore` (`ignore`).
 fn collect_copy_src(
     context_dir: &str,
     src: &str,
     dest: &str,
     single_source: bool,
+    ignore: &[(bool, String)],
     files: &mut Vec<LayerFile>,
     line: usize,
 ) -> Result<(), BuildError> {
-    use crate::fs::vfs::{EntryType, Vfs};
-    let ctx = format!("{}/{}", context_dir.trim_end_matches('/'), src.trim_start_matches('/'));
+    use crate::fs::vfs::{normalize_path, EntryType, Vfs};
+    // Normalise the joined path so `.`/`..`/double-slash in a COPY source
+    // (notably `COPY . /dest`) resolve to a real context path.
+    let ctx = normalize_path(&format!(
+        "{}/{}",
+        context_dir.trim_end_matches('/'),
+        src.trim_start_matches('/')
+    ));
     let meta = match Vfs::metadata(&ctx) {
         Ok(m) => m,
         Err(_) => return Err(BuildError::CopySourceMissing { src: String::from(src) }),
@@ -1402,6 +1510,11 @@ fn collect_copy_src(
 
     match meta.entry_type {
         EntryType::File => {
+            // A `.dockerignore`-excluded explicit source contributes nothing
+            // (Docker removes it from the build context entirely).
+            if path_ignored(ignore, &ctx_rel(context_dir, &ctx)) {
+                return Ok(());
+            }
             let basename = src.rsplit('/').next().unwrap_or(src);
             let target = if dest_is_dir || !single_source {
                 if dest_norm.is_empty() {
@@ -1439,8 +1552,13 @@ fn collect_copy_src(
                         format!("{cur_dest}/{}", de.name)
                     };
                     match de.entry_type {
+                        // Always descend (a `!rule` can re-include a file under
+                        // an otherwise-ignored directory), filtering per file.
                         EntryType::Directory => stack.push((child, child_dest)),
                         EntryType::File => {
+                            if path_ignored(ignore, &ctx_rel(context_dir, &child)) {
+                                continue;
+                            }
                             if files.len() >= MAX_COPY_FILES {
                                 return Err(BuildError::Parse {
                                     line,
@@ -1532,6 +1650,16 @@ pub fn build_image_with_args(
             msg: String::from("Dockerfile has too many instructions"),
         });
     }
+
+    // Read `.dockerignore` from the build-context root (best-effort; absence is
+    // not an error — an empty rule set excludes nothing).
+    let ignore = {
+        let path = format!("{}/.dockerignore", context_dir.trim_end_matches('/'));
+        match Vfs::read_file(&path) {
+            Ok(bytes) => parse_dockerignore(&bytes),
+            Err(_) => Vec::new(),
+        }
+    };
 
     let mut spec = ImageSpec::new();
     // Build-time variables (ARG defaults + ENV), used for `${VAR}` expansion.
@@ -1708,7 +1836,7 @@ pub fn build_image_with_args(
                 let single = src_count == 1;
                 let mut files: Vec<LayerFile> = Vec::new();
                 for src in toks.iter().take(src_count) {
-                    collect_copy_src(context_dir, src, &dest_path, single, &mut files, line)?;
+                    collect_copy_src(context_dir, src, &dest_path, single, &ignore, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
             }
@@ -2232,7 +2360,72 @@ CMD ["--serve"]
         serial_println!("[oci]   Dockerfile builder (build_image): OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (12 tests)");
+    // Test 13: `.dockerignore` filtering of the build context — glob excludes,
+    // directory excludes, and `!` re-inclusion (last-match-wins).
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_di_ctx";
+        let img = "/tmp/oci_di_img";
+        let ext = "/tmp/oci_di_ext";
+        cleanup_image_dir(img);
+
+        let _ = Vfs::mkdir(ctx);
+        let _ = Vfs::mkdir(&format!("{ctx}/secret"));
+        let _ = Vfs::mkdir(&format!("{ctx}/logs"));
+        Vfs::write_file(&format!("{ctx}/keep.txt"), b"keep")?;
+        Vfs::write_file(&format!("{ctx}/debug.log"), b"noisy")?;
+        Vfs::write_file(&format!("{ctx}/logs/app.log"), b"applog")?;
+        Vfs::write_file(&format!("{ctx}/logs/important.log"), b"important")?;
+        Vfs::write_file(&format!("{ctx}/secret/key.pem"), b"topsecret")?;
+        // Exclude all *.log and the whole secret/ dir, but re-include one log.
+        Vfs::write_file(
+            &format!("{ctx}/.dockerignore"),
+            b"# ignore rules\n*.log\nlogs/*.log\nsecret\n!logs/important.log\n",
+        )?;
+
+        let df = b"FROM scratch\nCOPY . /data\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] dockerignore build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let di = load_image(img)?;
+        assert_eq!(di.manifest.layers.len(), 1, "single COPY layer");
+
+        let _ = Vfs::mkdir(ext);
+        for layer in &di.manifest.layers {
+            extract_layer(img, layer, ext)?;
+        }
+        // Kept: keep.txt and the re-included important.log.
+        assert_eq!(Vfs::read_file(&format!("{ext}/data/keep.txt"))?, b"keep");
+        assert_eq!(
+            Vfs::read_file(&format!("{ext}/data/logs/important.log"))?,
+            b"important"
+        );
+        // Excluded: top-level log, dir log, and everything under secret/.
+        assert!(Vfs::read_file(&format!("{ext}/data/debug.log")).is_err(), "*.log excluded");
+        assert!(Vfs::read_file(&format!("{ext}/data/logs/app.log")).is_err(), "logs/*.log excluded");
+        assert!(Vfs::read_file(&format!("{ext}/data/secret/key.pem")).is_err(), "secret/ excluded");
+
+        // Clean up context, extract tree, and image.
+        let _ = Vfs::remove(&format!("{ext}/data/keep.txt"));
+        let _ = Vfs::remove(&format!("{ext}/data/logs/important.log"));
+        let _ = Vfs::rmdir(&format!("{ext}/data/logs"));
+        let _ = Vfs::rmdir(&format!("{ext}/data"));
+        let _ = Vfs::rmdir(ext);
+        let _ = Vfs::remove(&format!("{ctx}/.dockerignore"));
+        let _ = Vfs::remove(&format!("{ctx}/keep.txt"));
+        let _ = Vfs::remove(&format!("{ctx}/debug.log"));
+        let _ = Vfs::remove(&format!("{ctx}/logs/app.log"));
+        let _ = Vfs::remove(&format!("{ctx}/logs/important.log"));
+        let _ = Vfs::remove(&format!("{ctx}/secret/key.pem"));
+        let _ = Vfs::rmdir(&format!("{ctx}/logs"));
+        let _ = Vfs::rmdir(&format!("{ctx}/secret"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   .dockerignore context filtering: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (13 tests)");
     Ok(())
 }
 

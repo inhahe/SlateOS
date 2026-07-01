@@ -2920,6 +2920,111 @@ pub fn wait_status(id: ContainerId) -> Option<(bool, Option<i32>)> {
     })
 }
 
+/// Outcome of a blocking [`wait`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The container reached a terminal state; carries the init process's
+    /// recorded exit code (`0` when none was recorded — e.g. a manual stop of
+    /// a never-run container).
+    Exited(i32),
+    /// The container was deleted out from under the waiter mid-wait.
+    Removed,
+}
+
+/// Atomic snapshot for the blocking-wait loop: `(terminal, exit_code,
+/// init_pid)`.  `None` when the container id is invalid/inactive (removed).
+fn wait_snapshot(id: ContainerId) -> Option<(bool, Option<i32>, Option<u64>)> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        let ct = &table.containers[idx];
+        let terminal = matches!(
+            ct.state,
+            ContainerState::Stopped | ContainerState::Failed
+        );
+        Some((terminal, ct.exit_code, ct.init_pid))
+    })
+}
+
+/// Block the calling task until the container reaches a terminal state
+/// (Docker `wait`), then return its init exit code.
+///
+/// This is the proper, event-driven counterpart to the pure [`wait_status`]
+/// query: instead of spinning on `wait_status` and yielding (a busy-wait that
+/// burns CPU while the init runs), the caller **blocks** on the container's
+/// init process and is woken by the scheduler when that process zombifies.
+/// The wake is delivered via the same [`pcb::set_wait_task`] mechanism
+/// `wait4`/`waitpid` use: when the init thread exits, `remove_thread` takes the
+/// registered wait-task (having *already* run [`notify_init_exit`], so the
+/// container is `Stopped` with its `exit_code` recorded by the time we wake)
+/// and the scheduler unblocks it.
+///
+/// The loop is lost-wakeup-safe two ways: (1) it re-checks the terminal state
+/// *after* registering the wake, and (2) the scheduler's sticky `pending_wake`
+/// flag makes a wake delivered between the re-check and `block_current`
+/// short-circuit the next block. A container with a restart policy re-runs a
+/// fresh init after each exit; this call keeps re-registering on the new init
+/// and only returns when it observes an actually-terminal state (a stop not
+/// followed by a restart) — event-driven throughout, never a spin.
+///
+/// # Concurrency
+/// Only one waiter per init process is supported (`set_wait_task` holds a
+/// single slot). A second concurrent `wait` on the *same* container would
+/// overwrite the first's registration; the first would then miss its wake and
+/// only make progress on the next init exit. In practice `container wait` is
+/// driven from the single interactive shell task, so this is not exercised.
+///
+/// # Errors
+/// Returns [`KernelError::NotFound`] if `id` is invalid/inactive at entry.
+pub fn wait(id: ContainerId) -> KernelResult<WaitOutcome> {
+    // Validate up front so a bad id is a clean error rather than a "removed".
+    let Some((terminal, exit_code, mut init_pid)) = wait_snapshot(id) else {
+        return Err(KernelError::NotFound);
+    };
+    if terminal {
+        return Ok(WaitOutcome::Exited(exit_code.unwrap_or(0)));
+    }
+
+    let task_id = crate::sched::current_task_id();
+    loop {
+        // Register to be woken when the current init process zombifies.  If the
+        // init pid is unknown (Created but not yet run, or a transient window
+        // during restart), fall back to a short yield-and-recheck — there is no
+        // process to block on yet.  This is bounded (it only applies before the
+        // init exists) and is not the steady-state path.
+        match init_pid {
+            Some(pid) => match crate::proc::pcb::set_wait_task(pid, task_id) {
+                Ok(()) => {}
+                // The init was already reaped between the snapshot and here;
+                // re-snapshot below will observe the terminal state (or the
+                // next init if it restarted).
+                Err(KernelError::NoSuchProcess) => {}
+                Err(e) => return Err(e),
+            },
+            None => {
+                crate::sched::yield_now();
+            }
+        }
+
+        // Re-check AFTER registering (closes the register-before-exit race).
+        match wait_snapshot(id) {
+            None => return Ok(WaitOutcome::Removed),
+            Some((true, code, _)) => return Ok(WaitOutcome::Exited(code.unwrap_or(0))),
+            Some((false, _, pid)) => {
+                init_pid = pid;
+                // Only park when we actually registered on a live init; if the
+                // init pid was unknown we already yielded above, so loop back to
+                // re-register once the init exists.
+                if init_pid.is_some() {
+                    crate::sched::block_current();
+                }
+            }
+        }
+    }
+}
+
 /// Rename a container (Docker `rename`).
 ///
 /// Replaces the container's human-readable name. The new name is truncated to
@@ -4118,6 +4223,32 @@ pub fn self_test() {
         delete(ct_w).expect("delete wait container");
     }
     serial_println!("[container]   wait status (wait_status): OK");
+
+    // Test 19k2: the blocking wait() returns immediately (never parks) when the
+    // container is already terminal, and errors on an invalid id.  The actual
+    // block-on-init path can't be driven from this boot-thread self-test (it
+    // would park the test), but the non-blocking short-circuits are checked
+    // here; the parking path is exercised by real `container wait` on running
+    // containers during the integration boot.
+    {
+        // Invalid id → NotFound (not a spurious "Removed").
+        assert!(matches!(
+            wait(MAX_CONTAINERS as ContainerId),
+            Err(KernelError::NotFound)
+        ));
+
+        let ct_bw = create(&ContainerConfig::new("test-blockwait-ct")).expect("create");
+        stop(ct_bw).expect("stop");
+        // Already terminal → Exited immediately, no parking, exit code 0 for a
+        // manual stop that recorded no init exit code.
+        assert_eq!(
+            wait(ct_bw).expect("blocking wait on terminal container"),
+            WaitOutcome::Exited(0),
+            "wait() on an already-stopped container returns its exit code without blocking",
+        );
+        delete(ct_bw).expect("delete blockwait container");
+    }
+    serial_println!("[container]   blocking wait (wait): OK");
 
     // Test 19l: pause()/unpause() freeze and thaw a container (Docker
     // `pause`/`unpause`), managing the `frozen` flag and its state-machine

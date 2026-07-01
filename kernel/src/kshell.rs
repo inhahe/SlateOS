@@ -67899,8 +67899,9 @@ fn cmd_container(args: &str) {
         "wait" => {
             // container wait <id>  (Docker `wait`): block until the container
             // reaches a terminal state (stopped/failed), then print its init
-            // exit code.  Polls the pure `wait_status` primitive, yielding the
-            // CPU between checks so the container's init can run and exit.
+            // exit code.  Uses the event-driven `container::wait`, which parks
+            // the shell task on the container's init process and is woken by the
+            // scheduler when it exits — no CPU-burning poll loop.
             let Some(id_str) = parts.get(1) else {
                 crate::console_println!("Usage: container wait <id>");
                 return;
@@ -67909,27 +67910,15 @@ fn cmd_container(args: &str) {
                 crate::console_println!("Invalid container ID");
                 return;
             };
-            // Validate the id once up front; if it vanishes mid-wait we stop.
-            if container::wait_status(id).is_none() {
-                crate::console_println!("Container {} not found", id);
-                return;
-            }
-            loop {
-                match container::wait_status(id) {
-                    Some((true, exit_code)) => {
-                        crate::console_println!("{}", exit_code.unwrap_or(0));
-                        break;
-                    }
-                    Some((false, _)) => {
-                        // Non-terminal: yield so the init process can progress,
-                        // then re-poll.
-                        crate::sched::yield_now();
-                    }
-                    None => {
-                        // Container was deleted out from under us.
-                        crate::console_println!("Container {} removed while waiting", id);
-                        break;
-                    }
+            match container::wait(id) {
+                Ok(container::WaitOutcome::Exited(code)) => {
+                    crate::console_println!("{}", code);
+                }
+                Ok(container::WaitOutcome::Removed) => {
+                    crate::console_println!("Container {} removed while waiting", id);
+                }
+                Err(_) => {
+                    crate::console_println!("Container {} not found", id);
                 }
             }
         }

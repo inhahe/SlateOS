@@ -5304,7 +5304,8 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     `import`, `system df`/`prune`, image `save`/`load`/`history`, and
     **`build`** (Dockerfile → OCI image via `oci::build_image`: FROM
     scratch|local-image with layer+config inheritance, COPY/ADD with
-    `.dockerignore` filtering, ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/
+    `.dockerignore` filtering + `--chmod`/`--chown` (numeric),
+    ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/
     VOLUME/STOPSIGNAL/SHELL/ONBUILD, ARG `${VAR}` expansion + `--build-arg`
     overrides, **multi-stage builds** (`FROM … AS <name>`, `FROM <stage>`
     inheritance, `COPY --from=<stage|index|image>`, `--target <stage>`),

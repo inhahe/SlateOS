@@ -130,6 +130,29 @@ in addition to reworking the harness to wait on a real exit signal. No code
 change made this session (the observation came from unrelated container-CLI
 boot tests); logged here so the intermittent total hang isn't forgotten.
 
+### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
+
+**Where:** the boot self-test that runs the REAL `dash` shell over a script fed
+on fd 0 (`kernel/src/proc/spawn.rs` ring-3 dash integration test; serial marker
+"REAL dash shell script-from-stdin …"). Normally logs `… captured 55 bytes ==
+expected, EOF→exit 0): OK`.
+
+**Observed:** on one boot (2026-07-01, `BOOT_OK after 181s`) the harness logged
+`WARNING: Path-Z real dash shell script-from-stdin self-test failed:
+InternalError` (serial line 3589) instead of the OK line, while the *immediately
+preceding* boots (identical dash test) passed. Load-dependent — same family as
+B-CONTAINER-JAIL-TESTRACE / B-PTHREAD-YIELDBUDGET (intermittent races in the
+ring-3 `clone`/`fork`/`exec`/reap + futex machinery). Non-fatal on this run:
+BOOT_OK was still reached; only the one sub-test flaked.
+
+**Assessment:** almost certainly the same underlying low-probability
+spawn/exec/reap or futex race already tracked for pthread/container tests, not a
+dash-specific logic bug. **Proper fix:** shares the root-cause work with the
+pthread `clone`+futex deadlock (B-PTHREAD-YIELDBUDGET) — instrument the ring-3
+spawn/reap path (lock-order tracer + futex wait/wake ordering) and fix the race;
+also make the dash harness distinguish a transient spawn failure from a real
+shell error. Logged so the intermittent dash failure isn't forgotten.
+
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 
 **Resolution (2026-06-30):** the two correctness gaps below are now
@@ -2599,6 +2622,42 @@ a new task adopts a cgroup, and `cgroup::detach_task(task.cgroup_id)` in
 lock order). Audit ROOT_CGROUP bootstrapping so the idle/boot tasks are counted
 consistently. Once symmetric, `cgroup::delete`'s `nr_tasks > 0 ⇒ NotEmpty` guard
 becomes a true "container still has live processes" check.
+
+**ATTEMPTED 2026-07-01 — BLOCKED on a boot hang the change triggers/exposes.**
+Implemented exactly the proper fix above: `attach_task(inherit_cgroup)` in
+`spawn_with_affinity` (after the `without_interrupts`/SCHED critical section, so
+the cgroup `TABLE` lock is taken strictly after SCHED, mirroring
+`set_task_cgroup`'s order) and `detach_task(task.cgroup_id)` in `reap_dead_tasks`
+(capture `task.cgroup_id` under SCHED, `drop(state)`, then detach — TABLE after
+SCHED). It builds clean, clippy-0, and the *normal* container lifecycle self-test
+(nr_tasks 0→1→0) still passes. **But two consecutive boot tests hung** (BOOT_OK
+never printed within 480 s), each time immediately after a **userspace container
+init process** was spawned and marked "running" — run #1 hung in the
+`container restart` self-test (after `test-restart-ct` task 185), run #2 in the
+`container port` self-test (after `test-port-ct` task 187). Reverting *only* the
+two sched edits → BOOT_OK reached in 181 s. So the change is the trigger; the
+varying hang location within a boot points to a **near-deterministic SMP timing
+race** in the process spawn/force-kill/reap path that the *extra cgroup-`TABLE`
+lock traffic* (one attach per spawn, one detach per reap) aggravates rather than
+a plain AB-BA deadlock (SCHED and `TABLE` are never held nested; charging holds
+frame-lock→`TABLE` while reap does `TABLE`→frame-lock but with `TABLE` released
+in between, so no static inversion was found by inspection). Note the boot is
+*already* mildly flaky independent of this change: the reverted-sched boot run
+saw an unrelated `dash script-from-stdin` self-test `InternalError` (see the
+dash-flake entry) — consistent with a pre-existing timing fragility in the
+ring-3 spawn/reap machinery that this change amplifies.
+
+**Decision (Claude, autonomous):** do NOT land the symmetric-accounting change
+until the underlying spawn/kill/reap race is root-caused, because it regresses
+boot stability, and the debt it fixes is cosmetic (stale `nr_tasks` for
+force-killed-unreaped tasks; `container::delete` ignores the `cgroup::delete`
+NotEmpty error with `let _ =`, so accounting drift never blocks teardown). The
+`nr_tasks==1` container-billing assertion and the D-CGROUP-TASK-UNASSIGNED
+end-to-end memory-charging test both pass without it. **Trigger to retry:** after
+the ring-3 spawn/reap SMP race is instrumented (per-lock acquire/spin counters or
+a lock-order tracer) and fixed; then re-apply the two sched edits and run the
+boot test ≥3× to confirm stability. The exact patch is small and is captured
+above so it can be reconstructed.
 
 ### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` + `NOFLSH` honoured, orphan-pgrp `SIGHUP`/`SIGCONT` — RESOLVED 2026-06-20
 

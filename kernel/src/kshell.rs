@@ -67386,8 +67386,19 @@ fn cmd_container(args: &str) {
             }
         }
         "info" | "inspect" => {
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container info <id>");
+            // Optional `--json`/`-j` (Docker `inspect` emits JSON): the first
+            // non-flag token is the container id.
+            let mut want_json = false;
+            let mut id_str: Option<&str> = None;
+            for &tok in parts.iter().skip(1) {
+                if tok == "--json" || tok == "-j" {
+                    want_json = true;
+                } else if id_str.is_none() {
+                    id_str = Some(tok);
+                }
+            }
+            let Some(id_str) = id_str else {
+                crate::console_println!("Usage: container info [--json] <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
@@ -67398,6 +67409,65 @@ fn cmd_container(args: &str) {
                 crate::console_println!("Container {} not found", id);
                 return;
             };
+            if want_json {
+                // JSON string escaper: names/labels are OS-boundary data that
+                // may contain quotes, backslashes, or control bytes.
+                let esc = |s: &str| -> alloc::string::String {
+                    let mut out = alloc::string::String::with_capacity(s.len());
+                    for c in s.chars() {
+                        match c {
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            c if (c as u32) < 0x20 => {
+                                out.push_str(&alloc::format!("\\u{:04x}", c as u32));
+                            }
+                            _ => out.push(c),
+                        }
+                    }
+                    out
+                };
+                let mut labels_json = alloc::string::String::from("{");
+                for (i, (k, v)) in ci.labels.iter().enumerate() {
+                    if i > 0 {
+                        labels_json.push(',');
+                    }
+                    labels_json.push_str(&alloc::format!("\"{}\":\"{}\"", esc(k), esc(v)));
+                }
+                labels_json.push('}');
+                let init_pid_json = match ci.init_pid {
+                    Some(pid) => alloc::format!("{}", pid),
+                    None => alloc::string::String::from("null"),
+                };
+                let exit_json = match ci.exit_code {
+                    Some(code) => alloc::format!("{}", code),
+                    None => alloc::string::String::from("null"),
+                };
+                crate::console_println!(
+                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"labels\":{}}}",
+                    id,
+                    esc(&ci.name),
+                    ci.state,
+                    ci.frozen,
+                    exit_json,
+                    ci.restart_policy,
+                    ci.restart_count,
+                    ci.auto_remove,
+                    init_pid_json,
+                    ci.nr_procs,
+                    esc(&ci.root_path),
+                    esc(&ci.hostname),
+                    ci.pid_ns,
+                    ci.user_ns,
+                    ci.net_ns,
+                    ci.cgroup_id,
+                    ci.created_seq,
+                    labels_json,
+                );
+                return;
+            }
             crate::console_println!("=== Container {} ===", id);
             crate::console_println!("  Name:       {}", ci.name);
             // A frozen running container shows "running (paused)" (Docker
@@ -68275,7 +68345,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");
             crate::console_println!("  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)");
-            crate::console_println!("  container info ID                        — detailed inspection");
+            crate::console_println!("  container info [--json] ID               — detailed inspection (--json: machine-readable)");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
             crate::console_println!("  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy");
@@ -68522,7 +68592,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a]                         — list containers (all states)");
             crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
-            crate::console_println!("  docker inspect <id>                    — detailed container info");
+            crate::console_println!("  docker inspect [--json] <id>           — detailed container info (--json)");
             crate::console_println!("  docker exec <id> <command...>          — run a command in the container NS");
             crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
             crate::console_println!();

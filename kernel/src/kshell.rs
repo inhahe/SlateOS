@@ -67236,7 +67236,7 @@ fn cmd_container(args: &str) {
             }
             crate::console_println!("=== Containers ({}) ===", shown.len());
             crate::console_println!(
-                "{:<5} {:<20} {:<18}",
+                "{:<5} {:<20} {:<26}",
                 "ID", "Name", "Status"
             );
             for (id, name, state) in &shown {
@@ -67254,10 +67254,25 @@ fn cmd_container(args: &str) {
                 {
                     // A frozen running container shows "paused" (Docker `ps`).
                     alloc::format!("{} (paused)", state)
+                } else if *state == container::ContainerState::Running {
+                    // Running: append the health sub-state when a healthcheck is
+                    // configured (Docker's "Up (healthy)" / "(health: starting)").
+                    match container::health_status(*id) {
+                        Some(container::HealthStatus::Healthy) => {
+                            alloc::format!("{} (healthy)", state)
+                        }
+                        Some(container::HealthStatus::Unhealthy) => {
+                            alloc::format!("{} (unhealthy)", state)
+                        }
+                        Some(container::HealthStatus::Starting) => {
+                            alloc::format!("{} (health: starting)", state)
+                        }
+                        _ => alloc::format!("{}", state),
+                    }
                 } else {
                     alloc::format!("{}", state)
                 };
-                crate::console_println!("{:<5} {:<20} {:<18}", id, name, status);
+                crate::console_println!("{:<5} {:<20} {:<26}", id, name, status);
             }
         }
         "create" => {
@@ -67464,12 +67479,21 @@ fn cmd_container(args: &str) {
                     Some(code) => alloc::format!("{}", code),
                     None => alloc::string::String::from("null"),
                 };
+                // Health surfaces as a JSON string only when a healthcheck is
+                // configured; otherwise `null` (Docker omits the Health object
+                // for containers without a healthcheck).
+                let health_json = if ci.has_healthcheck {
+                    alloc::format!("\"{}\"", ci.health_status)
+                } else {
+                    alloc::string::String::from("null")
+                };
                 crate::console_println!(
-                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"labels\":{}}}",
+                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"labels\":{}}}",
                     id,
                     esc(&ci.name),
                     ci.state,
                     ci.frozen,
+                    health_json,
                     exit_json,
                     ci.restart_policy,
                     ci.restart_count,
@@ -67495,6 +67519,18 @@ fn cmd_container(args: &str) {
                 crate::console_println!("  State:      {} (paused)", ci.state);
             } else {
                 crate::console_println!("  State:      {}", ci.state);
+            }
+            // Health (Docker `HEALTHCHECK`): shown only when a healthcheck is
+            // configured; the failure streak is appended while unhealthy.
+            if ci.has_healthcheck {
+                if ci.health_status == container::HealthStatus::Unhealthy {
+                    crate::console_println!(
+                        "  Health:     {} (failing streak: {})",
+                        ci.health_status, ci.health_fail_streak
+                    );
+                } else {
+                    crate::console_println!("  Health:     {}", ci.health_status);
+                }
             }
             // Docker's "Exited (N)": show the init process's recorded exit
             // code once the container has stopped.

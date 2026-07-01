@@ -117,6 +117,107 @@ impl core::fmt::Display for ContainerState {
     }
 }
 
+/// Health status of a container's healthcheck (Docker `HEALTHCHECK`).
+///
+/// A container without a configured healthcheck is [`None`](Self::None) and no
+/// health is surfaced.  When a healthcheck *is* configured the status begins at
+/// [`Starting`](Self::Starting) (Docker's "health: starting") and transitions to
+/// [`Healthy`](Self::Healthy)/[`Unhealthy`](Self::Unhealthy) as probes run — see
+/// [`apply_probe_result`], which implements Docker's start-period / retry
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HealthStatus {
+    /// No healthcheck configured for this container.
+    #[default]
+    None,
+    /// Healthcheck configured; still in the start period or awaiting the first
+    /// passing probe (Docker "health: starting").
+    Starting,
+    /// The most recent probe passed (Docker "healthy").
+    Healthy,
+    /// The failing streak reached the retry count (Docker "unhealthy").
+    Unhealthy,
+}
+
+impl core::fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Starting => write!(f, "starting"),
+            Self::Healthy => write!(f, "healthy"),
+            Self::Unhealthy => write!(f, "unhealthy"),
+        }
+    }
+}
+
+/// Pure state-machine step for a single healthcheck probe result (Docker
+/// `HEALTHCHECK` semantics).
+///
+/// Given the container's current health `status`, its consecutive-failure
+/// `streak`, the wall-clock time the container's init started (`started_ns`),
+/// the current time (`now_ns`), the healthcheck `cfg`, and the probe's
+/// `exit_code` (0 = pass, non-zero or a synthesized timeout code = fail), this
+/// returns the container's `(new_status, new_streak)`.
+///
+/// The rules mirror Docker's `handleProbeResult`:
+///
+/// * A passing probe resets the streak to 0 and marks the container
+///   [`Healthy`](HealthStatus::Healthy).
+/// * A failing probe *during the start period* while the container is still
+///   [`Starting`](HealthStatus::Starting) does **not** count against the retry
+///   budget (Docker's start-period grace — see moby/moby#44348). The container
+///   stays `Starting`.
+/// * Any other failing probe increments the streak (saturating at the retry
+///   count) and, once the streak reaches the effective retry count, marks the
+///   container [`Unhealthy`](HealthStatus::Unhealthy).
+///
+/// This function is pure (no I/O, no locking) so it can be exhaustively unit
+/// tested; the live supervisor calls it with real timings and probe exit codes.
+#[must_use]
+pub fn apply_probe_result(
+    status: HealthStatus,
+    streak: u32,
+    started_ns: u64,
+    now_ns: u64,
+    cfg: &crate::oci::HealthcheckConfig,
+    exit_code: i32,
+) -> (HealthStatus, u32) {
+    let retries = cfg.effective_retries().max(1);
+
+    if exit_code == 0 {
+        // Passing probe: healthy, streak cleared. A pass at any time (even in
+        // the start period) promotes the container out of "starting".
+        return (HealthStatus::Healthy, 0);
+    }
+
+    // Failing probe. During the start period, failures are not counted while
+    // the container is still Starting — this gives slow-booting services time
+    // to come up without accruing an unhealthy verdict.
+    let in_start_period = now_ns.saturating_sub(started_ns) < cfg.start_period_ns;
+    if in_start_period && status == HealthStatus::Starting {
+        return (HealthStatus::Starting, streak);
+    }
+
+    let new_streak = if streak < retries {
+        streak.saturating_add(1)
+    } else {
+        streak
+    };
+
+    if new_streak >= retries {
+        (HealthStatus::Unhealthy, new_streak)
+    } else {
+        // Not yet at the retry threshold. Preserve the current status, except
+        // that an unconfigured `None` coming in defensively becomes `Starting`.
+        let carried = if status == HealthStatus::None {
+            HealthStatus::Starting
+        } else {
+            status
+        };
+        (carried, new_streak)
+    }
+}
+
 /// Restart policy for a container's init process (Docker `--restart`).
 ///
 /// Evaluated automatically when the init process exits (see
@@ -557,6 +658,23 @@ struct Container {
     /// Empty for a container created from a bind rootfs (no image). Recorded so
     /// `oci commit`/`docker commit` can carry the base image forward.
     image_source: String,
+    /// Healthcheck configuration (Docker `HEALTHCHECK`), if the image or the
+    /// create request specified one. `None` means no healthcheck — the
+    /// container's [`health_status`](Self::health_status) stays
+    /// [`HealthStatus::None`] and no probes are scheduled.
+    healthcheck: Option<crate::oci::HealthcheckConfig>,
+    /// Current health status (Docker's health sub-state of running). Driven by
+    /// the healthcheck supervisor via [`apply_probe_result`]; always
+    /// [`HealthStatus::None`] when [`healthcheck`](Self::healthcheck) is `None`.
+    health_status: HealthStatus,
+    /// Consecutive healthcheck failure streak, capped at the effective retry
+    /// count. Reset to 0 by any passing probe. Meaningful only while a
+    /// healthcheck is configured.
+    health_fail_streak: u32,
+    /// Wall-clock time (`hrtimer::now_ns`) the container's init last started,
+    /// stamped at [`run`]/restart time. Used by [`apply_probe_result`] to decide
+    /// whether a failing probe falls within the healthcheck start period.
+    health_started_ns: u64,
 }
 
 impl Container {
@@ -592,6 +710,10 @@ impl Container {
             auto_remove: false,
             created_seq: 0,
             image_source: String::new(),
+            healthcheck: None,
+            health_status: HealthStatus::None,
+            health_fail_streak: 0,
+            health_started_ns: 0,
         }
     }
 }
@@ -660,6 +782,13 @@ pub struct ContainerInfo {
     pub auto_remove: bool,
     /// Monotonic creation sequence (for ordering by creation time).
     pub created_seq: u64,
+    /// Current healthcheck status (Docker health sub-state). [`HealthStatus::None`]
+    /// when no healthcheck is configured.
+    pub health_status: HealthStatus,
+    /// Whether a healthcheck is configured for this container.
+    pub has_healthcheck: bool,
+    /// Consecutive healthcheck failure streak (0 when healthy or no healthcheck).
+    pub health_fail_streak: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -3076,7 +3205,62 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             restart_count: ct.restart_count,
             auto_remove: ct.auto_remove,
             created_seq: ct.created_seq,
+            health_status: ct.health_status,
+            has_healthcheck: ct.healthcheck.is_some(),
+            health_fail_streak: ct.health_fail_streak,
         })
+    })
+}
+
+/// Configure (or clear) a container's healthcheck (Docker `HEALTHCHECK`).
+///
+/// Records `cfg` on the container so the healthcheck supervisor can drive
+/// periodic probes.  Passing a config whose test is disabled (`NONE`) or that
+/// is not runnable clears the healthcheck instead, matching Docker's
+/// `HEALTHCHECK NONE`.  The container's health status is (re)initialised to
+/// [`HealthStatus::Starting`] when a runnable check is installed, or
+/// [`HealthStatus::None`] when cleared, and the failure streak is reset.
+///
+/// Returns [`KernelError::NotFound`] if the id is invalid or its slot is
+/// inactive.
+pub fn set_healthcheck(
+    id: ContainerId,
+    cfg: Option<crate::oci::HealthcheckConfig>,
+) -> Result<(), KernelError> {
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::NotFound);
+        }
+        let ct = &mut table.containers[idx];
+        match cfg {
+            Some(hc) if hc.is_runnable() => {
+                ct.healthcheck = Some(hc);
+                ct.health_status = HealthStatus::Starting;
+                ct.health_fail_streak = 0;
+            }
+            _ => {
+                ct.healthcheck = None;
+                ct.health_status = HealthStatus::None;
+                ct.health_fail_streak = 0;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Current healthcheck status of a container (Docker health sub-state).
+///
+/// Returns [`HealthStatus::None`] when no healthcheck is configured. `None`
+/// (the option) if the container id is invalid or its slot is inactive.
+#[must_use]
+pub fn health_status(id: ContainerId) -> Option<HealthStatus> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        Some(table.containers[idx].health_status)
     })
 }
 
@@ -4761,6 +4945,78 @@ pub fn self_test() {
         let _ = crate::fs::vfs::Vfs::remove("/tmp/ct_exec_root/bin/hello");
     }
     serial_println!("[container]   exec + wait (exec_path/wait_process): OK");
+
+    // Test 19k2h: healthcheck state machine (apply_probe_result) + the
+    // set_healthcheck/health_status container APIs (Docker `HEALTHCHECK`).
+    {
+        // start_period = 1s, retries default (3).
+        let cfg = crate::oci::HealthcheckConfig {
+            test: alloc::vec![
+                alloc::string::String::from("CMD"),
+                alloc::string::String::from("/bin/health"),
+            ],
+            interval_ns: 5_000_000_000,
+            timeout_ns: 2_000_000_000,
+            start_period_ns: 1_000_000_000,
+            retries: 3,
+        };
+        assert!(cfg.is_runnable());
+        assert_eq!(cfg.effective_retries(), 3);
+
+        // A pass at any time → Healthy with a cleared streak.
+        assert_eq!(
+            apply_probe_result(HealthStatus::Starting, 0, 0, 500_000_000, &cfg, 0),
+            (HealthStatus::Healthy, 0)
+        );
+
+        // A failure *inside* the start period while still Starting is NOT
+        // counted (streak preserved, stays Starting).
+        assert_eq!(
+            apply_probe_result(HealthStatus::Starting, 0, 0, 500_000_000, &cfg, 1),
+            (HealthStatus::Starting, 0)
+        );
+
+        // Failures after the start period accrue the streak and flip to
+        // Unhealthy once the streak reaches the retry count.
+        let (s1, k1) = apply_probe_result(HealthStatus::Starting, 0, 0, 2_000_000_000, &cfg, 1);
+        assert_eq!((s1, k1), (HealthStatus::Starting, 1));
+        let (s2, k2) = apply_probe_result(s1, k1, 0, 2_000_000_000, &cfg, 1);
+        assert_eq!((s2, k2), (HealthStatus::Starting, 2));
+        let (s3, k3) = apply_probe_result(s2, k2, 0, 2_000_000_000, &cfg, 1);
+        assert_eq!((s3, k3), (HealthStatus::Unhealthy, 3));
+
+        // A pass recovers an unhealthy container.
+        assert_eq!(
+            apply_probe_result(s3, k3, 0, 3_000_000_000, &cfg, 0),
+            (HealthStatus::Healthy, 0)
+        );
+
+        // Once Healthy, a failure counts immediately even inside the start
+        // period (Docker: a pass ends the start-period grace).
+        let (fs, fk) =
+            apply_probe_result(HealthStatus::Healthy, 0, 0, 500_000_000, &cfg, 1);
+        assert_eq!((fs, fk), (HealthStatus::Healthy, 1));
+
+        // set_healthcheck / health_status APIs.
+        let cth = create(&ContainerConfig::new("test-health")).expect("create health");
+        assert_eq!(health_status(cth), Some(HealthStatus::None));
+        set_healthcheck(cth, Some(cfg.clone())).expect("install healthcheck");
+        assert_eq!(health_status(cth), Some(HealthStatus::Starting));
+        // A disabled (NONE) check clears the healthcheck.
+        let none_cfg = crate::oci::HealthcheckConfig {
+            test: alloc::vec![alloc::string::String::from("NONE")],
+            ..Default::default()
+        };
+        set_healthcheck(cth, Some(none_cfg)).expect("clear via NONE");
+        assert_eq!(health_status(cth), Some(HealthStatus::None));
+        // Invalid id → NotFound.
+        assert!(matches!(
+            set_healthcheck(MAX_CONTAINERS as ContainerId, None),
+            Err(KernelError::NotFound)
+        ));
+        delete(cth).expect("delete health");
+    }
+    serial_println!("[container]   healthcheck state machine (apply_probe_result): OK");
 
     // Test 19k3: diff() reports overlay upper-layer changes (Docker `diff`) —
     // added (upper-only), changed (copied-up/both), and deleted (whiteout)

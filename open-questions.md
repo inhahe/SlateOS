@@ -240,3 +240,48 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   `design-decisions.md` §41.
 
 ---
+
+## Q19 container network model — single veth vs. multi-network membership? — OPEN
+
+- **Question** — Docker lets a container join **multiple** user-defined
+  networks (`docker network connect NET CTR` at runtime, and repeated
+  `--network` at create), each giving it a separate interface + address +
+  embedded-DNS scope. Our container model currently assumes **one** veth pair
+  per container (`Container.veth_pair: Option<VethPairId>`, and one
+  `Allocation.veth_pair` per network membership). Before building `container
+  network connect/disconnect`, do we (a) keep single-network membership and
+  implement only connect-when-unattached / disconnect, or (b) generalise the
+  model to N interfaces per container?
+- **Context / why it's an operator call** — This is a data-model fork with
+  real downstream cost either way, and it shapes the container↔network API
+  surface (interface naming, per-network gateway/DNS, IP-per-network in
+  `inspect`/`ps`). It's not obviously-correct and would be costly to reverse
+  once `connect/disconnect` ship on top of whichever model is chosen.
+- **Options**
+  - **A. Single-network (minimal).** `network connect` only succeeds if the
+    container has no network yet; `network disconnect` detaches it. *Pro:* no
+    model change; the existing single-veth plumbing (L2 bridge attach, embedded
+    DNS, NAT) already works. *Con:* diverges from Docker (can't multi-home a
+    container); `connect` on an already-networked container must error.
+  - **B. Multi-network (Docker parity).** Make `Container` hold a list of
+    `(net_ns-iface, veth_pair, network_name, ip)` memberships; `connect`
+    allocates a new veth into the running container's netns, configures it,
+    attaches it to that network's bridge, and registers DNS names; `disconnect`
+    tears one membership down. *Pro:* real Docker semantics; multi-homed
+    containers. *Con:* a genuine refactor — per-interface addressing/routing
+    inside the netns, `inspect`/`ps` become per-network, and adding an
+    interface to a *running* netns must be proven (the current veth setup runs
+    only at container create).
+- **Claude's recommendation** — **B**, but as its own dedicated increment (it's
+  a real refactor, ~a few active hours, not a bolt-on). In the meantime the
+  container-networking feature set is complete and correct for single-network
+  membership (create `--network`, L2 bridge, embedded DNS + `--network-alias`,
+  in-container resolver), so nothing is blocked — `connect/disconnect` is the
+  only gap and it waits on this decision. If the operator is away, defaulting to
+  **B** when I next pick this up is the low-regret path.
+- **Where it bites** — `kernel/src/container.rs` (`Container.veth_pair` →
+  membership list; a runtime `attach_network`/`detach_network`),
+  `kernel/src/cnetwork.rs` (`Allocation.veth_pair` already per-membership; add a
+  runtime connect that allocates + attaches), `kernel/src/kshell.rs` (`container
+  network connect|disconnect` arms + `docker` delegate).
+- **Status** — OPEN.

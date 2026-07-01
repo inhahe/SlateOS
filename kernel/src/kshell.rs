@@ -67993,11 +67993,40 @@ fn cmd_container(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "logs" => {
+            // container logs <id>  (Docker `logs`): print the container init
+            // process's captured stdout+stderr.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container logs ID");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::logs(id) {
+                Ok(data) => match core::str::from_utf8(&data) {
+                    // Captured output is text: print it verbatim.
+                    Ok(text) => {
+                        crate::console::write_str(text);
+                        if !text.ends_with('\n') {
+                            crate::console_println!();
+                        }
+                    }
+                    // Non-UTF-8 capture: don't force bytes through the text
+                    // console — report the size (matches `cat`'s convention).
+                    Err(_) => crate::console_println!(
+                        "(binary log, {} bytes)", data.len()
+                    ),
+                },
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete [-f] ID                 — delete container (-f force-removes a running one)");
@@ -68015,6 +68044,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");
+            crate::console_println!("  container logs ID                        — print captured init stdout/stderr");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");

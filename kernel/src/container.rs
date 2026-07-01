@@ -66,6 +66,13 @@ pub const MAX_VOLUMES_PER_CONTAINER: usize = 64;
 /// host-port NAT rule, and a container rarely publishes more than a handful.
 pub const MAX_PUBLISHED_PORTS: usize = 32;
 
+/// Host VFS directory under which per-container stdout+stderr capture logs are
+/// written (Docker's json-file log driver equivalent, minus the JSON framing).
+/// Each container's log lives at `<LOG_DIR>/<id>.log`; [`run`] creates the
+/// directory tree lazily and redirects the init process's fd 1/2 there, and
+/// [`logs`] reads it back.
+const LOG_DIR: &str = "/var/log/containers";
+
 /// A container's published-port forward spec: `(proto, host_port,
 /// container_port)`.  The Docker `-p host:container[/proto]` mechanism.
 pub type PublishedPort = (crate::net::nat::NatProto, u16, u16);
@@ -355,6 +362,13 @@ struct Container {
     /// originate from the shell command line (already UTF-8), so they are
     /// stored as `String`s.
     init_args: Vec<String>,
+    /// Host VFS path of this container's captured stdout+stderr log (Docker
+    /// `logs`).  Set by [`run`] when it redirects the init process's fd 1 and
+    /// fd 2 to a capture file before the process first runs; read back by
+    /// [`logs`].  Empty until the container has been run (or when the capture
+    /// file could not be opened — capture is best-effort and its failure never
+    /// blocks the container from starting).  Removed on [`delete`].
+    log_path: String,
 }
 
 impl Container {
@@ -382,6 +396,7 @@ impl Container {
             frozen: false,
             init_exe_path: String::new(),
             init_args: Vec::new(),
+            log_path: String::new(),
         }
     }
 }
@@ -854,7 +869,8 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount) = with_table(|table| {
+    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount, log_path) =
+        with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -865,7 +881,8 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
 
         let ct = &table.containers[idx];
         let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
-                      ct.veth_pair, ct.name.clone(), ct.rootfs_mount.clone());
+                      ct.veth_pair, ct.name.clone(), ct.rootfs_mount.clone(),
+                      ct.log_path.clone());
 
         // Mark slot as inactive.
         table.containers[idx].active = false;
@@ -878,6 +895,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].volumes.clear();
         table.containers[idx].container_ip = None;
         table.containers[idx].published_ports.clear();
+        table.containers[idx].log_path.clear();
 
         Ok(result)
     })?;
@@ -906,6 +924,13 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     // own and must not unmount.
     if !rootfs_mount.is_empty() {
         let _ = crate::fs::Vfs::unmount(&rootfs_mount);
+    }
+
+    // Remove the container's captured stdout+stderr log, if it had one.  Done
+    // outside the table lock; a missing file (never run, or capture skipped) is
+    // fine to ignore.
+    if !log_path.is_empty() {
+        let _ = crate::fs::vfs::Vfs::remove(&log_path);
     }
 
     serial_println!("[container] Deleted '{}' (id={})", name, id);
@@ -1128,6 +1153,83 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     Ok(())
 }
 
+/// Build the host VFS path of a container's stdout+stderr capture log:
+/// `<LOG_DIR>/<id>.log`.
+fn log_path_for(id: ContainerId) -> String {
+    alloc::format!("{LOG_DIR}/{id}.log")
+}
+
+/// Redirect a freshly-spawned container init process's stdout (fd 1) and stderr
+/// (fd 2) to a per-container capture file, returning the host VFS path of that
+/// file on success.
+///
+/// The process must not yet have executed — [`run`] calls this while the child
+/// is merely enqueued, so the redirect is in place before its first write.  The
+/// log directory is created lazily; the capture file is truncated so each run
+/// starts with a fresh log.  fd 1 is pointed at the file, then fd 2 is `dup2`'d
+/// onto fd 1 so stdout and stderr share one handle (and thus one append
+/// position — writes interleave in order rather than overwriting each other).
+///
+/// Returns `None` (capture skipped, non-fatal) if the log file cannot be opened
+/// or fd 1 cannot be redirected; the container still runs, just without a log.
+fn redirect_output_to_capture(id: ContainerId, pid: u64) -> Option<String> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::pcb;
+
+    // Create the log directory tree (idempotent) and derive the log path.
+    ensure_dir_path("", LOG_DIR.trim_start_matches('/'));
+    let path = log_path_for(id);
+
+    // Open (create + truncate) the capture file.  On failure, skip capture.
+    let capture_handle = match handle::open(
+        &path,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE)
+            .union(handle::OpenFlags::TRUNCATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!(
+                "[container] run id={}: log capture disabled (open {} failed: {:?})",
+                id, path, e
+            );
+            return None;
+        }
+    };
+
+    // Redirect fd 1 → capture file.  Drop the existing fd-1 entry first (a
+    // Console entry owns no kernel resource, so no close is needed).  On
+    // install failure ownership never transferred, so we close the handle and
+    // skip capture.
+    let _ = pcb::linux_fd_take(pid, 1);
+    if let Err(e) =
+        pcb::linux_fd_install_at(pid, 1, FdEntry::file(capture_handle, O_WRONLY))
+    {
+        let _ = handle::close(capture_handle);
+        serial_println!(
+            "[container] run id={}: log capture disabled (redirect fd 1 failed: {:?})",
+            id, e
+        );
+        return None;
+    }
+
+    // Point fd 2 at the same handle via dup2 so stderr shares stdout's log.
+    // dup2 returns any entry it displaced from fd 2 (the Console stub); it owns
+    // no resource, so dropping it is sufficient.  A dup2 failure is non-fatal:
+    // stdout is still captured; stderr just keeps its own (console) fd.
+    match pcb::linux_fd_dup2(pid, 1, 2) {
+        Ok((_newfd, _displaced)) => {}
+        Err(e) => serial_println!(
+            "[container] run id={}: stderr not captured (dup2 fd 2 failed: {:?})",
+            id, e
+        ),
+    }
+
+    Some(path)
+}
+
 /// Launch an init process inside a container and start it running.
 ///
 /// This is the orchestration entry point that turns a `Created`
@@ -1166,6 +1268,31 @@ pub fn run(
     elf_data: &[u8],
     options: &crate::proc::spawn::SpawnOptions<'_>,
 ) -> KernelResult<u64> {
+    // Auto-detect the init binary's ABI (the default for real containers:
+    // Docker images carry glibc/Linux ELFs, which `spawn_process` classifies
+    // as Linux from their markers).
+    run_with_abi(id, elf_data, options, None)
+}
+
+/// [`run`], but with an explicit ABI override for the init process instead of
+/// auto-detecting it from the ELF markers.
+///
+/// `abi` is passed straight through to
+/// [`spawn_process_with_abi`](crate::proc::spawn::spawn_process_with_abi) when
+/// `Some`; `None` auto-detects (the [`run`] default).  The override exists so
+/// callers that already know the binary's ABI — and the container self-test,
+/// which needs a Linux-ABI init to exercise the `logs` capture path with the
+/// embedded (natively-marked) test ELF — can state it explicitly rather than
+/// relying on the marker heuristic.
+///
+/// # Errors
+/// Same as [`run`].
+fn run_with_abi(
+    id: ContainerId,
+    elf_data: &[u8],
+    options: &crate::proc::spawn::SpawnOptions<'_>,
+    abi: Option<crate::proc::pcb::AbiMode>,
+) -> KernelResult<u64> {
     // Step 1: container must exist and be freshly created.
     with_table_ref(|table| {
         let idx = id as usize;
@@ -1179,7 +1306,10 @@ pub fn run(
     })?;
 
     // Step 2: spawn the init process.  It is enqueued but not yet run.
-    let result = crate::proc::spawn::spawn_process(elf_data, options)?;
+    let result = match abi {
+        Some(m) => crate::proc::spawn::spawn_process_with_abi(elf_data, options, m)?,
+        None => crate::proc::spawn::spawn_process(elf_data, options)?,
+    };
 
     // Step 3: bind it into the container (cgroup billing + namespaces),
     // keyed on the spawn result's task id for the scheduler resources.
@@ -1189,6 +1319,16 @@ pub fn run(
         crate::proc::pcb::destroy(result.pid);
         return Err(e);
     }
+
+    // Step 3.5: redirect the init process's stdout+stderr (fd 1 and fd 2) to a
+    // per-container capture file so `container logs` can read them back.  This
+    // runs while the child is still merely enqueued (it does not execute until
+    // the scheduler next picks it — see the doc comment above), so the redirect
+    // is guaranteed in place before the process writes its first byte.  Capture
+    // is best-effort: if the log file cannot be opened or the fds cannot be
+    // redirected, the container still runs (just without a captured log),
+    // mirroring the non-fatal stdio install in `spawn_process`.
+    let captured_log_path = redirect_output_to_capture(id, result.pid);
 
     // Step 4: record init PID and flip Created → Running atomically under
     // the table lock.  Snapshot the network namespace, container IP, and
@@ -1201,6 +1341,13 @@ pub fn run(
             }
             table.containers[idx].init_pid = Some(result.pid);
             table.containers[idx].state = ContainerState::Running;
+            // Record the capture-log path (if the redirect above succeeded) so
+            // `logs(id)` knows where to read from.  Empty when capture was
+            // skipped.
+            table.containers[idx].log_path.clear();
+            if let Some(ref p) = captured_log_path {
+                table.containers[idx].log_path.push_str(p);
+            }
             // Only install port forwards when the container has both an IP
             // (forward target) and at least one published port.
             match table.containers[idx].container_ip {
@@ -1249,6 +1396,39 @@ pub fn run(
     );
 
     Ok(result.pid)
+}
+
+/// Read back a container's captured stdout+stderr log (Docker `logs`).
+///
+/// Returns the raw bytes written to fd 1/2 by the container's init process
+/// since it was last launched by [`run`] (the capture file is truncated on each
+/// run, so this reflects the current run only).  Output is returned as bytes —
+/// container programs may emit arbitrary (non-UTF-8) data, and OS-boundary data
+/// is never forced through UTF-8.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist.
+/// - [`KernelError::NotFound`] if the container has no capture log — it was
+///   never run, or capture was skipped because the log file could not be
+///   opened at run time.
+/// - Any VFS error encountered reading the log file back.
+pub fn logs(id: ContainerId) -> KernelResult<Vec<u8>> {
+    // Snapshot the log path under the table lock, then read the file outside it
+    // (VFS reads must not run while holding the container table lock).
+    let path = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(table.containers[idx].log_path.clone())
+    })?;
+
+    if path.is_empty() {
+        return Err(KernelError::NotFound);
+    }
+
+    crate::fs::vfs::Vfs::read_file(&path)
 }
 
 /// Launch a container's init process from a host VFS path, recording the
@@ -3804,6 +3984,89 @@ pub fn self_test() {
     }
     serial_println!("[container]   cp -r (recursive directory copy): OK");
 
+    // Test 19t: `logs` — running a container redirects its init process's
+    // stdout+stderr to a per-container capture file, and `logs(id)` reads that
+    // file back.  As in Test 17 the init process is enqueued but never
+    // scheduled (interrupts off + immediate teardown), so this test verifies
+    // the capture *wiring* deterministically — run() creates and truncates the
+    // log at the expected path, logs() reads its current contents, and delete()
+    // removes it — without depending on the child actually executing (the
+    // fd-redirect→file delivery itself is covered by the spawn self-tests).
+    //
+    // The init is spawned with a forced Linux ABI so it gets a Linux fd table
+    // for the capture redirect: real containers run glibc/Linux images (the
+    // common case), whereas the embedded test ELF is natively marked.  The
+    // process never executes, so the forced ABI has no runtime effect here.
+    {
+        use crate::fs::vfs::Vfs;
+        static HELLO_ELF: &[u8] = include_bytes!(
+            "../../services/hello/target/x86_64-unknown-none/release/hello"
+        );
+
+        let ct = create(&ContainerConfig::new("test-logs-ct").memory(4096))
+            .expect("create logs container");
+
+        // Before run: no log recorded yet → NotFound.
+        assert!(
+            matches!(logs(ct), Err(KernelError::NotFound)),
+            "logs on a never-run container must be NotFound",
+        );
+
+        let opts = crate::proc::spawn::SpawnOptions::new("logs-init");
+        crate::cpu::without_interrupts(|| {
+            let pid = run_with_abi(ct, HELLO_ELF, &opts, Some(crate::proc::pcb::AbiMode::Linux))
+                .expect("run logs init");
+
+            // run() created and truncated the capture file, so logs() returns
+            // Ok with the current (empty) contents.
+            let expected_path = log_path_for(ct);
+            assert_eq!(
+                logs(ct).expect("logs after run"),
+                Vec::<u8>::new(),
+                "fresh capture log must be empty",
+            );
+            assert!(
+                Vfs::stat(&expected_path).is_ok(),
+                "run() must have created the capture file at {expected_path}",
+            );
+
+            // Simulate the init process emitting output: write bytes to the
+            // capture file and confirm logs() reads them back verbatim (bytes,
+            // not UTF-8-forced).
+            let payload: &[u8] = b"line1\n\xff\xfebinary\n";
+            Vfs::write_file(&expected_path, payload).expect("write simulated log");
+            assert_eq!(
+                logs(ct).expect("logs after write"),
+                payload,
+                "logs() must read back the captured bytes verbatim",
+            );
+
+            // Tear the never-scheduled init process down (as Test 17 does).
+            let init_task = crate::proc::pcb::get_threads(pid)
+                .and_then(|t| t.first().copied())
+                .expect("logs init has a thread");
+            remove_process_task(ct, pid, init_task).expect("detach logs init");
+            crate::proc::thread::kill_process_threads(pid);
+            crate::proc::pcb::destroy(pid);
+        });
+
+        stop(ct).expect("stop logs container");
+
+        // delete() removes the capture file and the container; logs() on the
+        // now-gone container is InvalidArgument, and the file is gone.
+        let gone_path = log_path_for(ct);
+        delete(ct).expect("delete logs container");
+        assert!(
+            matches!(logs(ct), Err(KernelError::InvalidArgument)),
+            "logs on a deleted container must be InvalidArgument",
+        );
+        assert!(
+            Vfs::stat(&gone_path).is_err(),
+            "delete() must remove the capture file",
+        );
+    }
+    serial_println!("[container]   logs (stdout/stderr capture): OK");
+
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
     // and tears them down on stop()/delete().  Unlike the jail/volume tests,
@@ -3928,5 +4191,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (39 tests)");
+    serial_println!("[container] Self-test PASSED (40 tests)");
 }

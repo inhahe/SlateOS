@@ -2407,6 +2407,40 @@ volume still writable, flag-clear restores writability) and container self-test
 longest-prefix mount-tree subsuming the rootfs as the `/` mount (`pivot_root`
 target) and tmpfs/named-volume types.
 
+### TD33. Container `logs` capture works only for Linux-ABI container inits — ACCEPTED LIMITATION 2026-06-30
+
+**Where:** `kernel/src/container.rs` (`redirect_output_to_capture`, called from
+`run_with_abi` right after `spawn_process`). The capture works by rewriting the
+init process's **Linux fd table** — `pcb::linux_fd_take(pid, 1)` then
+`linux_fd_install_at(pid, 1, FdEntry::file(capture_handle, O_WRONLY))` and
+`linux_fd_dup2(pid, 1, 2)` — during the window after spawn but before the init is
+scheduled.
+
+**The limitation.** The `linux_fd_table` is only installed for **Linux-ABI**
+binaries (`spawn.rs`: `if is_linux_abi { … linux_fd_install_stdio(pid) }`).
+Native SlateOS binaries have no `linux_fd_table`, so `linux_fd_install_at` fails,
+`redirect_output_to_capture` returns `None`, the container's `log_path` stays
+empty, and `container logs ID` returns `NotFound`. A native-ABI container init's
+stdout/stderr therefore goes to the console and is **not** captured to
+`/var/log/containers/<id>.log`.
+
+**Why it's accepted, not blocking.** Real Docker/OCI container entrypoints are
+Linux-ABI glibc ELFs, which is exactly the path the capture supports. The
+native-ABI container init is a SlateOS-specific corner case (no real image ships
+one), so the Docker-compatible `logs` feature is correct and sufficient for its
+intended use. The self-test (19t) deliberately forces `AbiMode::Linux` via
+`run_with_abi` so it exercises the real capture path deterministically.
+
+**Proper fix (deferred).** Also wire capture through the **native** fd-inheritance
+channel (`initial_fds` / `SpawnOptions.fd_map`, consumed via
+`SYS_PROCESS_GET_INITIAL_FDS`): install the capture handle as fd 1/2 in the
+native init's `initial_fds` when the ABI is Native. Deferred because it needs
+verification that native binaries honour `initial_fds` for stdout and that the
+file-offset-sharing (single append position for interleaved 1+2) semantics match
+the Linux-fd path — unverified today, and shipping it unverified would violate
+the no-band-aid rule. Trigger to do it: a real native-ABI container init appears,
+or `initial_fds` stdout semantics are confirmed.
+
 ### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),

@@ -5301,12 +5301,15 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     (mem/cpu via cgroups), restart/`--rm` policies, `run`/`create`/`start`/
     `stop`/`kill`/`pause`/`ps`/`rm`/`inspect`/`logs`/`events`/`stats`/`top`/
     `port`/`wait`/`diff`/`rename`/`update`/`prune`/`cp`/`commit`/`export`/
-    `import`, `system df`/`prune`, image `save`/`load`, and **`build`**
-    (Dockerfile → OCI image via `oci::build_image`: FROM scratch|local-image
-    with inheritance, COPY/ADD, ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL,
-    ARG `${VAR}` expansion). Remaining: real `container exec` / Dockerfile
-    `RUN` (rootfs-binary exec in the container's namespaces) — gated on
-    operator decision Q17 (see open-questions.md).
+    `import`, `system df`/`prune`, image `save`/`load`/`history`, and
+    **`build`** (Dockerfile → OCI image via `oci::build_image`: FROM
+    scratch|local-image with layer+config inheritance, COPY/ADD with
+    `.dockerignore` filtering, ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/
+    VOLUME/STOPSIGNAL/SHELL/ONBUILD, ARG `${VAR}` expansion + `--build-arg`
+    overrides, and OCI config `history[]` recording surfaced via
+    `oci`/`docker history`). Remaining: real `container exec` / Dockerfile
+    `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)
+    — gated on operator decision Q17 (see open-questions.md).
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

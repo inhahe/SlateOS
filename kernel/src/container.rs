@@ -497,6 +497,10 @@ struct Container {
     /// Captured from [`ContainerConfig::auto_remove`] at create time; honoured
     /// by [`notify_init_exit`] *only* when no restart is scheduled.
     auto_remove: bool,
+    /// Monotonic creation sequence (from [`ContainerTable::next_seq`]), used to
+    /// order listings by creation time (Docker `ps -n`/`-l`). Slots are reused,
+    /// so this — not the slot id — is the true creation order.
+    created_seq: u64,
 }
 
 impl Container {
@@ -529,6 +533,7 @@ impl Container {
             restart_count: 0,
             user_stopped: false,
             auto_remove: false,
+            created_seq: 0,
         }
     }
 }
@@ -595,6 +600,8 @@ pub struct ContainerInfo {
     pub restart_count: u32,
     /// Auto-remove on init exit (Docker `--rm`).
     pub auto_remove: bool,
+    /// Monotonic creation sequence (for ordering by creation time).
+    pub created_seq: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +611,11 @@ pub struct ContainerInfo {
 struct ContainerTable {
     containers: Vec<Container>,
     next_id: u32,
+    /// Monotonic creation counter, stamped onto each container at [`create`]
+    /// time so listings can order by *creation* rather than slot index (slots
+    /// are reused, so id order is not creation order). Never wraps in practice
+    /// (u64 at container-create rates).
+    next_seq: u64,
 }
 
 impl ContainerTable {
@@ -615,6 +627,7 @@ impl ContainerTable {
         Self {
             containers,
             next_id: 0,
+            next_seq: 0,
         }
     }
 }
@@ -875,6 +888,9 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.restart_count = 0;
         ct.user_stopped = false;
         ct.auto_remove = config.auto_remove;
+        // Stamp the creation sequence so listings can order by creation time.
+        ct.created_seq = table.next_seq;
+        table.next_seq = table.next_seq.saturating_add(1);
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -2589,6 +2605,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             restart_policy: ct.restart_policy,
             restart_count: ct.restart_count,
             auto_remove: ct.auto_remove,
+            created_seq: ct.created_seq,
         })
     })
 }
@@ -4598,5 +4615,28 @@ pub fn self_test() {
     }
     serial_println!("[container]   auto-remove (--rm) config: OK");
 
-    serial_println!("[container] Self-test PASSED (43 tests)");
+    // Creation sequence: strictly increasing across creates, so listings can
+    // order by creation time even after slot reuse (Docker `ps -n`/`-l`).
+    {
+        let a = create(&ContainerConfig::new("seq-a")).expect("create seq-a");
+        let b = create(&ContainerConfig::new("seq-b")).expect("create seq-b");
+        let sa = info(a).expect("info seq-a").created_seq;
+        let sb = info(b).expect("info seq-b").created_seq;
+        assert!(sb > sa, "later create must have a higher created_seq");
+        // Deleting `a` and creating `c` (which may reuse a's slot) must still
+        // yield a created_seq newer than everything before it.
+        delete(a).expect("cleanup seq-a");
+        let c = create(&ContainerConfig::new("seq-c")).expect("create seq-c");
+        let sc = info(c).expect("info seq-c").created_seq;
+        assert!(
+            sc > sb,
+            "created_seq is monotonic across slot reuse (sc={sc} > sb={sb})",
+        );
+        delete(b).expect("cleanup seq-b");
+        delete(c).expect("cleanup seq-c");
+        assert_eq!(active_count(), 0);
+    }
+    serial_println!("[container]   creation sequence (monotonic ordering): OK");
+
+    serial_println!("[container] Self-test PASSED (44 tests)");
 }

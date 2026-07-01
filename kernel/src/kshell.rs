@@ -67067,6 +67067,10 @@ fn cmd_container(args: &str) {
             // (a `status=` filter, if given, overrides this running-only
             // default so `ls --filter status=stopped` still works).
             let mut all_states = false;
+            // `-n N` (Docker `ps -n`): show the N most-recently-created
+            // containers of any state; `-l`/`--latest` == `-n 1`. Setting a
+            // limit implies `-a` (last-N spans all states).
+            let mut limit: Option<usize> = None;
             let mut fi = 1;
             while fi < parts.len() {
                 match parts.get(fi) {
@@ -67077,6 +67081,23 @@ fn cmd_container(args: &str) {
                     Some(&"-a") | Some(&"--all") => {
                         all_states = true;
                         fi = fi.saturating_add(1);
+                    }
+                    Some(&"-l") | Some(&"--latest") => {
+                        limit = Some(1);
+                        all_states = true;
+                        fi = fi.saturating_add(1);
+                    }
+                    Some(&"-n") | Some(&"--last") => {
+                        match parts.get(fi.saturating_add(1)).and_then(|s| s.parse::<usize>().ok()) {
+                            Some(n) => {
+                                limit = Some(n);
+                                all_states = true;
+                            }
+                            None => crate::console_println!(
+                                "[container] Ignoring -n: expected a count (e.g. -n 5)"
+                            ),
+                        }
+                        fi = fi.saturating_add(2);
                     }
                     Some(&"--filter") | Some(&"-f") => {
                         if let Some(&spec) = parts.get(fi.saturating_add(1)) {
@@ -67158,8 +67179,18 @@ fn cmd_container(args: &str) {
                 container::labels_match(&ci.labels, &label_filters)
             };
 
-            let shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
+            let mut shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
                 all.iter().filter(|(id, name, state)| matches(*id, name, *state)).collect();
+            // `-n N`/`-l`: keep only the N most-recently-created (by creation
+            // sequence, descending — newest first, like Docker `ps -n`).
+            if let Some(n) = limit {
+                shown.sort_by(|a, b| {
+                    let sa = container::info(a.0).map_or(0, |ci| ci.created_seq);
+                    let sb = container::info(b.0).map_or(0, |ci| ci.created_seq);
+                    sb.cmp(&sa)
+                });
+                shown.truncate(n);
+            }
             if shown.is_empty() {
                 if !quiet {
                     // Distinguish "filtered everything out" from "only stopped
@@ -68225,7 +68256,7 @@ fn cmd_container(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
-            crate::console_println!("  container [list] [-a] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all states, -q: IDs only)");
+            crate::console_println!("  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");

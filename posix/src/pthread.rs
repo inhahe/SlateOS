@@ -12,9 +12,11 @@
 //!
 //! - **Joinable** (default): Another thread calls `pthread_join` which
 //!   blocks on `SYS_THREAD_JOIN`, then frees the stack.
-//! - **Detached**: `pthread_detach` marks the thread; its stack cannot
-//!   currently be reclaimed (known limitation — needs kernel-level
-//!   cleanup notification or a reaper thread).
+//! - **Detached**: `pthread_detach` marks the thread; when it exits it
+//!   frees its *own* stack (glibc `__unmapself` style) via the
+//!   `__pthread_exit_unmap` primitive, so detached stacks are reclaimed
+//!   without a joiner.  The per-slot atomic `state` arbitrates the
+//!   detach-vs-exit race so exactly one party frees the stack.
 //!
 //! ## Synchronization Primitives
 //!
@@ -55,7 +57,10 @@
 //!   This is a table-keyed-by-tid implementation rather than FS/GS-based
 //!   TLS, which is correct (proper per-thread semantics) but does an
 //!   O(active-threads) slot lookup per access.
-//! - Detached thread stacks are leaked (no cleanup notification).
+//! - Detached thread stacks are reclaimed by self-unmap on exit; the
+//!   kernel's small per-thread exit-value map entry (~tens of bytes) is
+//!   still retained until process exit for a never-joined detached thread
+//!   (needs a kernel `SYS_THREAD_EXIT` "detached" flag to drop eagerly).
 //! - `pthread_cancel` accepted but never actually cancels a thread.
 //! - Mutex is a spinlock (no futex-based blocking).
 //! - Condition variables use spin-yield (1ms intervals) watching a
@@ -65,7 +70,7 @@
 
 use crate::errno;
 use crate::syscall;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 /// Opaque pthread_t type — holds the kernel task ID.
 pub type PthreadT = u64;
@@ -157,15 +162,13 @@ pub const PTHREAD_MUTEX_INITIALIZER: PthreadMutexT = PthreadMutexT {
 // ---------------------------------------------------------------------------
 // Thread table — tracks created threads for stack cleanup
 // ---------------------------------------------------------------------------
-
-/// Per-thread metadata stored at creation time.
-#[derive(Clone, Copy)]
-struct ThreadInfo {
-    task_id: u64,
-    stack_base: usize,
-    stack_size: usize,
-    detached: bool,
-}
+//
+// The table is lock-free.  Each slot's `task_id` doubles as an occupancy
+// flag (`SLOT_EMPTY` / `SLOT_RESERVED` / real id) and each slot carries an
+// atomic `state` that arbitrates — race-free — which single party frees the
+// thread's mmap'd stack.  This replaces the former `static mut` +
+// "single-creator convention" (which was a data race for the concurrent
+// detach-vs-exit window) with real atomics.
 
 /// Maximum number of concurrently tracked threads.
 const MAX_THREADS: usize = 64;
@@ -173,31 +176,114 @@ const MAX_THREADS: usize = 64;
 /// Default user-mode stack size for new threads (64 KiB = 4 pages).
 const DEFAULT_THREAD_STACK_SIZE: usize = 64 * 1024;
 
-/// Thread info table.
-static mut THREAD_TABLE: [Option<ThreadInfo>; MAX_THREADS] = [None; MAX_THREADS];
+/// `task_id` sentinel for an unused slot.
+const SLOT_EMPTY: u64 = 0;
+/// `task_id` sentinel for a slot claimed but not yet published.
+const SLOT_RESERVED: u64 = u64::MAX;
 
-/// Raw pointer to the thread table.
-#[inline]
-fn thread_table_ptr() -> *mut [Option<ThreadInfo>; MAX_THREADS] {
-    core::ptr::addr_of_mut!(THREAD_TABLE)
+/// Thread is joinable and still tracked (initial state).
+const STATE_JOINABLE: u8 = 0;
+/// Thread was detached; it will free its *own* stack when it exits.
+const STATE_DETACHED: u8 = 1;
+/// Thread exited while joinable and left its stack for a joiner (or for a
+/// `pthread_detach` that lost the race) to reclaim.
+const STATE_EXITED: u8 = 2;
+
+/// Per-thread metadata slot.  All fields are atomic, so the table needs no
+/// external lock.
+///
+/// Ownership protocol (all `state` transitions are `compare_exchange`):
+///
+/// ```text
+///   JOINABLE --pthread_detach--> DETACHED   (thread self-unmaps on exit)
+///   JOINABLE --pthread_exit----> EXITED      (joiner/late-detach frees it)
+/// ```
+///
+/// Exactly one party ever unmaps a given stack:
+/// - `DETACHED` → the exiting thread frees its own stack (self-unmap).
+/// - `EXITED`   → whichever of `pthread_join` / a late `pthread_detach`
+///   observes it frees the stack, but only *after* `SYS_THREAD_JOIN`
+///   confirms the thread is off that stack (so there is no use-after-free).
+struct ThreadSlot {
+    /// Kernel task id, or `SLOT_EMPTY` / `SLOT_RESERVED`.
+    task_id: AtomicU64,
+    /// Base address of the thread's mmap'd stack.
+    stack_base: AtomicUsize,
+    /// Size of the thread's stack in bytes.
+    stack_size: AtomicUsize,
+    /// Lifecycle state (`STATE_*`).
+    state: AtomicU8,
 }
 
-/// Store thread info in the first available slot.
+impl ThreadSlot {
+    const fn new() -> Self {
+        Self {
+            task_id: AtomicU64::new(SLOT_EMPTY),
+            stack_base: AtomicUsize::new(0),
+            stack_size: AtomicUsize::new(0),
+            state: AtomicU8::new(STATE_JOINABLE),
+        }
+    }
+}
+
+/// Read-only snapshot of a tracked thread's metadata.
+#[derive(Clone, Copy)]
+struct ThreadInfo {
+    stack_base: usize,
+    stack_size: usize,
+    detached: bool,
+}
+
+/// Thread info table — lock-free, statically allocated.
+static THREAD_TABLE: [ThreadSlot; MAX_THREADS] = [const { ThreadSlot::new() }; MAX_THREADS];
+
+/// Claim a free slot for a newly created thread and publish its metadata.
 ///
 /// Returns `true` on success, `false` if the table is full.
-fn store_thread_info(info: ThreadInfo) -> bool {
-    // SAFETY: Single-process access; thread creation is serialized
-    // by convention (only one thread creates others at a time).
-    unsafe {
-        let table = &mut *thread_table_ptr();
-        for slot in table.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(info);
-                return true;
-            }
+fn store_thread_info(task_id: u64, stack_base: usize, stack_size: usize, detached: bool) -> bool {
+    for slot in THREAD_TABLE.iter() {
+        // Claim an empty slot atomically (EMPTY -> RESERVED).
+        if slot
+            .task_id
+            .compare_exchange(
+                SLOT_EMPTY,
+                SLOT_RESERVED,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            slot.stack_base.store(stack_base, Ordering::Relaxed);
+            slot.stack_size.store(stack_size, Ordering::Relaxed);
+            slot.state.store(
+                if detached {
+                    STATE_DETACHED
+                } else {
+                    STATE_JOINABLE
+                },
+                Ordering::Relaxed,
+            );
+            // Publish: this Release pairs with the Acquire loads in the
+            // lookup helpers so the field writes above are visible to any
+            // thread that observes the real `task_id`.
+            slot.task_id.store(task_id, Ordering::Release);
+            return true;
         }
     }
     false
+}
+
+/// Locate the (static) slot tracking `task_id`, if present.
+fn find_slot(task_id: u64) -> Option<&'static ThreadSlot> {
+    THREAD_TABLE
+        .iter()
+        .find(|slot| slot.task_id.load(Ordering::Acquire) == task_id)
+}
+
+/// Release a slot back to the pool.  Must be called only by the single
+/// party that owns the stack free (see [`ThreadSlot`] protocol).
+fn release_slot(slot: &ThreadSlot) {
+    slot.task_id.store(SLOT_EMPTY, Ordering::Release);
 }
 
 /// Look up thread info by kernel task ID without removing it.
@@ -205,33 +291,12 @@ fn store_thread_info(info: ThreadInfo) -> bool {
 /// Used by `pthread_getattr_np` to report a live thread's stack bounds.
 #[cfg(target_os = "none")]
 fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
-    // SAFETY: Same single-creator convention as store_thread_info.
-    unsafe {
-        let table = &*thread_table_ptr();
-        for slot in table.iter() {
-            if let Some(info) = slot.as_ref() {
-                if info.task_id == task_id {
-                    return Some(*info);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Find and remove thread info by kernel task ID.
-fn take_thread_info(task_id: u64) -> Option<ThreadInfo> {
-    // SAFETY: Same single-creator convention as store_thread_info.
-    unsafe {
-        let table = &mut *thread_table_ptr();
-        for slot in table.iter_mut() {
-            let matches = slot.as_ref().is_some_and(|i| i.task_id == task_id);
-            if matches {
-                return slot.take();
-            }
-        }
-    }
-    None
+    let slot = find_slot(task_id)?;
+    Some(ThreadInfo {
+        stack_base: slot.stack_base.load(Ordering::Relaxed),
+        stack_size: slot.stack_size.load(Ordering::Relaxed),
+        detached: slot.state.load(Ordering::Acquire) == STATE_DETACHED,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +339,53 @@ core::arch::global_asm!(
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn _pthread_trampoline();
+}
+
+// ---------------------------------------------------------------------------
+// Detached-thread self-unmap primitive
+// ---------------------------------------------------------------------------
+//
+// A detached thread must free its *own* stack as its final act (no joiner
+// will do it).  This is the glibc `__unmapself` pattern: unmap the stack
+// and exit without ever touching the (now-freed) stack between the two
+// syscalls.  We carry `retval` across the SYS_MUNMAP call in R12 — a
+// callee-saved register the kernel's SYSCALL entry stub preserves (it
+// pushes/pops rbx/rbp/r12-r15 around the handler, see kernel
+// syscall/entry.rs) — so nothing is stashed on the doomed stack.
+//
+// Register in (SysV): rdi=stack_base, rsi=stack_size, rdx=retval.
+//
+// Why this is safe even though we unmap the running stack:
+// - The SYS_MUNMAP syscall runs on the *kernel* stack; on SYSRET the CPU
+//   merely reloads user RSP into the register (never dereferences it).
+// - Every instruction after the munmap syscall touches only registers, so
+//   the freed stack region is never read or written.
+// - Asynchronous interrupts from ring-3 push onto the kernel stack (via
+//   TSS.RSP0), not the user stack, so they don't fault on the freed page.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".global __pthread_exit_unmap",
+    ".type __pthread_exit_unmap, @function",
+    "__pthread_exit_unmap:",
+    "    mov r12, rdx",                 // stash retval in callee-saved r12
+    "    mov rax, {sys_munmap}",        // SYS_MUNMAP(stack_base, stack_size)
+    "    syscall",                      // rdi/rsi already hold base/size
+    // --- stack is unmapped past this point; registers only ---
+    "    mov rdi, r12",                 // retval
+    "    mov rax, {sys_thread_exit}",   // SYS_THREAD_EXIT(retval)
+    "    syscall",
+    "    ud2",                          // unreachable
+    sys_munmap = const crate::syscall::SYS_MUNMAP,
+    sys_thread_exit = const crate::syscall::SYS_THREAD_EXIT,
+);
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// Free `[stack_base, stack_base+stack_size)` then terminate the calling
+    /// thread with `retval`, never touching the stack between the two
+    /// syscalls.  Never returns.  Caller must guarantee the region is this
+    /// thread's own stack and that no other party will also free it.
+    fn __pthread_exit_unmap(stack_base: usize, stack_size: usize, retval: u64);
 }
 
 /// Rust entry point for a newly created thread (called by the assembly
@@ -360,12 +472,7 @@ pub extern "C" fn pthread_create(
 
     // Track the thread for later cleanup (best effort — if the table
     // is full the thread runs but its stack leaks on join).
-    let _ = store_thread_info(ThreadInfo {
-        task_id,
-        stack_base,
-        stack_size: DEFAULT_THREAD_STACK_SIZE,
-        detached: false,
-    });
+    let _ = store_thread_info(task_id, stack_base, DEFAULT_THREAD_STACK_SIZE, false);
 
     if !thread.is_null() {
         // SAFETY: caller guarantees thread points to valid PthreadT.
@@ -385,6 +492,14 @@ pub extern "C" fn pthread_create(
 /// Returns 0 on success, or a POSIX error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
+    // A detached thread must not be joined (POSIX: EINVAL).  Reject early
+    // so we never race the detached thread's self-unmap.
+    if let Some(slot) = find_slot(thread_id) {
+        if slot.state.load(Ordering::Acquire) == STATE_DETACHED {
+            return errno::EINVAL;
+        }
+    }
+
     let ret = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
 
     if ret < 0 {
@@ -400,9 +515,16 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
         }
     }
 
-    // Free the thread's stack.
-    if let Some(info) = take_thread_info(thread_id) {
-        let _ = crate::mman::munmap(info.stack_base as *mut core::ffi::c_void, info.stack_size);
+    // Free the thread's stack.  SYS_THREAD_JOIN has confirmed the thread
+    // has exited (it is off its stack), so the unmap is safe.  Release the
+    // slot before unmapping so it can be reused promptly.
+    if let Some(slot) = find_slot(thread_id) {
+        let base = slot.stack_base.load(Ordering::Relaxed);
+        let size = slot.stack_size.load(Ordering::Relaxed);
+        release_slot(slot);
+        if base != 0 {
+            let _ = crate::mman::munmap(base as *mut core::ffi::c_void, size);
+        }
     }
 
     0
@@ -410,27 +532,44 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
 
 /// Detach a thread.
 ///
-/// Marks the thread so that its resources are released when it exits
-/// without requiring a `pthread_join`.
+/// Marks the thread so its stack is reclaimed when it exits, without a
+/// `pthread_join`.  A detached thread frees its own stack on exit (see
+/// [`pthread_exit`]).  If the thread has *already* exited (as joinable)
+/// by the time we detach it, we reap it here instead.
 ///
-/// **Known limitation**: detached thread stacks are currently leaked
-/// because there is no kernel notification when a thread exits.  A
-/// reaper thread or kernel callback would be needed to fix this.
+/// Returns 0 on success, `ESRCH` if no such thread is tracked, or
+/// `EINVAL` if the thread is already detached.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
-    // SAFETY: Thread table access is serialized by convention.
-    unsafe {
-        let table = &mut *thread_table_ptr();
-        for slot in table.iter_mut() {
-            if slot.as_ref().is_some_and(|i| i.task_id == thread_id) {
-                if let Some(info) = slot {
-                    info.detached = true;
-                }
-                return 0;
+    let Some(slot) = find_slot(thread_id) else {
+        return errno::ESRCH;
+    };
+
+    match slot.state.compare_exchange(
+        STATE_JOINABLE,
+        STATE_DETACHED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        // Thread still running (or not yet at exit): it will self-unmap
+        // its stack when it exits.  Nothing more to do here.
+        Ok(_) => 0,
+        // Thread already exited while joinable and left its stack behind.
+        // We now own the reclaim: join to guarantee it is off its stack,
+        // then free it.
+        Err(STATE_EXITED) => {
+            let _ = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
+            let base = slot.stack_base.load(Ordering::Relaxed);
+            let size = slot.stack_size.load(Ordering::Relaxed);
+            release_slot(slot);
+            if base != 0 {
+                let _ = crate::mman::munmap(base as *mut core::ffi::c_void, size);
             }
+            0
         }
+        // Already detached (double detach) or an unexpected state.
+        Err(_) => errno::EINVAL,
     }
-    errno::ESRCH
 }
 
 /// Get the calling thread's ID.
@@ -459,6 +598,54 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     let self_tid = pthread_self();
     tsd_thread_cleanup(self_tid);
     thread_name_release(self_tid);
+
+    // Decide how this thread's stack is reclaimed.  The `compare_exchange`
+    // arbitrates against a concurrent `pthread_detach`: exactly one party
+    // ends up owning the free.
+    let mut self_unmap: Option<(usize, usize)> = None;
+    if let Some(slot) = find_slot(self_tid) {
+        match slot.state.compare_exchange(
+            STATE_JOINABLE,
+            STATE_EXITED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            // We were joinable at exit: leave the stack and slot for a
+            // future `pthread_join` (or a `pthread_detach` that observes
+            // STATE_EXITED) to reclaim.
+            Ok(_) => {}
+            // We were detached: free our own stack as the final act.
+            // Release the slot *before* unmapping (after the unmap we can
+            // no longer safely touch memory).
+            Err(STATE_DETACHED) => {
+                let base = slot.stack_base.load(Ordering::Relaxed);
+                let size = slot.stack_size.load(Ordering::Relaxed);
+                release_slot(slot);
+                if base != 0 {
+                    self_unmap = Some((base, size));
+                }
+            }
+            // Already EXITED (double pthread_exit — shouldn't happen) or an
+            // unexpected state: fall through to a plain exit.
+            Err(_) => {}
+        }
+    }
+
+    #[cfg(target_os = "none")]
+    if let Some((base, size)) = self_unmap {
+        // SAFETY: (base, size) describes this thread's own mmap'd stack,
+        // and the STATE_DETACHED arbitration above guarantees no other
+        // party will free it.  `__pthread_exit_unmap` issues SYS_MUNMAP
+        // then SYS_THREAD_EXIT without touching the (freed) stack between
+        // the two, carrying `retval` in a callee-saved register.  Never
+        // returns.
+        unsafe {
+            __pthread_exit_unmap(base, size, retval as u64);
+        }
+    }
+    // Consumed on the bare-metal detached path above; unused on host.
+    let _ = self_unmap;
+
     let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
     loop {
@@ -4676,6 +4863,95 @@ mod tests {
     fn test_pthread_detach_nonexistent() {
         let ret = pthread_detach(0xDEAD_BEEF);
         assert_eq!(ret, crate::errno::ESRCH);
+    }
+
+    // -----------------------------------------------------------------------
+    // Thread-table state machine (detach / exit / join arbitration)
+    //
+    // These exercise the lock-free ownership protocol directly with unique
+    // synthetic task ids so they don't collide across the shared static
+    // THREAD_TABLE (tests may run in parallel).  Each test releases the
+    // slots it claims.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_thread_slot_store_find_release() {
+        let tid: u64 = 0x5100_0001;
+        assert!(store_thread_info(tid, 0x1_0000, DEFAULT_THREAD_STACK_SIZE, false));
+        let slot = find_slot(tid).expect("slot should be found after store");
+        assert_eq!(slot.stack_base.load(Ordering::Relaxed), 0x1_0000);
+        assert_eq!(
+            slot.stack_size.load(Ordering::Relaxed),
+            DEFAULT_THREAD_STACK_SIZE
+        );
+        assert_eq!(slot.state.load(Ordering::Relaxed), STATE_JOINABLE);
+        release_slot(slot);
+        assert!(find_slot(tid).is_none(), "slot should be free after release");
+    }
+
+    #[test]
+    fn test_detach_marks_state_detached() {
+        let tid: u64 = 0x5100_0002;
+        // base = 0 so the (never-reached) reclaim path won't call munmap.
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert_eq!(pthread_detach(tid), 0);
+        let slot = find_slot(tid).expect("detached thread stays tracked");
+        assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
+        // The exit path's CAS(JOINABLE -> EXITED) must now lose to DETACHED,
+        // steering the exiting thread onto the self-unmap branch.
+        let cas = slot.state.compare_exchange(
+            STATE_JOINABLE,
+            STATE_EXITED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        assert_eq!(cas, Err(STATE_DETACHED));
+        release_slot(slot);
+    }
+
+    #[test]
+    fn test_double_detach_is_einval() {
+        let tid: u64 = 0x5100_0003;
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert_eq!(pthread_detach(tid), 0);
+        assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
+        let slot = find_slot(tid).expect("still tracked");
+        release_slot(slot);
+    }
+
+    #[test]
+    fn test_join_rejects_detached_thread() {
+        let tid: u64 = 0x5100_0004;
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert_eq!(pthread_detach(tid), 0);
+        // Joining a detached thread must be rejected before any syscall.
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
+        let slot = find_slot(tid).expect("still tracked");
+        release_slot(slot);
+    }
+
+    #[test]
+    fn test_detach_after_joinable_exit_reaps() {
+        let tid: u64 = 0x5100_0005;
+        // base = 0 so detach's reclaim path skips the host munmap call.
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        // Simulate the exit path winning the race: it marks the slot EXITED
+        // and leaves the stack for a reaper.
+        let slot = find_slot(tid).expect("tracked");
+        let cas = slot.state.compare_exchange(
+            STATE_JOINABLE,
+            STATE_EXITED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        assert!(cas.is_ok());
+        // A late pthread_detach must observe EXITED, reap, and free the slot.
+        assert_eq!(pthread_detach(tid), 0);
+        assert!(
+            find_slot(tid).is_none(),
+            "detach-after-exit must release the slot"
+        );
     }
 
     // -----------------------------------------------------------------------

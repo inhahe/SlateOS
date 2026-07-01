@@ -3349,7 +3349,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
     let mut offset: u64 = 0;
 
     while total < len {
-        let chunk = (len - total).min(buf.len());
+        let chunk = len.saturating_sub(total).min(buf.len());
         // Non-destructive copy of up to `chunk` bytes at `offset`.
         let n = syscall4(
             SYS_PIPE_PEEK,
@@ -3394,7 +3394,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
             // SAFETY: written < to_write <= buf.len(), so the pointer stays
             // inside `buf`.
             let ptr = unsafe { buf.as_ptr().add(written) } as u64;
-            let remaining = (to_write - written) as u64;
+            let remaining = to_write.saturating_sub(written) as u64;
             let nw = if nonblock {
                 syscall3(SYS_PIPE_TRY_WRITE, out_handle, ptr, remaining)
             } else {
@@ -3405,7 +3405,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
                 // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
                 // mid-tee).  Otherwise surface the error.
                 if total > 0 || written > 0 {
-                    return (total + written) as isize;
+                    return total.saturating_add(written) as isize;
                 }
                 return errno::translate(nw) as isize;
             }
@@ -3413,11 +3413,11 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
                 // No space and no error (nonblocking, full pipe) — stop.
                 break;
             }
-            written += nw as usize;
+            written = written.saturating_add(nw as usize);
         }
 
-        total += written;
-        offset += written as u64;
+        total = total.saturating_add(written);
+        offset = offset.saturating_add(written as u64);
         if written < to_write {
             // Couldn't place the whole peeked chunk (destination full under
             // SPLICE_F_NONBLOCK) — stop with a short transfer.

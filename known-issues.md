@@ -508,7 +508,58 @@ cgroup. Container memory limits did not actually constrain memory.
 (`kernel/src/cgroup.rs` enforces + owns assignment via `set_task_cgroup`;
 `fs::cgroupfs` remains the config frontend).
 
-### D-PTHREAD-DETACH-LEAK. Detached pthread stacks are never freed (64 KiB leaked per detached thread) — TECH DEBT
+### D-PTHREAD-DETACH-LEAK. Detached pthread stacks are never freed (64 KiB leaked per detached thread) — RESOLVED (2026-07-01)
+
+**Resolved 2026-07-01.** Implemented the userspace self-unmap fix exactly
+as prescribed below:
+
+- `THREAD_TABLE` is now a **lock-free array of atomic `ThreadSlot`s**
+  (`task_id: AtomicU64` doubling as occupancy flag with `SLOT_EMPTY`/
+  `SLOT_RESERVED` sentinels; `stack_base`/`stack_size: AtomicUsize`;
+  `state: AtomicU8`). The old `static mut` + "single-creator convention"
+  data race is gone.
+- Added the `__pthread_exit_unmap(stack_base, stack_size, retval)`
+  `global_asm!` primitive (`target_os="none"` only): it does
+  `SYS_MUNMAP` then `SYS_THREAD_EXIT`, carrying `retval` in **R12** (a
+  callee-saved reg the kernel's SYSCALL entry stub preserves — verified
+  against `kernel/src/syscall/entry.rs`, which pushes/pops rbx/rbp/r12-r15
+  around the handler). No memory is touched between the two syscalls.
+- The per-slot `state` arbitrates the detach-vs-exit race via
+  `compare_exchange`: `JOINABLE --detach--> DETACHED` (thread self-unmaps
+  on exit) vs `JOINABLE --exit--> EXITED` (a joiner, or a `pthread_detach`
+  that observes `EXITED`, frees the stack after `SYS_THREAD_JOIN` confirms
+  the thread is off it). **Exactly one party frees** — no use-after-free.
+  `pthread_join` rejects a detached thread (`EINVAL`); double-detach
+  returns `EINVAL`; detach-after-joinable-exit reaps.
+- Covered by 5 host unit tests in `pthread::tests`
+  (`test_thread_slot_store_find_release`, `test_detach_marks_state_detached`,
+  `test_double_detach_is_einval`, `test_join_rejects_detached_thread`,
+  `test_detach_after_joinable_exit_reaps`) exercising the arbitration
+  state machine directly.
+
+**Residual (smaller) follow-up — D-PTHREAD-DETACH-KERNEL-EXITVAL:** the
+kernel still retains a small `THREAD_EXIT_VALUES: BTreeMap<TaskId,i64>`
+entry (~tens of bytes) for a never-joined *detached* thread, because only
+`join` removes it (`on_thread_exit` in `kernel/src/proc/thread.rs` does
+not). The kernel *task itself* is already reaped on exit
+(`thread_exit_with_value` → `sched::task_exit()`), so only this map entry
+lingers, and it is freed at process exit. This is ~4000× smaller than the
+64 KiB stack this task fixed and is **kernel-side** (out of scope of the
+userspace-only fix). Proper fix: add a "detached" flag to
+`SYS_THREAD_EXIT` (or a `SYS_THREAD_DETACH` syscall) so the kernel drops
+the exit-value entry eagerly instead of holding it for a join that never
+comes. Deferred to a focused kernel task; low priority.
+
+*Note:* a native SlateOS-ABI userspace test harness that links `posix`
+does not currently exist (the boot path's thread tests use real glibc via
+`clone`, not our `SYS_THREAD_CREATE`), so the "boot self-test spawning N
+detached threads" originally envisioned below is deferred until such a
+harness exists; the host unit tests cover the (bug-prone) arbitration
+logic in the meantime.
+
+---
+
+**Original entry (for reference):**
 
 **Where:** `posix/src/pthread.rs`. `pthread_create` mmaps a
 `DEFAULT_THREAD_STACK_SIZE` (64 KiB) user stack and records it in

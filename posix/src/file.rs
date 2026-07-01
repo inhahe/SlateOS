@@ -3428,19 +3428,27 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
     total as isize
 }
 
-/// Splice user pages into a pipe.
+/// Splice user pages into, or out of, a pipe.
 ///
-/// Linux `vmsplice()` has two modes depending on which end of the
-/// pipe `fd` refers to:
-/// - Write end: the iovec contents are "gifted" into the pipe
-///   (zero-copy by remapping user pages).
-/// - Read end: the next pipe buffers are copied out into the iovec.
+/// Linux `vmsplice()` has two directions, chosen by which end of the
+/// pipe `fd` refers to (Linux `fs/splice.c::do_vmsplice` branches on
+/// `FMODE_WRITE` vs `FMODE_READ`):
+/// - **Write end** (`O_WRONLY`/`O_RDWR`): the iovec contents are moved
+///   into the pipe.  Implemented as a plain `writev()` — a data copy,
+///   not zero-copy page gifting.  `SPLICE_F_GIFT` is therefore advisory
+///   only; true page donation needs VFS-level pipe page sharing we
+///   don't have.
+/// - **Read end** (`O_RDONLY`): the buffered pipe bytes are copied
+///   (consumed) out into the iovec.  Implemented as a plain `readv()`.
 ///
-/// We implement only the write-end direction, as a plain `writev()`
-/// into the pipe — no page gifting.  The `SPLICE_F_GIFT` flag is
-/// therefore advisory only; the kernel-zero-copy semantics aren't
-/// available without VFS-level pipe page sharing.  Read-end use
-/// returns -1/EINVAL — callers should use `readv()` instead.
+/// Direction is decided from the fd's access mode, which `pipe2()` sets
+/// per end (read end = `O_RDONLY`, write end = `O_WRONLY`).  Because
+/// both directions delegate to `readv`/`writev`, `SPLICE_F_NONBLOCK` is
+/// honored via the fd's own `O_NONBLOCK` status flag rather than as an
+/// independent per-call override (a pre-existing limitation shared by
+/// both directions — a true per-call non-block would need the pipe
+/// try-read/try-write primitives wired in for the iovec loop, a
+/// separate enhancement).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vmsplice(fd: Fd, iov: *const Iovec, nr_segs: u64, flags: u32) -> isize {
     // Linux's `do_vmsplice` rejects unknown flag bits with EINVAL
@@ -3459,7 +3467,7 @@ pub extern "C" fn vmsplice(fd: Fd, iov: *const Iovec, nr_segs: u64, flags: u32) 
         return 0;
     }
     // Linux caps at UIO_MAXIOV (1024); we use a more generous i32 cap
-    // since writev() takes i32 — beyond that, EINVAL.
+    // since readv()/writev() take i32 — beyond that, EINVAL.
     if nr_segs > i32::MAX as u64 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -3474,10 +3482,18 @@ pub extern "C" fn vmsplice(fd: Fd, iov: *const Iovec, nr_segs: u64, flags: u32) 
         return -1;
     }
 
-    // Treat fd as the write end.  Read-end vmsplice (copying pipe
-    // buffers into iovec) is not supported — if the caller wanted to
-    // read, they should have called readv().
-    writev(fd, iov, nr_segs as i32)
+    // Direction follows the fd's access mode, mirroring Linux's
+    // `do_vmsplice`, which prefers the write direction when the file is
+    // writable and otherwise copies out of the pipe.  A pipe read end is
+    // `O_RDONLY`; a write end is `O_WRONLY`.
+    let accmode = entry.status_flags & crate::fcntl::O_ACCMODE;
+    if accmode == crate::fcntl::O_WRONLY || accmode == crate::fcntl::O_RDWR {
+        // Write end: move the iovec contents into the pipe.
+        writev(fd, iov, nr_segs as i32)
+    } else {
+        // Read end (O_RDONLY): consume buffered pipe bytes into the iovec.
+        readv(fd, iov, nr_segs as i32)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7676,6 +7692,53 @@ mod tests {
         let result = vmsplice(1, &raw const dummy, 1, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_vmsplice_read_end_pipe_accepted() {
+        // A pipe *read* end (O_RDONLY) must be accepted and routed to the
+        // read-out (readv) direction — not rejected as EBADF the way a
+        // non-pipe fd is.  Real byte copy-out rides on the kernel pipe read
+        // path (no kernel on host), so here we only confirm the read-end fd
+        // passes validation: an empty transfer is a clean success (0), and a
+        // non-empty one reaches the delegate rather than a validation error.
+        let Some(rfd) = fdtable::alloc_fd_with_flags(
+            crate::fdtable::HandleKind::Pipe,
+            0x5678_u64,
+            crate::fcntl::O_RDONLY,
+        ) else {
+            return;
+        };
+        crate::errno::set_errno(0);
+        let empty = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        // Empty transfer: routed to readv, which returns 0 without a syscall.
+        assert_eq!(vmsplice(rfd, &raw const empty, 1, 0), 0);
+        // Not rejected as a bad fd (which would be -1/EBADF before delegation).
+        assert_ne!(crate::errno::get_errno(), crate::errno::EBADF);
+        let _ = fdtable::close_fd(rfd);
+    }
+
+    #[test]
+    fn test_vmsplice_write_end_pipe_accepted() {
+        // Symmetric guard for the write end (O_WRONLY → writev direction).
+        let Some(wfd) = fdtable::alloc_fd_with_flags(
+            crate::fdtable::HandleKind::Pipe,
+            0x1234_u64,
+            crate::fcntl::O_WRONLY,
+        ) else {
+            return;
+        };
+        crate::errno::set_errno(0);
+        let empty = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        assert_eq!(vmsplice(wfd, &raw const empty, 1, 0), 0);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EBADF);
+        let _ = fdtable::close_fd(wfd);
     }
 
     // ----------------------------------------------------------------

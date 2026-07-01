@@ -810,6 +810,10 @@ pub struct LayerFile {
     pub data: Vec<u8>,
     /// POSIX permission bits (e.g. `0o755`).
     pub mode: u32,
+    /// Owning user id (tar `uid`; `COPY --chown`).
+    pub uid: u32,
+    /// Owning group id (tar `gid`; `COPY --chown`).
+    pub gid: u32,
 }
 
 /// One layer of a built image — an ordered set of files.
@@ -1011,8 +1015,8 @@ fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
             kind: EntryKind::File,
             link_target: String::new(),
             mode: f.mode,
-            uid: 0,
-            gid: 0,
+            uid: f.uid,
+            gid: f.gid,
             mtime: 0,
         });
     }
@@ -1638,6 +1642,7 @@ fn collect_copy_src(
     single_source: bool,
     ignore: &[(bool, String)],
     chmod: Option<u32>,
+    chown: (u32, u32),
     files: &mut Vec<LayerFile>,
     line: usize,
 ) -> Result<(), BuildError> {
@@ -1681,7 +1686,13 @@ fn collect_copy_src(
                 });
             }
             let data = Vfs::read_file(&ctx)?;
-            files.push(LayerFile { path: target, data, mode: chmod.unwrap_or_else(|| file_mode(&meta)) });
+            files.push(LayerFile {
+                path: target,
+                data,
+                mode: chmod.unwrap_or_else(|| file_mode(&meta)),
+                uid: chown.0,
+                gid: chown.1,
+            });
         }
         EntryType::Directory => {
             // Docker copies the *contents* of a directory source into dest.
@@ -1719,6 +1730,8 @@ fn collect_copy_src(
                                 path: archive_norm(&child_dest),
                                 data,
                                 mode: chmod.unwrap_or_else(|| file_mode(&cmeta)),
+                                uid: chown.0,
+                                gid: chown.1,
                             });
                         }
                         // Symlinks/other kinds are skipped (documented limitation).
@@ -2283,6 +2296,29 @@ fn build_one_stage_inner(
                     },
                     None => None,
                 };
+                // `--chown=<uid>[:<gid>]` sets the owner (numeric only — name
+                // resolution needs the stage's /etc/passwd, unsupported).  A
+                // bare uid uses that value for the gid too, matching Docker.
+                let chown: (u32, u32) = match toks.iter().find_map(|t| t.strip_prefix("--chown=")) {
+                    Some(spec) => {
+                        let (us, gs) = match spec.split_once(':') {
+                            Some((u, g)) => (u, g),
+                            None => (spec, spec),
+                        };
+                        match (us.parse::<u32>(), gs.parse::<u32>()) {
+                            (Ok(u), Ok(g)) => (u, g),
+                            _ => {
+                                return Err(BuildError::Parse {
+                                    line,
+                                    msg: format!(
+                                        "COPY/ADD --chown must be numeric uid[:gid] (name resolution unsupported): {spec}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    None => (0, 0),
+                };
                 // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
                 toks.retain(|t| !t.starts_with("--"));
                 if toks.len() < 2 {
@@ -2306,7 +2342,7 @@ fn build_one_stage_inner(
                     None => (String::from(context_dir), ignore),
                 };
                 for src in toks.iter().take(src_count) {
-                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, &mut files, line)?;
+                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, chown, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
             }
@@ -2732,6 +2768,8 @@ pub fn self_test() -> KernelResult<()> {
                 path: String::from("entry.sh"),
                 data: b"#!/bin/sh\necho base\n".to_vec(),
                 mode: 0o755,
+                uid: 0,
+                gid: 0,
             }],
         });
         spec.layers.push(BuildLayer {
@@ -2739,6 +2777,8 @@ pub fn self_test() -> KernelResult<()> {
                 path: String::from("bin/hello"),
                 data: b"hello-binary-contents".to_vec(),
                 mode: 0o755,
+                uid: 0,
+                gid: 0,
             }],
         });
 
@@ -3134,7 +3174,7 @@ COPY --from=mid /extra.txt /extra.txt
         let _ = Vfs::mkdir(ctx);
         Vfs::write_file(&format!("{ctx}/run.sh"), b"#!/bin/sh\n")?;
 
-        let df = b"FROM scratch\nCOPY --chmod=0600 run.sh /run.sh\n";
+        let df = b"FROM scratch\nCOPY --chmod=0600 --chown=1000:1001 run.sh /run.sh\n";
         build_image(df, ctx, img).map_err(|e| {
             serial_println!("[oci] chmod build failed: {}", e.describe());
             KernelError::InternalError
@@ -3150,11 +3190,13 @@ COPY --from=mid /extra.txt /extra.txt
             .find(|e| e.name.trim_start_matches('/') == "run.sh")
             .ok_or(KernelError::InternalError)?;
         assert_eq!(run.mode & 0o777, 0o600, "--chmod=0600 applied to run.sh");
+        assert_eq!(run.uid, 1000, "--chown uid applied to run.sh");
+        assert_eq!(run.gid, 1001, "--chown gid applied to run.sh");
 
         let _ = Vfs::remove(&format!("{ctx}/run.sh"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
-        serial_println!("[oci]   COPY --chmod: OK");
+        serial_println!("[oci]   COPY --chmod / --chown: OK");
     }
 
     serial_println!("[oci] Self-test PASSED (16 tests)");

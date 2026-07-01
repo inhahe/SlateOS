@@ -67062,11 +67062,20 @@ fn cmd_container(args: &str) {
             // `-q`/`--quiet` (Docker `ps -q`): print only container IDs, one per
             // line, with no header — for scripting (`rm $(ls -q)`).
             let mut quiet = false;
+            // `-a`/`--all` (Docker `ps -a`): include non-running containers.
+            // Without it, `ps` shows only Running containers, matching Docker
+            // (a `status=` filter, if given, overrides this running-only
+            // default so `ls --filter status=stopped` still works).
+            let mut all_states = false;
             let mut fi = 1;
             while fi < parts.len() {
                 match parts.get(fi) {
                     Some(&"-q") | Some(&"--quiet") => {
                         quiet = true;
+                        fi = fi.saturating_add(1);
+                    }
+                    Some(&"-a") | Some(&"--all") => {
+                        all_states = true;
                         fi = fi.saturating_add(1);
                     }
                     Some(&"--filter") | Some(&"-f") => {
@@ -67133,7 +67142,13 @@ fn cmd_container(args: &str) {
                 if !name_filters.iter().all(|sub| name.contains(sub)) {
                     return false;
                 }
-                if !status_filters.is_empty() && !status_filters.contains(&state) {
+                if status_filters.is_empty() {
+                    // No explicit status filter: Docker `ps` shows only Running
+                    // unless `-a`/`--all` was given.
+                    if !all_states && state != container::ContainerState::Running {
+                        return false;
+                    }
+                } else if !status_filters.contains(&state) {
                     return false;
                 }
                 if label_filters.is_empty() {
@@ -67147,7 +67162,17 @@ fn cmd_container(args: &str) {
                 all.iter().filter(|(id, name, state)| matches(*id, name, *state)).collect();
             if shown.is_empty() {
                 if !quiet {
-                    crate::console_println!("No containers match the filter.");
+                    // Distinguish "filtered everything out" from "only stopped
+                    // containers exist and -a wasn't given".
+                    if !all_states
+                        && status_filters.is_empty()
+                        && label_filters.is_empty()
+                        && name_filters.is_empty()
+                    {
+                        crate::console_println!("No running containers (use -a to show all).");
+                    } else {
+                        crate::console_println!("No containers match the filter.");
+                    }
                 }
                 return;
             }
@@ -68200,7 +68225,7 @@ fn cmd_container(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
-            crate::console_println!("  container [list] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-q: IDs only)");
+            crate::console_println!("  container [list] [-a] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all states, -q: IDs only)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");

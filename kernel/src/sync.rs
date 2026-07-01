@@ -412,6 +412,12 @@ impl<T> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.ensure_registered();
         let addr = self.addr();
+        // Disable involuntary preemption for the whole hold — a spinlock must
+        // never be held across a context switch (see
+        // `sched::PREEMPT_DISABLE_COUNT`).  Paired with `preempt_enable()` in
+        // `MutexGuard::drop`.  Done before spinning so the holder can't be
+        // preempted while contended either.
+        crate::sched::preempt_disable();
         lockdep::lock_acquire(addr, self.name);
 
         if tracking_enabled() {
@@ -420,7 +426,7 @@ impl<T> Mutex<T> {
                 self.stats.record_uncontended();
                 let acquire_tsc = crate::bench::rdtsc();
                 return MutexGuard {
-                    guard,
+                    guard: core::mem::ManuallyDrop::new(guard),
                     addr,
                     stats: &self.stats,
                     acquire_tsc,
@@ -434,7 +440,7 @@ impl<T> Mutex<T> {
             let wait = end.saturating_sub(start);
             self.stats.record_contended(wait);
             return MutexGuard {
-                guard,
+                guard: core::mem::ManuallyDrop::new(guard),
                 addr,
                 stats: &self.stats,
                 acquire_tsc: end,
@@ -444,7 +450,7 @@ impl<T> Mutex<T> {
         // Tracking disabled: still bounded-spin so the stall detector runs.
         let guard = self.lock_contended();
         MutexGuard {
-            guard,
+            guard: core::mem::ManuallyDrop::new(guard),
             addr,
             stats: &self.stats,
             acquire_tsc: 0,
@@ -538,7 +544,14 @@ impl<T> Mutex<T> {
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         self.ensure_registered();
         let addr = self.addr();
-        let guard = self.inner.try_lock()?;
+        // Disable preemption first, then attempt the lock; if we fail to
+        // acquire, undo the disable before returning (no guard will be
+        // created to do it for us).
+        crate::sched::preempt_disable();
+        let Some(guard) = self.inner.try_lock() else {
+            crate::sched::preempt_enable();
+            return None;
+        };
         // Only record if we actually got the lock — try_lock doesn't
         // block, so there's no ordering issue to detect on failure.
         lockdep::lock_acquire(addr, self.name);
@@ -550,7 +563,12 @@ impl<T> Mutex<T> {
         } else {
             0
         };
-        Some(MutexGuard { guard, addr, stats: &self.stats, acquire_tsc })
+        Some(MutexGuard {
+            guard: core::mem::ManuallyDrop::new(guard),
+            addr,
+            stats: &self.stats,
+            acquire_tsc,
+        })
     }
 
     /// Get the address used as the lockdep class identifier.
@@ -566,7 +584,9 @@ impl<T> Mutex<T> {
 ///
 /// Also records hold duration for contention statistics.
 pub struct MutexGuard<'a, T> {
-    guard: spin::MutexGuard<'a, T>,
+    /// Inner spin guard, held in `ManuallyDrop` so [`Drop`] can release the
+    /// physical lock *before* re-enabling preemption (see the drop impl).
+    guard: core::mem::ManuallyDrop<spin::MutexGuard<'a, T>>,
     addr: usize,
     /// Reference to the owning Mutex's stats for hold-time recording.
     stats: &'a ContentionStats,
@@ -603,6 +623,21 @@ impl<T> Drop for MutexGuard<'_, T> {
         // This way, if another CPU is spinning on this lock and acquires
         // it immediately after us, the ordering edges are correct.
         lockdep::lock_release(self.addr);
+        // Ordering is critical for the preempt-disable invariant: the
+        // *physical* lock must be released before we re-enable preemption.
+        // If we re-enabled first, a timer tick landing in the tiny window
+        // before the spin guard's own drop could involuntarily switch away
+        // while the lock is still physically held — exactly the deadlock the
+        // preempt-disable count exists to prevent.  ManuallyDrop lets us
+        // force the unlock here, ahead of preempt_enable.
+        //
+        // SAFETY: `guard` is never touched again after this point (the field
+        // is dropped exactly once, here), so taking it out of ManuallyDrop
+        // and dropping it is sound.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.guard);
+        }
+        crate::sched::preempt_enable();
     }
 }
 

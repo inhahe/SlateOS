@@ -327,6 +327,76 @@ static NEED_RESCHED: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU preemption-disable count (spinlock hold depth).
+///
+/// Incremented for the whole duration a CPU holds (or is spinning to acquire)
+/// a tracked [`crate::sync::Mutex`], decremented on release.  While this count
+/// is non-zero on a CPU, [`do_deferred_preempt`] refuses to perform an
+/// *involuntary* context switch on that CPU.
+///
+/// # The deadlock this prevents
+///
+/// A kernel spinlock must never be held across a context switch.  On a single
+/// CPU, if a task is involuntarily preempted (timer tick) while holding a
+/// spinlock and a higher-priority task then spins on that same lock, the
+/// preempted holder can never be rescheduled to release it — the spinner
+/// monopolizes the CPU — a priority-inversion deadlock.  This was observed as
+/// a recursive-looking `cpu N holds [0] ACCT [1] ACCT` stall on the memory
+/// accounting lock: the preempted holder's still-tracked lockdep entry plus
+/// the higher-priority spinner's, both accumulated on one CPU's held stack.
+///
+/// Disabling *involuntary preemption* (not interrupts) for the hold duration
+/// is the minimal correct fix: hardware IRQs still run and softirqs still
+/// fire, but the timer-driven context switch is deferred to the next tick
+/// *after* the lock is released, so a spinlock is never held across a switch.
+/// This generalises the earlier SCHED-only `SCHED.is_locked()` guard in
+/// [`do_deferred_preempt`] to *every* tracked lock.  (Locks also taken from a
+/// hardware ISR — e.g. the cgroup table from `timer_tick` — additionally use
+/// `try_lock` on the ISR side, so preempt-disable alone is sufficient here;
+/// no full interrupt-disable is required.)
+static PREEMPT_DISABLE_COUNT: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Disable involuntary preemption on the calling CPU.
+///
+/// Called by [`crate::sync::Mutex::lock`] / `try_lock` when acquiring a
+/// tracked spinlock.  Cheap: one lock-free CPU-index read plus one relaxed
+/// atomic increment.  Must be paired with exactly one [`preempt_enable`]
+/// (the `MutexGuard`'s `Drop` guarantees this).
+#[inline]
+pub fn preempt_disable() {
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Re-enable involuntary preemption on the calling CPU.
+///
+/// Saturating: an (erroneous) unbalanced release can never wrap the counter
+/// to a huge value and wedge preemption off permanently — the worst case is a
+/// missed decrement, which self-heals on the next balanced pair.
+#[inline]
+pub fn preempt_enable() {
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
+        // fetch_update keeps the decrement atomic w.r.t. a nested ISR that
+        // acquires/releases a tracked lock between our read and write.
+        let _ = c.fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
+    }
+}
+
+/// Current preemption-disable depth on `cpu` (0 == preemptible).
+#[inline]
+#[must_use]
+pub fn preempt_count(cpu: usize) -> u64 {
+    PREEMPT_DISABLE_COUNT
+        .get(cpu)
+        .map_or(0, |c| c.load(Ordering::Acquire))
+}
+
 // ---------------------------------------------------------------------------
 // Per-CPU scheduler statistics
 // ---------------------------------------------------------------------------
@@ -2225,6 +2295,19 @@ pub fn do_deferred_preempt() {
         .get(cpu)
         .is_some_and(|f| f.swap(false, Ordering::AcqRel));
     if pending && !cpu_is_idle(cpu) && !crate::softirq::is_processing() {
+        // Spinlock guard: never involuntarily preempt a task that holds a
+        // tracked spinlock.  Preempting mid-critical-section lets a higher-
+        // priority task spin forever on a lock whose (now un-scheduled) holder
+        // can never run to release it — a single-CPU priority-inversion
+        // deadlock (see PREEMPT_DISABLE_COUNT).  Re-arm NEED_RESCHED so the
+        // preemption lands on a subsequent tick once the lock is released;
+        // tracked critical sections are short, so this is a bounded deferral.
+        if preempt_count(cpu) > 0 {
+            if let Some(f) = NEED_RESCHED.get(cpu) {
+                f.store(true, Ordering::Release);
+            }
+            return;
+        }
         // Deadlock guard: never block on SCHED from the deferred-preempt path.
         //
         // `preempt()` calls `schedule_inner()`, which takes `SCHED.lock()`.  If

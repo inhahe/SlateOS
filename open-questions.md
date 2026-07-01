@@ -285,3 +285,54 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   runtime connect that allocates + attaches), `kernel/src/kshell.rs` (`container
   network connect|disconnect` arms + `docker` delegate).
 - **Status** — OPEN.
+
+---
+
+## Q20 hard-lockup (BSP-dead) detector — add a QEMU `i6300esb` watchdog to the shared boot harness? — OPEN
+
+- **Question** — The #1 tracked kernel bug (`B-PTHREAD-YIELDBUDGET`, see
+  `known-issues.md`) is a rare (~5%) **total** boot hang in the ring-3
+  clone/CoW/thread-spawn path whose signature is *the BSP wedged with interrupts
+  disabled* — total serial silence, no watchdog dump. The software liveness
+  watchdog now covers the idle-hang and busy-livelock variants (blind spots 0 and
+  1), but the BSP-dead variant (blind spot 2) is uncatchable by any IF-gated
+  mechanism. The only way to interrupt a single CPU spinning with IF=0 is an
+  **NMI**. The textbook PMC-overflow→NMI detector **does not work here**: our
+  `scripts/boot-test.sh` runs QEMU under TCG with no PMU emulation (verified —
+  no `-accel`/`-cpu`), and the boot test is single-CPU (no AP to send an
+  NMI-IPI). The one TCG-compatible NMI source is QEMU's **`i6300esb` PCI
+  watchdog** with `-action watchdog=inject-nmi`. Should we take that path, which
+  means **modifying the shared boot harness** (QEMU flags) plus adding a kernel
+  driver + a dedicated NMI IST?
+- **Options**
+  - **A. Add the `i6300esb` watchdog + inject-nmi (build the detector).** *Pro:*
+    the only mechanism that can actually catch the observed BSP-dead hang in our
+    environment; gives a task-table dump at the moment of the hang, which is the
+    single most valuable datapoint for root-causing it. *Con:* touches the
+    *shared* boot harness — a mis-tuned kick period would make **every** future
+    boot test spuriously NMI-dump or let QEMU reset the guest mid-boot; adds a
+    driver + IST plumbing; and it's still only a *diagnostic* (doesn't fix the
+    hang). Validating it needs ~20 boots to reproduce the heisenbug once.
+  - **B. Don't instrument; attack the root cause directly instead.** Spend the
+    effort auditing the ring-3 `clone`/CoW-fault/thread-teardown-reap/futex path
+    for the lost-wakeup / IF=0 spin rather than building a catcher. *Pro:* aims at
+    the actual fix; no shared-harness risk. *Con:* the path is already believed
+    sound (futex primitive proven); without a dump at the hang moment we're
+    debugging blind on a 5% repro.
+  - **C. Defer both; leave blind spot 2 uncovered for now.** *Pro:* zero risk to
+    the harness; the bug is rare and non-corrupting (a hung boot, caught by the
+    test timeout). *Con:* the bug stays un-instrumented and un-fixed.
+- **Claude's recommendation** — **A**, but *because it changes shared test
+  infra* I did not land it unilaterally. If the operator is away when I next pick
+  this up, the low-regret path is to build the `i6300esb` driver + NMI dump
+  **behind an opt-in `boot-test.sh --hard-lockup-watchdog` flag** (off by
+  default), so the shared harness is untouched unless explicitly enabled — that
+  removes the blast-radius objection while still making the detector available
+  for a dedicated repro run.
+- **Where it bites** — `scripts/boot-test.sh` (QEMU `-device i6300esb` +
+  `-action watchdog=inject-nmi`, ideally behind a flag), a new
+  `kernel/src/drivers/i6300esb.rs` (BAR map + periodic kick), `kernel/src/idt.rs`
+  (`handle_nmi` → `sched::dump_task_table`; NMI vector needs a dedicated IST,
+  currently `ist=0`), `kernel/src/gdt.rs` (add the NMI IST stack), and the
+  arming scope (boot ring-3 window, mirroring `sched::liveness_arm/disarm`).
+- **Status** — OPEN.

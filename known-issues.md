@@ -285,20 +285,40 @@ watchdog called for above is now **implemented and boot-validated**.
      heartbeats and would fire within 15 s if the BSP were still ticking while an
      AP froze) is the fingerprint of a dead BSP tick, i.e. blind spot (2).
   **Proper fix (the real next build, deferred — larger than a one-liner):** make
-  the hung-system detector independent of the BSP timer tick. Two robust options,
-  either or both:
-  - *NMI-based hard-lockup detector (Linux `kernel/watchdog_hld.c` model):* arm a
-    LAPIC/HPET one-shot that delivers an **NMI**, which fires even with IF=0. The
-    NMI handler checks a per-CPU "I made progress" flag and, if a CPU (esp. the
-    BSP) has been stuck for N periods, dumps the task table from NMI context
-    (try_lock-only). This is the standard way to catch a CPU spinning with
-    interrupts off — exactly blind spot (2).
+  the hung-system detector independent of the BSP timer tick.
   - *Cross-CPU liveness (cheap partial fix):* also call `liveness_check()` from an
     **AP's** `timer_tick`, not just cpu 0, so a wedged BSP doesn't take the whole
     watchdog down with it. Guard the shared stall counters for concurrent access
     (they're already atomics; the one-shot disarm makes double-fire harmless).
-    Does not help if *all* CPUs stop ticking, but covers the single-BSP-stuck case
-    that this reproduction most likely is.
+    Does not help if *all* CPUs stop ticking, and — critically — **our boot test
+    runs single-CPU**, so there is no AP to run this. Useful only once boot tests
+    exercise SMP.
+  - *NMI-based hard-lockup detector — FEASIBILITY BLOCKER FOUND 2026-07-01.* The
+    Linux `watchdog_hld.c` model arms a **PMC counter overflow → LAPIC LVT
+    PerfMon → NMI**, which fires even with IF=0. **But this cannot work in our
+    validation environment:** `scripts/boot-test.sh` launches QEMU with **no
+    `-accel` and no `-cpu` flag** → default **TCG** + `qemu64`, which does **not
+    emulate the PMU overflow→NMI path** at all. A PMC-based detector would never
+    fire under our only test harness, so it is untestable and effectively dead on
+    arrival here. (On real hardware / KVM it would work, but we have no such test
+    path.) Combined with single-CPU (no AP to send a watching NMI-IPI), the PMC
+    approach is the wrong build for this project as currently tested. **Do NOT
+    build the PMC detector against the current harness.**
+  - *Revised approach that DOES work under TCG (the actual next build): QEMU
+    `i6300esb` PCI watchdog → inject-NMI.* Add `-device i6300esb` +
+    `-action watchdog=inject-nmi` to `boot-test.sh`, write a small kernel driver
+    that maps the device BAR and **kicks** the watchdog from the timer tick (or a
+    dedicated periodic point). If the BSP wedges with IF=0 the kicks stop, the
+    watchdog expires, and QEMU injects a real NMI regardless of IF — caught by
+    `handle_nmi` (idt.rs:1422), which would then dump the task table (try_lock
+    only) via `sched::dump_task_table`. Requires: the driver, a **dedicated IST**
+    for the NMI vector (currently `ist=0`), arming scoped to the boot ring-3
+    window, and the harness flag change. **Blast-radius caveat:** this touches the
+    *shared* boot harness — a mis-tuned kick period would make every future boot
+    test spuriously NMI-dump or let QEMU reset the guest. Because it changes shared
+    test infra, it is queued for an operator steer in `open-questions.md` rather
+    than landed unilaterally. Validating it against the actual ~5% heisenbug is
+    also hard (needs ~20 boots to reproduce once).
   **Blind spot (1) livelock guard — IMPLEMENTED 2026-07-01** (`sched/mod.rs`
   `liveness_check`, `total_ctx_switches`, statics `LIVENESS_LAST_CTX` /
   `LIVENESS_CTX_STALL_COUNT`). On the healthy branch (useful-work advanced), the

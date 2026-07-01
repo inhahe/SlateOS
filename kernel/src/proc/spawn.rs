@@ -5484,7 +5484,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
              ld.so/libc startup faulted or blocked",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -5673,7 +5673,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc stdio — child did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -5910,7 +5910,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
             "[spawn]   FAIL: real glibc full — child did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -6103,7 +6103,11 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
              (state={:?}); a thread likely deadlocked on a futex or a worker faulted",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        // A hang (never reached Zombie in budget) is the transient spawn/reap/
+        // futex flake family (B-PTHREAD-YIELDBUDGET), NOT a wrong-result bug —
+        // classify it as TimedOut so the caller's WARNING line self-identifies
+        // it as a flake rather than a genuine logic error.
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -6304,7 +6308,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
              corrupted the resume context",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -6500,7 +6504,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
              the ISR context) or siglongjmp could not unwind",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -6698,7 +6702,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
              SI_QUEUE payload corrupted the siginfo",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -6902,7 +6906,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
              wait4 likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -7133,7 +7137,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
              parent's blocking read, or wait4 likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -7308,7 +7312,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
              write likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -7488,7 +7492,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
              read likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -7649,7 +7653,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
              open()/dup2() redirection likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -7831,7 +7835,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
              wait4 likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8021,7 +8025,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
              read-to-EOF likely hung (EOF needs every pipe write end closed)",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8197,7 +8201,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
              crashed mid-loop (e.g. a stale CoW double-free corrupting its image)",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8394,7 +8398,9 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(SCRIPT);
         let _ = crate::fs::Vfs::remove(CAPTURE);
         serial_println!("[spawn]   FAIL: real dash script — redirecting fd 0 failed: {:?}", e);
-        return Err(KernelError::InternalError);
+        // Propagate the real fd-install error (infrastructure failure), not a
+        // blanket InternalError, so the failure class is unambiguous.
+        return Err(e);
     }
 
     // Redirect fd 1 (stdout) → capture file.
@@ -8406,7 +8412,8 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(SCRIPT);
         let _ = crate::fs::Vfs::remove(CAPTURE);
         serial_println!("[spawn]   FAIL: real dash script — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
+        // Propagate the real fd-install error (infrastructure failure).
+        return Err(e);
     }
 
     let mut reaped = false;
@@ -8434,7 +8441,10 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
              or EOF-driven termination likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        // A hang here (B-DASH-STDIN-FLAKE) is the transient spawn/reap/futex
+        // flake family — classify as TimedOut, distinct from a genuine dash
+        // wrong-output/exit bug (which keeps InternalError below).
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8617,7 +8627,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
              (state={:?}); dash's opendir/getdents64 directory read likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8793,7 +8803,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
              (state={:?}); dash's pipe/fork/exec of /bin/emit or its capture read likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -8951,7 +8961,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
              (state={:?}); dash's if/test evaluation likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9106,7 +9116,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
              (state={:?}); dash's arithmetic evaluation likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9264,7 +9274,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
              (state={:?}); dash's heredoc pipe write/read likely deadlocked",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9426,7 +9436,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
              (state={:?}); the `wait` builtin likely never reaped the async child",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9592,7 +9602,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
              (state={:?}); the pipeline likely never completed (a stage blocked on the pipe)",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9749,7 +9759,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
             "[spawn]   FAIL: real dash cwd — shell did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -9909,7 +9919,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
             "[spawn]   FAIL: real dash relpath — shell did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -10063,7 +10073,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
             "[spawn]   FAIL: real dash statpath — shell did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -10211,7 +10221,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
             "[spawn]   FAIL: real dash dirstat — shell did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -10359,7 +10369,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
             "[spawn]   FAIL: real dash append — shell did not exit within {} yields (state={:?})",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -10549,7 +10559,7 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
              startup (ld.so/libc), Makefile parse, or its fork/exec of /bin/sh likely hung",
             MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if exit_code != Some(EXPECT_EXIT) {
@@ -10762,7 +10772,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
             COMPILE_MAX_YIELDS, cc_state
         );
         let _ = crate::fs::Vfs::remove(SRC_PATH);
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     if cc_exit != Some(EXPECT_EXIT) {
@@ -10906,7 +10916,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
              (state={:?}); tcc may have produced a broken ELF",
             RUN_MAX_YIELDS, run_state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     match out {
@@ -11136,7 +11146,7 @@ fn spawn_reap_tcc(
              startup or its compile/link loop likely hung",
             label, COMPILE_MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
     Ok(exit)
 }
@@ -11276,7 +11286,7 @@ fn run_dynamic_capture(
              (state={:?}); ld.so startup or libc init for the freshly-built binary likely hung",
             label, RUN_MAX_YIELDS, state
         );
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
 
     match out {
@@ -11850,7 +11860,7 @@ int main(void){\n\
             MAX_YIELDS, state
         );
         cleanup();
-        return Err(KernelError::InternalError);
+        return Err(KernelError::TimedOut);
     }
     if make_exit != Some(EXPECT_EXIT) {
         serial_println!(

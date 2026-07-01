@@ -523,6 +523,23 @@ spawn/reap path (lock-order tracer + futex wait/wake ordering) and fix the race;
 also make the dash harness distinguish a transient spawn failure from a real
 shell error. Logged so the intermittent dash failure isn't forgotten.
 
+**Diagnostic classification DONE (2026-07-01):** all ~34 ring-3 real-binary
+self-tests (`proc/spawn.rs`: glibc hello/stdio/full/pthread/signal/fault/
+sigqueue/forkexec/pipe/redir/redirin, all 16 real-dash tests, make/cc/hosted-cc/
+make+tcc) previously collapsed *both* a **hang** ("did not exit within N yields")
+and a genuine **wrong-result** (mismatched output/exit code) into the same
+`KernelError::InternalError`, so a captured flake report ("InternalError") could
+not be told apart from a real shell logic bug. Now the two are distinct: a
+never-reached-Zombie timeout returns `KernelError::TimedOut` (the transient
+spawn/reap/futex flake class — B-DASH-STDIN-FLAKE / B-PTHREAD-YIELDBUDGET), while
+a completed-but-wrong result keeps `InternalError`; fd-redirect infrastructure
+failures now propagate the real fd-install error. So the non-fatal WARNING line
+in `main.rs` is self-classifying: `TimedOut` == flake/hang, `InternalError` ==
+real logic bug, other == infra. This does not *fix* the underlying race (root-
+cause work still pending), but future flakes are now unambiguously attributed.
+The B-PREEMPT-SPINLOCK preempt-disable fix (top of file) may also have reduced
+this race's incidence; watching future boots for recurrence.
+
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 
 **Resolution (2026-06-30):** the two correctness gaps below are now

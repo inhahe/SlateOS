@@ -1761,6 +1761,18 @@ fn liveness_check() {
     dump_all_tasks_serial();
 }
 
+/// Dump every task's scheduling state to the serial log on demand.
+///
+/// Public wrapper around the liveness watchdog's task-table dump so an
+/// operator can trigger the same diagnostic manually (e.g. from a kshell
+/// command) when the system *feels* wedged at an interactive prompt —
+/// exactly the window where the boot-scoped liveness watchdog is disarmed
+/// and so would never fire on its own. Uses only `try_lock`, so it is safe
+/// to call from any context, including a partially-hung system.
+pub fn dump_task_table() {
+    dump_all_tasks_serial();
+}
+
 /// Dump every task's scheduling state to the serial log.
 ///
 /// Runs from timer-IRQ context, so it must never block: it uses `try_lock`

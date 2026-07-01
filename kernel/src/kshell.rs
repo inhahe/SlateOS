@@ -3644,7 +3644,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
+    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "taskdump", "tasks", "taskset", "tcache", "tee", "template", "test",
     "then", "thumbcache", "throttle", "time", "timezone", "tz", "toolbar", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
@@ -4778,6 +4778,7 @@ fn dispatch(line: &str) {
         "top" => cmd_top(),
         "profile" => cmd_profile(args),
         "watchdog" => cmd_watchdog(),
+        "taskdump" | "hungcheck" | "dumptasks" => cmd_taskdump(),
         "kill" => cmd_kill(args),
         "renice" => cmd_renice(args),
         "throttle" => cmd_throttle(args),
@@ -6158,6 +6159,24 @@ fn cmd_watchdog() {
             i, heartbeat, stall, indicator
         );
     }
+}
+
+/// Dump the full scheduler task table to the serial log.
+///
+/// Usage: `taskdump` (aliases: `hungcheck`, `dumptasks`)
+///
+/// Triggers the same per-task state dump the boot-window liveness watchdog
+/// emits automatically — but on demand, so an operator can capture it when
+/// the system feels wedged at an interactive prompt (where the liveness
+/// watchdog is disarmed and would never fire on its own). Prints, for every
+/// task, `(tid, state, cpu, prio, pending_wake, ready_since, waited,
+/// blocked_on_pi, name)` plus each CPU's `(heartbeat, ctx_switches,
+/// has_work)`. The dump goes to the **serial** log (it uses the kernel's
+/// try_lock-only, IRQ-safe dumper), so read it there, not on this console.
+fn cmd_taskdump() {
+    shell_println!("Dumping scheduler task table to the serial log...");
+    crate::sched::dump_task_table();
+    shell_println!("Task table dumped (see serial console / serial-test.txt).");
 }
 
 /// Kill a task by its ID.
@@ -73058,7 +73077,8 @@ fn is_builtin(name: &str) -> bool {
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
-        | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
+        | "cpuinfo" | "cpu" | "watchdog" | "taskdump" | "hungcheck" | "dumptasks"
+        | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
         | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random" | "trace" | "ktrace"
         | "supervisor" | "sv"

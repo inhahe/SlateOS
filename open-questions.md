@@ -92,6 +92,69 @@ Format for each entry:
 
 ---
 
+## Q18 GPU acceleration — how far to invest, given the virgl/Mesa ceiling? — OPEN
+
+- **Question** — Q15 gave the go-ahead for the GPU-acceleration initiative
+  (roadmap §4582 "Vulkan loader and basic GPU command submission", §4583
+  "OpenGL via Mesa"). The **foundation** is now built and tested (see "Where it
+  bites"), but the **headline payoff — real 3D rendering — is gated on two
+  prerequisites that are genuine operator calls**, not just effort:
+  1. **A virgl-capable test environment.** Our headless CI (`-display none`,
+     `virtio-gpu-pci`) is 2D-only: plain virtio-gpu offers **no
+     `VIRTIO_GPU_F_VIRGL`** (observed device features `0x30000002` — EDID bit
+     only). Real 3D needs `virtio-gpu-gl-pci` **plus** a host GL/display backend
+     **plus** host `virglrenderer`. On the Windows dev box that means QEMU built
+     with virgl (ANGLE/OpenGL) and a non-headless display — none of which the
+     boot-test can currently provide. Without it, every 3D code path is
+     **unfalsifiable** (buildable + self-testable only, never integration-tested
+     against a GPU).
+  2. **The Mesa port itself (§4583).** The only consumer of the virtio-gpu
+     render ioctls is Mesa's virgl (OpenGL) / venus (Vulkan) drivers — a **large
+     external C port** (Mesa + its Vulkan loader). Per CLAUDE.md, a giant
+     external port needs operator go-ahead on prerequisites/prioritization
+     before starting. Building the kernel-side render-ioctl dispatch *before*
+     there is any client makes it speculative infrastructure with nothing to
+     validate it.
+- **Options**
+  - **A. Invest in the virgl test env + commit to the Mesa port now.** *Pro:*
+    unlocks genuine, testable GPU acceleration end-to-end. *Con:* requires
+    provisioning a virgl-capable QEMU+display on the dev box (may be
+    non-trivial/impossible headlessly), and commits to a large multi-part C
+    port whose validation depends on (1).
+  - **B. Build the kernel-side virtio-gpu render-ioctl dispatch now with honest
+    "no-3D" reporting, defer Mesa.** GETPARAM reports `3D_FEATURES=0`,
+    GET_CAPS returns no capsets, 3D-requiring ioctls return the correct errno;
+    verified by a new ring-3 self-test that opens `renderD128` and issues the
+    ioctls. *Pro:* real, testable ABI plumbing on real hardware; correct
+    behaviour for any future client. *Con:* the reporting is necessarily
+    "unsupported" until (1)+(2) land, so it delivers no *acceleration* — it just
+    makes the render node answer virtio-gpu ioctls correctly.
+  - **C. Treat the foundation as a good stopping point for GPU accel and pick up
+    other roadmap work** until (1)/(2) are resolved. *Pro:* no speculative
+    infrastructure; keeps delivering fully-testable features elsewhere. *Con:*
+    GPU accel pauses short of any rendering.
+- **Claude's recommendation** — **C now, with B available on request.** The
+  foundation trilogy below is complete and tested; the next *acceleration* step
+  genuinely needs a decision on (1) the test environment and (2) the Mesa-port
+  commitment. In the meantime I'm continuing with other unblocked roadmap tasks
+  (not idling), and can do **B** whenever you want the render-node ioctls
+  answered correctly ahead of the Mesa port.
+- **Where it bites / what's already done** —
+  - `kernel/src/drm/virtgpu_uapi.rs` — pure `virtgpu_drm.h` uAPI ABI layer
+    (structs + ioctl numbers + `param_value` policy + self-test). *Done.*
+  - `scripts/boot-test.sh` — `-device virtio-gpu-pci` so the 2D device path is
+    exercised (DRM device 1 = virtio-gpu, promoted to primary). *Done.*
+  - `kernel/src/drm/mod.rs` (`primary_device`) + `kernel/src/syscall/linux.rs`
+    (`try_open_drm`) — `/dev/dri/card0`+`renderD128` bound to the primary GPU.
+    *Done.*
+  - Option B would land in `kernel/src/syscall/linux.rs` `drm_card_ioctl` (a new
+    `DRM_COMMAND_BASE`-range arm routing to `drm::virtgpu_uapi`), plus a ring-3
+    `renderD128` ioctl self-test.
+- **Status** — `OPEN` (deferred; **not blocking** — the foundation is done and
+  other roadmap work continues; only the *acceleration* payoff awaits the fork).
+
+---
+
 All deferred operator decisions (Q1–Q15) have been resolved — see the
 "Recently resolved" list below and `design-decisions.md` for full rationale. New
 decisions should be appended above this line as `## Q17 …`.

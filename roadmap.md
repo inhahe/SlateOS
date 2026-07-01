@@ -4581,6 +4581,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Atomic commit syscall (SYS_DRM_ATOMIC_COMMIT with serialized state buffer)
 - [-] Vulkan loader and basic GPU command submission
   - [x] virtio-gpu DRM driver-specific uAPI ABI layer (`kernel/src/drm/virtgpu_uapi.rs`): byte-exact `virtgpu_drm.h` struct mirrors + `DRM_IOCTL_VIRTGPU_*` numbers + `VIRTGPU_PARAM_*`/capset/blob/context-param constants + GETPARAM policy + exhaustive self-test. Pure ABI (no device state/unsafe), mirroring the DRM/KMS `uapi.rs` shim. Foundation for routing render-node ioctls (GETPARAM/GET_CAPS/RESOURCE_CREATE/CONTEXT_INIT/EXECBUFFER/TRANSFER_*/WAIT/MAP) into the virtio-gpu driver's 3D/virgl path.
+  - [x] Boot test attaches `-device virtio-gpu-pci` so the virtio-gpu 2D device bring-up path is exercised on real hardware (DRM device 1 = virtio-gpu, promoted to primary; live pixel write/read + flush_rect self-test).
+  - [x] `/dev/dri/card0` + `renderD128` bound to the primary GPU device (`drm::primary_device`), so a libdrm/Mesa client's render node targets the GPU rather than the fallback dumb framebuffer.
+  - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — the headless CI is 2D-only) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request.
 - [ ] OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
 

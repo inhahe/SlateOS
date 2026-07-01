@@ -761,17 +761,17 @@ fn send_ns_ecn(
         return Err(KernelError::PermissionDenied);
     }
 
-    // MAC always comes from the physical NIC (shared across namespaces).
-    let our_mac = interface::mac();
-
-    // Source IP comes from the namespace's interface configuration.
+    // Source MAC/IP come from the namespace's interface: the physical NIC
+    // in the root namespace, or the container's veth endpoint otherwise.
+    let our_mac = interface::ns_mac(ns_id);
     let our_ip = interface::ns_ip(ns_id);
 
     // Build the IP packet with the namespace's source address and ECN.
     let ip_packet = build_packet_ecn(our_ip, dst, protocol, payload, ecn);
 
-    // Determine the next-hop MAC address.
-    let iface_info = interface::info();
+    // Determine the next-hop MAC address.  Broadcast detection uses the
+    // sending namespace's own interface config (not the root NIC's).
+    let iface_info = interface::ns_info(ns_id);
     let dst_mac = if dst.is_broadcast()
         || (!iface_info.subnet_mask.is_unspecified()
             && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
@@ -782,13 +782,14 @@ fn send_ns_ecn(
         multicast_mac(dst)
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);
-        super::arp::resolve(next_hop)?
+        super::arp::resolve_ns(ns_id, next_hop)?
     };
 
-    // Wrap in Ethernet frame and send via the active NIC.
+    // Wrap in Ethernet frame and egress via this namespace's link (physical
+    // NIC for root, veth for a container namespace).
     let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
 
-    super::send_frame(&frame)?;
+    super::send_frame_ns(ns_id, &frame)?;
 
     Ok(())
 }
@@ -823,11 +824,12 @@ fn send_fragmentable_ns(
         return Err(KernelError::PermissionDenied);
     }
 
-    let our_mac = interface::mac();
+    // Source MAC/IP come from the sending namespace's interface.
+    let our_mac = interface::ns_mac(ns_id);
     let our_ip = interface::ns_ip(ns_id);
 
-    // Resolve next-hop MAC address.
-    let iface_info = interface::info();
+    // Resolve next-hop MAC address using the sending namespace's config.
+    let iface_info = interface::ns_info(ns_id);
     let dst_mac = if dst.is_broadcast()
         || (!iface_info.subnet_mask.is_unspecified()
             && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
@@ -838,7 +840,7 @@ fn send_fragmentable_ns(
         multicast_mac(dst)
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);
-        super::arp::resolve(next_hop)?
+        super::arp::resolve_ns(ns_id, next_hop)?
     };
 
     let total_ip_len = IPV4_HEADER_SIZE + payload.len();
@@ -847,7 +849,7 @@ fn send_fragmentable_ns(
         // Fits in one frame — send without DF (but no fragmentation needed).
         let ip_packet = build_packet_no_df(our_ip, dst, protocol, payload, 0);
         let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
-        return super::send_frame(&frame);
+        return super::send_frame_ns(ns_id, &frame);
     }
 
     // Need fragmentation.  Allocate a unique IP identification.
@@ -869,7 +871,7 @@ fn send_fragmentable_ns(
             ip_id, frag_offset_units, more_fragments,
         );
         let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &frag_packet);
-        super::send_frame(&frame)?;
+        super::send_frame_ns(ns_id, &frame)?;
 
         offset += frag_len;
     }

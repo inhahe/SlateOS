@@ -266,12 +266,11 @@ pub fn process_arp(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<()
 
 /// Send an ARP reply to the given target from a namespace's interface.
 ///
-/// The reply is sourced from `ns_id`'s MAC and IP address.  For the root
-/// namespace it egresses the physical NIC as before.  For a container
-/// namespace the reply must egress the veth endpoint rather than the
-/// physical NIC; container veth TX wiring is not yet in place (tracked as
-/// D-CNET-NSRX), so the reply is dropped rather than emitted on the
-/// physical LAN.  Once veth egress lands, this will send into the veth.
+/// The reply is sourced from `ns_id`'s MAC and IP address and egresses
+/// through that namespace's link: the physical NIC in the root namespace,
+/// or the container's veth (via [`net::send_frame_ns`]) in a container
+/// namespace, so a container answers ARP for its own IP on its
+/// user-defined network.
 fn send_reply(
     target_mac: &MacAddress,
     target_ip: Ipv4Addr,
@@ -283,19 +282,28 @@ fn send_reply(
     let arp_data = build_arp(ARP_REPLY, &our_mac, our_ip, target_mac, target_ip);
     let frame = ethernet::build_frame(target_mac, &our_mac, ETHERTYPE_ARP, &arp_data);
 
-    if ns_id == crate::netns::ROOT_NS {
-        super::send_frame(&frame)?;
-    }
-    // Non-root namespaces: reply intentionally not emitted on the physical
-    // NIC (it would be wrong-wire).  Awaits container veth TX wiring.
+    super::send_frame_ns(ns_id, &frame)?;
 
     Ok(())
 }
 
-/// Send an ARP request for the given IP address.
+/// Send an ARP request for the given IP address (root namespace).
 pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
-    let our_mac = interface::mac();
-    let our_ip = interface::ip();
+    send_request_ns(crate::netns::ROOT_NS, target_ip)
+}
+
+/// Send an ARP request for the given IP address from a network namespace.
+///
+/// The request is sourced from `ns_id`'s interface MAC and IP, and egresses
+/// through that namespace's link: the physical NIC in the root namespace,
+/// or the container's veth (via [`net::send_frame_ns`]) in a container
+/// namespace so a container can resolve its user-defined-network peers.
+pub fn send_request_ns(
+    ns_id: crate::netns::NetNsId,
+    target_ip: Ipv4Addr,
+) -> KernelResult<()> {
+    let our_mac = interface::ns_mac(ns_id);
+    let our_ip = interface::ns_ip(ns_id);
 
     let arp_data = build_arp(
         ARP_REQUEST,
@@ -306,17 +314,29 @@ pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
     );
     let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
 
-    super::send_frame(&frame)?;
+    super::send_frame_ns(ns_id, &frame)?;
 
     Ok(())
 }
 
-/// Resolve an IP address to a MAC address.
-///
-/// First checks the ARP cache.  If not found, sends an ARP request
-/// and polls for a reply (blocking, with timeout).
-#[allow(clippy::arithmetic_side_effects)]
+/// Resolve an IP address to a MAC address (root namespace).
 pub fn resolve(ip: Ipv4Addr) -> KernelResult<MacAddress> {
+    resolve_ns(crate::netns::ROOT_NS, ip)
+}
+
+/// Resolve an IP address to a MAC address within a network namespace.
+///
+/// First checks the (shared) ARP cache.  If not found, sends an ARP
+/// request from `ns_id` and polls for a reply (blocking, with timeout).
+/// The poll loop drives [`net::poll`], which drains both the physical NIC
+/// and the veth/bridge fabric, so a container peer's reply — delivered
+/// back through the bridge — is learned into the cache here.
+///
+/// Note: the ARP cache is currently shared across namespaces (a known
+/// limitation — see the send-path docs); resolution keys on the target IP
+/// only.  Distinct container-network subnets avoid collisions in practice.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn resolve_ns(ns_id: crate::netns::NetNsId, ip: Ipv4Addr) -> KernelResult<MacAddress> {
     // Check cache first.
     if let Some(mac) = lookup(ip) {
         return Ok(mac);
@@ -328,11 +348,12 @@ pub fn resolve(ip: Ipv4Addr) -> KernelResult<MacAddress> {
     }
 
     // Send ARP request and wait for reply.
-    send_request(ip)?;
+    send_request_ns(ns_id, ip)?;
 
     // Poll for up to ~1 second (1000 iterations with spin + NIC poll).
     for _ in 0..1000 {
-        // Poll the NIC for any incoming frames (including the ARP reply).
+        // Poll the NIC (and veth/bridge) for any incoming frames,
+        // including the ARP reply.
         super::poll();
 
         // Check if the reply arrived.

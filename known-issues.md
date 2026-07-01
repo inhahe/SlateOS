@@ -740,14 +740,16 @@ switching work.
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
 IPAM feature, increments 60–61). **Resolved:** 2026-07-01.
 
-### D-CNET-NSRX. Per-namespace veth RX dispatch — RX chain threading DONE; container veth TX egress still missing
+### D-CNET-NSRX. Per-namespace veth RX + TX dispatch — RESOLVED (RX threading + container veth TX egress both landed)
 
-**Status (2026-07-01): the RX-threading half is landed and boot-validated.**
-The whole ingress chain now carries the arrival namespace, so a container
-server socket bound in its own netns is matched by the per-ns socket lookup.
-What remains is the **TX (egress) half**: container sockets and ARP replies
-still have no path onto the veth, so container-inbound is not yet functional
-end-to-end.
+**Status (2026-07-01): both halves landed and boot-validated.** The whole
+ingress chain carries the arrival namespace (a container server socket bound
+in its own netns is matched by the per-ns socket lookup), **and** the egress
+path now routes container traffic (IPv4 data, fragments, ARP requests, ARP
+replies) onto the container's veth instead of the physical NIC. Container
+inbound/outbound over a user-defined network is functional end-to-end. The
+one residual limitation is the **shared (non-namespaced) ARP cache** — see
+the note at the end.
 
 **What landed (RX threading).** `ns_id` is threaded as a parameter through
 the entire RX chain:
@@ -778,27 +780,49 @@ delivery-level scoping — a datagram arriving in ns1 reaches only the ns1
 socket, root arrival is permissive), full `[net] Network self-test PASSED`,
 and the ARP ns tests — no physical-NIC regression.
 
-**What remains (container veth TX egress) — the functional blocker.**
-`ipv4::send_ns` still builds the frame with `interface::mac()` and egresses
-via `super::send_frame` (the physical NIC) for *all* namespaces (see the
-comment at `ipv4.rs` ~L695 "physical NIC's MAC … shared across all
-namespaces"). So:
-- A container socket's outbound segment never enters the veth — it goes out
-  the host NIC with the host MAC. Container *ingress* delivery now lands in
-  the right socket, but the container cannot **reply** over its user-defined
-  network.
-- `arp::send_reply` deliberately **drops** replies for non-root namespaces
-  (rather than emit them wrong-wire on the physical NIC) pending this wiring.
-The proper fix: give the ns-aware send path a veth egress branch — when
-`ns_id != ROOT_NS` and the ns has a veth endpoint, build the frame with the
-veth endpoint's MAC and `veth::send(pair, B, frame)` (→ lands on host end A →
-`bridge::forward` switches to the peer / NAT) instead of `send_frame`. This
-also needs the container ns to have an assigned IP + connected route so
-`resolve_next_hop`/`is_for_us` line up. That's a self-contained TX increment;
-do it next to make container-inbound work end-to-end.
+**What landed (container veth TX egress).** The ns-aware send path now has a
+veth egress branch keyed on the namespace:
+- `net::send_frame_ns(ns_id, frame)` (`net/mod.rs`) — the single egress
+  chokepoint: for `ns_id != ROOT_NS` with a veth endpoint
+  (`veth::find_endpoint_for_ns`), it captures TX, `veth::send(pair, end,
+  frame)` (→ enqueues on the peer host end A's RX → `bridge::forward_all`
+  switches to the peer / floods to the host NAT stack), and records TX;
+  otherwise it falls through to `send_frame` (physical NIC). Root traffic is
+  unchanged.
+- `ipv4::send_ns_ecn` and `send_fragmentable_ns` (both single-frame and the
+  fragmentation while-loop) now source MAC/IP from `interface::ns_mac(ns_id)`
+  / `ns_ip(ns_id)` / `ns_info(ns_id)`, resolve the next hop via
+  `arp::resolve_ns(ns_id, …)`, and egress via `send_frame_ns(ns_id, …)`.
+- `arp::send_request_ns` / `resolve_ns` — ARP requests are sourced from the
+  ns interface and egress the ns link; `resolve_ns`'s poll loop drives
+  `net::poll` (drains veth+bridge), so a peer reply returning through the
+  bridge is learned into the cache. `resolve`/`send_request` delegate to the
+  `_ns` forms with `ROOT_NS`.
+- `arp::send_reply` — **no longer drops** non-root replies; it egresses via
+  `send_frame_ns(ns_id, …)`, so a container answers ARP for its own IP on its
+  user-defined network.
+
+The container-creation path already assigns the ns interface IP/mask/gw/dns
+(`netns::configure_interface`) and sets up the veth pair
+(`setup_container_veth`), and `resolve_next_hop` for non-root uses
+`netns::route_lookup` → ns gateway → direct-to-dst fallback, so
+`resolve_next_hop`/`is_for_us` line up.
+
+Boot-validated: new `[veth]   test 11 (send_frame_ns veth egress): OK`
+(`[veth] Self-test PASSED (11 tests)`) — asserts a non-root
+`send_frame_ns` lands on the peer host end's RX and a root-ns frame does NOT
+leak into the veth — plus the RX-side `[udp]   Namespace isolation: OK` and
+full `[net] Network self-test PASSED`, no physical-NIC regression.
+
+**Residual limitation — shared ARP cache.** The ARP cache is still global
+(keyed on target IP only), not per-namespace. Two different container
+networks that reuse the same subnet/IP could collide; distinct
+container-network subnets avoid this in practice. Proper fix (future): key
+the ARP cache on `(ns_id, ip)` or maintain a per-ns cache. Not a blocker for
+the current single-user-defined-network container use.
 
 **Discovered/analyzed:** 2026-07-01 (embedded-DNS work). **RX threading
-landed:** 2026-07-01.
+landed:** 2026-07-01. **TX egress landed:** 2026-07-01.
 
 ### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 

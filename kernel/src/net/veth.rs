@@ -719,8 +719,9 @@ pub fn self_test() -> KernelResult<()> {
     test_stats_tracking()?;
     test_multiple_pairs()?;
     test_bidirectional()?;
+    test_send_frame_ns_veth_egress()?;
 
-    crate::serial_println!("[veth] Self-test PASSED (10 tests)");
+    crate::serial_println!("[veth] Self-test PASSED (11 tests)");
     Ok(())
 }
 
@@ -1220,5 +1221,84 @@ fn test_bidirectional() -> KernelResult<()> {
 
     destroy_pair(id)?;
     crate::serial_println!("[veth]   test 10 (bidirectional): OK");
+    Ok(())
+}
+
+/// Test 11: `net::send_frame_ns` egresses a container namespace via its veth.
+///
+/// This exercises the D-CNET-NSRX TX (egress) path: for a non-root namespace
+/// with a veth endpoint, the ns-aware send path must route the frame through
+/// the container's veth end (B), which enqueues on the peer host end (A)'s RX
+/// queue — the point where the bridge picks it up.  Root-namespace traffic
+/// (no veth endpoint) continues to the physical NIC via `send_frame`.
+fn test_send_frame_ns_veth_egress() -> KernelResult<()> {
+    let id = create_pair()?;
+    let ns = crate::netns::create()?;
+
+    // Move end B into the container namespace (must be down to move), then
+    // bring both ends up so delivery works.
+    move_end(id, VethEndId::B, ns)?;
+    set_up(id, VethEndId::A, true)?;
+    set_up(id, VethEndId::B, true)?;
+
+    // Sanity: the namespace's container endpoint is end B.
+    match find_endpoint_for_ns(ns) {
+        Some((pid, eid)) if pid == id && eid == VethEndId::B => {}
+        other => {
+            crate::serial_println!("[veth]   FAIL: find_endpoint_for_ns = {:?}", other);
+            destroy_pair(id)?;
+            crate::netns::delete(ns)?;
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Build a minimal Ethernet frame (dst = host end A, src = container end B).
+    let mut frame = alloc::vec![0u8; ETH_HEADER_SIZE + 4];
+    let mac_a = mac(id, VethEndId::A).ok_or(KernelError::InternalError)?;
+    let mac_b = mac(id, VethEndId::B).ok_or(KernelError::InternalError)?;
+    frame[..6].copy_from_slice(&mac_a);
+    frame[6..12].copy_from_slice(&mac_b);
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    frame[14] = 0xC0;
+    frame[15] = 0xFF;
+    frame[16] = 0xEE;
+    frame[17] = 0x00;
+
+    // Egress via the ns-aware send path — must route through the container's
+    // veth (end B), enqueuing on the peer end A's RX queue.
+    super::send_frame_ns(ns, &frame)?;
+
+    match recv(id, VethEndId::A) {
+        Some(ref data) if data.as_slice() == frame.as_slice() => {}
+        Some(_) => {
+            crate::serial_println!("[veth]   FAIL: send_frame_ns frame mismatch on A");
+            destroy_pair(id)?;
+            crate::netns::delete(ns)?;
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[veth]   FAIL: send_frame_ns did not egress via veth");
+            destroy_pair(id)?;
+            crate::netns::delete(ns)?;
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // A root-namespace frame must NOT be enqueued on this veth (it goes to the
+    // physical NIC path instead), so end A's RX queue stays empty.  The physical
+    // send itself may succeed or fail with NoSuchDevice depending on whether a
+    // NIC is present — irrelevant here; only the veth queue matters.
+    let _ = super::send_frame_ns(crate::netns::ROOT_NS, &frame);
+    if recv(id, VethEndId::A).is_some() {
+        crate::serial_println!("[veth]   FAIL: root-ns frame leaked into veth");
+        destroy_pair(id)?;
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    destroy_pair(id)?;
+    crate::netns::delete(ns)?;
+    crate::serial_println!("[veth]   test 11 (send_frame_ns veth egress): OK");
     Ok(())
 }

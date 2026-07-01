@@ -164,6 +164,36 @@ fn recv_frame() -> Option<Vec<u8>> {
     None
 }
 
+/// Send an Ethernet frame from a specific network namespace.
+///
+/// For the root namespace — or any namespace that has no veth endpoint
+/// (the legacy shared-NIC namespace model) — this is identical to
+/// [`send_frame`]: the frame egresses the physical NIC.
+///
+/// For a container namespace that owns a veth endpoint, the frame is
+/// injected into that veth instead of the physical NIC.  `veth::send`
+/// enqueues on the *peer* endpoint's RX queue, so sending from the
+/// container-side endpoint lands the frame on the host-side endpoint,
+/// which is a bridge port — `bridge::forward_all` then switches it to the
+/// destination peer (same-network delivery) or floods it to the host
+/// stack (gateway / external NAT).  This is what gives a container-bound
+/// socket a working *reply* path on a user-defined network.
+///
+/// # Errors
+///
+/// - Propagates [`veth::send`] / [`send_frame`] errors.
+pub fn send_frame_ns(ns_id: crate::netns::NetNsId, frame: &[u8]) -> KernelResult<()> {
+    if ns_id != crate::netns::ROOT_NS {
+        if let Some((pair, end)) = veth::find_endpoint_for_ns(ns_id) {
+            pcap::capture_tx(frame);
+            veth::send(pair, end, frame.to_vec())?;
+            interface::record_tx(frame.len());
+            return Ok(());
+        }
+    }
+    send_frame(frame)
+}
+
 /// Send an Ethernet frame via the active NIC.
 ///
 /// Used by the IPv4 layer and ARP to transmit packets.

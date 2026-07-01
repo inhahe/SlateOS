@@ -5306,7 +5306,8 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     scratch|local-image with layer+config inheritance, COPY/ADD with
     `.dockerignore` filtering + `--chmod`/`--chown` (numeric) + `ADD`
     local-tar auto-extraction (plain/gzip),
-    ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL/
+    ENV/CMD/ENTRYPOINT/`WORKDIR` (records config *and* materialises the
+    directory as a filesystem layer)/USER/EXPOSE/LABEL/
     VOLUME/STOPSIGNAL/SHELL/ONBUILD, ARG `${VAR}` expansion + `--build-arg`
     overrides, **multi-stage builds** (`FROM … AS <name>`, `FROM <stage>`
     inheritance, `COPY --from=<stage|index|image>`, `--target <stage>`),

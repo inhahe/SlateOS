@@ -816,8 +816,21 @@ pub struct LayerFile {
     pub gid: u32,
 }
 
-/// One layer of a built image — an ordered set of files.
+/// An explicit directory to create in a built image layer (e.g. Dockerfile
+/// `WORKDIR`).  Parent directories are synthesised automatically by
+/// [`build_layer_tar`], so only the leaf need be listed.
+pub struct LayerDir {
+    /// Archive-relative path, e.g. `"srv/app"` (no leading `/`).
+    pub path: String,
+    /// POSIX permission bits (Docker's `WORKDIR` uses `0o755`).
+    pub mode: u32,
+}
+
+/// One layer of a built image — an ordered set of directories and files.
 pub struct BuildLayer {
+    /// Explicit directories created by this layer (e.g. `WORKDIR`).  These are
+    /// emitted with their own mode; parent prefixes are synthesised at `0o755`.
+    pub dirs: Vec<LayerDir>,
     /// Files contained in this layer (bottom-to-top layer order is the order
     /// of layers in [`ImageSpec::layers`]).
     pub files: Vec<LayerFile>,
@@ -985,24 +998,42 @@ fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
     use crate::fs::tar::{EntryKind, TarWriteEntry};
     use alloc::collections::BTreeSet;
 
-    // Collect all directory prefixes across all files, deduplicated and ordered
-    // shallow→deep (BTreeSet gives lexicographic order; a parent always sorts
-    // before its children because it is a prefix ending at a `/` boundary).
+    // Collect all directory prefixes across all files and explicit dirs,
+    // deduplicated and ordered shallow→deep (BTreeSet gives lexicographic
+    // order; a parent always sorts before its children because it is a prefix
+    // ending at a `/` boundary).  Explicit dirs (e.g. `WORKDIR`) carry their
+    // own mode; synthesised parents default to `0o755`.
+    let mut explicit: alloc::collections::BTreeMap<String, u32> =
+        alloc::collections::BTreeMap::new();
+    for d in &layer.dirs {
+        let name = d.path.trim_matches('/');
+        if name.is_empty() {
+            continue;
+        }
+        explicit.insert(String::from(name), d.mode);
+    }
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     for f in &layer.files {
         for d in parent_prefixes(&f.path) {
             dirs.insert(d);
         }
     }
+    for name in explicit.keys() {
+        for d in parent_prefixes(&format!("{name}/x")) {
+            dirs.insert(d);
+        }
+        dirs.insert(name.clone());
+    }
 
     let mut entries: Vec<TarWriteEntry> = Vec::new();
     for d in dirs {
+        let mode = explicit.get(&d).copied().unwrap_or(0o755);
         entries.push(TarWriteEntry {
             name: format!("{d}/"),
             data: Vec::new(),
             kind: EntryKind::Directory,
             link_target: String::new(),
-            mode: 0o755,
+            mode,
             uid: 0,
             gid: 0,
             mtime: 0,
@@ -2223,6 +2254,12 @@ fn build_one_stage_inner(
             return Err(BuildError::MissingFrom);
         }
 
+        // Number of layers before this instruction: an instruction "produced a
+        // layer" iff it grew this count (COPY/ADD always do; WORKDIR does
+        // unless it resolves to `/`).  This keeps the OCI `history[]`
+        // `empty_layer` flags exactly in step with the real layer count.
+        let layers_before = spec.layers.len();
+
         match instr_up.as_str() {
             "FROM" => {
                 let expanded = expand_vars(rest_raw, &vars);
@@ -2337,6 +2374,20 @@ fn build_one_stage_inner(
                     spec.working_dir =
                         format!("{}/{}", spec.working_dir.trim_end_matches('/'), w);
                 }
+                // Docker creates the working directory in the image filesystem
+                // (mode 0o755, root-owned) if it does not already exist.  Emit a
+                // layer that materialises it; overlay semantics make this a
+                // no-op when the directory already exists in a lower layer.
+                let dir_rel = archive_norm(&spec.working_dir);
+                if !dir_rel.is_empty() {
+                    spec.layers.push(BuildLayer {
+                        dirs: alloc::vec![LayerDir {
+                            path: dir_rel,
+                            mode: 0o755,
+                        }],
+                        files: Vec::new(),
+                    });
+                }
             }
             "USER" => {
                 let expanded = expand_vars(rest_raw, &vars);
@@ -2408,7 +2459,21 @@ fn build_one_stage_inner(
                         msg: String::from("COPY/ADD needs at least one source and a destination"),
                     });
                 }
-                let dest_path = toks.last().cloned().unwrap_or_default();
+                // A destination that does not start with `/` is interpreted
+                // relative to the current WORKDIR (Docker semantics); an unset
+                // WORKDIR defaults to root.  The trailing slash (dir marker) is
+                // preserved by the join.
+                let dest_raw = toks.last().cloned().unwrap_or_default();
+                let dest_path = if dest_raw.starts_with('/') {
+                    dest_raw
+                } else {
+                    let wd = if spec.working_dir.is_empty() {
+                        "/"
+                    } else {
+                        spec.working_dir.as_str()
+                    };
+                    format!("{}/{}", wd.trim_end_matches('/'), dest_raw)
+                };
                 let src_count = toks.len().saturating_sub(1);
                 let single = src_count == 1;
                 let mut files: Vec<LayerFile> = Vec::new();
@@ -2438,7 +2503,7 @@ fn build_one_stage_inner(
                     }
                     collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, chown, &mut files, line)?;
                 }
-                spec.layers.push(BuildLayer { files });
+                spec.layers.push(BuildLayer { dirs: Vec::new(), files });
             }
             "VOLUME" => {
                 let expanded = expand_vars(rest_raw, &vars);
@@ -2513,7 +2578,7 @@ fn build_one_stage_inner(
         if instr_up != "FROM" {
             spec.history.push(HistoryEntry {
                 created_by: logical.clone(),
-                empty_layer: !matches!(instr_up.as_str(), "COPY" | "ADD"),
+                empty_layer: spec.layers.len() == layers_before,
             });
         }
     }
@@ -2858,6 +2923,7 @@ pub fn self_test() -> KernelResult<()> {
         spec.labels.push((String::from("version"), String::from("1.0")));
         // Two layers: one file each.
         spec.layers.push(BuildLayer {
+            dirs: Vec::new(),
             files: alloc::vec![LayerFile {
                 path: String::from("entry.sh"),
                 data: b"#!/bin/sh\necho base\n".to_vec(),
@@ -2867,6 +2933,7 @@ pub fn self_test() -> KernelResult<()> {
             }],
         });
         spec.layers.push(BuildLayer {
+            dirs: Vec::new(),
             files: alloc::vec![LayerFile {
                 path: String::from("bin/hello"),
                 data: b"hello-binary-contents".to_vec(),
@@ -2963,17 +3030,21 @@ CMD ["--serve"]
         assert!(image.config.labels.iter().any(|(k, v)| k == "role" && v == "web"));
         assert_eq!(image.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
         assert_eq!(image.config.cmd, alloc::vec![String::from("--serve")]);
-        assert_eq!(image.manifest.layers.len(), 2);
-        assert_eq!(image.config.diff_ids.len(), 2);
+        // WORKDIR now materialises its directory as a layer, so this build
+        // yields 3 layers: WORKDIR ${APPDIR} (→ /srv), COPY app, COPY readme.txt.
+        assert_eq!(image.manifest.layers.len(), 3);
+        assert_eq!(image.config.diff_ids.len(), 3);
 
         // Build history: FROM/ARG contribute none; the 10 remaining steps each
-        // add an entry, with the two COPY steps non-empty (1:1 with layers).
+        // add an entry, with WORKDIR + the two COPY steps non-empty (1:1 with
+        // layers, in Dockerfile order).
         assert_eq!(image.config.history.len(), 10, "history step count");
         let non_empty: Vec<&HistoryEntry> =
             image.config.history.iter().filter(|h| !h.empty_layer).collect();
-        assert_eq!(non_empty.len(), 2, "two layer-producing steps");
-        assert!(non_empty.first().is_some_and(|h| h.created_by.starts_with("COPY app")));
-        assert!(non_empty.get(1).is_some_and(|h| h.created_by.starts_with("COPY readme.txt")));
+        assert_eq!(non_empty.len(), 3, "three layer-producing steps");
+        assert!(non_empty.first().is_some_and(|h| h.created_by.starts_with("WORKDIR")));
+        assert!(non_empty.get(1).is_some_and(|h| h.created_by.starts_with("COPY app")));
+        assert!(non_empty.get(2).is_some_and(|h| h.created_by.starts_with("COPY readme.txt")));
         assert!(
             image.config.history.iter().any(|h| h.empty_layer && h.created_by.starts_with("LABEL")),
             "LABEL recorded as empty layer"
@@ -3003,16 +3074,16 @@ CMD ["--serve"]
             KernelError::InternalError
         })?;
         let child = load_image(img2)?;
-        assert_eq!(child.manifest.layers.len(), 3, "2 inherited + 1 new layer");
+        assert_eq!(child.manifest.layers.len(), 4, "3 inherited + 1 new layer");
         assert!(child.config.env.iter().any(|e| e == "PATH=/usr/bin"), "inherited env");
         assert!(child.config.env.iter().any(|e| e == "EXTRA=1"), "new env");
         assert_eq!(child.config.entrypoint, alloc::vec![String::from("/srv/app/run.sh")]);
-        // History carried forward: base's 10 + ENV + COPY = 12; 3 non-empty
-        // entries stay 1:1 with the 3 layers.
+        // History carried forward: base's 10 + ENV + COPY = 12; 4 non-empty
+        // entries stay 1:1 with the 4 layers.
         assert_eq!(child.config.history.len(), 12, "base history carried forward");
         assert_eq!(
             child.config.history.iter().filter(|h| !h.empty_layer).count(),
-            3,
+            4,
             "non-empty history == layer count"
         );
 
@@ -3366,7 +3437,75 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   ADD local-tar auto-extraction: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (17 tests)");
+    // Test 18: WORKDIR creates the directory (and parents) in the image
+    // filesystem, records the config WorkingDir, and keeps the OCI history
+    // `empty_layer` accounting in step with the real layer count.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_workdir_ctx";
+        let img = "/tmp/oci_workdir_img";
+        let ext = "/tmp/oci_workdir_ext";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/app.txt"), b"payload")?;
+
+        // WORKDIR /srv then a relative WORKDIR app → /srv/app.
+        let df = b"FROM scratch\nWORKDIR /srv\nWORKDIR app\nCOPY app.txt ./app.txt\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] WORKDIR build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+
+        // Config records the final WorkingDir.
+        let wi = load_image(img)?;
+        assert_eq!(wi.config.working_dir, "/srv/app", "WorkingDir must be /srv/app");
+
+        // Three filesystem layers: `WORKDIR /srv`, `WORKDIR app` (→ /srv/app),
+        // and the COPY.
+        assert_eq!(
+            wi.manifest.layers.len(),
+            3,
+            "expected 3 layers (2 WORKDIR + 1 COPY), got {}",
+            wi.manifest.layers.len()
+        );
+        // OCI invariant: non-empty history entries == layer count.
+        let non_empty = wi.config.history.iter().filter(|h| !h.empty_layer).count();
+        assert_eq!(non_empty, 3, "non-empty history entries must equal layer count");
+
+        // Extracting all layers yields the directory tree and the copied file.
+        let _ = Vfs::mkdir(ext);
+        for layer in &wi.manifest.layers {
+            extract_layer(img, layer, ext)?;
+        }
+        assert!(Vfs::is_directory(&format!("{ext}/srv")), "/srv must be a directory");
+        assert!(Vfs::is_directory(&format!("{ext}/srv/app")), "/srv/app must be a directory");
+        assert_eq!(Vfs::read_file(&format!("{ext}/srv/app/app.txt"))?, b"payload");
+        let _ = Vfs::remove_recursive(ext);
+        cleanup_image_dir(img);
+
+        // `WORKDIR /` resets the working dir to root and must NOT emit a
+        // spurious layer (root already exists) — only the COPY produces one.
+        let df_root = b"FROM scratch\nWORKDIR /\nCOPY app.txt /app.txt\n";
+        build_image(df_root, ctx, img).map_err(|e| {
+            serial_println!("[oci] WORKDIR-root build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let ri = load_image(img)?;
+        assert_eq!(ri.config.working_dir, "/", "WORKDIR / resets to root");
+        assert_eq!(
+            ri.manifest.layers.len(),
+            1,
+            "WORKDIR / emits no layer; only the COPY does, got {}",
+            ri.manifest.layers.len()
+        );
+
+        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   WORKDIR creates image directory: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (18 tests)");
     Ok(())
 }
 

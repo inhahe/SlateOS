@@ -299,12 +299,29 @@ watchdog called for above is now **implemented and boot-validated**.
     (they're already atomics; the one-shot disarm makes double-fire harmless).
     Does not help if *all* CPUs stop ticking, but covers the single-BSP-stuck case
     that this reproduction most likely is.
-  Also add a livelock guard for blind spot (1): track whether `USEFUL_WORK_TICKS`
-  advances *only* because the same task keeps being re-ticked (e.g. sample the
-  running tid alongside the counter; if the counter moves but the running-task set
-  hasn't changed across an interval, treat that as a stall too). Until this lands,
-  the watchdog remains useful only for the idle-hang variant; the busy/BSP-dead
-  variant (which this 2026-07-01 catch appears to be) still escapes it.
+  **Blind spot (1) livelock guard — IMPLEMENTED 2026-07-01** (`sched/mod.rs`
+  `liveness_check`, `total_ctx_switches`, statics `LIVENESS_LAST_CTX` /
+  `LIVENESS_CTX_STALL_COUNT`). On the healthy branch (useful-work advanced), the
+  watchdog now also samples the **system-wide context-switch total** (sum of the
+  per-CPU `CTX_SWITCHES`). The busy-livelock signature is *useful-work advancing
+  while the aggregate ctx-switch count is frozen*: a task monopolizing a CPU
+  without ever yielding gets its own timer ticks charged as "useful work" yet
+  produces no context switch, whereas a healthy boot self-test phase
+  context-switches continuously (thread spawn/reap/futex hand-off/yield). After
+  `LIVENESS_ALERT_COUNT` (3 = 15 s) such intervals it prints a `SUSPECTED
+  LIVELOCK` line + task dump. Deliberately chosen discriminator over
+  "sample-the-running-tid": the long-lived boot self-test *driver* task keeps the
+  same tid across the whole armed window, so same-tid-for-K-intervals would
+  false-positive; ctx-switch-frozen does not. Because a rare legit long
+  single-task compute in a stress self-test could in principle also freeze ctx
+  switches while charging useful work, the livelock report is a **soft warning**:
+  it does NOT disarm the watchdog (so a false positive cannot disable hang
+  detection for the rest of boot) and re-fires at most once per 3 intervals.
+  Covered by an extended `test_liveness_watchdog` self-test (drives the guard to
+  threshold under IF=0, asserts it warns without disarming and resets on
+  ctx-switch progress). This closes the *busy*-livelock variant; the **BSP-dead
+  blind spot (2)** (total silence, IF=0 spin — the fingerprint of the 2026-07-01
+  catches) still requires the NMI-based detector above and remains deferred.
 
 **Recurrence 2026-07-01 (embedded-DNS work, same signature).** During the
 boot test for the container embedded-DNS increment, one run hung with no
@@ -319,6 +336,21 @@ new `[cnetwork]   embedded DNS resolve: OK`). Confirms again the hang is in
 the ring-3 `clone`/CoW-fault/thread-spawn path and is independent of the
 touched code (this session changed only `cnetwork.rs`/`kshell.rs`, neither
 on the boot spawn path). No new fix this session; datapoint logged.
+
+**Recurrence 2026-07-01 (livelock-guard work, same signature).** While
+boot-testing the new blind-spot-(1) livelock guard, one confirmation run hung
+with no BOOT_OK in 480 s; serial stopped at `[spawn] Process 220 running
+(thread 184, entry=0x4000000000, user_rsp=0x7fffffff0000)` — the container
+`exec` self-test spawning ring-3 `/bin/hello` (task 184 in process 220),
+immediately after `[thread] Spawned thread (task 184)`. Same
+clone/thread-spawn fingerprint, and **no watchdog dump at all** (BSP-dead
+blind spot 2). This is the *variant the new guard does NOT catch* — the guard
+targets busy-livelock (blind spot 1); this is the IF=0 BSP-dead case that
+still needs the NMI detector. Confirmed unrelated to the change: the new
+`test_liveness_watchdog` self-test logged `[sched]   liveness watchdog: OK`
+long before the hang, and the immediately-prior boot of near-identical code
+reached BOOT_OK in 191 s. Datapoint logged; underscores that blind spot 2
+(NMI detector) is the remaining high-value work on this bug.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

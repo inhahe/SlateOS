@@ -1680,6 +1680,19 @@ static LIVENESS_LAST_WORK: AtomicU64 = AtomicU64::new(0);
 /// Consecutive liveness intervals with zero forward progress.
 static LIVENESS_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// System-wide context-switch total observed at the previous liveness check.
+///
+/// Used by the busy-livelock guard: a task that monopolizes a CPU without
+/// ever yielding advances [`USEFUL_WORK_TICKS`] (its timer ticks are charged
+/// as useful work) yet produces **no context switches** system-wide. This
+/// snapshot lets the watchdog notice that the useful-work counter is moving
+/// for the wrong reason (see [`liveness_check`]).
+static LIVENESS_LAST_CTX: AtomicU64 = AtomicU64::new(0);
+
+/// Consecutive intervals where useful-work advanced but no context switch
+/// occurred system-wide (the busy-livelock signature).
+static LIVENESS_CTX_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Consecutive stalled check-intervals before declaring a hung system.
 ///
 /// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
@@ -1709,7 +1722,27 @@ fn note_useful_work() {
 pub fn liveness_arm() {
     LIVENESS_LAST_WORK.store(USEFUL_WORK_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
     LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+    LIVENESS_LAST_CTX.store(total_ctx_switches(), Ordering::Relaxed);
+    LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_ARMED.store(true, Ordering::Release);
+}
+
+/// Sum the per-CPU context-switch counters into a single system-wide total.
+///
+/// A whole-system scheduling-progress signal that is independent of
+/// [`USEFUL_WORK_TICKS`]: it advances only when a *different* task is
+/// actually switched in, not merely when a timer tick is charged to the
+/// currently-running task. Relaxed loads are fine — the watchdog only cares
+/// whether the aggregate moved at all across a 5-second interval.
+fn total_ctx_switches() -> u64 {
+    let mut total: u64 = 0;
+    let num_cpus = crate::smp::cpu_count().min(priority_rr::MAX_CPUS);
+    for cpu in 0..num_cpus {
+        if let Some(ctr) = CTX_SWITCHES.get(cpu) {
+            total = total.wrapping_add(ctr.load(Ordering::Relaxed));
+        }
+    }
+    total
 }
 
 /// Disarm the system-wide liveness watchdog.
@@ -1735,28 +1768,77 @@ fn liveness_check() {
     let previous = LIVENESS_LAST_WORK.load(Ordering::Relaxed);
     LIVENESS_LAST_WORK.store(current, Ordering::Relaxed);
 
-    if current != previous {
-        // Progress was made — healthy.  Reset the stall counter.
-        LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+    // Snapshot the system-wide context-switch total every interval so the
+    // busy-livelock guard below always compares against the immediately
+    // preceding interval, regardless of which branch we took.
+    let ctx_now = total_ctx_switches();
+    let ctx_prev = LIVENESS_LAST_CTX.swap(ctx_now, Ordering::Relaxed);
+
+    if current == previous {
+        // No task-level progress this interval — the total-hang signature
+        // (every CPU idle-ticking).  A total stall is reported by this path,
+        // so keep the busy-livelock counter quiet to avoid double-reporting.
+        LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+
+        let count = LIVENESS_STALL_COUNT
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if count < LIVENESS_ALERT_COUNT {
+            return;
+        }
+
+        // Confirmed hang: dump every task's state, then disarm so the report
+        // appears exactly once (further intervals would just repeat it).
+        LIVENESS_ARMED.store(false, Ordering::Release);
+        let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
+        serial_println!(
+            "[liveness] SYSTEM HANG: no task-level forward progress for {}+ seconds \
+             (useful_work={}, all CPUs idle-ticking). Dumping task table:",
+            stall_secs, current,
+        );
+        dump_all_tasks_serial();
         return;
     }
 
-    // No task-level progress this interval.
-    let count = LIVENESS_STALL_COUNT
+    // Useful-work ticks advanced, so the primary watchdog above considers the
+    // system healthy.  Reset its stall counter.
+    LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+
+    // Busy-livelock guard (watchdog blind spot 1): the useful-work counter
+    // can advance for the *wrong* reason — a single task monopolizing a CPU
+    // (e.g. a futex/yield-budget spin) has its own timer ticks charged as
+    // "useful work" even though no real forward progress is happening.  The
+    // giveaway is that such a task never yields, so **no context switch**
+    // occurs system-wide.  A healthy boot self-test phase context-switches
+    // continuously (thread spawn/reap/futex hand-off/yield), so useful-work
+    // advancing while the aggregate context-switch count is frozen for
+    // several consecutive intervals is the busy-livelock signature.
+    if ctx_now != ctx_prev {
+        LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+        return;
+    }
+    let count = LIVENESS_CTX_STALL_COUNT
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     if count < LIVENESS_ALERT_COUNT {
         return;
     }
 
-    // Confirmed hang: dump every task's state, then disarm so the report
-    // appears exactly once (further intervals would just repeat it).
-    LIVENESS_ARMED.store(false, Ordering::Release);
+    // Suspected busy-livelock.  Unlike the total-hang path this is a *soft*
+    // warning: it does NOT disarm the watchdog, because a rare legitimate
+    // long single-task computation during a stress self-test could in
+    // principle also freeze context switches while charging useful work.
+    // Keeping the watchdog armed means a false positive here cannot disable
+    // hang detection for the remainder of boot.  Reset the counter so the
+    // warning re-fires at most once per LIVENESS_ALERT_COUNT intervals
+    // rather than every interval.
+    LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
     let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
     serial_println!(
-        "[liveness] SYSTEM HANG: no task-level forward progress for {}+ seconds \
-         (useful_work={}, all CPUs idle-ticking). Dumping task table:",
-        stall_secs, current,
+        "[liveness] SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
+         context switches for {}+ seconds (useful_work={}, ctx_switches={}) — a \
+         task is likely monopolizing a CPU without yielding. Dumping task table:",
+        stall_secs, current, ctx_now,
     );
     dump_all_tasks_serial();
 }
@@ -4778,6 +4860,57 @@ fn test_liveness_watchdog() -> KernelResult<()> {
     liveness_disarm();
     if LIVENESS_ARMED.load(Ordering::Relaxed) {
         serial_println!("[sched]   FAIL: liveness_disarm did not clear the armed flag");
+        return Err(KernelError::InternalError);
+    }
+
+    // Busy-livelock guard (blind spot 1): when useful-work advances every
+    // interval but the system-wide context-switch total stays frozen, the
+    // guard must count consecutive intervals and, at LIVENESS_ALERT_COUNT,
+    // emit a soft warning WITHOUT disarming the watchdog.  Drive the logic
+    // with interrupts off so no real preemption/context-switch on this CPU
+    // perturbs the frozen-ctx assumption mid-sequence (the boot self-test
+    // runs single-CPU, so no other CPU advances CTX_SWITCHES either).
+    serial_println!(
+        "[sched]   (self-test) intentionally driving the busy-livelock guard; the \
+         'SUSPECTED LIVELOCK' line below is expected and not a real event:"
+    );
+    let livelock_ok = crate::cpu::without_interrupts(|| {
+        liveness_arm(); // armed; baselines LAST_WORK and LAST_CTX to "now"
+        LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+
+        // Simulate consecutive intervals where useful-work advances (a task's
+        // ticks are charged) but no context switch occurs.  total_ctx_switches()
+        // is stable across these back-to-back calls (IF=0, single CPU), so the
+        // guard sees a frozen ctx count each interval.
+        for _ in 0..LIVENESS_ALERT_COUNT {
+            note_useful_work(); // useful-work advances → healthy branch taken
+            liveness_check();
+        }
+
+        // The guard fired at the threshold and reset its counter, but must NOT
+        // have disarmed the watchdog (soft warning only).
+        if !LIVENESS_ARMED.load(Ordering::Relaxed) {
+            serial_println!("[sched]   FAIL: livelock guard disarmed the watchdog");
+            return false;
+        }
+        if LIVENESS_CTX_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+            serial_println!("[sched]   FAIL: livelock guard did not reset its counter after warning");
+            return false;
+        }
+
+        // A subsequent interval that DOES advance context switches must clear
+        // the guard's counter (no spurious accrual once scheduling resumes).
+        note_useful_work();
+        LIVENESS_LAST_CTX.store(total_ctx_switches().wrapping_sub(1), Ordering::Relaxed);
+        liveness_check();
+        if LIVENESS_CTX_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+            serial_println!("[sched]   FAIL: livelock guard counted an interval with ctx-switch progress");
+            return false;
+        }
+        true
+    });
+    liveness_disarm();
+    if !livelock_ok {
         return Err(KernelError::InternalError);
     }
 

@@ -5317,6 +5317,11 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     **named image store** at `/var/lib/images` (single shared OCI layout keyed
     by `ref.name` annotations: `oci`/`docker` `tag`/`images`/`rmi` with
     content-addressed blob dedup + reference-counted blob GC on removal).
+    Store references are usable everywhere an image is named: `FROM name:tag`
+    (base inheritance from the store), `oci`/`docker run name:tag`,
+    `oci inspect|layers|history name:tag`, and `oci build -t name:tag`
+    (auto-tag the built image into the store) — all via
+    `oci::resolve_image_source` (dir-or-reference).
     Remaining: real `container exec` / Dockerfile
     `RUN` + `HEALTHCHECK` (rootfs-binary exec in the container's namespaces)
     — gated on operator decision Q17 (see open-questions.md).

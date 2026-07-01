@@ -69089,8 +69089,8 @@ fn cmd_oci(args: &str) {
                 crate::console_println!("Usage: oci inspect <image-dir>");
                 return;
             };
-            match oci::load_image(dir) {
-                Ok(image) => {
+            match oci::resolve_image_source(dir) {
+                Ok((_, image)) => {
                     crate::console_println!("=== OCI Image: {} ===", dir);
                     crate::console_println!("  Architecture: {}", image.config.architecture);
                     crate::console_println!("  OS:           {}", image.config.os);
@@ -69153,8 +69153,8 @@ fn cmd_oci(args: &str) {
                 crate::console_println!("Usage: oci layers <image-dir>");
                 return;
             };
-            match oci::load_image(dir) {
-                Ok(image) => {
+            match oci::resolve_image_source(dir) {
+                Ok((_, image)) => {
                     crate::console_println!("=== Layers ({}) ===", image.manifest.layers.len());
                     for (i, layer) in image.manifest.layers.iter().enumerate() {
                         crate::console_println!(
@@ -69175,8 +69175,8 @@ fn cmd_oci(args: &str) {
                 crate::console_println!("Usage: oci history <image-dir>");
                 return;
             };
-            match oci::load_image(dir) {
-                Ok(image) => {
+            match oci::resolve_image_source(dir) {
+                Ok((_, image)) => {
                     if image.config.history.is_empty() {
                         crate::console_println!(
                             "No build history recorded in image config ({} layers)",
@@ -69672,10 +69672,12 @@ fn cmd_oci(args: &str) {
                 }
             }
 
-            // Step 1: Load OCI image metadata.
+            // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
+            // layout directory or a named-store reference (`name:tag`);
+            // `blob_dir` is where the layer blobs actually live.
             crate::console_println!("[oci] Loading image from {}...", dir);
-            let image = match oci::load_image(dir) {
-                Ok(img) => img,
+            let (blob_dir, image) = match oci::resolve_image_source(dir) {
+                Ok(pair) => pair,
                 Err(e) => {
                     crate::console_println!("[oci] Failed to load image: {:?}", e);
                     return;
@@ -69729,7 +69731,7 @@ fn cmd_oci(args: &str) {
                     image.manifest.layers.len(),
                     layer.size
                 );
-                match oci::extract_layer(dir, layer, &rootfs_lower) {
+                match oci::extract_layer(&blob_dir, layer, &rootfs_lower) {
                     Ok(count) => {
                         total_files = total_files.saturating_add(count);
                         crate::console_println!(
@@ -70272,9 +70274,21 @@ fn cmd_oci(args: &str) {
             let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
                 alloc::vec::Vec::new();
             let mut target: Option<&str> = None;
+            let mut tag: Option<&str> = None;
             let mut i = 1usize;
             while let Some(&tok) = parts.get(i) {
-                if tok == "--build-arg" {
+                if tok == "-t" || tok == "--tag" {
+                    if let Some(&t) = parts.get(i.saturating_add(1)) {
+                        tag = Some(t);
+                        i = i.saturating_add(2);
+                    } else {
+                        crate::console_println!("[oci] -t/--tag needs a name:tag");
+                        i = i.saturating_add(1);
+                    }
+                } else if let Some(t) = tok.strip_prefix("--tag=") {
+                    tag = Some(t);
+                    i = i.saturating_add(1);
+                } else if tok == "--build-arg" {
                     if let Some(&kv) = parts.get(i.saturating_add(1)) {
                         // KEY=VALUE; a bare KEY takes the ambient value "" here
                         // (the builder only applies it to a declared ARG).
@@ -70315,16 +70329,28 @@ fn cmd_oci(args: &str) {
                 (positional.first(), positional.get(1), positional.get(2))
             else {
                 crate::console_println!(
-                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [--build-arg KEY=VALUE ...] [--target STAGE]"
+                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [-t name:tag] [--build-arg KEY=VALUE ...] [--target STAGE]"
                 );
                 return;
             };
             match crate::fs::vfs::Vfs::read_file(dockerfile) {
                 Ok(df) => match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
-                    Ok(desc) => crate::console_println!(
-                        "Built image -> {} (manifest {}, {} bytes)",
-                        dest, desc.digest, desc.size
-                    ),
+                    Ok(desc) => {
+                        crate::console_println!(
+                            "Built image -> {} (manifest {}, {} bytes)",
+                            dest, desc.digest, desc.size
+                        );
+                        // `-t name:tag` imports the freshly-built image into the
+                        // named store so it can be referenced by name.
+                        if let Some(reference) = tag {
+                            match oci::store_tag_from_dir(dest, reference) {
+                                Ok(_) => crate::console_println!("Tagged -> {}", reference),
+                                Err(e) => crate::console_println!(
+                                    "build succeeded but tag '{}' failed: {:?}", reference, e
+                                ),
+                            }
+                        }
+                    }
                     Err(e) => crate::console_println!("build failed: {}", e.describe()),
                 },
                 Err(e) => {

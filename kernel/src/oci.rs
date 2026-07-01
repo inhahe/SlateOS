@@ -1578,6 +1578,53 @@ fn collect_manifest_blob_hexes(
     }
 }
 
+/// Load an image from an OCI layout `dir` by an explicit manifest digest,
+/// rather than by host-platform selection.  Used to pick one specific tagged
+/// image out of the store's shared multi-manifest layout.
+///
+/// # Errors
+/// Propagates VFS/parse errors; `InvalidArgument` if the digest is malformed.
+fn load_manifest_by_digest(dir: &str, manifest_digest: &str) -> KernelResult<OciImage> {
+    let (_, hex) = manifest_digest
+        .split_once(':')
+        .ok_or(KernelError::InvalidArgument)?;
+    let manifest_data = crate::fs::Vfs::read_file(&format!("{dir}/blobs/sha256/{hex}"))?;
+    verify_digest(&manifest_data, manifest_digest)?;
+    let manifest = ImageManifest::parse(&manifest_data)?;
+
+    let config_blob_path = manifest.config.blob_path().ok_or(KernelError::InvalidArgument)?;
+    let config_data = crate::fs::Vfs::read_file(&format!("{dir}/{config_blob_path}"))?;
+    verify_digest(&config_data, &manifest.config.digest)?;
+    let config = ImageConfig::parse(&config_data)?;
+
+    Ok(OciImage { manifest, config })
+}
+
+/// Resolve an image argument that is either an on-disk OCI-layout **directory**
+/// or a named-store **reference** (`name:tag`, defaulting to `:latest`) into
+/// the blob-source directory to extract from and the loaded image.
+///
+/// A path that exists as a valid OCI layout (has an `oci-layout` marker) is
+/// treated as a directory; otherwise the argument is looked up in the named
+/// store at [`STORE_DIR`], and the returned blob-source directory *is*
+/// `STORE_DIR` (all store images share its content-addressed blob pool).
+///
+/// # Errors
+/// `NotFound` if the argument is neither a valid layout directory nor a known
+/// store reference; propagates VFS/parse errors otherwise.
+pub fn resolve_image_source(arg: &str) -> KernelResult<(String, OciImage)> {
+    let dir = arg.trim_end_matches('/');
+    // A valid on-disk OCI layout is marked by its `oci-layout` file.
+    if crate::fs::Vfs::metadata(&format!("{dir}/oci-layout")).is_ok() {
+        let img = load_image(dir)?;
+        return Ok((String::from(dir), img));
+    }
+    // Otherwise treat the argument as a store reference.
+    let digest = store_resolve(arg)?;
+    let img = load_manifest_by_digest(STORE_DIR, &digest)?;
+    Ok((String::from(STORE_DIR), img))
+}
+
 // ---------------------------------------------------------------------------
 // Dockerfile builder (`docker build` / `oci build`)
 // ---------------------------------------------------------------------------
@@ -2633,12 +2680,12 @@ fn build_one_stage_inner(
                 }
                 if base_ref != "scratch" {
                     // A prior-stage reference resolves to that stage's built
-                    // image dir; otherwise treat it as an external image dir.
-                    let base_path = match resolve_stage_dir(base_ref, prior) {
-                        Some(d) => String::from(d),
-                        None => String::from(base_ref),
+                    // image dir; otherwise resolve as either an on-disk OCI
+                    // layout directory or a named-store reference (`name:tag`).
+                    let (base_path, base) = match resolve_stage_dir(base_ref, prior) {
+                        Some(d) => (String::from(d), load_image(d).map_err(BuildError::Kernel)?),
+                        None => resolve_image_source(base_ref).map_err(BuildError::Kernel)?,
                     };
-                    let base = load_image(&base_path).map_err(BuildError::Kernel)?;
                     spec.architecture = base.config.architecture.clone();
                     spec.os = base.config.os.clone();
                     spec.env = base.config.env.clone();
@@ -4004,7 +4051,64 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   named image store tag/list/resolve/rmi+GC: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (20 tests)");
+    // Test 21: store reference resolution — a `name:tag` reference resolves via
+    // the store (blob-source = STORE_DIR), a directory path resolves in place,
+    // and `FROM name:tag` inherits the stored base image's config + layers.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_ref_ctx";
+        let base = "/tmp/oci_ref_base";
+        let child = "/tmp/oci_ref_child";
+        cleanup_image_dir(base);
+        cleanup_image_dir(child);
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/base.txt"), b"base-data")?;
+
+        // Build a base image and tag it into the store as `base:1`.
+        let df_base = b"FROM scratch\nENV FOO=bar\nCOPY base.txt /base.txt\n";
+        build_image(df_base, ctx, base).map_err(|e| {
+            serial_println!("[oci] ref base build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let base_digest = store_tag_from_dir(base, "base:1")?;
+
+        // A directory path resolves in place (blob-source == the dir).
+        let (dsrc, dimg) = resolve_image_source(base)?;
+        assert_eq!(dsrc, base, "directory arg resolves to itself");
+        assert_eq!(dimg.manifest.layers.len(), 1);
+
+        // A store reference resolves to STORE_DIR with the tagged manifest.
+        let (rsrc, rimg) = resolve_image_source("base:1")?;
+        assert_eq!(rsrc, STORE_DIR, "store ref resolves to STORE_DIR");
+        assert!(rimg.config.env.iter().any(|e| e == "FOO=bar"), "config inherited");
+        let _ = base_digest;
+
+        // `FROM base:1` (resolved from the store) inherits ENV + the base layer,
+        // then adds a COPY layer of its own.
+        Vfs::write_file(&format!("{ctx}/child.txt"), b"child-data")?;
+        let df_child = b"FROM base:1\nCOPY child.txt /child.txt\n";
+        build_image(df_child, ctx, child).map_err(|e| {
+            serial_println!("[oci] FROM name:tag build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let ci = load_image(child)?;
+        assert_eq!(ci.manifest.layers.len(), 2, "base layer + child COPY");
+        assert!(ci.config.env.iter().any(|e| e == "FOO=bar"), "child inherits base ENV");
+
+        // An unknown reference is a clean NotFound, not a panic.
+        assert!(resolve_image_source("nope:9").is_err(), "unknown ref errors");
+
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::remove(&format!("{ctx}/base.txt"));
+        let _ = Vfs::remove(&format!("{ctx}/child.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(base);
+        cleanup_image_dir(child);
+        serial_println!("[oci]   store reference resolution + FROM name:tag: OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (21 tests)");
     Ok(())
 }
 

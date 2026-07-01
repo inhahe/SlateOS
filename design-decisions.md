@@ -3665,5 +3665,14 @@ nothing; removing the last GCs everything).
 `store_tag_from_dir`/`store_add_tag`/`store_resolve`/`store_list`/`store_remove`,
 `collect_manifest_blob_hexes`, self-test 20); `kernel/src/kshell.rs` (`oci
 tag`/`images`/`rmi` arms + `docker` shim routes for `images`/`tag`/`rmi`).
-Follow-up: teach `FROM name:tag` and `oci/docker run name:tag` to resolve via
-`store_resolve` and load from the store's multi-manifest layout.
+
+**Follow-up (done, same day).** Store references are now resolvable everywhere
+an image is named, via `resolve_image_source(arg)` — which treats `arg` as an
+on-disk OCI layout directory if it has an `oci-layout` marker, else looks it up
+in the store (`store_resolve` → `load_manifest_by_digest(STORE_DIR, digest)`,
+returning `STORE_DIR` as the blob-source since all store images share its blob
+pool). Wired into `FROM name:tag` (base inheritance), `oci`/`docker run`,
+`oci inspect|layers|history`, and `oci build -t name:tag` (auto-import the built
+image into the store). A dedicated `load_manifest_by_digest` was needed because
+the store is a *multi-manifest* layout — `load_image`'s host-platform manifest
+selection would be ambiguous across tags. Covered by self-test 21.

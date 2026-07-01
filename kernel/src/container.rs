@@ -246,6 +246,11 @@ pub struct ContainerConfig {
     /// Automatic restart policy for the init process (Docker `--restart`).
     /// Defaults to [`RestartPolicy::No`].
     pub restart_policy: RestartPolicy,
+    /// Automatically remove the container when its init process exits (Docker
+    /// `--rm`). Mutually exclusive with a restart policy in Docker; here a
+    /// restart takes precedence (a container that is going to restart is not
+    /// removed). Defaults to `false`.
+    pub auto_remove: bool,
 }
 
 
@@ -295,6 +300,13 @@ impl ContainerConfig {
     #[must_use]
     pub fn restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.restart_policy = policy;
+        self
+    }
+
+    /// Automatically remove the container when its init exits (Docker `--rm`).
+    #[must_use]
+    pub fn auto_remove(mut self, auto_remove: bool) -> Self {
+        self.auto_remove = auto_remove;
         self
     }
 
@@ -481,6 +493,10 @@ struct Container {
     /// opposed to a crash or a force [`kill`]). A user stop suppresses every
     /// restart policy (Docker semantics). Cleared on every (re)launch.
     user_stopped: bool,
+    /// Automatically delete the container when its init exits (Docker `--rm`).
+    /// Captured from [`ContainerConfig::auto_remove`] at create time; honoured
+    /// by [`notify_init_exit`] *only* when no restart is scheduled.
+    auto_remove: bool,
 }
 
 impl Container {
@@ -512,6 +528,7 @@ impl Container {
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,
+            auto_remove: false,
         }
     }
 }
@@ -576,6 +593,8 @@ pub struct ContainerInfo {
     pub restart_policy: RestartPolicy,
     /// Number of automatic restarts performed since the last manual (re)start.
     pub restart_count: u32,
+    /// Auto-remove on init exit (Docker `--rm`).
+    pub auto_remove: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +874,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.restart_policy = config.restart_policy;
         ct.restart_count = 0;
         ct.user_stopped = false;
+        ct.auto_remove = config.auto_remove;
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -947,6 +967,7 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     // uninitialized table as "no containers" rather than panicking.
     let mut net_ns_to_flush = None;
     let mut restart_id: Option<ContainerId> = None;
+    let mut remove_id: Option<ContainerId> = None;
     {
         let mut guard = TABLE.lock();
         let Some(table) = guard.as_mut() else {
@@ -974,6 +995,12 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
                 ) {
                     ct.restart_count = ct.restart_count.saturating_add(1);
                     restart_id = ContainerId::try_from(idx).ok();
+                } else if ct.auto_remove {
+                    // Docker `--rm`: delete the container once its init exits,
+                    // but only when it is *not* going to restart (a restart
+                    // takes precedence).  Deletion touches the VFS/overlay and
+                    // must run in task context, so it is deferred like restart.
+                    remove_id = ContainerId::try_from(idx).ok();
                 }
                 break;
             }
@@ -991,6 +1018,16 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
         if !crate::workqueue::submit(do_container_restart, u64::from(id)) {
             serial_println!(
                 "[container] auto-restart of id={} dropped (workqueue full)", id
+            );
+        }
+    }
+    // Schedule the deferred auto-remove (Docker `--rm`).  Deletion requires the
+    // container to be non-Running; it is Stopped by the block above, so the
+    // reaper will succeed.  A full queue leaves the container Stopped (logged).
+    if let Some(id) = remove_id {
+        if !crate::workqueue::submit(do_container_autoremove, u64::from(id)) {
+            serial_println!(
+                "[container] auto-remove of id={} dropped (workqueue full)", id
             );
         }
     }
@@ -1015,6 +1052,26 @@ fn do_container_restart(arg: u64) {
         ),
         Err(e) => serial_println!(
             "[container] auto-restart of id={} failed: {:?}", id, e
+        ),
+    }
+}
+
+/// Workqueue callback: perform a deferred automatic removal of container `arg`
+/// (Docker `--rm`).
+///
+/// Runs in the `kworker` task context (may take locks and touch the VFS/overlay
+/// during teardown), scheduled by [`notify_init_exit`] when an `--rm` container's
+/// init exits and no restart is due.  The container is `Stopped` by that point,
+/// so [`delete`] succeeds.  Errors (already deleted, teardown failure) are
+/// logged and dropped.
+fn do_container_autoremove(arg: u64) {
+    let Ok(id) = ContainerId::try_from(arg) else {
+        return;
+    };
+    match delete(id) {
+        Ok(()) => serial_println!("[container] auto-removed id={} (--rm)", id),
+        Err(e) => serial_println!(
+            "[container] auto-remove of id={} failed: {:?}", id, e
         ),
     }
 }
@@ -2531,6 +2588,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             frozen: ct.frozen,
             restart_policy: ct.restart_policy,
             restart_count: ct.restart_count,
+            auto_remove: ct.auto_remove,
         })
     })
 }
@@ -4520,5 +4578,25 @@ pub fn self_test() {
     }
     serial_println!("[container]   restart policy (parse + decision table + update): OK");
 
-    serial_println!("[container] Self-test PASSED (42 tests)");
+    // Auto-remove (--rm): the config builder records it and info() surfaces it.
+    {
+        let plain = create(&ContainerConfig::new("rm-off-ct")).expect("create rm-off-ct");
+        assert!(
+            !info(plain).expect("info rm-off-ct").auto_remove,
+            "auto_remove must default to false",
+        );
+        delete(plain).expect("cleanup rm-off-ct");
+
+        let rm = create(&ContainerConfig::new("rm-on-ct").auto_remove(true))
+            .expect("create rm-on-ct");
+        assert!(
+            info(rm).expect("info rm-on-ct").auto_remove,
+            "auto_remove(true) must be recorded",
+        );
+        delete(rm).expect("cleanup rm-on-ct");
+        assert_eq!(active_count(), 0);
+    }
+    serial_println!("[container]   auto-remove (--rm) config: OK");
+
+    serial_println!("[container] Self-test PASSED (43 tests)");
 }

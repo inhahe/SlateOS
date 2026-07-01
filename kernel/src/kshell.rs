@@ -67235,6 +67235,12 @@ fn cmd_container(args: &str) {
                             val
                         ),
                     }
+                } else if arg == "rm" || arg == "--rm" || arg == "rm=true" {
+                    // Docker `--rm`: auto-delete the container when its init
+                    // exits (unless a restart policy takes precedence).
+                    cfg.auto_remove = true;
+                } else if arg == "rm=false" {
+                    cfg.auto_remove = false;
                 } else {
                     // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
                     if parts.get(2) == Some(&arg) {
@@ -67358,6 +67364,9 @@ fn cmd_container(args: &str) {
                     "  Restart:    {} (restarts: {})",
                     ci.restart_policy, ci.restart_count
                 );
+            }
+            if ci.auto_remove {
+                crate::console_println!("  AutoRemove: yes (--rm)");
             }
             crate::console_println!("  Processes:  {}", ci.nr_procs);
             match ci.init_pid {
@@ -68192,7 +68201,7 @@ fn cmd_container(args: &str) {
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-q: IDs only)");
-            crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] — create container");
+            crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");

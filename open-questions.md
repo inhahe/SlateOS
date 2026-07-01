@@ -335,4 +335,15 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   (`handle_nmi` → `sched::dump_task_table`; NMI vector needs a dedicated IST,
   currently `ist=0`), `kernel/src/gdt.rs` (add the NMI IST stack), and the
   arming scope (boot ring-3 window, mirroring `sched::liveness_arm/disarm`).
-- **Status** — OPEN.
+- **Progress (2026-07-01)** — the *harness half* of the low-regret default is
+  landed and validated: `boot-test.sh` now has an opt-in
+  `--hard-lockup-watchdog` flag that appends `-device i6300esb,id=hwdog0
+  -action watchdog=inject-nmi` **only when passed** (default runs are byte-for-byte
+  unchanged, verified). Confirmed the installed QEMU accepts the device and the
+  `inject-nmi` action. Remaining (still OPEN, delicate — the kernel half): the
+  `i6300esb` driver (BAR map + periodic kick), the dedicated NMI IST
+  (`gdt.rs`/`idt.rs`, NMI vector currently `ist=0`), the `handle_nmi` →
+  `sched::dump_task_table` dump path, and boot-window arming. Kept the kernel
+  half unstarted pending either the operator's steer on option A/B/C or a fresh
+  focused session, since the IST/NMI changes touch shared boot infra.
+- **Status** — OPEN (harness flag landed opt-in; kernel driver + NMI/IST wiring pending).

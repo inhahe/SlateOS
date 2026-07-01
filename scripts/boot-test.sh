@@ -13,6 +13,21 @@
 #                                       # deferred background task AFTER BOOT_OK,
 #                                       # so the default fast path never sees
 #                                       # them — use this to catch perf regressions)
+#   ./scripts/boot-test.sh --hard-lockup-watchdog
+#                                       # attach a QEMU i6300esb PCI watchdog set
+#                                       # to inject an NMI on timeout. OFF by
+#                                       # default (zero effect on normal runs).
+#                                       # For deliberate repro runs of the
+#                                       # B-PTHREAD-YIELDBUDGET BSP-dead hang: if
+#                                       # the kernel's (future) watchdog driver
+#                                       # stops kicking because the BSP wedged
+#                                       # with IF=0, QEMU injects an NMI that
+#                                       # fires regardless of IF, letting the NMI
+#                                       # handler dump the task table. See
+#                                       # open-questions.md Q20. Under our default
+#                                       # TCG/no-PMU QEMU this is the only NMI
+#                                       # source that can catch a single-CPU
+#                                       # IF=0 spin.
 
 set -euo pipefail
 
@@ -71,6 +86,10 @@ SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 TIMEOUT=480
 NO_BUILD=0
 BENCH=0
+# Attach the QEMU i6300esb PCI watchdog (inject-nmi on timeout)?  OFF by
+# default so the shared harness is byte-for-byte unchanged on normal runs;
+# only --hard-lockup-watchdog opts in (see Q20 in open-questions.md).
+HARD_LOCKUP_WATCHDOG=0
 # Which serial marker the wait loop treats as "boot finished".  Default is
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
@@ -82,8 +101,24 @@ for arg in "$@"; do
         --no-build) NO_BUILD=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
         --timeout=*) TIMEOUT="${arg#*=}" ;;
+        --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
     esac
 done
+
+# Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and
+# Q20).  Empty unless opted in, so the default QEMU command line is unchanged.
+#
+#  * -device i6300esb        — Intel 6300ESB PCI watchdog, emulated by QEMU under
+#                              TCG (unlike the PMU, which TCG does not model), so
+#                              it is the one NMI source that works in our harness.
+#  * -action watchdog=inject-nmi
+#                            — on watchdog expiry, inject an NMI into the guest
+#                              (fires even with IF=0) instead of resetting it.
+WATCHDOG_ARGS=()
+if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
+    WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action watchdog=inject-nmi)
+    echo "=== Hard-lockup watchdog ENABLED (i6300esb -> inject-nmi) ==="
+fi
 
 # Print the micro-benchmark result lines from the serial log.  The kernel emits
 # them as "[bench] <name>: <number>" plus PASS / "ABOVE TARGET" verdicts from a
@@ -251,6 +286,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
+    "${WATCHDOG_ARGS[@]}" \
     -device virtio-gpu-pci \
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \

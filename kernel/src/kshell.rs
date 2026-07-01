@@ -68228,6 +68228,68 @@ fn cmd_container(args: &str) {
             let removed = container::prune();
             crate::console_println!("Removed {} stopped container(s)", removed);
         }
+        "system" => {
+            // container system <df|prune>  (Docker `docker system df` /
+            // `docker system prune`): aggregate disk usage across the three
+            // runtime registries, and a combined reclaim sweep.
+            match parts.get(1).copied() {
+                Some("df") => {
+                    // Docker `system df`: a per-type usage summary. Counts come
+                    // straight from the registries; volume "size" is the summed
+                    // byte total of each volume's backing tree (walked on the
+                    // host VFS). Images are directory-referenced (no name-keyed
+                    // store), so there is no image row to total.
+                    let cts = container::list();
+                    let total_ct = cts.len();
+                    let running_ct = cts
+                        .iter()
+                        .filter(|(_, _, st)| *st == container::ContainerState::Running)
+                        .count();
+                    let vols = crate::volume::list();
+                    let mut vol_bytes: u64 = 0;
+                    for v in &vols {
+                        vol_bytes = vol_bytes.saturating_add(crate::volume::backing_size(v));
+                    }
+                    let nets = crate::cnetwork::count();
+                    let active_nets = crate::cnetwork::list()
+                        .iter()
+                        .filter(|n| !n.allocations.is_empty())
+                        .count();
+                    crate::console_println!("TYPE            TOTAL     ACTIVE    SIZE");
+                    crate::console_println!(
+                        "Containers      {:<9} {:<9} -", total_ct, running_ct
+                    );
+                    crate::console_println!(
+                        "Volumes         {:<9} {:<9} {}",
+                        vols.len(), "-", format_size_human(vol_bytes)
+                    );
+                    crate::console_println!(
+                        "Networks        {:<9} {:<9} -", nets, active_nets
+                    );
+                }
+                Some("prune") => {
+                    // Docker `system prune`: reclaim stopped containers and
+                    // unused (zero-allocation) networks. Volumes are NOT pruned:
+                    // our runtime does not track per-volume usage, so "unused"
+                    // is undeterminable — sweeping them could delete live data.
+                    // (Docker likewise leaves volumes alone without --volumes.)
+                    let ct_removed = container::prune();
+                    let net_removed = crate::cnetwork::prune();
+                    crate::console_println!(
+                        "Removed {} stopped container(s), {} unused network(s)",
+                        ct_removed, net_removed
+                    );
+                    crate::console_println!(
+                        "Volumes left intact (usage is untracked; remove explicitly with `container volume remove`)"
+                    );
+                }
+                _ => {
+                    crate::console_println!("Usage: container system <df|prune>");
+                    crate::console_println!("  container system df     — disk usage by containers/volumes/networks");
+                    crate::console_println!("  container system prune  — remove stopped containers + unused networks");
+                }
+            }
+        }
         "export" => {
             // container export <id> <host-tar-path>  (Docker `export`): pack the
             // container's rootfs into a tar archive written to the host VFS.
@@ -68520,7 +68582,7 @@ fn cmd_container(args: &str) {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|system|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
@@ -68533,6 +68595,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container pause ID [ID...]               — freeze (suspend all threads)");
             crate::console_println!("  container unpause ID [ID...]             — thaw (resume all threads)");
             crate::console_println!("  container prune                          — remove all stopped containers");
+            crate::console_println!("  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)");
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
@@ -68915,7 +68978,7 @@ fn cmd_docker(args: &str) {
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
         | "diff" | "rename" | "update" | "prune" | "cp" | "commit" | "export"
-        | "import" | "volume" | "network" => delegate(sub),
+        | "import" | "volume" | "network" | "system" => delegate(sub),
         // SlateOS has no image registry/store keyed by name — images are
         // referenced by their on-disk OCI layout directory. `docker images`
         // therefore inspects a directory rather than listing a registry.
@@ -68943,7 +69006,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|images|version> ...");
+            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -68964,6 +69027,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker commit|export|import ...        — snapshot / pack / load a rootfs");
             crate::console_println!("  docker save <image-dir> <out-tar>      — bundle an OCI image into a tar");
             crate::console_println!("  docker load <in-tar> <dest-dir>        — restore a saved image tar into a dir");
+            crate::console_println!("  docker system df|prune                 — disk usage / reclaim stopped containers+networks");
             crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
             crate::console_println!();
             crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");

@@ -223,6 +223,56 @@ pub fn prune() -> usize {
     removed
 }
 
+/// Total byte size of a volume's backing tree, summing regular-file sizes.
+///
+/// Walks the volume's backing directory (under [`VOLUMES_ROOT`]) with an
+/// explicit work stack — bounded kernel stack, no recursion — so a deep tree
+/// cannot overflow.  Returns `0` for an unknown/invalid name or a volume whose
+/// backing directory was never materialized; directories that fail to
+/// `readdir` are skipped rather than aborting the total.  This is a best-effort
+/// `du`-style measurement for `docker system df` (a summary display), so it
+/// tolerates transient VFS errors instead of surfacing them.
+#[must_use]
+pub fn backing_size(name: &str) -> u64 {
+    let Ok(root) = backing_path(name) else {
+        return 0;
+    };
+    dir_tree_bytes(&root)
+}
+
+/// Sum of regular-file sizes in the directory subtree rooted at `root`.
+///
+/// Iterative (stack-based) VFS walk shared by [`backing_size`].  A `MAX_ENTRIES`
+/// cap bounds a pathological tree; symlinks carry no data payload to sum.
+fn dir_tree_bytes(root: &str) -> u64 {
+    use crate::fs::vfs::{EntryType, Vfs};
+    const MAX_ENTRIES: usize = 1_000_000;
+    let mut total: u64 = 0;
+    let mut visited: usize = 0;
+    let mut stack: Vec<String> = alloc::vec![String::from(root.trim_end_matches('/'))];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = Vfs::readdir(&dir) else {
+            continue;
+        };
+        for de in entries {
+            if de.name == "." || de.name == ".." {
+                continue;
+            }
+            visited = visited.saturating_add(1);
+            if visited >= MAX_ENTRIES {
+                return total;
+            }
+            let child = alloc::format!("{dir}/{}", de.name);
+            match de.entry_type {
+                EntryType::Directory => stack.push(child),
+                EntryType::File => total = total.saturating_add(de.size),
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
 /// Self-test for the named-volume registry (invoked at boot).
 ///
 /// Exercises name validation, create/idempotency, list/exists/path_of, remove,
@@ -282,6 +332,23 @@ pub fn self_test() {
     assert!(exists("st-vol-b"), "ensure must create the volume");
     assert!(crate::fs::vfs::Vfs::exists(&p2), "ensure must materialize the dir");
     serial_println!("[volume]   ensure (create-on-demand): OK");
+
+    // backing_size(): sums regular-file bytes across the backing tree, including
+    // a nested subdir; unknown volume is 0; a freshly-created empty volume is 0.
+    {
+        use crate::fs::vfs::Vfs;
+        assert_eq!(backing_size("st-vol-missing"), 0, "unknown volume sizes to 0");
+        assert_eq!(backing_size("st-vol-b"), 0, "empty volume sizes to 0");
+        // Write 3 + 5 bytes at two depths and confirm the total is 8.
+        Vfs::write_file(&alloc::format!("{p2}/a.txt"), b"AAA").expect("write a");
+        Vfs::mkdir(&alloc::format!("{p2}/sub")).expect("mkdir sub");
+        Vfs::write_file(&alloc::format!("{p2}/sub/b.txt"), b"BBBBB").expect("write b");
+        assert_eq!(
+            backing_size("st-vol-b"), 8,
+            "backing_size must sum nested regular-file bytes",
+        );
+    }
+    serial_println!("[volume]   backing_size (du-style tree sum): OK");
 
     // Remove: unregisters and deletes the backing directory.
     remove("st-vol-a").expect("remove st-vol-a");

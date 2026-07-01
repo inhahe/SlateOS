@@ -1249,6 +1249,8 @@ fn finish_image(
 const MAX_BUILD_INSTRUCTIONS: usize = 4096;
 /// Upper bound on files collected by a single COPY/ADD (runaway-recursion guard).
 const MAX_COPY_FILES: usize = 100_000;
+/// Upper bound on build stages (`FROM …`) in one multi-stage Dockerfile.
+const MAX_BUILD_STAGES: usize = 128;
 
 /// Failure modes of [`build_image`].
 ///
@@ -1805,16 +1807,267 @@ pub fn build_image_with_args(
         }
     };
 
+    // Split the Dockerfile into stages at `FROM` boundaries and collect the
+    // "global" ARGs declared before the first FROM.
+    let StageSplit { global_args, stages } = split_stages(&instrs, build_args)?;
+    if stages.len() > MAX_BUILD_STAGES {
+        return Err(BuildError::Parse {
+            line: 0,
+            msg: String::from("Dockerfile has too many build stages"),
+        });
+    }
+
+    // Build each stage in order.  Every stage but the last is materialised to a
+    // temporary OCI image directory so that a later `FROM <stage>` or
+    // `COPY --from=<stage>` can consume it; the last stage writes to `dest`.
+    let mut built: Vec<StageBuilt> = Vec::new();
+    let mut temp_stage_dirs: Vec<String> = Vec::new();
+    let stage_count = stages.len();
+    let mut final_desc: Option<Descriptor> = None;
+
+    for (i, stage) in stages.iter().enumerate() {
+        let is_last = i.saturating_add(1) == stage_count;
+        let stage_dest = if is_last {
+            String::from(dest)
+        } else {
+            format!("{dest}.stage{i}")
+        };
+        match build_one_stage(
+            stage,
+            context_dir,
+            &ignore,
+            build_args,
+            &global_args,
+            &built,
+            &stage_dest,
+        ) {
+            Ok(d) => {
+                if is_last {
+                    final_desc = Some(d);
+                } else {
+                    temp_stage_dirs.push(stage_dest.clone());
+                }
+                built.push(StageBuilt {
+                    name: stage.name.clone(),
+                    image_dir: stage_dest,
+                });
+            }
+            Err(e) => {
+                for d in &temp_stage_dirs {
+                    let _ = Vfs::remove_recursive(d);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    // Remove intermediate stage images (the final image stays in `dest`).
+    for d in &temp_stage_dirs {
+        let _ = Vfs::remove_recursive(d);
+    }
+    final_desc.ok_or(BuildError::MissingFrom)
+}
+
+/// One parsed build stage: its optional `AS <name>` and its instruction slice
+/// (including the leading `FROM` line as element 0).
+struct StageSpec<'a> {
+    name: Option<String>,
+    instrs: &'a [(usize, String)],
+}
+
+/// The result of splitting a Dockerfile into stages: the pre-FROM "global"
+/// ARGs plus the ordered per-stage instruction slices.
+struct StageSplit<'a> {
+    global_args: Vec<(String, String)>,
+    stages: Vec<StageSpec<'a>>,
+}
+
+/// A completed stage, addressable by name or by index for `FROM <stage>` /
+/// `COPY --from=<stage>` resolution.
+struct StageBuilt {
+    name: Option<String>,
+    image_dir: String,
+}
+
+/// Apply an `ARG` instruction to the running variable set, honouring any
+/// matching `--build-arg` override (which only takes effect for a declared
+/// name, superseding the `ARG` default).
+fn apply_arg(rest_raw: &str, vars: &mut Vec<(String, String)>, build_args: &[(String, String)]) {
+    let expanded = expand_vars(rest_raw, vars);
+    let (name, default) = match expanded.split_once('=') {
+        Some((n, v)) => (String::from(n.trim()), String::from(v)),
+        None => (String::from(expanded.trim()), String::new()),
+    };
+    if !name.is_empty() {
+        let value = build_args
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == name)
+            .map_or(default, |(_, v)| v.clone());
+        vars.push((name, value));
+    }
+}
+
+/// Extract the `AS <name>` label from a `FROM <ref> [AS <name>]` line, if any.
+fn parse_stage_name(from_line: &str) -> Option<String> {
+    let toks: Vec<&str> = from_line.split_whitespace().collect();
+    let mut it = toks.iter();
+    while let Some(t) = it.next() {
+        if t.eq_ignore_ascii_case("AS") {
+            return it.next().map(|s| String::from(*s));
+        }
+    }
+    None
+}
+
+/// Split logical Dockerfile lines into stages at each `FROM`, returning the
+/// pre-FROM global ARGs and the ordered stage slices.
+///
+/// Any non-`ARG` instruction before the first `FROM` is a hard error
+/// ([`BuildError::MissingFrom`]), matching Docker's rule that a build must
+/// begin (globals aside) with `FROM`.
+fn split_stages<'a>(
+    instrs: &'a [(usize, String)],
+    build_args: &[(String, String)],
+) -> Result<StageSplit<'a>, BuildError> {
+    let mut starts: Vec<usize> = Vec::new();
+    for (idx, (_, logical)) in instrs.iter().enumerate() {
+        let first = logical.split_whitespace().next().unwrap_or("");
+        if first.eq_ignore_ascii_case("FROM") {
+            starts.push(idx);
+        }
+    }
+    let first_from = match starts.first() {
+        Some(&s) => s,
+        None => return Err(BuildError::MissingFrom),
+    };
+
+    // Pre-FROM preamble: only ARG is allowed there.
+    let mut global_args: Vec<(String, String)> = Vec::new();
+    for (_, logical) in instrs.get(..first_from).unwrap_or(&[]) {
+        let (instr, rest_raw) = match logical.split_once(char::is_whitespace) {
+            Some((a, b)) => (a, b.trim()),
+            None => (logical.as_str(), ""),
+        };
+        if instr.eq_ignore_ascii_case("ARG") {
+            apply_arg(rest_raw, &mut global_args, build_args);
+        } else {
+            return Err(BuildError::MissingFrom);
+        }
+    }
+
+    let mut stages: Vec<StageSpec<'a>> = Vec::new();
+    for (si, &start) in starts.iter().enumerate() {
+        let end = starts.get(si.saturating_add(1)).copied().unwrap_or(instrs.len());
+        let slice = instrs.get(start..end).unwrap_or(&[]);
+        let name = slice.first().and_then(|(_, l)| parse_stage_name(l));
+        stages.push(StageSpec { name, instrs: slice });
+    }
+    Ok(StageSplit { global_args, stages })
+}
+
+/// Resolve a `FROM <ref>` / `COPY --from=<ref>` reference to a prior stage's
+/// image directory (by `AS` name, else by 0-based index).  Returns `None` if
+/// the reference is not a prior stage (caller treats it as an external image).
+fn resolve_stage_dir<'a>(reference: &str, prior: &'a [StageBuilt]) -> Option<&'a str> {
+    if let Some(s) = prior.iter().find(|s| s.name.as_deref() == Some(reference)) {
+        return Some(&s.image_dir);
+    }
+    if let Ok(idx) = reference.parse::<usize>() {
+        if let Some(s) = prior.get(idx) {
+            return Some(&s.image_dir);
+        }
+    }
+    None
+}
+
+/// Extract every layer of an OCI image (bottom-to-top) into `out_dir`, yielding
+/// that stage's assembled rootfs — the source tree for a `COPY --from`.
+fn materialize_rootfs(image_dir: &str, out_dir: &str) -> Result<(), BuildError> {
+    let img = load_image(image_dir).map_err(BuildError::Kernel)?;
+    for layer in &img.manifest.layers {
+        extract_layer(image_dir, layer, out_dir).map_err(BuildError::Kernel)?;
+    }
+    Ok(())
+}
+
+/// Resolve a `COPY --from=<ref>` reference to a rootfs directory to copy from,
+/// materialising (and memoising) the referenced image's filesystem.
+fn resolve_from_rootfs(
+    reference: &str,
+    prior: &[StageBuilt],
+    cache: &mut Vec<(String, String)>,
+    scratch: &mut Vec<String>,
+    dest: &str,
+) -> Result<String, BuildError> {
+    let image_dir = match resolve_stage_dir(reference, prior) {
+        Some(d) => String::from(d),
+        None => String::from(reference),
+    };
+    if let Some((_, rd)) = cache.iter().find(|(id, _)| *id == image_dir) {
+        return Ok(rd.clone());
+    }
+    let rootfs_dir = format!("{dest}.from{}", cache.len());
+    crate::fs::Vfs::mkdir_all(&rootfs_dir).map_err(BuildError::Kernel)?;
+    materialize_rootfs(&image_dir, &rootfs_dir)?;
+    scratch.push(rootfs_dir.clone());
+    cache.push((image_dir, rootfs_dir.clone()));
+    Ok(rootfs_dir)
+}
+
+/// Build a single stage, cleaning up any transient `COPY --from` rootfs
+/// extractions before returning (success or failure).
+fn build_one_stage(
+    stage: &StageSpec,
+    context_dir: &str,
+    ignore: &[(bool, String)],
+    build_args: &[(String, String)],
+    global_args: &[(String, String)],
+    prior: &[StageBuilt],
+    dest: &str,
+) -> Result<Descriptor, BuildError> {
+    let mut scratch: Vec<String> = Vec::new();
+    let res = build_one_stage_inner(
+        stage,
+        context_dir,
+        ignore,
+        build_args,
+        global_args,
+        prior,
+        dest,
+        &mut scratch,
+    );
+    for d in &scratch {
+        let _ = crate::fs::Vfs::remove_recursive(d);
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_one_stage_inner(
+    stage: &StageSpec,
+    context_dir: &str,
+    ignore: &[(bool, String)],
+    build_args: &[(String, String)],
+    global_args: &[(String, String)],
+    prior: &[StageBuilt],
+    dest: &str,
+    scratch: &mut Vec<String>,
+) -> Result<Descriptor, BuildError> {
+    use crate::fs::Vfs;
+
     let mut spec = ImageSpec::new();
-    // Build-time variables (ARG defaults + ENV), used for `${VAR}` expansion.
-    let mut vars: Vec<(String, String)> = Vec::new();
-    // Base-image layer blobs carried forward verbatim (FROM <dir>).
+    // Build-time variables: global ARGs seed each stage, then ARG/ENV extend.
+    let mut vars: Vec<(String, String)> = global_args.to_vec();
+    // Base-image layer blobs carried forward verbatim (FROM <dir>/<stage>).
     let mut base_layer_descs: Vec<Descriptor> = Vec::new();
     let mut base_diff_ids: Vec<String> = Vec::new();
     let mut base_dir: Option<String> = None;
     let mut from_seen = false;
+    // Memoised (image_dir -> extracted rootfs dir) for `COPY --from`.
+    let mut rootfs_cache: Vec<(String, String)> = Vec::new();
 
-    for (line, logical) in &instrs {
+    for (line, logical) in stage.instrs {
         let line = *line;
         let (instr, rest_raw) = match logical.split_once(char::is_whitespace) {
             Some((a, b)) => (a, b.trim()),
@@ -1824,21 +2077,7 @@ pub fn build_image_with_args(
 
         // ARG may legally precede FROM (a "global" build arg).
         if instr_up == "ARG" {
-            let expanded = expand_vars(rest_raw, &vars);
-            let (name, default) = match expanded.split_once('=') {
-                Some((n, v)) => (String::from(n.trim()), String::from(v)),
-                None => (String::from(expanded.trim()), String::new()),
-            };
-            if !name.is_empty() {
-                // A `--build-arg NAME=value` override supersedes the default,
-                // but only for a NAME the Dockerfile actually declares (here).
-                let value = build_args
-                    .iter()
-                    .rev()
-                    .find(|(k, _)| *k == name)
-                    .map_or(default, |(_, v)| v.clone());
-                vars.push((name, value));
-            }
+            apply_arg(rest_raw, &mut vars, build_args);
             continue;
         }
 
@@ -1857,7 +2096,13 @@ pub fn build_image_with_args(
                     });
                 }
                 if base_ref != "scratch" {
-                    let base = load_image(base_ref).map_err(BuildError::Kernel)?;
+                    // A prior-stage reference resolves to that stage's built
+                    // image dir; otherwise treat it as an external image dir.
+                    let base_path = match resolve_stage_dir(base_ref, prior) {
+                        Some(d) => String::from(d),
+                        None => String::from(base_ref),
+                    };
+                    let base = load_image(&base_path).map_err(BuildError::Kernel)?;
                     spec.architecture = base.config.architecture.clone();
                     spec.os = base.config.os.clone();
                     spec.env = base.config.env.clone();
@@ -1889,7 +2134,7 @@ pub fn build_image_with_args(
                             msg: String::from("base image layer/diff_id count mismatch"),
                         });
                     }
-                    base_dir = Some(String::from(base_ref));
+                    base_dir = Some(base_path);
                 }
                 from_seen = true;
             }
@@ -1975,7 +2220,13 @@ pub fn build_image_with_args(
             "COPY" | "ADD" => {
                 let expanded = expand_vars(rest_raw, &vars);
                 let mut toks = tokenize(&expanded);
-                // Drop leading flag tokens (e.g. --chown=, --chmod=).
+                // Detect `--from=<ref>` *before* dropping flag tokens: it
+                // switches the copy source from the build context to a prior
+                // stage's (or an external image's) assembled rootfs.
+                let from_ref: Option<String> = toks
+                    .iter()
+                    .find_map(|t| t.strip_prefix("--from=").map(String::from));
+                // Drop leading flag tokens (e.g. --chown=, --chmod=, --from=).
                 toks.retain(|t| !t.starts_with("--"));
                 if toks.len() < 2 {
                     return Err(BuildError::Parse {
@@ -1987,8 +2238,18 @@ pub fn build_image_with_args(
                 let src_count = toks.len().saturating_sub(1);
                 let single = src_count == 1;
                 let mut files: Vec<LayerFile> = Vec::new();
+                // For `--from`, copy from the referenced rootfs with no
+                // `.dockerignore` filtering (that only applies to the context).
+                let empty_ignore: [(bool, String); 0] = [];
+                let (src_dir, eff_ignore): (String, &[(bool, String)]) = match &from_ref {
+                    Some(r) => (
+                        resolve_from_rootfs(r, prior, &mut rootfs_cache, scratch, dest)?,
+                        &empty_ignore,
+                    ),
+                    None => (String::from(context_dir), ignore),
+                };
                 for src in toks.iter().take(src_count) {
-                    collect_copy_src(context_dir, src, &dest_path, single, &ignore, &mut files, line)?;
+                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { files });
             }
@@ -2709,7 +2970,82 @@ ONBUILD RUN echo triggered
         serial_println!("[oci]   metadata instructions (VOLUME/STOPSIGNAL/SHELL/ONBUILD): OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (14 tests)");
+    // Test 15: multi-stage builds — named + indexed stages, `FROM <stage>`
+    // base inheritance, and `COPY --from=<stage>` cross-stage copies.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_ms_ctx";
+        let img = "/tmp/oci_ms_img";
+        let ext = "/tmp/oci_ms_ext";
+        cleanup_image_dir(img);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/app.txt"), b"appdata")?;
+        Vfs::write_file(&format!("{ctx}/extra.txt"), b"extradata")?;
+
+        // Stage 0 (builder): puts /out/app.txt into its rootfs.
+        // Stage 1 (mid): FROM builder, so it inherits /out/app.txt, adds
+        //   /extra.txt.
+        // Stage 2 (final): scratch; pulls app.txt from stage 0 by index and
+        //   extra.txt from `mid` by name via COPY --from.
+        let df = br#"FROM scratch AS builder
+COPY app.txt /out/app.txt
+
+FROM builder AS mid
+COPY extra.txt /extra.txt
+
+FROM scratch
+COPY --from=0 /out/app.txt /app.txt
+COPY --from=mid /extra.txt /extra.txt
+"#;
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] multi-stage build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+
+        let ms = load_image(img)?;
+        // Final image = two COPY --from layers only (the scratch final stage
+        // inherits no base layers).
+        assert_eq!(ms.manifest.layers.len(), 2, "final stage has 2 COPY layers");
+
+        let _ = Vfs::mkdir(ext);
+        for layer in &ms.manifest.layers {
+            extract_layer(img, layer, ext)?;
+        }
+        assert_eq!(Vfs::read_file(&format!("{ext}/app.txt"))?, b"appdata");
+        assert_eq!(Vfs::read_file(&format!("{ext}/extra.txt"))?, b"extradata");
+        // The final stage copied only specific files: the builder's /out/
+        // directory must NOT leak into the final image.
+        assert!(
+            Vfs::read_file(&format!("{ext}/out/app.txt")).is_err(),
+            "builder /out/ must not leak into the final image"
+        );
+
+        // Intermediate stage images and `--from` scratch rootfs dirs must be
+        // cleaned up by the builder.
+        assert!(
+            Vfs::metadata(&format!("{img}.stage0")).is_err(),
+            "stage0 temp image removed"
+        );
+        assert!(
+            Vfs::metadata(&format!("{img}.stage1")).is_err(),
+            "stage1 temp image removed"
+        );
+        assert!(
+            Vfs::metadata(&format!("{img}.from0")).is_err(),
+            "COPY --from rootfs scratch removed"
+        );
+
+        let _ = Vfs::remove(&format!("{ext}/app.txt"));
+        let _ = Vfs::remove(&format!("{ext}/extra.txt"));
+        let _ = Vfs::rmdir(ext);
+        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
+        let _ = Vfs::remove(&format!("{ctx}/extra.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        serial_println!("[oci]   multi-stage builds (FROM..AS / COPY --from): OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (15 tests)");
     Ok(())
 }
 

@@ -5294,7 +5294,19 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     - [x] `oci run`: full container creation from OCI image (layer extraction → overlay rootfs → container with namespace isolation)
   - [x] Per-namespace DNS resolution: containers use their own configured DNS server (fallback to host)
   - [x] `container exec <id> <cmd>`: run kshell commands inside a container's network namespace
-  - [ ] Port Docker (or equivalent container runtime)
+  - [-] Port Docker (or equivalent container runtime) — in progress. Native
+    `container`/`ct` runtime + `oci` image tooling + a `docker`/`dk` compat
+    shim. Shipped: OCI image load/inspect/layers/extract, overlay rootfs,
+    volumes, user-defined networks + IPAM, port publishing, resource limits
+    (mem/cpu via cgroups), restart/`--rm` policies, `run`/`create`/`start`/
+    `stop`/`kill`/`pause`/`ps`/`rm`/`inspect`/`logs`/`events`/`stats`/`top`/
+    `port`/`wait`/`diff`/`rename`/`update`/`prune`/`cp`/`commit`/`export`/
+    `import`, `system df`/`prune`, image `save`/`load`, and **`build`**
+    (Dockerfile → OCI image via `oci::build_image`: FROM scratch|local-image
+    with inheritance, COPY/ADD, ENV/CMD/ENTRYPOINT/WORKDIR/USER/EXPOSE/LABEL,
+    ARG `${VAR}` expansion). Remaining: real `container exec` / Dockerfile
+    `RUN` (rootfs-binary exec in the container's namespaces) — gated on
+    operator decision Q17 (see open-questions.md).
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

@@ -67059,9 +67059,16 @@ fn cmd_container(args: &str) {
             let mut name_filters: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
             let mut status_filters: alloc::vec::Vec<container::ContainerState> =
                 alloc::vec::Vec::new();
+            // `-q`/`--quiet` (Docker `ps -q`): print only container IDs, one per
+            // line, with no header — for scripting (`rm $(ls -q)`).
+            let mut quiet = false;
             let mut fi = 1;
             while fi < parts.len() {
                 match parts.get(fi) {
+                    Some(&"-q") | Some(&"--quiet") => {
+                        quiet = true;
+                        fi = fi.saturating_add(1);
+                    }
                     Some(&"--filter") | Some(&"-f") => {
                         if let Some(&spec) = parts.get(fi.saturating_add(1)) {
                             if let Some(lbl) = spec.strip_prefix("label=") {
@@ -67110,7 +67117,10 @@ fn cmd_container(args: &str) {
 
             let all = container::list();
             if all.is_empty() {
-                crate::console_println!("No containers.");
+                // Quiet mode stays silent so `rm $(ls -q)` degrades to a no-op.
+                if !quiet {
+                    crate::console_println!("No containers.");
+                }
                 return;
             }
             // A container matches only if every filter is satisfied. Name and
@@ -67136,7 +67146,16 @@ fn cmd_container(args: &str) {
             let shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
                 all.iter().filter(|(id, name, state)| matches(*id, name, *state)).collect();
             if shown.is_empty() {
-                crate::console_println!("No containers match the filter.");
+                if !quiet {
+                    crate::console_println!("No containers match the filter.");
+                }
+                return;
+            }
+            // Quiet mode: just the IDs, one per line (Docker `ps -q`).
+            if quiet {
+                for (id, _name, _state) in &shown {
+                    crate::console_println!("{}", id);
+                }
                 return;
             }
             crate::console_println!("=== Containers ({}) ===", shown.len());
@@ -67229,57 +67248,68 @@ fn cmd_container(args: &str) {
         }
         "delete" | "del" | "rm" => {
             // `--force`/`-f` removes a running container (Docker `rm -f`); the
-            // flag may appear before or after the id.  The first non-flag token
-            // after the subcommand is the id.
+            // flag may appear before or after the ids.  Every non-flag token
+            // after the subcommand is treated as a container id (Docker `rm`
+            // accepts multiple targets and processes each independently).
             let force = parts.iter().skip(1).any(|&t| t == "-f" || t == "--force");
-            let Some(id_str) = parts
+            let ids: alloc::vec::Vec<&str> = parts
                 .iter()
                 .skip(1)
-                .find(|&&t| t != "-f" && t != "--force")
-            else {
-                crate::console_println!("Usage: container delete [-f|--force] <id>");
+                .copied()
+                .filter(|&t| t != "-f" && t != "--force")
+                .collect();
+            if ids.is_empty() {
+                crate::console_println!("Usage: container delete [-f|--force] <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let result = if force {
-                container::force_delete(id)
-            } else {
-                container::delete(id)
-            };
-            match result {
-                Ok(()) => crate::console_println!("Deleted container {}", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for id_str in ids {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                let result = if force {
+                    container::force_delete(id)
+                } else {
+                    container::delete(id)
+                };
+                match result {
+                    Ok(()) => crate::console_println!("Deleted container {}", id),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "start" => {
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container start <id>");
+            // Docker `start` accepts multiple targets: each is processed
+            // independently and failures don't abort the rest.
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container start <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::start(id) {
-                Ok(()) => crate::console_println!("Container {} started", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::start(id) {
+                    Ok(()) => crate::console_println!("Container {} started", id),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "stop" => {
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container stop <id>");
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container stop <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::stop(id) {
-                Ok(()) => crate::console_println!("Container {} stopped", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::stop(id) {
+                    Ok(()) => crate::console_println!("Container {} stopped", id),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "info" | "inspect" => {
@@ -67571,21 +67601,23 @@ fn cmd_container(args: &str) {
             }
         }
         "kill" => {
-            // container kill <id>  (Docker `kill`): force-terminate the
+            // container kill <id> [id...]  (Docker `kill`): force-terminate the
             // container by killing all its processes; the init's exit
             // auto-stops the container with exit code 137.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container kill <id>");
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container kill <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::kill(id) {
-                Ok(0) => crate::console_println!("Container {}: no running processes to kill", id),
-                Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::kill(id) {
+                    Ok(0) => crate::console_println!("Container {}: no running processes to kill", id),
+                    Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "port" => {
@@ -67655,35 +67687,39 @@ fn cmd_container(args: &str) {
             }
         }
         "pause" => {
-            // container pause <id>  (Docker `pause`): freeze the container,
-            // suspending all of its threads until `unpause`.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container pause <id>");
+            // container pause <id> [id...]  (Docker `pause`): freeze the
+            // container, suspending all of its threads until `unpause`.
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container pause <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::pause(id) {
-                Ok(n) => crate::console_println!("Container {} paused ({} thread(s) suspended)", id, n),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::pause(id) {
+                    Ok(n) => crate::console_println!("Container {} paused ({} thread(s) suspended)", id, n),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "unpause" | "resume" => {
-            // container unpause <id>  (Docker `unpause`): thaw a frozen
+            // container unpause <id> [id...]  (Docker `unpause`): thaw a frozen
             // container, resuming all of its threads.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container unpause <id>");
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container unpause <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::unpause(id) {
-                Ok(n) => crate::console_println!("Container {} unpaused ({} thread(s) resumed)", id, n),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::unpause(id) {
+                    Ok(n) => crate::console_println!("Container {} unpaused ({} thread(s) resumed)", id, n),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "rootfs" => {
@@ -67756,21 +67792,23 @@ fn cmd_container(args: &str) {
             }
         }
         "restart" => {
-            // container restart <id>  (Docker `restart`): re-launch the
+            // container restart <id> [id...]  (Docker `restart`): re-launch each
             // container's recorded init command (from the last `run`).
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container restart <id>");
+            if parts.len() < 2 {
+                crate::console_println!("Usage: container restart <id> [id...]");
                 return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::restart(id) {
-                Ok(pid) => crate::console_println!(
-                    "Container {} restarted: init pid={}", id, pid
-                ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+            for &id_str in parts.iter().skip(1) {
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID '{}'", id_str);
+                    continue;
+                };
+                match container::restart(id) {
+                    Ok(pid) => crate::console_println!(
+                        "Container {} restarted: init pid={}", id, pid
+                    ),
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
             }
         }
         "cp" => {
@@ -68027,17 +68065,17 @@ fn cmd_container(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
-            crate::console_println!("  container [list] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (optionally filtered)");
+            crate::console_println!("  container [list] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-q: IDs only)");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
-            crate::console_println!("  container delete [-f] ID                 — delete container (-f force-removes a running one)");
+            crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");
-            crate::console_println!("  container restart ID                     — re-launch the recorded init command");
-            crate::console_println!("  container start ID                       — mark as running");
-            crate::console_println!("  container stop ID                        — mark as stopped");
-            crate::console_println!("  container kill ID                        — force-kill all container processes");
-            crate::console_println!("  container pause ID                       — freeze (suspend all threads)");
-            crate::console_println!("  container unpause ID                     — thaw (resume all threads)");
+            crate::console_println!("  container restart ID [ID...]             — re-launch the recorded init command");
+            crate::console_println!("  container start ID [ID...]               — mark as running");
+            crate::console_println!("  container stop ID [ID...]                — mark as stopped");
+            crate::console_println!("  container kill ID [ID...]                — force-kill all container processes");
+            crate::console_println!("  container pause ID [ID...]               — freeze (suspend all threads)");
+            crate::console_println!("  container unpause ID [ID...]             — thaw (resume all threads)");
             crate::console_println!("  container prune                          — remove all stopped containers");
             crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)");

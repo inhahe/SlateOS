@@ -105,6 +105,12 @@ failure is purely budget-vs-wall-clock under contention. **Proper fix
 adaptive budget rather than a fixed yield count, so a slow-but-correct
 run isn't misreported. Tracked here until the harness is reworked.
 
+**Recurrence 2026-06-30:** observed again on a ~217 s BOOT_OK run (heavy
+boot); the harness logged the same "did not exit within 262144 yields
+(state=Running)" for the real-glibc pthread variant. Non-fatal as before —
+BOOT_OK was reached and the container self-test (40 tests) passed on the
+same boot. Reinforces the timing-flake assessment; no code change made.
+
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 
 **Resolution (2026-06-30):** the two correctness gaps below are now

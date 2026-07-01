@@ -8503,6 +8503,8 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_THREAD_EXIT` — exit the current thread with an exit value.
 ///
 /// `arg0`: exit value (i64).
+/// `arg1`: detached flag (non-zero → the thread is detached, so its exit
+///         value is not retained for a join that will never come).
 ///
 /// Does not return.
 pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
@@ -8510,9 +8512,10 @@ pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
 
     #[allow(clippy::cast_possible_wrap)]
     let exit_value = args.arg0 as i64;
+    let detached = args.arg1 != 0;
 
     // This function never returns — it terminates the calling thread.
-    thread::thread_exit_with_value(exit_value);
+    thread::thread_exit_with_value(exit_value, detached);
 
     // Unreachable.
     // SyscallResult::ok(0)

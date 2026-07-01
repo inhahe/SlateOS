@@ -57,10 +57,10 @@
 //!   This is a table-keyed-by-tid implementation rather than FS/GS-based
 //!   TLS, which is correct (proper per-thread semantics) but does an
 //!   O(active-threads) slot lookup per access.
-//! - Detached thread stacks are reclaimed by self-unmap on exit; the
-//!   kernel's small per-thread exit-value map entry (~tens of bytes) is
-//!   still retained until process exit for a never-joined detached thread
-//!   (needs a kernel `SYS_THREAD_EXIT` "detached" flag to drop eagerly).
+//! - Detached thread stacks are reclaimed by self-unmap on exit, and the
+//!   kernel drops the per-thread exit-value entry eagerly (the self-unmap
+//!   path passes the `SYS_THREAD_EXIT` detached flag = 1), so a detached
+//!   thread leaks neither its stack nor a kernel map entry.
 //! - `pthread_cancel` accepted but never actually cancels a thread.
 //! - Mutex is a spinlock (no futex-based blocking).
 //! - Condition variables use spin-yield (1ms intervals) watching a
@@ -371,8 +371,9 @@ core::arch::global_asm!(
     "    mov rax, {sys_munmap}",        // SYS_MUNMAP(stack_base, stack_size)
     "    syscall",                      // rdi/rsi already hold base/size
     // --- stack is unmapped past this point; registers only ---
-    "    mov rdi, r12",                 // retval
-    "    mov rax, {sys_thread_exit}",   // SYS_THREAD_EXIT(retval)
+    "    mov rdi, r12",                 // arg0 = retval
+    "    mov esi, 1",                   // arg1 = detached flag (don't retain exit value)
+    "    mov rax, {sys_thread_exit}",   // SYS_THREAD_EXIT(retval, detached=1)
     "    syscall",
     "    ud2",                          // unreachable
     sys_munmap = const crate::syscall::SYS_MUNMAP,
@@ -646,7 +647,9 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     // Consumed on the bare-metal detached path above; unused on host.
     let _ = self_unmap;
 
-    let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
+    // Joinable exit: pass detached=0 explicitly so the kernel retains the
+    // exit value for a future join (arg1 must be a defined 0, not stale).
+    let _ = syscall::syscall2(syscall::SYS_THREAD_EXIT, retval as u64, 0);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
     loop {
         unsafe {

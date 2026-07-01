@@ -236,21 +236,39 @@ pub fn spawn_user(
     }
 }
 
+/// Record a thread's exit value for a later `join()`.
+///
+/// A **detached** thread will never be joined, so retaining its exit
+/// value would leak the `THREAD_EXIT_VALUES` map entry until the owning
+/// process exits.  For detached threads we therefore store nothing.  This
+/// is the kernel-side counterpart of the userspace pthread self-unmap fix
+/// (see `posix/src/pthread.rs` and known-issues.md
+/// D-PTHREAD-DETACH-KERNEL-EXITVAL).
+fn record_exit_value(task_id: TaskId, exit_value: i64, detached: bool) {
+    if detached {
+        // No joiner will ever retrieve this — do not retain it.  Task IDs
+        // are not reused while a task is live, so there is no stale entry
+        // to clear here.
+        return;
+    }
+    let mut exit_values = THREAD_EXIT_VALUES.lock();
+    exit_values.insert(task_id, exit_value);
+}
+
 /// Exit the current thread with a value, supporting join.
 ///
-/// Stores the exit value so a joining thread can retrieve it, wakes
-/// any thread blocked in `join()`, then notifies the process system
-/// and terminates the scheduler task.
+/// Stores the exit value so a joining thread can retrieve it (unless the
+/// thread is `detached`, in which case nothing is stored — no one will
+/// join it), wakes any thread blocked in `join()`, then notifies the
+/// process system and terminates the scheduler task.
 ///
 /// This function does **not return**.
-pub fn thread_exit_with_value(exit_value: i64) -> ! {
+pub fn thread_exit_with_value(exit_value: i64, detached: bool) -> ! {
     let task_id = sched::current_task_id();
 
-    // Store exit value.
-    {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        exit_values.insert(task_id, exit_value);
-    }
+    // Store exit value (skipped for detached threads to avoid leaking the
+    // map entry — see `record_exit_value`).
+    record_exit_value(task_id, exit_value, detached);
 
     // Wake any thread that is joining on us.
     {
@@ -669,7 +687,47 @@ pub fn self_test() -> KernelResult<()> {
     test_thread_exit_with_value()?;
     test_thread_join()?;
     test_join_self_fails()?;
+    test_detached_exit_not_retained()?;
 
+    Ok(())
+}
+
+/// Test 7: A detached thread's exit value is not retained.
+///
+/// Exercises [`record_exit_value`] directly (the gate that
+/// `thread_exit_with_value` applies), using a synthetic task ID far
+/// outside the live-task range so it cannot collide with a real thread.
+/// A joinable exit is recorded; a detached exit is not — proving the
+/// D-PTHREAD-DETACH-KERNEL-EXITVAL leak is closed for detached threads.
+fn test_detached_exit_not_retained() -> KernelResult<()> {
+    // Synthetic, never-scheduled task IDs.
+    let fake: TaskId = TaskId::MAX - 7;
+
+    // Joinable: the value is recorded and retrievable.
+    record_exit_value(fake, 7, false);
+    {
+        let mut ev = THREAD_EXIT_VALUES.lock();
+        if ev.remove(&fake) != Some(7) {
+            serial_println!(
+                "[thread]   FAIL: joinable exit value should have been recorded"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Detached: nothing is stored, so nothing leaks.
+    record_exit_value(fake, 7, true);
+    {
+        let mut ev = THREAD_EXIT_VALUES.lock();
+        if ev.remove(&fake).is_some() {
+            serial_println!(
+                "[thread]   FAIL: detached exit value must not be retained"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[thread]   Detached exit value not retained: OK");
     Ok(())
 }
 

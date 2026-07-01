@@ -537,18 +537,25 @@ as prescribed below:
   `test_detach_after_joinable_exit_reaps`) exercising the arbitration
   state machine directly.
 
-**Residual (smaller) follow-up — D-PTHREAD-DETACH-KERNEL-EXITVAL:** the
-kernel still retains a small `THREAD_EXIT_VALUES: BTreeMap<TaskId,i64>`
+**Residual (smaller) follow-up — D-PTHREAD-DETACH-KERNEL-EXITVAL — RESOLVED (2026-07-01):**
+the kernel previously retained a small `THREAD_EXIT_VALUES: BTreeMap<TaskId,i64>`
 entry (~tens of bytes) for a never-joined *detached* thread, because only
-`join` removes it (`on_thread_exit` in `kernel/src/proc/thread.rs` does
-not). The kernel *task itself* is already reaped on exit
-(`thread_exit_with_value` → `sched::task_exit()`), so only this map entry
-lingers, and it is freed at process exit. This is ~4000× smaller than the
-64 KiB stack this task fixed and is **kernel-side** (out of scope of the
-userspace-only fix). Proper fix: add a "detached" flag to
-`SYS_THREAD_EXIT` (or a `SYS_THREAD_DETACH` syscall) so the kernel drops
-the exit-value entry eagerly instead of holding it for a join that never
-comes. Deferred to a focused kernel task; low priority.
+`join` removed it. **Fixed** by threading a "detached" flag through
+`SYS_THREAD_EXIT` (arg1): `sys_thread_exit` (`kernel/src/syscall/handlers.rs`)
+now decodes `let detached = args.arg1 != 0;` and passes it to
+`thread_exit_with_value(exit_value, detached)`. A new `record_exit_value`
+helper in `kernel/src/proc/thread.rs` skips the map insert entirely when
+`detached` is set (task IDs are not reused while a task is live, so there
+is no stale entry to clear). The userspace `__pthread_exit_unmap` self-unmap
+asm sets `esi = 1` (detached) before `SYS_THREAD_EXIT`; the joinable
+`pthread_exit` path uses `syscall2(SYS_THREAD_EXIT, retval, 0)` so arg1 is a
+*defined* 0 (a bare `syscall1` would leave RSI holding stale/undefined bits,
+which the kernel could misread as detached). In-kernel self-test
+`test_detached_exit_not_retained` (verified at boot: `[thread]   Detached
+exit value not retained: OK`) confirms joinable exits are recorded and
+detached exits are not. Combined with the userspace stack self-unmap fix,
+a detached thread now leaks neither its 64 KiB stack, its table slot, nor a
+kernel map entry.
 
 *Note:* a native SlateOS-ABI userspace test harness that links `posix`
 does not currently exist (the boot path's thread tests use real glibc via

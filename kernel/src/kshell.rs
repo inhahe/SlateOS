@@ -68927,11 +68927,23 @@ fn cmd_docker(args: &str) {
             }
             cmd_oci(&delegated);
         }
+        // Image save/load operate on OCI *images* (directory trees), so they
+        // route to the `oci` handler, not the container handler. `docker save`
+        // bundles an image dir into a tar; `docker load` restores it into a dir
+        // (we take an explicit dest dir since there is no name-keyed store).
+        "save" | "load" => {
+            let mut delegated = alloc::string::String::from(sub);
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
         "version" => {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|images|version> ...");
+            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|images|version> ...");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -68950,6 +68962,8 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker prune                           — remove all stopped containers");
             crate::console_println!("  docker cp <src> <dest>                 — copy between host and rootfs");
             crate::console_println!("  docker commit|export|import ...        — snapshot / pack / load a rootfs");
+            crate::console_println!("  docker save <image-dir> <out-tar>      — bundle an OCI image into a tar");
+            crate::console_println!("  docker load <in-tar> <dest-dir>        — restore a saved image tar into a dir");
             crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
             crate::console_println!();
             crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
@@ -70023,6 +70037,77 @@ fn cmd_oci(args: &str) {
                 }
             }
         }
+        "save" => {
+            // oci save <image-dir> <out-tar>  (Docker `save`): bundle a complete
+            // OCI image *directory tree* (index, manifests, config blob, layer
+            // blobs) into a single ustar archive on the host VFS, so the image
+            // can be moved to another host and restored with `oci load`.  Unlike
+            // `container export` (which packs a *container's* flattened rootfs),
+            // `save` preserves the image's layered on-disk layout verbatim.
+            let (Some(&dir), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: oci save <image-dir> <out-tar>");
+                return;
+            };
+            // Validate that the directory really is an OCI image before packing,
+            // so `save` on a bogus path fails cleanly instead of producing a tar
+            // of arbitrary junk (Docker `save` operates on images, not dirs).
+            match oci::load_image(dir) {
+                Ok(image) => {
+                    let layers = image.manifest.layers.len();
+                    match crate::container::tar_tree(dir) {
+                        Ok(archive) => {
+                            match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
+                                Ok(()) => crate::console_println!(
+                                    "Saved image {} ({} layers): {} bytes -> {}",
+                                    dir, layers, archive.len(), out_path
+                                ),
+                                Err(e) => crate::console_println!(
+                                    "Failed to write '{}': {:?}", out_path, e
+                                ),
+                            }
+                        }
+                        Err(e) => crate::console_println!(
+                            "Failed to pack image '{}': {:?}", dir, e
+                        ),
+                    }
+                }
+                Err(e) => crate::console_println!(
+                    "Not a valid OCI image at '{}': {:?}", dir, e
+                ),
+            }
+        }
+        "load" => {
+            // oci load <in-tar> <dest-dir>  (Docker `load`): restore an image
+            // archive produced by `oci save` into a fresh image directory.  Our
+            // images are referenced by their on-disk OCI layout directory (there
+            // is no name-keyed registry), so `load` takes an explicit
+            // destination directory rather than repopulating a store.  The tar is
+            // validated and extracted via the shared `untar_tree` primitive
+            // (which rejects `..`-escaping member names before writing), then the
+            // result is re-parsed to confirm a well-formed image landed.
+            let (Some(&tar_path), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: oci load <in-tar> <dest-dir>");
+                return;
+            };
+            match crate::fs::vfs::Vfs::read_file(tar_path) {
+                Ok(archive) => match crate::container::untar_tree(dest_dir, &archive) {
+                    Ok(()) => match oci::load_image(dest_dir) {
+                        Ok(image) => crate::console_println!(
+                            "Loaded image from {} ({} bytes) -> {} ({} layers)",
+                            tar_path, archive.len(), dest_dir, image.manifest.layers.len()
+                        ),
+                        Err(e) => crate::console_println!(
+                            "Extracted {} -> {} but it is not a valid OCI image: {:?}",
+                            tar_path, dest_dir, e
+                        ),
+                    },
+                    Err(e) => crate::console_println!(
+                        "Failed to extract '{}' into '{}': {:?}", tar_path, dest_dir, e
+                    ),
+                },
+                Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
+            }
+        }
         "test" => {
             match oci::self_test() {
                 Ok(()) => crate::console_println!("OCI self-test passed."),
@@ -70030,9 +70115,11 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|run|test]");
+            crate::console_println!("Usage: oci [inspect|layers|run|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+            crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
+            crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");

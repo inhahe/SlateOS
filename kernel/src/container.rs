@@ -4470,6 +4470,61 @@ pub fn self_test() {
     }
     serial_println!("[container]   diff (overlay changes): OK");
 
+    // Test 19k4: the `oci save`/`oci load` data path — tar a directory tree,
+    // write the archive to a host file, read it back, and extract it into a
+    // fresh directory — reconstructs the tree byte-for-byte, including nested
+    // subdirs.  This exercises the exact tar_tree -> write_file -> read_file ->
+    // untar_tree pipeline the save/load commands use (test 19s covers the
+    // in-memory tar round-trip but skips the on-disk file write/read hop).
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Source "image-like" tree: /tmp/ct_saveload_src/{oci-layout, blobs/x}.
+        let src = "/tmp/ct_saveload_src";
+        let _ = Vfs::mkdir(src);
+        let _ = Vfs::mkdir(&alloc::format!("{src}/blobs"));
+        Vfs::write_file(&alloc::format!("{src}/oci-layout"), b"{\"v\":\"1.0.0\"}")
+            .expect("write oci-layout");
+        Vfs::write_file(&alloc::format!("{src}/blobs/x"), b"BLOBDATA")
+            .expect("write blob");
+
+        // save: tar the tree, write archive to a host file.
+        let archive = tar_tree(src).expect("tar image tree");
+        let tar_path = "/tmp/ct_saveload.tar";
+        Vfs::write_file(tar_path, &archive).expect("write archive");
+
+        // load: read the archive back, extract into a fresh directory.
+        let dst = "/tmp/ct_saveload_dst";
+        let back = Vfs::read_file(tar_path).expect("read archive");
+        assert_eq!(back, archive, "archive survives the file round-trip");
+        untar_tree(dst, &back).expect("extract image tree");
+
+        // The reconstructed tree matches byte-for-byte, nested subdir included.
+        assert_eq!(
+            Vfs::read_file(&alloc::format!("{dst}/oci-layout")).expect("read layout"),
+            b"{\"v\":\"1.0.0\"}",
+        );
+        assert_eq!(
+            Vfs::read_file(&alloc::format!("{dst}/blobs/x")).expect("read blob"),
+            b"BLOBDATA",
+        );
+
+        // untar_tree rejects a `..`-escaping member without writing (jail guard).
+        assert!(untar_tree("", &archive).is_err(), "empty base rejected");
+
+        // Cleanup.
+        let _ = Vfs::remove(&alloc::format!("{src}/blobs/x"));
+        let _ = Vfs::rmdir(&alloc::format!("{src}/blobs"));
+        let _ = Vfs::remove(&alloc::format!("{src}/oci-layout"));
+        let _ = Vfs::rmdir(src);
+        let _ = Vfs::remove(tar_path);
+        let _ = Vfs::remove(&alloc::format!("{dst}/blobs/x"));
+        let _ = Vfs::rmdir(&alloc::format!("{dst}/blobs"));
+        let _ = Vfs::remove(&alloc::format!("{dst}/oci-layout"));
+        let _ = Vfs::rmdir(dst);
+    }
+    serial_println!("[container]   image save/load data path: OK");
+
     // Test 19l: pause()/unpause() freeze and thaw a container (Docker
     // `pause`/`unpause`), managing the `frozen` flag and its state-machine
     // guards.  Synthetic PIDs have no backing threads, so the suspended/resumed

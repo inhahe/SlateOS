@@ -67225,6 +67225,16 @@ fn cmd_container(args: &str) {
                             }
                         }
                     }
+                } else if let Some(val) = arg.strip_prefix("restart=") {
+                    // restart=no|always|unless-stopped|on-failure[:N] (Docker
+                    // `--restart`).
+                    match container::parse_restart_policy(val) {
+                        Some(policy) => cfg.restart_policy = policy,
+                        None => crate::console_println!(
+                            "[container] Ignoring restart='{}' (want no|always|unless-stopped|on-failure[:N])",
+                            val
+                        ),
+                    }
                 } else {
                     // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
                     if parts.get(2) == Some(&arg) {
@@ -67338,6 +67348,16 @@ fn cmd_container(args: &str) {
             // code once the container has stopped.
             if let Some(code) = ci.exit_code {
                 crate::console_println!("  Exit code:  {}", code);
+            }
+            // Restart policy (Docker `--restart`); show the auto-restart count
+            // only when a policy other than `no` is in effect.
+            if ci.restart_policy == container::RestartPolicy::No {
+                crate::console_println!("  Restart:    {}", ci.restart_policy);
+            } else {
+                crate::console_println!(
+                    "  Restart:    {} (restarts: {})",
+                    ci.restart_policy, ci.restart_count
+                );
             }
             crate::console_println!("  Processes:  {}", ci.nr_procs);
             match ci.init_pid {
@@ -68116,7 +68136,7 @@ fn cmd_container(args: &str) {
         _ => {
             crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-q] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-q: IDs only)");
-            crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
+            crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
             crate::console_println!("  container rootfs ID <host-path>          — set filesystem root (chroot)");
             crate::console_println!("  container run ID <elf-path> [args...]    — launch init process in container");

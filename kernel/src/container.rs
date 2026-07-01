@@ -117,6 +117,95 @@ impl core::fmt::Display for ContainerState {
     }
 }
 
+/// Restart policy for a container's init process (Docker `--restart`).
+///
+/// Evaluated automatically when the init process exits (see
+/// [`notify_init_exit`]): if the policy calls for a restart, the container's
+/// recorded launch command is replayed via a deferred workqueue job so the
+/// respawn runs in a full task context (the exit path itself must not spawn).
+///
+/// A *graceful* [`stop`] is treated as a user request and suppresses **all**
+/// policies (Docker: "the restart policy is not honored when a container is
+/// stopped via `docker stop`"). A force [`kill`] is **not** a user stop, so
+/// `Always`/`UnlessStopped`/`OnFailure` still restart after a kill — matching
+/// Docker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestartPolicy {
+    /// Never restart automatically (Docker `no`). The default.
+    #[default]
+    No,
+    /// Restart only if the init exited with a non-zero code (a failure),
+    /// up to `max_retries` times. `0` means unlimited retries (Docker
+    /// `on-failure` with no count).
+    OnFailure(u32),
+    /// Always restart the init when it exits, regardless of exit code
+    /// (Docker `always`). A graceful `stop` still suppresses it.
+    Always,
+    /// Like [`Always`](Self::Always), but a user stop is remembered so the
+    /// container is not auto-restarted after it (Docker `unless-stopped`).
+    /// In our single-session model (no daemon restart to replay across) this
+    /// behaves identically to `Always`.
+    UnlessStopped,
+}
+
+impl core::fmt::Display for RestartPolicy {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::No => write!(f, "no"),
+            Self::OnFailure(0) => write!(f, "on-failure"),
+            Self::OnFailure(n) => write!(f, "on-failure:{n}"),
+            Self::Always => write!(f, "always"),
+            Self::UnlessStopped => write!(f, "unless-stopped"),
+        }
+    }
+}
+
+/// Parse a Docker `--restart` policy string: `no`, `always`, `unless-stopped`,
+/// `on-failure`, or `on-failure:N`. Returns `None` for an unrecognised value.
+#[must_use]
+pub fn parse_restart_policy(s: &str) -> Option<RestartPolicy> {
+    match s {
+        "no" | "" => Some(RestartPolicy::No),
+        "always" => Some(RestartPolicy::Always),
+        "unless-stopped" => Some(RestartPolicy::UnlessStopped),
+        "on-failure" => Some(RestartPolicy::OnFailure(0)),
+        other => {
+            let count = other.strip_prefix("on-failure:")?;
+            count.parse::<u32>().ok().map(RestartPolicy::OnFailure)
+        }
+    }
+}
+
+/// Decide whether a container's init exit should trigger an automatic
+/// restart, per its [`RestartPolicy`]. Pure function (no I/O, no locks) so it
+/// can be unit-tested exhaustively.
+///
+/// - `exit_code` is the init's recorded exit code (negative = crash).
+/// - `user_stopped` is `true` when a graceful [`stop`] requested the halt;
+///   it suppresses every policy.
+/// - `restart_count` is how many automatic restarts have already happened
+///   since the last manual (re)start; it caps `OnFailure(N)`.
+#[must_use]
+pub fn should_auto_restart(
+    policy: RestartPolicy,
+    exit_code: i32,
+    user_stopped: bool,
+    restart_count: u32,
+) -> bool {
+    if user_stopped {
+        return false;
+    }
+    match policy {
+        RestartPolicy::No => false,
+        RestartPolicy::Always | RestartPolicy::UnlessStopped => true,
+        RestartPolicy::OnFailure(max) => {
+            // Only failures (non-zero exit) count, capped at `max` retries
+            // (0 = unlimited).
+            exit_code != 0 && (max == 0 || restart_count < max)
+        }
+    }
+}
+
 /// Configuration for creating a container.
 #[derive(Debug, Clone)]
 #[derive(Default)]
@@ -154,6 +243,9 @@ pub struct ContainerConfig {
     /// surfaced by inspection. Keys are unique — setting an existing key
     /// replaces its value (last-write-wins, matching Docker).
     pub labels: Vec<(String, String)>,
+    /// Automatic restart policy for the init process (Docker `--restart`).
+    /// Defaults to [`RestartPolicy::No`].
+    pub restart_policy: RestartPolicy,
 }
 
 
@@ -196,6 +288,13 @@ impl ContainerConfig {
     /// Mark the container's root filesystem as read-only (Docker `--read-only`).
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only_root = read_only;
+        self
+    }
+
+    /// Set the container's automatic restart policy (Docker `--restart`).
+    #[must_use]
+    pub fn restart_policy(mut self, policy: RestartPolicy) -> Self {
+        self.restart_policy = policy;
         self
     }
 
@@ -369,6 +468,19 @@ struct Container {
     /// file could not be opened — capture is best-effort and its failure never
     /// blocks the container from starting).  Removed on [`delete`].
     log_path: String,
+    /// Automatic restart policy for the init process (Docker `--restart`).
+    /// Captured from [`ContainerConfig::restart_policy`] at create time and
+    /// evaluated by [`notify_init_exit`] when the init exits.
+    restart_policy: RestartPolicy,
+    /// Number of automatic restarts performed since the last *manual*
+    /// (re)start. Incremented by [`notify_init_exit`] when it schedules an
+    /// auto-restart; caps [`RestartPolicy::OnFailure`]; reset to 0 by manual
+    /// [`start`]/[`restart`].
+    restart_count: u32,
+    /// Whether the container was halted by a *graceful* user [`stop`] (as
+    /// opposed to a crash or a force [`kill`]). A user stop suppresses every
+    /// restart policy (Docker semantics). Cleared on every (re)launch.
+    user_stopped: bool,
 }
 
 impl Container {
@@ -397,6 +509,9 @@ impl Container {
             init_exe_path: String::new(),
             init_args: Vec::new(),
             log_path: String::new(),
+            restart_policy: RestartPolicy::No,
+            restart_count: 0,
+            user_stopped: false,
         }
     }
 }
@@ -457,6 +572,10 @@ pub struct ContainerInfo {
     /// suspended. A frozen container's `state` stays `Running` — pause is a
     /// sub-state of running, surfaced separately so callers can show "paused".
     pub frozen: bool,
+    /// Automatic restart policy for the init process (Docker `--restart`).
+    pub restart_policy: RestartPolicy,
+    /// Number of automatic restarts performed since the last manual (re)start.
+    pub restart_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +849,12 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         // from a reused slot).
         ct.init_exe_path.clear();
         ct.init_args.clear();
+        // Restart policy from the config; a fresh container has done no
+        // auto-restarts and was not user-stopped (clears stale values on
+        // slot reuse).
+        ct.restart_policy = config.restart_policy;
+        ct.restart_count = 0;
+        ct.user_stopped = false;
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
         {
@@ -763,6 +888,10 @@ pub fn start(id: ContainerId) -> KernelResult<()> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].state = ContainerState::Running;
+        // A manual start is a fresh run of the restart-policy clock: clear any
+        // remembered user stop and reset the auto-restart counter.
+        table.containers[idx].user_stopped = false;
+        table.containers[idx].restart_count = 0;
         Ok(())
     })
 }
@@ -781,6 +910,9 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
             return Err(KernelError::InvalidArgument);
         }
         table.containers[idx].state = ContainerState::Stopped;
+        // A graceful stop is a user request: remember it so the restart policy
+        // is suppressed (Docker: restart is not honored after `docker stop`).
+        table.containers[idx].user_stopped = true;
         Ok(table.containers[idx].net_ns)
     })?;
     // A stopped container publishes no ports (Docker semantics): tear down its
@@ -813,13 +945,14 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     // early boot before `container::init()` has populated the table (e.g. a
     // bootstrap thread exiting). Access the table directly and treat an
     // uninitialized table as "no containers" rather than panicking.
-    let net_ns = {
+    let mut net_ns_to_flush = None;
+    let mut restart_id: Option<ContainerId> = None;
+    {
         let mut guard = TABLE.lock();
         let Some(table) = guard.as_mut() else {
             return;
         };
-        let mut found = None;
-        for ct in table.containers.iter_mut() {
+        for (idx, ct) in table.containers.iter_mut().enumerate() {
             if ct.active
                 && ct.state == ContainerState::Running
                 && ct.init_pid == Some(pid)
@@ -828,16 +961,61 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
                 // Record the init's exit code (Docker's "Exited (N)").  A
                 // negative value indicates a crash (negated exception code).
                 ct.exit_code = Some(exit_code);
-                found = Some(ct.net_ns);
+                net_ns_to_flush = Some(ct.net_ns);
+                // Evaluate the restart policy.  When it calls for a restart we
+                // *schedule* it (below, via the workqueue) rather than spawning
+                // here — the process-exit path must not spawn (it can hold
+                // scheduler state and cannot safely allocate an address space).
+                if should_auto_restart(
+                    ct.restart_policy,
+                    exit_code,
+                    ct.user_stopped,
+                    ct.restart_count,
+                ) {
+                    ct.restart_count = ct.restart_count.saturating_add(1);
+                    restart_id = ContainerId::try_from(idx).ok();
+                }
                 break;
             }
         }
-        found
-    };
+    }
     // Outside the table lock: tear down the dead container's host-port NAT
     // forwards (idempotent if it had none), mirroring `stop`.
-    if let Some(net_ns) = net_ns {
+    if let Some(net_ns) = net_ns_to_flush {
         crate::net::nat::flush_port_forwards(net_ns);
+    }
+    // Schedule the deferred restart in the kworker task context, where spawning
+    // is safe.  If the queue is full the restart is dropped (logged) rather
+    // than blocking or spawning inline on the exit path.
+    if let Some(id) = restart_id {
+        if !crate::workqueue::submit(do_container_restart, u64::from(id)) {
+            serial_println!(
+                "[container] auto-restart of id={} dropped (workqueue full)", id
+            );
+        }
+    }
+}
+
+/// Workqueue callback: perform a deferred automatic restart of container `arg`.
+///
+/// Runs in the `kworker` task context (full privileges — may spawn, allocate,
+/// take locks), scheduled by [`notify_init_exit`] when a container's restart
+/// policy fires.  Replays the recorded launch command *without* resetting the
+/// auto-restart counter, so an `on-failure:N` policy still terminates after
+/// `N` attempts.  Errors (the binary vanished, OOM, the container was deleted
+/// meanwhile) are logged and dropped — a failed auto-restart simply leaves the
+/// container stopped.
+fn do_container_restart(arg: u64) {
+    let Ok(id) = ContainerId::try_from(arg) else {
+        return;
+    };
+    match relaunch_recorded(id, false) {
+        Ok(pid) => serial_println!(
+            "[container] auto-restarted id={}: new init pid={}", id, pid
+        ),
+        Err(e) => serial_println!(
+            "[container] auto-restart of id={} failed: {:?}", id, e
+        ),
     }
 }
 
@@ -1341,6 +1519,12 @@ fn run_with_abi(
             }
             table.containers[idx].init_pid = Some(result.pid);
             table.containers[idx].state = ContainerState::Running;
+            // A launched container is, by definition, not user-stopped; clear
+            // the flag so its restart policy is armed for the new init. (The
+            // auto-restart counter is *not* reset here — that would let an
+            // `on-failure:N` container loop forever; it is reset only by a
+            // manual start/restart.)
+            table.containers[idx].user_stopped = false;
             // Record the capture-log path (if the redirect above succeeded) so
             // `logs(id)` knows where to read from.  Empty when capture was
             // skipped.
@@ -1503,6 +1687,25 @@ pub fn run_path(
 ///   nothing to replay).
 /// - Any error from [`run_path`] (the binary vanished from the VFS, OOM, …).
 pub fn restart(id: ContainerId) -> KernelResult<u64> {
+    // A manual restart resets the auto-restart clock (Docker restarts the
+    // policy counter when the user intervenes).
+    relaunch_recorded(id, true)
+}
+
+/// Replay a container's recorded init command (the shared core of the manual
+/// [`restart`] and the automatic [`do_container_restart`]).
+///
+/// `reset_restart_count` distinguishes the two callers: a manual restart
+/// resets the auto-restart counter to 0, whereas an automatic restart
+/// preserves it so an [`RestartPolicy::OnFailure`] cap is honoured across the
+/// series of automatic attempts.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist or has no
+///   recorded launch spec.
+/// - Any error from [`run_path`] (the binary vanished from the VFS, OOM, …).
+fn relaunch_recorded(id: ContainerId, reset_restart_count: bool) -> KernelResult<u64> {
     // Fetch the stored launch spec and current state under the table lock.  A
     // container with no recorded path was never run via run_path and cannot be
     // restarted.
@@ -1522,13 +1725,17 @@ pub fn restart(id: ContainerId) -> KernelResult<u64> {
         ))
     })?;
 
-    // If still running, force-kill the live processes (best-effort) and stop
-    // the container so its published-port forwards are flushed.  kill()/stop()
-    // both take the table lock internally, so they must run outside the
-    // snapshot above.
+    // If still running, stop the container *first* (flips it out of the
+    // `Running` state and flushes its published-port forwards), *then*
+    // force-kill the live processes.  The stop-before-kill ordering is
+    // deliberate: it moves the container out of `Running` before the old init
+    // dies, so the [`notify_init_exit`] fired by that death sees a non-`Running`
+    // state and does *not* schedule a second (nested) restart.  kill()/stop()
+    // both take the table lock internally, so they run outside the snapshot
+    // above.
     if is_running {
-        let _ = kill(id);
         let _ = stop(id);
+        let _ = kill(id);
     }
 
     // Reset the container to a fresh Created state, preserving its
@@ -1546,6 +1753,13 @@ pub fn restart(id: ContainerId) -> KernelResult<u64> {
         ct.pids.clear();
         ct.exit_code = None;
         ct.frozen = false;
+        // A relaunch clears any user-stop mark (set by the stop() above);
+        // the container is about to run again.  The auto-restart counter is
+        // reset only for a manual restart.
+        ct.user_stopped = false;
+        if reset_restart_count {
+            ct.restart_count = 0;
+        }
         Ok(())
     })?;
 
@@ -2315,6 +2529,8 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             labels: ct.labels.clone(),
             exit_code: ct.exit_code,
             frozen: ct.frozen,
+            restart_policy: ct.restart_policy,
+            restart_count: ct.restart_count,
         })
     })
 }
@@ -4191,5 +4407,84 @@ pub fn self_test() {
     }
     serial_println!("[container]   prune (remove stopped): OK");
 
-    serial_println!("[container] Self-test PASSED (40 tests)");
+    // Restart policy: parse round-trips, the pure decision table, and that a
+    // created container records + reports its policy via info().
+    {
+        // parse_restart_policy round-trips for every canonical spelling.
+        assert_eq!(parse_restart_policy("no"), Some(RestartPolicy::No));
+        assert_eq!(parse_restart_policy(""), Some(RestartPolicy::No));
+        assert_eq!(parse_restart_policy("always"), Some(RestartPolicy::Always));
+        assert_eq!(
+            parse_restart_policy("unless-stopped"),
+            Some(RestartPolicy::UnlessStopped),
+        );
+        assert_eq!(
+            parse_restart_policy("on-failure"),
+            Some(RestartPolicy::OnFailure(0)),
+        );
+        assert_eq!(
+            parse_restart_policy("on-failure:3"),
+            Some(RestartPolicy::OnFailure(3)),
+        );
+        assert_eq!(parse_restart_policy("bogus"), None);
+        assert_eq!(parse_restart_policy("on-failure:x"), None);
+
+        // Display round-trips (used by `container info`).
+        assert_eq!(alloc::format!("{}", RestartPolicy::No), "no");
+        assert_eq!(alloc::format!("{}", RestartPolicy::Always), "always");
+        assert_eq!(
+            alloc::format!("{}", RestartPolicy::OnFailure(0)),
+            "on-failure"
+        );
+        assert_eq!(
+            alloc::format!("{}", RestartPolicy::OnFailure(5)),
+            "on-failure:5"
+        );
+
+        // No: never restarts.
+        assert!(!should_auto_restart(RestartPolicy::No, 1, false, 0));
+        assert!(!should_auto_restart(RestartPolicy::No, 0, false, 0));
+
+        // Always: restarts on any exit code, but a user-stop suppresses it.
+        assert!(should_auto_restart(RestartPolicy::Always, 0, false, 9));
+        assert!(should_auto_restart(RestartPolicy::Always, 137, false, 0));
+        assert!(!should_auto_restart(RestartPolicy::Always, 1, true, 0));
+
+        // UnlessStopped behaves identically to Always in our model.
+        assert!(should_auto_restart(RestartPolicy::UnlessStopped, 0, false, 0));
+        assert!(!should_auto_restart(
+            RestartPolicy::UnlessStopped,
+            0,
+            true,
+            0
+        ));
+
+        // OnFailure(N): only non-zero exit, capped at N restarts (0 == ∞).
+        assert!(!should_auto_restart(RestartPolicy::OnFailure(2), 0, false, 0));
+        assert!(should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 0));
+        assert!(should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 1));
+        assert!(!should_auto_restart(RestartPolicy::OnFailure(2), 1, false, 2));
+        assert!(should_auto_restart(RestartPolicy::OnFailure(0), 1, false, 999));
+        assert!(!should_auto_restart(
+            RestartPolicy::OnFailure(2),
+            1,
+            true,
+            0
+        ));
+
+        // A created container records and reports its policy.
+        let rp = create(
+            &ContainerConfig::new("restart-policy-ct")
+                .restart_policy(RestartPolicy::OnFailure(3)),
+        )
+        .expect("create restart-policy-ct");
+        let inf = info(rp).expect("info restart-policy-ct");
+        assert_eq!(inf.restart_policy, RestartPolicy::OnFailure(3));
+        assert_eq!(inf.restart_count, 0);
+        delete(rp).expect("cleanup restart-policy-ct");
+        assert_eq!(active_count(), 0);
+    }
+    serial_println!("[container]   restart policy (parse + decision table): OK");
+
+    serial_println!("[container] Self-test PASSED (41 tests)");
 }

@@ -68430,11 +68430,75 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "volume" | "vol" => {
+            // container volume <create|ls|rm|inspect|prune> ... (Docker
+            // `docker volume`): manage named volumes — runtime-owned backing
+            // directories mounted into containers via `-v NAME:/path`.
+            let action = parts.get(1).copied().unwrap_or("ls");
+            match action {
+                "ls" | "list" => {
+                    let names = crate::volume::list();
+                    if names.is_empty() {
+                        crate::console_println!("(no volumes)");
+                    } else {
+                        crate::console_println!("{:<24} {}", "NAME", "MOUNTPOINT");
+                        for name in &names {
+                            let mount = crate::volume::path_of(name).unwrap_or_default();
+                            crate::console_println!("{:<24} {}", name, mount);
+                        }
+                    }
+                }
+                "create" => {
+                    let Some(name) = parts.get(2) else {
+                        crate::console_println!("Usage: container volume create NAME");
+                        return;
+                    };
+                    match crate::volume::create(name) {
+                        Ok(path) => crate::console_println!("{} ({})", name, path),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" | "delete" => {
+                    if parts.len() < 3 {
+                        crate::console_println!("Usage: container volume rm NAME [NAME...]");
+                        return;
+                    }
+                    for name in parts.iter().skip(2) {
+                        match crate::volume::remove(name) {
+                            Ok(()) => crate::console_println!("{}", name),
+                            Err(e) => crate::console_println!("{}: {:?}", name, e),
+                        }
+                    }
+                }
+                "inspect" => {
+                    let Some(name) = parts.get(2) else {
+                        crate::console_println!("Usage: container volume inspect NAME");
+                        return;
+                    };
+                    match crate::volume::path_of(name) {
+                        Some(path) => {
+                            crate::console_println!("Name:       {}", name);
+                            crate::console_println!("Driver:     local");
+                            crate::console_println!("Mountpoint: {}", path);
+                        }
+                        None => crate::console_println!("Volume '{}' not found", name),
+                    }
+                }
+                "prune" => {
+                    let n = crate::volume::prune();
+                    crate::console_println!("Removed {} volume(s)", n);
+                }
+                other => {
+                    crate::console_println!("Unknown volume action '{}'", other);
+                    crate::console_println!("Usage: container volume <create|ls|rm|inspect|prune> ...");
+                }
+            }
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|info|top|stats|update|rename|port|wait|test]");
+            crate::console_println!("Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|exec|cp|export|import|commit|logs|events|volume|info|top|stats|update|rename|port|wait|test]");
             crate::console_println!("  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)");
             crate::console_println!("  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container");
             crate::console_println!("  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)");
@@ -68454,6 +68518,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");
             crate::console_println!("  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)");
             crate::console_println!("  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)");
+            crate::console_println!("  container volume <create|ls|rm|inspect|prune> NAME — manage named volumes (mount with -v NAME:/path)");
             crate::console_println!("  container info [--json] ID               — detailed inspection (--json: machine-readable)");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats [ID]                     — cgroup resource usage (no ID: table of all running)");
@@ -68662,7 +68727,7 @@ fn cmd_docker(args: &str) {
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
         | "rename" | "update" | "prune" | "cp" | "commit" | "export"
-        | "import" => delegate(sub),
+        | "import" | "volume" => delegate(sub),
         // SlateOS has no image registry/store keyed by name — images are
         // referenced by their on-disk OCI layout directory. `docker images`
         // therefore inspects a directory rather than listing a registry.
@@ -68789,14 +68854,16 @@ fn cmd_oci(args: &str) {
         }
         "run" | "create" => {
             // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
-            //                      [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...]
+            //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
+            //   where src is an absolute host path (bind mount) or a bare name
+            //   (named volume, created on demand under VOLUMES_ROOT)
             //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
             //
             // Loads an OCI image, extracts all layers into a merged rootfs
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -68805,10 +68872,14 @@ fn cmd_oci(args: &str) {
             let mut net_ip: Option<[u8; 4]> = None;
             let mut net_gw: Option<[u8; 4]> = None;
             let mut net_dns: Option<[u8; 4]> = None;
-            // Volume (bind) mounts as (host_target, guest_prefix) pairs from
-            // `-v host:guest` (Docker order). Installed after the container is
+            // Volume mounts as (host_target, guest_prefix, read_only) triples
+            // from `-v host:guest` (Docker order). The host target is either an
+            // absolute host path (bind mount) or a named volume's backing path
+            // (resolved at parse time), so the tuple owns its strings rather
+            // than borrowing the raw argv. Installed after the container is
             // created (while still in Created state).
-            let mut volumes: alloc::vec::Vec<(&str, &str, bool)> = alloc::vec::Vec::new();
+            let mut volumes: alloc::vec::Vec<(alloc::string::String, alloc::string::String, bool)> =
+                alloc::vec::Vec::new();
             // Published ports as (proto, host_port, container_port) from
             // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
             // Installed after the container is created (Created state).
@@ -68993,13 +69064,19 @@ fn cmd_oci(args: &str) {
                     }
                     "--volume" | "-v" => {
                         if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Docker `-v host:guest[:mode]`.  Host and guest are
-                            // both absolute Unix paths; an optional third field
-                            // is the access mode (`ro` = read-only, `rw` =
-                            // read-write, the default).  Split into at most
-                            // three colon-separated segments.
+                            // Docker `-v source:guest[:mode]`.  The guest is an
+                            // absolute Unix path; an optional third field is the
+                            // access mode (`ro` = read-only, `rw` = read-write,
+                            // the default).  The source is one of two forms,
+                            // distinguished exactly as Docker does — by whether
+                            // it starts with `/`:
+                            //   * absolute path (`/host/path`)  -> bind mount
+                            //   * bare name    (`myvol`)        -> named volume,
+                            //     created on demand under VOLUMES_ROOT and its
+                            //     backing directory bind-mounted in.
+                            // Split into at most three colon-separated segments.
                             let mut segs = spec.splitn(3, ':');
-                            let host = segs.next().unwrap_or("");
+                            let source = segs.next().unwrap_or("");
                             let guest = segs.next().unwrap_or("");
                             let mode = segs.next();
                             let read_only = match mode {
@@ -69013,17 +69090,43 @@ fn cmd_oci(args: &str) {
                                     None
                                 }
                             };
-                            match read_only {
-                                Some(ro) if host.starts_with('/') && guest.starts_with('/') => {
-                                    volumes.push((host, guest, ro));
-                                }
-                                Some(_) => {
+                            if let Some(ro) = read_only {
+                                if !guest.starts_with('/') {
                                     crate::console_println!(
-                                        "[oci] Ignoring volume '{}': both paths must be absolute (host:guest[:ro|:rw])",
+                                        "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
                                         spec
                                     );
+                                } else if source.starts_with('/') {
+                                    // Host bind mount: use the absolute host path.
+                                    volumes.push((
+                                        alloc::string::String::from(source),
+                                        alloc::string::String::from(guest),
+                                        ro,
+                                    ));
+                                } else if source.is_empty() {
+                                    crate::console_println!(
+                                        "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
+                                        spec
+                                    );
+                                } else {
+                                    // Named volume: create-on-demand and mount
+                                    // its backing directory.
+                                    match crate::volume::ensure(source) {
+                                        Ok(backing) => {
+                                            volumes.push((
+                                                backing,
+                                                alloc::string::String::from(guest),
+                                                ro,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            crate::console_println!(
+                                                "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
+                                                spec, source, e
+                                            );
+                                        }
+                                    }
                                 }
-                                None => {}
                             }
                             i = i.saturating_add(2);
                         } else {
@@ -69461,12 +69564,12 @@ fn cmd_oci(args: &str) {
                     // while still in Created state).  A volume lets the
                     // container see a host directory at a guest path, escaping
                     // the rootfs (e.g. `-v /srv/data:/data`).
-                    for &(host, guest, read_only) in &volumes {
-                        match crate::container::add_volume_mount(ct_id, host, guest, read_only) {
+                    for (host, guest, read_only) in &volumes {
+                        match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
                             Ok(()) => crate::console_println!(
                                 "  Volume:       {} -> {}{}",
                                 host, guest,
-                                if read_only { " (ro)" } else { "" }
+                                if *read_only { " (ro)" } else { "" }
                             ),
                             Err(e) => crate::console_println!(
                                 "[oci] Warning: could not add volume {}:{}: {:?}",
@@ -69669,7 +69772,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v host:guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

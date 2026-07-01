@@ -173,6 +173,7 @@ mod vmguest;
 mod watchdog;
 #[allow(dead_code)]
 mod xhci;
+mod volume;
 mod watchpoint;
 mod wchan;
 mod workqueue;
@@ -3449,6 +3450,9 @@ extern "C" fn kernel_main() -> ! {
     // into a single lifecycle with create/start/stop/delete state machine.
     container::init();
     container::self_test();
+    // Named-volume registry self-test (Docker `docker volume`). Runs after the
+    // container self-test; exercises the registry against real backing dirs.
+    volume::self_test();
     // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
     kshell::cli_resource_parser_self_test();
 

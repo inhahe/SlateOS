@@ -276,6 +276,29 @@ pub fn stats(id: OverlayId) -> KernelResult<OverlayStats> {
     })
 }
 
+/// Return the absolute upper-layer (read-write) path for `id`.
+///
+/// Used by callers that need to enumerate the container's scratch layer
+/// directly — e.g. `container diff`, which walks the upper layer to report
+/// added/changed files relative to the read-only image.
+pub fn upper_path(id: OverlayId) -> KernelResult<String> {
+    let inner = OVERLAYS.lock();
+    let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
+    Ok(m.upper_path.clone())
+}
+
+/// Return the overlay's whiteout entries — normalized relative paths (no
+/// leading slash) that are hidden from the merged view because they were
+/// deleted after being present in the lower layer.
+///
+/// The result is sorted (the backing set is a `BTreeSet`). Used by
+/// `container diff` to report `D` (deleted) entries.
+pub fn whiteouts(id: OverlayId) -> KernelResult<Vec<String>> {
+    let inner = OVERLAYS.lock();
+    let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
+    Ok(m.whiteouts.iter().cloned().collect())
+}
+
 // ---------------------------------------------------------------------------
 // Public API — resolution
 // ---------------------------------------------------------------------------

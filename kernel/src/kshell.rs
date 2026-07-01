@@ -67922,6 +67922,36 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "diff" => {
+            // container diff <id>  (Docker `diff`): list filesystem changes in
+            // the container relative to its image — A (added), C (changed),
+            // D (deleted) — by inspecting the overlay's writable upper layer.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container diff <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::diff(id) {
+                Ok(changes) => {
+                    if changes.is_empty() {
+                        crate::console_println!("(no changes)");
+                    } else {
+                        for c in &changes {
+                            crate::console_println!("{} {}", c.kind.prefix(), c.path);
+                        }
+                    }
+                }
+                Err(crate::error::KernelError::InvalidArgument) => {
+                    crate::console_println!(
+                        "Container {} has no overlay rootfs (nothing to diff)", id
+                    );
+                }
+                Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+            }
+        }
         "pause" => {
             // container pause <id> [id...]  (Docker `pause`): freeze the
             // container, suspending all of its threads until `unpause`.
@@ -68519,6 +68549,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container rename ID <new-name>           — rename a container");
             crate::console_println!("  container port ID                        — list published port mappings");
             crate::console_println!("  container wait ID                        — block until container stops, print exit code");
+            crate::console_println!("  container diff ID                        — list rootfs changes vs image (A/C/D)");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();
             crate::console_println!("Aliases: ct");
@@ -68883,7 +68914,7 @@ fn cmd_docker(args: &str) {
         // 1:1 passthroughs — the Docker and native subcommand names match.
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
         | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
-        | "rename" | "update" | "prune" | "cp" | "commit" | "export"
+        | "diff" | "rename" | "update" | "prune" | "cp" | "commit" | "export"
         | "import" | "volume" | "network" => delegate(sub),
         // SlateOS has no image registry/store keyed by name — images are
         // referenced by their on-disk OCI layout directory. `docker images`
@@ -68900,7 +68931,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|rename|update|prune|cp|commit|export|import|images|version> ...");
+            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|images|version> ...");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -68913,6 +68944,7 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker events [-n N] [--id <id>]       — recent lifecycle events");
             crate::console_println!("  docker stats|top <id>                  — live resource usage / process list");
             crate::console_println!("  docker port|wait <id>                  — published ports / block until exit");
+            crate::console_println!("  docker diff <id>                       — rootfs changes vs image (A/C/D)");
             crate::console_println!("  docker rename <id> <name>              — rename a container");
             crate::console_println!("  docker update <id> [--cpus N] [--memory SIZE] [--restart POLICY]");
             crate::console_println!("  docker prune                           — remove all stopped containers");
@@ -69769,6 +69801,17 @@ fn cmd_oci(args: &str) {
                         if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount) {
                             crate::console_println!(
                                 "[oci] Warning: could not record rootfs mount: {:?}", e
+                            );
+                        }
+                    }
+                    // Record the overlay id (independent of whether the adapter
+                    // was mounted) so `container diff` can locate the writable
+                    // scratch layer even when the merged mount fell back to the
+                    // read-only lower dir.
+                    if let Some(ov_id) = overlay_id {
+                        if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
+                            crate::console_println!(
+                                "[oci] Warning: could not record overlay id: {:?}", e
                             );
                         }
                     }

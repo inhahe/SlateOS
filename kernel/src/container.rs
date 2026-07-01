@@ -442,6 +442,13 @@ struct Container {
     /// container's jail (if any) points at a plain host directory that the
     /// container module does not own and must not unmount.
     rootfs_mount: String,
+    /// Overlay id backing this container's copy-on-write rootfs, if one was
+    /// created for it. `None` when the container is jailed directly at a plain
+    /// (non-overlay) directory. Recorded at run time so introspection that
+    /// needs the writable scratch layer — [`diff`] (Docker `diff`) — can locate
+    /// the upper layer and whiteouts without relying on the (rename-fragile)
+    /// overlay name.
+    overlay_id: Option<crate::fs::overlay::OverlayId>,
     /// Volume (bind) mounts as `(guest_prefix, host_target, read_only)`
     /// triples — the Docker `-v host_target:guest_prefix[:ro]` mechanism.
     /// Each is installed on every process launched by [`run`] via
@@ -547,6 +554,7 @@ impl Container {
             init_pid: None,
             root_path: String::new(),
             rootfs_mount: String::new(),
+            overlay_id: None,
             volumes: Vec::new(),
             read_only_root: false,
             hostname: String::new(),
@@ -2669,6 +2677,160 @@ pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
     })
 }
 
+/// Record the overlay id backing this container's copy-on-write rootfs.
+///
+/// Stored at run time (alongside [`set_rootfs_mount`]) so introspection that
+/// needs the writable scratch layer — [`diff`] — can locate the overlay's
+/// upper layer and whiteouts. Only takes effect while the container is still
+/// in `Created` state, matching the other rootfs setters. `None` clears it.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the container doesn't exist or is not
+///   in `Created` state.
+pub fn set_overlay_id(
+    id: ContainerId,
+    overlay_id: Option<crate::fs::overlay::OverlayId>,
+) -> KernelResult<()> {
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        table.containers[idx].overlay_id = overlay_id;
+        Ok(())
+    })
+}
+
+/// A single filesystem change reported by [`diff`] (Docker `diff`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffEntry {
+    /// The kind of change (added / changed / deleted).
+    pub kind: DiffKind,
+    /// Absolute guest path (leading `/`) of the changed entry.
+    pub path: String,
+}
+
+/// The three change classes Docker `diff` reports, matching its `A`/`C`/`D`
+/// prefixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    /// Added: exists only in the writable upper layer (new file/dir).
+    Added,
+    /// Changed: exists in both layers — a lower-layer entry that was copied up
+    /// (modified) or a directory whose contents changed.
+    Changed,
+    /// Deleted: whited out — present in the image but removed in the container.
+    Deleted,
+}
+
+impl DiffKind {
+    /// The single-character Docker `diff` prefix (`A`/`C`/`D`).
+    #[must_use]
+    pub fn prefix(self) -> char {
+        match self {
+            DiffKind::Added => 'A',
+            DiffKind::Changed => 'C',
+            DiffKind::Deleted => 'D',
+        }
+    }
+}
+
+/// Report the filesystem changes in a container relative to its image
+/// (Docker `diff`).
+///
+/// Walks the container's overlay **upper** (writable) layer and classifies
+/// every entry: an entry present in both layers is `Changed` (a copied-up file
+/// or a directory whose contents changed), one present only in the upper layer
+/// is `Added`. Whiteouts (entries deleted from the image) are reported as
+/// `Deleted`. The result is sorted by path, so parent directories precede their
+/// children — matching Docker's ordering.
+///
+/// The walk is iterative (an explicit work stack), not recursive, to bound
+/// kernel stack use on deep container trees.
+///
+/// # Errors
+///
+/// - [`KernelError::NotFound`] if the container id is invalid/inactive.
+/// - [`KernelError::InvalidArgument`] if the container has no overlay (it was
+///   jailed directly at a plain directory, so there is no writable layer to
+///   diff).
+/// - Propagates overlay errors from [`crate::fs::overlay`].
+pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
+    // Resolve the overlay id under the table lock. `Some(None)` means the
+    // container exists but owns no overlay; `None` means no such container.
+    let overlay_id = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        Some(table.containers[idx].overlay_id)
+    })
+    .ok_or(KernelError::NotFound)?;
+    let Some(ov_id) = overlay_id else {
+        return Err(KernelError::InvalidArgument);
+    };
+
+    let upper = crate::fs::overlay::upper_path(ov_id)?;
+    let upper_base = upper.trim_end_matches('/');
+    let mut out: Vec<DiffEntry> = Vec::new();
+
+    // Iterative walk of the upper layer. Each work item is a normalized rel
+    // directory ("" == the upper root).
+    let mut stack: Vec<String> = alloc::vec![String::new()];
+    while let Some(rel_dir) = stack.pop() {
+        let dir_abs = if rel_dir.is_empty() {
+            String::from(upper_base)
+        } else {
+            alloc::format!("{}/{}", upper_base, rel_dir)
+        };
+        // A directory that vanished mid-walk (concurrent teardown) is skipped
+        // rather than failing the whole diff.
+        let Ok(entries) = crate::fs::vfs::Vfs::readdir(&dir_abs) else {
+            continue;
+        };
+        for e in entries {
+            if e.name == "." || e.name == ".." {
+                continue;
+            }
+            let child_rel = if rel_dir.is_empty() {
+                e.name.clone()
+            } else {
+                alloc::format!("{}/{}", rel_dir, e.name)
+            };
+            let kind = match crate::fs::overlay::which_layer(ov_id, &child_rel)? {
+                crate::fs::overlay::Layer::Both => DiffKind::Changed,
+                crate::fs::overlay::Layer::Upper => DiffKind::Added,
+                // Whited-out or (racily) vanished — not an upper-layer change.
+                crate::fs::overlay::Layer::Lower | crate::fs::overlay::Layer::None => {
+                    continue;
+                }
+            };
+            out.push(DiffEntry {
+                kind,
+                path: alloc::format!("/{child_rel}"),
+            });
+            if e.entry_type == crate::fs::vfs::EntryType::Directory {
+                stack.push(child_rel);
+            }
+        }
+    }
+
+    // Whiteouts → deleted entries (present in the image, removed here).
+    for w in crate::fs::overlay::whiteouts(ov_id)? {
+        out.push(DiffEntry {
+            kind: DiffKind::Deleted,
+            path: alloc::format!("/{w}"),
+        });
+    }
+
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
 /// Add a volume (bind) mount to a container before it is run — the Docker
 /// `-v host_target:guest_prefix` mechanism.
 ///
@@ -4249,6 +4411,64 @@ pub fn self_test() {
         delete(ct_bw).expect("delete blockwait container");
     }
     serial_println!("[container]   blocking wait (wait): OK");
+
+    // Test 19k3: diff() reports overlay upper-layer changes (Docker `diff`) —
+    // added (upper-only), changed (copied-up/both), and deleted (whiteout)
+    // entries, sorted by path.  Builds a real overlay under /tmp (memfs).
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Invalid id → NotFound.
+        assert!(matches!(
+            diff(MAX_CONTAINERS as ContainerId),
+            Err(KernelError::NotFound)
+        ));
+
+        // A container with no overlay → InvalidArgument (nothing to diff).
+        let ct_noov = create(&ContainerConfig::new("test-diff-noov")).expect("create");
+        assert!(matches!(diff(ct_noov), Err(KernelError::InvalidArgument)));
+        delete(ct_noov).expect("delete noov");
+
+        // Build a real overlay: lower has `keep` and `gone`.
+        let base = "/tmp/ct_diff_test";
+        let lower = "/tmp/ct_diff_test/lower";
+        let upper = "/tmp/ct_diff_test/upper";
+        let _ = Vfs::mkdir(base);
+        let _ = Vfs::mkdir(lower);
+        let _ = Vfs::mkdir(upper);
+        Vfs::write_file(&alloc::format!("{lower}/keep"), b"orig").expect("write keep");
+        Vfs::write_file(&alloc::format!("{lower}/gone"), b"bye").expect("write gone");
+        let ov = crate::fs::overlay::create("ct-diff-ov", lower, upper).expect("overlay");
+        // Modify keep (copy-up → Both/Changed), add a new file (Upper/Added),
+        // delete gone (whiteout → Deleted).
+        crate::fs::overlay::write_file(ov, "keep", b"modified").expect("modify keep");
+        crate::fs::overlay::write_file(ov, "added.txt", b"new").expect("add file");
+        crate::fs::overlay::remove(ov, "gone").expect("remove gone");
+
+        let ct_d = create(&ContainerConfig::new("test-diff-ct")).expect("create");
+        set_overlay_id(ct_d, Some(ov)).expect("set overlay id");
+        let changes = diff(ct_d).expect("diff");
+        assert!(
+            changes.iter().any(|c| c.kind == DiffKind::Added && c.path == "/added.txt"),
+            "added.txt must be reported as Added",
+        );
+        assert!(
+            changes.iter().any(|c| c.kind == DiffKind::Changed && c.path == "/keep"),
+            "keep must be reported as Changed",
+        );
+        assert!(
+            changes.iter().any(|c| c.kind == DiffKind::Deleted && c.path == "/gone"),
+            "gone must be reported as Deleted",
+        );
+        // Output is sorted by path.
+        let mut sorted = changes.clone();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(changes, sorted, "diff output must be sorted by path");
+
+        delete(ct_d).expect("delete diff ct");
+        let _ = crate::fs::overlay::destroy(ov);
+    }
+    serial_println!("[container]   diff (overlay changes): OK");
 
     // Test 19l: pause()/unpause() freeze and thaw a container (Docker
     // `pause`/`unpause`), managing the `frozen` flag and its state-machine

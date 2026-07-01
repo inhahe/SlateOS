@@ -68592,9 +68592,22 @@ fn cmd_docker(args: &str) {
         None => (trimmed, ""),
     };
 
+    // Delegate a Docker subcommand to the native `container` handler, forwarding
+    // the argument tail verbatim.  `target` is the `container` subcommand name
+    // (often identical to the Docker one, occasionally renamed — e.g. `rm` ->
+    // `delete`, `inspect` -> `info`, `ps` -> `list`).
+    let delegate = |target: &str| {
+        let mut delegated = alloc::string::String::from(target);
+        if !rest.is_empty() {
+            delegated.push(' ');
+            delegated.push_str(rest);
+        }
+        cmd_container(&delegated);
+    };
+
     match sub {
         // Image-backed lifecycle: delegate straight to the OCI runner, which
-        // already understands -v/-p/-e/--name/--net.
+        // already understands -v/-p/-e/--name/--net/--restart/--rm.
         "run" | "create" => {
             let mut delegated = alloc::string::String::from(sub);
             if !rest.is_empty() {
@@ -68603,57 +68616,18 @@ fn cmd_docker(args: &str) {
             }
             cmd_oci(&delegated);
         }
-        // `docker ps` / `docker ps -a`: our listing always shows every
-        // container, so the `-a`/`--all` flag is a no-op we accept silently.
-        "ps" => cmd_container("list"),
-        "start" => {
-            let mut delegated = alloc::string::String::from("start");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
-        "stop" => {
-            let mut delegated = alloc::string::String::from("stop");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
-        "rm" => {
-            let mut delegated = alloc::string::String::from("delete");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
-        "inspect" => {
-            let mut delegated = alloc::string::String::from("info");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
-        "exec" => {
-            let mut delegated = alloc::string::String::from("exec");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
-        "events" => {
-            let mut delegated = alloc::string::String::from("events");
-            if !rest.is_empty() {
-                delegated.push(' ');
-                delegated.push_str(rest);
-            }
-            cmd_container(&delegated);
-        }
+        // `docker ps` shows running containers; `docker ps -a` shows all — the
+        // native `container list` has identical semantics, so forward the flags
+        // (previously they were silently dropped).
+        "ps" => delegate("list"),
+        // Renamed subcommands (Docker name differs from the native one).
+        "rm" => delegate("delete"),
+        "inspect" => delegate("info"),
+        // 1:1 passthroughs — the Docker and native subcommand names match.
+        "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
+        | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
+        | "rename" | "update" | "prune" | "cp" | "commit" | "export"
+        | "import" => delegate(sub),
         // SlateOS has no image registry/store keyed by name — images are
         // referenced by their on-disk OCI layout directory. `docker images`
         // therefore inspects a directory rather than listing a registry.
@@ -68669,13 +68643,24 @@ fn cmd_docker(args: &str) {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <run|create|ps|start|stop|rm|inspect|exec|images> ...");
-            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|rename|update|prune|cp|commit|export|import|images|version> ...");
+            crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
-            crate::console_println!("  docker ps [-a]                         — list containers (all states)");
-            crate::console_println!("  docker start|stop|rm <id>              — lifecycle control");
+            crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
+            crate::console_println!("  docker start|stop|restart|kill <id>    — lifecycle control");
+            crate::console_println!("  docker pause|unpause <id>              — freeze / thaw all threads");
+            crate::console_println!("  docker rm [-f] <id>                    — remove container(s)");
             crate::console_println!("  docker inspect [--json] <id>           — detailed container info (--json)");
             crate::console_println!("  docker exec <id> <command...>          — run a command in the container NS");
+            crate::console_println!("  docker logs [--tail N] <id>            — captured init stdout/stderr");
+            crate::console_println!("  docker events [-n N] [--id <id>]       — recent lifecycle events");
+            crate::console_println!("  docker stats|top <id>                  — live resource usage / process list");
+            crate::console_println!("  docker port|wait <id>                  — published ports / block until exit");
+            crate::console_println!("  docker rename <id> <name>              — rename a container");
+            crate::console_println!("  docker update <id> [--cpus N] [--memory SIZE] [--restart POLICY]");
+            crate::console_println!("  docker prune                           — remove all stopped containers");
+            crate::console_println!("  docker cp <src> <dest>                 — copy between host and rootfs");
+            crate::console_println!("  docker commit|export|import ...        — snapshot / pack / load a rootfs");
             crate::console_println!("  docker images <image-dir>              — inspect an OCI image directory");
             crate::console_println!();
             crate::console_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");

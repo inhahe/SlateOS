@@ -107,6 +107,12 @@ pub fn poll() {
         }
     }
 
+    // Layer-2-switch frames among bridged container-network veth ports before
+    // the generic drain: a bridged host-end is skipped by `poll_all`, so the
+    // bridge must be the one to consume and forward its frames (to same-network
+    // peers, and — for unknown/broadcast — to the host stack).
+    bridge::forward_all();
+
     // Drain virtual ethernet (veth) pair RX queues into the protocol stack.
     veth::poll_all();
 

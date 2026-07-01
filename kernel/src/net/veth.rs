@@ -83,6 +83,13 @@ struct VethEnd {
     ns_id: NetNsId,
     /// Whether this endpoint is administratively up.
     up: bool,
+    /// Whether this endpoint is attached to an L2 bridge (a container-network
+    /// bridge port). When set, [`poll_all`] does **not** drain this endpoint's
+    /// RX queue into the global protocol stack — the owning bridge drains it
+    /// instead (see `net::bridge::forward`). This is how a container attached
+    /// to a user-defined network has its host-end frames routed to same-network
+    /// peers at layer 2 rather than terminating at the host stack.
+    bridged: bool,
     /// Inbound frame queue (frames sent by the peer land here).
     rx_queue: VecDeque<Vec<u8>>,
     /// Total bytes transmitted (to peer).
@@ -104,6 +111,7 @@ impl VethEnd {
             mac,
             ns_id,
             up: false,
+            bridged: false,
             rx_queue: VecDeque::with_capacity(16),
             tx_bytes: 0,
             rx_bytes: 0,
@@ -389,6 +397,42 @@ pub fn set_up(pair_id: VethPairId, end: VethEndId, up: bool) -> KernelResult<()>
     })
 }
 
+/// Mark (or unmark) an endpoint as attached to an L2 bridge.
+///
+/// A bridged endpoint is skipped by [`poll_all`]: its RX frames are drained and
+/// switched by the owning bridge (`net::bridge::forward`) rather than delivered
+/// to the global host protocol stack. Used when a container joins a
+/// user-defined network so its host-end participates in L2 forwarding to
+/// same-network peers.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the pair/end is invalid or inactive.
+pub fn set_bridged(pair_id: VethPairId, end: VethEndId, bridged: bool) -> KernelResult<()> {
+    with_table(|table| {
+        let pair = table.pairs.get_mut(pair_id)
+            .ok_or(KernelError::InvalidArgument)?;
+        if !pair.active {
+            return Err(KernelError::InvalidArgument);
+        }
+        pair.end_mut(end).bridged = bridged;
+        Ok(())
+    })
+}
+
+/// Whether an endpoint is currently marked bridged.
+///
+/// Returns `false` for an invalid or inactive pair.
+#[must_use]
+pub fn is_bridged(pair_id: VethPairId, end: VethEndId) -> bool {
+    with_table_ref(|table| {
+        table
+            .pairs
+            .get(pair_id)
+            .is_some_and(|p| p.active && p.end_ref(end).bridged)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API: frame I/O
 // ---------------------------------------------------------------------------
@@ -487,6 +531,14 @@ pub fn poll_all() {
             for end_id in &[VethEndId::A, VethEndId::B] {
                 let endpoint = pair.end_mut(*end_id);
                 if !endpoint.up {
+                    continue;
+                }
+                // A bridged endpoint's frames are owned by its L2 bridge, which
+                // drains and forwards them itself (net::bridge::forward). Leave
+                // them here so the bridge — not the global host stack — sees
+                // them; otherwise same-network peer traffic would be swallowed
+                // by the host stack instead of switched to the peer.
+                if endpoint.bridged {
                     continue;
                 }
                 while let Some(frame) = endpoint.dequeue_rx() {

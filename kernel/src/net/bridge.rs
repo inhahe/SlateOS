@@ -39,7 +39,11 @@ use crate::virtio::net::MacAddress;
 // ---------------------------------------------------------------------------
 
 /// Maximum number of bridges.
-const MAX_BRIDGES: usize = 4;
+///
+/// Sized to give each user-defined container network its own L2 bridge
+/// (`cnetwork` creates one lazily per multi-member network) with headroom for
+/// a few operator-created bridges besides.
+const MAX_BRIDGES: usize = 16;
 
 /// Maximum number of ports per bridge.
 const MAX_PORTS_PER_BRIDGE: usize = 8;
@@ -157,6 +161,11 @@ struct BridgePort {
     id: u8,
     /// STP state.
     stp_state: StpState,
+    /// The veth pair whose host-end (end A) this port represents, when the port
+    /// is a container-network veth port. `None` for a plain (id-only) port.
+    /// A veth port lets [`forward`] pull frames from and push frames to a
+    /// container's host-side veth endpoint for layer-2 switching.
+    veth_pair: Option<usize>,
     /// Frames received on this port.
     rx_frames: u64,
     /// Frames sent on this port.
@@ -171,6 +180,7 @@ impl BridgePort {
             active: false,
             id: 0,
             stp_state: StpState::Forwarding,
+            veth_pair: None,
             rx_frames: 0,
             tx_frames: 0,
             drops: 0,
@@ -450,6 +460,7 @@ pub fn add_port(bridge_idx: usize, port_id: u8) -> KernelResult<()> {
             port.active = true;
             port.id = port_id;
             port.stp_state = StpState::Forwarding;
+            port.veth_pair = None;
             port.rx_frames = 0;
             port.tx_frames = 0;
             port.drops = 0;
@@ -496,6 +507,228 @@ pub fn set_port_stp(bridge_idx: usize, port_id: u8, state: StpState) -> KernelRe
     }
 
     Err(KernelError::NotFound)
+}
+
+// ---------------------------------------------------------------------------
+// Container-network L2 switching (veth ports)
+// ---------------------------------------------------------------------------
+//
+// A user-defined container network (`cnetwork`) stands up one bridge and
+// attaches each member container's host-side veth endpoint as a port. Frames
+// a container emits (which land on its veth host-end's RX queue) are drained by
+// `forward` and switched at layer 2 to the destination member — or flooded to
+// all members and the host stack for unknown/broadcast destinations. This is
+// what lets two containers on the same network address each other directly by
+// their allocated IPs, rather than only reaching the host via NAT.
+
+use crate::net::veth::{self, VethEndId, VethPairId};
+
+/// Attach a veth pair's host-end (end A) to a bridge as a switching port.
+///
+/// The host-end is marked *bridged* (via [`veth::set_bridged`]) so the generic
+/// veth poll (`veth::poll_all`) stops draining it — the bridge now owns those
+/// frames. Returns the assigned port id (its slot index within the bridge).
+///
+/// Idempotent: attaching an already-attached pair returns its existing port id.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the bridge index is out of range.
+/// - [`KernelError::NotFound`] if the bridge slot is inactive.
+/// - [`KernelError::OutOfMemory`] if the bridge has no free port slot.
+pub fn attach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<u8> {
+    let port_id = {
+        let mut bridges = BRIDGES.lock();
+        let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+        if !bridge.active {
+            return Err(KernelError::NotFound);
+        }
+        // Already attached? Return the existing port id (idempotent).
+        if let Some(p) = bridge.ports.iter().find(|p| p.active && p.veth_pair == Some(pair)) {
+            return Ok(p.id);
+        }
+        // Claim a free port slot; the port id is its slot index.
+        let mut assigned: Option<u8> = None;
+        for (i, port) in bridge.ports.iter_mut().enumerate() {
+            if !port.active {
+                let id = u8::try_from(i).unwrap_or(0);
+                port.active = true;
+                port.id = id;
+                port.stp_state = StpState::Forwarding;
+                port.veth_pair = Some(pair);
+                port.rx_frames = 0;
+                port.tx_frames = 0;
+                port.drops = 0;
+                assigned = Some(id);
+                break;
+            }
+        }
+        assigned.ok_or(KernelError::OutOfMemory)?
+    };
+    // Mark the host-end bridged outside the BRIDGES lock (veth takes its own
+    // lock; never nest the two).
+    veth::set_bridged(pair, VethEndId::A, true)?;
+    Ok(port_id)
+}
+
+/// Detach a veth pair from a bridge and clear its bridged flag so the host-end
+/// returns to generic host-stack delivery.
+///
+/// Any FDB entries that pointed at the freed port are dropped so a later reuse
+/// of that slot cannot inherit a stale MAC→port mapping.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the bridge index is out of range.
+/// - [`KernelError::NotFound`] if the bridge is inactive or the pair is not
+///   attached to it.
+pub fn detach_veth(bridge_idx: usize, pair: VethPairId) -> KernelResult<()> {
+    {
+        let mut bridges = BRIDGES.lock();
+        let bridge = bridges.get_mut(bridge_idx).ok_or(KernelError::InvalidArgument)?;
+        if !bridge.active {
+            return Err(KernelError::NotFound);
+        }
+        let freed_port = {
+            let port = bridge.ports.iter_mut()
+                .find(|p| p.active && p.veth_pair == Some(pair))
+                .ok_or(KernelError::NotFound)?;
+            port.active = false;
+            port.veth_pair = None;
+            port.id
+        };
+        for entry in bridge.fdb.iter_mut() {
+            if entry.active && entry.port == freed_port {
+                entry.active = false;
+            }
+        }
+    }
+    // Best-effort: clear the bridged flag. The pair may already be destroyed
+    // (teardown ordering), in which case this is a harmless no-op error.
+    let _ = veth::set_bridged(pair, VethEndId::A, false);
+    Ok(())
+}
+
+/// Number of veth switching ports currently attached to a bridge.
+#[must_use]
+pub fn veth_port_count(bridge_idx: usize) -> usize {
+    let bridges = BRIDGES.lock();
+    bridges
+        .get(bridge_idx)
+        .filter(|b| b.active)
+        .map_or(0, |b| b.ports.iter().filter(|p| p.active && p.veth_pair.is_some()).count())
+}
+
+/// Whether a bridge index refers to an active bridge.
+#[must_use]
+pub fn is_active(bridge_idx: usize) -> bool {
+    BRIDGES.lock().get(bridge_idx).is_some_and(|b| b.active)
+}
+
+/// Drain and layer-2-switch frames among a bridge's veth ports.
+///
+/// For each frame a member container emitted (drained from its host-end's RX
+/// queue): learn the source MAC on the ingress port, then
+/// - **known unicast** → deliver only to the destination member's container
+///   side;
+/// - **unknown unicast / broadcast / multicast** → flood to every other
+///   member's container side *and* hand the frame to the host protocol stack
+///   (so the network's gateway / external NAT still sees it — this preserves a
+///   bridged container's outbound connectivity, which `poll_all` used to
+///   provide before the host-end was bridged).
+///
+/// Never holds the `BRIDGES` lock across veth I/O (which takes the veth lock).
+pub fn forward(bridge_idx: usize) {
+    // Snapshot the bridge's veth ports under the lock, then act outside it.
+    let ports: Vec<(u8, VethPairId)> = {
+        let bridges = BRIDGES.lock();
+        match bridges.get(bridge_idx) {
+            Some(b) if b.active => b
+                .ports
+                .iter()
+                .filter_map(|p| if p.active { p.veth_pair.map(|vp| (p.id, vp)) } else { None })
+                .collect(),
+            _ => return,
+        }
+    };
+    if ports.is_empty() {
+        return;
+    }
+
+    let now = crate::hrtimer::now_ns();
+
+    for &(in_port, in_pair) in &ports {
+        while let Some(frame) = veth::recv(in_pair, VethEndId::A) {
+            // Parse the Ethernet destination/source MACs without slicing panics.
+            let (Some(dst), Some(src)) = (
+                frame.get(0..6).and_then(|s| <[u8; 6]>::try_from(s).ok()),
+                frame.get(6..12).and_then(|s| <[u8; 6]>::try_from(s).ok()),
+            ) else {
+                // Runt frame (< 12 bytes): cannot switch on it; drop.
+                continue;
+            };
+
+            // Learn source → ingress port, and resolve the destination port in
+            // one lock acquisition (no veth I/O held under the BRIDGES lock).
+            let is_flood = dst == [0xFF; 6] || dst.first().is_some_and(|b| b & 0x01 != 0);
+            let dst_port = {
+                let mut bridges = BRIDGES.lock();
+                match bridges.get_mut(bridge_idx) {
+                    Some(b) if b.active => {
+                        b.learn(&src, in_port, now);
+                        b.frames_bridged = b.frames_bridged.saturating_add(1);
+                        if is_flood { None } else { b.lookup(&dst) }
+                    }
+                    _ => None,
+                }
+            };
+
+            match dst_port {
+                Some(p) if p == in_port => {
+                    // Destination resolves to the ingress port — don't echo.
+                }
+                Some(p) => {
+                    // Known unicast: deliver only to that member's container side
+                    // (send from the host-end A → lands on the container-end B).
+                    if let Some(&(_, out_pair)) = ports.iter().find(|&&(pid, _)| pid == p) {
+                        let _ = veth::send(out_pair, VethEndId::A, frame);
+                    }
+                    // else: learned port no longer present — drop.
+                }
+                None => {
+                    // Flood to every other member's container side …
+                    for &(pid, out_pair) in &ports {
+                        if pid == in_port {
+                            continue;
+                        }
+                        let _ = veth::send(out_pair, VethEndId::A, frame.clone());
+                    }
+                    // … and to the host stack (gateway / external NAT).
+                    let _ = super::ethernet::process_frame(&frame);
+                    let mut bridges = BRIDGES.lock();
+                    if let Some(b) = bridges.get_mut(bridge_idx) {
+                        b.frames_flooded = b.frames_flooded.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Layer-2-switch frames across every active bridge (called from `net::poll`).
+///
+/// Bridges with no veth ports return immediately, so this is cheap when no
+/// user-defined container network has multiple members.
+pub fn forward_all() {
+    let active: Vec<usize> = {
+        let bridges = BRIDGES.lock();
+        bridges
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| if b.active { Some(i) } else { None })
+            .collect()
+    };
+    for idx in active {
+        forward(idx);
+    }
 }
 
 // ---------------------------------------------------------------------------

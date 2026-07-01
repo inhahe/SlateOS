@@ -75,6 +75,11 @@ struct Allocation {
     /// or `None` for an address reserved without a container (e.g. a manual
     /// `network connect` with no container binding yet).
     owner: Option<u32>,
+    /// The container's host-side veth pair id, recorded when the container is
+    /// attached to this network's L2 bridge. Lets [`release`]/
+    /// [`release_container`] detach the veth from the bridge (and tear the
+    /// bridge down when its last member leaves). `None` until attached.
+    veth_pair: Option<usize>,
 }
 
 /// A registered container network.
@@ -89,6 +94,11 @@ struct Network {
     gateway: [u8; 4],
     /// Currently-allocated host addresses.
     allocations: Vec<Allocation>,
+    /// The `net::bridge` instance backing this network's shared layer-2 domain,
+    /// or `None` until the first container attaches. Created lazily on first
+    /// attach and torn down when the last member detaches, so a network with at
+    /// most one member never consumes a scarce bridge slot.
+    bridge_idx: Option<usize>,
 }
 
 /// Public, read-only view of a network (for `inspect`/`ls`).
@@ -296,6 +306,7 @@ pub fn create_with_subnet(
         prefix_len,
         gateway: gw,
         allocations: Vec::new(),
+        bridge_idx: None,
     });
     Ok(())
 }
@@ -434,7 +445,7 @@ pub fn allocate(name: &str, container_id: Option<u32>) -> KernelResult<Lease> {
         let taken = candidate == gw
             || n.allocations.iter().any(|a| ip_to_u32(a.ip) == candidate);
         if !taken {
-            n.allocations.push(Allocation { ip, owner: container_id });
+            n.allocations.push(Allocation { ip, owner: container_id, veth_pair: None });
             return Ok(Lease {
                 ip,
                 gateway: n.gateway,
@@ -471,7 +482,89 @@ pub fn set_allocation_owner(name: &str, ip: [u8; 4], owner: u32) -> KernelResult
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// L2 bridge lifecycle (shared broadcast domain for same-network peers)
+// ---------------------------------------------------------------------------
+
+/// Detach a container's host-side veth from a network's L2 bridge and, when the
+/// bridge has no members left, tear it down (freeing the scarce bridge slot).
+///
+/// Runs under the `TABLE` lock. The lock order is `TABLE → BRIDGES → veth`;
+/// nothing acquires these in the reverse order, so holding `TABLE` across the
+/// bridge calls is deadlock-free.
+fn detach_and_maybe_teardown(n: &mut Network, veth_pair: usize) {
+    if let Some(b) = n.bridge_idx {
+        let _ = crate::net::bridge::detach_veth(b, veth_pair);
+        if crate::net::bridge::veth_port_count(b) == 0 {
+            let _ = crate::net::bridge::delete_bridge(b);
+            n.bridge_idx = None;
+        }
+    }
+}
+
+/// Attach a container's host-side veth to its network's shared L2 bridge,
+/// standing the bridge up lazily on the first attach.
+///
+/// This is what puts two containers on the same named network into one
+/// broadcast domain: each member's host-end veth becomes a bridge port, and
+/// `net::bridge::forward` switches frames between them (see D-CNET-L2BRIDGE).
+/// The `veth_pair` is recorded on the container's allocation so
+/// [`release`]/[`release_container`] can detach it (and tear the bridge down
+/// when its last member leaves).
+///
+/// The container must already own an allocation on the network (bind it with
+/// [`set_allocation_owner`] first); otherwise the attach is rolled back and
+/// [`KernelError::NotFound`] is returned so a bridged veth is never left
+/// untracked for cleanup.
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the network is not registered, or the
+///   container owns no allocation on it.
+/// - Propagates [`net::bridge`] errors (e.g. [`KernelError::OutOfMemory`] if
+///   the bridge table or the bridge's ports are exhausted).
+pub fn attach_container_veth(
+    name: &str,
+    container_id: u32,
+    veth_pair: usize,
+) -> KernelResult<()> {
+    let mut table = TABLE.lock();
+    let idx = table.position(name).ok_or(KernelError::NotFound)?;
+    let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
+
+    // Lazily create the bridge on first attach (or if a stale index no longer
+    // refers to an active bridge).
+    let bridge_idx = match n.bridge_idx {
+        Some(b) if crate::net::bridge::is_active(b) => b,
+        _ => {
+            let b = crate::net::bridge::create_bridge(&n.name)?;
+            n.bridge_idx = Some(b);
+            b
+        }
+    };
+
+    crate::net::bridge::attach_veth(bridge_idx, veth_pair)?;
+
+    // Record the veth on the container's owned allocation(s) for later cleanup.
+    let mut bound = false;
+    for a in n.allocations.iter_mut() {
+        if a.owner == Some(container_id) {
+            a.veth_pair = Some(veth_pair);
+            bound = true;
+        }
+    }
+    if !bound {
+        // No owned allocation to hang the cleanup off — roll the attach back so
+        // we never leave a bridged veth untracked.
+        detach_and_maybe_teardown(n, veth_pair);
+        return Err(KernelError::NotFound);
+    }
+    Ok(())
+}
+
 /// Release a specific address from a network.
+///
+/// If the released allocation had a bridged veth, it is detached from the
+/// network's L2 bridge (which is torn down if it becomes memberless).
 ///
 /// # Errors
 /// - [`KernelError::NotFound`] if the network is not registered or the address
@@ -480,25 +573,40 @@ pub fn release(name: &str, ip: [u8; 4]) -> KernelResult<()> {
     let mut table = TABLE.lock();
     let idx = table.position(name).ok_or(KernelError::NotFound)?;
     let n = table.networks.get_mut(idx).ok_or(KernelError::NotFound)?;
+    let veth = n.allocations.iter().find(|a| a.ip == ip).and_then(|a| a.veth_pair);
     let before = n.allocations.len();
     n.allocations.retain(|a| a.ip != ip);
     if n.allocations.len() == before {
         return Err(KernelError::NotFound);
+    }
+    if let Some(vp) = veth {
+        detach_and_maybe_teardown(n, vp);
     }
     Ok(())
 }
 
 /// Release every address owned by `container_id`, across all networks.
 ///
-/// Called when a container is removed so its leases do not leak. Returns the
-/// number of addresses freed.
+/// Called when a container is removed so its leases do not leak. Detaches any
+/// bridged veths from their networks' L2 bridges (tearing a bridge down when
+/// its last member leaves). Returns the number of addresses freed.
 pub fn release_container(container_id: u32) -> usize {
     let mut table = TABLE.lock();
     let mut freed = 0usize;
     for n in &mut table.networks {
+        // Collect the veth pairs to detach before dropping the allocations.
+        let veths: Vec<usize> = n
+            .allocations
+            .iter()
+            .filter(|a| a.owner == Some(container_id))
+            .filter_map(|a| a.veth_pair)
+            .collect();
         let before = n.allocations.len();
         n.allocations.retain(|a| a.owner != Some(container_id));
         freed = freed.saturating_add(before.saturating_sub(n.allocations.len()));
+        for vp in veths {
+            detach_and_maybe_teardown(n, vp);
+        }
     }
     freed
 }
@@ -644,6 +752,97 @@ pub fn self_test() {
     remove("st-net-own").expect("remove own-net");
     assert_eq!(count(), base, "registry returns to baseline after own net");
     serial_println!("[cnetwork]   set_allocation_owner (run-path reservation): OK");
+
+    // L2 bridge: two members on one network share a broadcast domain, and the
+    // bridge is stood up lazily / torn down when memberless (D-CNET-L2BRIDGE).
+    {
+        use crate::net::bridge;
+        use crate::net::veth::{self, VethEndId};
+
+        create_with_subnet("st-l2", [10, 60, 0, 0], 24, None).expect("create st-l2");
+        let lease1 = allocate("st-l2", Some(101)).expect("lease c1");
+        let lease2 = allocate("st-l2", Some(102)).expect("lease c2");
+        assert_eq!(lease1.ip, [10, 60, 0, 2], "c1 gets .2");
+        assert_eq!(lease2.ip, [10, 60, 0, 3], "c2 gets .3");
+
+        // Two veth pairs stand in for the two containers' host links; bring both
+        // ends of each up so frames flow. End B is the container side.
+        let pair1 = veth::create_pair().expect("veth pair1");
+        let pair2 = veth::create_pair().expect("veth pair2");
+        for &p in &[pair1, pair2] {
+            veth::set_up(p, VethEndId::A, true).expect("up A");
+            veth::set_up(p, VethEndId::B, true).expect("up B");
+        }
+        let mac1 = veth::mac(pair1, VethEndId::B).expect("mac1");
+        let mac2 = veth::mac(pair2, VethEndId::B).expect("mac2");
+
+        // The bridge is lazy: none exists until the first attach.
+        assert!(
+            !bridge::list_bridges().iter().any(|b| b.name == "st-l2"),
+            "bridge is lazy — none before attach",
+        );
+        attach_container_veth("st-l2", 101, pair1).expect("attach c1");
+        attach_container_veth("st-l2", 102, pair2).expect("attach c2");
+        assert!(
+            bridge::list_bridges().iter().any(|b| b.name == "st-l2"),
+            "bridge created on first attach",
+        );
+        assert!(veth::is_bridged(pair1, VethEndId::A), "c1 host-end bridged");
+        assert!(veth::is_bridged(pair2, VethEndId::A), "c2 host-end bridged");
+
+        // Minimal Ethernet frame (dst + src + ethertype + 4-byte tagged payload),
+        // built without slicing so the defensive lints stay quiet.
+        let make_frame = |dst: [u8; 6], src: [u8; 6], tag: u8| -> Vec<u8> {
+            let mut f = Vec::with_capacity(18);
+            f.extend_from_slice(&dst);
+            f.extend_from_slice(&src);
+            f.extend_from_slice(&[0x08, 0x00, tag, 0, 0, 0]);
+            f
+        };
+
+        // c1 broadcasts (unknown destination) → flooded to c2's container side.
+        veth::send(pair1, VethEndId::B, make_frame([0xFF; 6], mac1, 0xA1))
+            .expect("c1 broadcast");
+        bridge::forward_all();
+        assert!(
+            veth::recv(pair2, VethEndId::B).is_some_and(|f| f.get(14) == Some(&0xA1)),
+            "broadcast flooded to peer c2",
+        );
+        assert!(veth::recv(pair1, VethEndId::B).is_none(), "broadcast not echoed to sender");
+
+        // The bridge learned c1's MAC on ingress; a unicast c2 → c1 is delivered
+        // only to c1 (switched, not flooded).
+        veth::send(pair2, VethEndId::B, make_frame(mac1, mac2, 0xB2))
+            .expect("c2 unicast to c1");
+        bridge::forward_all();
+        assert!(
+            veth::recv(pair1, VethEndId::B).is_some_and(|f| f.get(14) == Some(&0xB2)),
+            "learned unicast delivered to c1",
+        );
+        assert!(veth::recv(pair2, VethEndId::B).is_none(), "unicast not echoed to sender");
+        serial_println!("[cnetwork]   L2 bridge forward/learn: OK");
+
+        // Teardown: releasing c1 leaves the bridge (c2 still a member); releasing
+        // c2 makes it memberless, so it is torn down and the host-ends unbridged.
+        assert_eq!(release_container(101), 1, "c1 lease freed");
+        assert!(
+            bridge::list_bridges().iter().any(|b| b.name == "st-l2"),
+            "bridge stays up while c2 remains",
+        );
+        assert_eq!(release_container(102), 1, "c2 lease freed");
+        assert!(
+            !bridge::list_bridges().iter().any(|b| b.name == "st-l2"),
+            "bridge torn down when last member left",
+        );
+        assert!(!veth::is_bridged(pair1, VethEndId::A), "c1 host-end unbridged");
+        assert!(!veth::is_bridged(pair2, VethEndId::A), "c2 host-end unbridged");
+
+        veth::destroy_pair(pair1).expect("destroy pair1");
+        veth::destroy_pair(pair2).expect("destroy pair2");
+        remove("st-l2").expect("remove st-l2");
+        assert_eq!(count(), base, "registry back to baseline after L2 test");
+        serial_println!("[cnetwork]   L2 bridge lifecycle: OK");
+    }
 
     serial_println!("[cnetwork] Self-test PASSED");
 }

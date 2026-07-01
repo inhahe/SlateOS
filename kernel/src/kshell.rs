@@ -69972,6 +69972,35 @@ fn cmd_oci(args: &str) {
                                 "[oci] Warning: could not bind network '{}' owner: {:?}", nn, e
                             ),
                         }
+                        // Attach the container's host-side veth to the network's
+                        // shared L2 bridge so same-network peers can reach it
+                        // directly (Docker user-defined bridge semantics). The
+                        // bridge is created lazily on the first attach; a
+                        // single-member network never allocates one. Non-fatal:
+                        // without the bridge the container still has host/NAT
+                        // connectivity, just no direct peer L2 path.
+                        match crate::container::info(ct_id).and_then(|i| i.veth_pair) {
+                            Some(vp) => {
+                                match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
+                                    Ok(()) => {
+                                        let peers = crate::cnetwork::inspect(nn)
+                                            .map_or(0, |i| i.allocations.len());
+                                        crate::console_println!(
+                                            "  L2 bridge:    {} ({} member{})",
+                                            nn, peers, if peers == 1 { "" } else { "s" }
+                                        );
+                                    }
+                                    Err(e) => crate::console_println!(
+                                        "[oci] Warning: could not attach to network '{}' bridge: {:?}",
+                                        nn, e
+                                    ),
+                                }
+                            }
+                            None => crate::console_println!(
+                                "[oci] Warning: network '{}' has no veth to bridge (no host link)",
+                                nn
+                            ),
+                        }
                     }
 
                     // Determine the container's jail root.  Prefer the merged

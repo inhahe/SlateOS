@@ -670,38 +670,61 @@ load*.
 **Discovered/documented:** 2026-06-30; mechanism implemented + host-tested
 2026-07-01.
 
-### D-CNET-L2BRIDGE. User-defined container networks provide IPAM but no shared layer-2 bridge (peers can't reach each other directly) — TECH DEBT
+### D-CNET-L2BRIDGE. User-defined container networks now provide a shared layer-2 bridge (same-network peers reach each other directly) — RESOLVED 2026-07-01
 
-**Where:** `kernel/src/cnetwork.rs` (registry + IPAM) and the `oci run
---network NAME` wiring in `kernel/src/kshell.rs` (cmd_oci run). Each
-container still gets its existing per-netns veth-to-host link
-(`setup_container_veth` in `kernel/src/container.rs`), so it has host and
-external connectivity via NAT, but two containers attached to the *same*
-named network are not on a shared broadcast domain and cannot address each
-other directly by their allocated IPs.
+**Resolution (2026-07-01):** each named network now stands up one
+`net::bridge` instance and switches frames at L2 between its members'
+veth host-ends, so two containers on the same named network reach each
+other directly by their allocated IPs. The prior IPAM-only behaviour is
+now backed by real inter-container reachability.
 
-**What works today:** named networks with subnet/gateway, conflict-free
-IPAM allocation (`allocate`/`release`/`release_container`), the full
-`docker network` CLI (create/ls/inspect/rm/prune), `--network NAME`
-drawing an address at run, and lease reclamation on container delete.
-`inspect` reports only what is real (subnet, gateway, leased addresses) —
-it does not claim inter-container reachability.
+**What landed:**
+1. **veth bridged flag** (`kernel/src/net/veth.rs`): `VethEnd` gained a
+   `bridged: bool`; `poll_all()` skips bridged ends (the bridge owns their
+   frames, not the global host stack). New `set_bridged`/`is_bridged`.
+2. **Bridge veth ports** (`kernel/src/net/bridge.rs`): `BridgePort` gained
+   `veth_pair: Option<usize>`; `MAX_BRIDGES` raised to 16.
+   `attach_veth`/`detach_veth` register a veth pair's host-end (end A) as a
+   bridge port (idempotent; port id = slot index), toggling the veth
+   bridged flag outside the BRIDGES lock. `forward(bridge_idx)` drains each
+   ingress port's `veth::recv(pair, A)`, learns src→port + resolves dst in
+   one BRIDGES-locked step (MACs parsed via `get`+`try_from`, no slicing),
+   then delivers: known unicast → `veth::send(out_pair, A, frame)`;
+   broadcast/multicast/unknown → flood-clone to all other members **and**
+   `ethernet::process_frame(&frame)` into the host stack (this preserves
+   the pre-existing external-NAT path — no regression). `forward_all()`
+   snapshots active bridges and forwards each.
+3. **net::poll wiring** (`kernel/src/net/mod.rs`): `bridge::forward_all()`
+   runs immediately before `veth::poll_all()`, so bridged host-ends are
+   consumed by the bridge rather than the generic drain.
+4. **Lazy per-network bridge lifecycle** (`kernel/src/cnetwork.rs`):
+   `Network` gained `bridge_idx: Option<usize>`; `Allocation` gained
+   `veth_pair: Option<usize>`. `attach_container_veth(name, cid, pair)`
+   creates the bridge lazily on first attach, attaches the veth, and
+   records the pair on the owning lease. `release`/`release_container`
+   detach their veth pairs; `detach_and_maybe_teardown` deletes the bridge
+   when its last port leaves (`veth_port_count == 0`).
+5. **run-path wiring** (`kernel/src/kshell.rs`): the `oci run --network
+   NAME` path calls `attach_container_veth` after taking the IPAM lease,
+   printing `L2 bridge: NAME (N members)` (non-fatal warning if the veth
+   is missing).
 
-**Proper fix:** stand up one `net::bridge` instance per named network and
-attach each member container's veth host-end as a bridge port, then pump
-frames between `net::veth::poll_all` and the bridge FDB so same-network
-peers forward at L2. This needs: (1) a bridge handle stored on each
-`Network`, created lazily on first attach and deleted on last detach; (2)
-mapping a veth host-end to a bridge port id (the bridge currently
-addresses ports by `u8` id — needs a veth↔port registration path); (3)
-frame plumbing so a frame egressing one member's veth host-end is
-forwarded by the bridge to the destination member's veth host-end (today
-veth host-ends terminate at the host stack, not a bridge). Until then,
-same-host inter-container connectivity must go through published ports +
-host loopback, exactly as before named networks existed.
+**Lock ordering:** `TABLE (cnetwork) → BRIDGES (bridge) → veth`; no reverse
+edge, and `bridge::forward` never holds BRIDGES across veth I/O.
+
+**Boot self-test:** `cnetwork::self_test()` builds a two-member network,
+asserts the bridge is created lazily, exercises broadcast-flood and
+learned-unicast forwarding, then verifies teardown on last detach —
+serial `[cnetwork]   L2 bridge forward/learn: OK` and
+`[cnetwork]   L2 bridge lifecycle: OK`.
+
+**Follow-up (unchanged from before):** `poll_all` still dispatches
+non-bridged veth frames into the *global* `ethernet::process_frame`;
+per-namespace RX dispatch remains a separate TODO independent of this L2
+switching work.
 
 **Discovered/documented:** 2026-07-01 (while landing the `docker network`
-IPAM feature, increments 60–61).
+IPAM feature, increments 60–61). **Resolved:** 2026-07-01.
 
 ### D-CONTAINER-EXEC-WAIT. Real in-container `docker exec` + synchronous wait — RESOLVED (all four steps landed)
 

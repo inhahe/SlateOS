@@ -342,6 +342,28 @@ watchdog called for above is now **implemented and boot-validated**.
   ctx-switch progress). This closes the *busy*-livelock variant; the **BSP-dead
   blind spot (2)** (total silence, IF=0 spin — the fingerprint of the 2026-07-01
   catches) still requires the NMI-based detector above and remains deferred.
+  **Blind spot (2) software mitigation — IMPLEMENTED 2026-07-01** (`sync.rs`
+  `Mutex::lock_contended` / `report_stall`, `lockdep::dump_held_locks`). Rather
+  than wait on the operator-gated i6300esb/NMI hardware path (Q20), the contended
+  path of `crate::sync::Mutex` now runs a **bounded-spin stall detector** in pure
+  software: it spins on `try_lock` (behaviourally identical to the old
+  `spin::Mutex::lock()`), and if a single acquisition spins longer than
+  `STALL_SECONDS` (30 s) of PIT-calibrated TSC wall time it emits a **one-shot,
+  non-fatal** `*** SPINLOCK STALL ***` diagnostic naming the lock, the wedged
+  cpu/task, and — via the new `lockdep::dump_held_locks` — the locks that cpu
+  already holds (the key AB-BA/convoy clue), then keeps spinning. Because it fires
+  from *inside* the spin loop it works even with IF=0, which is exactly the
+  BSP-dead fingerprint the timer-driven watchdog misses. The threshold is far
+  beyond any legitimate kernel hold (ms-scale), so it never false-fires under
+  normal contention (verified: BOOT_OK 182 s, zero `SPINLOCK STALL` lines).
+  Globally rate-limited to `MAX_STALL_REPORTS` (8) so a multi-CPU convoy can't
+  flood serial; falls back to a raw iteration count if the TSC isn't yet
+  calibrated. **Coverage caveat:** this only catches deadlocks on locks that go
+  through `crate::sync::Mutex`; a hang on a *raw* `spin::Mutex` (or a
+  non-lock IF=0 spin) is still invisible to it — those remain the domain of the
+  Q20 hardware NMI detector. The new `dump_held_locks` helper is exercised by a
+  lockdep self-test (Test 6). This meaningfully narrows blind spot (2) without
+  touching the shared boot harness or waiting on the operator.
 
 **Recurrence 2026-07-01 (embedded-DNS work, same signature).** During the
 boot test for the container embedded-DNS increment, one run hung with no

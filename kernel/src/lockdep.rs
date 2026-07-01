@@ -410,6 +410,52 @@ pub fn held_depth(cpu: usize) -> u8 {
     unsafe { HELD[cpu].depth }
 }
 
+/// Print the names of all locks currently held by `cpu`, in acquisition
+/// order (bottom → top of the held stack).
+///
+/// Used by the spinlock stall detector ([`crate::sync::Mutex`]) to report
+/// the lock-holding context of a CPU that appears to be wedged spinning on
+/// a lock.  This is the single most useful piece of deadlock diagnostics:
+/// it reveals whether the spinning CPU already holds a lock that the
+/// holder of the wanted lock is itself blocked on (an AB-BA / convoy).
+///
+/// Best-effort and lock-free: it reads the per-CPU held stack without any
+/// synchronization.  The caller is (by construction) a CPU that is stuck
+/// spinning and therefore not mutating its own held stack, so the read is
+/// stable; a benign race against another CPU could at worst misprint a
+/// name.  Safe to call from interrupts-disabled context (it only touches
+/// static arrays and the serial port).
+#[allow(dead_code)]
+pub fn dump_held_locks(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    // SAFETY: Reading the per-CPU held stack + depth for diagnostics only.
+    // See the doc comment: the target CPU is spinning and not mutating its
+    // own stack, so this snapshot is stable. Copying by value avoids
+    // holding any reference into the static across the serial prints.
+    let (depth, stack) = unsafe { (HELD[cpu].depth as usize, HELD[cpu].stack) };
+    let count = (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(MAX_CLASSES);
+    serial_println!("[lockdep]   cpu {} holds {} lock(s):", cpu, depth);
+    for i in 0..depth.min(MAX_DEPTH) {
+        let class_idx = stack[i] as usize;
+        if class_idx >= count {
+            continue;
+        }
+        // SAFETY: class_idx < count ≤ number of registered classes; the
+        // CLASSES array is append-only so this slot is fully initialized.
+        let (name, name_len) = unsafe {
+            (CLASSES[class_idx].name, CLASSES[class_idx].name_len as usize)
+        };
+        let n = name.get(..name_len.min(16)).unwrap_or(b"");
+        serial_println!(
+            "[lockdep]     [{}] {}",
+            i,
+            core::str::from_utf8(n).unwrap_or("<non-utf8>")
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -653,6 +699,25 @@ pub fn self_test() {
     let depth = unsafe { HELD[cpu].depth };
     assert_eq!(depth, 0, "held stack should be empty after all releases");
     serial_println!("[lockdep]   Release cleanup: OK");
+
+    // Test 6: dump_held_locks reports the held stack for the current CPU.
+    // Acquire two locks, dump, then release — verifies the new diagnostic
+    // helper (used by the spinlock stall detector) walks the held stack and
+    // resolves class names without panicking. We only assert the depth is
+    // observed correctly; the printed names are for human inspection.
+    lock_acquire(lock_a, b"stall-A");
+    lock_acquire(lock_b, b"stall-B");
+    // SAFETY: cpu is the current CPU index (< MAX_CPUS).
+    let held = unsafe { HELD[cpu].depth };
+    assert_eq!(held, 2, "two locks held before dump");
+    serial_println!("[lockdep]   dump_held_locks (2 held) — expected output follows:");
+    dump_held_locks(cpu);
+    lock_release(lock_b);
+    lock_release(lock_a);
+    // SAFETY: same CPU, after releases.
+    let held_after = unsafe { HELD[cpu].depth };
+    assert_eq!(held_after, 0, "held stack empty after releases");
+    serial_println!("[lockdep]   dump_held_locks: OK");
 
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);

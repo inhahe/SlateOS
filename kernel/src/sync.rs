@@ -45,6 +45,52 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
+// Spinlock stall detector (software hard-lockup diagnostic)
+// ---------------------------------------------------------------------------
+//
+// The timer-driven liveness watchdog in `sched` can only observe the system
+// from a timer interrupt, so it is blind to a CPU that spins forever with
+// interrupts disabled (IF=0) — the timer ISR never runs and the whole
+// machine goes silent with no task-table dump. That is exactly the signature
+// of the intermittent spawn/kill/reap hang (B-PTHREAD-YIELDBUDGET / TD31).
+//
+// The stall detector closes that blind spot in pure software: the contended
+// lock path spins on `try_lock`, and if it spins for longer than
+// `STALL_SECONDS` of wall-clock time (measured with the PIT-calibrated TSC,
+// which reflects guest wall time even under QEMU/TCG) it emits a one-shot,
+// non-fatal diagnostic naming the lock, the wedged CPU/task, and the locks
+// that CPU already holds — then keeps spinning. Because it fires from *inside*
+// the spin loop, it works regardless of IF state. The threshold is far beyond
+// any legitimate kernel lock hold, so it never false-fires under normal
+// contention.
+
+/// Wall-clock seconds a CPU may spin on a single lock before the stall
+/// detector fires. Deliberately far larger than any legitimate lock hold in
+/// the kernel (the longest boot-time critical sections are milliseconds), so
+/// only a true deadlock or pathological convoy ever reaches it. Fires well
+/// inside the 480 s boot-test timeout, so the diagnostic reaches the serial
+/// log before the harness gives up.
+const STALL_SECONDS: u64 = 30;
+
+/// Iteration mask controlling how often the (relatively costly) `rdtsc`
+/// stall check runs — once every 4096 spins keeps the loop tight.
+const STALL_CHECK_MASK: u64 = 0xFFF;
+
+/// Fallback stall threshold in raw spin iterations, used only before the TSC
+/// is calibrated (very early boot, effectively single-threaded and
+/// uncontended). Large enough to never trip under legitimate early-boot
+/// contention.
+const STALL_FALLBACK_ITERS: u64 = 5_000_000_000;
+
+/// Cap on how many stall reports are printed globally. A genuine multi-CPU
+/// convoy would otherwise flood the serial log; the first few reports carry
+/// all the diagnostic value.
+const MAX_STALL_REPORTS: u64 = 8;
+
+/// Global count of stall reports emitted (rate-limits [`MAX_STALL_REPORTS`]).
+static STALL_REPORTS: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
 // Contention statistics
 // ---------------------------------------------------------------------------
 
@@ -381,9 +427,9 @@ impl<T> Mutex<T> {
                 };
             }
 
-            // Contended path: time the spin.
+            // Contended path: time the spin (with stall detection).
             let start = crate::bench::rdtsc();
-            let guard = self.inner.lock();
+            let guard = self.lock_contended();
             let end = crate::bench::rdtsc();
             let wait = end.saturating_sub(start);
             self.stats.record_contended(wait);
@@ -395,14 +441,92 @@ impl<T> Mutex<T> {
             };
         }
 
-        // Tracking disabled: just lock.
-        let guard = self.inner.lock();
+        // Tracking disabled: still bounded-spin so the stall detector runs.
+        let guard = self.lock_contended();
         MutexGuard {
             guard,
             addr,
             stats: &self.stats,
             acquire_tsc: 0,
         }
+    }
+
+    /// Contended-path acquisition with a bounded-spin stall detector.
+    ///
+    /// Spins on `try_lock` until the lock is acquired — behaviourally
+    /// identical to `spin::Mutex::lock()` (which spins the same way) except
+    /// that a spin lasting longer than [`STALL_SECONDS`] triggers a one-shot,
+    /// non-fatal diagnostic (see [`Self::report_stall`]) and then continues
+    /// spinning. Marked `#[cold]`/`#[inline(never)]` so the fast path in
+    /// [`Self::lock`] stays lean.
+    #[cold]
+    #[inline(never)]
+    fn lock_contended(&self) -> spin::MutexGuard<'_, T> {
+        // Compute the stall threshold in TSC cycles once. If the TSC is not
+        // yet calibrated (very early boot), `tsc_freq()` returns 0 and we
+        // fall back to a raw iteration count.
+        let threshold_cycles = crate::bench::tsc_freq().saturating_mul(STALL_SECONDS);
+        let start_tsc = crate::bench::rdtsc();
+
+        let mut iters: u64 = 0;
+        let mut warned = false;
+        loop {
+            if let Some(guard) = self.inner.try_lock() {
+                return guard;
+            }
+            core::hint::spin_loop();
+            iters = iters.wrapping_add(1);
+
+            // Throttle the stall check: only probe once every 4096 spins,
+            // and only until we've reported once for this spin episode.
+            if !warned && (iters & STALL_CHECK_MASK) == 0 {
+                let stalled = if threshold_cycles != 0 {
+                    crate::bench::rdtsc().saturating_sub(start_tsc) >= threshold_cycles
+                } else {
+                    iters >= STALL_FALLBACK_ITERS
+                };
+                if stalled {
+                    warned = true;
+                    self.report_stall(iters);
+                }
+            }
+        }
+    }
+
+    /// Emit a one-shot diagnostic for a lock that has been spun on for an
+    /// abnormally long time. Non-fatal: the caller keeps spinning afterwards.
+    ///
+    /// Reports the lock name, the wedged CPU and task, and — via lockdep —
+    /// the locks that CPU already holds (the key clue for an AB-BA deadlock
+    /// or convoy). Globally rate-limited to [`MAX_STALL_REPORTS`] so a
+    /// multi-CPU convoy cannot flood the serial log.
+    ///
+    /// Limitation: this prints via the serial port, so if the *serial* lock
+    /// itself is the deadlocked lock (or is held by this same CPU) the report
+    /// may not appear. That is an accepted edge case — the target failure
+    /// modes are the scheduler / cgroup-table locks, not serial.
+    #[cold]
+    #[inline(never)]
+    fn report_stall(&self, iters: u64) {
+        use crate::serial_println;
+
+        let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
+        if n >= MAX_STALL_REPORTS {
+            return;
+        }
+
+        let cpu = crate::sched::current_cpu_id();
+        let tid = crate::sched::current_task_id();
+        let name = core::str::from_utf8(self.name).unwrap_or("<non-utf8>");
+        serial_println!(
+            "[sync] *** SPINLOCK STALL *** lock '{}' still not acquired after ~{}s of \
+             spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
+             the timer-driven liveness watchdog is blind to this if interrupts are \
+             disabled.",
+            name, STALL_SECONDS, cpu, tid, iters
+        );
+        // The single most useful clue: what else this CPU already holds.
+        crate::lockdep::dump_held_locks(cpu);
     }
 
     /// Try to acquire the lock without blocking.

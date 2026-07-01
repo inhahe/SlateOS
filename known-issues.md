@@ -184,6 +184,60 @@ change).** Two findings that reshape what "instrument this" requires:
    does not affect the common boot (BOOT_OK is reached ~95%+ of runs), and is
    fully documented here.
 
+**Root-cause narrowing 2026-07-01 (audit line concluded — I/O paths cleared,
+instrument built).** A systematic pass eliminated every lock-order and I/O
+lost-wakeup hypothesis, leaving two structural suspects, and the hung-task
+watchdog called for above is now **implemented and boot-validated**.
+- *Hypotheses eliminated (all proven sound by inspection):*
+  1. Futex primitive — sound; `pending_wake` closes the register/block race.
+  2. Ready-starved task lost from the run queue — RULED OUT: `check_starvation`
+     (`sched/mod.rs`) re-enqueues any Ready non-throttled task within ~2 s.
+  3. `page_cache::get_or_fill` (`mm/page_cache.rs:214`) — optimistic
+     fill-then-insert with race resolution; **no fill-in-progress wait queue**,
+     so no lost-wakeup there.
+  4. PAGE_CACHE ↔ frame ALLOCATOR lock order — consistent (PAGE_CACHE is always
+     the outer lock via `ref_inc`; `alloc_order` releases ALLOCATOR *before*
+     reclaim/compact/OOM), so no AB-BA.
+  5. Page-cache fill closure (`fs/handle.rs:584` `read_at_uncached` →
+     `Vfs::read_at_uncached_resolved` → `fs.lock().read_at`) holds **no**
+     page-cache/frame lock across the read, and `write_at`/`truncate` invalidate
+     the cache only *after* dropping `fs.lock()` — no fs.lock↔PAGE_CACHE nesting.
+  6. **Block-device read (the serial trace stops exactly here) — ELIMINATED.**
+     `virtio/blk.rs::wait_completion` in IRQ mode is a **HLT-poll loop bounded by
+     a 500-attempt (~5 s) timeout** (`if attempts > 500 { … "timed out (IRQ
+     mode)" … return Err(TimedOut) }`), *not* a wait-queue block. The 100 Hz
+     timer wakes every `hlt()`, so even a fully lost device IRQ cannot hang it
+     silently — it would print `[virtio-blk] … timed out` and return an error.
+     The hang trace shows no such line, so the disk read is not the stall. The
+     RAM-disk path is a plain synchronous memcpy (no wait queue either).
+- *Remaining suspects (cannot be pinned by static reading — need a runtime
+  dump at the moment of hang):* (a) a `clone`/CoW thread whose wakeup is lost on
+  some primitive *other* than the futex/page-cache/frame paths above; (b)
+  `on_thread_exit`/`reap_dead_tasks` racing a thread that is mid-`clone`.
+- *Instrument built (this is the "real next build" the reconnaissance note asked
+  for):* a **system-wide liveness watchdog** in `sched/mod.rs`
+  (`liveness_arm`/`liveness_disarm`/`liveness_check`/`dump_all_tasks_serial`,
+  driven by the BSP every `WATCHDOG_CHECK_INTERVAL` = 5 s alongside the existing
+  soft-lockup watchdog). It watches one global counter, `USEFUL_WORK_TICKS`,
+  bumped by `timer_tick` whenever a tick preempts a **non-idle** context
+  (`from_user || local_has_real_work`). At the total-hang every CPU is parked in
+  the idle task with an empty run queue, so this counter **freezes** even though
+  per-CPU heartbeats keep climbing (which is precisely why the soft-lockup
+  watchdog can't see it). If it fails to advance for `LIVENESS_ALERT_COUNT` = 3
+  consecutive intervals (~15 s) while armed, the BSP dumps every task's
+  `(tid, state, cpu, prio, pending_wake, ready_since, waited, blocked_on_pi,
+  name)` plus each CPU's `(heartbeat, ctx_switches, local_has_real_work)`
+  straight to serial from IRQ context using **try_lock only** — and if it can't
+  get `SCHED`, it reports *that* (a task wedged holding `SCHED` is itself the
+  deadlock). It then disarms so the report prints exactly once. Scoping solves
+  the idle false-positive problem the reconnaissance note flagged: it is armed
+  only for the boot ring-3 window (`main.rs`, right before the ring-3 fork/CoW/
+  reap self-tests) and disarmed at BOOT_OK, before the system may legitimately
+  idle at an interactive prompt. Validated: a healthy boot reaches BOOT_OK with
+  **zero** `[liveness]` output (silent when healthy). Next time the hang
+  reproduces in a boot test, the serial log will name the lost thread and its
+  state — turning this heisenbug into a directly-diagnosable one.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

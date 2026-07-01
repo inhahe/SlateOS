@@ -1329,6 +1329,17 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux file-backed mmap self-test failed: {:?}", e);
     }
 
+    // Arm the system-wide liveness watchdog for the boot-time ring-3 phase.
+    // From here until BOOT_OK the kernel spawns ring-3 processes that fork,
+    // CoW-clone their address spaces, exec, and reap — the exact window in
+    // which the intermittent total-hang (known-issues.md B-PTHREAD-
+    // YIELDBUDGET) has been observed.  The watchdog dumps the full task
+    // table to serial if every CPU goes idle while a thread is lost, giving
+    // us the breadcrumb the soft-lockup watchdog structurally cannot.  It is
+    // disarmed at BOOT_OK, before the system may legitimately idle at a
+    // prompt.
+    sched::liveness_arm();
+
     // Ring-3 end-to-end counterpart of the above: a real Linux-ABI process
     // issues open(2)+mmap(2) itself and exits with a mapped second-frame byte,
     // proving the whole syscall path (fd install, caller_pid, ring-3 read).
@@ -3950,6 +3961,13 @@ extern "C" fn kernel_main() -> ! {
     serial_println!("=== Kernel boot complete ===");
     serial_println!("BOOT_OK");
     boot_timing::mark(boot_timing::Milestone::ShellReady);
+
+    // Disarm the boot-window liveness watchdog: past BOOT_OK the system may
+    // legitimately go idle at an interactive prompt (all tasks blocked on the
+    // keyboard), which — without a per-task block-reason field — is
+    // indistinguishable from the hang the watchdog looks for.  Its job (guard
+    // the continuous-progress boot window) is done.
+    sched::liveness_disarm();
 
     // Show boot-complete on the framebuffer console too.
     console_println!();

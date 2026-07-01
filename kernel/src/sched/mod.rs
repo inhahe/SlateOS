@@ -1627,6 +1627,200 @@ pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
 }
 
 // ---------------------------------------------------------------------------
+// System-wide liveness watchdog (hung-task detector)
+// ---------------------------------------------------------------------------
+//
+// The soft-lockup watchdog above detects a CPU that STOPS ticking (stuck
+// with interrupts disabled — a spinlock deadlock or an IRQ-off infinite
+// loop).  It structurally CANNOT detect the intermittent total-hang we
+// have observed (known-issues.md B-PTHREAD-YIELDBUDGET): in that failure
+// every CPU keeps ticking happily in its idle loop — the timer IRQ still
+// fires, heartbeats still advance — yet no *task* ever runs again because
+// a runnable/blocked thread was lost (a lost-wakeup or a reap-vs-clone
+// race).  From the soft-lockup watchdog's point of view the machine is
+// perfectly healthy; from the user's point of view it is dead.
+//
+// This liveness watchdog closes that gap.  It watches a single global
+// "useful work" counter that advances only when a tick is charged to a
+// non-idle context (a ring-3 task, or a CPU with real work in its local
+// run queue).  At a true total-hang every CPU is parked in the idle task
+// with an empty run queue, so the counter FREEZES while heartbeats keep
+// climbing.  If the counter fails to advance for LIVENESS_ALERT_COUNT
+// consecutive check intervals, the BSP dumps every task's
+// (id, name, state, cpu, priority, wait-clock, blocked-on, pending_wake)
+// straight to the serial log from IRQ context using only try_lock — the
+// exact breadcrumb needed to identify which thread was lost and in what
+// state.  It then disarms itself so the dump appears exactly once.
+//
+// Scoping: the watchdog is armed explicitly (`liveness_arm`) at the start
+// of the boot-time task/ring-3 phase and disarmed (`liveness_disarm`)
+// once BOOT_OK is reached and the system may legitimately go idle at an
+// interactive prompt.  Without a per-task block-reason field we cannot
+// otherwise distinguish "shell blocked on the keyboard" (healthy idle)
+// from "thread blocked on a wakeup that will never come" (the hang), so
+// restricting the active window to boot — where continuous forward
+// progress is expected until BOOT_OK — is what makes the detector free of
+// idle false-positives.  During boot the only sustained no-progress state
+// IS the bug.
+
+/// Global monotonic count of timer ticks charged to a non-idle context.
+///
+/// Advanced by [`timer_tick`] whenever the preempted context was a ring-3
+/// task or a CPU that had real work queued.  Frozen only when every CPU is
+/// idle — which, during the armed boot window, means the system has hung.
+static USEFUL_WORK_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the liveness watchdog is active.  Armed for the boot window,
+/// disarmed at BOOT_OK (see module comment above).
+static LIVENESS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// `USEFUL_WORK_TICKS` value observed at the previous liveness check.
+static LIVENESS_LAST_WORK: AtomicU64 = AtomicU64::new(0);
+
+/// Consecutive liveness intervals with zero forward progress.
+static LIVENESS_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Consecutive stalled check-intervals before declaring a hung system.
+///
+/// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
+/// of the whole machine making zero task-level progress during boot.  No
+/// legitimate pre-BOOT_OK operation stalls all tasks for that long, so 15s
+/// is comfortably above the noise floor while still catching the hang
+/// promptly.
+const LIVENESS_ALERT_COUNT: u64 = 3;
+
+/// Record forward progress for the liveness watchdog.
+///
+/// Called from [`timer_tick`] when this tick is charged to a non-idle
+/// context.  A single global relaxed increment — negligible cost, and
+/// contention is irrelevant because the watchdog only reads the value once
+/// every 5 seconds and only cares whether it moved at all.
+#[inline]
+fn note_useful_work() {
+    USEFUL_WORK_TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Arm the system-wide liveness watchdog.
+///
+/// Call once the scheduler is running real tasks and continuous forward
+/// progress is expected (i.e., at the start of the boot-time task/ring-3
+/// self-test phase).  Resets the progress baseline so the first interval
+/// measures from "now".
+pub fn liveness_arm() {
+    LIVENESS_LAST_WORK.store(USEFUL_WORK_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+    LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+    LIVENESS_ARMED.store(true, Ordering::Release);
+}
+
+/// Disarm the system-wide liveness watchdog.
+///
+/// Call at BOOT_OK, before the system may legitimately idle at an
+/// interactive prompt (where task-level progress correctly stops).
+pub fn liveness_disarm() {
+    LIVENESS_ARMED.store(false, Ordering::Release);
+}
+
+/// Run the system-wide liveness check.
+///
+/// Called by the BSP every `WATCHDOG_CHECK_INTERVAL` ticks alongside the
+/// soft-lockup watchdog.  If the global useful-work counter has not moved
+/// for `LIVENESS_ALERT_COUNT` consecutive intervals while armed, dumps
+/// every task's state and disarms (one-shot).
+fn liveness_check() {
+    if !LIVENESS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let current = USEFUL_WORK_TICKS.load(Ordering::Relaxed);
+    let previous = LIVENESS_LAST_WORK.load(Ordering::Relaxed);
+    LIVENESS_LAST_WORK.store(current, Ordering::Relaxed);
+
+    if current != previous {
+        // Progress was made — healthy.  Reset the stall counter.
+        LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    // No task-level progress this interval.
+    let count = LIVENESS_STALL_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    if count < LIVENESS_ALERT_COUNT {
+        return;
+    }
+
+    // Confirmed hang: dump every task's state, then disarm so the report
+    // appears exactly once (further intervals would just repeat it).
+    LIVENESS_ARMED.store(false, Ordering::Release);
+    let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
+    serial_println!(
+        "[liveness] SYSTEM HANG: no task-level forward progress for {}+ seconds \
+         (useful_work={}, all CPUs idle-ticking). Dumping task table:",
+        stall_secs, current,
+    );
+    dump_all_tasks_serial();
+}
+
+/// Dump every task's scheduling state to the serial log.
+///
+/// Runs from timer-IRQ context, so it must never block: it uses `try_lock`
+/// on the scheduler and reports failure (itself a strong signal — a task
+/// wedged while holding `SCHED` is a prime hang cause) rather than waiting.
+fn dump_all_tasks_serial() {
+    // Per-CPU liveness snapshot first — shows which CPUs are still ticking
+    // (all of them, in the classic total-hang) and their last context
+    // switch counts (frozen at the hang).
+    let num_cpus = crate::smp::cpu_count();
+    for cpu in 0..num_cpus {
+        let hb = WATCHDOG_HEARTBEAT
+            .get(cpu)
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let cs = CTX_SWITCHES
+            .get(cpu)
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let has_work = PER_CPU_SCHED.local_has_real_work(cpu);
+        serial_println!(
+            "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={}",
+            cpu, hb, cs, has_work,
+        );
+    }
+
+    let now = crate::apic::tick_count();
+    let Some(state) = SCHED.try_lock() else {
+        serial_println!(
+            "[liveness]   !! could not acquire SCHED lock — a task is likely \
+             wedged holding it (this IS the deadlock)",
+        );
+        return;
+    };
+
+    serial_println!("[liveness]   {} task(s) in table (now_tick={}):", state.tasks.len(), now);
+    for (&id, task) in state.tasks.iter() {
+        // Name is stored as raw bytes (OS-boundary data): render losslessly
+        // as an escaped byte string rather than forcing UTF-8.
+        let name = task.name.get(..task.name_len.min(task.name.len())).unwrap_or(&[]);
+        let waited = if task.ready_since_tick == 0 {
+            0
+        } else {
+            now.saturating_sub(task.ready_since_tick)
+        };
+        serial_println!(
+            "[liveness]   tid={} state={:?} cpu={} prio={} pending_wake={} \
+             ready_since={} waited={} blocked_on_pi={:#x} name={:?}",
+            id,
+            task.state,
+            task.last_cpu,
+            task.priority,
+            task.pending_wake,
+            task.ready_since_tick,
+            waited,
+            task.blocked_on_pi_addr.unwrap_or(0),
+            core::str::from_utf8(name).unwrap_or("<non-utf8>"),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Timer tick handler
 // ---------------------------------------------------------------------------
 
@@ -1690,10 +1884,21 @@ pub fn timer_tick(from_user: bool) -> bool {
     // the task has idle priority (31) and is running on this CPU.
     // For simplicity, we track idle via the PER_CPU_SCHED fast check:
     // if the local queue has no real work, this CPU is effectively idle.
-    if !PER_CPU_SCHED.local_has_real_work(cpu)
+    let has_real_work = PER_CPU_SCHED.local_has_real_work(cpu);
+    if !has_real_work
         && let Some(idle) = IDLE_TICK_COUNTS.get(cpu)
     {
         idle.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Liveness watchdog progress signal: this tick counts as "useful work"
+    // if it preempted a ring-3 task (from_user) or a CPU that has real work
+    // queued.  When every CPU is parked in the idle task with an empty run
+    // queue — the signature of the intermittent total-hang — this counter
+    // freezes even though heartbeats keep advancing, which is exactly what
+    // `liveness_check()` looks for.
+    if from_user || has_real_work {
+        note_useful_work();
     }
 
     // Track CPU burst length and enforce CPU bandwidth quotas.
@@ -1754,6 +1959,9 @@ pub fn timer_tick(from_user: bool) -> bool {
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick.is_multiple_of(WATCHDOG_CHECK_INTERVAL) {
             watchdog_check();
+            // System-wide liveness check runs on the same cadence: detects
+            // a total-hang where every CPU keeps ticking but no task runs.
+            liveness_check();
         }
     }
 

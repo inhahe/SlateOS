@@ -67581,7 +67581,42 @@ fn cmd_container(args: &str) {
             // PIDs, and throttle counts.  Memory/I/O byte figures are stored
             // as 16 KiB frame counts; we surface both frames and MiB.
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container stats <id>");
+                // No id: one-shot table of every running container's cgroup
+                // usage (Docker `docker stats --no-stream`).  We do not stream
+                // (the shell has no interactive interrupt), so this is a single
+                // snapshot rather than a live refresh.
+                let running: alloc::vec::Vec<_> = container::list()
+                    .into_iter()
+                    .filter(|(_, _, st)| *st == container::ContainerState::Running)
+                    .collect();
+                if running.is_empty() {
+                    crate::console_println!("(no running containers)");
+                    return;
+                }
+                crate::console_println!(
+                    "{:>4}  {:<20} {:>8} {:>10} {:>6}", "ID", "NAME", "CPU", "MEM(MiB)", "TASKS"
+                );
+                for (rid, rname, _) in running {
+                    let Some(rci) = container::info(rid) else { continue };
+                    match crate::cgroup::stats(rci.cgroup_id) {
+                        Some(cg) => {
+                            // 16 KiB per frame: MiB = frames / 64.
+                            let mem_mib = cg.mem_usage / 64;
+                            let name_disp = if rname.len() > 20 {
+                                rname.get(..20).unwrap_or(&rname)
+                            } else {
+                                &rname
+                            };
+                            crate::console_println!(
+                                "{:>4}  {:<20} {:>8} {:>10} {:>6}",
+                                rid, name_disp, cg.cpu_used, mem_mib, cg.nr_tasks
+                            );
+                        }
+                        None => crate::console_println!(
+                            "{:>4}  {:<20} {:>8} {:>10} {:>6}", rid, rname, "-", "-", "-"
+                        ),
+                    }
+                }
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
@@ -68421,7 +68456,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)");
             crate::console_println!("  container info [--json] ID               — detailed inspection (--json: machine-readable)");
             crate::console_println!("  container top ID                         — list processes running in container");
-            crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");
+            crate::console_println!("  container stats [ID]                     — cgroup resource usage (no ID: table of all running)");
             crate::console_println!("  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy");
             crate::console_println!("  container rename ID <new-name>           — rename a container");
             crate::console_println!("  container port ID                        — list published port mappings");

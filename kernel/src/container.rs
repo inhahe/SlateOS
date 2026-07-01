@@ -66,6 +66,12 @@ pub const MAX_VOLUMES_PER_CONTAINER: usize = 64;
 /// host-port NAT rule, and a container rarely publishes more than a handful.
 pub const MAX_PUBLISHED_PORTS: usize = 32;
 
+/// Host VFS directory under which per-container tmpfs (in-memory) mountpoints
+/// are created.  Each `--tmpfs /guest` mount gets a unique backing mountpoint
+/// `<TMPFS_ROOT>/<id>-<index>` where a fresh [`crate::fs::memfs`] is mounted;
+/// the container owns these and [`delete`] unmounts + removes them.
+const TMPFS_ROOT: &str = "/var/lib/slate/tmpfs";
+
 /// Host VFS directory under which per-container stdout+stderr capture logs are
 /// written (Docker's json-file log driver equivalent, minus the JSON framing).
 /// Each container's log lives at `<LOG_DIR>/<id>.log`; [`run`] creates the
@@ -573,6 +579,16 @@ struct Container {
     /// container rootfs.  A `read_only` volume rejects writes with `EROFS`.
     /// Empty for a container with no volumes.
     volumes: Vec<VolumeSpec>,
+    /// VFS mountpoints of this container's tmpfs (in-memory) mounts — the
+    /// Docker `--tmpfs /guest` mechanism.  Each entry is a host mountpoint
+    /// (under [`TMPFS_ROOT`]) where a fresh [`crate::fs::memfs`] was mounted
+    /// at configure time and bind-mounted into the container as a writable
+    /// volume at the requested guest path.  Unlike [`volumes`] (whose host
+    /// targets the container does not own), these mountpoints ARE owned by the
+    /// container: [`delete`] unmounts each and removes its (now-empty)
+    /// backing directory, so the tmpfs contents are ephemeral — freed when
+    /// the container is removed.  Empty for a container with no tmpfs mounts.
+    tmpfs_mounts: Vec<String>,
     /// When `true`, the container's root filesystem is read-only (Docker
     /// `--read-only`): writes resolving into the rootfs are denied with
     /// `EROFS`, while writable (`:rw`) volumes remain writable.  Installed on
@@ -716,6 +732,7 @@ impl Container {
             rootfs_mount: String::new(),
             overlay_id: None,
             volumes: Vec::new(),
+            tmpfs_mounts: Vec::new(),
             read_only_root: false,
             hostname: String::new(),
             container_ip: None,
@@ -1534,7 +1551,7 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount, log_path) =
+    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount, tmpfs_mounts, log_path) =
         with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -1547,6 +1564,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         let ct = &table.containers[idx];
         let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
                       ct.veth_pair, ct.name.clone(), ct.rootfs_mount.clone(),
+                      ct.tmpfs_mounts.clone(),
                       ct.log_path.clone());
 
         // Mark slot as inactive.
@@ -1558,6 +1576,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].root_path.clear();
         table.containers[idx].rootfs_mount.clear();
         table.containers[idx].volumes.clear();
+        table.containers[idx].tmpfs_mounts.clear();
         table.containers[idx].container_ip = None;
         table.containers[idx].published_ports.clear();
         table.containers[idx].log_path.clear();
@@ -1598,6 +1617,15 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     // own and must not unmount.
     if !rootfs_mount.is_empty() {
         let _ = crate::fs::Vfs::unmount(&rootfs_mount);
+    }
+
+    // Release each tmpfs (in-memory) mount the container owns: unmount the
+    // memfs (freeing its RAM) and remove the now-empty backing mountpoint dir.
+    // Done outside the table lock (VFS has its own per-mount locking). A
+    // container with no `--tmpfs` mounts has an empty list, so this is a no-op.
+    for mount in &tmpfs_mounts {
+        let _ = crate::fs::Vfs::unmount(mount);
+        let _ = crate::fs::vfs::Vfs::remove_recursive(mount);
     }
 
     // Remove the container's captured stdout+stderr log, if it had one.  Done
@@ -3143,6 +3171,92 @@ pub fn add_volume_mount(
         ));
         Ok(())
     })
+}
+
+/// Add a tmpfs (in-memory) mount to a container — the Docker `--tmpfs /guest`
+/// mechanism.
+///
+/// Mounts a fresh [`crate::fs::memfs`] at a unique host mountpoint under
+/// [`TMPFS_ROOT`] and records it as a writable volume at `guest_prefix`, so the
+/// container sees an ephemeral, in-memory writable filesystem at that path —
+/// commonly used to give a `--read-only` container scratch space (e.g.
+/// `--tmpfs /tmp`) without persisting anything to the image. The mountpoint is
+/// owned by the container: [`delete`] unmounts it and removes its backing
+/// directory, so the contents are freed when the container is removed.
+///
+/// Must be called while the container is still in
+/// [`Created`](ContainerState::Created) state (the mount is installed on each
+/// process at [`run`] time via the volume list). Re-adding the same
+/// `guest_prefix` is rejected — unlike a bind volume there is no meaningful
+/// "replace" for an owned mountpoint (the old memfs would leak); remove and
+/// recreate the container instead.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `guest_prefix` is not an absolute path,
+///   is `/`, the container doesn't exist, is not in `Created` state, or already
+///   has a tmpfs/volume at `guest_prefix`.
+/// - [`KernelError::ResourceExhausted`] if the container already has
+///   [`MAX_VOLUMES_PER_CONTAINER`] volume/tmpfs entries.
+/// - Any VFS error from creating or mounting the tmpfs backing directory.
+pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> {
+    if !guest_prefix.starts_with('/') || guest_prefix == "/" {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Reserve an index and validate state/uniqueness under the table lock,
+    // WITHOUT touching the VFS (which has its own locking — never nest).
+    let index = with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        let ct = &table.containers[idx];
+        if ct.state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Reject a duplicate guest prefix (a plain volume or an existing tmpfs).
+        if ct.volumes.iter().any(|(g, _, _)| g == guest_prefix) {
+            return Err(KernelError::InvalidArgument);
+        }
+        if ct.volumes.len() >= MAX_VOLUMES_PER_CONTAINER {
+            return Err(KernelError::ResourceExhausted);
+        }
+        Ok(ct.tmpfs_mounts.len())
+    })?;
+
+    // Build a unique host mountpoint and mount a fresh in-memory filesystem
+    // there, outside the table lock.
+    let host_mount = alloc::format!("{TMPFS_ROOT}/{id}-{index}");
+    crate::fs::vfs::Vfs::mkdir_all(&host_mount)?;
+    if let Err(e) = crate::fs::memfs::mount(&host_mount) {
+        // Leave the (empty) mountpoint dir behind on failure — harmless, and
+        // removing it here would race a concurrent mount attempt. Report the
+        // mount error so the caller can surface it.
+        return Err(e);
+    }
+
+    // Record the mapping. If the container vanished or left Created state
+    // between the checks above and here (single session: it won't), roll the
+    // mount back so we don't leak an unowned memfs.
+    let recorded = with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if table.containers[idx].state != ContainerState::Created {
+            return Err(KernelError::InvalidArgument);
+        }
+        let ct = &mut table.containers[idx];
+        ct.volumes.push((String::from(guest_prefix), host_mount.clone(), false));
+        ct.tmpfs_mounts.push(host_mount.clone());
+        Ok(())
+    });
+    if recorded.is_err() {
+        let _ = crate::fs::vfs::Vfs::unmount(&host_mount);
+        let _ = crate::fs::vfs::Vfs::remove_recursive(&host_mount);
+    }
+    recorded
 }
 
 /// Publish a container port to the host — the Docker `-p host:container[/proto]`
@@ -6383,5 +6497,75 @@ pub fn self_test() {
     }
     serial_println!("[container]   lifecycle event log (events): OK");
 
-    serial_println!("[container] Self-test PASSED (59 tests)");
+    // Test 46: tmpfs container mounts (Docker `--tmpfs /guest`).  Each spec
+    // mounts a fresh in-memory filesystem at a per-container host mountpoint and
+    // records it as a writable volume at the guest path.  The backing memfs must
+    // be genuinely writable, and `delete` must unmount + remove every owned
+    // mountpoint so nothing leaks.
+    {
+        let tf_cfg = ContainerConfig::new("test-tmpfs-ct").memory(4096);
+        let ct_tf = create(&tf_cfg).expect("create tmpfs container");
+        set_root_path(ct_tf, "/containers/test-tmpfs/rootfs")
+            .expect("set rootfs");
+
+        // Two ephemeral mounts at distinct guest prefixes.
+        add_tmpfs_mount(ct_tf, "/tmp").expect("add /tmp tmpfs");
+        add_tmpfs_mount(ct_tf, "/run").expect("add /run tmpfs");
+
+        // Bad specs are rejected: relative guest, guest-root, and a duplicate
+        // guest prefix (already claimed by the first tmpfs).
+        assert!(
+            add_tmpfs_mount(ct_tf, "relative").is_err(),
+            "tmpfs guest path must be absolute",
+        );
+        assert!(
+            add_tmpfs_mount(ct_tf, "/").is_err(),
+            "tmpfs at guest-root must be rejected",
+        );
+        assert!(
+            add_tmpfs_mount(ct_tf, "/tmp").is_err(),
+            "duplicate tmpfs guest prefix must be rejected",
+        );
+
+        // Each tmpfs is recorded as a writable volume; the two mounts show up in
+        // the container's volume list.
+        let vols = info(ct_tf).unwrap().volumes;
+        assert_eq!(vols.len(), 2, "two tmpfs mounts must appear as volumes");
+        let tmp_vol = vols
+            .iter()
+            .find(|(g, _, _)| g == "/tmp")
+            .expect("tmpfs /tmp volume must exist");
+        assert!(!tmp_vol.2, "a tmpfs mount is always writable (never read-only)");
+
+        // The backing memfs is genuinely writable: write a file through the host
+        // mountpoint and read it back byte-for-byte.
+        let tmp_host = &tmp_vol.1;
+        let probe = alloc::format!("{tmp_host}/probe.txt");
+        crate::fs::vfs::Vfs::write_file(&probe, b"tmpfs-ok")
+            .expect("write into tmpfs");
+        assert_eq!(
+            crate::fs::vfs::Vfs::read_file(&probe).expect("read from tmpfs"),
+            b"tmpfs-ok",
+            "tmpfs must persist the written bytes in memory",
+        );
+
+        // Adding a tmpfs to a non-Created container is rejected (the
+        // `state != Created` guard, exercised deterministically via stop()).
+        stop(ct_tf).expect("stop tmpfs container");
+        assert!(
+            add_tmpfs_mount(ct_tf, "/late").is_err(),
+            "tmpfs mount on a non-Created container must be rejected",
+        );
+
+        // delete() must unmount and remove every owned tmpfs mountpoint.
+        let host0 = alloc::format!("{TMPFS_ROOT}/{ct_tf}-0");
+        delete(ct_tf).expect("delete tmpfs container");
+        assert!(
+            !crate::fs::vfs::Vfs::exists(&host0),
+            "delete must remove the owned tmpfs mountpoint",
+        );
+    }
+    serial_println!("[container]   tmpfs container mounts (--tmpfs): OK");
+
+    serial_println!("[container] Self-test PASSED (60 tests)");
 }

@@ -2929,6 +2929,30 @@ volume still writable, flag-clear restores writability) and container self-test
 longest-prefix mount-tree subsuming the rootfs as the `/` mount (`pivot_root`
 target) and tmpfs/named-volume types.
 
+**Update 2026-07-01 (increment 17): tmpfs mounts (`--tmpfs`) — DONE.** Docker
+`--tmpfs /guest` now mounts an ephemeral in-memory filesystem at a guest path.
+Modeled as a bind mount whose host target is a per-container `fs::memfs` mount:
+`add_tmpfs_mount(id, guest)` (Created-only) validates the guest path (absolute,
+not `/`, no duplicate against existing volumes/tmpfs), then — outside the table
+lock — `Vfs::mkdir_all` + `memfs::mount` a fresh in-memory fs at a unique host
+mountpoint `/var/lib/slate/tmpfs/<id>-<index>`, and records it as a **writable**
+`VolumeSpec` at the guest prefix so all the existing volume resolution/write
+machinery (`resolve_path_for`, `check_writable_for`, `..`-clamping) applies
+unchanged. The `Container` gained a `tmpfs_mounts: Vec<String>` of owned
+mountpoints; `delete()` unmounts and `remove_recursive`-removes each so nothing
+leaks. CLI: `oci run … --tmpfs /tmp` (repeatable) — mount **options** (`--tmpfs
+/tmp:size=64m`) are explicitly rejected with a warning rather than silently
+ignored (an unbounded tmpfs is a containment/DoS gap until per-mount quota
+enforcement lands; honest failure until then). Covered by container self-test 46
+(two mounts, bad-spec/duplicate rejection, writable-memfs write+read-back,
+non-Created rejection, delete-unmount verification — now 60 tests total). Build/
+clippy clean, boot-test green. With this, the volume *types* are all covered —
+host bind mounts (`-v /host:/guest`), read-only volumes (`:ro`), named volumes
+(`-v NAME:/guest` via `volume::ensure`), and now tmpfs (`--tmpfs`). The TD32
+mount remainder is therefore now just the true longest-prefix mount-tree
+subsuming the rootfs as the `/` mount (the `pivot_root` target) — the last
+structural piece, not a volume-type gap.
+
 ### TD33. Container `logs` capture works only for Linux-ABI container inits — ACCEPTED LIMITATION 2026-06-30
 
 **Where:** `kernel/src/container.rs` (`redirect_output_to_capture`, called from

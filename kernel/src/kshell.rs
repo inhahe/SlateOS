@@ -69337,7 +69337,7 @@ fn cmd_oci(args: &str) {
             // directory, creates a container with the image's configuration,
             // and reports the container ID for subsequent exec/stop/delete.
             let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
                 return;
             };
 
@@ -69365,6 +69365,11 @@ fn cmd_oci(args: &str) {
             // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
             // Installed after the container is created (Created state).
             let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
+                alloc::vec::Vec::new();
+            // Tmpfs (in-memory) mounts as absolute guest paths from
+            // `--tmpfs /guest`. Installed after the container is created
+            // (Created state); each backs an ephemeral writable memfs.
+            let mut tmpfs: alloc::vec::Vec<alloc::string::String> =
                 alloc::vec::Vec::new();
             // Extra `KEY=value` environment entries from `-e`/`--env`. These
             // override the image's declared ENV (Docker semantics) and are
@@ -69608,6 +69613,35 @@ fn cmd_oci(args: &str) {
                                         }
                                     }
                                 }
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    "--tmpfs" => {
+                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                            // Docker `--tmpfs /guest[:options]`. The guest is an
+                            // absolute Unix path; Docker also accepts mount
+                            // options after a `:` (size=, mode=, …). Our memfs
+                            // does not yet enforce size/mode quotas, so rather
+                            // than silently ignore them (an unbounded tmpfs is a
+                            // containment/DoS gap), reject a spec that carries
+                            // options — the honest failure mode until quota
+                            // enforcement lands.
+                            if let Some((path, opts)) = spec.split_once(':') {
+                                crate::console_println!(
+                                    "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
+                                    spec, opts
+                                );
+                                let _ = path;
+                            } else if !spec.starts_with('/') || spec == "/" {
+                                crate::console_println!(
+                                    "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
+                                    spec
+                                );
+                            } else {
+                                tmpfs.push(alloc::string::String::from(spec));
                             }
                             i = i.saturating_add(2);
                         } else {
@@ -70197,6 +70231,22 @@ fn cmd_oci(args: &str) {
                         }
                     }
 
+                    // Install any `--tmpfs /guest` in-memory mounts (Created
+                    // state).  Each gives the container an ephemeral writable
+                    // filesystem at the guest path, backed by a fresh memfs —
+                    // common for scratch space in a `--read-only` container.
+                    for guest in &tmpfs {
+                        match crate::container::add_tmpfs_mount(ct_id, guest) {
+                            Ok(()) => crate::console_println!(
+                                "  Tmpfs:        {} (in-memory)", guest
+                            ),
+                            Err(e) => crate::console_println!(
+                                "[oci] Warning: could not add tmpfs {}: {:?}",
+                                guest, e
+                            ),
+                        }
+                    }
+
                     // Install any `-p host:container` published ports (Created
                     // state).  The NAT rules forwarding host traffic to the
                     // container are installed at run() time; this records the
@@ -70706,7 +70756,7 @@ fn cmd_oci(args: &str) {
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)");
-            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)");
             crate::console_println!("  oci test           — run parser self-tests");
         }

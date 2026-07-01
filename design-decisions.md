@@ -3416,12 +3416,33 @@ inline there.
 - *Reset `restart_count` whenever the recorded command is replayed.* Rejected —
   it would make `on-failure:N` loop forever, defeating the cap.
 
-**Limitations / deferred.** No restart back-off/delay yet (Docker's exponential
-`RestartCount`-based delay); auto-restart fires immediately. `unless-stopped`
-collapses to `always` because there is no persistent daemon to replay boot-time
-start decisions. `container ls -n/-l` order by a monotonic per-table creation
-sequence (`created_seq`), added because slot ids are reused and so are not
-creation order.
+**Update (increment 57): exponential restart back-off implemented.**
+Auto-restart no longer fires immediately: `notify_init_exit` now schedules the
+restart through an hrtimer with an exponential crash-loop back-off
+(`restart_backoff_ns`: 100 ms, 200 ms, 400 ms, … doubling per consecutive
+attempt, capped at 30 s), so an `always`-policy container that crashes instantly
+can't spin the CPU in a tight respawn loop. The timer fires in ISR context and
+hands the actual relaunch to the kworker via a trampoline
+(`restart_backoff_fire` → `workqueue::submit(do_container_restart)`) — spawning
+inline on the timer/exit path is unsafe. The back-off is derived from the
+(already-incremented) `restart_count`; it is *not* reset after a period of
+successful running (Docker resets after ~10 s up), because `restart_count`
+doubles as the `on-failure:N` cap and resetting it would defeat the cap. In
+practice the monotonic back-off is strictly safer (a flaky container backs off
+more, never less).
+
+**Update (increment 56): lifecycle event log.** A bounded (256-entry) ring
+records create/start/die/stop/kill/pause/unpause/restart/destroy events
+(`record_event`/`events_snapshot`, surfaced by `container events`). `record_event`
+is lock-local (event-log lock only, never the container table), so it is safe
+from within `with_table` closures and the process-exit path.
+
+**Limitations / deferred.** Restart back-off is *not* reset after a successful
+run window (see the increment-57 update above for why — it shares the
+`on-failure:N` counter). `unless-stopped` collapses to `always` because there is
+no persistent daemon to replay boot-time start decisions. `container ls -n/-l`
+order by a monotonic per-table creation sequence (`created_seq`), added because
+slot ids are reused and so are not creation order.
 
 **Where it bites.** `kernel/src/container.rs` (`RestartPolicy` +
 `parse_restart_policy`/`should_auto_restart`; `Container`/`ContainerConfig`/

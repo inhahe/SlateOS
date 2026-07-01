@@ -206,6 +206,35 @@ pub fn should_auto_restart(
     }
 }
 
+/// Base delay for the auto-restart exponential back-off (100 ms).
+const RESTART_BACKOFF_BASE_NS: u64 = 100_000_000;
+
+/// Cap for the auto-restart exponential back-off (30 s).  A container that
+/// keeps crashing backs off up to this ceiling rather than restarting faster
+/// and faster forever.
+const RESTART_BACKOFF_CAP_NS: u64 = 30_000_000_000;
+
+/// Compute the auto-restart back-off delay for the `restart_count`-th
+/// consecutive automatic restart (Docker's crash-loop back-off).
+///
+/// `restart_count` is the (already-incremented) attempt number, so the first
+/// auto-restart is `1`.  The delay doubles each consecutive attempt —
+/// 100 ms, 200 ms, 400 ms, … — capped at [`RESTART_BACKOFF_CAP_NS`].  This
+/// prevents an `always`-policy container that crashes immediately from
+/// spinning the CPU in a tight respawn loop.
+///
+/// Pure and overflow-safe: the shift is clamped and saturated to the cap.
+#[must_use]
+pub fn restart_backoff_ns(restart_count: u32) -> u64 {
+    // Clamp the shift so `checked_shl` never wraps; anything past the cap is
+    // pinned to the ceiling regardless.
+    let shift = restart_count.saturating_sub(1).min(15);
+    RESTART_BACKOFF_BASE_NS
+        .checked_shl(shift)
+        .unwrap_or(RESTART_BACKOFF_CAP_NS)
+        .min(RESTART_BACKOFF_CAP_NS)
+}
+
 /// Configuration for creating a container.
 #[derive(Debug, Clone)]
 #[derive(Default)]
@@ -1138,6 +1167,7 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     // uninitialized table as "no containers" rather than panicking.
     let mut net_ns_to_flush = None;
     let mut restart_id: Option<ContainerId> = None;
+    let mut restart_attempt: u32 = 0;
     let mut remove_id: Option<ContainerId> = None;
     let mut die_event: Option<(ContainerId, String)> = None;
     {
@@ -1169,6 +1199,7 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
                     ct.restart_count,
                 ) {
                     ct.restart_count = ct.restart_count.saturating_add(1);
+                    restart_attempt = ct.restart_count;
                     restart_id = ContainerId::try_from(idx).ok();
                 } else if ct.auto_remove {
                     // Docker `--rm`: delete the container once its init exits,
@@ -1191,15 +1222,23 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
     if let Some(net_ns) = net_ns_to_flush {
         crate::net::nat::flush_port_forwards(net_ns);
     }
-    // Schedule the deferred restart in the kworker task context, where spawning
-    // is safe.  If the queue is full the restart is dropped (logged) rather
-    // than blocking or spawning inline on the exit path.
+    // Schedule the deferred restart with an exponential crash-loop back-off
+    // (100 ms, 200 ms, 400 ms, … capped at 30 s), so an `always`-policy
+    // container that crashes immediately can't spin the CPU in a tight respawn
+    // loop.  The hrtimer fires in ISR context and hands off to the kworker task
+    // (where spawning is safe) via the back-off trampoline.  Spawning inline on
+    // the exit path is unsafe (it can hold scheduler state and cannot allocate
+    // an address space), hence the timer→workqueue two-step.
     if let Some(id) = restart_id {
-        if !crate::workqueue::submit(do_container_restart, u64::from(id)) {
-            serial_println!(
-                "[container] auto-restart of id={} dropped (workqueue full)", id
-            );
-        }
+        let delay_ns = restart_backoff_ns(restart_attempt);
+        serial_println!(
+            "[container] auto-restart of id={} scheduled in {} ms (attempt {})",
+            id,
+            delay_ns / 1_000_000,
+            restart_attempt
+        );
+        // schedule_ns returns a one-shot handle we don't need to retain.
+        let _ = crate::hrtimer::schedule_ns(delay_ns, restart_backoff_fire, u64::from(id));
     }
     // Schedule the deferred auto-remove (Docker `--rm`).  Deletion requires the
     // container to be non-Running; it is Stopped by the block above, so the
@@ -1222,6 +1261,20 @@ pub fn notify_init_exit(pid: u64, exit_code: i32) {
 /// `N` attempts.  Errors (the binary vanished, OOM, the container was deleted
 /// meanwhile) are logged and dropped — a failed auto-restart simply leaves the
 /// container stopped.
+/// Timer callback: the crash-loop back-off delay for container `arg` elapsed.
+///
+/// Runs in the hrtimer ISR context, so it does the minimum — hands the actual
+/// relaunch off to the `kworker` task (where spawning is safe) via the
+/// workqueue.  A full queue drops the restart (logged); the container stays
+/// stopped rather than blocking the ISR.
+fn restart_backoff_fire(arg: u64) {
+    if !crate::workqueue::submit(do_container_restart, arg) {
+        serial_println!(
+            "[container] delayed auto-restart of id={} dropped (workqueue full)", arg
+        );
+    }
+}
+
 fn do_container_restart(arg: u64) {
     let Ok(id) = ContainerId::try_from(arg) else {
         return;
@@ -4821,6 +4874,30 @@ pub fn self_test() {
     }
     serial_println!("[container]   creation sequence (monotonic ordering): OK");
 
+    // Auto-restart crash-loop back-off: exponential from 100 ms, doubling per
+    // attempt, capped at 30 s; overflow-safe for large attempt counts.
+    {
+        assert_eq!(restart_backoff_ns(1), 100_000_000, "attempt 1 = 100 ms");
+        assert_eq!(restart_backoff_ns(2), 200_000_000, "attempt 2 = 200 ms");
+        assert_eq!(restart_backoff_ns(3), 400_000_000, "attempt 3 = 400 ms");
+        assert_eq!(restart_backoff_ns(4), 800_000_000, "attempt 4 = 800 ms");
+        // attempt 0 (shouldn't occur — count is >=1 when scheduled) clamps to
+        // the base rather than under/overflowing.
+        assert_eq!(restart_backoff_ns(0), 100_000_000, "attempt 0 clamps to base");
+        // High attempt counts saturate at the 30 s cap (and never overflow).
+        assert_eq!(restart_backoff_ns(20), 30_000_000_000, "high count hits cap");
+        assert_eq!(restart_backoff_ns(u32::MAX), 30_000_000_000, "u32::MAX hits cap");
+        // Monotonically non-decreasing across the whole range.
+        let mut prev = 0u64;
+        for n in 0..40u32 {
+            let d = restart_backoff_ns(n);
+            assert!(d >= prev, "back-off must be non-decreasing");
+            assert!(d <= 30_000_000_000, "back-off must never exceed the cap");
+            prev = d;
+        }
+    }
+    serial_println!("[container]   auto-restart back-off (exponential, capped): OK");
+
     // Lifecycle event log (Docker `container events`): action strings, ordering,
     // since/limit/filter semantics of `events_snapshot`.
     {
@@ -4882,5 +4959,5 @@ pub fn self_test() {
     }
     serial_println!("[container]   lifecycle event log (events): OK");
 
-    serial_println!("[container] Self-test PASSED (52 tests)");
+    serial_println!("[container] Self-test PASSED (59 tests)");
 }

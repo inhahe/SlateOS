@@ -69002,11 +69002,22 @@ fn cmd_docker(args: &str) {
             }
             cmd_oci(&delegated);
         }
+        // `docker build` authors an OCI image from a Dockerfile — an image
+        // operation, so it routes to the `oci` handler (`oci build`).
+        "build" => {
+            let mut delegated = alloc::string::String::from("build");
+            if !rest.is_empty() {
+                delegated.push(' ');
+                delegated.push_str(rest);
+            }
+            cmd_oci(&delegated);
+        }
         "version" => {
             crate::console_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!("Usage: docker <run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
+            crate::console_println!("Usage: docker <build|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|version> ...");
+            crate::console_println!("  docker build <dockerfile> <context-dir> <dest-dir>   — build an OCI image from a Dockerfile (RUN deferred, see Q17)");
             crate::console_println!("  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");
             crate::console_println!("  docker create <image-dir> [flags...]   — create without starting");
             crate::console_println!("  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)");
@@ -70172,6 +70183,33 @@ fn cmd_oci(args: &str) {
                 Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
             }
         }
+        "build" => {
+            // oci build <dockerfile> <context-dir> <dest-image-dir>  (Docker
+            // `build`): parse a Dockerfile and author an OCI image directory.
+            // Every instruction except RUN is supported (RUN needs the
+            // operator-gated in-container exec — see open-questions.md Q17);
+            // build_image reports a precise diagnostic in that case.
+            let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
+                (parts.get(1), parts.get(2), parts.get(3))
+            else {
+                crate::console_println!(
+                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir>"
+                );
+                return;
+            };
+            match crate::fs::vfs::Vfs::read_file(dockerfile) {
+                Ok(df) => match oci::build_image(&df, ctx, dest) {
+                    Ok(desc) => crate::console_println!(
+                        "Built image -> {} (manifest {}, {} bytes)",
+                        dest, desc.digest, desc.size
+                    ),
+                    Err(e) => crate::console_println!("build failed: {}", e.describe()),
+                },
+                Err(e) => {
+                    crate::console_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
+                }
+            }
+        }
         "test" => {
             match oci::self_test() {
                 Ok(()) => crate::console_println!("OCI self-test passed."),
@@ -70179,9 +70217,10 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|run|save|load|test]");
+            crate::console_println!("Usage: oci [inspect|layers|run|build|save|load|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+            crate::console_println!("  oci build <dockerfile> <context-dir> <dest-dir> — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)");
             crate::console_println!("  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)");
             crate::console_println!("  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)");
             crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]");

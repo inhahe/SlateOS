@@ -68032,10 +68032,47 @@ fn cmd_container(args: &str) {
             }
         }
         "logs" => {
-            // container logs <id>  (Docker `logs`): print the container init
-            // process's captured stdout+stderr.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container logs ID");
+            // container logs [--tail N] <id>  (Docker `logs`): print the
+            // container init process's captured stdout+stderr.  `--tail N`
+            // limits output to the last N lines (Docker `logs --tail`).
+            let mut tail: Option<usize> = None;
+            let mut id_str: Option<&str> = None;
+            let mut li = 1;
+            while li < parts.len() {
+                match parts.get(li) {
+                    Some(&"--tail") | Some(&"-n") => {
+                        match parts.get(li.saturating_add(1)) {
+                            Some(&"all") => {
+                                tail = None;
+                                li = li.saturating_add(2);
+                            }
+                            Some(n) => match n.parse::<usize>() {
+                                Ok(v) => {
+                                    tail = Some(v);
+                                    li = li.saturating_add(2);
+                                }
+                                Err(_) => {
+                                    crate::console_println!(
+                                        "container logs: invalid --tail value '{}'", n
+                                    );
+                                    return;
+                                }
+                            },
+                            None => {
+                                crate::console_println!("container logs: --tail needs a value");
+                                return;
+                            }
+                        }
+                    }
+                    Some(tok) => {
+                        id_str = Some(tok);
+                        li = li.saturating_add(1);
+                    }
+                    None => li = li.saturating_add(1),
+                }
+            }
+            let Some(id_str) = id_str else {
+                crate::console_println!("Usage: container logs [--tail N] ID");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
@@ -68044,10 +68081,23 @@ fn cmd_container(args: &str) {
             };
             match container::logs(id) {
                 Ok(data) => match core::str::from_utf8(&data) {
-                    // Captured output is text: print it verbatim.
+                    // Captured output is text: print it verbatim (or the last
+                    // N lines under --tail).
                     Ok(text) => {
-                        crate::console::write_str(text);
-                        if !text.ends_with('\n') {
+                        let out = match tail {
+                            Some(n) => {
+                                // Trailing newline shouldn't count as an empty
+                                // final line; trim it before splitting, then
+                                // keep the last N lines.
+                                let trimmed = text.strip_suffix('\n').unwrap_or(text);
+                                let lines: alloc::vec::Vec<&str> = trimmed.split('\n').collect();
+                                let start = lines.len().saturating_sub(n);
+                                lines.get(start..).unwrap_or(&[]).join("\n")
+                            }
+                            None => alloc::string::String::from(text.strip_suffix('\n').unwrap_or(text)),
+                        };
+                        if !out.is_empty() {
+                            crate::console::write_str(&out);
                             crate::console_println!();
                         }
                     }
@@ -68082,7 +68132,7 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
             crate::console_println!("  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container");
-            crate::console_println!("  container logs ID                        — print captured init stdout/stderr");
+            crate::console_println!("  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container top ID                         — list processes running in container");
             crate::console_println!("  container stats ID                       — live cgroup resource usage (CPU/mem/IO)");

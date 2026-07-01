@@ -107,9 +107,28 @@ run isn't misreported. Tracked here until the harness is reworked.
 
 **Recurrence 2026-06-30:** observed again on a ~217 s BOOT_OK run (heavy
 boot); the harness logged the same "did not exit within 262144 yields
-(state=Running)" for the real-glibc pthread variant. Non-fatal as before —
+(state=Running)" for the real-glibc pthread variant. Non-fatal that time —
 BOOT_OK was reached and the container self-test (40 tests) passed on the
-same boot. Reinforces the timing-flake assessment; no code change made.
+same boot.
+
+**Severity escalation 2026-06-30 — a *full* boot hang was observed, not
+just the non-fatal warning.** On a subsequent run the boot never reached
+BOOT_OK within the 480 s timeout; the serial log's last activity was in the
+real-glibc clone/COW region (pid 170/171: `[cow] Cloned address space`,
+page-cache faults for the glibc text inode, a freshly spawned thread in the
+child) with no further progress — consistent with the pthread `clone`+futex
+worker deadlocking *permanently* rather than merely running slow. The very
+next boot (identical binary) reached BOOT_OK at 222 s with the pthread test
+passing (`captured 48 bytes == expected: OK`), confirming the hang is
+intermittent. This means the futex/clone path has a **real, low-probability
+deadlock**, not purely a yield-budget timing artifact — the fixed-budget
+harness masks it as a warning on slow-but-live runs but the underlying hang
+can be total. **Proper fix (still deferred, now higher priority):** root-cause
+the futex wait/wake race in the glibc `clone`+TLS worker path (candidate: a
+lost wakeup when a waker runs before the waiter parks, or a missed requeue),
+in addition to reworking the harness to wait on a real exit signal. No code
+change made this session (the observation came from unrelated container-CLI
+boot tests); logged here so the intermittent total hang isn't forgotten.
 
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 

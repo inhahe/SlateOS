@@ -69056,8 +69056,8 @@ fn cmd_docker(args: &str) {
             crate::console_println!("  docker prune                           — remove all stopped containers");
             crate::console_println!("  docker cp <src> <dest>                 — copy between host and rootfs");
             crate::console_println!("  docker commit|export|import ...        — snapshot / pack / load a rootfs");
-            crate::console_println!("  docker save <image-dir> <out-tar>      — bundle an OCI image into a tar");
-            crate::console_println!("  docker load <in-tar> <dest-dir>        — restore a saved image tar into a dir");
+            crate::console_println!("  docker save <image-dir|name:tag> <out-tar>  — bundle an OCI image into a tar");
+            crate::console_println!("  docker load <in-tar> [dest-dir]        — restore a saved image tar (imports into the store by ref.name)");
             crate::console_println!("  docker system df|prune                 — disk usage / reclaim stopped containers+networks");
             crate::console_println!("  docker images                          — list tagged images in the named store");
             crate::console_println!("  docker tag <dir|ref> <ref>             — import an image dir or re-tag an existing ref");
@@ -70193,28 +70193,49 @@ fn cmd_oci(args: &str) {
             }
         }
         "save" => {
-            // oci save <image-dir> <out-tar>  (Docker `save`): bundle a complete
-            // OCI image *directory tree* (index, manifests, config blob, layer
-            // blobs) into a single ustar archive on the host VFS, so the image
-            // can be moved to another host and restored with `oci load`.  Unlike
-            // `container export` (which packs a *container's* flattened rootfs),
-            // `save` preserves the image's layered on-disk layout verbatim.
-            let (Some(&dir), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: oci save <image-dir> <out-tar>");
+            // oci save <image-dir|name:tag> <out-tar>  (Docker `save`): bundle a
+            // complete OCI image *directory tree* (index, manifest, config blob,
+            // layer blobs) into a single ustar archive on the host VFS, so the
+            // image can be moved to another host and restored with `oci load`.
+            // A `name:tag` argument is first exported from the named store into a
+            // temporary single-manifest layout (only that image's blobs), which
+            // is then tarred and removed.  Unlike `container export` (which packs
+            // a *container's* flattened rootfs), `save` preserves the image's
+            // layered on-disk layout verbatim.
+            let (Some(&src), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
+                crate::console_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
                 return;
             };
-            // Validate that the directory really is an OCI image before packing,
-            // so `save` on a bogus path fails cleanly instead of producing a tar
-            // of arbitrary junk (Docker `save` operates on images, not dirs).
-            match oci::load_image(dir) {
+            let is_layout = crate::fs::vfs::Vfs::metadata(
+                &alloc::format!("{}/oci-layout", src.trim_end_matches('/')),
+            )
+            .is_ok();
+            let (pack_dir, temp) = if is_layout {
+                (alloc::string::String::from(src.trim_end_matches('/')), false)
+            } else {
+                let tmp = alloc::string::String::from("/tmp/oci-save-tmp");
+                let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
+                match oci::store_export_ref(src, &tmp) {
+                    Ok(()) => (tmp, true),
+                    Err(e) => {
+                        crate::console_println!(
+                            "Not an image dir or store reference '{}': {:?}", src, e
+                        );
+                        return;
+                    }
+                }
+            };
+            // Validate that a real OCI image landed before packing, so `save`
+            // fails cleanly instead of producing a tar of arbitrary junk.
+            match oci::load_image(&pack_dir) {
                 Ok(image) => {
                     let layers = image.manifest.layers.len();
-                    match crate::container::tar_tree(dir) {
+                    match crate::container::tar_tree(&pack_dir) {
                         Ok(archive) => {
                             match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
                                 Ok(()) => crate::console_println!(
                                     "Saved image {} ({} layers): {} bytes -> {}",
-                                    dir, layers, archive.len(), out_path
+                                    src, layers, archive.len(), out_path
                                 ),
                                 Err(e) => crate::console_println!(
                                     "Failed to write '{}': {:?}", out_path, e
@@ -70222,45 +70243,79 @@ fn cmd_oci(args: &str) {
                             }
                         }
                         Err(e) => crate::console_println!(
-                            "Failed to pack image '{}': {:?}", dir, e
+                            "Failed to pack image '{}': {:?}", src, e
                         ),
                     }
                 }
                 Err(e) => crate::console_println!(
-                    "Not a valid OCI image at '{}': {:?}", dir, e
+                    "Not a valid OCI image at '{}': {:?}", pack_dir, e
                 ),
+            }
+            if temp {
+                let _ = crate::fs::vfs::Vfs::remove_recursive(&pack_dir);
             }
         }
         "load" => {
-            // oci load <in-tar> <dest-dir>  (Docker `load`): restore an image
-            // archive produced by `oci save` into a fresh image directory.  Our
-            // images are referenced by their on-disk OCI layout directory (there
-            // is no name-keyed registry), so `load` takes an explicit
-            // destination directory rather than repopulating a store.  The tar is
-            // validated and extracted via the shared `untar_tree` primitive
-            // (which rejects `..`-escaping member names before writing), then the
-            // result is re-parsed to confirm a well-formed image landed.
-            let (Some(&tar_path), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: oci load <in-tar> <dest-dir>");
+            // oci load <in-tar> [dest-dir]  (Docker `load`): restore an image
+            // archive produced by `oci save`.  The tar is extracted via the
+            // shared `untar_tree` primitive (which rejects `..`-escaping member
+            // names before writing) into `dest-dir` if given, else into a temp
+            // dir.  Any `ref.name`-annotated manifests are then imported into the
+            // named store so the image is usable by `name:tag` — matching Docker,
+            // where `load` repopulates the local image store.
+            let Some(&tar_path) = parts.get(1) else {
+                crate::console_println!("Usage: oci load <in-tar> [dest-dir]");
                 return;
             };
-            match crate::fs::vfs::Vfs::read_file(tar_path) {
-                Ok(archive) => match crate::container::untar_tree(dest_dir, &archive) {
-                    Ok(()) => match oci::load_image(dest_dir) {
-                        Ok(image) => crate::console_println!(
-                            "Loaded image from {} ({} bytes) -> {} ({} layers)",
-                            tar_path, archive.len(), dest_dir, image.manifest.layers.len()
-                        ),
-                        Err(e) => crate::console_println!(
-                            "Extracted {} -> {} but it is not a valid OCI image: {:?}",
-                            tar_path, dest_dir, e
-                        ),
-                    },
+            let archive = match crate::fs::vfs::Vfs::read_file(tar_path) {
+                Ok(a) => a,
+                Err(e) => {
+                    crate::console_println!("Failed to read '{}': {:?}", tar_path, e);
+                    return;
+                }
+            };
+            let (extract_dir, temp) = match parts.get(2) {
+                Some(&d) => (alloc::string::String::from(d), false),
+                None => {
+                    let tmp = alloc::string::String::from("/tmp/oci-load-tmp");
+                    let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
+                    (tmp, true)
+                }
+            };
+            match crate::container::untar_tree(&extract_dir, &archive) {
+                Ok(()) => match oci::load_image(&extract_dir) {
+                    Ok(image) => {
+                        let layers = image.manifest.layers.len();
+                        // Import ref.name-annotated tags into the store.
+                        match oci::store_import_dir(&extract_dir) {
+                            Ok(tags) if !tags.is_empty() => crate::console_println!(
+                                "Loaded {} ({} bytes, {} layers) -> store tags: {}",
+                                tar_path, archive.len(), layers, tags.join(", ")
+                            ),
+                            Ok(_) => crate::console_println!(
+                                "Loaded {} ({} bytes, {} layers){}",
+                                tar_path, archive.len(), layers,
+                                if temp {
+                                    " but no ref.name annotation; nothing tagged in store"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            Err(e) => crate::console_println!(
+                                "Loaded {} but store import failed: {:?}", tar_path, e
+                            ),
+                        }
+                    }
                     Err(e) => crate::console_println!(
-                        "Failed to extract '{}' into '{}': {:?}", tar_path, dest_dir, e
+                        "Extracted {} but it is not a valid OCI image: {:?}", tar_path, e
                     ),
                 },
-                Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
+                Err(e) => crate::console_println!(
+                    "Failed to extract '{}': {:?}", tar_path, e
+                ),
+            }
+            if temp {
+                let _ = crate::fs::vfs::Vfs::remove_recursive(&extract_dir);
             }
         }
         "build" => {

@@ -3676,3 +3676,16 @@ pool). Wired into `FROM name:tag` (base inheritance), `oci`/`docker run`,
 image into the store). A dedicated `load_manifest_by_digest` was needed because
 the store is a *multi-manifest* layout — `load_image`'s host-platform manifest
 selection would be ambiguous across tags. Covered by self-test 21.
+
+**Follow-up 2 — store-aware `save`/`load` (done, same day).** `oci save
+name:tag` exports *one* image (not the whole shared store) into a standalone
+single-manifest layout via `store_export_ref` (copies only that manifest's
+config + layer blobs and writes a one-entry `index.json` preserving the
+`ref.name` annotation), then tars it; `oci load` extracts a tar and calls
+`store_import_dir`, which copies the blobs into the shared pool and re-adds each
+`ref.name`-annotated manifest as a store tag — matching Docker, where `load`
+repopulates the local image store. `load`'s dest-dir is now optional (temp dir +
+store import when omitted). The index (de)serialisers were generalised to a
+`dir` parameter (`serialize_index`/`write_index_at`/`read_index_at`) so the same
+code writes the store index and per-export indices. Covered by self-test 22
+(build → tag → export → wipe store → import → resolve + extract original bytes).

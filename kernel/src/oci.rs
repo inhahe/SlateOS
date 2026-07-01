@@ -1327,8 +1327,15 @@ fn normalize_ref(reference: &str) -> String {
 
 /// Read and parse the store `index.json` into entries (empty if absent).
 fn store_read_index() -> KernelResult<Vec<StoreEntry>> {
+    read_index_at(STORE_DIR)
+}
+
+/// Read and parse the `index.json` of an arbitrary OCI layout `dir` into
+/// [`StoreEntry`] rows (each manifest descriptor + its `ref.name` annotation).
+/// Returns an empty vec if the index is absent.
+fn read_index_at(dir: &str) -> KernelResult<Vec<StoreEntry>> {
     use crate::fs::Vfs;
-    let data = match Vfs::read_file(&format!("{STORE_DIR}/index.json")) {
+    let data = match Vfs::read_file(&format!("{}/index.json", dir.trim_end_matches('/'))) {
         Ok(d) => d,
         Err(_) => return Ok(Vec::new()),
     };
@@ -1367,10 +1374,9 @@ fn store_read_index() -> KernelResult<Vec<StoreEntry>> {
     Ok(out)
 }
 
-/// Serialise `entries` to the store `index.json` (and refresh the `oci-layout`
-/// marker).
-fn store_write_index(entries: &[StoreEntry]) -> KernelResult<()> {
-    use crate::fs::Vfs;
+/// Serialise `entries` to an OCI multi-manifest `index.json` string (each with
+/// its platform + `ref.name` annotation).
+fn serialize_index(entries: &[StoreEntry]) -> String {
     let mut index = String::from("{\"schemaVersion\":2,\"mediaType\":");
     push_json_string(&mut index, MEDIA_TYPE_INDEX);
     index.push_str(",\"manifests\":[");
@@ -1395,12 +1401,26 @@ fn store_write_index(entries: &[StoreEntry]) -> KernelResult<()> {
         index.push_str("}}");
     }
     index.push_str("]}");
-    Vfs::write_file(&format!("{STORE_DIR}/index.json"), index.as_bytes())?;
+    index
+}
+
+/// Write `entries` as the `index.json` of the OCI layout at `dir` (and refresh
+/// its `oci-layout` marker).
+fn write_index_at(dir: &str, entries: &[StoreEntry]) -> KernelResult<()> {
+    use crate::fs::Vfs;
+    let dir = dir.trim_end_matches('/');
+    Vfs::write_file(&format!("{dir}/index.json"), serialize_index(entries).as_bytes())?;
     Vfs::write_file(
-        &format!("{STORE_DIR}/oci-layout"),
+        &format!("{dir}/oci-layout"),
         b"{\"imageLayoutVersion\":\"1.0.0\"}",
     )?;
     Ok(())
+}
+
+/// Serialise `entries` to the store `index.json` (and refresh the `oci-layout`
+/// marker).
+fn store_write_index(entries: &[StoreEntry]) -> KernelResult<()> {
+    write_index_at(STORE_DIR, entries)
 }
 
 /// Copy every blob under `src/blobs/sha256` into `dst/blobs/sha256`
@@ -1576,6 +1596,74 @@ fn collect_manifest_blob_hexes(
             }
         }
     }
+}
+
+/// Copy the blob identified by `digest` (`algo:hex`) from the `src` OCI layout
+/// into the `dst` layout's content-addressed blob pool.
+fn copy_blob_by_digest(src: &str, dst: &str, digest: &str) -> KernelResult<()> {
+    use crate::fs::Vfs;
+    let (_, hex) = digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
+    let data = Vfs::read_file(&format!("{}/blobs/sha256/{hex}", src.trim_end_matches('/')))?;
+    Vfs::write_file(&format!("{}/blobs/sha256/{hex}", dst.trim_end_matches('/')), &data)?;
+    Ok(())
+}
+
+/// Export a single stored image `reference` into a standalone **single-manifest**
+/// OCI layout at `dest_dir` — the form `oci save` / `docker save` bundles into a
+/// tar.  Only that image's manifest, config, and layer blobs are copied (not the
+/// whole shared store), and the dest `index.json` carries exactly one manifest
+/// with the `ref.name` annotation preserved.
+///
+/// # Errors
+/// `NotFound` if `reference` is not in the store; propagates VFS/parse errors.
+pub fn store_export_ref(reference: &str, dest_dir: &str) -> KernelResult<()> {
+    use crate::fs::Vfs;
+    let reference = normalize_ref(reference);
+    let entries = store_read_index()?;
+    let entry = entries
+        .iter()
+        .find(|e| e.reference == reference)
+        .ok_or(KernelError::NotFound)?;
+
+    create_layout_skeleton(dest_dir);
+    // Manifest blob, then the config + layer blobs it references.
+    copy_blob_by_digest(STORE_DIR, dest_dir, &entry.digest)?;
+    let (_, hex) = entry.digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
+    let manifest_data = Vfs::read_file(&format!("{STORE_DIR}/blobs/sha256/{hex}"))?;
+    let manifest = ImageManifest::parse(&manifest_data)?;
+    copy_blob_by_digest(STORE_DIR, dest_dir, &manifest.config.digest)?;
+    for l in &manifest.layers {
+        copy_blob_by_digest(STORE_DIR, dest_dir, &l.digest)?;
+    }
+    write_index_at(dest_dir, core::slice::from_ref(entry))
+}
+
+/// Import every annotated image from a standalone OCI layout `src_dir` into the
+/// store (the inverse of [`store_export_ref`]; used by `oci load` / `docker
+/// load`).  Blobs are copied into the shared pool and each `ref.name`-annotated
+/// manifest becomes/refreshes a store tag.  Returns the tags added.
+///
+/// # Errors
+/// Propagates VFS/parse errors.  A layout with no `ref.name` annotations yields
+/// an empty list (nothing to name).
+pub fn store_import_dir(src_dir: &str) -> KernelResult<Vec<String>> {
+    create_layout_skeleton(STORE_DIR);
+    let src = src_dir.trim_end_matches('/');
+    let src_entries = read_index_at(src)?;
+    copy_all_blobs(src, STORE_DIR)?;
+
+    let mut store = store_read_index()?;
+    let mut added = Vec::new();
+    for e in src_entries {
+        if e.reference.is_empty() {
+            continue;
+        }
+        store.retain(|s| s.reference != e.reference);
+        added.push(e.reference.clone());
+        store.push(e);
+    }
+    store_write_index(&store)?;
+    Ok(added)
 }
 
 /// Load an image from an OCI layout `dir` by an explicit manifest digest,
@@ -4108,7 +4196,68 @@ COPY --from=mid /extra.txt /extra.txt
         serial_println!("[oci]   store reference resolution + FROM name:tag: OK");
     }
 
-    serial_println!("[oci] Self-test PASSED (21 tests)");
+    // Test 22: store export/import round-trip (the core of `oci save`/`load`).
+    // Tag an image into the store, export it to a standalone single-manifest
+    // layout, then import that layout into a fresh store and confirm the tag +
+    // blobs come back intact.
+    {
+        use crate::fs::Vfs;
+        let ctx = "/tmp/oci_si_ctx";
+        let img = "/tmp/oci_si_img";
+        let exp = "/tmp/oci_si_exp";
+        cleanup_image_dir(img);
+        cleanup_image_dir(exp);
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::mkdir(ctx);
+        Vfs::write_file(&format!("{ctx}/data.txt"), b"round-trip")?;
+
+        let df = b"FROM scratch\nCOPY data.txt /data.txt\n";
+        build_image(df, ctx, img).map_err(|e| {
+            serial_println!("[oci] save/load build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let digest = store_tag_from_dir(img, "roundtrip:1")?;
+
+        // Export the single image to a standalone layout: exactly one manifest,
+        // its config, and its layer blobs (nothing else from the store).
+        store_export_ref("roundtrip:1", exp)?;
+        let exp_entries = read_index_at(exp)?;
+        assert_eq!(exp_entries.len(), 1, "export holds one manifest");
+        assert_eq!(
+            exp_entries.first().map(|e| e.reference.as_str()),
+            Some("roundtrip:1"),
+            "ref.name preserved in export"
+        );
+        // The exported layout must itself load as a valid image.
+        let ei = load_image(exp)?;
+        assert_eq!(ei.manifest.layers.len(), 1, "exported image has its layer");
+
+        // Wipe the store and import the exported layout back.
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let added = store_import_dir(exp)?;
+        assert_eq!(added, alloc::vec![String::from("roundtrip:1")], "import re-adds the tag");
+        assert_eq!(store_resolve("roundtrip:1")?, digest, "digest survives round-trip");
+        // The imported blobs must extract to the original content.
+        let (src, _img) = resolve_image_source("roundtrip:1")?;
+        assert_eq!(src, STORE_DIR);
+        let li = load_manifest_by_digest(STORE_DIR, &digest)?;
+        let ext = "/tmp/oci_si_ext";
+        let _ = Vfs::mkdir(ext);
+        for layer in &li.manifest.layers {
+            extract_layer(STORE_DIR, layer, ext)?;
+        }
+        assert_eq!(Vfs::read_file(&format!("{ext}/data.txt"))?, b"round-trip");
+        let _ = Vfs::remove_recursive(ext);
+
+        let _ = Vfs::remove_recursive(STORE_DIR);
+        let _ = Vfs::remove(&format!("{ctx}/data.txt"));
+        let _ = Vfs::rmdir(ctx);
+        cleanup_image_dir(img);
+        cleanup_image_dir(exp);
+        serial_println!("[oci]   store export/import round-trip (save/load): OK");
+    }
+
+    serial_println!("[oci] Self-test PASSED (22 tests)");
     Ok(())
 }
 

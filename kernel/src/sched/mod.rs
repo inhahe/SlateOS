@@ -1131,6 +1131,33 @@ pub fn spawn_with_affinity(
         Ok((id, prio, target_cpu))
     })?;
 
+    // TD31: symmetric cgroup membership accounting.  A task that inherits a
+    // non-root cgroup must increment that cgroup's `nr_tasks`, mirroring the
+    // `detach_task` in `reap_dead_tasks`.  Without this, only tasks explicitly
+    // moved via `set_task_cgroup` are counted, so a cgroup could report
+    // `nr_tasks == 0` while hosting many inherited (forked/cloned) children.
+    //
+    // Done here — *after* the `without_interrupts`/SCHED critical section has
+    // ended and SCHED is dropped — so the cgroup `TABLE` lock is taken strictly
+    // after SCHED is released, never nested inside it (preserving the
+    // SCHED → TABLE lock order that `set_task_cgroup` also uses).  ROOT is
+    // skipped to avoid churning the root count for ordinary kernel tasks,
+    // matching the reap-side skip; `attach_task` on ROOT would otherwise pair
+    // with the reap-side ROOT skip and leave ROOT permanently inflated.
+    //
+    // The earlier TD31 attempt hung the boot because the extra `TABLE` lock
+    // traffic aggravated a spinlock-across-preemption deadlock; that root cause
+    // (B-PREEMPT-SPINLOCK) is now fixed — a `crate::sync::Mutex` (including
+    // `TABLE`) disables preemption while held, so it can no longer be preempted
+    // mid-critical-section and deadlocked by a higher-priority spinner.
+    //
+    // `attach_task` only fails with `InvalidArgument` when the cgroup doesn't
+    // exist (raced deletion); in that case the task simply isn't counted, which
+    // is the same benign outcome as before this call existed — safe to ignore.
+    if inherit_cgroup != crate::cgroup::ROOT_CGROUP {
+        let _ = crate::cgroup::attach_task(inherit_cgroup);
+    }
+
     // Wake the target CPU if it's idle (remote CPUs may be in HLT).
     // Done outside without_interrupts — signal_cpu sends an IPI which
     // is fine with interrupts enabled.

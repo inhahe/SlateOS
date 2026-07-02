@@ -3499,7 +3499,39 @@ the Linux-fd path — unverified today, and shipping it unverified would violate
 the no-band-aid rule. Trigger to do it: a real native-ABI container init appears,
 or `initial_fds` stdout semantics are confirmed.
 
-### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate
+### TD31. Cgroup `nr_tasks` accounting is attach/detach-symmetric only, not membership-accurate — RESOLVED 2026-07-02
+
+**RESOLUTION (2026-07-02).** Made membership counting symmetric with task
+lifetime. The **detach half** had already landed in `reap_dead_tasks` (commit
+`d7b926037`, 2026-07-01): a reaped task in a non-root cgroup calls
+`cgroup::detach_task(task_cgroup)` after `drop(state)` (SCHED released → TABLE,
+preserving lock order). This 2026-07-02 change adds the matching **attach half**
+in `sched::spawn_with_affinity`: after the `without_interrupts`/SCHED critical
+section ends and SCHED is dropped, a task that inherited a non-root cgroup calls
+`cgroup::attach_task(inherit_cgroup)` (ROOT skipped, matching the reap-side skip;
+TABLE taken strictly after SCHED). Because *all* task creation (kernel and user)
+funnels through `spawn_with_affinity` (`proc::thread::spawn_user` →
+`thread::spawn` → `sched::spawn` → `spawn_with_affinity`), this single site makes
+every fork/clone/spawn counted and every reap decremented — a true membership
+count. Tasks bound via `set_task_cgroup` (e.g. a container init, which inherits
+ROOT at spawn so the spawn-attach is skipped, then is explicitly bound) stay
+balanced: attach at bind, detach at reap.
+
+**Why it's now safe (was BLOCKED on a boot hang).** The earlier attempt hung the
+boot twice because the extra `TABLE` lock traffic aggravated
+**B-PREEMPT-SPINLOCK** — a `crate::sync::Mutex` held across an involuntary
+preemption could deadlock against a higher-priority spinner on a single CPU. That
+root cause was fixed 2026-07-01 (per-CPU `PREEMPT_DISABLE_COUNT`: a tracked mutex
+now disables preemption while held). With that fix, re-applying the attach edit
+booted **green 4× consecutively** (baseline 190s + 182s/181s/185s), zero hangs,
+zero `SPINLOCK STALL`, zero self-test failures, and no `dash`/`pthread` flakes —
+exactly the retry trigger this entry documented. `cgroup::delete`'s
+`nr_tasks > 0 ⇒ NotEmpty` guard is now a true "container still has live
+processes" check.
+
+---
+
+**Original entry (for context):**
 
 **Where:** `kernel/src/cgroup.rs` (`attach_task`/`detach_task`/`stats.nr_tasks`),
 `kernel/src/sched/mod.rs` (`sched::spawn` ~L1046 sets `new_task.cgroup_id` on

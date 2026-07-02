@@ -536,8 +536,111 @@ impl Framebuffer {
     }
 
     /// Clear the back buffer to a solid color.
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): a full 4K clear writes ~33 MB, enough that a
+    /// single core does not saturate DRAM write bandwidth. Above
+    /// [`PARALLEL_FILL_THRESHOLD_PX`] the fill is split into disjoint row-bands
+    /// filled on scoped worker threads (`split_at_mut` guarantees each thread
+    /// owns a non-overlapping `&mut [u32]`, so this is safe with no `unsafe`).
+    /// Below the threshold, or when the platform reports no usable parallelism
+    /// (e.g. a target whose std has not implemented `available_parallelism`), it
+    /// falls back to a single-threaded `[u32]::fill` — so this never pessimizes
+    /// small buffers or single-core targets.
     pub fn clear(&mut self, color: u32) {
-        self.back.fill(color);
+        let workers = Self::fill_worker_count(self.back.len());
+        if workers <= 1 {
+            self.back.fill(color);
+            return;
+        }
+        let band_stride = self.back.len().div_ceil(workers);
+        std::thread::scope(|s| {
+            for chunk in self.back.chunks_mut(band_stride) {
+                s.spawn(move || chunk.fill(color));
+            }
+        });
+    }
+
+    /// Number of worker threads to use for a solid fill covering `px` pixels.
+    ///
+    /// Returns 1 (single-threaded) for small fills or when the platform cannot
+    /// report parallelism, so callers can use the result to decide whether to
+    /// spawn threads at all. Capped at 8 to bound per-frame thread-spawn cost.
+    fn fill_worker_count(px: usize) -> usize {
+        // ~1M px (e.g. > 1024×1024). Below this the thread-spawn overhead is not
+        // worth it; the per-frame spawn cost would dominate the fill savings.
+        const PARALLEL_FILL_THRESHOLD_PX: usize = 1 << 20;
+        if px < PARALLEL_FILL_THRESHOLD_PX {
+            return 1;
+        }
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .min(8)
+    }
+
+    /// Fill `buf` — which holds `band_rows` contiguous scanlines of `width`
+    /// pixels each, the first of which is at absolute framebuffer row `y0` — with
+    /// `color`, skipping the horizontal spans covered by any `covered` rect.
+    ///
+    /// Shared by the single-threaded and parallel [`clear_except`] paths so the
+    /// per-scanline span-merging logic lives in exactly one place. `covered`
+    /// rects are given in absolute framebuffer coordinates; the vertical overlap
+    /// test uses the absolute row `y0 + r`, and writes target the band-local row
+    /// offset `r * width`.
+    fn fill_uncovered_band(
+        buf: &mut [u32],
+        y0: u32,
+        band_rows: u32,
+        width: u32,
+        color: u32,
+        covered: &[Rect],
+        fb_height: u32,
+    ) {
+        let width_usize = width as usize;
+        // Reused across scanlines so this allocates once, not per row.
+        let mut spans: Vec<(u32, u32)> = Vec::with_capacity(covered.len());
+        for r in 0..band_rows {
+            let abs_y = y0.saturating_add(r);
+            spans.clear();
+            for rect in covered {
+                let ry0 = rect.y.max(0) as u32;
+                let ry1 = (rect.y.saturating_add(rect.height as i32).max(0) as u32).min(fb_height);
+                if abs_y >= ry0 && abs_y < ry1 {
+                    let x0 = rect.x.max(0) as u32;
+                    let x1 = (rect.x.saturating_add(rect.width as i32).max(0) as u32).min(width);
+                    if x1 > x0 {
+                        spans.push((x0, x1));
+                    }
+                }
+            }
+            let row_base = r as usize * width_usize;
+            if spans.is_empty() {
+                if let Some(s) = buf.get_mut(row_base..row_base + width_usize) {
+                    s.fill(color);
+                }
+                continue;
+            }
+            // Sort covered spans by start, then fill the complementary gaps.
+            spans.sort_unstable_by_key(|&(a, _)| a);
+            let mut cursor = 0u32;
+            for &(a, b) in &spans {
+                if a > cursor {
+                    let lo = row_base + cursor as usize;
+                    let hi = row_base + a as usize;
+                    if let Some(s) = buf.get_mut(lo..hi) {
+                        s.fill(color);
+                    }
+                }
+                cursor = cursor.max(b);
+            }
+            if cursor < width {
+                let lo = row_base + cursor as usize;
+                let hi = row_base + width_usize;
+                if let Some(s) = buf.get_mut(lo..hi) {
+                    s.fill(color);
+                }
+            }
+        }
     }
 
     /// Clear a specific rectangle in the back buffer.
@@ -577,55 +680,31 @@ impl Framebuffer {
     /// covered) which is negligible next to the pixel stores it elides.
     pub fn clear_except(&mut self, color: u32, covered: &[Rect]) {
         if covered.is_empty() {
-            self.back.fill(color);
+            // Delegates to the (possibly parallel) full-buffer clear.
+            self.clear(color);
             return;
         }
         let width = self.width;
         let height = self.height;
-        // Reused across scanlines so this allocates once, not per row.
-        let mut spans: Vec<(u32, u32)> = Vec::with_capacity(covered.len());
-        for y in 0..height {
-            spans.clear();
-            for r in covered {
-                let ry0 = r.y.max(0) as u32;
-                // r.y + r.height, clamped to >= 0 then to the framebuffer height.
-                let ry1 = (r.y.saturating_add(r.height as i32).max(0) as u32).min(height);
-                if y >= ry0 && y < ry1 {
-                    let x0 = r.x.max(0) as u32;
-                    let x1 = (r.x.saturating_add(r.width as i32).max(0) as u32).min(width);
-                    if x1 > x0 {
-                        spans.push((x0, x1));
-                    }
-                }
-            }
-            let row_base = y as usize * width as usize;
-            if spans.is_empty() {
-                if let Some(s) = self.back.get_mut(row_base..row_base + width as usize) {
-                    s.fill(color);
-                }
-                continue;
-            }
-            // Sort covered spans by start, then fill the complementary gaps.
-            spans.sort_unstable_by_key(|&(a, _)| a);
-            let mut cursor = 0u32;
-            for &(a, b) in &spans {
-                if a > cursor {
-                    let lo = row_base + cursor as usize;
-                    let hi = row_base + a as usize;
-                    if let Some(s) = self.back.get_mut(lo..hi) {
-                        s.fill(color);
-                    }
-                }
-                cursor = cursor.max(b);
-            }
-            if cursor < width {
-                let lo = row_base + cursor as usize;
-                let hi = row_base + width as usize;
-                if let Some(s) = self.back.get_mut(lo..hi) {
-                    s.fill(color);
-                }
-            }
+        let workers = Self::fill_worker_count(self.back.len());
+        if workers <= 1 {
+            Self::fill_uncovered_band(&mut self.back, 0, height, width, color, covered, height);
+            return;
         }
+        // Partition the scanlines into `workers` disjoint row-bands. Each band is
+        // a non-overlapping `&mut [u32]` (via chunks_mut), so the scoped threads
+        // never alias — safe parallel fill with no `unsafe`.
+        let rows_per_band = height.div_ceil(workers as u32);
+        let band_stride = rows_per_band as usize * width as usize;
+        std::thread::scope(|s| {
+            for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
+                let y0 = band_idx as u32 * rows_per_band;
+                let band_rows = (chunk.len() / width as usize) as u32;
+                s.spawn(move || {
+                    Self::fill_uncovered_band(chunk, y0, band_rows, width, color, covered, height);
+                });
+            }
+        });
     }
 
     /// Set a pixel in the back buffer (bounds-checked).
@@ -4910,6 +4989,40 @@ mod tests {
                 assert_eq!(fb2.get_pixel(x, y), Some(0xFF_FF_FF_FF), "pixel ({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn test_clear_except_parallel_band_boundaries() {
+        // A framebuffer above the parallel-fill threshold (>1M px) so the
+        // multi-threaded row-band path runs on a multicore host. A covered rect
+        // whose vertical extent straddles band boundaries must be skipped
+        // correctly in every band (the key parallel-correctness risk), and the
+        // result must be bit-identical to a single-threaded clear_except.
+        const W: u32 = 2048;
+        const H: u32 = 1024; // 2M px > 1<<20 threshold
+        let covered = [
+            Rect::new(100, 50, 400, 900),  // tall: crosses many band boundaries
+            Rect::new(1500, 300, 400, 200), // offset block
+        ];
+
+        let mut par = Framebuffer::new(W, H).unwrap();
+        par.clear(0xFF_00_00_00);
+        par.clear_except(0xFF_AB_CD_EF, &covered);
+
+        // Ground truth: fill the same buffer single-threaded via the shared helper.
+        let mut reference = vec![0xFF_00_00_00u32; (W * H) as usize];
+        Framebuffer::fill_uncovered_band(&mut reference, 0, H, W, 0xFF_AB_CD_EF, &covered, H);
+
+        assert_eq!(par.back.len(), reference.len());
+        assert!(
+            par.back == reference,
+            "parallel clear_except must match single-threaded reference"
+        );
+
+        // Spot-check a covered pixel (kept prior) and an uncovered one (cleared),
+        // both far from row 0 so at least one band boundary was crossed.
+        assert_eq!(par.get_pixel(200, 600), Some(0xFF_00_00_00));
+        assert_eq!(par.get_pixel(900, 600), Some(0xFF_AB_CD_EF));
     }
 
     // ---- opaque_cover_rects (which windows cull the desktop clear) ---------

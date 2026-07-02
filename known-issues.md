@@ -2895,7 +2895,29 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~11.9ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.1x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~10.6ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.6x 2026-07-02
+
+**UPDATE 2026-07-02 (4) — parallel background clear landed, 11.9ms → 10.6ms/frame
+min (cumulative 48.6ms → 10.6ms = 4.6x).** Both `Framebuffer::clear` and
+`Framebuffer::clear_except` now split the framebuffer into horizontal row-bands
+and fill them concurrently via `std::thread::scope` over disjoint
+`chunks_mut` slices — no `unsafe`, no shared mutable aliasing (each worker owns a
+distinct slice). Worker count comes from the new `fill_worker_count`, which caps
+at 8 and gracefully falls back to a single thread when the buffer is below 1M
+pixels or when `std::thread::available_parallelism()` can't be reported, so it
+never pessimizes small buffers or single-core targets. The per-scanline
+span-merging logic (formerly inline in `clear_except`) was extracted into the
+static `fill_uncovered_band(buf, y0, band_rows, width, color, covered, fb_height)`
+helper, shared by the single-threaded and parallel paths, using absolute-y
+overlap tests against the covered rects and band-local writes. New unit test
+`test_clear_except_parallel_band_boundaries` (2048×1024 = 2M px, covered rects
+straddling band boundaries; asserts the parallel result is byte-identical to the
+single-threaded reference, plus covered-kept / uncovered-cleared spot checks). 64
+compositor tests total, clippy clean. baselines.toml `measured_ns` updated to
+10572000. NOTE: this only parallelizes the *background clear*; the per-window
+opaque content draws are still single-threaded, so the remaining gap needs a
+persistent thread-pool (to amortize the per-frame `thread::scope` spawn cost) + a
+RenderEngine band-view refactor to parallelize the window-render tiles too.
 
 **UPDATE 2026-07-02 (3) — desktop-clear occlusion cull landed, 15.8ms → 11.9ms/frame
 min (cumulative 48.6ms → 11.9ms = 4.1x).** The full-desktop background clear no
@@ -2997,12 +3019,14 @@ this is the CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is
 separate.
 
 **Status:** per-pixel-cost bug FIXED + redundant-bg-fill occlusion cull DONE +
-desktop-clear occlusion cull DONE (cumulative 4.1x, 48.6ms → 11.9ms, 2026-07-02);
-the remaining gap to 2ms on a *full* recomposite is memory-bandwidth-bound
-(~124 MB/frame worst case at ~10 GB/s scalar stores) and needs a
-SIMD-streaming-store + multithreaded-tile initiative (its own focused session).
-All the cheap algorithmic overdraw wins have now been taken; the remaining work
-is a bandwidth/parallelism problem, not a naive-code problem. Unblocked (no Linux
+desktop-clear occlusion cull DONE + parallel background clear DONE (cumulative
+4.6x, 48.6ms → 10.6ms, 2026-07-02); the remaining gap to 2ms on a *full*
+recomposite is memory-bandwidth-bound (~124 MB/frame worst case at ~12 GB/s
+scalar stores) and needs a SIMD-streaming-store + multithreaded-window-tile
+initiative (its own focused session: persistent thread-pool to avoid per-frame
+`thread::scope` spawn cost + a RenderEngine band-view refactor). All the cheap
+algorithmic overdraw wins have now been taken; the remaining work is a
+bandwidth/parallelism problem, not a naive-code problem. Unblocked (no Linux
 binaries / operator input needed).
 
 ### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)

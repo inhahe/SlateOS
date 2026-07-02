@@ -2928,6 +2928,43 @@ pub const SYS_TCP_LAST_ERROR: u64 = 853;
 /// `arg0`: connection handle.
 pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 
+/// `SYS_NET_IF_CONFIG` — configure the primary network interface (write side
+/// of [`SYS_NET_IF_INFO`]).
+///
+/// This is the native syscall behind `ifconfig`/`ip addr`/`ip link`/`route`
+/// address configuration: it applies IPv4 address/mask/gateway/DNS and/or the
+/// interface up/down state to the physical NIC (root network namespace). It is
+/// **root-gated** (`CAP_NET_ADMIN`-class authority) because interface
+/// reconfiguration is a system-wide side effect.
+///
+/// `arg0`: pointer to an 18-byte config record.
+/// `arg1`: record length in bytes (must be >= 18).
+///
+/// Record layout (little-endian octet order, matching [`SYS_NET_IF_INFO`] for
+/// the address fields):
+/// ```text
+/// [0..4]   IPv4 address
+/// [4..8]   subnet mask
+/// [8..12]  default gateway
+/// [12..16] DNS server
+/// [16]     up flag (0 = down, non-zero = up) — applied only if bit 4 of the mask is set
+/// [17]     field mask: which fields to apply
+///            bit0 = set IPv4 address
+///            bit1 = set subnet mask
+///            bit2 = set gateway
+///            bit3 = set DNS server
+///            bit4 = set up/down flag
+/// ```
+///
+/// Unmasked fields are left unchanged (read-modify-write against the current
+/// config), so `ip link set up` (mask = bit4 only) and `ip addr add`
+/// (mask = bits 0|1) each touch only what they mean to. A mask of 0 is a
+/// no-op success.
+///
+/// Returns 0 on success, or a negative `KernelError` (`PermissionDenied` if
+/// the caller is not root, `InvalidArgument` on a bad pointer/length/mask).
+pub const SYS_NET_IF_CONFIG: u64 = 856;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

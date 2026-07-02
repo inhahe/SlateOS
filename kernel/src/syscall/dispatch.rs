@@ -118,6 +118,7 @@ use super::number::{
     SYS_NET_STAT,
     SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
     SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_NET_IF_INFO,
+    SYS_NET_IF_CONFIG,
     SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
     SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
     SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
@@ -526,6 +527,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TCP_LIST as usize] = Some(handlers::sys_tcp_list);
     handlers[SYS_TCP_LISTENER_LIST as usize] = Some(handlers::sys_tcp_listener_list);
     handlers[SYS_NET_IF_INFO as usize] = Some(handlers::sys_net_if_info);
+    handlers[SYS_NET_IF_CONFIG as usize] = Some(handlers::sys_net_if_config);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);

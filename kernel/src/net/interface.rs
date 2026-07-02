@@ -323,6 +323,33 @@ pub fn configure(ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr, dns: Ipv4Addr)
     let _ = super::arp::send_gratuitous();
 }
 
+/// Bring the interface administratively up or down.
+///
+/// This is the write side of [`is_up`], used by `ifconfig <if> up/down` and
+/// `ip link set <if> up/down` via `SYS_NET_IF_CONFIG`. It flips the `up` flag
+/// on the physical NIC (root namespace) and, if the netns subsystem is
+/// initialized, syncs the flag into the root network namespace so
+/// namespace-aware queries stay consistent.
+///
+/// Note: this reflects the *administrative* state only — it does not power the
+/// NIC hardware down. Bringing the interface down stops the stack from treating
+/// it as usable for new traffic; addresses are retained so a subsequent `up`
+/// restores connectivity without reconfiguration (matching Linux semantics).
+pub fn set_up(up: bool) {
+    IFACE.lock().up = up;
+    crate::serial_println!("[net] Interface administratively {}", if up { "up" } else { "down" });
+
+    // Keep the root namespace's view consistent. No-op if netns is not yet
+    // initialized (boot ordering: net::init runs before netns::init).
+    if crate::netns::is_initialized() {
+        // Ignore the "namespace missing" error: the root namespace always
+        // exists once netns is initialized, and if it somehow does not, the
+        // global IFACE flag above is still authoritative for the root ns
+        // (ns_is_up falls back to is_up() for ROOT_NS).
+        let _ = crate::netns::set_interface_up(crate::netns::ROOT_NS, up);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Namespace-aware accessors
 // ---------------------------------------------------------------------------
@@ -510,8 +537,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     test_ipv4_addr_classification()?;
     test_ipv4_same_subnet()?;
     test_interface_info_default()?;
+    test_write_primitives()?;
 
-    crate::serial_println!("[interface] Self-test PASSED (5 tests)");
+    crate::serial_println!("[interface] Self-test PASSED (6 tests)");
+    Ok(())
+}
+
+/// Test the interface write primitives (`configure` + `set_up`) that back the
+/// `SYS_NET_IF_CONFIG` syscall. Snapshots the live config, mutates it, asserts
+/// the changes are visible via `info()`/`is_up()`, then restores the original
+/// state so the self-test does not disrupt real networking configured earlier
+/// in boot (DHCP, static config).
+fn test_write_primitives() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let orig = info();
+    let orig_up = is_up();
+
+    // Apply a distinctive test configuration.
+    let ip = Ipv4Addr::new(10, 77, 88, 99);
+    let mask = Ipv4Addr::new(255, 255, 255, 0);
+    let gw = Ipv4Addr::new(10, 77, 88, 1);
+    let dns = Ipv4Addr::new(9, 9, 9, 9);
+    configure(ip, mask, gw, dns);
+
+    let after = info();
+    if after.ip != ip || after.subnet_mask != mask || after.gateway != gw || after.dns != dns {
+        crate::serial_println!("[interface]   FAIL: configure() did not apply all fields");
+        // Best-effort restore before returning the error.
+        configure(orig.ip, orig.subnet_mask, orig.gateway, orig.dns);
+        set_up(orig_up);
+        return Err(KernelError::InternalError);
+    }
+
+    // Toggle the administrative up/down flag.
+    set_up(false);
+    if is_up() {
+        crate::serial_println!("[interface]   FAIL: set_up(false) did not bring interface down");
+        configure(orig.ip, orig.subnet_mask, orig.gateway, orig.dns);
+        set_up(orig_up);
+        return Err(KernelError::InternalError);
+    }
+    set_up(true);
+    if !is_up() {
+        crate::serial_println!("[interface]   FAIL: set_up(true) did not bring interface up");
+        configure(orig.ip, orig.subnet_mask, orig.gateway, orig.dns);
+        set_up(orig_up);
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore the original live configuration.
+    configure(orig.ip, orig.subnet_mask, orig.gateway, orig.dns);
+    set_up(orig_up);
+
+    crate::serial_println!("[interface]   write primitives (configure/set_up): OK");
     Ok(())
 }
 

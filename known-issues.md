@@ -4213,13 +4213,25 @@ client-side number correction:
 
 - **net-config** (`dhcpcd`, `fw`, `ifconfig`, `ip`, `nft`, `route`): all issue
   `SYS_NET_IOCTL=810` (which aliases `UDP_BIND`) for interface/route/DNS/firewall
-  *writes*. No net-config write syscall exists; only `NET_IF_INFO=842` /
-  `ARP_TABLE=843` are present and read-only. Precise harm (traced 2026-06-01):
-  with a Socket-WRITE cap the call silently binds+leaks a UDP socket on a low
-  port and misleads the user that the config change applied; without the cap it
-  fails. The intended operation never happens either way. **Write-path harm
-  neutered 2026-06-14** for all six net-config tools (`ifconfig`/`ip`/`route`
-  then `dhcpcd`/`fw`/`nft`) — see the dedicated bullets below.
+  *writes*. **Interface-address writes: kernel syscall LANDED 2026-07-02** —
+  `SYS_NET_IF_CONFIG=856` (`kernel/src/syscall/number.rs`, dispatched in
+  `dispatch.rs`, handled by `sys_net_if_config` in `handlers.rs`) is the native
+  write side of `NET_IF_INFO=842`: root-gated (`require_netadmin_authority`), it
+  applies IPv4 address/mask/gateway/DNS and/or the up/down flag to the physical
+  NIC via `net::interface::configure`/`set_up` (new `set_up` helper), using an
+  18-byte record with a per-field mask (bit0..4 = ip/mask/gateway/dns/up) so a
+  tool changes only the fields it means to (read-modify-write). Boot self-test
+  `net::interface::test_write_primitives` (snapshot→configure→toggle up/down→
+  restore) verified in serial. **Still TODO:** (a) rewire the six userspace
+  tools' *address/link* paths (`ifconfig`/`ip addr`/`ip link`/`route`) to call
+  `SYS_NET_IF_CONFIG` instead of the neutered `SYS_NET_IOCTL` stub; (b) *route
+  table* writes (add/del route) and *firewall* (`nft`/`fw`) writes still have no
+  native syscall — separate follow-ups. Original harm analysis (traced
+  2026-06-01): with a Socket-WRITE cap the old call silently binds+leaks a UDP
+  socket on a low port and misleads the user that the config change applied;
+  without the cap it fails. **Write-path harm neutered 2026-06-14** for all six
+  net-config tools (`ifconfig`/`ip`/`route` then `dhcpcd`/`fw`/`nft`) — see the
+  dedicated bullets below.
 - **mount/umount**: **RESOLVED 2026-06-20.** Real native syscalls now exist —
   `SYS_FS_MOUNT=652` and `SYS_FS_UMOUNT=653` (`kernel/src/syscall/number.rs`),
   dispatched in `dispatch.rs`, handled in `handlers.rs`

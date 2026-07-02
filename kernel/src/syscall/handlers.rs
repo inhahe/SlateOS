@@ -260,6 +260,26 @@ fn require_trim_authority() -> Result<(), KernelError> {
     require_root_authority()
 }
 
+/// Check that the calling process is privileged enough to reconfigure a
+/// network interface (`SYS_NET_IF_CONFIG`).
+///
+/// Changing an interface's address, routes, DNS, or up/down state is a
+/// system-wide side effect: it redirects every process's traffic, can hijack
+/// connectivity, and can expose the host on an attacker-chosen address. In
+/// POSIX terms this is `CAP_NET_ADMIN`, which on our system maps to running as
+/// root (uid 0). Kept distinct from the storage authorities so a future
+/// network daemon (dhcpcd, a config service) could be granted net-admin rights
+/// without also gaining mount/format authority.
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_netadmin_authority() -> Result<(), KernelError> {
+    require_root_authority()
+}
+
 // ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
@@ -9812,6 +9832,118 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: out_ptr is a userspace pointer, buf_len >= INFO_SIZE.
     unsafe {
         core::ptr::copy_nonoverlapping(record.as_ptr(), dst, INFO_SIZE);
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// Field-mask bits for [`sys_net_if_config`] (record byte 17).
+mod net_if_config_mask {
+    /// Apply the IPv4 address field (bytes 0..4).
+    pub const IP: u8 = 1 << 0;
+    /// Apply the subnet-mask field (bytes 4..8).
+    pub const MASK: u8 = 1 << 1;
+    /// Apply the gateway field (bytes 8..12).
+    pub const GATEWAY: u8 = 1 << 2;
+    /// Apply the DNS-server field (bytes 12..16).
+    pub const DNS: u8 = 1 << 3;
+    /// Apply the up/down flag (byte 16).
+    pub const UP: u8 = 1 << 4;
+    /// All recognised bits — any bit outside this set is rejected.
+    pub const ALL: u8 = IP | MASK | GATEWAY | DNS | UP;
+}
+
+/// `SYS_NET_IF_CONFIG` — configure the primary network interface.
+///
+/// Write side of [`sys_net_if_info`]: applies IPv4 address/mask/gateway/DNS
+/// and/or the up/down flag to the physical NIC (root network namespace). This
+/// is the native syscall behind `ifconfig`/`ip addr`/`ip link`/`route`.
+///
+/// Root-gated (`CAP_NET_ADMIN`-class). Reads an 18-byte record from `arg0`
+/// (length in `arg1`); a per-field mask (byte 17) selects which fields to
+/// apply, so callers can change only what they mean to (read-modify-write
+/// against the current config). See the [`SYS_NET_IF_CONFIG`] doc for the
+/// exact layout.
+///
+/// [`SYS_NET_IF_CONFIG`]: crate::syscall::number::SYS_NET_IF_CONFIG
+pub fn sys_net_if_config(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+
+    let in_ptr = args.arg0;
+    let buf_len = args.arg1 as usize;
+
+    const REC_SIZE: usize = 18;
+    if in_ptr == 0 || buf_len < REC_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Copy the fixed-size record out of user memory (validated first).
+    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
+        return SyscallResult::err(e);
+    }
+    let mut record = [0u8; REC_SIZE];
+    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
+    unsafe {
+        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
+    }
+
+    // Destructure the fixed-size record by value: no indexing/arithmetic on the
+    // hot path, and every field is named per the ABI layout.
+    let [ip0, ip1, ip2, ip3, m0, m1, m2, m3, g0, g1, g2, g3, d0, d1, d2, d3, up_byte, field_mask] =
+        record;
+
+    // Reject unknown mask bits so a future ABI extension can't be silently
+    // ignored by an old kernel.
+    if field_mask & !net_if_config_mask::ALL != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if field_mask == 0 {
+        // Nothing to do — a no-op success (matches "ip addr" with no change).
+        return SyscallResult::ok(0);
+    }
+
+    use crate::net::interface::Ipv4Addr;
+
+    // Read-modify-write: start from the current config and override only the
+    // masked address fields, then apply in one `configure` call (which also
+    // syncs netns and sends a gratuitous ARP).
+    let addr_bits =
+        net_if_config_mask::IP | net_if_config_mask::MASK | net_if_config_mask::GATEWAY | net_if_config_mask::DNS;
+    if field_mask & addr_bits != 0 {
+        let cur = crate::net::interface::info();
+        let ip = if field_mask & net_if_config_mask::IP != 0 {
+            Ipv4Addr([ip0, ip1, ip2, ip3])
+        } else {
+            cur.ip
+        };
+        let mask = if field_mask & net_if_config_mask::MASK != 0 {
+            Ipv4Addr([m0, m1, m2, m3])
+        } else {
+            cur.subnet_mask
+        };
+        let gateway = if field_mask & net_if_config_mask::GATEWAY != 0 {
+            Ipv4Addr([g0, g1, g2, g3])
+        } else {
+            cur.gateway
+        };
+        let dns = if field_mask & net_if_config_mask::DNS != 0 {
+            Ipv4Addr([d0, d1, d2, d3])
+        } else {
+            cur.dns
+        };
+
+        // Reject an interface address that can never be a host address.
+        if field_mask & net_if_config_mask::IP != 0 && (ip.is_broadcast() || ip.is_multicast()) {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+
+        crate::net::interface::configure(ip, mask, gateway, dns);
+    }
+
+    if field_mask & net_if_config_mask::UP != 0 {
+        crate::net::interface::set_up(up_byte != 0);
     }
 
     SyscallResult::ok(0)

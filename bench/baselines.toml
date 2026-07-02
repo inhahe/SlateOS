@@ -148,18 +148,26 @@ source        = "Lighter than channels — single atomic counter"
 [compositor_frame_4k]
 description   = "Full-desktop recomposite at 4K (3840x2160), 16 decorated windows w/ client content"
 target_ns     = 2000000        # 2 ms — must beat a 144Hz (6.9ms) and 60Hz (16.7ms) vsync budget
-measured_ns   = 48570000       # ~48.6 ms min, dev host, RELEASE build, 2026-07-01
+measured_ns   = 21358000       # ~21.4 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms)
 source        = "cargo test -p compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture bench_compose_frame_4k"
 notes         = """
-MEASURED FAR OVER TARGET: ~48.6ms/frame (min) vs the 2ms budget — roughly \
-25x too slow, i.e. ~20 fps, missing even a 60Hz vsync. This is the naive \
-software-composite path (Framebuffer per-pixel fills + per-window \
-decoration/shadow draw + full clear each frame). Tracked as a real \
-performance bug in known-issues.md (BENCH-COMPOSITOR-SLOW) with the \
-optimization directions (row/SIMD fills, dirty-rect-only redraw, avoid \
-per-pixel float alpha, cache decorations). This is a dev-host software \
-number; a real GPU/DRM-KMS path would differ, but the CPU composite \
-fallback must still be far faster. Re-measure after optimizing; the \
+STILL OVER TARGET but improved 2.3x: ~21.4ms/frame (min) vs the 2ms budget \
+(was ~48.6ms on 2026-07-01). The row-wise fill_rect rewrite (opaque fills \
+now use a single slice memset per row via Framebuffer::fill_row_solid; \
+translucent fills hoist the alpha math out of the inner loop via blend_row) \
+removed the per-pixel float-alpha cost that dominated the old number. \
+What remains is memory-bandwidth-bound: this benchmark issues ~44M opaque \
+u32 stores/frame (8.3M-pixel clear + 16 windows each painting a full-window \
+client bg PLUS a full-window FillRect on top = heavy overdraw), i.e. ~176 MB \
+written/frame; ~21ms => ~8 GB/s effective, which is near the ceiling for \
+scalar cache-polluting stores. Reaching 2ms for a *full* 16-window \
+recomposite would require SIMD non-temporal (streaming) stores + \
+multithreaded tiles, and/or occlusion culling to skip the fully-covered \
+white client-bg fill. Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \
+NOTE: in steady state the compositor does NOT full-recomposite every frame — \
+it uses damage-rect partial updates (only changed regions), which is the \
+real 144Hz-vsync mechanism; this benchmark deliberately measures the \
+worst-case full-recomposite path. Re-measure after further optimizing; the \
 benchmark (Compositor::bench_full_composite) bypasses the vsync gate to \
 measure raw composite cost deterministically."""
 

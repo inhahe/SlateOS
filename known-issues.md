@@ -2895,7 +2895,35 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### BENCH-COMPOSITOR-SLOW. Compositor is ~25x over its 4K frame budget (~48.6ms/frame vs 2ms) — PERF BUG 2026-07-01
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~21.4ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 2.3x 2026-07-02
+
+**UPDATE 2026-07-02 — fill_rect row-wise rewrite landed, 48.6ms → 21.4ms/frame
+min (2.3x).** `RenderEngine::fill_rect` no longer calls `blend_pixel`
+per pixel. Two new `Framebuffer` fast paths were added next to `copy_row`:
+`fill_row_solid` (opaque color → single `[u32]::fill`/memset per row, skips the
+per-pixel float-alpha math and bounds check) and `blend_row` (translucent color
+→ hoists the alpha computation and branch out of the inner loop, integer blend
+only). `fill_rect` resolves the effective alpha once (color-alpha × opacity) and
+dispatches to the solid, blend, or skip (alpha 0) path per row. All 54
+compositor tests + clippy + slateos check-build stay green. baselines.toml
+`[compositor_frame_4k]` `measured_ns` updated to 21358000.
+
+**Why it's still over 2ms (and why the remaining gap is *not* another naive-code
+bug):** the benchmark issues ~44M opaque u32 stores/frame — an 8.3M-pixel clear
+plus 16 windows each painting a *full-window* client background AND then a
+full-window `FillRect` on top (heavy, realistic overdraw) — i.e. ~176 MB written
+per frame. At ~21ms that's ~8 GB/s effective, near the ceiling for scalar
+cache-polluting stores on this host. The per-pixel-work bug is fixed; what's left
+is memory bandwidth on a *full* recomposite. Getting a full 16-window 4K
+recomposite under 2ms would need SIMD non-temporal (streaming) stores +
+multithreaded tiles, and/or occlusion culling to skip the fully-covered white
+client-bg fill (that first fill is 100% overdraw when the client paints an opaque
+full-window rect). **Crucially, steady-state rendering does NOT full-recomposite
+every frame** — the compositor uses damage-rect partial updates (only changed
+regions repaint), which is the actual 144Hz-vsync mechanism; this benchmark
+deliberately stresses the worst-case full-recomposite path (wallpaper change,
+resize, many simultaneously-moving windows). Remaining optimization directions
+below are now *lower priority* — the dominant per-pixel bug is resolved.
 
 **Where:** `gui/compositor/src/main.rs` — the software composite path
 `Compositor::full_recomposite_into_back` → `render_all_windows` (~2807) →
@@ -2912,31 +2940,36 @@ i.e. ~20fps, missing even a 60Hz (16.7ms) vsync budget, nowhere near 144Hz
 benchmark-everything mandate exists to catch. Recorded in
 `bench/baselines.toml` `[compositor_frame_4k]` (`measured_ns = 48570000`).
 
-**Likely culprits (profile before optimizing):** (1) per-pixel scalar fills in
-`Framebuffer::clear_rect`/`set_pixel` with bounds-checks per pixel — a 4K clear
-alone is 8.3M u32 writes; (2) per-pixel float alpha in `blend_pixel` for shadows
-/ translucent windows; (3) full-screen clear + full redraw of every window every
-frame even when `bench_full_composite` forces it — the real `compose_frame` has
-a partial-damage path, but the fully-damaged case (wallpaper change, resize,
-many moving windows) hits this; (4) `render_window` clones `render_tree.commands`
-and the z-stack each frame (`render_all_windows`/`render_window`, allocations on
-the hot path).
+**Likely culprits (profile before optimizing):** (1) ~~per-pixel scalar fills in
+`fill_rect` with bounds-checks per pixel~~ — **FIXED 2026-07-02** (row-wise
+`fill_row_solid`/`blend_row`); (2) ~~per-pixel float alpha in `blend_pixel` for
+solid fills~~ — **FIXED for fills** (alpha resolved once per fill; `blend_pixel`
+still used by the per-pixel `blit_buffer` slow path and font glyphs); (3)
+full-screen clear + full redraw of every window every frame even when
+`bench_full_composite` forces it — the real `compose_frame` has a partial-damage
+path, but the fully-damaged case (wallpaper change, resize, many moving windows)
+hits this — STILL the structural cost (bandwidth-bound overdraw); (4)
+`render_window` clones `render_tree.commands` and the z-stack each frame
+(`render_all_windows`/`render_window`, allocations on the hot path) — small for
+the benchmark's 4-command windows, but worth eliminating for large trees.
 
-**Proper fix (optimization initiative — do with a profiler):** row-wise fills
-(`copy_from_slice`/`fill` on row slices, already partly done via `copy_row`) and
-SIMD/word-at-a-time for solid rects; precompute/caches for window decorations and
-shadows (they rarely change frame-to-frame); integer/premultiplied-alpha blend
-instead of per-pixel float; avoid per-frame `Vec` clones (borrow or reuse
-scratch buffers); ensure the damage-tracking fast path is actually taken for the
-common "one window changed" case. Target: < 2ms/4K. Re-run
-`bench_compose_frame_4k` after each change to track progress. NB: this is the
-CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is separate, but
-the software path must still be far faster than 48ms.
+**Remaining optimization directions (lower priority — per-pixel bug resolved):**
+SIMD non-temporal/streaming stores for solid rects (avoid cache pollution on
+huge fills) + multithreaded tile compositing to break the single-core bandwidth
+ceiling; occlusion culling so a window's default opaque client-bg fill is skipped
+when a subsequent opaque full-window `FillRect` (or an opaque shared buffer)
+fully covers it — that first fill is 100% overdraw; precompute/caches for window
+decorations and shadows (they rarely change frame-to-frame); avoid per-frame
+`Vec` clones in `render_window` (borrow or reuse scratch buffers); ensure the
+damage-tracking fast path is actually taken for the common "one window changed"
+case. Target: < 2ms/4K (for a full recomposite; likely needs SIMD+threads). NB:
+this is the CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is
+separate.
 
-**Not fixed in the discovering session:** found by the benchmark at the tail of
-a long autonomous session; optimizing the render path is a focused,
-profiler-driven initiative that deserves its own fresh-context session. Unblocked
-(no Linux binaries / operator input needed).
+**Status:** primary per-pixel-cost bug FIXED (2.3x, 2026-07-02); the remaining
+gap to 2ms on a *full* recomposite is memory-bandwidth-bound and needs a
+SIMD/multithread/occlusion initiative (its own focused session). Unblocked (no
+Linux binaries / operator input needed).
 
 ### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)
 

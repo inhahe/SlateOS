@@ -663,6 +663,73 @@ impl Framebuffer {
         }
     }
 
+    /// Fill a horizontal span of back-buffer row `y`, columns `[x_start, x_end)`,
+    /// with a fully-opaque `color` using a single slice `fill()`.
+    ///
+    /// This is the fast path for solid (alpha 255) rectangle fills: it skips the
+    /// per-pixel alpha math and bounds check that `blend_pixel` performs. The
+    /// caller must have already clipped `x_start`/`x_end`/`y` to the framebuffer.
+    ///
+    /// OPT: replaces a per-pixel `blend_pixel` loop with one `[u32]::fill`, which
+    /// the compiler lowers to a `memset`-style store. This is the dominant win in
+    /// the 4K compositor benchmark (BENCH-COMPOSITOR-SLOW): opaque `FillRect`s
+    /// (window backgrounds, decorations) no longer pay per-pixel float alpha cost.
+    #[inline]
+    fn fill_row_solid(&mut self, y: u32, x_start: u32, x_end: u32, color: u32) {
+        if y >= self.height || x_end <= x_start {
+            return;
+        }
+        let x_hi = x_end.min(self.width);
+        if x_hi <= x_start {
+            return;
+        }
+        let row_base = y as usize * self.width as usize;
+        let lo = row_base + x_start as usize;
+        let hi = row_base + x_hi as usize;
+        if let Some(span) = self.back.get_mut(lo..hi) {
+            span.fill(color | 0xFF_00_00_00);
+        }
+    }
+
+    /// Blend a horizontal span of back-buffer row `y`, columns `[x_start, x_end)`,
+    /// with `src_color` at pre-computed integer alpha `src_a` (0..=255).
+    ///
+    /// OPT: hoists the alpha computation and per-pixel branch/float conversion out
+    /// of the inner loop (versus calling `blend_pixel` per pixel). Only the integer
+    /// channel blend runs per pixel. Caller guarantees `0 < src_a < 255`.
+    #[inline]
+    fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u32) {
+        if y >= self.height || x_end <= x_start {
+            return;
+        }
+        let x_hi = x_end.min(self.width);
+        if x_hi <= x_start {
+            return;
+        }
+        let inv_a = 255 - src_a;
+        let src_r = (src_color >> 16) & 0xFF;
+        let src_g = (src_color >> 8) & 0xFF;
+        let src_b = src_color & 0xFF;
+        let sr = src_r * src_a;
+        let sg = src_g * src_a;
+        let sb = src_b * src_a;
+        let row_base = y as usize * self.width as usize;
+        let lo = row_base + x_start as usize;
+        let hi = row_base + x_hi as usize;
+        if let Some(span) = self.back.get_mut(lo..hi) {
+            for pixel in span {
+                let dst = *pixel;
+                let dst_r = (dst >> 16) & 0xFF;
+                let dst_g = (dst >> 8) & 0xFF;
+                let dst_b = dst & 0xFF;
+                let out_r = (sr + dst_r * inv_a) / 255;
+                let out_g = (sg + dst_g * inv_a) / 255;
+                let out_b = (sb + dst_b * inv_a) / 255;
+                *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+    }
+
     /// Get a reference to the front buffer for display.
     pub fn front_buffer(&self) -> &[u32] {
         &self.front
@@ -1624,10 +1691,26 @@ impl RenderEngine {
         let y_start = clipped.y.max(0) as u32;
         let x_end = (clipped.x + clipped.width as i32).max(0) as u32;
         let y_end = (clipped.y + clipped.height as i32).max(0) as u32;
+        if x_end <= x_start || y_end <= y_start {
+            return;
+        }
 
-        for row in y_start..y_end {
-            for col in x_start..x_end {
-                fb.blend_pixel(col, row, color, opacity);
+        // Resolve the effective alpha once (color alpha scaled by window opacity)
+        // and pick a per-row fast path instead of blending pixel-by-pixel.
+        // OPT (BENCH-COMPOSITOR-SLOW): opaque fills become a single slice memset
+        // per row; translucent fills hoist the alpha math out of the inner loop.
+        let src_a_raw = ((color >> 24) & 0xFF) as f32;
+        let src_a = ((src_a_raw * opacity) as u32).min(255);
+        if src_a == 0 {
+            return;
+        }
+        if src_a == 255 {
+            for row in y_start..y_end {
+                fb.fill_row_solid(row, x_start, x_end, color);
+            }
+        } else {
+            for row in y_start..y_end {
+                fb.blend_row(row, x_start, x_end, color, src_a);
             }
         }
     }
@@ -4023,10 +4106,12 @@ mod tests {
     ///
     /// The `< 2ms/4K` target is judged on a release build (ideally on real
     /// hardware); the recorded dev-host baseline lives in
-    /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-01
-    /// the compositor is FAR over target (~50ms/frame release on the dev host,
-    /// ~25x the 2ms budget — see known-issues BENCH-COMPOSITOR-SLOW); this
-    /// test therefore does NOT assert the 2ms target (it would always fail).
+    /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-02
+    /// the compositor is still over target (~21ms/frame release on the dev host
+    /// after the row-wise `fill_rect` rewrite, down from ~48.6ms — see
+    /// known-issues BENCH-COMPOSITOR-SLOW; the remaining gap is memory-bandwidth
+    /// bound on a full recomposite). This test therefore does NOT assert the
+    /// 2ms target (it would always fail on a full-recomposite stress).
     /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
     /// catastrophic regression (mean > 150 ms/frame, ~3x the current baseline)
     /// so an accidental super-linear blow-up is still caught without flaking.
@@ -4117,11 +4202,12 @@ mod tests {
         );
 
         // Catastrophic-regression guard only (see doc): the current baseline
-        // is ~50ms (already ~25x over the 2ms target, tracked separately); a
-        // mean past 150ms means a super-linear blow-up crept into the path.
+        // is ~21ms (still over the 2ms target, tracked separately); a mean past
+        // 80ms (~3.7x the baseline, and worse than the pre-optimization ~50ms)
+        // means a super-linear blow-up crept into the path.
         assert!(
-            mean_ms < 150.0,
-            "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>150ms)"
+            mean_ms < 80.0,
+            "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>80ms)"
         );
     }
 

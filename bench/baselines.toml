@@ -148,25 +148,28 @@ source        = "Lighter than channels — single atomic counter"
 [compositor_frame_4k]
 description   = "Full-desktop recomposite at 4K (3840x2160), 16 decorated windows w/ client content"
 target_ns     = 2000000        # 2 ms — must beat a 144Hz (6.9ms) and 60Hz (16.7ms) vsync budget
-measured_ns   = 15831000       # ~15.8 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms -> 21.4ms -> 15.8ms)
+measured_ns   = 11929000       # ~11.9 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms -> 21.4ms -> 15.8ms -> 11.9ms)
 source        = "cargo test -p compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture bench_compose_frame_4k"
 notes         = """
-STILL OVER TARGET but improved 3.1x: ~15.8ms/frame (min) vs the 2ms budget \
-(48.6ms on 2026-07-01 -> 21.4ms -> 15.8ms on 2026-07-02). Two optimizations: \
+STILL OVER TARGET but improved 4.1x: ~11.9ms/frame (min) vs the 2ms budget \
+(48.6ms on 2026-07-01 -> 21.4ms -> 15.8ms -> 11.9ms on 2026-07-02). Three optimizations: \
 (1) the row-wise fill_rect rewrite (opaque fills now use a single slice \
 memset per row via Framebuffer::fill_row_solid; translucent fills hoist the \
 alpha math out of the inner loop via blend_row) removed the per-pixel \
-float-alpha cost; (2) occlusion cull — the compositor's default white \
-client-bg fill is skipped when the client's first command is an opaque, \
-square-cornered, full-cover FillRect on a fully-opaque window (that fill was \
-100% overdraw). What remains is memory-bandwidth-bound: even after culling \
-the wasted bg fill, this benchmark still issues ~31M opaque u32 stores/frame \
-(8.3M-pixel clear + per-window opaque content), i.e. ~124 MB written/frame; \
-~16ms => ~8 GB/s effective, which is near the ceiling for scalar \
+float-alpha cost; (2) per-window bg-fill occlusion cull — the compositor's \
+default white client-bg fill is skipped when the client's first command is an \
+opaque, square-cornered, full-cover FillRect on a fully-opaque window (that \
+fill was 100% overdraw); (3) desktop-clear occlusion cull — the desktop \
+background clear now skips the screen-space rectangles fully covered by opaque \
+windows (Framebuffer::clear_except + Compositor::opaque_cover_rects), so the \
+per-frame background memset only touches the visible desktop, not the ~8.3M \
+pixels hidden under windows. What remains is memory-bandwidth-bound: even \
+after both culls, this benchmark still issues millions of opaque u32 \
+stores/frame for the per-window opaque content (~124 MB written/frame worst \
+case); ~12ms => ~10 GB/s effective, near the ceiling for scalar \
 cache-polluting stores. Reaching 2ms for a *full* 16-window \
 recomposite would require SIMD non-temporal (streaming) stores + \
-multithreaded tiles, and/or occlusion culling to skip the fully-covered \
-white client-bg fill. Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \
+multithreaded tiles. Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \
 NOTE: in steady state the compositor does NOT full-recomposite every frame — \
 it uses damage-rect partial updates (only changed regions), which is the \
 real 144Hz-vsync mechanism; this benchmark deliberately measures the \

@@ -2895,7 +2895,26 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~15.8ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 3.1x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~11.9ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.1x 2026-07-02
+
+**UPDATE 2026-07-02 (3) — desktop-clear occlusion cull landed, 15.8ms → 11.9ms/frame
+min (cumulative 48.6ms → 11.9ms = 4.1x).** The full-desktop background clear no
+longer memsets the pixels hidden behind opaque windows. `full_recomposite_into_back`
+now computes `Compositor::opaque_cover_rects()` — the screen-space rectangles
+provably overwritten with opaque content this frame (buffer-less windows whose
+first command opaquely covers the client area at full opacity, and windows
+carrying an opaque `is_opaque()` shared buffer at full opacity, over the covered
+sub-rect) — and calls the new `Framebuffer::clear_except(color, &covered)`, which
+fills only the complementary (uncovered) spans per scanline. Decorations
+(title bar, border, translucent shadow) are deliberately excluded from the cover
+rects since they lie outside the client rect, so the background under them is
+still cleared (conservative → only ever costs a little correct overdraw, never
+correctness). New unit tests: `test_clear_except_*` (4: empty/single/overlapping-
+merge/offscreen-clip), `test_opaque_cover_rects_*` (3: opaque-command window
+reported, translucent/minimized/rounded excluded, buffer sub-rect + Argb
+excluded), and `test_full_recomposite_cull_matches_uncovered_background` (visual
+equivalence). 63 compositor tests total, clippy clean. baselines.toml
+`measured_ns` updated to 11929000.
 
 **UPDATE 2026-07-02 (2) — occlusion cull landed, 21.4ms → 15.8ms/frame min
 (cumulative 48.6ms → 15.8ms = 3.1x).** `render_window` now skips the
@@ -2968,8 +2987,8 @@ SIMD non-temporal/streaming stores for solid rects (avoid cache pollution on
 huge fills) + multithreaded tile compositing to break the single-core bandwidth
 ceiling; ~~occlusion culling so a window's default opaque client-bg fill is
 skipped when the first command fully covers it~~ — **DONE 2026-07-02** (first-command
-cull; could be extended to cull the desktop clear under fully-opaque covering
-windows, and to opaque shared buffers); precompute/caches for window
+cull, plus desktop-clear cull under fully-opaque covering windows and opaque
+shared buffers — DONE 2026-07-02 (2) & (3)); precompute/caches for window
 decorations and shadows (they rarely change frame-to-frame); avoid per-frame
 `Vec` clones in `render_window` (borrow or reuse scratch buffers); ensure the
 damage-tracking fast path is actually taken for the common "one window changed"
@@ -2977,12 +2996,14 @@ case. Target: < 2ms/4K (for a full recomposite; likely needs SIMD+threads). NB:
 this is the CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is
 separate.
 
-**Status:** per-pixel-cost bug FIXED + redundant-bg-fill occlusion cull DONE
-(cumulative 3.1x, 48.6ms → 15.8ms, 2026-07-02); the remaining gap to 2ms on a
-*full* recomposite is memory-bandwidth-bound (~124 MB/frame at ~8 GB/s scalar
-stores) and needs a SIMD-streaming-store + multithreaded-tile initiative (its own
-focused session), plus optionally culling the desktop clear under fully-opaque
-covering windows. Unblocked (no Linux binaries / operator input needed).
+**Status:** per-pixel-cost bug FIXED + redundant-bg-fill occlusion cull DONE +
+desktop-clear occlusion cull DONE (cumulative 4.1x, 48.6ms → 11.9ms, 2026-07-02);
+the remaining gap to 2ms on a *full* recomposite is memory-bandwidth-bound
+(~124 MB/frame worst case at ~10 GB/s scalar stores) and needs a
+SIMD-streaming-store + multithreaded-tile initiative (its own focused session).
+All the cheap algorithmic overdraw wins have now been taken; the remaining work
+is a bandwidth/parallelism problem, not a naive-code problem. Unblocked (no Linux
+binaries / operator input needed).
 
 ### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)
 

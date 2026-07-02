@@ -557,6 +557,77 @@ impl Framebuffer {
         }
     }
 
+    /// Clear the back buffer to `color`, but skip pixels covered by any rect in
+    /// `covered`.
+    ///
+    /// The caller guarantees every `covered` rect will be fully overwritten by
+    /// opaque content later in the frame, so clearing those pixels first is pure
+    /// overdraw. Skipping it is bit-identical to a full [`clear`](Self::clear)
+    /// followed by the opaque paints, but writes fewer bytes — the dominant cost
+    /// on a full 4K recomposite is memory bandwidth (BENCH-COMPOSITOR-SLOW).
+    ///
+    /// Correctness: because the covered regions are opaque, their final pixels
+    /// never depend on what the background clear wrote (opaque paint replaces,
+    /// and any translucent window above blends against the opaque pixel, not the
+    /// cleared background). Rects are clipped to the framebuffer; overlapping and
+    /// unsorted rects are handled by per-scanline span merging.
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): culls the desktop-background clear under
+    /// fully-opaque covering windows. Per-scanline interval math is O(rows ×
+    /// covered) which is negligible next to the pixel stores it elides.
+    pub fn clear_except(&mut self, color: u32, covered: &[Rect]) {
+        if covered.is_empty() {
+            self.back.fill(color);
+            return;
+        }
+        let width = self.width;
+        let height = self.height;
+        // Reused across scanlines so this allocates once, not per row.
+        let mut spans: Vec<(u32, u32)> = Vec::with_capacity(covered.len());
+        for y in 0..height {
+            spans.clear();
+            for r in covered {
+                let ry0 = r.y.max(0) as u32;
+                // r.y + r.height, clamped to >= 0 then to the framebuffer height.
+                let ry1 = (r.y.saturating_add(r.height as i32).max(0) as u32).min(height);
+                if y >= ry0 && y < ry1 {
+                    let x0 = r.x.max(0) as u32;
+                    let x1 = (r.x.saturating_add(r.width as i32).max(0) as u32).min(width);
+                    if x1 > x0 {
+                        spans.push((x0, x1));
+                    }
+                }
+            }
+            let row_base = y as usize * width as usize;
+            if spans.is_empty() {
+                if let Some(s) = self.back.get_mut(row_base..row_base + width as usize) {
+                    s.fill(color);
+                }
+                continue;
+            }
+            // Sort covered spans by start, then fill the complementary gaps.
+            spans.sort_unstable_by_key(|&(a, _)| a);
+            let mut cursor = 0u32;
+            for &(a, b) in &spans {
+                if a > cursor {
+                    let lo = row_base + cursor as usize;
+                    let hi = row_base + a as usize;
+                    if let Some(s) = self.back.get_mut(lo..hi) {
+                        s.fill(color);
+                    }
+                }
+                cursor = cursor.max(b);
+            }
+            if cursor < width {
+                let lo = row_base + cursor as usize;
+                let hi = row_base + width as usize;
+                if let Some(s) = self.back.get_mut(lo..hi) {
+                    s.fill(color);
+                }
+            }
+        }
+    }
+
     /// Set a pixel in the back buffer (bounds-checked).
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, color: u32) {
@@ -2893,10 +2964,60 @@ impl Compositor {
     /// measure exactly the same work and can never drift. Does NOT swap
     /// buffers — the caller owns presentation.
     fn full_recomposite_into_back(&mut self) {
-        self.framebuffer.clear(self.theme.desktop_background);
+        // OPT (BENCH-COMPOSITOR-SLOW): don't clear the desktop background under
+        // windows that will fully overwrite it with opaque content — that clear
+        // is pure overdraw. `clear_except` fills only the uncovered region.
+        let covered = self.opaque_cover_rects();
+        self.framebuffer
+            .clear_except(self.theme.desktop_background, &covered);
         self.render_all_windows();
         self.full_recomposite = false;
         self.damage.clear();
+    }
+
+    /// Collect the screen-space rectangles that are guaranteed to be fully
+    /// overwritten with opaque content during this recomposite.
+    ///
+    /// Used by [`full_recomposite_into_back`](Self::full_recomposite_into_back)
+    /// to cull the desktop-background clear under opaque windows. Only windows
+    /// whose *client area* is provably opaque and fully covered are included:
+    ///
+    /// - buffer-less windows whose first render command opaquely covers the
+    ///   whole client area (same predicate the per-window bg-fill cull uses),
+    ///   at full window opacity; and
+    /// - buffer-backed windows carrying an opaque buffer at full opacity, over
+    ///   the sub-rectangle actually covered by the buffer.
+    ///
+    /// Decorations (title bar, border, shadow) are deliberately excluded: they
+    /// lie outside the client rect and the shadow is translucent, so the
+    /// background under them must still be cleared. Being conservative here only
+    /// costs a little extra (correct) overdraw, never correctness.
+    fn opaque_cover_rects(&self) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        for win in &self.windows {
+            if !win.visible || win.minimized || win.opacity < 1.0 {
+                continue;
+            }
+            if let Some(buf) = win.buffer.as_ref() {
+                // Opaque shared buffer: covers min(buffer, client) from the
+                // client origin.
+                if buf.is_opaque() {
+                    let cols = buf.width().min(win.width);
+                    let rows = buf.height().min(win.height);
+                    if cols > 0 && rows > 0 {
+                        rects.push(Rect::new(win.x, win.y, cols, rows));
+                    }
+                }
+            } else if Self::first_command_covers_client(
+                &win.render_tree.commands,
+                win.width,
+                win.height,
+                win.opacity,
+            ) {
+                rects.push(Rect::new(win.x, win.y, win.width, win.height));
+            }
+        }
+        rects
     }
 
     /// Benchmark/test hook: perform one full recomposite and buffer swap
@@ -4707,5 +4828,239 @@ mod tests {
 
         stack.pop();
         assert_eq!(stack.offset(), (0.0, 0.0));
+    }
+
+    // ---- clear_except (occlusion-culled desktop clear) ---------------------
+
+    #[test]
+    fn test_clear_except_empty_covered_fills_all() {
+        // No covered rects => behaves exactly like `clear`.
+        let mut fb = Framebuffer::new(6, 4).unwrap();
+        fb.set_pixel(3, 2, 0xFF_12_34_56); // dirty the back buffer first
+        fb.clear_except(0xFF_AA_BB_CC, &[]);
+        for y in 0..4 {
+            for x in 0..6 {
+                assert_eq!(fb.get_pixel(x, y), Some(0xFF_AA_BB_CC));
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear_except_single_rect_preserves_covered() {
+        // A single covered rect: pixels inside keep their prior value, pixels
+        // outside get the clear color.
+        let mut fb = Framebuffer::new(8, 6).unwrap();
+        fb.clear(0xFF_00_00_00); // known prior state everywhere
+        let covered = [Rect::new(2, 1, 3, 2)]; // x:2..5, y:1..3
+        fb.clear_except(0xFF_FF_FF_FF, &covered);
+        for y in 0..6 {
+            for x in 0..8 {
+                let inside = (2..5).contains(&x) && (1..3).contains(&y);
+                let expect = if inside { 0xFF_00_00_00 } else { 0xFF_FF_FF_FF };
+                assert_eq!(
+                    fb.get_pixel(x, y),
+                    Some(expect),
+                    "pixel ({x},{y}) inside={inside}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear_except_overlapping_rects_merge_spans() {
+        // Two overlapping rects on the same rows must merge into one covered
+        // span (no clear color bleeds into the overlap or the seam between
+        // them). Covered union on rows 0..3: x in 1..7.
+        let mut fb = Framebuffer::new(10, 4).unwrap();
+        fb.clear(0xFF_00_00_00);
+        let covered = [Rect::new(1, 0, 4, 3), Rect::new(4, 0, 3, 3)]; // 1..5 and 4..7
+        fb.clear_except(0xFF_FF_FF_FF, &covered);
+        for y in 0..4 {
+            for x in 0..10 {
+                let inside = (1..7).contains(&x) && (0..3).contains(&y);
+                let expect = if inside { 0xFF_00_00_00 } else { 0xFF_FF_FF_FF };
+                assert_eq!(fb.get_pixel(x, y), Some(expect), "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear_except_clips_offscreen_and_oversized_rects() {
+        // Rects extending past the framebuffer edges (and with negative
+        // origins) must be clipped, never panic or write OOB.
+        let mut fb = Framebuffer::new(6, 5).unwrap();
+        fb.clear(0xFF_00_00_00);
+        // Straddles the top-left corner and overshoots bottom-right.
+        let covered = [Rect::new(-3, -2, 100, 100)];
+        fb.clear_except(0xFF_FF_FF_FF, &covered);
+        // The whole framebuffer is covered by the clipped rect => nothing gets
+        // the clear color.
+        for y in 0..5 {
+            for x in 0..6 {
+                assert_eq!(fb.get_pixel(x, y), Some(0xFF_00_00_00), "pixel ({x},{y})");
+            }
+        }
+
+        // A fully-offscreen rect covers nothing => full clear.
+        let mut fb2 = Framebuffer::new(6, 5).unwrap();
+        fb2.clear(0xFF_00_00_00);
+        fb2.clear_except(0xFF_FF_FF_FF, &[Rect::new(50, 50, 4, 4)]);
+        for y in 0..5 {
+            for x in 0..6 {
+                assert_eq!(fb2.get_pixel(x, y), Some(0xFF_FF_FF_FF), "pixel ({x},{y})");
+            }
+        }
+    }
+
+    // ---- opaque_cover_rects (which windows cull the desktop clear) ---------
+
+    #[test]
+    fn test_opaque_cover_rects_reports_opaque_command_window() {
+        // A full-opacity window whose first command opaquely covers the client
+        // area is reported over its whole client rect.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let id = comp.create_window("Solid".to_string(), 200, 150, 1);
+        comp.move_window(id, 120, 90).unwrap();
+        comp.submit_render(
+            id,
+            vec![RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 150.0,
+                color: Color::rgba(30, 34, 40, 255),
+                corner_radii: CornerRadii::ZERO,
+            }],
+        )
+        .unwrap();
+
+        let rects = comp.opaque_cover_rects();
+        assert_eq!(rects, vec![Rect::new(120, 90, 200, 150)]);
+    }
+
+    #[test]
+    fn test_opaque_cover_rects_excludes_translucent_and_hidden() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+
+        // Translucent window: opaque command but window opacity < 1.0 => excluded.
+        let ghost = comp.create_window("Ghost".to_string(), 100, 100, 1);
+        comp.submit_render(
+            ghost,
+            vec![RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+                color: Color::rgba(10, 20, 30, 255),
+                corner_radii: CornerRadii::ZERO,
+            }],
+        )
+        .unwrap();
+        comp.set_opacity(ghost, 0.5).unwrap();
+
+        // Minimized window: opaque + full opacity but not visible => excluded.
+        let hidden = comp.create_window("Hidden".to_string(), 100, 100, 2);
+        comp.submit_render(
+            hidden,
+            vec![RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+                color: Color::rgba(10, 20, 30, 255),
+                corner_radii: CornerRadii::ZERO,
+            }],
+        )
+        .unwrap();
+        comp.minimize_window(hidden).unwrap();
+
+        // Rounded-corner window: corners show background => not a full cover.
+        let rounded = comp.create_window("Rounded".to_string(), 100, 100, 3);
+        comp.submit_render(
+            rounded,
+            vec![RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+                color: Color::rgba(10, 20, 30, 255),
+                corner_radii: CornerRadii::all(8.0),
+            }],
+        )
+        .unwrap();
+
+        assert!(
+            comp.opaque_cover_rects().is_empty(),
+            "no window should cull the desktop clear"
+        );
+    }
+
+    #[test]
+    fn test_opaque_cover_rects_buffer_window_uses_covered_subrect() {
+        // An Xrgb (opaque) buffer smaller than the client area only covers the
+        // sub-rectangle it actually spans, from the client origin.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Buf".to_string(), 20, 20, 1);
+        let (wx, wy) = {
+            let w = comp.window_ref(id).unwrap();
+            (w.x, w.y)
+        };
+        let bytes = solid_buffer_bytes(8, 6, 0x0011_2233);
+        comp.attach_buffer(id, 1, 8, 6, 8 * 4, BufferFormat::Xrgb8888, &bytes)
+            .unwrap();
+
+        let rects = comp.opaque_cover_rects();
+        assert_eq!(rects, vec![Rect::new(wx, wy, 8, 6)]);
+
+        // An Argb buffer (not is_opaque) must NOT be reported.
+        let id2 = comp.create_window("Argb".to_string(), 20, 20, 2);
+        let bytes2 = solid_buffer_bytes(8, 6, 0xFF00_FF00);
+        comp.attach_buffer(id2, 2, 8, 6, 8 * 4, BufferFormat::Argb8888, &bytes2)
+            .unwrap();
+        let id2_pos = {
+            let w = comp.window_ref(id2).unwrap();
+            Rect::new(w.x, w.y, 8, 6)
+        };
+        assert!(
+            !comp.opaque_cover_rects().contains(&id2_pos),
+            "Argb buffer window must not be treated as opaque"
+        );
+    }
+
+    #[test]
+    fn test_full_recomposite_cull_matches_uncovered_background() {
+        // Visual-equivalence: after a full recomposite, the desktop background
+        // shows through where nothing covers it, and covered pixels carry the
+        // window's opaque content — identical to a plain clear+draw.
+        let mut comp = Compositor::new(300, 200, 60).unwrap();
+        let id = comp.create_window("Solid".to_string(), 120, 80, 1);
+        comp.move_window(id, 50, 40).unwrap();
+        comp.submit_render(
+            id,
+            vec![RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 80.0,
+                color: Color::rgba(30, 34, 40, 255),
+                corner_radii: CornerRadii::ZERO,
+            }],
+        )
+        .unwrap();
+
+        comp.bench_full_composite();
+
+        // `bench_full_composite` swaps, so the composited result is in front.
+        let bg = comp.theme.desktop_background;
+        let front = comp.framebuffer.front_buffer();
+        let stride = 300usize;
+        let at = |x: usize, y: usize| front[y * stride + x];
+        // A pixel well inside the client area carries the window content.
+        assert_eq!(at(60, 50), 0xFF_1E_22_28);
+        assert_ne!(at(60, 50), bg);
+        // A pixel far from any window keeps the desktop background.
+        assert_eq!(at(250, 150), bg);
+        // A pixel just left of the client rect (still background region).
+        assert_eq!(at(10, 50), bg);
     }
 }

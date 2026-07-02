@@ -518,6 +518,35 @@ would finally produce a `SPINLOCK STALL` dump rather than silence). The genuinel
 *total-silence* BSP-dead variant (blind spot 2) still needs the operator-gated
 i6300esb/NMI detector (Q20) to be caught if it recurs.
 
+**Blind spot (2) NMI hard-lockup detector — IMPLEMENTED 2026-07-02 (the
+operator authorized option D — root-cause this hang — which unblocked the
+i6300esb build previously gated behind Q20).** New `kernel/src/hardlockup.rs`
+drives the QEMU i6300esb watchdog (PCI `0x8086:0x25ab`): maps BAR0 NO_CACHE,
+programs a two-stage ~9.8 s countdown (1 kHz mode, `STAGE_PRELOAD`=5000 ≈
+4915 ms/stage) with the reboot action left enabled (QEMU's inverted
+`ESB_WDT_REBOOT` logic — bit clear = action armed), which `-action
+watchdog=inject-nmi` routes to an injected NMI. `arm`/`kick`/`disarm`/`is_armed`
+API. The **BSP** `timer_tick` (`sched/mod.rs`, `cpu==0`) kicks it every tick, so
+while the BSP takes timer interrupts it never expires; if the BSP wedges with
+IF=0 the kicks stop and QEMU broadcasts an NMI to every CPU — the wedged BSP
+takes it *despite* IF=0. `handle_nmi` (`idt.rs`), when `hardlockup::is_armed()`
+and the NMI has no port-0x61 hardware-error bits, prints `[hardlockup] NMI
+WATCHDOG FIRED cpu=… rip=… cs=… rflags=…` for every CPU (the BSP's line is the
+prize — the wedge RIP we could never observe) and the first arriver dumps the
+full task table (one-shot latch). Armed at `main.rs` right after `liveness_arm`
+(before the ring-3 container self-tests), disarmed at BOOT_OK. The device is
+**opt-in** via `boot-test.sh --hard-lockup-watchdog` (already present, off by
+default), so a normal boot finds no device and every entry point is a cheap
+no-op — **zero blast radius on ordinary boots** (this resolves the shared-harness
+blast-radius caveat that gated the build). Uses `ist=0` for v1 (the wedge is an
+ISR spin with the stack intact). Verified: a clean `--hard-lockup-watchdog` boot
+arms (~4915 ms/stage), disarms at BOOT_OK, reaches BOOT_OK in 172 s with **no
+false-fire**. `hang-repro-loop.sh` now boots with the watchdog and treats
+`[hardlockup] NMI WATCHDOG FIRED` as a catch. A soak with the instrument is
+running to capture the wedge RIP; once captured, the RIP + task-table dump turn
+this heisenbug into a directly-diagnosable one. **This is the tool that finally
+makes blind spot 2 observable.**
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

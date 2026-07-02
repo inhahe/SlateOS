@@ -703,6 +703,15 @@ pub fn run_all() {
     // --- Scheduler pick_next (O(1) bitmap scan) ---
     bench_pick_next();
 
+    // --- Scheduler pick_next, ISOLATED + depth-scaling (verifies O(1)) ---
+    //
+    // The integrated bench above folds pick_next into a full yield (two
+    // context switches).  This one drives the run queue directly at
+    // depths 1..1024 to prove the pick cost stays flat as the number of
+    // runnable tasks grows — the property CLAUDE.md requires ("must be
+    // O(1)... never O(n) over all tasks").
+    bench_pick_next_scaling();
+
     // --- Syscall dispatch (kernel-side only) ---
     //
     // Measures the dispatch function for SYS_TASK_ID (trivial syscall
@@ -1085,6 +1094,94 @@ fn bench_pick_next() {
 extern "C" fn bench_nop_task(_arg: u64) {
     crate::sched::yield_now();
     // Exit after one yield.
+}
+
+/// Benchmark scheduler `pick_next_task` in **isolation**, across
+/// increasing run-queue depths, to empirically verify its O(1) claim.
+///
+/// `bench_pick_next` above measures pick_next *inside* a full `yield_now`
+/// (two context switches, register save/restore, address-space reload),
+/// so it can neither isolate the pick cost nor reveal how it scales with
+/// the number of runnable tasks.  Here we drive a *local*
+/// `PriorityRoundRobin` directly: fill it with N synthetic tasks, then
+/// measure one steady-state round-robin rotation per iteration —
+/// `pick_next` (bitmap `trailing_zeros` + `pop_front`) followed by
+/// `enqueue` (`push_back` + bit-set), exactly what a running task's
+/// preemption does.  The queue depth is held constant across the whole
+/// measured loop (each pick is immediately re-enqueued), so if pick_next
+/// were secretly O(N) the per-op latency would climb with N.
+///
+/// All N tasks share one priority level: that is the worst case for a
+/// per-priority FIFO (a single queue holds everything), so a hidden
+/// linear scan in queue depth would surface here rather than being
+/// masked by the 32-way bitmap fan-out.
+fn bench_pick_next_scaling() {
+    use crate::sched::priority_rr::PriorityRoundRobin;
+
+    // Mid priority; the specific level is irrelevant to the O(1) claim.
+    const PRIO: u8 = 16;
+    const DEPTHS: [u32; 5] = [1, 8, 64, 256, 1024];
+
+    let mut shallow_ns = 0u64;
+    let mut deepest = None;
+
+    for (i, &depth) in DEPTHS.iter().enumerate() {
+        let mut rq = PriorityRoundRobin::new();
+        for id in 1..=u64::from(depth) {
+            rq.enqueue(id, PRIO);
+        }
+
+        // Steady-state rotation keeps `depth` tasks queued throughout.
+        let result = run("sched_pick_next_isolated", 2000, || {
+            if let Some(id) = rq.pick_next() {
+                rq.enqueue(id, PRIO);
+                core::hint::black_box(id);
+            }
+        });
+        serial_println!(
+            "[bench]   pick_next depth={:>4}: min={}ns mean={}ns",
+            depth, result.min_ns, result.mean_ns
+        );
+
+        if i == 0 {
+            shallow_ns = result.min_ns;
+        }
+        deepest = Some(result);
+    }
+
+    let Some(deepest) = deepest else { return };
+
+    // O(1) verdict: the 1024-deep pick must not be materially slower than
+    // the 1-deep pick.  A truly linear scan would be ~1000x here; we flag
+    // anything past 4x (generous headroom for cache effects and the
+    // coarse rdtsc/rounding noise that dominates at single-digit ns).
+    let ratio_x100 = deepest
+        .min_ns
+        .saturating_mul(100)
+        .checked_div(shallow_ns.max(1))
+        .unwrap_or(0);
+    if deepest.min_ns <= shallow_ns.saturating_mul(4).max(shallow_ns.saturating_add(30)) {
+        serial_println!(
+            "[bench]   pick_next O(1) CONFIRMED: depth 1->1024 is {}.{:02}x (flat)",
+            ratio_x100 / 100, ratio_x100 % 100
+        );
+    } else {
+        serial_println!(
+            "[bench]   pick_next WARNING: depth 1->1024 scaled {}.{:02}x — not O(1)!",
+            ratio_x100 / 100, ratio_x100 % 100
+        );
+    }
+
+    // Score the deepest-depth isolated rotation.  On real hardware the
+    // pick+enqueue is single-digit ns, but under QEMU/TCG the `run()`
+    // harness pays one CPUID-serialized `rdtsc` per iteration (~900-950ns
+    // — the same floor `hpet_read` sees), which entirely dominates the
+    // measurement.  So the absolute number is a TCG floor artifact and
+    // the real regression signal is the O(1) *ratio* above; the target
+    // here is just set above that floor so a genuine O(n) blow-up (a
+    // linear scan of 1024 queued tasks would add microseconds) still
+    // trips it, without false-alarming on the constant overhead.
+    score("sched_pick_next", &deepest, 1500);
 }
 
 // ---------------------------------------------------------------------------

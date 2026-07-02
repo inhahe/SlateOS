@@ -3,15 +3,19 @@
 # reproduce the intermittent total-hang (known-issues.md B-PTHREAD-YIELDBUDGET)
 # now that the boot-window liveness watchdog is in place.
 #
-# On each iteration it runs the boot test WITHOUT rebuilding, then inspects the
-# serial log for one of two failure signatures:
-#   1. "[liveness] SYSTEM HANG"  — the watchdog fired: the task-table dump that
-#      follows names the lost thread. This is the jackpot; we stop and preserve
-#      the log.
-#   2. missing "BOOT_OK"         — the boot did not complete (a hang so total
-#      that even the liveness watchdog's own timer path stalled, OR a different
+# On each iteration it runs the boot test WITHOUT rebuilding (WITH the i6300esb
+# hard-lockup NMI watchdog enabled), then inspects the serial log for one of
+# three failure signatures:
+#   1. "[hardlockup] NMI WATCHDOG FIRED" — the BSP wedged with IF=0 (the
+#      BSP-dead total-silence hang) and the NMI watchdog fired, dumping the
+#      wedge RIP + task table. This is the real jackpot for the silent hang;
+#      we stop and preserve the log.
+#   2. "[liveness] SYSTEM HANG"  — the timer-driven watchdog fired: the
+#      task-table dump that follows names the lost thread. Stop and preserve.
+#   3. missing "BOOT_OK"         — the boot did not complete (a hang so total
+#      that even the NMI watchdog was somehow defeated, OR a different
 #      failure). We also stop and preserve the log.
-# A clean boot (BOOT_OK present, no liveness line) is a miss; we go again.
+# A clean boot (BOOT_OK present, no hang line) is a miss; we go again.
 #
 # Usage: scripts/hang-repro-loop.sh [MAX_ITERS]   (default 15)
 set -u
@@ -27,13 +31,20 @@ caught=""
 
 for i in $(seq 1 "$MAX_ITERS"); do
     echo "=== hang-repro iteration $i/$MAX_ITERS ($(date +%H:%M:%S)) ==="
-    bash scripts/boot-test.sh --no-build >"$CATCH_DIR/iter-$i.stdout" 2>&1
+    bash scripts/boot-test.sh --no-build --hard-lockup-watchdog >"$CATCH_DIR/iter-$i.stdout" 2>&1
     rc=$?
 
     if [ ! -f "$SERIAL_FILE" ]; then
         echo "iter $i: no serial file produced (rc=$rc) — treating as failure"
         cp "$CATCH_DIR/iter-$i.stdout" "$CATCH_DIR/CAUGHT-iter-$i-noserial.txt" 2>/dev/null
         caught="iter-$i-noserial"
+        break
+    fi
+
+    if grep -q "\[hardlockup\] NMI WATCHDOG FIRED" "$SERIAL_FILE"; then
+        echo "!!! iter $i: HARDLOCKUP NMI FIRED — BSP-dead wedge caught with RIP !!!"
+        cp "$SERIAL_FILE" "$CATCH_DIR/CAUGHT-iter-$i-hardlockup.txt"
+        caught="iter-$i-hardlockup"
         break
     fi
 

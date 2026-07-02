@@ -84,6 +84,7 @@ mod eventlog;
 mod font;
 mod fs;
 mod gdt;
+mod hardlockup;
 mod hda;
 mod hpet;
 mod hrtimer;
@@ -969,6 +970,12 @@ extern "C" fn kernel_main() -> ! {
     // Common on older hardware and available as a QEMU option.
     rtl8139::init(boot_info.hhdm_offset);
 
+    // Step 20d-2d: Program the i6300esb hard-lockup watchdog if the boot
+    // harness supplied one (opt-in `--hard-lockup-watchdog`). Absent on a
+    // normal boot, in which case this is a no-op. Left disarmed here; armed
+    // only around the ring-3 container self-tests. See kernel/src/hardlockup.rs.
+    hardlockup::init(boot_info.hhdm_offset);
+
     // Step 20d-2d: Initialize Intel HD Audio controller (if present).
     // Discovers codecs, sets up CORB/RIRB command buffers, probes audio
     // topology for output path (DAC → Pin).  QEMU: `-device intel-hda
@@ -1339,6 +1346,12 @@ extern "C" fn kernel_main() -> ! {
     // disarmed at BOOT_OK, before the system may legitimately idle at a
     // prompt.
     sched::liveness_arm();
+
+    // Arm the hard-lockup watchdog (i6300esb NMI) for the same window. The
+    // liveness watchdog above is timer-driven and therefore blind to a
+    // BSP-dead total-silence wedge (spin with IF=0 in interrupt context); the
+    // NMI watchdog is not. No-op unless the harness supplied the device.
+    hardlockup::arm();
 
     // Ring-3 end-to-end counterpart of the above: a real Linux-ABI process
     // issues open(2)+mmap(2) itself and exits with a mapped second-frame byte,
@@ -3981,6 +3994,11 @@ extern "C" fn kernel_main() -> ! {
     // indistinguishable from the hang the watchdog looks for.  Its job (guard
     // the continuous-progress boot window) is done.
     sched::liveness_disarm();
+
+    // Disarm the hard-lockup NMI watchdog too: past BOOT_OK the BSP may
+    // legitimately go long stretches without a timer tick (idle at a prompt),
+    // which would otherwise trip the watchdog. No-op if it was never present.
+    hardlockup::disarm();
 
     // Show boot-complete on the framebuffer console too.
     console_println!();

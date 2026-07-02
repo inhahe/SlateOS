@@ -2064,6 +2064,16 @@ pub fn timer_tick(from_user: bool) -> bool {
         hb.fetch_add(1, Ordering::Relaxed);
     }
 
+    // --- Hard-lockup watchdog kick (BSP only) ---
+    // Reload the i6300esb NMI watchdog from the BSP timer tick. As long as the
+    // BSP keeps taking timer interrupts this never expires; if the BSP wedges
+    // with IF=0 (the BSP-dead total-silence hang the timer-driven watchdogs
+    // cannot see), the kicks stop and QEMU injects an NMI ~9.8 s later so
+    // handle_nmi() can dump the wedge RIP. No-op unless armed (opt-in device).
+    if cpu == 0 {
+        crate::hardlockup::kick();
+    }
+
     // --- Per-CPU utilization tracking (no lock needed) ---
     // Increment total and idle tick counters for utilization calculation.
     if let Some(total) = TOTAL_TICKS.get(cpu) {

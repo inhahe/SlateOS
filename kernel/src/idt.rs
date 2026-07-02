@@ -1440,12 +1440,41 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             "NMI hardware error at {:#x}: parity={}, iochan={}",
             frame.rip, parity_error, iochan_check
         );
+    } else if crate::hardlockup::is_armed() {
+        // No hardware-error bits and the hard-lockup watchdog is armed: this is
+        // almost certainly the i6300esb NMI fired because the BSP stopped
+        // kicking it (a BSP-dead total-silence wedge — see hardlockup.rs and
+        // known-issues.md B-PTHREAD-YIELDBUDGET). QEMU's inject-nmi broadcasts
+        // to every CPU, so the BSP — even spinning with IF=0 — takes this NMI,
+        // and frame.rip here is the wedged instruction we've been unable to
+        // observe any other way.
+        //
+        // Every CPU prints its own one-line RIP (the BSP's line is the prize);
+        // the first CPU to arrive also dumps the whole task table. A greppable
+        // marker lets the soak harness recognize a catch.
+        let cpu = crate::sched::current_cpu_id();
+        serial_println!(
+            "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x}",
+            cpu, frame.rip, frame.cs, frame.rflags
+        );
+        // One-shot full task-table dump (first arriver wins the latch).
+        if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            crate::sched::dump_task_table();
+        }
+        crate::klog!(Error, "hw.nmi",
+            "hardlockup NMI cpu={} rip={:#x}", cpu, frame.rip);
     } else {
-        // No hardware error bits — likely a software NMI (debugger,
-        // watchdog, or performance monitoring).  Just log it.
+        // No hardware error bits — likely a software NMI (debugger, watchdog,
+        // or performance monitoring).  Just log it.
         serial_println!("EXCEPTION: NMI at {:#x} (software/external)", frame.rip);
     }
 }
+
+/// One-shot latch so only the first CPU to take a hard-lockup watchdog NMI
+/// dumps the (global) task table, avoiding N× serial spam when QEMU broadcasts
+/// the injected NMI to every CPU.
+static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.
 #[unsafe(no_mangle)]

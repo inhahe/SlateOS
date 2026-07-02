@@ -2943,6 +2943,46 @@ impl Compositor {
     }
 
     /// Render a single window (shadow, decorations, client content).
+    /// True when the client's first render command is an opaque, square-cornered
+    /// `FillRect` that fully covers the client area and the window is fully
+    /// opaque — meaning the compositor's default white background fill would be
+    /// entirely painted over and can be skipped.
+    ///
+    /// Coordinates in render commands are client-local (origin at the client
+    /// top-left), so a covering rect starts at or above/left of (0,0) and extends
+    /// at least to `(win_width, win_height)`. Rounded corners are rejected because
+    /// they would leave the corner pixels showing the background, and any window
+    /// opacity < 1.0 is rejected because the top rect would then blend rather than
+    /// fully replace the pixels beneath it.
+    fn first_command_covers_client(
+        commands: &[RenderCommand],
+        win_width: u32,
+        win_height: u32,
+        opacity: f32,
+    ) -> bool {
+        if opacity < 1.0 {
+            return false;
+        }
+        match commands.first() {
+            Some(RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            }) => {
+                color.a == 255
+                    && *corner_radii == CornerRadii::ZERO
+                    && *x <= 0.0
+                    && *y <= 0.0
+                    && *x + *width >= win_width as f32
+                    && *y + *height >= win_height as f32
+            }
+            _ => false,
+        }
+    }
+
     fn render_window(&mut self, window_id: WindowId) {
         // Gather window data we need (avoiding borrow conflicts with self).
         let win_data = match self.window_ref(window_id) {
@@ -3014,16 +3054,24 @@ impl Compositor {
                 buf.mark_released();
             }
         } else {
-            // 4. Fill client area background (white).
-            self.render_engine.fill_rect(
-                &mut self.framebuffer,
-                win_x,
-                win_y,
-                win_width,
-                win_height,
-                0xFF_FF_FF_FF,
-                opacity,
-            );
+            // 4. Fill client area background (white) — UNLESS the client's first
+            //    command already paints the whole client area opaquely, in which
+            //    case the white fill is 100% overdraw. OPT (BENCH-COMPOSITOR-SLOW):
+            //    skipping it removes a full-window fill per such window per frame
+            //    (~29% of the 4K-benchmark's opaque stores). Only safe when the
+            //    window itself is fully opaque (opacity >= 1.0) — otherwise the
+            //    top rect blends and the background would show through.
+            if !Self::first_command_covers_client(&commands, win_width, win_height, opacity) {
+                self.render_engine.fill_rect(
+                    &mut self.framebuffer,
+                    win_x,
+                    win_y,
+                    win_width,
+                    win_height,
+                    0xFF_FF_FF_FF,
+                    opacity,
+                );
+            }
 
             // 5. Execute client render commands.
             self.render_engine.execute(
@@ -4085,6 +4133,96 @@ mod tests {
         assert!(comp.compose_frame());
     }
 
+    #[test]
+    fn test_first_command_covers_client() {
+        // Opaque, square-cornered, full-cover FillRect at a fully-opaque window
+        // => the white background fill can be skipped.
+        let full = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 150.0,
+            color: Color::rgba(10, 20, 30, 255),
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert!(Compositor::first_command_covers_client(&full, 200, 150, 1.0));
+        // Overshooting origin/size still counts as full cover.
+        let overshoot = vec![RenderCommand::FillRect {
+            x: -5.0,
+            y: -5.0,
+            width: 300.0,
+            height: 300.0,
+            color: Color::rgba(0, 0, 0, 255),
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert!(Compositor::first_command_covers_client(
+            &overshoot,
+            200,
+            150,
+            1.0
+        ));
+
+        // Translucent window => must NOT skip (top rect would blend).
+        assert!(!Compositor::first_command_covers_client(&full, 200, 150, 0.5));
+        // Non-opaque color => must NOT skip.
+        let translucent = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 150.0,
+            color: Color::rgba(10, 20, 30, 128),
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert!(!Compositor::first_command_covers_client(
+            &translucent,
+            200,
+            150,
+            1.0
+        ));
+        // Rounded corners => must NOT skip (corner pixels show background).
+        let rounded = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 150.0,
+            color: Color::rgba(10, 20, 30, 255),
+            corner_radii: CornerRadii::all(8.0),
+        }];
+        assert!(!Compositor::first_command_covers_client(
+            &rounded, 200, 150, 1.0
+        ));
+        // Partial-cover rect => must NOT skip.
+        let partial = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 150.0,
+            color: Color::rgba(10, 20, 30, 255),
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert!(!Compositor::first_command_covers_client(
+            &partial, 200, 150, 1.0
+        ));
+        // First command is not a FillRect => must NOT skip.
+        let text_first = vec![RenderCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            text: "hi".to_string(),
+            color: Color::WHITE,
+            font_size: 14.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+        }];
+        assert!(!Compositor::first_command_covers_client(
+            &text_first,
+            200,
+            150,
+            1.0
+        ));
+        // Empty command list => must NOT skip.
+        assert!(!Compositor::first_command_covers_client(&[], 200, 150, 1.0));
+    }
+
     /// Benchmark: full-desktop recomposite cost at 4K (3840x2160).
     ///
     /// CLAUDE.md's performance-critical-subsystems table requires the
@@ -4107,11 +4245,12 @@ mod tests {
     /// The `< 2ms/4K` target is judged on a release build (ideally on real
     /// hardware); the recorded dev-host baseline lives in
     /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-02
-    /// the compositor is still over target (~21ms/frame release on the dev host
-    /// after the row-wise `fill_rect` rewrite, down from ~48.6ms — see
-    /// known-issues BENCH-COMPOSITOR-SLOW; the remaining gap is memory-bandwidth
-    /// bound on a full recomposite). This test therefore does NOT assert the
-    /// 2ms target (it would always fail on a full-recomposite stress).
+    /// the compositor is still over target (~15.8ms/frame release on the dev host
+    /// after the row-wise `fill_rect` rewrite + redundant-bg-fill occlusion cull,
+    /// down from ~48.6ms — see known-issues BENCH-COMPOSITOR-SLOW; the remaining
+    /// gap is memory-bandwidth bound on a full recomposite). This test therefore
+    /// does NOT assert the 2ms target (it would always fail on a full-recomposite
+    /// stress).
     /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
     /// catastrophic regression (mean > 150 ms/frame, ~3x the current baseline)
     /// so an accidental super-linear blow-up is still caught without flaking.
@@ -4202,8 +4341,8 @@ mod tests {
         );
 
         // Catastrophic-regression guard only (see doc): the current baseline
-        // is ~21ms (still over the 2ms target, tracked separately); a mean past
-        // 80ms (~3.7x the baseline, and worse than the pre-optimization ~50ms)
+        // is ~16ms (still over the 2ms target, tracked separately); a mean past
+        // 80ms (~5x the baseline, and worse than the pre-optimization ~50ms)
         // means a super-linear blow-up crept into the path.
         assert!(
             mean_ms < 80.0,

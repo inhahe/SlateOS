@@ -2895,26 +2895,36 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~21.4ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 2.3x 2026-07-02
+### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~15.8ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 3.1x 2026-07-02
 
-**UPDATE 2026-07-02 — fill_rect row-wise rewrite landed, 48.6ms → 21.4ms/frame
+**UPDATE 2026-07-02 (2) — occlusion cull landed, 21.4ms → 15.8ms/frame min
+(cumulative 48.6ms → 15.8ms = 3.1x).** `render_window` now skips the
+compositor's default white client-background fill when the client's first render
+command is an opaque, square-cornered `FillRect` that fully covers the client
+area on a fully-opaque window (`Compositor::first_command_covers_client`). That
+first fill was 100% overdraw in the common "client paints its own background"
+case (~29% of the 4K benchmark's opaque stores). Guarded to be correct: rejects
+translucent windows (opacity < 1.0), non-opaque colors (alpha < 255), rounded
+corners (corner pixels would show the bg), and partial-cover rects. New unit
+test `test_first_command_covers_client` (55 tests total). baselines.toml
+`measured_ns` updated to 15831000.
+
+**UPDATE 2026-07-02 (1) — fill_rect row-wise rewrite landed, 48.6ms → 21.4ms/frame
 min (2.3x).** `RenderEngine::fill_rect` no longer calls `blend_pixel`
 per pixel. Two new `Framebuffer` fast paths were added next to `copy_row`:
 `fill_row_solid` (opaque color → single `[u32]::fill`/memset per row, skips the
 per-pixel float-alpha math and bounds check) and `blend_row` (translucent color
 → hoists the alpha computation and branch out of the inner loop, integer blend
 only). `fill_rect` resolves the effective alpha once (color-alpha × opacity) and
-dispatches to the solid, blend, or skip (alpha 0) path per row. All 54
-compositor tests + clippy + slateos check-build stay green. baselines.toml
-`[compositor_frame_4k]` `measured_ns` updated to 21358000.
+dispatches to the solid, blend, or skip (alpha 0) path per row.
 
 **Why it's still over 2ms (and why the remaining gap is *not* another naive-code
-bug):** the benchmark issues ~44M opaque u32 stores/frame — an 8.3M-pixel clear
-plus 16 windows each painting a *full-window* client background AND then a
-full-window `FillRect` on top (heavy, realistic overdraw) — i.e. ~176 MB written
-per frame. At ~21ms that's ~8 GB/s effective, near the ceiling for scalar
-cache-polluting stores on this host. The per-pixel-work bug is fixed; what's left
-is memory bandwidth on a *full* recomposite. Getting a full 16-window 4K
+bug):** after culling the wasted white bg fill, the benchmark still issues ~31M
+opaque u32 stores/frame — an 8.3M-pixel clear plus 16 windows painting opaque
+client content — i.e. ~124 MB written per frame. At ~16ms that's ~8 GB/s
+effective, near the ceiling for scalar cache-polluting stores on this host. The
+per-pixel-work bug is fixed; what's left is memory bandwidth on a *full*
+recomposite. Getting a full 16-window 4K
 recomposite under 2ms would need SIMD non-temporal (streaming) stores +
 multithreaded tiles, and/or occlusion culling to skip the fully-covered white
 client-bg fill (that first fill is 100% overdraw when the client paints an opaque
@@ -2956,9 +2966,10 @@ the benchmark's 4-command windows, but worth eliminating for large trees.
 **Remaining optimization directions (lower priority — per-pixel bug resolved):**
 SIMD non-temporal/streaming stores for solid rects (avoid cache pollution on
 huge fills) + multithreaded tile compositing to break the single-core bandwidth
-ceiling; occlusion culling so a window's default opaque client-bg fill is skipped
-when a subsequent opaque full-window `FillRect` (or an opaque shared buffer)
-fully covers it — that first fill is 100% overdraw; precompute/caches for window
+ceiling; ~~occlusion culling so a window's default opaque client-bg fill is
+skipped when the first command fully covers it~~ — **DONE 2026-07-02** (first-command
+cull; could be extended to cull the desktop clear under fully-opaque covering
+windows, and to opaque shared buffers); precompute/caches for window
 decorations and shadows (they rarely change frame-to-frame); avoid per-frame
 `Vec` clones in `render_window` (borrow or reuse scratch buffers); ensure the
 damage-tracking fast path is actually taken for the common "one window changed"
@@ -2966,10 +2977,12 @@ case. Target: < 2ms/4K (for a full recomposite; likely needs SIMD+threads). NB:
 this is the CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is
 separate.
 
-**Status:** primary per-pixel-cost bug FIXED (2.3x, 2026-07-02); the remaining
-gap to 2ms on a *full* recomposite is memory-bandwidth-bound and needs a
-SIMD/multithread/occlusion initiative (its own focused session). Unblocked (no
-Linux binaries / operator input needed).
+**Status:** per-pixel-cost bug FIXED + redundant-bg-fill occlusion cull DONE
+(cumulative 3.1x, 48.6ms → 15.8ms, 2026-07-02); the remaining gap to 2ms on a
+*full* recomposite is memory-bandwidth-bound (~124 MB/frame at ~8 GB/s scalar
+stores) and needs a SIMD-streaming-store + multithreaded-tile initiative (its own
+focused session), plus optionally culling the desktop clear under fully-opaque
+covering windows. Unblocked (no Linux binaries / operator input needed).
 
 ### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)
 

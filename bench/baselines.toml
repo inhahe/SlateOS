@@ -148,19 +148,22 @@ source        = "Lighter than channels — single atomic counter"
 [compositor_frame_4k]
 description   = "Full-desktop recomposite at 4K (3840x2160), 16 decorated windows w/ client content"
 target_ns     = 2000000        # 2 ms — must beat a 144Hz (6.9ms) and 60Hz (16.7ms) vsync budget
-measured_ns   = 21358000       # ~21.4 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms)
+measured_ns   = 15831000       # ~15.8 ms min, dev host, RELEASE build, 2026-07-02 (was 48.6ms -> 21.4ms -> 15.8ms)
 source        = "cargo test -p compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture bench_compose_frame_4k"
 notes         = """
-STILL OVER TARGET but improved 2.3x: ~21.4ms/frame (min) vs the 2ms budget \
-(was ~48.6ms on 2026-07-01). The row-wise fill_rect rewrite (opaque fills \
-now use a single slice memset per row via Framebuffer::fill_row_solid; \
-translucent fills hoist the alpha math out of the inner loop via blend_row) \
-removed the per-pixel float-alpha cost that dominated the old number. \
-What remains is memory-bandwidth-bound: this benchmark issues ~44M opaque \
-u32 stores/frame (8.3M-pixel clear + 16 windows each painting a full-window \
-client bg PLUS a full-window FillRect on top = heavy overdraw), i.e. ~176 MB \
-written/frame; ~21ms => ~8 GB/s effective, which is near the ceiling for \
-scalar cache-polluting stores. Reaching 2ms for a *full* 16-window \
+STILL OVER TARGET but improved 3.1x: ~15.8ms/frame (min) vs the 2ms budget \
+(48.6ms on 2026-07-01 -> 21.4ms -> 15.8ms on 2026-07-02). Two optimizations: \
+(1) the row-wise fill_rect rewrite (opaque fills now use a single slice \
+memset per row via Framebuffer::fill_row_solid; translucent fills hoist the \
+alpha math out of the inner loop via blend_row) removed the per-pixel \
+float-alpha cost; (2) occlusion cull — the compositor's default white \
+client-bg fill is skipped when the client's first command is an opaque, \
+square-cornered, full-cover FillRect on a fully-opaque window (that fill was \
+100% overdraw). What remains is memory-bandwidth-bound: even after culling \
+the wasted bg fill, this benchmark still issues ~31M opaque u32 stores/frame \
+(8.3M-pixel clear + per-window opaque content), i.e. ~124 MB written/frame; \
+~16ms => ~8 GB/s effective, which is near the ceiling for scalar \
+cache-polluting stores. Reaching 2ms for a *full* 16-window \
 recomposite would require SIMD non-temporal (streaming) stores + \
 multithreaded tiles, and/or occlusion culling to skip the fully-covered \
 white client-bg fill. Tracked in known-issues.md (BENCH-COMPOSITOR-SLOW). \

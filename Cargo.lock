@@ -2277,6 +2277,10 @@ name = "diff"
 version = "0.1.0"
 
 [[package]]
+name = "diffcore"
+version = "0.1.0"
+
+[[package]]
 name = "difftastic"
 version = "0.1.0"
 
@@ -2670,6 +2674,7 @@ version = "0.1.0"
 name = "editor"
 version = "0.1.0"
 dependencies = [
+ "diffcore",
  "guitk",
 ]
 
@@ -3047,6 +3052,7 @@ version = "0.1.0"
 name = "filediff"
 version = "0.1.0"
 dependencies = [
+ "diffcore",
  "guitk",
 ]
 

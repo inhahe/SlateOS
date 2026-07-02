@@ -19,8 +19,16 @@
 //!   "theirs", so non-conflicting changes from both sides are combined
 //!   automatically and genuine conflicts are reported for review.
 //!
-//! The engine is UI-agnostic (no `guitk` dependency) so it can be unit-tested
-//! on the host and reused by any front end.
+//! - [`FileSync`] / [`DiskChange`] — the editors' external-change tracker: it
+//!   records the last-loaded/saved content and mtime, detects when the file is
+//!   changed on disk, and builds a [`three_way_merge`] against the buffer.
+//! - [`MergeReview`] / [`MergeOutcome`] — the interactive per-conflict review
+//!   model used by the "review the merge" flow.
+//!
+//! The core diff/merge algorithms are UI-agnostic (no `guitk` dependency) so
+//! they can be unit-tested on the host and reused by any front end. [`FileSync`]
+//! adds thin `std::fs`/`std::time` glue so both text editors share one correct
+//! implementation of external-change detection instead of duplicating it.
 
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(
@@ -34,6 +42,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::path::Path;
+use std::time::SystemTime;
 
 // ============================================================================
 // Myers diff algorithm
@@ -1106,6 +1116,205 @@ fn equal_map(edits: &[DiffEdit]) -> std::collections::BTreeMap<usize, usize> {
     map
 }
 
+// ============================================================================
+// External-change tracking (FileSync) + interactive merge review
+// ============================================================================
+
+/// Normalize raw file bytes-as-text into the editors' canonical line form.
+///
+/// Splits on line boundaries (dropping a trailing newline and stripping `\r`),
+/// then re-joins with `\n`. This matches how the editors store a loaded file
+/// (`content.lines().collect::<Vec<_>>()`), so a freshly loaded buffer compares
+/// equal to its file regardless of the on-disk line-ending style.
+#[must_use]
+pub fn normalize_content(content: &str) -> String {
+    content.lines().collect::<Vec<_>>().join("\n")
+}
+
+/// The result of checking a tracked file for external modification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiskChange {
+    /// The file is unchanged (or there is no baseline to compare against).
+    Unchanged,
+    /// The file changed on disk; carries the LF-normalized disk content.
+    Modified {
+        /// LF-normalized current on-disk content.
+        disk: String,
+    },
+    /// The file no longer exists on disk.
+    Deleted,
+}
+
+/// The outcome of an automatic merge of on-disk changes into a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// All changes merged cleanly with no conflicts.
+    Clean,
+    /// Some regions conflicted; the caller should surface them for resolution.
+    Conflicted {
+        /// Number of conflicting regions.
+        conflicts: usize,
+    },
+}
+
+/// Tracks a file's last-loaded/saved snapshot so external edits can be detected
+/// and three-way merged against the in-memory buffer.
+///
+/// Both text editors embed one of these per open document. It records an
+/// LF-normalized `base` (the common ancestor for merging) and the file's
+/// `mtime` (a cheap pre-filter that avoids re-reading unchanged files).
+#[derive(Clone, Debug, Default)]
+pub struct FileSync {
+    /// LF-normalized content as of the last load/save — the merge ancestor.
+    pub base: Option<String>,
+    /// File mtime as of the last load/save, used as a fast change pre-check.
+    pub mtime: Option<SystemTime>,
+}
+
+impl FileSync {
+    /// A tracker with no recorded baseline (e.g. an unsaved buffer).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: None,
+            mtime: None,
+        }
+    }
+
+    /// Record a load/save: `normalized` becomes the new merge ancestor and the
+    /// file's current mtime is captured. Call after reading or writing `path`.
+    pub fn record(&mut self, path: &Path, normalized: String) {
+        self.base = Some(normalized);
+        self.mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    }
+
+    /// Refresh only the recorded mtime from `path`, leaving the ancestor intact.
+    ///
+    /// Used by "keep current changes": we dismiss the detected external edit
+    /// (so it is not re-reported) without adopting it as the new ancestor.
+    pub fn touch(&mut self, path: &Path) {
+        self.mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    }
+
+    /// Check whether `path` changed on disk since the last [`record`](Self::record).
+    ///
+    /// Uses the recorded mtime as a cheap pre-filter and only re-reads content
+    /// when the mtime differs (or is unavailable). Returns [`DiskChange::Unchanged`]
+    /// when there is no recorded baseline.
+    #[must_use]
+    pub fn changed(&self, path: &Path) -> DiskChange {
+        let Some(base) = self.base.as_ref() else {
+            return DiskChange::Unchanged;
+        };
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                // Fast path: matching mtime means the file is untouched.
+                if let (Ok(mtime), Some(known)) = (meta.modified(), self.mtime)
+                    && mtime == known
+                {
+                    return DiskChange::Unchanged;
+                }
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        let disk = normalize_content(&content);
+                        if &disk == base {
+                            // Same content despite an mtime bump (touch / no-op save).
+                            DiskChange::Unchanged
+                        } else {
+                            DiskChange::Modified { disk }
+                        }
+                    }
+                    // File exists but is momentarily unreadable — don't nag; the
+                    // next check retries.
+                    Err(_) => DiskChange::Unchanged,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DiskChange::Deleted,
+            // Transient stat error (permissions, race): report no change.
+            Err(_) => DiskChange::Unchanged,
+        }
+    }
+
+    /// Build a three-way merge of `buffer` (ours) against `disk` (theirs) using
+    /// the recorded ancestor as base. Falls back to `disk` as the ancestor when
+    /// none is recorded (degrading gracefully to a two-way merge).
+    #[must_use]
+    pub fn merge(&self, buffer: &str, disk: &str) -> ThreeWayMerge {
+        let base = self.base.as_deref().unwrap_or(disk);
+        three_way_merge(base, buffer, disk)
+    }
+}
+
+/// Interactive review state for resolving a three-way merge conflict-by-conflict.
+///
+/// Built from a [`ThreeWayMerge`]; holds one [`ConflictChoice`] per conflicting
+/// region (defaulting to [`ConflictChoice::Theirs`], i.e. take the disk version)
+/// which the user can flip before [accepting][`MergeReview::accepted_text`] the
+/// result. Mirrors the side-by-side "review the merge" flow of orchestrator2's
+/// file-edit diff viewer.
+#[derive(Clone, Debug)]
+pub struct MergeReview {
+    merge: ThreeWayMerge,
+    choices: Vec<ConflictChoice>,
+}
+
+impl MergeReview {
+    /// Build a review over `merge`, defaulting every conflict to the disk side.
+    #[must_use]
+    pub fn new(merge: ThreeWayMerge) -> Self {
+        let choices = vec![ConflictChoice::Theirs; merge.conflict_count()];
+        Self { merge, choices }
+    }
+
+    /// Number of conflicting regions to review.
+    #[must_use]
+    pub fn conflict_count(&self) -> usize {
+        self.choices.len()
+    }
+
+    /// The current choice for conflict `index`, if in range.
+    #[must_use]
+    pub fn choice(&self, index: usize) -> Option<ConflictChoice> {
+        self.choices.get(index).copied()
+    }
+
+    /// Set the resolution choice for conflict `index`. Out-of-range is a no-op.
+    pub fn set_choice(&mut self, index: usize, choice: ConflictChoice) {
+        if let Some(slot) = self.choices.get_mut(index) {
+            *slot = choice;
+        }
+    }
+
+    /// The conflicting regions, in output order, as `(base, ours, theirs)`.
+    #[must_use]
+    pub fn conflicts(&self) -> Vec<(&[String], &[String], &[String])> {
+        self.merge
+            .chunks
+            .iter()
+            .filter_map(|c| match c {
+                MergeChunk::Conflict {
+                    base,
+                    ours,
+                    theirs,
+                } => Some((base.as_slice(), ours.as_slice(), theirs.as_slice())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The merged text with the current per-conflict choices applied.
+    #[must_use]
+    pub fn accepted_text(&self) -> String {
+        self.merge.resolve(&self.choices)
+    }
+
+    /// The underlying merge.
+    #[must_use]
+    pub fn merge(&self) -> &ThreeWayMerge {
+        &self.merge
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,5 +1568,66 @@ mod tests {
             let lines = split_lines(s);
             assert_eq!(join_lines(&lines), s, "roundtrip failed for {s:?}");
         }
+    }
+
+    // --- FileSync / MergeReview tests ---
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("diffcore_test_{tag}_{nanos}.txt"));
+        p
+    }
+
+    #[test]
+    fn test_normalize_content() {
+        assert_eq!(normalize_content("a\r\nb\r\n"), "a\nb");
+        assert_eq!(normalize_content("a\nb"), "a\nb");
+        assert_eq!(normalize_content(""), "");
+    }
+
+    #[test]
+    fn test_filesync_detects_modify_and_delete() {
+        let path = temp_path("fs_detect");
+        std::fs::write(&path, b"line1\nline2\n").expect("write");
+        let mut sync = FileSync::new();
+        sync.record(&path, normalize_content("line1\nline2\n"));
+        assert_eq!(sync.changed(&path), DiskChange::Unchanged);
+
+        std::fs::write(&path, b"line1 X\nline2\n").expect("rewrite");
+        match sync.changed(&path) {
+            DiskChange::Modified { disk } => assert_eq!(disk, "line1 X\nline2"),
+            other => panic!("expected Modified, got {other:?}"),
+        }
+
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(sync.changed(&path), DiskChange::Deleted);
+    }
+
+    #[test]
+    fn test_filesync_merge_uses_base() {
+        let sync = FileSync {
+            base: Some("alpha\nmiddle\nbeta".to_string()),
+            mtime: None,
+        };
+        let merge = sync.merge("ALPHA\nmiddle\nbeta", "alpha\nmiddle\nBETA");
+        assert_eq!(merge.clean_merge().as_deref(), Some("ALPHA\nmiddle\nBETA"));
+    }
+
+    #[test]
+    fn test_merge_review_choices() {
+        let mut review = MergeReview::new(three_way_merge("shared", "ours", "theirs"));
+        assert_eq!(review.conflict_count(), 1);
+        assert_eq!(review.accepted_text(), "theirs"); // default = disk
+        review.set_choice(0, ConflictChoice::Ours);
+        assert_eq!(review.accepted_text(), "ours");
+        review.set_choice(0, ConflictChoice::Both);
+        assert_eq!(review.accepted_text(), "ours\ntheirs");
+        // Out-of-range set is a no-op.
+        review.set_choice(9, ConflictChoice::Base);
+        assert_eq!(review.accepted_text(), "ours\ntheirs");
     }
 }

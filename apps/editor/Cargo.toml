@@ -5,3 +5,4 @@ edition = "2024"
 description = "SlateOS Text Editor — graphical text editor with syntax highlighting"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+diffcore = { path = "../diffcore" }

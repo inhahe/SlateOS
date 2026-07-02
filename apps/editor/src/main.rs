@@ -21,6 +21,11 @@ use guitk::color::Color;
 use guitk::render::RenderTree;
 use syntree::{Pos, SyntaxTree};
 
+use diffcore::{
+    ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
+    normalize_content,
+};
+
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -61,6 +66,9 @@ pub struct Document {
     pub use_spaces: bool,
     /// Detected language for syntax highlighting.
     pub language: Language,
+    /// External-change tracker: records the last loaded/saved content and mtime
+    /// so edits made to the file by other programs can be detected and merged.
+    pub sync: FileSync,
 }
 
 /// An edit action for undo/redo.
@@ -187,6 +195,7 @@ impl Document {
             tab_width: 4,
             use_spaces: true,
             language: Language::Plain,
+            sync: FileSync::new(),
         }
     }
 
@@ -216,6 +225,12 @@ impl Document {
             .map(|e| Language::from_extension(&e.to_string_lossy()))
             .unwrap_or(Language::Plain);
 
+        // Record the load-time snapshot (LF-normalized, matching our in-memory
+        // representation) and mtime so we can later detect external edits and
+        // three-way merge against this common ancestor.
+        let mut sync = FileSync::new();
+        sync.record(path, normalize_content(&content));
+
         Ok(Self {
             lines,
             path: Some(path.to_path_buf()),
@@ -232,7 +247,18 @@ impl Document {
             tab_width: 4,
             use_spaces: true,
             language,
+            sync,
         })
+    }
+
+    /// The LF-normalized text of the current buffer.
+    ///
+    /// This is the canonical form used for diffing/merging: it matches
+    /// [`normalize_content`] applied to on-disk bytes, so a freshly loaded and
+    /// unedited buffer compares equal to its file.
+    #[must_use]
+    pub fn buffer_text(&self) -> String {
+        self.lines.join("\n")
     }
 
     /// Save the document to its file path.
@@ -245,6 +271,10 @@ impl Document {
         let content: String = self.lines.join(self.line_ending.chars());
         fs::write(path, &content)?;
         self.modified = false;
+        // Refresh the merge ancestor and mtime so the file we just wrote is not
+        // mistaken for an external change on the next check.
+        let text = self.buffer_text();
+        self.sync.record(path, text);
         Ok(())
     }
 
@@ -260,6 +290,127 @@ impl Document {
             .map(|e| Language::from_extension(&e.to_string_lossy()))
             .unwrap_or(Language::Plain);
         self.save()
+    }
+
+    // ======================================================================
+    // External-change detection & three-way merge
+    // ======================================================================
+
+    /// Check whether the file backing this document has changed on disk since
+    /// it was last loaded or saved.
+    ///
+    /// Delegates to the shared [`FileSync`] tracker, which uses the recorded
+    /// mtime as a cheap pre-filter and only re-reads content when it differs.
+    /// Returns [`DiskChange::Unchanged`] for buffers with no backing file.
+    #[must_use]
+    pub fn disk_changed(&self) -> DiskChange {
+        match self.path.as_ref() {
+            Some(path) => self.sync.changed(path),
+            None => DiskChange::Unchanged,
+        }
+    }
+
+    /// Dismiss an external change, keeping the current buffer as-is.
+    ///
+    /// Records the disk's current mtime so the same external edit is not
+    /// re-reported. The buffer stays modified and will overwrite the file on the
+    /// next save. The merge ancestor is intentionally left unchanged so a later
+    /// merge still diffs against the original common ancestor.
+    pub fn keep_current(&mut self) {
+        if let Some(path) = self.path.clone() {
+            self.sync.touch(&path);
+        }
+    }
+
+    /// Replace the buffer with the on-disk content, discarding local edits.
+    ///
+    /// `disk` is the LF-normalized disk content (as produced by
+    /// [`DiskChange::Modified`]). Resets the modified flag, refreshes the merge
+    /// ancestor/mtime, clears undo history (the reload is not itself undoable),
+    /// and clamps the cursor into the new bounds.
+    pub fn reload_from_disk(&mut self, disk: &str) {
+        self.set_lines_from_text(disk);
+        self.modified = false;
+        if let Some(path) = self.path.clone() {
+            self.sync.record(&path, disk.to_string());
+        } else {
+            self.sync.base = Some(disk.to_string());
+        }
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// Compute the three-way merge of the current buffer against `disk`.
+    ///
+    /// `base` = last loaded/saved content, `ours` = current buffer, `theirs` =
+    /// `disk`. When the ancestor is unknown (never saved), the disk content is
+    /// used as the ancestor, which degrades gracefully to a two-way merge.
+    #[must_use]
+    pub fn merge_preview(&self, disk: &str) -> ThreeWayMerge {
+        self.sync.merge(&self.buffer_text(), disk)
+    }
+
+    /// Auto-merge the on-disk changes into the buffer.
+    ///
+    /// Non-conflicting changes from both sides are combined automatically. If
+    /// the merge is clean the buffer becomes the merged result; if it conflicts,
+    /// the buffer is filled with Git-style conflict markers for manual
+    /// resolution. In both cases the buffer is marked modified (it now differs
+    /// from disk and must be saved) and the merge ancestor advances to `disk`.
+    pub fn merge_from_disk(&mut self, disk: &str) -> MergeOutcome {
+        let merge = self.merge_preview(disk);
+        let (text, outcome) = match merge.clean_merge() {
+            Some(clean) => (clean, MergeOutcome::Clean),
+            None => (
+                merge.text_with_markers(&self.name, "disk"),
+                MergeOutcome::Conflicted {
+                    conflicts: merge.conflict_count(),
+                },
+            ),
+        };
+        self.apply_merged(&text, disk);
+        outcome
+    }
+
+    /// Apply an already-resolved merge result to the buffer.
+    ///
+    /// Used by the review flow after the user has chosen per-conflict
+    /// resolutions. `disk` becomes the new merge ancestor.
+    pub fn apply_merged(&mut self, merged: &str, disk: &str) {
+        self.set_lines_from_text(merged);
+        self.modified = true;
+        // Their changes are now incorporated, so the disk content is the new
+        // common ancestor; the buffer is "ours" relative to it and needs saving.
+        if let Some(path) = self.path.clone() {
+            self.sync.record(&path, disk.to_string());
+        } else {
+            self.sync.base = Some(disk.to_string());
+        }
+    }
+
+    /// Replace the buffer's lines from LF-normalized `text`, clamping the cursor.
+    fn set_lines_from_text(&mut self, text: &str) {
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.lines = lines;
+        self.selection_anchor = None;
+        // Clamp the cursor into the new bounds.
+        let last_line = self.lines.len().saturating_sub(1);
+        if self.cursor_line > last_line {
+            self.cursor_line = last_line;
+        }
+        let line_len = self
+            .lines
+            .get(self.cursor_line)
+            .map_or(0, std::string::String::len);
+        if self.cursor_col > line_len {
+            self.cursor_col = line_len;
+        }
+        if self.scroll_line > last_line {
+            self.scroll_line = last_line;
+        }
     }
 
     // ======================================================================
@@ -743,6 +894,35 @@ pub struct EditorState {
     /// Character dimensions (approximate).
     pub char_width: f32,
     pub line_height: f32,
+    /// Pending external-change prompt (file edited/deleted outside the editor).
+    pub external_prompt: Option<ExternalChangePrompt>,
+}
+
+/// A pending prompt shown when the active document's file changed on disk.
+///
+/// Presents the user with keep-current / reload / merge / review options
+/// (see [`EditorState::resolve_external`]). When [`review`](Self::review) is
+/// `Some`, the editor is in the side-by-side review sub-mode.
+pub struct ExternalChangePrompt {
+    /// Index of the document (tab) the prompt concerns.
+    pub tab: usize,
+    /// What changed on disk.
+    pub change: DiskChange,
+    /// Active review state when the user chose "review the merge".
+    pub review: Option<MergeReview>,
+}
+
+/// The four top-level responses to an [`ExternalChangePrompt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalChoice {
+    /// Keep the current buffer, ignoring the disk change.
+    KeepCurrent,
+    /// Discard local edits and reload the file from disk.
+    Reload,
+    /// Auto-merge disk changes into the buffer.
+    Merge,
+    /// Open the side-by-side review to resolve conflicts manually.
+    Review,
 }
 
 impl Default for EditorState {
@@ -765,6 +945,7 @@ impl EditorState {
             font_size,
             char_width: font_size * 0.6,
             line_height: font_size * 1.5,
+            external_prompt: None,
         }
     }
 
@@ -815,6 +996,145 @@ impl EditorState {
     }
 
     // ======================================================================
+    // External-change handling
+    // ======================================================================
+
+    /// Check the active document's file for external modification and, if it
+    /// changed in a way that needs the user's attention, raise a prompt.
+    ///
+    /// Policy: if the file changed on disk but the buffer has *no* unsaved edits,
+    /// the disk version is loaded automatically (there is nothing to lose and
+    /// nothing to decide). A prompt is raised only when there is a genuine
+    /// choice to make — the buffer is modified and the file also changed, or the
+    /// file was deleted. Returns `true` when a prompt was raised.
+    pub fn check_external_change(&mut self) -> bool {
+        // Don't stack prompts.
+        if self.external_prompt.is_some() {
+            return false;
+        }
+        let tab = self.active_tab;
+        let Some(doc) = self.documents.get(self.active_tab) else {
+            return false;
+        };
+        match doc.disk_changed() {
+            DiskChange::Unchanged => false,
+            DiskChange::Modified { disk } => {
+                if doc.modified {
+                    self.external_prompt = Some(ExternalChangePrompt {
+                        tab,
+                        change: DiskChange::Modified { disk },
+                        review: None,
+                    });
+                    true
+                } else {
+                    // No local edits at risk — just adopt the disk version.
+                    if let Some(doc) = self.documents.get_mut(tab) {
+                        doc.reload_from_disk(&disk);
+                    }
+                    false
+                }
+            }
+            DiskChange::Deleted => {
+                self.external_prompt = Some(ExternalChangePrompt {
+                    tab,
+                    change: DiskChange::Deleted,
+                    review: None,
+                });
+                true
+            }
+        }
+    }
+
+    /// Respond to the pending external-change prompt.
+    ///
+    /// [`ExternalChoice::Review`] transitions the prompt into review sub-mode
+    /// (building a [`MergeReview`]); the other three choices resolve immediately
+    /// and clear the prompt.
+    pub fn resolve_external(&mut self, choice: ExternalChoice) {
+        let Some(prompt) = self.external_prompt.as_ref() else {
+            return;
+        };
+        let tab = prompt.tab;
+        // "disk" is only meaningful for a Modified change.
+        let disk = match &prompt.change {
+            DiskChange::Modified { disk } => Some(disk.clone()),
+            _ => None,
+        };
+
+        match choice {
+            ExternalChoice::KeepCurrent => {
+                if let Some(doc) = self.documents.get_mut(tab) {
+                    // For a deletion, there is no disk mtime to record; keep the
+                    // buffer (marked modified) so a save recreates the file.
+                    doc.keep_current();
+                    doc.modified = true;
+                }
+                self.external_prompt = None;
+            }
+            ExternalChoice::Reload => {
+                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                    doc.reload_from_disk(&disk);
+                }
+                self.external_prompt = None;
+            }
+            ExternalChoice::Merge => {
+                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                    doc.merge_from_disk(&disk);
+                }
+                self.external_prompt = None;
+            }
+            ExternalChoice::Review => {
+                if let (Some(doc), Some(disk)) = (self.documents.get(tab), disk.as_ref()) {
+                    let review = MergeReview::new(doc.merge_preview(disk));
+                    if let Some(prompt) = self.external_prompt.as_mut() {
+                        prompt.review = Some(review);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Change the resolution of conflict `index` in the active review.
+    pub fn review_set_choice(&mut self, index: usize, choice: ConflictChoice) {
+        if let Some(review) = self
+            .external_prompt
+            .as_mut()
+            .and_then(|p| p.review.as_mut())
+        {
+            review.set_choice(index, choice);
+        }
+    }
+
+    /// Accept the reviewed merge, applying the chosen resolutions to the buffer.
+    pub fn review_accept(&mut self) {
+        let Some(prompt) = self.external_prompt.as_ref() else {
+            return;
+        };
+        let tab = prompt.tab;
+        let (Some(review), DiskChange::Modified { disk }) = (&prompt.review, &prompt.change) else {
+            return;
+        };
+        let merged = review.accepted_text();
+        let disk = disk.clone();
+        if let Some(doc) = self.documents.get_mut(tab) {
+            doc.apply_merged(&merged, &disk);
+        }
+        self.external_prompt = None;
+    }
+
+    /// Cancel the review, returning to the top-level prompt options.
+    pub fn review_cancel(&mut self) {
+        if let Some(prompt) = self.external_prompt.as_mut() {
+            prompt.review = None;
+        }
+    }
+
+    /// Dismiss the external-change prompt without taking any action.
+    pub fn dismiss_external(&mut self) {
+        self.external_prompt = None;
+    }
+
+    // ======================================================================
     // Rendering
     // ======================================================================
 
@@ -839,6 +1159,11 @@ impl EditorState {
         // Find panel (if visible)
         if self.find_visible {
             self.render_find_panel(&mut tree);
+        }
+
+        // External-change prompt / merge review (modal overlay)
+        if let Some(prompt) = self.external_prompt.as_ref() {
+            self.render_external_prompt(&mut tree, prompt);
         }
 
         tree
@@ -1019,6 +1344,163 @@ impl EditorState {
             10.0,
         );
     }
+
+    /// Render the external-change modal — either the four-option prompt or, when
+    /// the user chose "review", the side-by-side merge review.
+    fn render_external_prompt(&self, tree: &mut RenderTree, prompt: &ExternalChangePrompt) {
+        let w = self.window_width as f32;
+        let h = self.window_height as f32;
+
+        // Dim the background.
+        tree.fill_rect(0.0, 0.0, w, h, Color::rgba(0x11, 0x11, 0x1B, 0xB0));
+
+        if let Some(review) = prompt.review.as_ref() {
+            self.render_merge_review(tree, prompt, review);
+            return;
+        }
+
+        // Centered dialog card.
+        let dw = 480.0_f32.min(w - 40.0);
+        let dh = 220.0_f32;
+        let dx = (w - dw) / 2.0;
+        let dy = (h - dh) / 2.0;
+        tree.fill_rect(dx, dy, dw, dh, Color::from_hex(0x1E1E2E));
+        tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
+
+        let name = self
+            .documents
+            .get(prompt.tab)
+            .map_or("file", |d| d.name.as_str());
+
+        let (title, body): (&str, String) = match &prompt.change {
+            DiskChange::Deleted => (
+                "File deleted on disk",
+                format!("\"{name}\" was deleted outside the editor while you have unsaved changes."),
+            ),
+            _ => (
+                "File changed on disk",
+                format!("\"{name}\" was modified outside the editor and you have unsaved changes."),
+            ),
+        };
+
+        tree.text(dx + 12.0, dy + 9.0, title, Color::from_hex(0xF9E2AF), 13.0);
+        tree.text(dx + 12.0, dy + 44.0, &body, Color::from_hex(0xCDD6F4), 11.0);
+
+        // Option buttons, stacked. For a deletion, merge/review don't apply.
+        let deleted = matches!(prompt.change, DiskChange::Deleted);
+        let mut options: Vec<(&str, &str)> = vec![
+            ("Keep current", "keep your buffer; overwrites disk on save"),
+            ("Reload from disk", "discard local edits, load disk version"),
+        ];
+        if !deleted {
+            options.push(("Merge", "auto-combine both; mark conflicts inline"));
+            options.push(("Review merge…", "resolve conflicts side-by-side"));
+        }
+
+        let mut by = dy + 74.0;
+        for (label, hint) in options {
+            tree.fill_rect(dx + 12.0, by, dw - 24.0, 30.0, Color::from_hex(0x45475A));
+            tree.text(dx + 20.0, by + 6.0, label, Color::from_hex(0xCDD6F4), 12.0);
+            tree.text(
+                dx + 160.0,
+                by + 8.0,
+                hint,
+                Color::from_hex(0x9399B2),
+                10.0,
+            );
+            by += 34.0;
+        }
+    }
+
+    /// Render the side-by-side merge review (ours | theirs) with each conflict's
+    /// current resolution. Mirrors orchestrator2's file-edit diff viewer layout.
+    fn render_merge_review(
+        &self,
+        tree: &mut RenderTree,
+        prompt: &ExternalChangePrompt,
+        review: &MergeReview,
+    ) {
+        let w = self.window_width as f32;
+        let h = self.window_height as f32;
+        let margin = 24.0;
+        let dx = margin;
+        let dy = margin;
+        let dw = w - margin * 2.0;
+        let dh = h - margin * 2.0;
+
+        tree.fill_rect(dx, dy, dw, dh, Color::from_hex(0x1E1E2E));
+        tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
+
+        let name = self
+            .documents
+            .get(prompt.tab)
+            .map_or("file", |d| d.name.as_str());
+        let header = format!(
+            "Review merge — {name}  ({} conflict(s))",
+            review.conflict_count()
+        );
+        tree.text(dx + 12.0, dy + 9.0, &header, Color::from_hex(0xF9E2AF), 13.0);
+
+        // Column headers.
+        let col_w = (dw - 24.0) / 2.0;
+        let ours_x = dx + 12.0;
+        let theirs_x = dx + 12.0 + col_w;
+        tree.text(ours_x, dy + 40.0, name, Color::from_hex(0xA6E3A1), 11.0);
+        tree.text(theirs_x, dy + 40.0, "disk", Color::from_hex(0xF38BA8), 11.0);
+
+        // Each conflict as a row block.
+        let mut y = dy + 60.0;
+        let line_h = self.line_height;
+        for (i, (_base, ours, theirs)) in review.conflicts().iter().enumerate() {
+            let choice = review.choice(i).unwrap_or(ConflictChoice::Theirs);
+            let chosen_ours = matches!(choice, ConflictChoice::Ours | ConflictChoice::Both);
+            let chosen_theirs = matches!(choice, ConflictChoice::Theirs | ConflictChoice::Both);
+
+            let block_lines = ours.len().max(theirs.len()).max(1);
+            let block_h = block_lines as f32 * line_h + 6.0;
+
+            // Highlight the selected side(s).
+            if chosen_ours {
+                tree.fill_rect(ours_x - 4.0, y, col_w, block_h, Color::from_hex(0x2A3A2A));
+            }
+            if chosen_theirs {
+                tree.fill_rect(theirs_x - 4.0, y, col_w, block_h, Color::from_hex(0x3A2A2A));
+            }
+
+            let label = format!("#{}", i + 1);
+            tree.text(dx + 2.0, y, &label, Color::from_hex(0x6C7086), 9.0);
+
+            for (li, line) in ours.iter().enumerate() {
+                tree.text(
+                    ours_x,
+                    y + li as f32 * line_h,
+                    line,
+                    Color::from_hex(0xCDD6F4),
+                    11.0,
+                );
+            }
+            for (li, line) in theirs.iter().enumerate() {
+                tree.text(
+                    theirs_x,
+                    y + li as f32 * line_h,
+                    line,
+                    Color::from_hex(0xCDD6F4),
+                    11.0,
+                );
+            }
+            y += block_h + 6.0;
+        }
+
+        // Footer actions.
+        let fy = dy + dh - 30.0;
+        tree.text(
+            dx + 12.0,
+            fy,
+            "[Accept]  [Cancel]   per-conflict: take ours / take disk / keep both",
+            Color::from_hex(0x9399B2),
+            11.0,
+        );
+    }
 }
 
 // ============================================================================
@@ -1180,5 +1662,201 @@ mod doc_syntree_tests {
             assert!(w[0] <= w[1]);
         }
         assert!(folds.len() >= 2);
+    }
+}
+
+// ============================================================================
+// External-change detection & three-way merge tests
+// ============================================================================
+
+#[cfg(test)]
+mod external_merge_tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::SystemTime;
+
+    /// Build a document as if it were loaded from disk with the given content
+    /// (LF-normalized `base`), without touching the filesystem.
+    fn loaded_doc(content: &str) -> Document {
+        let mut d = Document::new();
+        d.lines = content.split('\n').map(str::to_string).collect();
+        if d.lines.is_empty() {
+            d.lines.push(String::new());
+        }
+        d.sync.base = Some(normalize_content(content));
+        d.modified = false;
+        d
+    }
+
+    /// Create a unique temp file path under the OS temp dir.
+    fn temp_path(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("slate_editor_test_{tag}_{nanos}.txt"));
+        p
+    }
+
+    #[test]
+    fn normalize_strips_crlf_and_trailing_newline() {
+        assert_eq!(normalize_content("a\r\nb\r\n"), "a\nb");
+        assert_eq!(normalize_content("a\nb"), "a\nb");
+        assert_eq!(normalize_content(""), "");
+    }
+
+    #[test]
+    fn buffer_text_is_lf_joined() {
+        let d = loaded_doc("one\ntwo\nthree");
+        assert_eq!(d.buffer_text(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn disk_changed_unchanged_when_no_path() {
+        let d = loaded_doc("hello");
+        assert_eq!(d.disk_changed(), DiskChange::Unchanged);
+    }
+
+    #[test]
+    fn disk_changed_detects_modification_and_deletion() {
+        let path = temp_path("detect");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"line1\nline2\n").expect("write");
+        }
+        let doc = Document::from_file(&path).expect("load");
+        assert_eq!(doc.disk_changed(), DiskChange::Unchanged);
+
+        // Modify the file externally.
+        std::fs::write(&path, b"line1 CHANGED\nline2\n").expect("rewrite");
+        match doc.disk_changed() {
+            DiskChange::Modified { disk } => assert_eq!(disk, "line1 CHANGED\nline2"),
+            other => panic!("expected Modified, got {other:?}"),
+        }
+
+        // Delete the file.
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(doc.disk_changed(), DiskChange::Deleted);
+    }
+
+    #[test]
+    fn reload_replaces_buffer_and_clears_modified() {
+        let mut d = loaded_doc("old\ncontent");
+        d.modified = true;
+        d.cursor_line = 5; // out of new bounds
+        d.reload_from_disk("new\ndisk\ncontent");
+        assert_eq!(d.lines, vec!["new", "disk", "content"]);
+        assert!(!d.modified);
+        assert_eq!(d.sync.base.as_deref(), Some("new\ndisk\ncontent"));
+        assert!(d.cursor_line <= 2); // clamped
+    }
+
+    #[test]
+    fn merge_disjoint_changes_is_clean() {
+        // base: ours edits the first line, theirs edits the last; the shared
+        // "middle" line is the common context anchor that lets both apply
+        // cleanly (matching `git merge-file` semantics — adjacent changes with
+        // no unchanged context line between them would instead conflict).
+        let mut d = loaded_doc("alpha\nmiddle\nbeta");
+        d.lines = vec![
+            "ALPHA".to_string(),
+            "middle".to_string(),
+            "beta".to_string(),
+        ];
+        d.modified = true;
+        let disk = "alpha\nmiddle\nBETA";
+        let outcome = d.merge_from_disk(disk);
+        assert_eq!(outcome, MergeOutcome::Clean);
+        assert_eq!(d.buffer_text(), "ALPHA\nmiddle\nBETA");
+        assert!(d.modified);
+    }
+
+    #[test]
+    fn merge_overlapping_changes_conflicts() {
+        let mut d = loaded_doc("shared");
+        d.lines = vec!["ours-version".to_string()];
+        d.modified = true;
+        let outcome = d.merge_from_disk("theirs-version");
+        match outcome {
+            MergeOutcome::Conflicted { conflicts } => assert_eq!(conflicts, 1),
+            MergeOutcome::Clean => panic!("expected a conflict"),
+        }
+        // Buffer should contain conflict markers for manual resolution.
+        assert!(d.buffer_text().contains("<<<<<<<"));
+        assert!(d.buffer_text().contains(">>>>>>>"));
+    }
+
+    #[test]
+    fn review_lets_user_pick_ours() {
+        let d = {
+            let mut d = loaded_doc("shared");
+            d.lines = vec!["ours-version".to_string()];
+            d.modified = true;
+            d
+        };
+        let mut review = MergeReview::new(d.merge_preview("theirs-version"));
+        assert_eq!(review.conflict_count(), 1);
+        // Default is theirs (disk).
+        assert_eq!(review.accepted_text(), "theirs-version");
+        // Flip to ours.
+        review.set_choice(0, ConflictChoice::Ours);
+        assert_eq!(review.accepted_text(), "ours-version");
+        // Keep both.
+        review.set_choice(0, ConflictChoice::Both);
+        assert_eq!(review.accepted_text(), "ours-version\ntheirs-version");
+    }
+
+    #[test]
+    fn editor_auto_reloads_unmodified_buffer() {
+        let path = temp_path("autoreload");
+        std::fs::write(&path, b"first\n").expect("write");
+        let mut editor = EditorState::new();
+        editor.open_file(&path).expect("open");
+        // Externally change the file; buffer is not modified.
+        std::fs::write(&path, b"second\n").expect("rewrite");
+        let raised = editor.check_external_change();
+        assert!(!raised, "no prompt expected for unmodified buffer");
+        assert_eq!(editor.active_document().buffer_text(), "second");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn editor_prompts_on_conflicting_change() {
+        let path = temp_path("prompt");
+        std::fs::write(&path, b"base\n").expect("write");
+        let mut editor = EditorState::new();
+        editor.open_file(&path).expect("open");
+        // Local edit.
+        editor.active_document_mut().lines = vec!["local".to_string()];
+        editor.active_document_mut().modified = true;
+        // External edit.
+        std::fs::write(&path, b"remote\n").expect("rewrite");
+        assert!(editor.check_external_change());
+        assert!(editor.external_prompt.is_some());
+
+        // Enter review, pick ours, accept.
+        editor.resolve_external(ExternalChoice::Review);
+        editor.review_set_choice(0, ConflictChoice::Ours);
+        editor.review_accept();
+        assert!(editor.external_prompt.is_none());
+        assert_eq!(editor.active_document().buffer_text(), "local");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_choice_discards_local_edits() {
+        let path = temp_path("reload");
+        std::fs::write(&path, b"base\n").expect("write");
+        let mut editor = EditorState::new();
+        editor.open_file(&path).expect("open");
+        editor.active_document_mut().lines = vec!["local".to_string()];
+        editor.active_document_mut().modified = true;
+        std::fs::write(&path, b"remote\n").expect("rewrite");
+        assert!(editor.check_external_change());
+        editor.resolve_external(ExternalChoice::Reload);
+        assert_eq!(editor.active_document().buffer_text(), "remote");
+        assert!(!editor.active_document().modified);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -61,6 +61,16 @@ mod cfg_mask {
     pub const UP: u8 = 1 << 4;
 }
 
+/// Routing-table write/read syscalls (`kernel/src/syscall/number.rs`). These
+/// carry *non-default* routes: `SYS_NET_ROUTE_ADD` takes a 16-byte record
+/// `[dest(4), mask(4), gateway(4), metric(4, LE)]`, `SYS_NET_ROUTE_DEL` takes
+/// an 8-byte `[dest(4), mask(4)]`, and `SYS_NET_ROUTE_LIST` fills a buffer with
+/// 16-byte records and returns the count. The *default* route lives in the
+/// interface gateway (`SYS_NET_IF_CONFIG`), not here (see design-decisions §52).
+const SYS_NET_ROUTE_ADD: u64 = 857;
+const SYS_NET_ROUTE_DEL: u64 = 858;
+const SYS_NET_ROUTE_LIST: u64 = 859;
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
@@ -135,6 +145,129 @@ fn net_if_config(rec: &[u8; 18]) -> i64 {
             0,
         )
     }
+}
+
+/// Size of a `SYS_NET_ROUTE_ADD` / `SYS_NET_ROUTE_LIST` record.
+const ROUTE_REC_SIZE: usize = 16;
+/// Size of a `SYS_NET_ROUTE_DEL` record.
+const ROUTE_DEL_SIZE: usize = 8;
+
+/// Build the 16-byte `SYS_NET_ROUTE_ADD` / listing record. The metric is stored
+/// little-endian to match the kernel's `u32::from_le_bytes` decode. Pure (no
+/// syscall) so it is unit-testable on the host.
+///
+/// Layout: `[0..4]` dest, `[4..8]` mask, `[8..12]` gateway, `[12..16]` metric.
+fn build_route_record(dest: [u8; 4], mask: [u8; 4], gateway: [u8; 4], metric: u32) -> [u8; 16] {
+    let mut rec = [0u8; 16];
+    rec[0..4].copy_from_slice(&dest);
+    rec[4..8].copy_from_slice(&mask);
+    rec[8..12].copy_from_slice(&gateway);
+    rec[12..16].copy_from_slice(&metric.to_le_bytes());
+    rec
+}
+
+/// Build the 8-byte `SYS_NET_ROUTE_DEL` record. Pure (no syscall).
+///
+/// Layout: `[0..4]` dest, `[4..8]` mask.
+fn build_route_del_record(dest: [u8; 4], mask: [u8; 4]) -> [u8; 8] {
+    let mut rec = [0u8; 8];
+    rec[0..4].copy_from_slice(&dest);
+    rec[4..8].copy_from_slice(&mask);
+    rec
+}
+
+/// Add a route via `SYS_NET_ROUTE_ADD`. Returns the kernel's signed result
+/// (0 on success, negative errno on failure).
+fn net_route_add(rec: &[u8; ROUTE_REC_SIZE]) -> i64 {
+    // SAFETY: `rec` is exactly `ROUTE_REC_SIZE` bytes, matching the kernel's
+    // contract; the kernel only reads (never writes) the record.
+    unsafe {
+        syscall4(
+            SYS_NET_ROUTE_ADD,
+            rec.as_ptr() as u64,
+            rec.len() as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Delete a route via `SYS_NET_ROUTE_DEL`. Returns the kernel's signed result
+/// (0 on success, negative errno on failure).
+fn net_route_del(rec: &[u8; ROUTE_DEL_SIZE]) -> i64 {
+    // SAFETY: `rec` is exactly `ROUTE_DEL_SIZE` bytes, matching the kernel's
+    // contract; the kernel only reads (never writes) the record.
+    unsafe {
+        syscall4(
+            SYS_NET_ROUTE_DEL,
+            rec.as_ptr() as u64,
+            rec.len() as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// List routes via `SYS_NET_ROUTE_LIST`. Fills `buf` with 16-byte records and
+/// returns the kernel's signed result (route count on success, negative errno
+/// on failure). Read-only (not root-gated).
+fn net_route_list(buf: &mut [u8]) -> i64 {
+    // SAFETY: `buf` is a valid writable slice of `buf.len()` bytes; the kernel
+    // writes at most `buf.len()` bytes (whole 16-byte records only).
+    unsafe {
+        syscall4(
+            SYS_NET_ROUTE_LIST,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Decode one 16-byte route record into dest/mask/gateway bytes and metric.
+/// Pure (no syscall) so it is unit-testable on the host.
+fn parse_route_record(rec: &[u8; ROUTE_REC_SIZE]) -> ([u8; 4], [u8; 4], [u8; 4], u32) {
+    let mut dest = [0u8; 4];
+    dest.copy_from_slice(&rec[0..4]);
+    let mut mask = [0u8; 4];
+    mask.copy_from_slice(&rec[4..8]);
+    let mut gateway = [0u8; 4];
+    gateway.copy_from_slice(&rec[8..12]);
+    let mut metric_bytes = [0u8; 4];
+    metric_bytes.copy_from_slice(&rec[12..16]);
+    (dest, mask, gateway, u32::from_le_bytes(metric_bytes))
+}
+
+/// Read the caller's netns route table via `SYS_NET_ROUTE_LIST`. Returns an
+/// empty vec on any error (e.g. the syscall is unavailable). The kernel caps
+/// the table at 32 entries, so a 32-record buffer always suffices.
+fn read_routes_from_kernel() -> Vec<RouteEntry> {
+    let mut routes = Vec::new();
+    let mut buf = [0u8; ROUTE_REC_SIZE * 32];
+    let ret = net_route_list(&mut buf);
+    if ret <= 0 {
+        return routes;
+    }
+    let count = (ret as usize).min(buf.len() / ROUTE_REC_SIZE);
+    for i in 0..count {
+        let start = i * ROUTE_REC_SIZE;
+        let Some(chunk) = buf.get(start..start + ROUTE_REC_SIZE) else {
+            break;
+        };
+        let mut rec = [0u8; ROUTE_REC_SIZE];
+        rec.copy_from_slice(chunk);
+        let (dest, mask, gateway, metric) = parse_route_record(&rec);
+        routes.push(RouteEntry {
+            destination: fmt_ipv4(dest),
+            gateway: fmt_ipv4(gateway),
+            mask: fmt_ipv4(mask),
+            iface: "eth0".to_string(),
+            metric,
+            flags: String::new(),
+        });
+    }
+    routes
 }
 
 // ============================================================================
@@ -570,14 +703,16 @@ fn read_routes() -> Vec<RouteEntry> {
             }
         }
 
-    // Last resort: synthesize the default route from the kernel's interface
-    // record. /proc/net/route(s) are not populated, so this is the only live
-    // source for the default gateway (TD18 read-path wiring).
-    if routes.is_empty()
-        && let Some(info) = query_net_if_info()
-        && let Some(route) = route_from_net_if_info(&info)
-    {
-        routes.push(route);
+    // /proc/net/route(s) are not populated on Slate OS, so the live sources are
+    // the kernel route table (SYS_NET_ROUTE_LIST, non-default routes) and the
+    // interface record (SYS_NET_IF_INFO, the default route). Merge both.
+    if routes.is_empty() {
+        routes.extend(read_routes_from_kernel());
+        if let Some(info) = query_net_if_info()
+            && let Some(route) = route_from_net_if_info(&info)
+        {
+            routes.push(route);
+        }
     }
 
     routes
@@ -932,6 +1067,7 @@ fn cmd_route_add(args: &[String]) {
     let dest = &args[0];
     let mut gateway = None;
     let mut iface = None;
+    let mut metric: u32 = 0;
 
     let mut i = 1;
     while i < args.len() {
@@ -952,25 +1088,28 @@ fn cmd_route_add(args: &[String]) {
                     i += 1;
                 }
             }
+            "metric" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u32>() {
+                        Ok(m) => metric = m,
+                        Err(_) => {
+                            eprintln!("Invalid metric: {}", args[i + 1]);
+                            process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
             _ => i += 1,
         }
     }
 
     let dev = iface.unwrap_or_else(|| "eth0".to_string());
 
-    // The kernel models a single default gateway on the primary interface (no
-    // general routing table yet), so only the default route is representable:
-    // `ip route add default via <gw>` sets that gateway. Any other destination
-    // needs a route-table write syscall that does not exist yet (TD18 follow-up).
-    if !is_default_route(dest) {
-        eprintln!(
-            "ip: adding a non-default route ({dest}) is not supported \
-             (only 'default' is representable via the interface gateway)"
-        );
-        process::exit(1);
-    }
     let Some(gw_str) = gateway else {
-        eprintln!("ip: 'route add default' requires 'via <gateway>'");
+        eprintln!("ip: 'route add' requires 'via <gateway>'");
         process::exit(1);
     };
     let Some(gw_bytes) = ip_to_bytes(&gw_str) else {
@@ -978,12 +1117,44 @@ fn cmd_route_add(args: &[String]) {
         process::exit(1);
     };
 
-    let rec = build_config_record(None, None, Some(gw_bytes), None, None);
-    let ret = net_if_config(&rec);
+    // The default route (0.0.0.0/0) is owned by the interface gateway
+    // (SYS_NET_IF_CONFIG), not the route table (design-decisions §52). Every
+    // other prefix is a route-table entry written via SYS_NET_ROUTE_ADD.
+    if is_default_route(dest) {
+        let rec = build_config_record(None, None, Some(gw_bytes), None, None);
+        let ret = net_if_config(&rec);
+        if ret < 0 {
+            config_fail(&format!("Failed to add default route via {gw_str}"), ret);
+        }
+        println!("Added default route via {gw_str} dev {dev}");
+        return;
+    }
+
+    // Non-default route: parse `<dest>[/<prefix>]` (bare address => /32 host
+    // route, matching iproute2), reject 0.0.0.0/0 (that's the default route).
+    let (dest_str, prefix_str) = dest.split_once('/').unwrap_or((dest.as_str(), "32"));
+    let Some(dest_bytes) = ip_to_bytes(dest_str) else {
+        eprintln!("Invalid destination address: {dest_str}");
+        process::exit(1);
+    };
+    let prefix: u8 = match prefix_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Invalid prefix length: {prefix_str}");
+            process::exit(1);
+        }
+    };
+    let Some(mask_bytes) = prefix_to_mask(prefix) else {
+        eprintln!("Prefix length out of range (0..=32): {prefix}");
+        process::exit(1);
+    };
+
+    let rec = build_route_record(dest_bytes, mask_bytes, gw_bytes, metric);
+    let ret = net_route_add(&rec);
     if ret < 0 {
         config_fail(&format!("Failed to add route {dest} via {gw_str}"), ret);
     }
-    println!("Added route {dest} via {gw_str} dev {dev}");
+    println!("Added route {dest} via {gw_str} dev {dev} metric {metric}");
 }
 
 /// True if a route destination refers to the default route (`default` or
@@ -993,17 +1164,39 @@ fn is_default_route(dest: &str) -> bool {
 }
 
 fn cmd_route_del(dest: &str) {
-    // Only the default route is representable (see `cmd_route_add`); deleting it
-    // clears the interface gateway.
-    if !is_default_route(dest) {
-        eprintln!(
-            "ip: deleting a non-default route ({dest}) is not supported \
-             (only 'default' is representable via the interface gateway)"
-        );
-        process::exit(1);
+    // The default route (0.0.0.0/0) lives in the interface gateway; deleting it
+    // clears that gateway (design-decisions §52).
+    if is_default_route(dest) {
+        let rec = build_config_record(None, None, Some([0, 0, 0, 0]), None, None);
+        let ret = net_if_config(&rec);
+        if ret < 0 {
+            config_fail("Failed to delete default route", ret);
+        }
+        println!("Deleted default route");
+        return;
     }
-    let rec = build_config_record(None, None, Some([0, 0, 0, 0]), None, None);
-    let ret = net_if_config(&rec);
+
+    // Non-default route: parse `<dest>[/<prefix>]` (bare address => /32) and
+    // remove the matching route-table entry via SYS_NET_ROUTE_DEL.
+    let (dest_str, prefix_str) = dest.split_once('/').unwrap_or((dest, "32"));
+    let Some(dest_bytes) = ip_to_bytes(dest_str) else {
+        eprintln!("Invalid destination address: {dest_str}");
+        process::exit(1);
+    };
+    let prefix: u8 = match prefix_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Invalid prefix length: {prefix_str}");
+            process::exit(1);
+        }
+    };
+    let Some(mask_bytes) = prefix_to_mask(prefix) else {
+        eprintln!("Prefix length out of range (0..=32): {prefix}");
+        process::exit(1);
+    };
+
+    let rec = build_route_del_record(dest_bytes, mask_bytes);
+    let ret = net_route_del(&rec);
     if ret < 0 {
         config_fail(&format!("Failed to delete route {dest}"), ret);
     }
@@ -1270,6 +1463,34 @@ mod tests {
         assert!(is_default_route("0.0.0.0/0"));
         assert!(!is_default_route("10.0.0.0/8"));
         assert!(!is_default_route("192.168.1.0/24"));
+    }
+
+    #[test]
+    fn test_build_route_record() {
+        // 203.0.113.0/24 via 10.0.2.250 metric 5.
+        let rec = build_route_record([203, 0, 113, 0], [255, 255, 255, 0], [10, 0, 2, 250], 5);
+        assert_eq!(&rec[0..4], &[203, 0, 113, 0]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(&rec[8..12], &[10, 0, 2, 250]);
+        // Metric is little-endian.
+        assert_eq!(&rec[12..16], &[5, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_build_route_del_record() {
+        let rec = build_route_del_record([203, 0, 113, 0], [255, 255, 255, 0]);
+        assert_eq!(&rec[0..4], &[203, 0, 113, 0]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+    }
+
+    #[test]
+    fn test_parse_route_record_roundtrip() {
+        let rec = build_route_record([172, 16, 0, 0], [255, 240, 0, 0], [10, 0, 2, 2], 300);
+        let (dest, mask, gw, metric) = parse_route_record(&rec);
+        assert_eq!(dest, [172, 16, 0, 0]);
+        assert_eq!(mask, [255, 240, 0, 0]);
+        assert_eq!(gw, [10, 0, 2, 2]);
+        assert_eq!(metric, 300);
     }
 
     #[test]

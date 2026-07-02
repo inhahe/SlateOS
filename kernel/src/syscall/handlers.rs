@@ -9949,6 +9949,144 @@ pub fn sys_net_if_config(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_NET_ROUTE_ADD` — add an IPv4 route to the caller's netns routing table.
+///
+/// See [`SYS_NET_ROUTE_ADD`] for the 16-byte record layout. Root-gated. Rejects
+/// the default route (`0.0.0.0/0`) — that is owned by the interface gateway
+/// ([`sys_net_if_config`], design-decisions §52).
+///
+/// [`SYS_NET_ROUTE_ADD`]: crate::syscall::number::SYS_NET_ROUTE_ADD
+pub fn sys_net_route_add(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+
+    let in_ptr = args.arg0;
+    let buf_len = args.arg1 as usize;
+
+    const REC_SIZE: usize = 16;
+    if in_ptr == 0 || buf_len < REC_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
+        return SyscallResult::err(e);
+    }
+    let mut record = [0u8; REC_SIZE];
+    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
+    unsafe {
+        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
+    }
+
+    // Destructure by value: named fields, no indexing/arithmetic on the path.
+    let [d0, d1, d2, d3, m0, m1, m2, m3, g0, g1, g2, g3, mt0, mt1, mt2, mt3] = record;
+    let destination = crate::netns::Ipv4Addr([d0, d1, d2, d3]);
+    let mask = crate::netns::Ipv4Addr([m0, m1, m2, m3]);
+    let gateway = crate::netns::Ipv4Addr([g0, g1, g2, g3]);
+    let metric = u32::from_le_bytes([mt0, mt1, mt2, mt3]);
+
+    // The default route is owned by the interface gateway, not the table.
+    if destination == crate::netns::Ipv4Addr([0, 0, 0, 0])
+        && mask == crate::netns::Ipv4Addr([0, 0, 0, 0])
+    {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let ns = crate::sched::current_task_net_ns();
+    match crate::netns::add_route(ns, destination, mask, gateway, metric) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_ROUTE_DEL` — remove an IPv4 route from the caller's netns table.
+///
+/// See [`SYS_NET_ROUTE_DEL`] for the 8-byte record layout. Root-gated.
+///
+/// [`SYS_NET_ROUTE_DEL`]: crate::syscall::number::SYS_NET_ROUTE_DEL
+pub fn sys_net_route_del(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+
+    let in_ptr = args.arg0;
+    let buf_len = args.arg1 as usize;
+
+    const REC_SIZE: usize = 8;
+    if in_ptr == 0 || buf_len < REC_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
+        return SyscallResult::err(e);
+    }
+    let mut record = [0u8; REC_SIZE];
+    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
+    unsafe {
+        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
+    }
+
+    let [d0, d1, d2, d3, m0, m1, m2, m3] = record;
+    let destination = crate::netns::Ipv4Addr([d0, d1, d2, d3]);
+    let mask = crate::netns::Ipv4Addr([m0, m1, m2, m3]);
+
+    let ns = crate::sched::current_task_net_ns();
+    match crate::netns::remove_route(ns, destination, mask) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_ROUTE_LIST` — enumerate the caller's netns routing table.
+///
+/// See [`SYS_NET_ROUTE_LIST`]. Read-only. Writes 16-byte records (same layout
+/// as [`sys_net_route_add`]) up to the buffer capacity; returns the count.
+///
+/// [`SYS_NET_ROUTE_LIST`]: crate::syscall::number::SYS_NET_ROUTE_LIST
+pub fn sys_net_route_list(args: &SyscallArgs) -> SyscallResult {
+    let buf_ptr = args.arg0;
+    let buf_len = args.arg1 as usize;
+
+    if buf_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const RECORD_SIZE: usize = 16;
+    let max_records = buf_len / RECORD_SIZE;
+    if max_records == 0 {
+        return SyscallResult::ok(0);
+    }
+    // Validate the full writable span we might touch (bounded by capacity).
+    let ns = crate::sched::current_task_net_ns();
+    let entries = crate::netns::routes(ns);
+    let to_write = entries.len().min(max_records);
+    if to_write == 0 {
+        return SyscallResult::ok(0);
+    }
+    let span = to_write.saturating_mul(RECORD_SIZE);
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, span) {
+        return SyscallResult::err(e);
+    }
+
+    let mut written: usize = 0;
+    for route in entries.iter().take(to_write) {
+        let mut record = [0u8; RECORD_SIZE];
+        record[0..4].copy_from_slice(&route.destination.0);
+        record[4..8].copy_from_slice(&route.mask.0);
+        record[8..12].copy_from_slice(&route.gateway.0);
+        record[12..16].copy_from_slice(&route.metric.to_le_bytes());
+
+        // SAFETY: `buf_ptr..buf_ptr+span` validated writable above; each record
+        // lands within that span (written < to_write, offset < span).
+        let dst = (buf_ptr as usize).wrapping_add(written.wrapping_mul(RECORD_SIZE)) as *mut u8;
+        unsafe {
+            core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+        }
+        written = written.wrapping_add(1);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(written as i64)
+}
+
 /// `SYS_ARP_TABLE` — query the ARP cache.
 ///
 /// `arg0`: pointer to output buffer.

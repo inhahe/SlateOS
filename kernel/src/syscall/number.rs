@@ -2965,6 +2965,68 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 /// the caller is not root, `InvalidArgument` on a bad pointer/length/mask).
 pub const SYS_NET_IF_CONFIG: u64 = 856;
 
+/// `SYS_NET_ROUTE_ADD` — add an IPv4 route to the caller's routing table.
+///
+/// Native syscall behind `ip route add <net>/<prefix> via <gw>` and
+/// `route add -net <net> gw <gw>` for **non-default** routes. Operates on the
+/// caller's network namespace (root netns for an unnamespaced process). The
+/// *default* route (`0.0.0.0/0`) is not stored here — it remains the interface
+/// gateway set via [`SYS_NET_IF_CONFIG`] (see design-decisions §52).
+///
+/// **Root-gated** (`CAP_NET_ADMIN`-class): the routing table is a system-wide
+/// side effect.
+///
+/// `arg0`: pointer to a 16-byte route record.
+/// `arg1`: record length in bytes (must be >= 16).
+///
+/// Record layout (network octet order for addresses, little-endian for metric):
+/// ```text
+/// [0..4]   destination network address
+/// [4..8]   destination subnet mask (e.g. 255.255.255.0 for /24)
+/// [8..12]  next-hop gateway (0.0.0.0 = directly connected)
+/// [12..16] metric (u32 LE; lower = preferred)
+/// ```
+///
+/// Rejects a `0.0.0.0/0` destination (`InvalidArgument`) — use
+/// [`SYS_NET_IF_CONFIG`] for the default gateway. Returns 0 on success, or a
+/// negative `KernelError` (`PermissionDenied`, `InvalidArgument`, or
+/// `ResourceExhausted` if the table is full).
+pub const SYS_NET_ROUTE_ADD: u64 = 857;
+
+/// `SYS_NET_ROUTE_DEL` — remove an IPv4 route from the caller's routing table.
+///
+/// Native syscall behind `ip route del <net>/<prefix>` and
+/// `route del -net <net>` for **non-default** routes. Removes the first route
+/// matching `destination`+`mask` in the caller's network namespace.
+///
+/// **Root-gated** (`CAP_NET_ADMIN`-class).
+///
+/// `arg0`: pointer to an 8-byte record.
+/// `arg1`: record length in bytes (must be >= 8).
+///
+/// Record layout:
+/// ```text
+/// [0..4]   destination network address
+/// [4..8]   destination subnet mask
+/// ```
+///
+/// Returns 0 on success, or a negative `KernelError` (`PermissionDenied`,
+/// `InvalidArgument`, or `NotFound` if no route matches).
+pub const SYS_NET_ROUTE_DEL: u64 = 858;
+
+/// `SYS_NET_ROUTE_LIST` — enumerate the caller's IPv4 routing table.
+///
+/// Read-only (not gated): the routing table is not sensitive to read. Backs the
+/// non-default rows of `ip route show` / `route -n`; the tools union these with
+/// the interface default gateway from [`SYS_NET_IF_INFO`].
+///
+/// `arg0`: pointer to an output buffer.
+/// `arg1`: buffer length in bytes.
+///
+/// Writes 16-byte records (same layout as [`SYS_NET_ROUTE_ADD`]) up to the
+/// buffer capacity. Returns the number of records written (>= 0).
+pub const SYS_NET_ROUTE_LIST: u64 = 859;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

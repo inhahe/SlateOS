@@ -985,6 +985,55 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// Verify that `resolve_next_hop` for the root namespace consults the routing
+/// table (populated via `SYS_NET_ROUTE_ADD`) before falling back to the
+/// interface gateway. Uses a TEST-NET-3 (`203.0.113.0/24`, RFC 5737) prefix so
+/// it can never collide with real traffic, and always removes the route again.
+///
+/// This is a *separate* entry point from [`self_test`] because it depends on
+/// `netns::init()`, which runs *after* the main IPv4 self-test on the boot
+/// path. Call it from boot only after the netns subsystem is initialized.
+pub fn root_route_next_hop_self_test() -> KernelResult<()> {
+    use crate::netns::{self, ROOT_NS};
+
+    crate::serial_println!("[ipv4] Running root route-table next-hop self-test...");
+
+    // netns accessors panic (not `Err`) when the table is `None`; guard so a
+    // mis-ordered boot can't panic here.
+    if !netns::is_initialized() {
+        crate::serial_println!("[ipv4]   root route table next-hop: SKIP (netns not ready)");
+        return Ok(());
+    }
+
+    let dest = netns::Ipv4Addr([203, 0, 113, 0]);
+    let mask = netns::Ipv4Addr([255, 255, 255, 0]);
+    let gw = netns::Ipv4Addr([10, 0, 2, 250]);
+
+    netns::add_route(ROOT_NS, dest, mask, gw, 0)?;
+
+    let our_ip = Ipv4Addr([10, 0, 2, 15]);
+    let dst = Ipv4Addr([203, 0, 113, 5]);
+    let next_hop = resolve_next_hop(ROOT_NS, our_ip, dst);
+
+    // Remove the test route before asserting so a failure can't leak it into
+    // the live root routing table.
+    if let Err(e) = netns::remove_route(ROOT_NS, dest, mask) {
+        crate::serial_println!("[ipv4]   FAIL: could not remove test route: {:?}", e);
+        return Err(e);
+    }
+
+    if next_hop.0 != [10, 0, 2, 250] {
+        crate::serial_println!(
+            "[ipv4]   FAIL: root route next-hop = {:?}, expected 10.0.2.250",
+            next_hop.0
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+
+    crate::serial_println!("[ipv4]   root route table next-hop: OK");
+    Ok(())
+}
+
 /// Test ip_checksum with a known-good header.
 fn test_ip_checksum() -> KernelResult<()> {
     // Build a valid IP header with build_packet, then verify that
@@ -1327,7 +1376,21 @@ fn resolve_next_hop(
         return dst;
     }
 
-    // Root namespace: use the global interface configuration.
+    // Root namespace: consult the routing table first for a specific
+    // (non-default) route via SYS_NET_ROUTE_ADD, then fall back to the
+    // interface's default gateway / connected delivery. An empty table behaves
+    // exactly as before this was added (see design-decisions §52).
+    if let Some(gw) = crate::netns::route_lookup(
+        crate::netns::ROOT_NS,
+        crate::netns::Ipv4Addr(dst.0),
+    ) {
+        return if gw == crate::netns::Ipv4Addr::UNSPECIFIED {
+            dst // Directly-connected route (gateway 0.0.0.0).
+        } else {
+            Ipv4Addr(gw.0) // Route via gateway.
+        };
+    }
+
     let info = interface::info();
     if !our_ip.is_unspecified()
         && !info.gateway.is_unspecified()

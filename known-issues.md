@@ -4232,13 +4232,27 @@ client-side number correction:
   `route add/del default gw <gw>` → GATEWAY bit (clearing to 0 on del);
   `dhcpcd` applies a whole lease (IP|MASK|GATEWAY|UP) in one call. Fields the
   kernel model can't represent are now honest hard errors instead of silent
-  fake-success: `ifconfig` MTU/explicit-broadcast, and *non-default* routes in
-  both `ip route` and `route` (which report "only the default route is
-  representable via the interface gateway"). Host tests green: `ifconfig` 38,
-  `ip` 20, `route` 12, `dhcpcd` 110. **Still TODO:** (b) a general *route
-  table* (non-default add/del route) and *firewall* (`nft`/`fw`) writes still
-  have no native syscall — separate follow-ups needing new syscalls, not just
-  rewiring. Original harm analysis (traced
+  fake-success: `ifconfig` MTU/explicit-broadcast. Host tests green: `ifconfig`
+  38, `ip` 23, `route` 15, `dhcpcd` 110.
+  **Route-table follow-up (b) — DONE 2026-07-02.** Three native route syscalls
+  now exist (`kernel/src/syscall/number.rs`): `SYS_NET_ROUTE_ADD=857`
+  (root-gated, 16-byte record `[dest(4), mask(4), gateway(4), metric(4 LE)]`,
+  rejects 0.0.0.0/0), `SYS_NET_ROUTE_DEL=858` (root-gated, 8-byte
+  `[dest(4), mask(4)]`), `SYS_NET_ROUTE_LIST=859` (read-only, fills a buffer
+  with 16-byte records, returns count). All operate on the caller's netns via
+  `crate::sched::current_task_net_ns()` and the pre-existing per-namespace
+  `netns` route table (`add_route`/`remove_route`/`routes`). The *default*
+  route (0.0.0.0/0) still lives in the interface gateway (SYS_NET_IF_CONFIG),
+  not the table — see design-decisions §52; `resolve_next_hop` for the root
+  namespace now consults `route_lookup(ROOT_NS, dst)` before the interface
+  gateway fallback. Boot self-test: `ipv4::root_route_next_hop_self_test()`
+  (runs after `netns::init()`; adds a TEST-NET-3 route, checks the next hop,
+  removes it). The `ip` tool (`ip route add/del <prefix> via <gw> [metric]`)
+  and `route` tool (`route add/del -net/-host …`, and `route flush`) now issue
+  these syscalls for non-default routes and list the table via
+  `SYS_NET_ROUTE_LIST`; the default-route path still uses the interface
+  gateway. **Still TODO:** *firewall* (`nft`/`fw`) writes still have no native
+  syscall — a separate follow-up needing new syscalls, not just rewiring. Original harm analysis (traced
   2026-06-01): with a Socket-WRITE cap the old call silently binds+leaks a UDP
   socket on a low port and misleads the user that the config change applied;
   without the cap it fails. **Write-path harm neutered 2026-06-14** for all six

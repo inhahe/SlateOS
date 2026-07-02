@@ -3430,6 +3430,12 @@ extern "C" fn kernel_main() -> ! {
     netns::init();
     netns::self_test();
 
+    // Verify the root-namespace routing table feeds resolve_next_hop (the
+    // SYS_NET_ROUTE_ADD path). Runs here because it needs netns::init().
+    if let Err(e) = net::ipv4::root_route_next_hop_self_test() {
+        serial_println!("[WARN] IPv4 root route next-hop self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++p8b: Virtual Ethernet (veth) pairs init + self-test.
     // Connected virtual links between namespaces — frame sent on one
     // end appears on the peer's RX queue.  Required for container

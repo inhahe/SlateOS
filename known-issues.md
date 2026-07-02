@@ -2889,6 +2889,62 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### EEVDF-PICK-ON. EEVDF backend `pick_next` is O(n) worst-case (non-default backend) — DEBT 2026-07-01
+
+**Where:** `kernel/src/sched/eevdf.rs`, `EevdfScheduler::pick_next` (Phase 1
+eligibility scan, ~lines 320-337). The same shape appears in the
+work-stealing `steal` path (`self.tree.iter().rev()`).
+
+**What:** The run queue is a `BTreeMap<(virtual_deadline, TaskId), EevdfEntry>`
+ordered by *deadline*, but a task is *eligible* only when
+`vruntime <= min_vruntime`. `pick_next` walks the tree from the front
+(earliest deadline) until it finds the first eligible task. Because the
+earliest-*deadline* tasks can be ineligible (higher vruntime — e.g. a
+just-preempted task re-enqueued with its accumulated vruntime but an early
+deadline), that scan can walk past many entries: **O(n) worst-case**, not the
+O(log n) the docs used to claim. This violates CLAUDE.md's hard rule that the
+scheduler's `pick_next` "must be O(1) or O(log n) — never O(n) over all tasks."
+
+**Why tolerated for now:** EEVDF is a **non-default, opt-in** backend
+(`SchedulerBackend::from_id(BACKEND_EEVDF)`); the default `PriorityRoundRobin`
+is strictly O(1). In the common case (most waiting tasks eligible) the scan
+stops almost immediately, so the O(n) only bites under an adversarial
+early-deadline/high-vruntime mix. The docs (module header, `pick_next`, and
+`backend.rs` variant doc) were corrected 2026-07-01 to state the real O(n)
+worst-case so nobody trusts a false O(log n) guarantee. It was NOT rewritten
+because a correct fix is a subtle, fairness-critical redesign of a component
+the operator won't line-review, tested only by a boot self-test — the risk of
+introducing a subtle starvation/unfairness regression outweighs the benefit
+for a non-default backend.
+
+**Secondary defect found while analysing this:** `update_min_vruntime`
+(~line 291) computes its candidate from `self.tree.values().next()` — the
+*earliest-deadline* task's vruntime, NOT the true minimum vruntime across the
+queue (the tree is keyed by deadline, not vruntime). So the `min_vruntime`
+reference point (hence the eligibility boundary itself) is approximate. A
+proper fix must correct this too. It is monotonic (only ever advances,
+line ~300), which is the one property a correct redesign can rely on.
+
+**Proper fix (do before EEVDF is ever made default or heavily used):** Linux
+solves this with an **augmented rb-tree** — each node caches its subtree's
+min vruntime, letting `__pick_eevdf` (`kernel/sched/fair.c`, v6.6+) find the
+earliest-deadline *eligible* task in O(log n). Rust's
+`alloc::collections::BTreeMap` is not augmentable, so this needs either
+(a) a custom intrusive augmented tree (unsafe, substantial), or (b) a
+redesign into split **eligible** (keyed by deadline) / **ineligible** (keyed
+by vruntime) structures with corrected, true-minimum `min_vruntime`
+bookkeeping — promoting ineligible→eligible as `min_vruntime` advances
+(correct because a waiting task's vruntime is fixed and `min_vruntime` is
+monotonic, so each task promotes at most once per residency), amortised
+O(log n). Option (b) stays in safe std collections but the Phase-2
+"no eligible → earliest deadline overall" fallback still needs a deadline
+ordering over the ineligible set, so it is not a trivial two-map swap.
+
+**Trigger to do it properly:** any move to make EEVDF a default backend, ship
+it as the recommended "interactive desktop" scheduler, or run it under
+workloads with many runnable tasks per CPU. Flag to operator so they can
+decide whether to prioritise the rewrite vs. keep EEVDF opt-in.
+
 ### TD32. Container rootfs jail uses the extracted `lower` dir directly (no overlay CoW) and only jails absolute paths
 
 **Where:** `kernel/src/kshell.rs` (`oci run`, `cmd_oci`) sets the container's

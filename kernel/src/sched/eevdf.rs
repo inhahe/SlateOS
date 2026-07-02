@@ -24,9 +24,28 @@
 //! ## Data Structure
 //!
 //! The run queue is a `BTreeMap<(u64, TaskId), EevdfEntry>` keyed by
-//! `(virtual_deadline, task_id)`.  This gives O(log n) insertion,
-//! removal, and pick_next.  A reverse index `BTreeMap<TaskId, u64>`
-//! maps task IDs to their deadlines for O(log n) dequeue-by-ID.
+//! `(virtual_deadline, task_id)`.  This gives O(log n) insertion and
+//! removal.  A reverse index `BTreeMap<TaskId, u64>` maps task IDs to
+//! their deadlines for O(log n) dequeue-by-ID.
+//!
+//! **Known limitation (`pick_next` is O(n) worst-case).** Because the
+//! tree is ordered by *deadline* but eligibility is a predicate on
+//! *vruntime*, selecting the earliest-deadline *eligible* task requires
+//! scanning the tree from the front past any earlier-deadline-but-
+//! ineligible tasks (see `pick_next`).  In the common case (most waiting
+//! tasks are eligible) this stops almost immediately, but an adversarial
+//! mix of early-deadline/high-vruntime tasks makes it O(n).  This
+//! violates the project's "scheduler must never be O(n) over all tasks"
+//! rule and is tracked as tech debt in `known-issues.md` (EEVDF-PICK-ON).
+//! It is tolerated for now only because EEVDF is a non-default, opt-in
+//! backend (the default `PriorityRoundRobin` is strictly O(1)).  The
+//! proper fix is a Linux-style augmented tree (each node caching its
+//! subtree's min vruntime, à la `kernel/sched/fair.c` `__pick_eevdf`),
+//! which Rust's non-augmentable `alloc::collections::BTreeMap` cannot
+//! express — so it needs a custom intrusive tree, or a redesign into
+//! split eligible/ineligible structures with corrected `min_vruntime`
+//! bookkeeping.  This must be done before EEVDF is made a default or
+//! heavily-used backend.
 //!
 //! ## Weight Table
 //!
@@ -37,7 +56,9 @@
 //!
 //! ## Performance
 //!
-//! - `pick_next`: O(log n) — iterate BTreeMap from front until eligible
+//! - `pick_next`: O(n) worst-case — scans the deadline-ordered BTreeMap
+//!   from the front until an *eligible* task is found (usually O(1) in
+//!   practice; see "Known limitation" above and `known-issues.md`)
 //! - `enqueue`: O(log n) — BTreeMap insert
 //! - `dequeue`: O(log n) — reverse index lookup + BTreeMap remove
 //! - `tick`: O(1) — decrement counter, advance vruntime
@@ -311,6 +332,14 @@ impl EevdfScheduler {
     /// If no task is eligible (can happen briefly during vruntime
     /// adjustments), we fall back to the task with the absolute earliest
     /// deadline — this guarantees forward progress.
+    ///
+    /// **Complexity: O(n) worst-case.** The front-to-back scan can walk
+    /// past many earlier-deadline-but-ineligible tasks before finding an
+    /// eligible one.  In practice most waiting tasks are eligible so it
+    /// stops almost immediately, but the worst case is linear.  See the
+    /// module-level "Known limitation" note and `known-issues.md`
+    /// (EEVDF-PICK-ON) for the proper augmented-tree fix.  This is
+    /// tolerated only because EEVDF is a non-default, opt-in backend.
     #[must_use]
     pub fn pick_next(&mut self) -> Option<TaskId> {
         if self.tree.is_empty() {

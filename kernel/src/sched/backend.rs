@@ -122,8 +122,11 @@ pub enum SchedulerBackend {
     PriorityRR(PriorityRoundRobin),
 
     /// EEVDF: virtual-runtime tracking with virtual deadlines.  Better
-    /// fairness guarantees and bounded latency.  O(log n) pick_next via
-    /// BTreeMap.  Best for interactive desktop workloads.
+    /// fairness guarantees and bounded latency.  Non-default, opt-in.
+    /// NOTE: `pick_next` is O(n) worst-case (deadline-ordered tree scanned
+    /// past ineligible entries) — tracked as tech debt EEVDF-PICK-ON in
+    /// `known-issues.md`; must be fixed before EEVDF becomes a default.
+    /// Best for interactive desktop workloads.
     Eevdf(EevdfScheduler),
 
     /// Deadline: EDF with admission control and budget throttling.

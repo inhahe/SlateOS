@@ -407,3 +407,74 @@ option A/B would reuse them. Related: known-issues TD18 residual.
 
 **Status** — OPEN (awaiting operator steer on A/B/C; `fw` native path already
 done, so this is not blocking any native firewall use).
+
+---
+
+## Q22 which big initiative to greenlight next? — OPEN
+
+**Date raised:** 2026-07-02
+**Raised by:** Claude (autonomous), after completing the operator's editor
+external-change merge request (todo2.txt) and doing a full cross-phase roadmap
+survey.
+
+**The situation.** The operator's explicit request (editors merge-on-external-
+change) is done and committed. A full survey of `roadmap.md` shows the project
+is now extraordinarily mature: **all** of Phase 4.1 core applications (~230
+apps), 4.2 package manager, 4.5 remote desktop, 5.4 advanced security, and 5.7
+installation wizard are `[x]`; Phase 1/2/3 core subsystems are `[x]`. Every
+**substantial** remaining roadmap item falls into one of two buckets that a
+single autonomous session should not just start unsupervised:
+
+1. **Giant external ports** — CLAUDE.md explicitly reserves "get operator
+   go-ahead before a giant external port." These are: 4.3 Chromium + web-app
+   framework + VS Code + Thunderbird; 4.4 dev toolchain (gcc/cmake/make, Rust
+   toolchain, CPython, the **fastpy** compiler port); 3.2 Mesa/OpenGL; 3.1 GPU
+   drivers (AMDGPU/i915) — see also Q18; 5.1 `bash`; 5.2 Btrfs/F2FS/NTFS; the
+   Docker runtime port. These are gated on **prioritization + prerequisites**,
+   not on effort.
+2. **Deferred-risky internal kernel work** — landing these fully unsupervised
+   carries real, documented trust-eroding risk:
+   - The **ring-3 spawn/exec/reap SMP timing race** (known-issues B-DASH-STDIN-
+     FLAKE, B-PTHREAD-YIELDBUDGET, B-CONTAINER-JAIL-TESTRACE) that also **blocks
+     TD31** (symmetric cgroup `nr_tasks` accounting) and the deferred fork+wait
+     E2E self-test. It is *not* a lock-order inversion (the existing `lockdep`
+     graph already can't catch it), so it needs bespoke event tracing + many
+     flaky boot cycles to reproduce — poor unsupervised ROI, and a wrong "fix"
+     regresses boot stability (prior TD31 attempt hung the boot twice).
+   - The TD32 container **mount-tree / `pivot_root`** remainder — a refactor of
+     the *security-critical* path-containment resolver (a subtle error is a
+     container escape), inappropriate to land fully unsupervised.
+
+**The question.** Which do you want next? Options (not mutually exclusive):
+
+- **A. Dev toolchain first (gcc/CPython/fastpy).** *Pro:* unlocks self-hosting
+  and makes many later ports buildable *on* SlateOS; fastpy is our first-class
+  userspace language per CLAUDE.md. *Con:* large; needs the POSIX layer exercised
+  hard (mostly there — real glibc/dash already run).
+- **B. Chromium / web stack.** *Pro:* the headline "real browser + Electron-class
+  apps" capability. *Con:* the single biggest port (~35M LoC C++); needs GPU +
+  audio + full networking; effectively depends on Q18 (GPU) too.
+- **C. GPU drivers + Mesa (resolve Q18 first).** *Pro:* unblocks compositor GPU
+  acceleration and everything graphics-accelerated. *Con:* hardware-driver ports;
+  Q18 flags a virgl/Mesa ceiling.
+- **D. Have me root-cause the spawn/reap SMP race** (instrument + fix), accepting
+  it's a slow, flaky, uncertain-per-tick hunt — but it unblocks TD31 + fork/wait
+  E2E and improves boot stability. Best done when you're reachable to sanity-check
+  boot stability across several runs.
+- **E. Additional filesystems (Btrfs/F2FS/NTFS) or the container mount-tree** —
+  medium ports / a security-critical refactor.
+
+**Claude's recommendation.** **A (dev toolchain)** as the highest-leverage next
+port — it's the foundation for building everything else natively and directly
+serves the fastpy-first mandate — with **D** done in a session where you're
+reachable. But this is genuinely a product/prioritization call (which is exactly
+why CLAUDE.md reserves it for you), so I did **not** unilaterally start any of
+these.
+
+**Where it bites.** roadmap.md §4.3/§4.4/§3.1/§3.2/§5.1/§5.2; known-issues.md
+TD31 + the spawn/reap flake cluster + TD32 mount remainder; open-questions Q18.
+
+**Status** — OPEN. In the meantime the explicit operator request is complete and
+committed; nothing is in-flight. Autonomous loop stopped pending this steer (all
+substantial forward progress is gated here or on the deferred-risky kernel work
+above).

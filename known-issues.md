@@ -4496,6 +4496,25 @@ same `SYS_NET_IOCTL=810` misuse lived in the remaining net-config tools:
   numbers are kept as documentation of the future control ABI. 102 host tests
   pass.
 
+  **`nft`/`iptables` are stateless and non-functional as configurators — BUG,
+  open 2026-07-02.** Separate from the (fixed) syscall-misuse issue: `run_nft`
+  and `run_iptables` (`userspace/nft/src/main.rs` ~lines 2264, 2278) each build a
+  fresh `Ruleset::new()` per invocation, apply the single command, print, and
+  **discard all state on exit**. The tool never persists to a file, never reads
+  `/proc/net/nftables`, and never touches the kernel — so `nft add rule …` /
+  `iptables -A …` are no-ops that only echo syntax. The module doc's claim that
+  "Rules are persisted through `/proc/net/nftables`" is a **doc/reality
+  mismatch** (nothing reads or writes that path). The kernel firewall write
+  syscalls now exist (860–864, used by `fw`), so wiring is *possible*, but doing
+  it well needs (1) a persistence-format decision and (2) a heavily-lossy mapping
+  from nftables' model (tables/chains/hooks/sets/maps/NAT) onto our narrow kernel
+  `Rule`. That is a genuine design fork, tracked as **open-questions Q21** (A full
+  wiring / B minimal wiring / C make it honestly parser-only + steer to `fw`;
+  Claude recommends C). Until resolved, `fw` is the one working firewall
+  front-end. **Proper fix:** resolve Q21, then either implement the chosen wiring
+  or (option C) correct the module doc and print a "not applied — use `fw`"
+  notice on mutating `nft`/`iptables` commands.
+
 All three cross-compile for `x86_64-slateos` and pass clippy. With this, **no
 remaining userspace tool defines or issues `SYS_NET_IOCTL`/`810` for net-config**
 (verified by grep). Only the legitimate `SYS_UDP_BIND=810` users (`dig`, `nc`,

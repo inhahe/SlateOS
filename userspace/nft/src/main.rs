@@ -8,12 +8,23 @@
 //!
 //! The active personality is determined by `argv[0]`.
 //!
-//! Rules are persisted through `/proc/net/nftables`. Slate OS has no
-//! nftables-control syscall yet; the kernel-submission path is not wired up
-//! (the earlier `SYS_NET_IOCTL=810` plumbing was dead code that, had it been
-//! called, would have aliased `SYS_UDP_BIND` and leaked UDP sockets — it has
-//! been removed). The `NFT_*` sub-command numbers below are retained as
-//! documentation of the control ABI the kernel will eventually expose.
+//! **State handling (important):** this tool is currently a *stateless
+//! parser/pretty-printer*. Each invocation builds a fresh in-memory [`Ruleset`],
+//! applies the one command, prints, and discards everything on exit — it does
+//! **not** persist to a file, does **not** read `/proc/net/nftables`, and does
+//! **not** submit to the kernel firewall. So mutating commands (`add`/`delete`/
+//! `insert`/`create`/`flush`) validate and echo syntax but have no lasting
+//! effect. The native `fw` tool is the working front-end for the kernel
+//! firewall (it issues the `SYS_NET_FW_*` syscalls, 860–864).
+//!
+//! Wiring `nft`/`iptables` to persist and apply is tracked as **open-questions
+//! Q21**: the kernel `Rule` model (one src IP/prefix + one dst port, input/
+//! output only, no NAT/sets/maps) is far narrower than nftables, so any wiring
+//! is heavily lossy and needs an operator steer on how far to invest. The
+//! earlier `SYS_NET_IOCTL=810` plumbing was dead code that, had it been called,
+//! would have aliased `SYS_UDP_BIND` and leaked UDP sockets — it has been
+//! removed. The `NFT_*` sub-command numbers below are retained as documentation
+//! of the control ABI the kernel will eventually expose.
 
 #![cfg_attr(not(test), no_main)]
 #![deny(clippy::all)]

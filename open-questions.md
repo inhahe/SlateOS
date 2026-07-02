@@ -347,3 +347,63 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   half unstarted pending either the operator's steer on option A/B/C or a fresh
   focused session, since the IST/NMI changes touch shared boot infra.
 - **Status** — OPEN (harness flag landed opt-in; kernel driver + NMI/IST wiring pending).
+
+## Q21 `nft`/`iptables` compat tooling — persist + wire to the kernel firewall, or keep as a stateless parser and steer users to `fw`? — OPEN
+
+**Date raised:** 2026-07-02
+**Raised by:** Claude (autonomous), while completing TD18 follow-up (b).
+
+**The discovery.** The `nft` binary (`userspace/nft/src/main.rs`, ~3.7k lines;
+also serves the `iptables`/`ip6tables` personalities via `argv[0]`) is currently
+**stateless and non-functional as a configurator.** `run_nft` / `run_iptables`
+each build a fresh `Ruleset::new()` per invocation, apply the one command, print,
+and discard everything on exit. It never reads/writes a persistence file, never
+reads `/proc/net/nftables`, and never touches the kernel. Its own module doc
+claims "Rules are persisted through `/proc/net/nftables`" — that is **not true in
+the code** (doc/reality mismatch). So `nft add rule …` today is a no-op that only
+echoes syntax. (Logged as a bug in known-issues.md alongside TD18.)
+
+By contrast, the native `fw` tool now fully works: as of 2026-07-02 it issues the
+new firewall write syscalls (`SYS_NET_FW_ENABLE`..`_FLUSH`, 860–864) and applies
+to the kernel per-netns. See design-decisions §53.
+
+**The question.** How much should we invest in making `nft`/`iptables` real?
+
+- **A. Full-ish wiring.** Give `nft` a persistent nftables ruleset (its own file
+  format under `/etc`), load it at startup, apply the command, then push the
+  *representable subset* to the kernel firewall via the 860–864 syscalls
+  (skip-with-warning on everything the kernel `Rule` can't express — NAT, sets,
+  maps, non-input/output hooks, ranges, ct-state, etc., exactly the fail-safe
+  policy of §53), and re-serialise. *Pro:* real Linux-compat firewall tooling;
+  scripts that use `iptables`/`nft` start working. *Con:* large; the mapping is
+  heavily lossy (our kernel firewall has no NAT, no sets/maps, one src IP/prefix
+  + one dst port, input/output only), so most real-world nft rulesets would be
+  mostly-skipped — arguably misleading. Needs a persistence-format decision.
+- **B. Minimal wiring.** Only wire the narrow subset that maps cleanly (simple
+  `ip saddr X [tcp|udp dport Y] {accept|drop}` in an input/output base chain →
+  kernel Rule), persist just that, warn on all else. *Pro:* smaller; honest about
+  the ceiling. *Con:* still needs persistence; still lossy; two half-working
+  firewall front-ends (`fw` + `nft`).
+- **C. Keep `nft` as an explicit parser/pretty-printer only; fix the docs.**
+  Correct the module doc to state it does not persist or apply, print a clear
+  "not applied — use `fw` to configure the kernel firewall" notice on mutating
+  commands, and treat `fw` as the one true firewall front-end. *Pro:* zero risk,
+  honest, no lossy-mapping trap; concentrates effort on the native tool. *Con:*
+  `iptables`/`nft` scripts still don't configure the firewall (compat gap).
+
+**Claude's recommendation — C now, A later if a concrete need appears.** The
+kernel firewall model is far narrower than nftables; a faithful `nft` is
+impossible against it and a lossy one risks silently under-applying a user's
+intended policy (the exact footgun §53 avoids for `fw`). Making the tool *honest*
+(C) is a small, clearly-correct fix; full compat (A) is a large investment whose
+value depends on whether we actually want to run Linux firewall scripts
+unmodified — an operator/product call. I did **not** unilaterally start A/B
+because the persistence-format + fidelity choices are a genuine fork.
+
+**Where it bites.** `userspace/nft/src/main.rs` (`run_nft`/`run_iptables` fresh
+`Ruleset` per call; module doc lines ~11–16); the kernel firewall write syscalls
+already exist (`kernel/src/syscall/{number,handlers,dispatch}.rs`, 860–864) so
+option A/B would reuse them. Related: known-issues TD18 residual.
+
+**Status** — OPEN (awaiting operator steer on A/B/C; `fw` native path already
+done, so this is not blocking any native firewall use).

@@ -5,3 +5,4 @@ edition = "2024"
 description = "SlateOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+diffcore = { path = "../diffcore" }

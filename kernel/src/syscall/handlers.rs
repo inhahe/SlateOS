@@ -10087,6 +10087,155 @@ pub fn sys_net_route_list(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(written as i64)
 }
 
+/// `SYS_NET_FW_ENABLE` — enable/disable the caller's netns firewall.
+///
+/// See [`SYS_NET_FW_ENABLE`]. Root-gated. `arg0`: 1 = enable, 0 = disable.
+///
+/// [`SYS_NET_FW_ENABLE`]: crate::syscall::number::SYS_NET_FW_ENABLE
+pub fn sys_net_fw_enable(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+    let ns = crate::sched::current_task_net_ns();
+    match args.arg0 {
+        0 => crate::net::firewall::ns_disable(ns),
+        1 => crate::net::firewall::ns_enable(ns),
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NET_FW_SET_POLICY` — set the caller's netns default firewall policy.
+///
+/// See [`SYS_NET_FW_SET_POLICY`]. Root-gated. `arg0`: 0 = accept, 1 = drop.
+///
+/// [`SYS_NET_FW_SET_POLICY`]: crate::syscall::number::SYS_NET_FW_SET_POLICY
+pub fn sys_net_fw_set_policy(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+    let policy = match args.arg0 {
+        0 => crate::net::firewall::DefaultPolicy::Accept,
+        1 => crate::net::firewall::DefaultPolicy::Drop,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let ns = crate::sched::current_task_net_ns();
+    crate::net::firewall::ns_set_default_policy(ns, policy);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NET_FW_ADD_RULE` — add an IPv4 firewall rule to the caller's netns.
+///
+/// See [`SYS_NET_FW_ADD_RULE`] for the 12-byte record layout. Root-gated.
+/// Returns the assigned rule index (>= 0).
+///
+/// [`SYS_NET_FW_ADD_RULE`]: crate::syscall::number::SYS_NET_FW_ADD_RULE
+pub fn sys_net_fw_add_rule(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::firewall::{Action, Direction, Protocol, Rule};
+    use crate::net::interface::Ipv4Addr;
+
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+
+    let in_ptr = args.arg0;
+    let buf_len = args.arg1 as usize;
+
+    const REC_SIZE: usize = 12;
+    if in_ptr == 0 || buf_len < REC_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
+        return SyscallResult::err(e);
+    }
+    let mut record = [0u8; REC_SIZE];
+    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
+    unsafe {
+        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
+    }
+
+    // Destructure by value: named fields, no indexing on the decode path.
+    let [dir_b, act_b, proto_b, prefix_b, dp0, dp1, pr0, pr1, s0, s1, s2, s3] = record;
+
+    let direction = match dir_b {
+        0 => Direction::In,
+        1 => Direction::Out,
+        2 => Direction::Both,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let action = match act_b {
+        0 => Action::Allow,
+        1 => Action::Deny,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let protocol = match proto_b {
+        0 => Protocol::Any,
+        1 => Protocol::Tcp,
+        2 => Protocol::Udp,
+        3 => Protocol::Icmp,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if prefix_b > 32 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let dst_port = u16::from_le_bytes([dp0, dp1]);
+    let priority = u16::from_le_bytes([pr0, pr1]);
+    let src_ip = Ipv4Addr([s0, s1, s2, s3]);
+
+    let rule = Rule {
+        active: true,
+        direction,
+        action,
+        protocol,
+        src_ip,
+        src_prefix: prefix_b,
+        dst_port,
+        priority,
+        match_count: 0,
+    };
+
+    let ns = crate::sched::current_task_net_ns();
+    match crate::net::firewall::ns_add_rule(ns, rule) {
+        // Rule indices are bounded by MAX_RULES (small), so the cast is safe.
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(idx) => SyscallResult::ok(idx as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_FW_DEL_RULE` — remove an IPv4 firewall rule by index from the
+/// caller's netns.
+///
+/// See [`SYS_NET_FW_DEL_RULE`]. Root-gated. `arg0`: rule index.
+///
+/// [`SYS_NET_FW_DEL_RULE`]: crate::syscall::number::SYS_NET_FW_DEL_RULE
+pub fn sys_net_fw_del_rule(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+    let index = args.arg0 as usize;
+    let ns = crate::sched::current_task_net_ns();
+    match crate::net::firewall::ns_remove_rule(ns, index) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_FW_FLUSH` — remove all firewall rules from the caller's netns.
+///
+/// See [`SYS_NET_FW_FLUSH`]. Root-gated. Leaves enabled state and default
+/// policy unchanged.
+///
+/// [`SYS_NET_FW_FLUSH`]: crate::syscall::number::SYS_NET_FW_FLUSH
+pub fn sys_net_fw_flush(_args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_netadmin_authority() {
+        return SyscallResult::err(e);
+    }
+    let ns = crate::sched::current_task_net_ns();
+    crate::net::firewall::ns_clear_rules(ns);
+    SyscallResult::ok(0)
+}
+
 /// `SYS_ARP_TABLE` — query the ARP cache.
 ///
 /// `arg0`: pointer to output buffer.

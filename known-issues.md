@@ -4251,8 +4251,22 @@ client-side number correction:
   and `route` tool (`route add/del -net/-host …`, and `route flush`) now issue
   these syscalls for non-default routes and list the table via
   `SYS_NET_ROUTE_LIST`; the default-route path still uses the interface
-  gateway. **Still TODO:** *firewall* (`nft`/`fw`) writes still have no native
-  syscall — a separate follow-up needing new syscalls, not just rewiring. Original harm analysis (traced
+  gateway. **Firewall write path DONE 2026-07-02:** `SYS_NET_FW_ENABLE`/
+  `_SET_POLICY`/`_ADD_RULE`/`_DEL_RULE`/`_FLUSH` (860–864, root-gated, per-netns
+  with root ns == global firewall) expose `net::firewall`'s write path.
+  `ADD_RULE` takes a 12-byte binary record mirroring `Rule` 1:1
+  (`[direction, action, protocol, src_prefix, dst_port:u16le, priority:u16le,
+  src_ip:4]`); reads stay on `/proc/net/firewall`. The `fw` tool now issues
+  these syscalls (`fw enable/disable/allow/deny/policy/delete/reset/load` apply
+  to the kernel; `apply_to_kernel` does flush+re-add so kernel state matches the
+  in-memory set). Rules the kernel model cannot represent (a `src_port` or
+  `dst_ip` constraint) are **skipped with a warning** rather than pushed as a
+  broader rule — see design-decisions §53. `fw delete N` maps the list position
+  to the correct kernel index (counting only representable rules). See
+  design-decisions §53 for the ABI + fail-safe rationale. **Still TODO:** the
+  `nft` tool (3.6k-line nftables front-end) is not yet wired to these syscalls,
+  and IPv6 firewall rules (`Rule6`) have no write syscall yet — both are
+  separate follow-ups. Original harm analysis (traced
   2026-06-01): with a Socket-WRITE cap the old call silently binds+leaks a UDP
   socket on a low port and misleads the user that the config change applied;
   without the cap it fails. **Write-path harm neutered 2026-06-14** for all six

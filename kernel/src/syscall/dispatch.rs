@@ -120,6 +120,8 @@ use super::number::{
     SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_NET_IF_INFO,
     SYS_NET_IF_CONFIG,
     SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
+    SYS_NET_FW_ENABLE, SYS_NET_FW_SET_POLICY, SYS_NET_FW_ADD_RULE,
+    SYS_NET_FW_DEL_RULE, SYS_NET_FW_FLUSH,
     SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
     SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
     SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
@@ -532,6 +534,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_NET_ROUTE_ADD as usize] = Some(handlers::sys_net_route_add);
     handlers[SYS_NET_ROUTE_DEL as usize] = Some(handlers::sys_net_route_del);
     handlers[SYS_NET_ROUTE_LIST as usize] = Some(handlers::sys_net_route_list);
+    handlers[SYS_NET_FW_ENABLE as usize] = Some(handlers::sys_net_fw_enable);
+    handlers[SYS_NET_FW_SET_POLICY as usize] = Some(handlers::sys_net_fw_set_policy);
+    handlers[SYS_NET_FW_ADD_RULE as usize] = Some(handlers::sys_net_fw_add_rule);
+    handlers[SYS_NET_FW_DEL_RULE as usize] = Some(handlers::sys_net_fw_del_rule);
+    handlers[SYS_NET_FW_FLUSH as usize] = Some(handlers::sys_net_fw_flush);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);

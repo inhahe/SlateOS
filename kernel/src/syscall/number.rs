@@ -3028,6 +3028,61 @@ pub const SYS_NET_ROUTE_DEL: u64 = 858;
 pub const SYS_NET_ROUTE_LIST: u64 = 859;
 
 // ---------------------------------------------------------------------------
+// Firewall control (860–864)
+//
+// Write-path syscalls for the packet-filtering firewall. Each operates on the
+// caller's network namespace: the root namespace (ID 0) uses the global
+// firewall state; child namespaces use their own per-namespace table (the same
+// split the packet path uses via `check_inbound_ns`/`check_outbound_ns`). All
+// are root-gated (`require_netadmin_authority`). Reads (status, rule listing)
+// remain served by the firewall procfs file, so no read syscall is defined.
+// ---------------------------------------------------------------------------
+
+/// `SYS_NET_FW_ENABLE` — enable or disable the firewall for the caller's netns.
+///
+/// `arg0`: `1` to enable, `0` to disable.
+/// Root-gated. Returns 0 on success.
+pub const SYS_NET_FW_ENABLE: u64 = 860;
+
+/// `SYS_NET_FW_SET_POLICY` — set the default policy (applied when no rule
+/// matches) for the caller's netns.
+///
+/// `arg0`: `0` = accept, `1` = drop.
+/// Root-gated. Returns 0 on success.
+pub const SYS_NET_FW_SET_POLICY: u64 = 861;
+
+/// `SYS_NET_FW_ADD_RULE` — add an IPv4 firewall rule to the caller's netns.
+///
+/// `arg0`: pointer to a 12-byte rule record.
+/// `arg1`: record length in bytes (must be >= 12).
+///
+/// Record layout:
+/// - `[0]`   direction (`0`=In, `1`=Out, `2`=Both)
+/// - `[1]`   action (`0`=Allow, `1`=Deny)
+/// - `[2]`   protocol (`0`=Any, `1`=TCP, `2`=UDP, `3`=ICMP)
+/// - `[3]`   source prefix length (0..=32)
+/// - `[4..6]`   destination port (u16, little-endian; 0 = any)
+/// - `[6..8]`   priority (u16, little-endian; lower = evaluated first)
+/// - `[8..12]`  source IPv4 address (network order; 0.0.0.0 = any)
+///
+/// Root-gated. Returns the assigned rule index (>= 0) on success.
+pub const SYS_NET_FW_ADD_RULE: u64 = 862;
+
+/// `SYS_NET_FW_DEL_RULE` — remove an IPv4 firewall rule by index from the
+/// caller's netns.
+///
+/// `arg0`: rule index (as returned by [`SYS_NET_FW_ADD_RULE`] or shown in the
+/// firewall procfs listing).
+/// Root-gated. Returns 0 on success.
+pub const SYS_NET_FW_DEL_RULE: u64 = 863;
+
+/// `SYS_NET_FW_FLUSH` — remove all firewall rules from the caller's netns.
+///
+/// Root-gated. Returns 0 on success. Does not change the enabled state or the
+/// default policy.
+pub const SYS_NET_FW_FLUSH: u64 = 864;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

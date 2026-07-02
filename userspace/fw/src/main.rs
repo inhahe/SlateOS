@@ -2,10 +2,12 @@
 //!
 //! Manages the kernel's packet-filtering firewall rules.  Rules are persisted
 //! to `/etc/fw.rules` and read from the `/proc/net/firewall` interface when the
-//! procfs path is available. Slate OS has no firewall-control syscall yet, so
-//! the kernel apply/query path (`fw_ioctl`) returns `ENOSYS` — see the note on
-//! `fw_ioctl` for why the previous `SYS_NET_IOCTL=810` calls were actively
-//! harmful (they bound and leaked UDP sockets).
+//! procfs path is available. Writes go to the kernel through the root-gated
+//! firewall syscalls (`SYS_NET_FW_ENABLE` .. `SYS_NET_FW_FLUSH`, 860..=864),
+//! each operating on the caller's network namespace. The kernel rule model is
+//! narrower than this tool's on-disk format (no source-port or destination-IP
+//! dimension), so rules constraining either are skipped with a warning rather
+//! than pushed as broader rules than the operator wrote.
 //!
 //! # Usage
 //!
@@ -41,45 +43,76 @@ use std::process;
 const RULES_PATH: &str = "/etc/fw.rules";
 const PROC_FIREWALL: &str = "/proc/net/firewall";
 
-// Firewall sub-commands. Retained as documentation of the control ABI the
-// kernel will eventually expose; today every one resolves to `fw_ioctl`, which
-// returns `ENOSYS` (see below) because no firewall-control syscall exists.
-const FW_ENABLE: u64 = 100;
-const FW_DISABLE: u64 = 101;
-#[allow(dead_code)] // Read path is served by /proc/net/firewall, not a syscall.
-const FW_GET_STATUS: u64 = 102;
-const FW_ADD_RULE: u64 = 103;
-const FW_DEL_RULE: u64 = 104;
-const FW_SET_POLICY: u64 = 105;
-const FW_SET_LOG: u64 = 106;
-#[allow(dead_code)] // Will be used when kernel wires up bulk flush.
-const FW_FLUSH: u64 = 107;
-#[allow(dead_code)] // Read path is served by /proc/net/firewall, not a syscall.
-const FW_GET_RULES: u64 = 108;
+// Firewall-control syscalls (`kernel/src/syscall/number.rs`). Root-gated write
+// path; each operates on the caller's network namespace (root ns uses the
+// global firewall). Reads (status + rule listing) are served by
+// `/proc/net/firewall`, so there is no read syscall.
+const SYS_NET_FW_ENABLE: u64 = 860; // arg0: 1 = enable, 0 = disable
+const SYS_NET_FW_SET_POLICY: u64 = 861; // arg0: 0 = accept, 1 = drop
+const SYS_NET_FW_ADD_RULE: u64 = 862; // arg0=ptr, arg1=len (12-byte record)
+const SYS_NET_FW_DEL_RULE: u64 = 863; // arg0: rule index
+const SYS_NET_FW_FLUSH: u64 = 864; // remove all rules
+
+/// Size of the `SYS_NET_FW_ADD_RULE` record (must match the kernel's REC_SIZE).
+const FW_RULE_REC_SIZE: usize = 12;
 
 // ============================================================================
 // Syscall interface
 // ============================================================================
 
-/// Send a firewall control command to the kernel.
-///
-/// Slate OS has no firewall-control syscall. The earlier implementation issued
-/// `syscall(810, cmd, ...)` with the firewall sub-command (`FW_ENABLE`,
-/// `FW_GET_STATUS`, ...) as arg0, but `810` is `SYS_UDP_BIND` whose arg0 is a
-/// *port*: each call bound a UDP socket to port 100/101/102/..., leaked the
-/// handle, and returned a non-negative value. For writes that masqueraded as
-/// success; for `FW_GET_STATUS` the leaked socket handle was even decoded as
-/// firewall status *bits*, fabricating bogus enabled/logging/policy state.
-/// Until the firewall-control ABI is defined this returns `ENOSYS` without
-/// issuing any syscall, so reads fall back to `/proc/net/firewall` / the saved
-/// rules file and writes honestly fail.
-fn fw_ioctl(_cmd: u64, _arg1: u64, _arg2: u64) -> i64 {
-    -38 // ENOSYS — firewall-control syscall ABI not yet defined (see note above).
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller ensures arguments are valid for the given syscall.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
 }
 
-/// Send a firewall command that would pass a buffer pointer. See `fw_ioctl`.
-fn fw_ioctl_buf(_cmd: u64, _buf: &[u8]) -> i64 {
-    -38 // ENOSYS — firewall-control syscall ABI not yet defined (see fw_ioctl).
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS on non-target host builds (unit tests use the pure builders).
+}
+
+/// Enable (`on = true`) or disable the firewall. Returns the kernel result.
+fn fw_enable(on: bool) -> i64 {
+    // SAFETY: scalar-only syscall; no user pointers are dereferenced.
+    unsafe { syscall3(SYS_NET_FW_ENABLE, u64::from(on), 0, 0) }
+}
+
+/// Set the default policy (`drop = true` → drop, else accept).
+fn fw_set_policy(drop: bool) -> i64 {
+    // SAFETY: scalar-only syscall; no user pointers are dereferenced.
+    unsafe { syscall3(SYS_NET_FW_SET_POLICY, u64::from(drop), 0, 0) }
+}
+
+/// Add one rule from its 12-byte record. Returns the rule index or negative errno.
+fn fw_add_rule(rec: &[u8; FW_RULE_REC_SIZE]) -> i64 {
+    // SAFETY: `rec` is exactly FW_RULE_REC_SIZE bytes, matching the kernel's
+    // contract; the kernel only reads (never writes) the record.
+    unsafe { syscall3(SYS_NET_FW_ADD_RULE, rec.as_ptr() as u64, rec.len() as u64, 0) }
+}
+
+/// Delete a rule by kernel index. Returns the kernel result.
+fn fw_del_rule(index: usize) -> i64 {
+    // SAFETY: scalar-only syscall; no user pointers are dereferenced.
+    unsafe { syscall3(SYS_NET_FW_DEL_RULE, index as u64, 0, 0) }
+}
+
+/// Remove all rules. Returns the kernel result.
+fn fw_flush() -> i64 {
+    // SAFETY: scalar-only syscall; no user pointers are dereferenced.
+    unsafe { syscall3(SYS_NET_FW_FLUSH, 0, 0, 0) }
 }
 
 // ============================================================================
@@ -246,6 +279,88 @@ impl Rule {
             json_escape(&self.dst_port),
         )
     }
+
+    /// Build the kernel's 12-byte firewall-rule record for this rule.
+    ///
+    /// Layout (see `SYS_NET_FW_ADD_RULE` in the kernel):
+    /// ```text
+    /// [0]     direction  (0 = In, 1 = Out, 2 = Both)
+    /// [1]     action     (0 = Allow, 1 = Deny)
+    /// [2]     protocol   (0 = Any, 1 = Tcp, 2 = Udp, 3 = Icmp)
+    /// [3]     src_prefix (0..=32)
+    /// [4..6]  dst_port   (u16 little-endian; 0 = any)
+    /// [6..8]  priority   (u16 little-endian)
+    /// [8..12] src_ip     (network byte order)
+    /// ```
+    ///
+    /// Returns `None` when the rule constrains a dimension the kernel model
+    /// cannot express — a source port or a destination IP — so the caller can
+    /// skip it rather than push a broader rule than the operator wrote.
+    fn to_kernel_record(&self, priority: usize) -> Option<[u8; FW_RULE_REC_SIZE]> {
+        // The kernel has no source-port or destination-IP dimension. If either
+        // is constrained, we cannot represent the rule faithfully.
+        if self.src_port != "*" || self.dst_ip != "*" {
+            return None;
+        }
+
+        let direction: u8 = match self.direction {
+            Direction::In => 0,
+            Direction::Out => 1,
+        };
+        let action: u8 = match self.action {
+            Action::Allow => 0,
+            Action::Deny => 1,
+        };
+        let protocol: u8 = match self.proto {
+            Proto::Any => 0,
+            Proto::Tcp => 1,
+            Proto::Udp => 2,
+        };
+
+        // Source IP + prefix: "*" means match any (0.0.0.0/0); a concrete
+        // address is treated as a /32 host match.
+        let (src_octets, src_prefix): ([u8; 4], u8) = if self.src_ip == "*" {
+            ([0, 0, 0, 0], 0)
+        } else {
+            (parse_ipv4_octets(&self.src_ip)?, 32)
+        };
+
+        // Destination port: "*" → 0 (any), else a concrete port.
+        let dst_port: u16 = if self.dst_port == "*" {
+            0
+        } else {
+            self.dst_port.parse::<u16>().ok()?
+        };
+
+        // Priority is capped at u16::MAX; larger indices saturate (they would
+        // only affect ordering among an implausibly large ruleset).
+        let priority = u16::try_from(priority).unwrap_or(u16::MAX);
+
+        let mut rec = [0u8; FW_RULE_REC_SIZE];
+        rec[0] = direction;
+        rec[1] = action;
+        rec[2] = protocol;
+        rec[3] = src_prefix;
+        rec[4..6].copy_from_slice(&dst_port.to_le_bytes());
+        rec[6..8].copy_from_slice(&priority.to_le_bytes());
+        rec[8..12].copy_from_slice(&src_octets);
+        Some(rec)
+    }
+}
+
+/// Parse a dotted-quad IPv4 string into its four octets (network order).
+fn parse_ipv4_octets(s: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in s.split('.') {
+        if count >= 4 {
+            return None;
+        }
+        let val = part.parse::<u8>().ok()?;
+        octets[count] = val;
+        count = count.checked_add(1)?;
+    }
+    if count == 4 { Some(octets) } else { None }
 }
 
 fn format_endpoint(ip: &str, port: &str) -> String {
@@ -282,8 +397,9 @@ impl Firewall {
             return state;
         }
 
-        // No firewall-query syscall exists (see `fw_ioctl`); fall back to the
-        // saved rules file, or built-in defaults if it is absent.
+        // There is no firewall-query syscall (reads are served via
+        // `/proc/net/firewall`); fall back to the saved rules file, or the
+        // built-in defaults if it is absent.
         Self::from_file().unwrap_or_else(Self::defaults)
     }
 
@@ -405,30 +521,67 @@ impl Firewall {
         Ok(())
     }
 
-    /// Push the current state to the kernel via syscalls.
+    /// Push the current state to the kernel via the firewall write syscalls.
+    ///
+    /// The kernel's rule model is narrower than this tool's on-disk format: it
+    /// filters on direction, action, protocol, a source IP/prefix and a single
+    /// destination port. It has no notion of a source port or a destination IP.
+    /// Rules that constrain either of those dimensions cannot be faithfully
+    /// represented, so they are skipped with a warning rather than pushed as an
+    /// overly-broad rule that would silently match more traffic than intended.
+    ///
+    /// Logging (`self.logging`) likewise has no kernel counterpart; it is a
+    /// display/persistence-only field and is not applied here.
     fn apply_to_kernel(&self) {
-        // Enable/disable.
-        if self.enabled {
-            fw_ioctl(FW_ENABLE, 0, 0);
-        } else {
-            fw_ioctl(FW_DISABLE, 0, 0);
+        // Replace the kernel's ruleset wholesale so it matches our in-memory
+        // view. Flush first, then re-add each representable rule in order.
+        let flush_ret = fw_flush();
+        if flush_ret < 0 {
+            eprintln!("fw: warning: failed to flush kernel rules (errno {flush_ret})");
         }
 
-        // Default policy (0 = accept, 1 = drop).
-        let policy_val: u64 = match self.default_policy {
-            Action::Allow => 0,
-            Action::Deny => 1,
-        };
-        fw_ioctl(FW_SET_POLICY, policy_val, 0);
+        // Enable/disable the firewall.
+        let en_ret = fw_enable(self.enabled);
+        if en_ret < 0 {
+            eprintln!(
+                "fw: warning: failed to {} firewall (errno {en_ret})",
+                if self.enabled { "enable" } else { "disable" }
+            );
+        }
 
-        // Logging (1 = on, 0 = off).
-        fw_ioctl(FW_SET_LOG, u64::from(self.logging), 0);
+        // Default policy.
+        let pol_ret = fw_set_policy(matches!(self.default_policy, Action::Deny));
+        if pol_ret < 0 {
+            eprintln!("fw: warning: failed to set default policy (errno {pol_ret})");
+        }
 
-        // Push each rule.
-        for rule in &self.rules {
-            let line = rule.to_line();
-            let terminated = format!("{line}\0");
-            fw_ioctl_buf(FW_ADD_RULE, terminated.as_bytes());
+        if self.logging {
+            eprintln!(
+                "fw: note: logging is a display-only setting; the kernel firewall \
+                 has no logging control, so it was not applied"
+            );
+        }
+
+        // Push each representable rule. `priority` preserves list order.
+        for (idx, rule) in self.rules.iter().enumerate() {
+            match rule.to_kernel_record(idx) {
+                Some(rec) => {
+                    let ret = fw_add_rule(&rec);
+                    if ret < 0 {
+                        eprintln!(
+                            "fw: warning: kernel rejected rule '{}' (errno {ret})",
+                            rule.describe()
+                        );
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "fw: warning: skipping rule '{}' — the kernel firewall cannot \
+                         represent a source port or destination IP constraint",
+                        rule.describe()
+                    );
+                }
+            }
         }
     }
 }
@@ -542,7 +695,7 @@ fn cmd_status(fw: &Firewall, json: bool) {
 }
 
 fn cmd_enable() {
-    let ret = fw_ioctl(FW_ENABLE, 0, 0);
+    let ret = fw_enable(true);
     if ret < 0 {
         eprintln!("Failed to enable firewall (kernel returned {ret}).");
         eprintln!("Updating local state only.");
@@ -567,7 +720,7 @@ fn cmd_enable() {
 }
 
 fn cmd_disable() {
-    let ret = fw_ioctl(FW_DISABLE, 0, 0);
+    let ret = fw_enable(false);
     if ret < 0 {
         eprintln!("Failed to disable firewall (kernel returned {ret}).");
         eprintln!("Updating local state only.");
@@ -672,7 +825,7 @@ fn cmd_allow_deny(fw: &mut Firewall, action: Action, args: &[String]) {
             dst_port: "*".to_string(),
         };
 
-        push_rule_to_kernel(&rule);
+        push_rule_to_kernel(&rule, fw.rules.len());
         println!("Rule added: {}", rule.describe());
         fw.rules.push(rule);
         return;
@@ -709,7 +862,7 @@ fn cmd_allow_deny(fw: &mut Firewall, action: Action, args: &[String]) {
         dst_port: port,
     };
 
-    push_rule_to_kernel(&rule);
+    push_rule_to_kernel(&rule, fw.rules.len());
     println!("Rule added: {}", rule.describe());
     fw.rules.push(rule);
 }
@@ -729,10 +882,25 @@ fn cmd_delete(fw: &mut Firewall, num_str: &str) {
         process::exit(1);
     }
 
-    let removed = fw.rules.remove(num - 1);
+    // Compute the kernel-side index of this rule before removing it. Rules the
+    // kernel cannot represent are never pushed, so the kernel index is the
+    // count of *representable* rules appearing before this one in the list.
+    let idx = num - 1;
+    let kernel_index = fw.rules[..idx]
+        .iter()
+        .filter(|r| r.to_kernel_record(0).is_some())
+        .count();
+    let was_pushed = fw.rules[idx].to_kernel_record(0).is_some();
 
-    // Tell the kernel to remove this rule.
-    fw_ioctl(FW_DEL_RULE, (num - 1) as u64, 0);
+    let removed = fw.rules.remove(idx);
+
+    // Only issue a kernel delete if this rule was actually pushed.
+    if was_pushed {
+        let ret = fw_del_rule(kernel_index);
+        if ret < 0 {
+            eprintln!("fw: warning: kernel rejected the delete (errno {ret}).");
+        }
+    }
 
     println!("Deleted rule #{num}: {}", removed.describe());
 }
@@ -743,10 +911,8 @@ fn cmd_reset(fw: &mut Firewall) {
     fw.default_policy = Action::Deny;
     fw.logging = false;
 
-    // Push reset to kernel.
-    fw_ioctl(FW_ENABLE, 0, 0);
-    fw_ioctl(FW_SET_POLICY, 1, 0); // 1 = drop
-    fw_ioctl(FW_SET_LOG, 0, 0);
+    // Push reset to kernel: flush rules, enable, deny-by-default.
+    fw.apply_to_kernel();
 
     println!("Firewall reset to defaults.");
     println!("  Status:  enabled");
@@ -756,9 +922,9 @@ fn cmd_reset(fw: &mut Firewall) {
 }
 
 fn cmd_policy(fw: &mut Firewall, value: &str) {
-    let (policy, policy_val) = match value.to_lowercase().as_str() {
-        "accept" | "allow" => (Action::Allow, 0u64),
-        "drop" | "deny" | "reject" => (Action::Deny, 1u64),
+    let policy = match value.to_lowercase().as_str() {
+        "accept" | "allow" => Action::Allow,
+        "drop" | "deny" | "reject" => Action::Deny,
         other => {
             eprintln!("Unknown policy: {other}");
             eprintln!("Expected: accept or drop");
@@ -767,7 +933,10 @@ fn cmd_policy(fw: &mut Firewall, value: &str) {
     };
 
     fw.default_policy = policy;
-    fw_ioctl(FW_SET_POLICY, policy_val, 0);
+    let ret = fw_set_policy(matches!(policy, Action::Deny));
+    if ret < 0 {
+        eprintln!("fw: warning: kernel rejected the policy change (errno {ret}).");
+    }
 
     println!("Default inbound policy set to: {}", policy.as_str().to_lowercase());
 }
@@ -784,7 +953,8 @@ fn cmd_log(fw: &mut Firewall, value: &str) {
     };
 
     fw.logging = on;
-    fw_ioctl(FW_SET_LOG, u64::from(on), 0);
+    // Logging is a local display/persistence setting only; the kernel firewall
+    // exposes no logging control, so there is nothing to push.
 
     println!("Blocked-packet logging: {}", if on { "on" } else { "off" });
 }
@@ -859,11 +1029,28 @@ fn cmd_load(fw: &mut Firewall) {
     println!("Loaded {} rules from {RULES_PATH}.", fw.rules.len());
 }
 
-/// Push a single rule to the kernel.
-fn push_rule_to_kernel(rule: &Rule) {
-    let line = rule.to_line();
-    let terminated = format!("{line}\0");
-    fw_ioctl_buf(FW_ADD_RULE, terminated.as_bytes());
+/// Push a single rule to the kernel via `SYS_NET_FW_ADD_RULE`.
+///
+/// `priority` is the index the rule will occupy in the ruleset, used to
+/// preserve list ordering in the kernel. Rules the kernel model cannot
+/// represent (a source-port or destination-IP constraint) are skipped with a
+/// warning — see [`Rule::to_kernel_record`].
+fn push_rule_to_kernel(rule: &Rule, priority: usize) {
+    match rule.to_kernel_record(priority) {
+        Some(rec) => {
+            let ret = fw_add_rule(&rec);
+            if ret < 0 {
+                eprintln!("fw: warning: kernel rejected the rule (errno {ret}).");
+            }
+        }
+        None => {
+            eprintln!(
+                "fw: warning: this rule constrains a source port or destination IP, \
+                 which the kernel firewall cannot represent — it was saved locally \
+                 but not applied to the kernel."
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -1455,5 +1642,108 @@ mod tests {
         assert_eq!(rules[1].dst_port, "80");
         assert_eq!(rules[2].src_ip, "10.0.0.50");
         assert_eq!(rules[3].direction, Direction::Out);
+    }
+
+    // ---- parse_ipv4_octets ------------------------------------------------
+
+    #[test]
+    fn test_parse_ipv4_octets_valid() {
+        assert_eq!(parse_ipv4_octets("10.0.2.15"), Some([10, 0, 2, 15]));
+        assert_eq!(parse_ipv4_octets("0.0.0.0"), Some([0, 0, 0, 0]));
+        assert_eq!(parse_ipv4_octets("255.255.255.255"), Some([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn test_parse_ipv4_octets_invalid() {
+        assert_eq!(parse_ipv4_octets("10.0.2"), None); // too few
+        assert_eq!(parse_ipv4_octets("10.0.2.15.7"), None); // too many
+        assert_eq!(parse_ipv4_octets("256.0.0.1"), None); // out of range
+        assert_eq!(parse_ipv4_octets("10.0.0.a"), None); // non-numeric
+        assert_eq!(parse_ipv4_octets(""), None);
+    }
+
+    // ---- Rule::to_kernel_record ------------------------------------------
+
+    fn rule(
+        action: Action,
+        direction: Direction,
+        proto: Proto,
+        src_ip: &str,
+        src_port: &str,
+        dst_ip: &str,
+        dst_port: &str,
+    ) -> Rule {
+        Rule {
+            action,
+            direction,
+            proto,
+            src_ip: src_ip.to_string(),
+            src_port: src_port.to_string(),
+            dst_ip: dst_ip.to_string(),
+            dst_port: dst_port.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_to_kernel_record_allow_in_tcp_port() {
+        // ALLOW IN tcp * * * 22  (priority 0)
+        let r = rule(Action::Allow, Direction::In, Proto::Tcp, "*", "*", "*", "22");
+        let rec = r.to_kernel_record(0).expect("representable");
+        assert_eq!(rec[0], 0); // direction In
+        assert_eq!(rec[1], 0); // action Allow
+        assert_eq!(rec[2], 1); // protocol Tcp
+        assert_eq!(rec[3], 0); // src_prefix 0 (any)
+        assert_eq!(u16::from_le_bytes([rec[4], rec[5]]), 22); // dst_port
+        assert_eq!(u16::from_le_bytes([rec[6], rec[7]]), 0); // priority
+        assert_eq!(&rec[8..12], &[0, 0, 0, 0]); // src_ip any
+    }
+
+    #[test]
+    fn test_to_kernel_record_deny_out_udp_srcip() {
+        // DENY OUT udp 10.0.2.50 * * *  (priority 5)
+        let r = rule(Action::Deny, Direction::Out, Proto::Udp, "10.0.2.50", "*", "*", "*");
+        let rec = r.to_kernel_record(5).expect("representable");
+        assert_eq!(rec[0], 1); // direction Out
+        assert_eq!(rec[1], 1); // action Deny
+        assert_eq!(rec[2], 2); // protocol Udp
+        assert_eq!(rec[3], 32); // src_prefix /32
+        assert_eq!(u16::from_le_bytes([rec[4], rec[5]]), 0); // dst_port any
+        assert_eq!(u16::from_le_bytes([rec[6], rec[7]]), 5); // priority
+        assert_eq!(&rec[8..12], &[10, 0, 2, 50]); // src_ip network order
+    }
+
+    #[test]
+    fn test_to_kernel_record_any_proto() {
+        let r = rule(Action::Allow, Direction::In, Proto::Any, "*", "*", "*", "*");
+        let rec = r.to_kernel_record(0).expect("representable");
+        assert_eq!(rec[2], 0); // protocol Any
+    }
+
+    #[test]
+    fn test_to_kernel_record_skips_src_port() {
+        // A source-port constraint cannot be represented by the kernel model.
+        let r = rule(Action::Allow, Direction::In, Proto::Tcp, "*", "1024", "*", "80");
+        assert_eq!(r.to_kernel_record(0), None);
+    }
+
+    #[test]
+    fn test_to_kernel_record_skips_dst_ip() {
+        // A destination-IP constraint cannot be represented by the kernel model.
+        let r = rule(Action::Allow, Direction::In, Proto::Tcp, "*", "*", "10.0.0.1", "80");
+        assert_eq!(r.to_kernel_record(0), None);
+    }
+
+    #[test]
+    fn test_to_kernel_record_bad_src_ip() {
+        // A malformed source IP yields None rather than a bogus record.
+        let r = rule(Action::Allow, Direction::In, Proto::Tcp, "not-an-ip", "*", "*", "80");
+        assert_eq!(r.to_kernel_record(0), None);
+    }
+
+    #[test]
+    fn test_to_kernel_record_priority_saturates() {
+        let r = rule(Action::Allow, Direction::In, Proto::Any, "*", "*", "*", "*");
+        let rec = r.to_kernel_record(100_000).expect("representable");
+        assert_eq!(u16::from_le_bytes([rec[6], rec[7]]), u16::MAX);
     }
 }

@@ -2,9 +2,11 @@
 //!
 //! Displays and configures network interfaces using the traditional `ifconfig`
 //! command syntax. Reads live state from `/sys/class/net/` and `/proc/net/`,
-//! falling back to read-only kernel syscalls (`SYS_NET_IF_INFO`). Write/config
-//! operations (up/down/set-ip/...) return `ENOSYS` until the net-config syscall
-//! ABI is defined -- see the note on `net_ioctl`.
+//! falling back to the read-only `SYS_NET_IF_INFO` syscall. Write operations
+//! (up/down/set-ip/set-netmask) apply via the root-gated `SYS_NET_IF_CONFIG`
+//! syscall. MTU and explicit-broadcast changes are not representable in the
+//! kernel interface model and are reported as unsupported rather than silently
+//! ignored.
 //!
 //! # Usage
 //!
@@ -38,15 +40,27 @@ use std::process;
 /// this syscall (TD18 read-path wiring).
 const SYS_NET_IF_INFO: u64 = 842;
 
-// IOCTL sub-commands for network interface configuration.
-const NET_IF_UP: u64 = 1;
-const NET_IF_DOWN: u64 = 2;
-const NET_IF_SET_IP: u64 = 3;
-const NET_IF_SET_MASK: u64 = 4;
-#[allow(dead_code)] // Available when gateway-via-ifconfig is wired up.
-const NET_IF_SET_GW: u64 = 5;
-const NET_IF_SET_MTU: u64 = 6;
-const NET_IF_SET_BCAST: u64 = 7;
+/// Interface-configuration write syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_CONFIG`). Root-gated. Reads an 18-byte record from `arg0`
+/// (length in `arg1`) whose byte 17 is a per-field mask selecting which of
+/// IP/mask/gateway/DNS/up to apply (read-modify-write against the live
+/// config). See [`build_config_record`] for the layout.
+const SYS_NET_IF_CONFIG: u64 = 856;
+
+/// Field-mask bits for the `SYS_NET_IF_CONFIG` record (byte 17). A set bit
+/// means "apply this field"; unset means "leave the current value untouched".
+mod cfg_mask {
+    /// Apply the IPv4 address (record bytes 0..4).
+    pub const IP: u8 = 1 << 0;
+    /// Apply the subnet mask (record bytes 4..8).
+    pub const MASK: u8 = 1 << 1;
+    /// Apply the gateway (record bytes 8..12).
+    pub const GATEWAY: u8 = 1 << 2;
+    /// Apply the DNS server (record bytes 12..16).
+    pub const DNS: u8 = 1 << 3;
+    /// Apply the up/down flag (record byte 16).
+    pub const UP: u8 = 1 << 4;
+}
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
@@ -68,17 +82,60 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
-/// Issue a network interface-configuration ioctl.
+/// Build the 18-byte `SYS_NET_IF_CONFIG` record from the fields the caller
+/// wants to change. Any `None` field is left out of the record and its mask
+/// bit stays clear, so the kernel preserves the current value for it
+/// (read-modify-write). Pure (no syscall) so it is unit-testable on the host.
 ///
-/// Slate OS does not yet expose a net-config syscall. The number these tools
-/// previously used (810) is actually `SYS_UDP_BIND` in the kernel, so issuing
-/// the syscall here bound a UDP socket to a bogus port (the `cmd` value),
-/// leaked the resulting handle, and reported false success. Until the
-/// net-config ABI lands (operator decision, TD18), interface configuration is
-/// unsupported: return `ENOSYS` without touching the kernel rather than
-/// corrupting UDP socket state.
-fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
-    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
+/// Layout: `[0..4]` ip, `[4..8]` mask, `[8..12]` gateway, `[12..16]` dns,
+/// `[16]` up flag, `[17]` field mask (see [`cfg_mask`]).
+fn build_config_record(
+    ip: Option<[u8; 4]>,
+    mask: Option<[u8; 4]>,
+    gateway: Option<[u8; 4]>,
+    dns: Option<[u8; 4]>,
+    up: Option<bool>,
+) -> [u8; 18] {
+    let mut rec = [0u8; 18];
+    let mut field_mask = 0u8;
+    if let Some(v) = ip {
+        rec[0..4].copy_from_slice(&v);
+        field_mask |= cfg_mask::IP;
+    }
+    if let Some(v) = mask {
+        rec[4..8].copy_from_slice(&v);
+        field_mask |= cfg_mask::MASK;
+    }
+    if let Some(v) = gateway {
+        rec[8..12].copy_from_slice(&v);
+        field_mask |= cfg_mask::GATEWAY;
+    }
+    if let Some(v) = dns {
+        rec[12..16].copy_from_slice(&v);
+        field_mask |= cfg_mask::DNS;
+    }
+    if let Some(u) = up {
+        rec[16] = u8::from(u);
+        field_mask |= cfg_mask::UP;
+    }
+    rec[17] = field_mask;
+    rec
+}
+
+/// Apply an interface configuration via `SYS_NET_IF_CONFIG`. Returns the
+/// kernel's signed result (0 on success, negative errno on failure).
+fn net_if_config(rec: &[u8; 18]) -> i64 {
+    // SAFETY: `rec` is exactly 18 bytes, matching the kernel's REC_SIZE
+    // contract; the kernel only reads (never writes) the record.
+    unsafe {
+        syscall4(
+            SYS_NET_IF_CONFIG,
+            rec.as_ptr() as u64,
+            rec.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
 // ============================================================================
@@ -513,6 +570,11 @@ fn ip_to_u32(ip: &str) -> Option<u32> {
     Some((a << 24) | (b << 16) | (c << 8) | d)
 }
 
+/// Parse a dotted-quad IPv4 string into its 4 network-order bytes.
+fn ip_to_bytes(ip: &str) -> Option<[u8; 4]> {
+    ip_to_u32(ip).map(u32::to_be_bytes)
+}
+
 /// Validate that a string looks like a dotted-quad IPv4 address.
 fn is_ipv4(s: &str) -> bool {
     ip_to_u32(s).is_some()
@@ -641,73 +703,85 @@ fn print_short_table(interfaces: &[&InterfaceInfo]) {
 // Configuration commands
 // ============================================================================
 
+/// Report a failed `SYS_NET_IF_CONFIG` call and exit. `-1` (EPERM) is the most
+/// common failure — the caller lacks the `CAP_NET_ADMIN`-class authority.
+fn config_fail(op: &str, iface: &str, ret: i64) -> ! {
+    if ret == -1 {
+        eprintln!("ifconfig: failed to {op} {iface}: permission denied (need root)");
+    } else {
+        eprintln!("ifconfig: failed to {op} {iface}: error {ret}");
+    }
+    process::exit(1);
+}
+
 /// Bring an interface up.
 fn cmd_up(iface: &str) {
-    let ret = net_ioctl(NET_IF_UP, iface, 0);
+    let rec = build_config_record(None, None, None, None, Some(true));
+    let ret = net_if_config(&rec);
     if ret < 0 {
-        eprintln!("ifconfig: failed to bring up {iface}: error {ret}");
-        process::exit(1);
+        config_fail("bring up", iface, ret);
     }
 }
 
 /// Bring an interface down.
 fn cmd_down(iface: &str) {
-    let ret = net_ioctl(NET_IF_DOWN, iface, 0);
+    let rec = build_config_record(None, None, None, None, Some(false));
+    let ret = net_if_config(&rec);
     if ret < 0 {
-        eprintln!("ifconfig: failed to bring down {iface}: error {ret}");
-        process::exit(1);
+        config_fail("bring down", iface, ret);
     }
 }
 
 /// Set the IP address for an interface.
 fn cmd_set_ip(iface: &str, ip: &str) {
-    let ip_val = match ip_to_u32(ip) {
-        Some(v) => v,
-        None => {
-            eprintln!("ifconfig: invalid IP address: {ip}");
-            process::exit(1);
-        }
-    };
-    let ret = net_ioctl(NET_IF_SET_IP, iface, u64::from(ip_val));
-    if ret < 0 {
-        eprintln!("ifconfig: failed to set IP on {iface}: error {ret}");
+    let Some(ip_bytes) = ip_to_bytes(ip) else {
+        eprintln!("ifconfig: invalid IP address: {ip}");
         process::exit(1);
+    };
+    let rec = build_config_record(Some(ip_bytes), None, None, None, None);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail("set IP on", iface, ret);
     }
 }
 
 /// Set the netmask for an interface.
 fn cmd_set_netmask(iface: &str, mask: &str) {
-    let mask_val = match ip_to_u32(mask) {
-        Some(v) => v,
-        None => {
-            eprintln!("ifconfig: invalid netmask: {mask}");
-            process::exit(1);
-        }
-    };
-    let ret = net_ioctl(NET_IF_SET_MASK, iface, u64::from(mask_val));
-    if ret < 0 {
-        eprintln!("ifconfig: failed to set netmask on {iface}: error {ret}");
+    let Some(mask_bytes) = ip_to_bytes(mask) else {
+        eprintln!("ifconfig: invalid netmask: {mask}");
         process::exit(1);
+    };
+    let rec = build_config_record(None, Some(mask_bytes), None, None, None);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail("set netmask on", iface, ret);
     }
 }
 
 /// Set the broadcast address for an interface.
+///
+/// The kernel derives the broadcast address from the IP/mask pair rather than
+/// storing it independently (`SYS_NET_IF_CONFIG` has no broadcast field), so an
+/// explicit broadcast override is not representable. Validate the argument and
+/// report that it is unsupported rather than silently ignoring it.
 fn cmd_set_broadcast(iface: &str, bcast: &str) {
-    let bcast_val = match ip_to_u32(bcast) {
-        Some(v) => v,
-        None => {
-            eprintln!("ifconfig: invalid broadcast address: {bcast}");
-            process::exit(1);
-        }
-    };
-    let ret = net_ioctl(NET_IF_SET_BCAST, iface, u64::from(bcast_val));
-    if ret < 0 {
-        eprintln!("ifconfig: failed to set broadcast on {iface}: error {ret}");
+    if !is_ipv4(bcast) {
+        eprintln!("ifconfig: invalid broadcast address: {bcast}");
         process::exit(1);
     }
+    eprintln!(
+        "ifconfig: setting an explicit broadcast on {iface} is not supported \
+         (the broadcast address is derived from the IP and netmask)"
+    );
+    process::exit(1);
 }
 
 /// Set the MTU for an interface.
+///
+/// The kernel interface model does not carry a per-interface MTU
+/// (`SYS_NET_IF_CONFIG` has no MTU field), so this is not representable.
+/// Validate the value and report that it is unsupported rather than silently
+/// pretending to succeed.
 fn cmd_set_mtu(iface: &str, mtu_str: &str) {
     let mtu: u32 = match mtu_str.parse() {
         Ok(v) => v,
@@ -720,11 +794,8 @@ fn cmd_set_mtu(iface: &str, mtu_str: &str) {
         eprintln!("ifconfig: MTU must be between 1 and 65535");
         process::exit(1);
     }
-    let ret = net_ioctl(NET_IF_SET_MTU, iface, u64::from(mtu));
-    if ret < 0 {
-        eprintln!("ifconfig: failed to set MTU on {iface}: error {ret}");
-        process::exit(1);
-    }
+    eprintln!("ifconfig: setting the MTU on {iface} is not supported by this kernel");
+    process::exit(1);
 }
 
 // ============================================================================
@@ -1361,6 +1432,72 @@ mod tests {
         );
         assert_eq!(fmt_mac([0, 0, 0, 0, 0, 0]), "00:00:00:00:00:00");
         assert_eq!(fmt_mac([0xff, 0xab, 0x0c, 0xde, 0x01, 0x9f]), "ff:ab:0c:de:01:9f");
+    }
+
+    // --- SYS_NET_IF_CONFIG record building ---
+
+    #[test]
+    fn test_ip_to_bytes() {
+        assert_eq!(ip_to_bytes("10.0.2.15"), Some([10, 0, 2, 15]));
+        assert_eq!(ip_to_bytes("255.255.255.0"), Some([255, 255, 255, 0]));
+        assert_eq!(ip_to_bytes("0.0.0.0"), Some([0, 0, 0, 0]));
+        assert_eq!(ip_to_bytes("not.an.ip.addr"), None);
+        assert_eq!(ip_to_bytes("10.0.0.256"), None);
+    }
+
+    #[test]
+    fn test_build_config_record_ip_only() {
+        let rec = build_config_record(Some([10, 0, 2, 42]), None, None, None, None);
+        assert_eq!(&rec[0..4], &[10, 0, 2, 42]);
+        // Unset fields stay zero.
+        assert_eq!(&rec[4..16], &[0u8; 12]);
+        assert_eq!(rec[16], 0); // up byte unused
+        assert_eq!(rec[17], cfg_mask::IP);
+    }
+
+    #[test]
+    fn test_build_config_record_mask_only() {
+        let rec = build_config_record(None, Some([255, 255, 255, 0]), None, None, None);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(rec[17], cfg_mask::MASK);
+    }
+
+    #[test]
+    fn test_build_config_record_up_and_down() {
+        let up = build_config_record(None, None, None, None, Some(true));
+        assert_eq!(up[16], 1);
+        assert_eq!(up[17], cfg_mask::UP);
+
+        let down = build_config_record(None, None, None, None, Some(false));
+        assert_eq!(down[16], 0);
+        assert_eq!(down[17], cfg_mask::UP);
+    }
+
+    #[test]
+    fn test_build_config_record_all_fields() {
+        let rec = build_config_record(
+            Some([10, 0, 2, 15]),
+            Some([255, 255, 255, 0]),
+            Some([10, 0, 2, 2]),
+            Some([9, 9, 9, 9]),
+            Some(true),
+        );
+        assert_eq!(&rec[0..4], &[10, 0, 2, 15]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(&rec[8..12], &[10, 0, 2, 2]);
+        assert_eq!(&rec[12..16], &[9, 9, 9, 9]);
+        assert_eq!(rec[16], 1);
+        assert_eq!(
+            rec[17],
+            cfg_mask::IP | cfg_mask::MASK | cfg_mask::GATEWAY | cfg_mask::DNS | cfg_mask::UP
+        );
+    }
+
+    #[test]
+    fn test_build_config_record_empty() {
+        // No fields requested -> mask 0 (kernel treats this as a no-op success).
+        let rec = build_config_record(None, None, None, None, None);
+        assert_eq!(rec, [0u8; 18]);
     }
 
     #[test]

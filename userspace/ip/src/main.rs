@@ -37,20 +37,29 @@ use std::process;
 /// show paths fall back to this syscall (TD18 read-path wiring).
 const SYS_NET_IF_INFO: u64 = 842;
 
-// IOCTL sub-commands for network configuration.
-const NET_IF_UP: u64 = 1;
-const NET_IF_DOWN: u64 = 2;
-const NET_IF_SET_IP: u64 = 3;
-#[allow(dead_code)] // Used when full ioctl support is wired up.
-const NET_IF_SET_MASK: u64 = 4;
-#[allow(dead_code)]
-const NET_IF_SET_GW: u64 = 5;
-const NET_ROUTE_ADD: u64 = 10;
-const NET_ROUTE_DEL: u64 = 11;
-#[allow(dead_code)] // DNS add/del use resolv.conf directly for now.
-const NET_DNS_ADD: u64 = 20;
-#[allow(dead_code)]
-const NET_DNS_DEL: u64 = 21;
+/// Interface-configuration write syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_CONFIG`). Root-gated. Reads an 18-byte record from `arg0`
+/// (length in `arg1`) whose byte 17 is a per-field mask selecting which of
+/// IP/mask/gateway/DNS/up to apply (read-modify-write against the live
+/// config). This is the native write path behind `ip addr` and `ip link`.
+/// See [`build_config_record`] for the layout.
+const SYS_NET_IF_CONFIG: u64 = 856;
+
+/// Field-mask bits for the `SYS_NET_IF_CONFIG` record (byte 17). A set bit
+/// means "apply this field"; unset means "leave the current value untouched".
+mod cfg_mask {
+    /// Apply the IPv4 address (record bytes 0..4).
+    pub const IP: u8 = 1 << 0;
+    /// Apply the subnet mask (record bytes 4..8).
+    pub const MASK: u8 = 1 << 1;
+    /// Apply the gateway (record bytes 8..12).
+    pub const GATEWAY: u8 = 1 << 2;
+    /// Apply the DNS server (record bytes 12..16).
+    #[allow(dead_code)] // `ip` uses resolv.conf for DNS, not this field.
+    pub const DNS: u8 = 1 << 3;
+    /// Apply the up/down flag (record byte 16).
+    pub const UP: u8 = 1 << 4;
+}
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
@@ -72,17 +81,60 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
-/// Issue a network-configuration ioctl.
+/// Build the 18-byte `SYS_NET_IF_CONFIG` record from the fields the caller
+/// wants to change. Any `None` field is left out of the record and its mask
+/// bit stays clear, so the kernel preserves the current value for it
+/// (read-modify-write). Pure (no syscall) so it is unit-testable on the host.
 ///
-/// Slate OS does not yet expose a net-config syscall. The number these tools
-/// previously used (810) is actually `SYS_UDP_BIND` in the kernel, so issuing
-/// the syscall here bound a UDP socket to a bogus port (the `cmd` value),
-/// leaked the resulting handle, and reported false success. Until the
-/// net-config ABI lands (operator decision, TD18), interface/route
-/// configuration is unsupported: return `ENOSYS` without touching the kernel
-/// rather than corrupting UDP socket state.
-fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
-    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
+/// Layout: `[0..4]` ip, `[4..8]` mask, `[8..12]` gateway, `[12..16]` dns,
+/// `[16]` up flag, `[17]` field mask (see [`cfg_mask`]).
+fn build_config_record(
+    ip: Option<[u8; 4]>,
+    mask: Option<[u8; 4]>,
+    gateway: Option<[u8; 4]>,
+    dns: Option<[u8; 4]>,
+    up: Option<bool>,
+) -> [u8; 18] {
+    let mut rec = [0u8; 18];
+    let mut field_mask = 0u8;
+    if let Some(v) = ip {
+        rec[0..4].copy_from_slice(&v);
+        field_mask |= cfg_mask::IP;
+    }
+    if let Some(v) = mask {
+        rec[4..8].copy_from_slice(&v);
+        field_mask |= cfg_mask::MASK;
+    }
+    if let Some(v) = gateway {
+        rec[8..12].copy_from_slice(&v);
+        field_mask |= cfg_mask::GATEWAY;
+    }
+    if let Some(v) = dns {
+        rec[12..16].copy_from_slice(&v);
+        field_mask |= cfg_mask::DNS;
+    }
+    if let Some(u) = up {
+        rec[16] = u8::from(u);
+        field_mask |= cfg_mask::UP;
+    }
+    rec[17] = field_mask;
+    rec
+}
+
+/// Apply an interface configuration via `SYS_NET_IF_CONFIG`. Returns the
+/// kernel's signed result (0 on success, negative errno on failure).
+fn net_if_config(rec: &[u8; 18]) -> i64 {
+    // SAFETY: `rec` is exactly 18 bytes, matching the kernel's REC_SIZE
+    // contract; the kernel only reads (never writes) the record.
+    unsafe {
+        syscall4(
+            SYS_NET_IF_CONFIG,
+            rec.as_ptr() as u64,
+            rec.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
 // ============================================================================
@@ -557,15 +609,35 @@ fn cidr_to_mask(cidr: &str) -> String {
     )
 }
 
-fn ip_to_u32(ip: &str) -> u32 {
-    let parts: Vec<u32> = ip.split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    if parts.len() == 4 {
-        (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
-    } else {
-        0
+/// Parse a dotted-quad IPv4 string into its 4 network-order bytes, rejecting
+/// malformed input (wrong component count or out-of-range octet). Pure, so it
+/// is unit-testable on the host.
+fn ip_to_bytes(ip: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return None;
     }
+    let mut out = [0u8; 4];
+    for (slot, part) in out.iter_mut().zip(parts) {
+        *slot = part.parse::<u8>().ok()?;
+    }
+    Some(out)
+}
+
+/// Convert a CIDR prefix length (0..=32) into a 4-byte subnet mask. Returns
+/// `None` for out-of-range prefixes. Pure, so it is unit-testable on the host.
+fn prefix_to_mask(prefix: u8) -> Option<[u8; 4]> {
+    if prefix > 32 {
+        return None;
+    }
+    // Build the mask as a u32 (guarding the `1<<32` overflow via the branch),
+    // then split into network-order bytes.
+    let bits: u32 = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Some(bits.to_be_bytes())
 }
 
 struct NeighEntry {
@@ -781,42 +853,71 @@ fn cmd_stats(iface_name: &str) {
     println!("    Errors:  {}", iface.tx_errors);
 }
 
+/// Report a failed `SYS_NET_IF_CONFIG` call and exit. `-1` (EPERM) is the most
+/// common failure — the caller lacks the `CAP_NET_ADMIN`-class authority.
+fn config_fail(msg: &str, ret: i64) -> ! {
+    if ret == -1 {
+        eprintln!("{msg}: permission denied (need root)");
+    } else {
+        eprintln!("{msg}: error {ret}");
+    }
+    process::exit(1);
+}
+
 fn cmd_link_set(iface: &str, action: &str) {
-    let cmd = match action {
-        "up" => NET_IF_UP,
-        "down" => NET_IF_DOWN,
+    let up = match action {
+        "up" => true,
+        "down" => false,
         other => {
             eprintln!("unknown action: {other} (expected 'up' or 'down')");
             process::exit(1);
         }
     };
 
-    let ret = net_ioctl(cmd, iface, 0);
+    let rec = build_config_record(None, None, None, None, Some(up));
+    let ret = net_if_config(&rec);
     if ret < 0 {
-        eprintln!("Failed to set {iface} {action}: error {ret}");
-        process::exit(1);
+        config_fail(&format!("Failed to set {iface} {action}"), ret);
     }
     println!("{iface}: set {action}");
 }
 
 fn cmd_addr_add(addr: &str, iface: &str) {
-    let (ip_str, _mask_str) = addr.split_once('/').unwrap_or((addr, "24"));
-    let ip_val = ip_to_u32(ip_str);
-
-    let ret = net_ioctl(NET_IF_SET_IP, iface, ip_val as u64);
-    if ret < 0 {
-        eprintln!("Failed to add address {addr} to {iface}: error {ret}");
+    // `ip addr add <ip>[/<prefix>] dev <iface>` — default /24 when omitted, as
+    // `ip` traditionally does for a bare IPv4 host address.
+    let (ip_str, prefix_str) = addr.split_once('/').unwrap_or((addr, "24"));
+    let Some(ip_bytes) = ip_to_bytes(ip_str) else {
+        eprintln!("Invalid IP address: {ip_str}");
         process::exit(1);
+    };
+    let prefix: u8 = match prefix_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Invalid prefix length: {prefix_str}");
+            process::exit(1);
+        }
+    };
+    let Some(mask_bytes) = prefix_to_mask(prefix) else {
+        eprintln!("Prefix length out of range (0..=32): {prefix}");
+        process::exit(1);
+    };
+
+    // Apply IP and mask together so the derived broadcast stays consistent.
+    let rec = build_config_record(Some(ip_bytes), Some(mask_bytes), None, None, None);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail(&format!("Failed to add address {addr} to {iface}"), ret);
     }
     println!("{iface}: added {addr}");
 }
 
 fn cmd_addr_del(addr: &str, iface: &str) {
-    // Setting IP to 0 effectively removes the address.
-    let ret = net_ioctl(NET_IF_SET_IP, iface, 0);
+    // The kernel models a single primary address per interface, so "delete"
+    // means clearing it: set the IP to 0.0.0.0 (unconfigured).
+    let rec = build_config_record(Some([0, 0, 0, 0]), None, None, None, None);
+    let ret = net_if_config(&rec);
     if ret < 0 {
-        eprintln!("Failed to remove address from {iface}: error {ret}");
-        process::exit(1);
+        config_fail(&format!("Failed to remove address from {iface}"), ret);
     }
     println!("{iface}: removed {addr}");
 }
@@ -855,23 +956,56 @@ fn cmd_route_add(args: &[String]) {
         }
     }
 
-    let gw_str = gateway.unwrap_or_else(|| "0.0.0.0".to_string());
     let dev = iface.unwrap_or_else(|| "eth0".to_string());
-    let gw_val = ip_to_u32(&gw_str);
 
-    let ret = net_ioctl(NET_ROUTE_ADD, &dev, gw_val as u64);
-    if ret < 0 {
-        eprintln!("Failed to add route {dest} via {gw_str}: error {ret}");
+    // The kernel models a single default gateway on the primary interface (no
+    // general routing table yet), so only the default route is representable:
+    // `ip route add default via <gw>` sets that gateway. Any other destination
+    // needs a route-table write syscall that does not exist yet (TD18 follow-up).
+    if !is_default_route(dest) {
+        eprintln!(
+            "ip: adding a non-default route ({dest}) is not supported \
+             (only 'default' is representable via the interface gateway)"
+        );
         process::exit(1);
+    }
+    let Some(gw_str) = gateway else {
+        eprintln!("ip: 'route add default' requires 'via <gateway>'");
+        process::exit(1);
+    };
+    let Some(gw_bytes) = ip_to_bytes(&gw_str) else {
+        eprintln!("Invalid gateway address: {gw_str}");
+        process::exit(1);
+    };
+
+    let rec = build_config_record(None, None, Some(gw_bytes), None, None);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail(&format!("Failed to add route {dest} via {gw_str}"), ret);
     }
     println!("Added route {dest} via {gw_str} dev {dev}");
 }
 
+/// True if a route destination refers to the default route (`default` or
+/// `0.0.0.0/0`).
+fn is_default_route(dest: &str) -> bool {
+    dest == "default" || dest == "0.0.0.0/0"
+}
+
 fn cmd_route_del(dest: &str) {
-    let ret = net_ioctl(NET_ROUTE_DEL, dest, 0);
-    if ret < 0 {
-        eprintln!("Failed to delete route {dest}: error {ret}");
+    // Only the default route is representable (see `cmd_route_add`); deleting it
+    // clears the interface gateway.
+    if !is_default_route(dest) {
+        eprintln!(
+            "ip: deleting a non-default route ({dest}) is not supported \
+             (only 'default' is representable via the interface gateway)"
+        );
         process::exit(1);
+    }
+    let rec = build_config_record(None, None, Some([0, 0, 0, 0]), None, None);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail(&format!("Failed to delete route {dest}"), ret);
     }
     println!("Deleted route {dest}");
 }
@@ -1072,6 +1206,70 @@ mod tests {
         assert_eq!(fmt_ipv4([10, 0, 2, 15]), "10.0.2.15");
         assert_eq!(fmt_ipv4([0, 0, 0, 0]), "0.0.0.0");
         assert_eq!(fmt_ipv4([255, 255, 255, 255]), "255.255.255.255");
+    }
+
+    // --- SYS_NET_IF_CONFIG record building ---
+
+    #[test]
+    fn test_ip_to_bytes() {
+        assert_eq!(ip_to_bytes("10.0.2.15"), Some([10, 0, 2, 15]));
+        assert_eq!(ip_to_bytes("0.0.0.0"), Some([0, 0, 0, 0]));
+        assert_eq!(ip_to_bytes("255.255.255.255"), Some([255, 255, 255, 255]));
+        assert_eq!(ip_to_bytes("10.0.0"), None);
+        assert_eq!(ip_to_bytes("10.0.0.256"), None);
+        assert_eq!(ip_to_bytes("nope"), None);
+    }
+
+    #[test]
+    fn test_prefix_to_mask() {
+        assert_eq!(prefix_to_mask(0), Some([0, 0, 0, 0]));
+        assert_eq!(prefix_to_mask(8), Some([255, 0, 0, 0]));
+        assert_eq!(prefix_to_mask(16), Some([255, 255, 0, 0]));
+        assert_eq!(prefix_to_mask(24), Some([255, 255, 255, 0]));
+        assert_eq!(prefix_to_mask(32), Some([255, 255, 255, 255]));
+        assert_eq!(prefix_to_mask(25), Some([255, 255, 255, 128]));
+        assert_eq!(prefix_to_mask(33), None);
+    }
+
+    #[test]
+    fn test_build_config_record_addr_add() {
+        // `ip addr add 10.0.2.42/24` -> IP + MASK fields set.
+        let rec = build_config_record(
+            Some([10, 0, 2, 42]),
+            prefix_to_mask(24),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(&rec[0..4], &[10, 0, 2, 42]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(rec[17], cfg_mask::IP | cfg_mask::MASK);
+    }
+
+    #[test]
+    fn test_build_config_record_link_updown() {
+        let up = build_config_record(None, None, None, None, Some(true));
+        assert_eq!(up[16], 1);
+        assert_eq!(up[17], cfg_mask::UP);
+        let down = build_config_record(None, None, None, None, Some(false));
+        assert_eq!(down[16], 0);
+        assert_eq!(down[17], cfg_mask::UP);
+    }
+
+    #[test]
+    fn test_build_config_record_gateway() {
+        // `ip route add default via 10.0.2.2` -> GATEWAY field only.
+        let rec = build_config_record(None, None, Some([10, 0, 2, 2]), None, None);
+        assert_eq!(&rec[8..12], &[10, 0, 2, 2]);
+        assert_eq!(rec[17], cfg_mask::GATEWAY);
+    }
+
+    #[test]
+    fn test_is_default_route() {
+        assert!(is_default_route("default"));
+        assert!(is_default_route("0.0.0.0/0"));
+        assert!(!is_default_route("10.0.0.0/8"));
+        assert!(!is_default_route("192.168.1.0/24"));
     }
 
     #[test]

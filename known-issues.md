@@ -4222,11 +4222,23 @@ client-side number correction:
   18-byte record with a per-field mask (bit0..4 = ip/mask/gateway/dns/up) so a
   tool changes only the fields it means to (read-modify-write). Boot self-test
   `net::interface::test_write_primitives` (snapshot→configure→toggle up/down→
-  restore) verified in serial. **Still TODO:** (a) rewire the six userspace
-  tools' *address/link* paths (`ifconfig`/`ip addr`/`ip link`/`route`) to call
-  `SYS_NET_IF_CONFIG` instead of the neutered `SYS_NET_IOCTL` stub; (b) *route
-  table* writes (add/del route) and *firewall* (`nft`/`fw`) writes still have no
-  native syscall — separate follow-ups. Original harm analysis (traced
+  restore) verified in serial. **Tool rewiring (a): DONE 2026-07-02** —
+  `ifconfig`, `ip`, `route`, and `dhcpcd` now issue `SYS_NET_IF_CONFIG=856`
+  instead of the neutered `net_ioctl` stub, via a shared `build_config_record`/
+  `net_if_config` (host-unit-tested per tool). Mapping: `ifconfig eth0 <ip>` →
+  IP bit; `ifconfig ... netmask` → MASK bit; `ifconfig up/down` → UP bit;
+  `ip addr add <ip>/<prefix>` → IP|MASK (prefix→mask); `ip addr del` → IP=0;
+  `ip link set up/down` → UP; `ip route add/del default via <gw>` and
+  `route add/del default gw <gw>` → GATEWAY bit (clearing to 0 on del);
+  `dhcpcd` applies a whole lease (IP|MASK|GATEWAY|UP) in one call. Fields the
+  kernel model can't represent are now honest hard errors instead of silent
+  fake-success: `ifconfig` MTU/explicit-broadcast, and *non-default* routes in
+  both `ip route` and `route` (which report "only the default route is
+  representable via the interface gateway"). Host tests green: `ifconfig` 38,
+  `ip` 20, `route` 12, `dhcpcd` 110. **Still TODO:** (b) a general *route
+  table* (non-default add/del route) and *firewall* (`nft`/`fw`) writes still
+  have no native syscall — separate follow-ups needing new syscalls, not just
+  rewiring. Original harm analysis (traced
   2026-06-01): with a Socket-WRITE cap the old call silently binds+leaks a UDP
   socket on a low port and misleads the user that the config change applied;
   without the cap it fails. **Write-path harm neutered 2026-06-14** for all six

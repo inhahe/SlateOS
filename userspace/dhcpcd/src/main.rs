@@ -93,13 +93,25 @@ const DEFAULT_TIMEOUT: u64 = 30;
 /// Maximum retries before giving up.
 const MAX_RETRIES: u32 = 5;
 
-/// Network IOCTL sub-commands. Retained as documentation of the operations the
-/// DHCP client *would* apply once a real net-config ABI exists; currently every
-/// one resolves to `net_ioctl`, which returns `ENOSYS` (see below).
-const NET_IF_UP: u64 = 1;
-const NET_IF_SET_IP: u64 = 3;
-const NET_IF_SET_MASK: u64 = 4;
-const NET_IF_SET_GW: u64 = 5;
+/// Interface-configuration write syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_CONFIG`). Root-gated. Reads an 18-byte record from `arg0`
+/// (length in `arg1`) whose byte 17 is a per-field mask selecting which of
+/// IP/mask/gateway/DNS/up to apply. This is the native path the DHCP client
+/// uses to apply an acquired lease. See [`build_lease_record`] for the layout.
+const SYS_NET_IF_CONFIG: u64 = 856;
+
+/// Field-mask bits for the `SYS_NET_IF_CONFIG` record (byte 17). A set bit
+/// means "apply this field"; unset means "leave the current value untouched".
+mod cfg_mask {
+    /// Apply the IPv4 address (record bytes 0..4).
+    pub const IP: u8 = 1 << 0;
+    /// Apply the subnet mask (record bytes 4..8).
+    pub const MASK: u8 = 1 << 1;
+    /// Apply the gateway (record bytes 8..12).
+    pub const GATEWAY: u8 = 1 << 2;
+    /// Apply the up/down flag (record byte 16).
+    pub const UP: u8 = 1 << 4;
+}
 
 // ============================================================================
 // DHCP message types (option 53)
@@ -1090,17 +1102,62 @@ fn apply_config_file(cfg: &mut Config, file_result: &ConfigFileResult) {
 // Syscall helpers
 // ============================================================================
 
-/// Apply a network interface-configuration change for the named interface.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller ensures arguments are valid for the given syscall number.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Build the 18-byte `SYS_NET_IF_CONFIG` record for applying a DHCP lease:
+/// IP address, subnet mask, and up flag are always set; the gateway field is
+/// set only when a router is present. Every unset field's mask bit stays clear
+/// so the kernel preserves its current value. Pure (no syscall) so it is
+/// unit-testable on the host.
 ///
-/// Slate OS has no net-config write syscall. The earlier implementation issued
-/// `syscall(810, cmd, ...)` with `cmd` (up/set-ip/set-mask/set-gw) as arg0, but
-/// `810` is `SYS_UDP_BIND` whose arg0 is a *port*: the call bound a UDP socket
-/// to port 1/3/4/5, leaked the handle, and returned a non-negative value that
-/// looked like success. Until the net-config ABI is defined this is a hard
-/// `ENOSYS` so the DHCP client honestly reports that it could not apply the
-/// lease rather than silently leaking sockets and claiming success.
-fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
-    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
+/// Layout: `[0..4]` ip, `[4..8]` mask, `[8..12]` gateway, `[12..16]` dns,
+/// `[16]` up flag, `[17]` field mask (see [`cfg_mask`]).
+fn build_lease_record(ip: [u8; 4], mask: [u8; 4], gateway: Option<[u8; 4]>) -> [u8; 18] {
+    let mut rec = [0u8; 18];
+    rec[0..4].copy_from_slice(&ip);
+    rec[4..8].copy_from_slice(&mask);
+    let mut field_mask = cfg_mask::IP | cfg_mask::MASK | cfg_mask::UP;
+    rec[16] = 1; // bring the interface up as part of applying the lease
+    if let Some(gw) = gateway {
+        rec[8..12].copy_from_slice(&gw);
+        field_mask |= cfg_mask::GATEWAY;
+    }
+    rec[17] = field_mask;
+    rec
+}
+
+/// Apply an interface configuration via `SYS_NET_IF_CONFIG`. Returns the
+/// kernel's signed result (0 on success, negative errno on failure).
+fn net_if_config(rec: &[u8; 18]) -> i64 {
+    // SAFETY: `rec` is exactly 18 bytes, matching the kernel's REC_SIZE
+    // contract; the kernel only reads (never writes) the record.
+    unsafe {
+        syscall4(
+            SYS_NET_IF_CONFIG,
+            rec.as_ptr() as u64,
+            rec.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
 // ============================================================================
@@ -1158,36 +1215,40 @@ fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
         return;
     }
 
-    // Set IP address.
-    let ret = net_ioctl(NET_IF_SET_IP, iface, u64::from(lease.ip_address));
-    if cfg.debug {
-        eprintln!("  set IP {} -> rc={}", ip_to_string(lease.ip_address), ret);
-    }
-
-    // Set subnet mask.
-    let ret = net_ioctl(NET_IF_SET_MASK, iface, u64::from(lease.subnet_mask));
+    // Apply the address, mask, gateway (if any) and up flag in one atomic
+    // read-modify-write via SYS_NET_IF_CONFIG. Applying them together avoids the
+    // transient inconsistent states the old per-field ioctls produced (IP set
+    // but mask stale, etc.).
+    let gateway = if cfg.no_gateway {
+        None
+    } else {
+        lease.routers.first().map(|&gw| gw.to_be_bytes())
+    };
+    let rec = build_lease_record(
+        lease.ip_address.to_be_bytes(),
+        lease.subnet_mask.to_be_bytes(),
+        gateway,
+    );
+    let ret = net_if_config(&rec);
     if cfg.debug {
         eprintln!(
-            "  set mask {} -> rc={}",
+            "  apply lease ip={} mask={} gw={} up -> rc={}",
+            ip_to_string(lease.ip_address),
             ip_to_string(lease.subnet_mask),
+            gateway.map_or_else(|| "none".to_string(), |g| ip_to_string(u32::from_be_bytes(g))),
             ret
         );
     }
-
-    // Bring interface up.
-    let ret = net_ioctl(NET_IF_UP, iface, 0);
-    if cfg.debug {
-        eprintln!("  interface up -> rc={ret}");
-    }
-
-    // Set default gateway (first router).
-    if !cfg.no_gateway
-        && let Some(&gw) = lease.routers.first() {
-            let ret = net_ioctl(NET_IF_SET_GW, iface, u64::from(gw));
-            if cfg.debug {
-                eprintln!("  set gateway {} -> rc={}", ip_to_string(gw), ret);
+    if ret < 0 {
+        eprintln!(
+            "dhcpcd: failed to apply lease to {iface}: {}",
+            if ret == -1 {
+                "permission denied (need root)".to_string()
+            } else {
+                format!("error {ret}")
             }
-        }
+        );
+    }
 
     // Write resolv.conf.
     if !cfg.no_dns && !lease.dns_servers.is_empty() {
@@ -1778,6 +1839,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SYS_NET_IF_CONFIG lease-record building ----
+
+    #[test]
+    fn test_build_lease_record_with_gateway() {
+        // Lease 10.0.2.15/24 via 10.0.2.2.
+        let rec = build_lease_record([10, 0, 2, 15], [255, 255, 255, 0], Some([10, 0, 2, 2]));
+        assert_eq!(&rec[0..4], &[10, 0, 2, 15]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(&rec[8..12], &[10, 0, 2, 2]);
+        assert_eq!(&rec[12..16], &[0, 0, 0, 0]); // dns untouched
+        assert_eq!(rec[16], 1); // up
+        assert_eq!(
+            rec[17],
+            cfg_mask::IP | cfg_mask::MASK | cfg_mask::GATEWAY | cfg_mask::UP
+        );
+    }
+
+    #[test]
+    fn test_build_lease_record_no_gateway() {
+        let rec = build_lease_record([192, 168, 1, 50], [255, 255, 255, 0], None);
+        assert_eq!(&rec[0..4], &[192, 168, 1, 50]);
+        assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
+        assert_eq!(&rec[8..12], &[0, 0, 0, 0]); // gateway untouched
+        assert_eq!(rec[16], 1);
+        assert_eq!(rec[17], cfg_mask::IP | cfg_mask::MASK | cfg_mask::UP);
+    }
+
+    #[test]
+    fn test_build_lease_record_be_order() {
+        // Confirm u32 -> byte order matches the wire/ABI (MSB = first octet).
+        let ip: u32 = 0x0A00020F; // 10.0.2.15
+        let rec = build_lease_record(ip.to_be_bytes(), [255, 255, 255, 0], None);
+        assert_eq!(&rec[0..4], &[10, 0, 2, 15]);
+    }
 
     // ---- IP / MAC helpers ----
 

@@ -34,10 +34,21 @@ const SYS_NET_IF_INFO: u64 = 842;
 /// Size of the `SYS_NET_IF_INFO` record (must match the kernel's `INFO_SIZE`).
 const NET_IF_INFO_SIZE: usize = 24;
 
-// Route ioctl sub-commands.
-const ROUTE_ADD: u64 = 10;
-const ROUTE_DEL: u64 = 11;
-const ROUTE_FLUSH: u64 = 12;
+/// Interface-configuration write syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_CONFIG`). Root-gated. Reads an 18-byte record from `arg0`
+/// (length in `arg1`) whose byte 17 is a per-field mask selecting which of
+/// IP/mask/gateway/DNS/up to apply (read-modify-write against the live
+/// config). The kernel models a single default gateway on the primary
+/// interface (no general routing table yet), so `route` can only represent the
+/// default route by writing this gateway field. See [`build_config_record`].
+const SYS_NET_IF_CONFIG: u64 = 856;
+
+/// Field-mask bits for the `SYS_NET_IF_CONFIG` record (byte 17). A set bit
+/// means "apply this field"; unset means "leave the current value untouched".
+mod cfg_mask {
+    /// Apply the gateway (record bytes 8..12).
+    pub const GATEWAY: u8 = 1 << 2;
+}
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
@@ -57,17 +68,27 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-/// Issue a routing-table modification.
+/// Build the 18-byte `SYS_NET_IF_CONFIG` record that sets the default gateway.
+/// Only the gateway field and its mask bit are populated; every other field is
+/// left clear so the kernel preserves the current IP/mask/DNS/up state
+/// (read-modify-write). Pure (no syscall) so it is unit-testable on the host.
 ///
-/// Slate OS does not yet expose a net-config / route-modification syscall.
-/// The number these tools previously used (810) is actually `SYS_UDP_BIND` in
-/// the kernel, so issuing the syscall here bound a UDP socket to a bogus port
-/// (the `cmd` value), leaked the resulting handle, and reported false success.
-/// Until the route-config ABI lands (operator decision, TD18), route
-/// modification is unsupported: return `ENOSYS` without touching the kernel
-/// rather than corrupting UDP socket state.
-fn net_ioctl(_cmd: u64, _a1: u64, _a2: u64) -> i64 {
-    -38 // ENOSYS — route-config syscall ABI not yet defined (see note above).
+/// Layout: `[0..4]` ip, `[4..8]` mask, `[8..12]` gateway, `[12..16]` dns,
+/// `[16]` up flag, `[17]` field mask.
+fn build_gateway_record(gateway: [u8; 4]) -> [u8; 18] {
+    let mut rec = [0u8; 18];
+    rec[8..12].copy_from_slice(&gateway);
+    rec[17] = cfg_mask::GATEWAY;
+    rec
+}
+
+/// Apply an interface configuration via `SYS_NET_IF_CONFIG`. Returns the
+/// kernel's signed result (0 on success, negative errno on failure).
+fn net_if_config(rec: &[u8; 18]) -> i64 {
+    // SAFETY: `rec` is exactly 18 bytes, matching the kernel's REC_SIZE
+    // contract; the kernel only reads (never writes) the record. `arg2` is
+    // unused by the syscall (it reads only arg0=ptr and arg1=len).
+    unsafe { syscall3(SYS_NET_IF_CONFIG, rec.as_ptr() as u64, rec.len() as u64, 0) }
 }
 
 // ============================================================================
@@ -440,118 +461,86 @@ fn display_routes(numeric: bool, verbose: bool) {
 // Route manipulation
 // ============================================================================
 
-fn add_route(dest: u32, mask: u32, gateway: u32, metric: u32, is_host: bool) {
-    let mut flags: u16 = RTF_UP;
-    if gateway != 0 {
-        flags |= RTF_GATEWAY;
-    }
-    if is_host {
-        flags |= RTF_HOST;
-    }
-
-    // Pack route info for the syscall.
-    // Encoding: dest in a1 (high 32 bits = dest, low 32 bits = mask)
-    //           gateway in a2 (high 32 bits = gw, low 16 bits = flags, next 16 bits = metric low)
-    let a1 = ((dest as u64) << 32) | (mask as u64);
-    let a2 = ((gateway as u64) << 32) | ((flags as u64) << 16) | ((metric & 0xFFFF) as u64);
-
-    let ret = net_ioctl(ROUTE_ADD, a1, a2);
-    if ret < 0 {
-        // Try writing to sysfs as fallback.
-        let prefix = mask_to_prefix(mask);
-        let dest_str = if dest == 0 && mask == 0 {
-            "default".to_string()
-        } else {
-            format!("{}/{}", ip_to_string(dest), prefix)
-        };
-        let gw_str = ip_to_string(gateway);
-        let entry = format!("{} {} {}", dest_str, gw_str, metric);
-
-        if fs::write("/sys/net/routes/add", &entry).is_ok() {
-            if dest == 0 && mask == 0 {
-                println!("Added default route via {}", gw_str);
-            } else {
-                println!("Added route to {} via {}", dest_str, gw_str);
-            }
-        } else {
-            eprintln!(
-                "SIOCADDRT: {}",
-                match ret {
-                    -1 => "Operation not permitted",
-                    -17 => "File exists (route already present)",
-                    -22 => "Invalid argument",
-                    -38 => "Function not implemented (route configuration not yet supported on Slate OS)",
-                    -99 => "Cannot assign requested address",
-                    _ => "Network is unreachable",
-                }
-            );
-            process::exit(1);
-        }
-    } else {
-        let prefix = mask_to_prefix(mask);
-        if dest == 0 && mask == 0 {
-            println!("Added default route via {}", ip_to_string(gateway));
-        } else {
-            println!(
-                "Added route to {}/{} via {}",
-                ip_to_string(dest),
-                prefix,
-                ip_to_string(gateway)
-            );
-        }
-    }
+/// True if `(dest, mask)` denotes the default route (`0.0.0.0/0`).
+fn is_default_route(dest: u32, mask: u32) -> bool {
+    dest == 0 && mask == 0
 }
 
-fn del_route(dest: u32, mask: u32) {
-    let a1 = ((dest as u64) << 32) | (mask as u64);
-    let ret = net_ioctl(ROUTE_DEL, a1, 0);
-    if ret < 0 {
-        // Try sysfs fallback.
-        let prefix = mask_to_prefix(mask);
-        let dest_str = if dest == 0 && mask == 0 {
-            "default".to_string()
-        } else {
-            format!("{}/{}", ip_to_string(dest), prefix)
-        };
-
-        if fs::write("/sys/net/routes/del", &dest_str).is_ok() {
-            println!("Deleted route {}", dest_str);
-        } else {
-            eprintln!(
-                "SIOCDELRT: {}",
-                match ret {
-                    -1 => "Operation not permitted",
-                    -3 => "No such process (route not found)",
-                    -22 => "Invalid argument",
-                    -38 => "Function not implemented (route configuration not yet supported on Slate OS)",
-                    _ => "Unknown error",
-                }
-            );
-            process::exit(1);
-        }
-    } else if dest == 0 && mask == 0 {
-        println!("Deleted default route");
+/// Report a failed `SYS_NET_IF_CONFIG` call and exit. `-1` (EPERM) is the most
+/// common failure — the caller lacks the `CAP_NET_ADMIN`-class authority.
+fn config_fail(msg: &str, ret: i64) -> ! {
+    if ret == -1 {
+        eprintln!("{msg}: Operation not permitted (need root)");
     } else {
-        println!(
-            "Deleted route to {}/{}",
+        eprintln!("{msg}: error {ret}");
+    }
+    process::exit(1);
+}
+
+fn add_route(dest: u32, mask: u32, gateway: u32, _metric: u32, _is_host: bool) {
+    // The kernel has no general routing table — it stores a single default
+    // gateway on the primary interface. Only the default route is therefore
+    // representable; a non-default destination needs a route-table write
+    // syscall that does not exist yet (TD18 follow-up).
+    if !is_default_route(dest, mask) {
+        eprintln!(
+            "route: adding a non-default route ({}/{}) is not supported \
+             (only the default route is representable via the interface gateway)",
             ip_to_string(dest),
             mask_to_prefix(mask)
         );
+        process::exit(1);
     }
+    if gateway == 0 {
+        eprintln!("route: 'add default' requires a gateway ('gw <address>')");
+        process::exit(1);
+    }
+
+    let rec = build_gateway_record(gateway.to_be_bytes());
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail(
+            &format!("SIOCADDRT: failed to add default route via {}", ip_to_string(gateway)),
+            ret,
+        );
+    }
+    println!("Added default route via {}", ip_to_string(gateway));
+}
+
+fn del_route(dest: u32, mask: u32) {
+    if !is_default_route(dest, mask) {
+        eprintln!(
+            "route: deleting a non-default route ({}/{}) is not supported \
+             (only the default route is representable via the interface gateway)",
+            ip_to_string(dest),
+            mask_to_prefix(mask)
+        );
+        process::exit(1);
+    }
+
+    // Deleting the default route clears the interface gateway.
+    let rec = build_gateway_record([0, 0, 0, 0]);
+    let ret = net_if_config(&rec);
+    if ret < 0 {
+        config_fail("SIOCDELRT: failed to delete default route", ret);
+    }
+    println!("Deleted default route");
 }
 
 fn flush_routes() {
-    let ret = net_ioctl(ROUTE_FLUSH, 0, 0);
+    // Flushing implies removing connected/host routes as well, which the
+    // interface-gateway model cannot represent. Clear only what we can — the
+    // default gateway — and tell the user the rest is unsupported.
+    let rec = build_gateway_record([0, 0, 0, 0]);
+    let ret = net_if_config(&rec);
     if ret < 0 {
-        if fs::write("/sys/net/routes/flush", "1").is_ok() {
-            println!("Flushed all routes");
-        } else {
-            eprintln!("Failed to flush routes (error {})", ret);
-            process::exit(1);
-        }
-    } else {
-        println!("Flushed all routes");
+        config_fail("route: failed to clear the default route", ret);
     }
+    println!("Cleared the default route");
+    eprintln!(
+        "route: a full flush is not supported (the kernel has no general \
+         routing table; only the default gateway was cleared)"
+    );
 }
 
 // ============================================================================
@@ -828,6 +817,28 @@ mod tests {
         assert_eq!(ip_to_string(0xC0A80101), "192.168.1.1");
         assert_eq!(ip_to_string(0), "0.0.0.0");
         assert_eq!(ip_to_string(0xFFFFFFFF), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_is_default_route() {
+        assert!(is_default_route(0, 0));
+        assert!(!is_default_route(0x0A000000, 0xFFFFFF00));
+        assert!(!is_default_route(0x0A00020F, 0xFFFFFFFF));
+    }
+
+    #[test]
+    fn test_build_gateway_record() {
+        // `route add default gw 10.0.2.2` -> only the GATEWAY field set.
+        let rec = build_gateway_record([10, 0, 2, 2]);
+        assert_eq!(&rec[0..8], &[0u8; 8]); // ip + mask untouched
+        assert_eq!(&rec[8..12], &[10, 0, 2, 2]);
+        assert_eq!(&rec[12..17], &[0u8; 5]); // dns + up untouched
+        assert_eq!(rec[17], cfg_mask::GATEWAY);
+
+        // Clearing the gateway (del/flush).
+        let cleared = build_gateway_record([0, 0, 0, 0]);
+        assert_eq!(&cleared[8..12], &[0, 0, 0, 0]);
+        assert_eq!(cleared[17], cfg_mask::GATEWAY);
     }
 
     #[test]

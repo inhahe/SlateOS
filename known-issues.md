@@ -500,6 +500,24 @@ long before the hang, and the immediately-prior boot of near-identical code
 reached BOOT_OK in 191 s. Datapoint logged; underscores that blind spot 2
 (NMI detector) is the remaining high-value work on this bug.
 
+**Clean datapoints 2026-07-02 (TD31 symmetric-accounting landed — *added*
+CGROUP TABLE traffic to spawn/reap).** Landing the TD31 attach-on-spawn change
+(commit `51c4033ef`) adds one `cgroup::attach_task` (TABLE lock) per task spawn,
+on top of the detach-per-reap already present — i.e. it re-introduces exactly the
+kind of extra TABLE traffic that, in the *original* TD31 attempt (pre
+B-PREEMPT-SPINLOCK fix), made this hang near-deterministic and hung the boot
+twice. With B-PREEMPT-SPINLOCK now fixed and CGROUP TABLE now a *tracked*
+`crate::sync::Mutex`, the change booted **green 4× consecutively** (190/182/181/
+185 s), **zero** `[liveness]`/`SPINLOCK STALL`/self-test-failure lines and no
+`dash`/`pthread` flake. This is strong evidence the preempt-disable fix cured (or
+at least drastically reduced) the TABLE-traffic-sensitive variant of this hang —
+the added traffic that used to make it ~deterministic no longer reproduces it. A
+follow-up 15-boot `hang-repro-loop.sh` soak on the TD31 binary is running to
+gather more evidence (the now-tracked CGROUP lock means a TABLE-side deadlock
+would finally produce a `SPINLOCK STALL` dump rather than silence). The genuinely
+*total-silence* BSP-dead variant (blind spot 2) still needs the operator-gated
+i6300esb/NMI detector (Q20) to be caught if it recurs.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed
@@ -544,7 +562,10 @@ this race's incidence; watching future boots for recurrence.
 dash script-from-stdin passed (`captured 55 bytes == expected, EOF→exit 0: OK`);
 no recurrence. No unexpected WARNING/failed lines this boot (the only
 `[lockdep] WARNING`s are the lockdep self-test's intentional AB/BA + transitive-
-cycle detections, each followed by `OK`).
+cycle detections, each followed by `OK`). **2026-07-02 (TD31 landed):** 4 further
+consecutive green boots (190/182/181/185 s) with zero self-test-failure lines —
+the dash script-from-stdin test passed on every one; no `InternalError`/`TimedOut`
+recurrence even with the added spawn/reap CGROUP traffic.
 
 ### TD-EDITOR-UTF8. Text editors reject non-UTF-8 files (`fs::read_to_string`) — LOW PRIORITY / graceful failure 2026-07-02
 

@@ -540,6 +540,12 @@ cause work still pending), but future flakes are now unambiguously attributed.
 The B-PREEMPT-SPINLOCK preempt-disable fix (top of file) may also have reduced
 this race's incidence; watching future boots for recurrence.
 
+**Boot-data points (post B-PREEMPT-SPINLOCK fix):** 2026-07-01 (BOOT_OK 177s):
+dash script-from-stdin passed (`captured 55 bytes == expected, EOF→exit 0: OK`);
+no recurrence. No unexpected WARNING/failed lines this boot (the only
+`[lockdep] WARNING`s are the lockdep self-test's intentional AB/BA + transitive-
+cycle detections, each followed by `OK`).
+
 ### B-PAGECACHE-COHERENCE. Read-only page cache invalidation on FS mutations — FIXED 2026-06-30 (de-double-cache vs. buffer cache still pending)
 
 **Resolution (2026-06-30):** the two correctness gaps below are now

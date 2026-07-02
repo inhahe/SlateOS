@@ -32,6 +32,11 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
+use diffcore::{
+    ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
+    normalize_content,
+};
+
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -355,6 +360,9 @@ pub struct Document {
     pub redo_stack: VecDeque<EditAction>,
     /// Seconds since the last save (for auto-save tracking).
     pub seconds_since_save: u64,
+    /// External-change tracker: records the last loaded/saved content and mtime
+    /// so edits made to the file by other programs can be detected and merged.
+    pub sync: FileSync,
 }
 
 impl Default for Document {
@@ -380,6 +388,7 @@ impl Document {
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             seconds_since_save: 0,
+            sync: FileSync::new(),
         }
     }
 
@@ -405,6 +414,7 @@ impl Document {
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             seconds_since_save: 0,
+            sync: FileSync::new(),
         }
     }
 
@@ -421,6 +431,10 @@ impl Document {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".to_string());
+        // Record the load-time snapshot (LF-normalized) and mtime so external
+        // edits can be detected and three-way merged against this ancestor.
+        let mut sync = FileSync::new();
+        sync.record(path, normalize_content(&content));
         Ok(Self {
             lines,
             path: Some(path.to_path_buf()),
@@ -435,6 +449,7 @@ impl Document {
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             seconds_since_save: 0,
+            sync,
         })
     }
 
@@ -449,6 +464,9 @@ impl Document {
         fs::write(&path, &content)?;
         self.modified = false;
         self.seconds_since_save = 0;
+        // Refresh the merge ancestor/mtime so our own write is not mistaken for
+        // an external change on the next check.
+        self.sync.record(&path, content);
         Ok(())
     }
 
@@ -463,12 +481,111 @@ impl Document {
             .unwrap_or_else(|| "Untitled".to_string());
         self.modified = false;
         self.seconds_since_save = 0;
+        self.sync.record(path, content);
         Ok(())
     }
 
     /// Get the full text content of the document.
     pub fn full_text(&self) -> String {
         self.lines.join("\n")
+    }
+
+    // ======================================================================
+    // External-change detection & three-way merge
+    // ======================================================================
+
+    /// Check whether the file backing this document changed on disk since it was
+    /// last loaded or saved. Delegates to the shared [`FileSync`] tracker.
+    #[must_use]
+    pub fn disk_changed(&self) -> DiskChange {
+        match self.path.as_ref() {
+            Some(path) => self.sync.changed(path),
+            None => DiskChange::Unchanged,
+        }
+    }
+
+    /// Dismiss an external change, keeping the current buffer as-is. Records the
+    /// disk's current mtime so the same edit is not re-reported; the merge
+    /// ancestor is left intact for a later merge.
+    pub fn keep_current(&mut self) {
+        if let Some(path) = self.path.clone() {
+            self.sync.touch(&path);
+        }
+    }
+
+    /// Replace the buffer with the on-disk content, discarding local edits.
+    pub fn reload_from_disk(&mut self, disk: &str) {
+        self.set_lines_from_text(disk);
+        self.modified = false;
+        self.seconds_since_save = 0;
+        if let Some(path) = self.path.clone() {
+            self.sync.record(&path, disk.to_string());
+        } else {
+            self.sync.base = Some(disk.to_string());
+        }
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// Compute the three-way merge of the current buffer against `disk`.
+    #[must_use]
+    pub fn merge_preview(&self, disk: &str) -> ThreeWayMerge {
+        self.sync.merge(&self.full_text(), disk)
+    }
+
+    /// Auto-merge the on-disk changes into the buffer. Clean merges become the
+    /// merged text; conflicts fill the buffer with Git-style markers for manual
+    /// resolution. The buffer is marked modified and the ancestor advances to
+    /// `disk` in both cases.
+    pub fn merge_from_disk(&mut self, disk: &str) -> MergeOutcome {
+        let merge = self.merge_preview(disk);
+        let (text, outcome) = match merge.clean_merge() {
+            Some(clean) => (clean, MergeOutcome::Clean),
+            None => (
+                merge.text_with_markers(&self.name, "disk"),
+                MergeOutcome::Conflicted {
+                    conflicts: merge.conflict_count(),
+                },
+            ),
+        };
+        self.apply_merged(&text, disk);
+        outcome
+    }
+
+    /// Apply an already-resolved merge result to the buffer. `disk` becomes the
+    /// new merge ancestor.
+    pub fn apply_merged(&mut self, merged: &str, disk: &str) {
+        self.set_lines_from_text(merged);
+        self.modified = true;
+        if let Some(path) = self.path.clone() {
+            self.sync.record(&path, disk.to_string());
+        } else {
+            self.sync.base = Some(disk.to_string());
+        }
+    }
+
+    /// Replace the buffer's lines from LF-normalized `text`, clamping the cursor.
+    fn set_lines_from_text(&mut self, text: &str) {
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.lines = lines;
+        self.selection_anchor = None;
+        let last_line = self.lines.len().saturating_sub(1);
+        if self.cursor_line > last_line {
+            self.cursor_line = last_line;
+        }
+        let line_len = self
+            .lines
+            .get(self.cursor_line)
+            .map_or(0, std::string::String::len);
+        if self.cursor_col > line_len {
+            self.cursor_col = line_len;
+        }
+        if self.scroll_line > last_line {
+            self.scroll_line = last_line;
+        }
     }
 
     /// Count the number of words in the document.
@@ -4112,6 +4229,35 @@ pub struct App {
     pub window_width: f32,
     /// Window height.
     pub window_height: f32,
+    /// Pending external-change prompt (file edited/deleted outside the editor).
+    pub external_prompt: Option<ExternalChangePrompt>,
+}
+
+/// A pending prompt shown when the active document's file changed on disk.
+///
+/// Presents the user with keep-current / reload / merge / review options (see
+/// [`App::resolve_external`]). When [`review`](Self::review) is `Some`, the
+/// editor is in the side-by-side review sub-mode.
+pub struct ExternalChangePrompt {
+    /// Index of the document (tab) the prompt concerns.
+    pub tab: usize,
+    /// What changed on disk.
+    pub change: DiskChange,
+    /// Active review state when the user chose "review the merge".
+    pub review: Option<MergeReview>,
+}
+
+/// The four top-level responses to an [`ExternalChangePrompt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalChoice {
+    /// Keep the current buffer, ignoring the disk change.
+    KeepCurrent,
+    /// Discard local edits and reload the file from disk.
+    Reload,
+    /// Auto-merge disk changes into the buffer.
+    Merge,
+    /// Open the side-by-side review to resolve conflicts manually.
+    Review,
 }
 
 impl App {
@@ -4135,6 +4281,7 @@ impl App {
             cached_toc: toc,
             window_width,
             window_height,
+            external_prompt: None,
         }
     }
 
@@ -4203,6 +4350,142 @@ impl App {
             self.active_doc = idx;
             self.refresh_cache();
         }
+    }
+
+    // ======================================================================
+    // External-change handling
+    // ======================================================================
+
+    /// Check the active document's file for external modification and, if it
+    /// changed in a way that needs the user's attention, raise a prompt.
+    ///
+    /// Policy: if the file changed but the buffer has no unsaved edits, the disk
+    /// version is adopted automatically. A prompt is raised only when there is a
+    /// genuine choice — the buffer is modified and the file also changed, or the
+    /// file was deleted. Returns `true` when a prompt was raised.
+    pub fn check_external_change(&mut self) -> bool {
+        if self.external_prompt.is_some() {
+            return false;
+        }
+        let tab = self.active_doc;
+        let Some(doc) = self.documents.get(tab) else {
+            return false;
+        };
+        match doc.disk_changed() {
+            DiskChange::Unchanged => false,
+            DiskChange::Modified { disk } => {
+                if doc.modified {
+                    self.external_prompt = Some(ExternalChangePrompt {
+                        tab,
+                        change: DiskChange::Modified { disk },
+                        review: None,
+                    });
+                    true
+                } else {
+                    if let Some(doc) = self.documents.get_mut(tab) {
+                        doc.reload_from_disk(&disk);
+                    }
+                    self.refresh_cache();
+                    false
+                }
+            }
+            DiskChange::Deleted => {
+                self.external_prompt = Some(ExternalChangePrompt {
+                    tab,
+                    change: DiskChange::Deleted,
+                    review: None,
+                });
+                true
+            }
+        }
+    }
+
+    /// Respond to the pending external-change prompt.
+    ///
+    /// [`ExternalChoice::Review`] transitions into review sub-mode; the other
+    /// three resolve immediately and clear the prompt.
+    pub fn resolve_external(&mut self, choice: ExternalChoice) {
+        let Some(prompt) = self.external_prompt.as_ref() else {
+            return;
+        };
+        let tab = prompt.tab;
+        let disk = match &prompt.change {
+            DiskChange::Modified { disk } => Some(disk.clone()),
+            _ => None,
+        };
+
+        match choice {
+            ExternalChoice::KeepCurrent => {
+                if let Some(doc) = self.documents.get_mut(tab) {
+                    doc.keep_current();
+                    doc.modified = true;
+                }
+                self.external_prompt = None;
+            }
+            ExternalChoice::Reload => {
+                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                    doc.reload_from_disk(&disk);
+                }
+                self.external_prompt = None;
+                self.refresh_cache();
+            }
+            ExternalChoice::Merge => {
+                if let (Some(doc), Some(disk)) = (self.documents.get_mut(tab), disk) {
+                    doc.merge_from_disk(&disk);
+                }
+                self.external_prompt = None;
+                self.refresh_cache();
+            }
+            ExternalChoice::Review => {
+                if let (Some(doc), Some(disk)) = (self.documents.get(tab), disk.as_ref()) {
+                    let review = MergeReview::new(doc.merge_preview(disk));
+                    if let Some(prompt) = self.external_prompt.as_mut() {
+                        prompt.review = Some(review);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Change the resolution of conflict `index` in the active review.
+    pub fn review_set_choice(&mut self, index: usize, choice: ConflictChoice) {
+        if let Some(review) = self
+            .external_prompt
+            .as_mut()
+            .and_then(|p| p.review.as_mut())
+        {
+            review.set_choice(index, choice);
+        }
+    }
+
+    /// Accept the reviewed merge, applying the chosen resolutions to the buffer.
+    pub fn review_accept(&mut self) {
+        let Some(prompt) = self.external_prompt.as_ref() else {
+            return;
+        };
+        let tab = prompt.tab;
+        let (Some(review), DiskChange::Modified { disk }) = (&prompt.review, &prompt.change) else {
+            return;
+        };
+        let merged = review.accepted_text();
+        let disk = disk.clone();
+        if let Some(doc) = self.documents.get_mut(tab) {
+            doc.apply_merged(&merged, &disk);
+        }
+        self.external_prompt = None;
+        self.refresh_cache();
+    }
+
+    /// Cancel the review, returning to the top-level prompt options.
+    pub fn review_cancel(&mut self) {
+        if let Some(prompt) = self.external_prompt.as_mut() {
+            prompt.review = None;
+        }
+    }
+
+    /// Dismiss the external-change prompt without taking any action.
+    pub fn dismiss_external(&mut self) {
+        self.external_prompt = None;
     }
 
     /// Handle a toolbar action.
@@ -4457,7 +4740,278 @@ impl App {
             ));
         }
 
+        // External-change prompt / merge review (modal overlay).
+        if let Some(prompt) = self.external_prompt.as_ref() {
+            cmds.extend(self.render_external_prompt(prompt));
+        }
+
         cmds
+    }
+
+    /// Render the external-change modal — either the four-option prompt or, when
+    /// the user chose "review", the side-by-side merge review.
+    fn render_external_prompt(&self, prompt: &ExternalChangePrompt) -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        let w = self.window_width;
+        let h = self.window_height;
+
+        // Dim the background.
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::rgba(0x11, 0x11, 0x1B, 0xB0),
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        if let Some(review) = prompt.review.as_ref() {
+            self.render_merge_review(&mut cmds, prompt, review);
+            return cmds;
+        }
+
+        let dw = 480.0_f32.min(w - 40.0);
+        let dh = 220.0_f32;
+        let dx = (w - dw) / 2.0;
+        let dy = (h - dh) / 2.0;
+        cmds.push(RenderCommand::FillRect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
+            color: BASE,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        cmds.push(RenderCommand::FillRect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        let name = self
+            .documents
+            .get(prompt.tab)
+            .map_or("file", |d| d.name.as_str());
+        let (title, body): (&str, String) = match &prompt.change {
+            DiskChange::Deleted => (
+                "File deleted on disk",
+                format!("\"{name}\" was deleted outside the editor while you have unsaved changes."),
+            ),
+            _ => (
+                "File changed on disk",
+                format!("\"{name}\" was modified outside the editor and you have unsaved changes."),
+            ),
+        };
+        cmds.push(RenderCommand::Text {
+            x: dx + 12.0,
+            y: dy + 9.0,
+            text: title.to_string(),
+            font_size: 14.0,
+            color: YELLOW,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(dw - 24.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: dx + 12.0,
+            y: dy + 44.0,
+            text: body,
+            font_size: 12.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(dw - 24.0),
+        });
+
+        let deleted = matches!(prompt.change, DiskChange::Deleted);
+        let mut options: Vec<(&str, &str)> = vec![
+            ("Keep current", "keep your buffer; overwrites disk on save"),
+            ("Reload from disk", "discard local edits, load disk version"),
+        ];
+        if !deleted {
+            options.push(("Merge", "auto-combine both; mark conflicts inline"));
+            options.push(("Review merge…", "resolve conflicts side-by-side"));
+        }
+
+        let mut by = dy + 74.0;
+        for (label, hint) in options {
+            cmds.push(RenderCommand::FillRect {
+                x: dx + 12.0,
+                y: by,
+                width: dw - 24.0,
+                height: 30.0,
+                color: SURFACE1,
+                corner_radii: CornerRadii::all(4.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: dx + 20.0,
+                y: by + 7.0,
+                text: label.to_string(),
+                font_size: 12.0,
+                color: TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(140.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: dx + 160.0,
+                y: by + 8.0,
+                text: hint.to_string(),
+                font_size: 10.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(dw - 176.0),
+            });
+            by += 34.0;
+        }
+        cmds
+    }
+
+    /// Render the side-by-side merge review (ours | disk) with each conflict's
+    /// current resolution highlighted. Mirrors orchestrator2's diff viewer.
+    fn render_merge_review(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        prompt: &ExternalChangePrompt,
+        review: &MergeReview,
+    ) {
+        let w = self.window_width;
+        let h = self.window_height;
+        let margin = 24.0;
+        let dx = margin;
+        let dy = margin;
+        let dw = w - margin * 2.0;
+        let dh = h - margin * 2.0;
+
+        cmds.push(RenderCommand::FillRect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
+            color: BASE,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        cmds.push(RenderCommand::FillRect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        let name = self
+            .documents
+            .get(prompt.tab)
+            .map_or("file", |d| d.name.as_str());
+        cmds.push(RenderCommand::Text {
+            x: dx + 12.0,
+            y: dy + 9.0,
+            text: format!(
+                "Review merge — {name}  ({} conflict(s))",
+                review.conflict_count()
+            ),
+            font_size: 14.0,
+            color: YELLOW,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(dw - 24.0),
+        });
+
+        let col_w = (dw - 24.0) / 2.0;
+        let ours_x = dx + 12.0;
+        let theirs_x = dx + 12.0 + col_w;
+        cmds.push(RenderCommand::Text {
+            x: ours_x,
+            y: dy + 40.0,
+            text: name.to_string(),
+            font_size: 11.0,
+            color: GREEN,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(col_w),
+        });
+        cmds.push(RenderCommand::Text {
+            x: theirs_x,
+            y: dy + 40.0,
+            text: "disk".to_string(),
+            font_size: 11.0,
+            color: RED,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(col_w),
+        });
+
+        let mut y = dy + 60.0;
+        for (i, (_base, ours, theirs)) in review.conflicts().iter().enumerate() {
+            let choice = review.choice(i).unwrap_or(ConflictChoice::Theirs);
+            let chosen_ours = matches!(choice, ConflictChoice::Ours | ConflictChoice::Both);
+            let chosen_theirs = matches!(choice, ConflictChoice::Theirs | ConflictChoice::Both);
+
+            let block_lines = ours.len().max(theirs.len()).max(1);
+            let block_h = block_lines as f32 * LINE_HEIGHT + 6.0;
+
+            if chosen_ours {
+                cmds.push(RenderCommand::FillRect {
+                    x: ours_x - 4.0,
+                    y,
+                    width: col_w,
+                    height: block_h,
+                    color: Color::from_hex(0x2A3A2A),
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+            if chosen_theirs {
+                cmds.push(RenderCommand::FillRect {
+                    x: theirs_x - 4.0,
+                    y,
+                    width: col_w,
+                    height: block_h,
+                    color: Color::from_hex(0x3A2A2A),
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+            cmds.push(RenderCommand::Text {
+                x: dx + 2.0,
+                y,
+                text: format!("#{}", i + 1),
+                font_size: 9.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(10.0),
+            });
+            for (li, line) in ours.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: ours_x,
+                    y: y + li as f32 * LINE_HEIGHT,
+                    text: line.clone(),
+                    font_size: 11.0,
+                    color: TEXT,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(col_w),
+                });
+            }
+            for (li, line) in theirs.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: theirs_x,
+                    y: y + li as f32 * LINE_HEIGHT,
+                    text: line.clone(),
+                    font_size: 11.0,
+                    color: TEXT,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(col_w),
+                });
+            }
+            y += block_h + 6.0;
+        }
+
+        cmds.push(RenderCommand::Text {
+            x: dx + 12.0,
+            y: dy + dh - 24.0,
+            text: "[Accept]  [Cancel]   per-conflict: take ours / take disk / keep both"
+                .to_string(),
+            font_size: 11.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(dw - 24.0),
+        });
     }
 }
 
@@ -6275,5 +6829,73 @@ mod tests {
         assert_eq!(app.active_document().lines[0], "");
         app.handle_toolbar_action(&ToolbarAction::Redo);
         assert_eq!(app.active_document().lines[0], "A");
+    }
+
+    // --- External-change / three-way merge tests ---
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("slate_md_test_{tag}_{nanos}.md"));
+        p
+    }
+
+    #[test]
+    fn test_disk_changed_detects_modification() {
+        let path = temp_path("md_detect");
+        std::fs::write(&path, b"# Title\n\nbody\n").unwrap();
+        let doc = Document::from_file(&path).unwrap();
+        assert_eq!(doc.disk_changed(), DiskChange::Unchanged);
+        std::fs::write(&path, b"# Title\n\nCHANGED body\n").unwrap();
+        match doc.disk_changed() {
+            DiskChange::Modified { disk } => assert_eq!(disk, "# Title\n\nCHANGED body"),
+            other => panic!("expected Modified, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_merge_clean_with_context_anchor() {
+        let mut d = Document::new();
+        d.lines = vec!["a".into(), "mid".into(), "b".into()];
+        d.sync.base = Some("a\nmid\nb".to_string());
+        d.lines = vec!["A".into(), "mid".into(), "b".into()];
+        d.modified = true;
+        let outcome = d.merge_from_disk("a\nmid\nB");
+        assert_eq!(outcome, MergeOutcome::Clean);
+        assert_eq!(d.full_text(), "A\nmid\nB");
+    }
+
+    #[test]
+    fn test_review_and_accept_ours() {
+        let path = temp_path("md_review");
+        std::fs::write(&path, b"shared\n").unwrap();
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().lines = vec!["local".to_string()];
+        app.active_document_mut().modified = true;
+        std::fs::write(&path, b"remote\n").unwrap();
+        assert!(app.check_external_change());
+        app.resolve_external(ExternalChoice::Review);
+        app.review_set_choice(0, ConflictChoice::Ours);
+        app.review_accept();
+        assert!(app.external_prompt.is_none());
+        assert_eq!(app.active_document().full_text(), "local");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_auto_reload_unmodified() {
+        let path = temp_path("md_autoreload");
+        std::fs::write(&path, b"first\n").unwrap();
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        std::fs::write(&path, b"second\n").unwrap();
+        assert!(!app.check_external_change());
+        assert_eq!(app.active_document().full_text(), "second");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -5,3 +5,4 @@ edition = "2024"
 description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+diffcore = { path = "../diffcore" }

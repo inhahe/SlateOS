@@ -2781,10 +2781,7 @@ impl Compositor {
 
         if self.full_recomposite {
             // Full recomposite: clear and redraw everything.
-            self.framebuffer.clear(self.theme.desktop_background);
-            self.render_all_windows();
-            self.full_recomposite = false;
-            self.damage.clear();
+            self.full_recomposite_into_back();
         } else {
             // Partial recomposite: only redraw damaged areas.
             let damaged_rects: Vec<Rect> = self.damage.rects().to_vec();
@@ -2801,6 +2798,40 @@ impl Compositor {
 
         self.frame_stats.end_frame();
         true
+    }
+
+    /// Full recomposite into the back buffer: clear to the desktop
+    /// background and redraw every window bottom-to-top, then clear the
+    /// pending-recomposite/damage state.
+    ///
+    /// Shared by [`compose_frame`](Compositor::compose_frame)'s
+    /// full-recomposite branch and the benchmark hook
+    /// [`bench_full_composite`](Compositor::bench_full_composite) so the two
+    /// measure exactly the same work and can never drift. Does NOT swap
+    /// buffers — the caller owns presentation.
+    fn full_recomposite_into_back(&mut self) {
+        self.framebuffer.clear(self.theme.desktop_background);
+        self.render_all_windows();
+        self.full_recomposite = false;
+        self.damage.clear();
+    }
+
+    /// Benchmark/test hook: perform one full recomposite and buffer swap
+    /// immediately, bypassing the vsync frame-rate gate that
+    /// [`compose_frame`](Compositor::compose_frame) enforces.
+    ///
+    /// This exists so benchmarks can measure the raw composite cost
+    /// deterministically (a tight loop over `compose_frame` would be
+    /// throttled by `should_compose` and skip most iterations). It runs the
+    /// same `full_recomposite_into_back` + `framebuffer.swap` sequence as the
+    /// real full-recomposite path. Production code must call `compose_frame`,
+    /// which honors vsync timing and the direct-scanout / partial-damage fast
+    /// paths.
+    #[doc(hidden)]
+    pub fn bench_full_composite(&mut self) {
+        self.full_recomposite = true;
+        self.full_recomposite_into_back();
+        self.framebuffer.swap();
     }
 
     /// Render all visible windows from bottom to top z-order.
@@ -3969,6 +4000,129 @@ mod tests {
         assert!(comp.submit_render(id, commands).is_ok());
         // Compose should succeed with the submitted content.
         assert!(comp.compose_frame());
+    }
+
+    /// Benchmark: full-desktop recomposite cost at 4K (3840x2160).
+    ///
+    /// CLAUDE.md's performance-critical-subsystems table requires the
+    /// compositor to "composite a full desktop in < 2ms at 4K to not miss
+    /// 144Hz vsync". This measures the raw full-recomposite cost — clear the
+    /// 4K back buffer, redraw every decorated window with toolkit-style client
+    /// content, and swap — via `bench_full_composite`, which bypasses the
+    /// vsync frame-rate gate (a tight loop over `compose_frame` would be
+    /// throttled by `should_compose` and skip most iterations).
+    ///
+    /// Run it explicitly (it is `#[ignore]`d so it never slows the normal
+    /// correctness run) on a RELEASE build — the debug build's unoptimised
+    /// per-pixel loops are not representative:
+    ///
+    /// ```text
+    /// cargo test -p compositor --target x86_64-pc-windows-gnu --release \
+    ///   -- --ignored --nocapture bench_compose_frame_4k
+    /// ```
+    ///
+    /// The `< 2ms/4K` target is judged on a release build (ideally on real
+    /// hardware); the recorded dev-host baseline lives in
+    /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-01
+    /// the compositor is FAR over target (~50ms/frame release on the dev host,
+    /// ~25x the 2ms budget — see known-issues BENCH-COMPOSITOR-SLOW); this
+    /// test therefore does NOT assert the 2ms target (it would always fail).
+    /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
+    /// catastrophic regression (mean > 150 ms/frame, ~3x the current baseline)
+    /// so an accidental super-linear blow-up is still caught without flaking.
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_compose_frame_4k() {
+        const W: u32 = 3840;
+        const H: u32 = 2160;
+        const NUM_WINDOWS: usize = 16;
+        const WARMUP: usize = 5;
+        const ITERS: usize = 60;
+        const TARGET_MS: f64 = 2.0;
+
+        let mut comp = Compositor::new(W, H, 144).expect("4K compositor");
+
+        // A representative desktop: overlapping decorated windows, each
+        // carrying toolkit-style client content (a titlebar band, a large
+        // content panel, and a text label), cascaded across the screen.
+        for i in 0..NUM_WINDOWS {
+            let ww = 1100u32;
+            let wh = 720u32;
+            let id = comp.create_window(format!("Window {i}"), ww, wh, i as u64 + 1);
+            let step = i as i32;
+            comp.move_window(id, 60 + step * 170, 40 + step * 110)
+                .expect("move_window");
+            let commands = vec![
+                RenderCommand::FillRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: ww as f32,
+                    height: wh as f32,
+                    color: Color::rgba(30, 34, 40, 255),
+                    corner_radii: CornerRadii::ZERO,
+                },
+                RenderCommand::FillRect {
+                    x: 20.0,
+                    y: 20.0,
+                    width: (ww - 40) as f32,
+                    height: 80.0,
+                    color: Color::rgba(60, 120, 200, 255),
+                    corner_radii: CornerRadii::ZERO,
+                },
+                RenderCommand::FillRect {
+                    x: 20.0,
+                    y: 120.0,
+                    width: (ww - 40) as f32,
+                    height: (wh - 160) as f32,
+                    color: Color::rgba(45, 48, 54, 255),
+                    corner_radii: CornerRadii::ZERO,
+                },
+                RenderCommand::Text {
+                    x: 30.0,
+                    y: 40.0,
+                    text: format!("Panel {i}"),
+                    color: Color::WHITE,
+                    font_size: 18.0,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: None,
+                },
+            ];
+            comp.submit_render(id, commands).expect("submit_render");
+        }
+
+        // Warm up: page in both framebuffers, prime caches/predictors.
+        for _ in 0..WARMUP {
+            comp.bench_full_composite();
+        }
+
+        let mut min_ns = u64::MAX;
+        let mut total_ns = 0u64;
+        for _ in 0..ITERS {
+            let start = std::time::Instant::now();
+            comp.bench_full_composite();
+            let ns = start.elapsed().as_nanos() as u64;
+            min_ns = min_ns.min(ns);
+            total_ns = total_ns.saturating_add(ns);
+        }
+        let mean_ns = total_ns / ITERS as u64;
+        let min_ms = min_ns as f64 / 1_000_000.0;
+        let mean_ms = mean_ns as f64 / 1_000_000.0;
+        let verdict = if min_ms <= TARGET_MS { "PASS" } else { "OVER" };
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+
+        println!(
+            "[compositor-bench] compose_frame 4K ({W}x{H}, {NUM_WINDOWS} windows, \
+             {profile} build): min={min_ms:.3}ms mean={mean_ms:.3}ms  \
+             target<{TARGET_MS}ms => {verdict}  (target judged on release+hardware)"
+        );
+
+        // Catastrophic-regression guard only (see doc): the current baseline
+        // is ~50ms (already ~25x over the 2ms target, tracked separately); a
+        // mean past 150ms means a super-linear blow-up crept into the path.
+        assert!(
+            mean_ms < 150.0,
+            "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>150ms)"
+        );
     }
 
     /// Build `w*h` tightly-packed (stride = w*4) ARGB bytes all of `color`.

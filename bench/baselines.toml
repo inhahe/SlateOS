@@ -145,6 +145,24 @@ description   = "Eventfd write (signal) + try_read (consume)"
 target_ns     = 1000
 source        = "Lighter than channels — single atomic counter"
 
+[compositor_frame_4k]
+description   = "Full-desktop recomposite at 4K (3840x2160), 16 decorated windows w/ client content"
+target_ns     = 2000000        # 2 ms — must beat a 144Hz (6.9ms) and 60Hz (16.7ms) vsync budget
+measured_ns   = 48570000       # ~48.6 ms min, dev host, RELEASE build, 2026-07-01
+source        = "cargo test -p compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture bench_compose_frame_4k"
+notes         = """
+MEASURED FAR OVER TARGET: ~48.6ms/frame (min) vs the 2ms budget — roughly \
+25x too slow, i.e. ~20 fps, missing even a 60Hz vsync. This is the naive \
+software-composite path (Framebuffer per-pixel fills + per-window \
+decoration/shadow draw + full clear each frame). Tracked as a real \
+performance bug in known-issues.md (BENCH-COMPOSITOR-SLOW) with the \
+optimization directions (row/SIMD fills, dirty-rect-only redraw, avoid \
+per-pixel float alpha, cache decorations). This is a dev-host software \
+number; a real GPU/DRM-KMS path would differ, but the CPU composite \
+fallback must still be far faster. Re-measure after optimizing; the \
+benchmark (Compositor::bench_full_composite) bypasses the vsync gate to \
+measure raw composite cost deterministically."""
+
 [semaphore_signal_wait]
 description   = "Semaphore signal + try_wait (uncontended)"
 target_ns     = 1000

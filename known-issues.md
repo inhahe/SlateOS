@@ -2895,13 +2895,66 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### BENCH-COMPOSITOR. Compositor frame has NO benchmark despite being a perf-critical subsystem with a hard target — DEBT 2026-07-01
+### BENCH-COMPOSITOR-SLOW. Compositor is ~25x over its 4K frame budget (~48.6ms/frame vs 2ms) — PERF BUG 2026-07-01
 
-**Where:** `gui/compositor/src/main.rs` — the composite path is
+**Where:** `gui/compositor/src/main.rs` — the software composite path
+`Compositor::full_recomposite_into_back` → `render_all_windows` (~2807) →
+`render_window` (~2832, shadows + decorations + per-command draw) over the
+`Framebuffer` per-pixel ops (`clear`/`clear_rect`/`set_pixel`/`blend_pixel`,
+~503-600).
+
+**Measured (2026-07-01, via the new `bench_compose_frame_4k`):** a 4K
+(3840×2160) full recomposite with 16 decorated windows carrying toolkit client
+content takes **~48.6ms/frame (min), ~50ms mean, RELEASE build on the dev
+host** — roughly **25x the 2ms target** in CLAUDE.md's perf-critical table,
+i.e. ~20fps, missing even a 60Hz (16.7ms) vsync budget, nowhere near 144Hz
+(6.9ms). This is the classic "correct-but-naive" hot-path code the
+benchmark-everything mandate exists to catch. Recorded in
+`bench/baselines.toml` `[compositor_frame_4k]` (`measured_ns = 48570000`).
+
+**Likely culprits (profile before optimizing):** (1) per-pixel scalar fills in
+`Framebuffer::clear_rect`/`set_pixel` with bounds-checks per pixel — a 4K clear
+alone is 8.3M u32 writes; (2) per-pixel float alpha in `blend_pixel` for shadows
+/ translucent windows; (3) full-screen clear + full redraw of every window every
+frame even when `bench_full_composite` forces it — the real `compose_frame` has
+a partial-damage path, but the fully-damaged case (wallpaper change, resize,
+many moving windows) hits this; (4) `render_window` clones `render_tree.commands`
+and the z-stack each frame (`render_all_windows`/`render_window`, allocations on
+the hot path).
+
+**Proper fix (optimization initiative — do with a profiler):** row-wise fills
+(`copy_from_slice`/`fill` on row slices, already partly done via `copy_row`) and
+SIMD/word-at-a-time for solid rects; precompute/caches for window decorations and
+shadows (they rarely change frame-to-frame); integer/premultiplied-alpha blend
+instead of per-pixel float; avoid per-frame `Vec` clones (borrow or reuse
+scratch buffers); ensure the damage-tracking fast path is actually taken for the
+common "one window changed" case. Target: < 2ms/4K. Re-run
+`bench_compose_frame_4k` after each change to track progress. NB: this is the
+CPU-software fallback; the eventual GPU/DRM-KMS accelerated path is separate, but
+the software path must still be far faster than 48ms.
+
+**Not fixed in the discovering session:** found by the benchmark at the tail of
+a long autonomous session; optimizing the render path is a focused,
+profiler-driven initiative that deserves its own fresh-context session. Unblocked
+(no Linux binaries / operator input needed).
+
+### BENCH-COMPOSITOR. Compositor frame benchmark — RESOLVED 2026-07-01 (benchmark added; revealed BENCH-COMPOSITOR-SLOW)
+
+**Resolution:** added `bench_compose_frame_4k` (an `#[ignore]`d measurement test
+in `gui/compositor/src/main.rs`) plus the `Compositor::bench_full_composite`
+hook (which shares `full_recomposite_into_back` with the real `compose_frame`
+so they can't drift) and the `[compositor_frame_4k]` baseline in
+`bench/baselines.toml`. The compositor is host-runnable (`cargo test -p
+compositor --target x86_64-pc-windows-gnu --release -- --ignored --nocapture
+bench_compose_frame_4k`), so a real number is measurable. Running it immediately
+surfaced the ~25x-over-target result now tracked as BENCH-COMPOSITOR-SLOW above.
+Original gap description retained below for context.
+
+**Where (original gap):** `gui/compositor/src/main.rs` — the composite path is
 `Compositor::compose_frame` (line ~2746) → `render_all_windows` (~2807) →
 `blit_buffer` (~2949). There is frame-budget *tracking* at runtime
 (`end_frame`, line ~849, returns whether the frame was within budget) but no
-benchmark that measures the actual composite cost against a target.
+benchmark that measured the actual composite cost against a target.
 
 **What:** CLAUDE.md's performance-critical-subsystems table lists "Compositor
 frame — Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync"

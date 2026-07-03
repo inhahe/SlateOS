@@ -1932,37 +1932,62 @@ pub fn liveness_disarm() {
 /// soft-lockup watchdog.  If the global useful-work counter has not moved
 /// for `LIVENESS_ALERT_COUNT` consecutive intervals while armed, dumps
 /// every task's state and disarms (one-shot).
+/// Wall-clock boot-deadline backstop — evaluated on **every** BSP timer tick.
+///
+/// This is deliberately separate from [`liveness_check`], which runs only every
+/// `WATCHDOG_CHECK_INTERVAL` (500) ticks for its interval-comparison detectors.
+/// That 500-tick cadence is itself tick-driven, and the hang this backstop
+/// exists to catch — an `IF=0` page-fault-storm livelock — *starves cpu0 of
+/// timer ticks*: cpu0 sits in the (poison-heap-slow) `#PF` handler with
+/// interrupts disabled almost continuously, taking only a handful of ticks per
+/// second. That is enough to keep kicking the ~9.8 s hard-lockup watchdog (so
+/// no NMI), but the `tick.is_multiple_of(500)` gate is then hit far too rarely
+/// to run `liveness_check` at all before the 480 s harness kill (observed
+/// 2026-07-02: two dash-redir/pipeline livelock catches with *no* dump, because
+/// `liveness_check` was never re-entered during the ~400 s storm).
+///
+/// The deadline test is cheap (an atomic load + one `rdtsc` + a compare), so we
+/// run it every tick. The wall-clock comparison then fires on the *first* tick
+/// past the deadline no matter how degraded the tick rate becomes. Detects
+/// *any* hang mode (including the ping-pong livelock the progress detectors are
+/// structurally blind to). One-shot; does not disarm, so the progress-based
+/// detectors can still add their own report if the hang later degrades into a
+/// total stall.
+#[inline]
+fn liveness_boot_deadline_check() {
+    if !LIVENESS_ARMED.load(Ordering::Acquire)
+        || LIVENESS_DEADLINE_FIRED.load(Ordering::Relaxed)
+    {
+        return;
+    }
+    let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
+    if arm_ns == 0 {
+        return;
+    }
+    let elapsed_ns = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns);
+    if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS
+        && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
+    {
+        serial_println!(
+            "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
+             The progress-based detectors did not trip, so this is a livelock or partial \
+             hang — some task(s) keep running/switching but boot is not advancing. \
+             Dumping task table:",
+            elapsed_ns / 1_000_000_000,
+        );
+        dump_all_tasks_serial();
+    }
+}
+
 fn liveness_check() {
     if !LIVENESS_ARMED.load(Ordering::Acquire) {
         return;
     }
 
-    // Absolute boot-deadline backstop (see LIVENESS_BOOT_DEADLINE_NS). Runs
-    // first so it catches hang modes the progress-based detectors below are
-    // blind to (notably the ping-pong livelock where both useful-work and
-    // context-switch counters keep advancing). Measured in wall-clock
-    // (monotonic) time — NOT a tick count — so it fires in real time even when
-    // cpu0 is dropping timer ticks under load (the tick-count version silently
-    // never reached its deadline; see LIVENESS_ARM_NS). We do NOT disarm here:
-    // leaving the watchdog armed lets the progress-based detectors still fire if
-    // the hang later degrades into a total stall, and the one-shot flag prevents
-    // repeated dumps.
-    let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
-    if arm_ns != 0 {
-        let elapsed_ns = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns);
-        if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS
-            && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
-        {
-            serial_println!(
-                "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
-                 The progress-based detectors did not trip, so this is a livelock or partial \
-                 hang — some task(s) keep running/switching but boot is not advancing. \
-                 Dumping task table:",
-                elapsed_ns / 1_000_000_000,
-            );
-            dump_all_tasks_serial();
-        }
-    }
+    // NOTE: the absolute boot-deadline backstop is NOT here — it lives in
+    // `liveness_boot_deadline_check`, called every BSP tick, because this
+    // function's 500-tick cadence is itself starved during the IF=0 fault-storm
+    // livelock it would need to catch. See that function's docs.
 
     let current = USEFUL_WORK_TICKS.load(Ordering::Relaxed);
     let previous = LIVENESS_LAST_WORK.load(Ordering::Relaxed);
@@ -2245,6 +2270,12 @@ pub fn timer_tick(from_user: bool) -> bool {
     // BSP drives bandwidth period resets, load average sampling, and
     // the soft lockup watchdog.
     if cpu == 0 {
+        // Wall-clock boot-deadline backstop: evaluated on EVERY BSP tick (not
+        // gated by the 500-tick multiple below) so it still fires when cpu0 is
+        // starved of ticks during an IF=0 fault-storm livelock. Cheap: an
+        // atomic load + rdtsc + compare, and a no-op once disarmed at BOOT_OK.
+        liveness_boot_deadline_check();
+
         let tick = BANDWIDTH_TICK.fetch_add(1, Ordering::Relaxed);
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick.is_multiple_of(BANDWIDTH_PERIOD_TICKS) {

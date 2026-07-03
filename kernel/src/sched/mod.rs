@@ -1815,17 +1815,26 @@ static LIVENESS_CTX_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// promptly.
 const LIVENESS_ALERT_COUNT: u64 = 3;
 
-/// Number of liveness intervals since arming (backstop deadline counter).
+/// Monotonic timestamp (ns since boot) captured when the liveness watchdog was
+/// armed, or 0 if not armed. Backs the wall-clock boot-deadline backstop below.
 ///
-/// Incremented once per `liveness_check` while armed. Backs the absolute
-/// boot-deadline watchdog below, which fires regardless of the progress
-/// counters.
-static LIVENESS_ARMED_INTERVALS: AtomicU64 = AtomicU64::new(0);
+/// **Why wall-clock, not a tick count:** an earlier version counted
+/// `liveness_check` invocations (tick-driven, 60 × 5 s intervals). That is
+/// structurally broken for the very hang it targets: under the heavy
+/// poison-debug build, cpu0 drops a large fraction of its 100 Hz timer ticks
+/// during long `IF=0` sections (poison-heap page-fault handling, spinlocks), so
+/// tick-time runs far slower than wall-clock and 30000 ticks never accrue
+/// within the harness's 480 s wall-clock window — the backstop silently never
+/// fired (observed 2026-07-02, dash-loop livelock caught with *no* dump).
+/// A monotonic-clock deadline is immune: `clock_monotonic()` is a bare `rdtsc`,
+/// independent of timer-tick delivery, so the deadline elapses in real time no
+/// matter how degraded tick delivery becomes.
+static LIVENESS_ARM_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the boot-deadline backstop already dumped (one-shot flag).
 static LIVENESS_DEADLINE_FIRED: AtomicBool = AtomicBool::new(false);
 
-/// Absolute boot-phase deadline, in liveness intervals.
+/// Absolute boot-phase deadline, in monotonic nanoseconds since [`liveness_arm`].
 ///
 /// The progress-based detectors above (total-hang: useful-work frozen;
 /// busy-livelock: context-switches frozen) are structurally blind to a
@@ -1834,16 +1843,22 @@ static LIVENESS_DEADLINE_FIRED: AtomicBool = AtomicBool::new(false);
 /// a spawned ring-3 child that deadlocks on a futex/reap while its driver
 /// keeps re-scheduling it). Both counters advance every interval, so neither
 /// detector ever trips, and the boot hangs silently (observed 2026-07-02:
-/// dash-redir ring-3 test wedged for 6+ min with no dump; see known-issues
-/// B-PTHREAD-YIELDBUDGET / B-DASH-STDIN-FLAKE).
+/// dash-loop ring-3 test wedged until the 480 s harness kill with no dump; see
+/// known-issues B-PTHREAD-YIELDBUDGET / B-DASH-STDIN-FLAKE).
 ///
-/// This is a purely time-based backstop that catches *any* hang mode. A
-/// healthy boot disarms this watchdog at BOOT_OK ~91 s after arming, so a
-/// deadline of 60 intervals (× 5 s = 300 s) leaves >3× headroom and cannot
-/// false-fire, while still dumping the full task table well within the
-/// harness's 480 s boot-test timeout — giving us the breadcrumb the
-/// progress-based detectors cannot.
-const LIVENESS_BOOT_DEADLINE_INTERVALS: u64 = 60;
+/// This is a purely time-based backstop that catches *any* hang mode. It is
+/// measured in wall-clock (monotonic) time so it is immune to the timer-tick
+/// starvation that broke the earlier tick-interval version. The value must sit
+/// above the slowest healthy armed-to-BOOT_OK duration and below the harness's
+/// 480 s boot-test timeout, so it dumps the task table before QEMU is killed.
+///
+/// Measured healthy armed-to-BOOT_OK (2026-07-02, full glibc/dash ring-3
+/// battery, poison-debug build): **67.7 s** (logged by [`liveness_disarm`]).
+/// 200 s is ~3× that — no realistic false-fire even for a much slower-than-
+/// normal healthy boot — while still leaving a 280 s margin before the 480 s
+/// kill for the dump (and for the progress-based detectors to add their own
+/// report if the livelock later degrades into a total stall).
+const LIVENESS_BOOT_DEADLINE_NS: u64 = 200_000_000_000; // 200 s
 
 /// Record forward progress for the liveness watchdog.
 ///
@@ -1867,7 +1882,7 @@ pub fn liveness_arm() {
     LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_LAST_CTX.store(total_ctx_switches(), Ordering::Relaxed);
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
-    LIVENESS_ARMED_INTERVALS.store(0, Ordering::Relaxed);
+    LIVENESS_ARM_NS.store(crate::timekeeping::clock_monotonic(), Ordering::Relaxed);
     LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
     LIVENESS_ARMED.store(true, Ordering::Release);
 }
@@ -1895,6 +1910,19 @@ fn total_ctx_switches() -> u64 {
 /// Call at BOOT_OK, before the system may legitimately idle at an
 /// interactive prompt (where task-level progress correctly stops).
 pub fn liveness_disarm() {
+    // Log the armed duration so the wall-clock boot-deadline (see
+    // LIVENESS_BOOT_DEADLINE_NS) can be tuned against real healthy-boot timing
+    // rather than a stale guess. Only meaningful when we were actually armed.
+    let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
+    if arm_ns != 0 && LIVENESS_ARMED.load(Ordering::Acquire) {
+        let elapsed_ms = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns) / 1_000_000;
+        serial_println!(
+            "[liveness] disarmed after {}.{:03}s armed (boot-deadline is {}s)",
+            elapsed_ms / 1000,
+            elapsed_ms % 1000,
+            LIVENESS_BOOT_DEADLINE_NS / 1_000_000_000,
+        );
+    }
     LIVENESS_ARMED.store(false, Ordering::Release);
 }
 
@@ -1909,29 +1937,31 @@ fn liveness_check() {
         return;
     }
 
-    // Absolute boot-deadline backstop (see LIVENESS_BOOT_DEADLINE_INTERVALS).
-    // Runs first so it catches hang modes the progress-based detectors below
-    // are blind to (notably the ping-pong livelock where both useful-work and
-    // context-switch counters keep advancing). Purely time-based: increment a
-    // per-interval counter and, once it crosses the deadline, dump the task
-    // table exactly once. We do NOT disarm here — leaving the watchdog armed
-    // lets the progress-based detectors still fire if the hang later degrades
-    // into a total stall, and the one-shot flag prevents repeated dumps.
-    let intervals = LIVENESS_ARMED_INTERVALS
-        .fetch_add(1, Ordering::Relaxed)
-        .saturating_add(1);
-    if intervals >= LIVENESS_BOOT_DEADLINE_INTERVALS
-        && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
-    {
-        let secs = intervals.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
-        serial_println!(
-            "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
-             The progress-based detectors did not trip, so this is a livelock or partial \
-             hang — some task(s) keep running/switching but boot is not advancing. \
-             Dumping task table:",
-            secs,
-        );
-        dump_all_tasks_serial();
+    // Absolute boot-deadline backstop (see LIVENESS_BOOT_DEADLINE_NS). Runs
+    // first so it catches hang modes the progress-based detectors below are
+    // blind to (notably the ping-pong livelock where both useful-work and
+    // context-switch counters keep advancing). Measured in wall-clock
+    // (monotonic) time — NOT a tick count — so it fires in real time even when
+    // cpu0 is dropping timer ticks under load (the tick-count version silently
+    // never reached its deadline; see LIVENESS_ARM_NS). We do NOT disarm here:
+    // leaving the watchdog armed lets the progress-based detectors still fire if
+    // the hang later degrades into a total stall, and the one-shot flag prevents
+    // repeated dumps.
+    let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
+    if arm_ns != 0 {
+        let elapsed_ns = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns);
+        if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS
+            && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
+        {
+            serial_println!(
+                "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
+                 The progress-based detectors did not trip, so this is a livelock or partial \
+                 hang — some task(s) keep running/switching but boot is not advancing. \
+                 Dumping task table:",
+                elapsed_ns / 1_000_000_000,
+            );
+            dump_all_tasks_serial();
+        }
     }
 
     let current = USEFUL_WORK_TICKS.load(Ordering::Relaxed);

@@ -11896,10 +11896,24 @@ int main(void){\n\
     };
 
     let mut reaped = false;
-    for _ in 0..MAX_YIELDS {
+    for i in 0..MAX_YIELDS {
         if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
             reaped = true;
             break;
+        }
+        // Periodic progress diagnostic for the intermittent make+tcc wedge.
+        // `make` forks tcc grandchildren that run the actual compiles; when one
+        // of *them* wedges, `make` blocks in wait4 and the culprit is a
+        // grandchild invisible in a single-task snapshot.  So in addition to
+        // the one-line `make` snapshot, dump the whole task table (with per-CPU
+        // last_rip) at a coarser cadence to capture the wedged descendant's
+        // sched-state — the datum needed to localize the bug (Blocked=lost
+        // wakeup / Ready=starvation / Running=half-done ctx switch).
+        if i != 0 && (i & (REAP_SNAPSHOT_INTERVAL - 1)) == 0 {
+            log_reap_wait_progress(LABEL, "make", result.pid, result.task_id, i);
+            if (i & ((REAP_SNAPSHOT_INTERVAL << 3) - 1)) == 0 {
+                crate::sched::dump_task_table();
+            }
         }
         crate::sched::yield_now();
     }

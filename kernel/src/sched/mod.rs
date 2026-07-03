@@ -1834,6 +1834,22 @@ static LIVENESS_ARM_NS: AtomicU64 = AtomicU64::new(0);
 /// Whether the boot-deadline backstop already dumped (one-shot flag).
 static LIVENESS_DEADLINE_FIRED: AtomicBool = AtomicBool::new(false);
 
+/// Highest 30 s "breadcrumb" bucket already logged during the armed boot window.
+///
+/// Diagnostic: the serial log carries no timestamps, so when the boot-deadline
+/// backstop mysteriously *never* dumps we can't tell whether (a) boot was simply
+/// too slow to reach arm+deadline before the 480 s harness kill, (b) the fault
+/// storm started too late/was too short, or (c) the check itself never runs
+/// during the storm (cpu0 gets zero ticks). This bucket lets
+/// [`liveness_boot_deadline_check`] emit one line every 30 s of *armed monotonic
+/// time*, so the last breadcrumb printed reveals exactly how far the deadline
+/// counter advanced and whether the per-tick check kept running through the
+/// storm. Cheap (one atomic load + compare per tick) and self-limiting.
+static LIVENESS_BREADCRUMB_BUCKET: AtomicU64 = AtomicU64::new(0);
+
+/// Breadcrumb interval, in nanoseconds (30 s of armed monotonic time).
+const LIVENESS_BREADCRUMB_NS: u64 = 30_000_000_000;
+
 /// Absolute boot-phase deadline, in monotonic nanoseconds since [`liveness_arm`].
 ///
 /// The progress-based detectors above (total-hang: useful-work frozen;
@@ -1884,6 +1900,7 @@ pub fn liveness_arm() {
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_ARM_NS.store(crate::timekeeping::clock_monotonic(), Ordering::Relaxed);
     LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
+    LIVENESS_BREADCRUMB_BUCKET.store(0, Ordering::Relaxed);
     LIVENESS_ARMED.store(true, Ordering::Release);
 }
 
@@ -1965,6 +1982,24 @@ fn liveness_boot_deadline_check() {
         return;
     }
     let elapsed_ns = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns);
+
+    // Diagnostic breadcrumb: emit one line each time armed-elapsed crosses a new
+    // 30 s boundary. Because this runs every BSP tick, the *last* breadcrumb in a
+    // hung boot's serial log tells us how far the monotonic deadline counter
+    // actually advanced and whether the per-tick check kept firing through the
+    // IF=0 fault-storm livelock (vs. cpu0 going fully tick-dark). See the
+    // LIVENESS_BREADCRUMB_BUCKET docs.
+    let bucket = elapsed_ns / LIVENESS_BREADCRUMB_NS;
+    if bucket > LIVENESS_BREADCRUMB_BUCKET.load(Ordering::Relaxed) {
+        LIVENESS_BREADCRUMB_BUCKET.store(bucket, Ordering::Relaxed);
+        serial_println!(
+            "[liveness] boot-window breadcrumb: {}s armed (deadline {}s, heartbeat={})",
+            elapsed_ns / 1_000_000_000,
+            LIVENESS_BOOT_DEADLINE_NS / 1_000_000_000,
+            bsp_heartbeat(),
+        );
+    }
+
     if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS
         && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
     {

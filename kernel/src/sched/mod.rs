@@ -4785,16 +4785,23 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         }
                     }
 
-                    // Found a ready task — set it up for switching.
-                    if let Some(task) = s.tasks.get_mut(&ready_id) {
-                        task.record_dispatch(crate::apic::tick_count());
-                        task.state = TaskState::Running;
-                        task.last_cpu = cpu;
-                    }
-
                     // Extract context and FPU pointers for old (blocked/dead)
                     // and new tasks.  The old task's entry still exists
                     // in the BTreeMap — it's Blocked or Dead, not removed.
+                    //
+                    // INVARIANT: `ready_id` was just removed from the run queue
+                    // by `pick_next_local`/`try_steal`.  We must NOT mark it
+                    // Running until we have confirmed BOTH context pointers
+                    // extract successfully — otherwise a failed extraction would
+                    // leave `ready_id` orphaned (state=Running, not current, and
+                    // no longer enqueued anywhere).  Nothing re-enqueues a
+                    // Running task (`check_starvation` only rescues Ready tasks),
+                    // so such an orphan drains the run queue and wedges the CPU in
+                    // this very idle loop forever.  This was the root cause of the
+                    // "task N /bin/hello state=Running on an idle CPU, never
+                    // executed a single instruction" boot hang (B-PTHREAD-YIELDBUDGET
+                    // family).  So: extract first, mark Running only on success,
+                    // and re-enqueue `ready_id` on failure.
                     let old_data = s.tasks.get_mut(&current_id)
                         .map(|t| {
                             t.check_stack_canary();
@@ -4813,6 +4820,41 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         });
                     let new_data = s.tasks.get(&ready_id)
                         .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base, t.gs_base));
+
+                    if old_data.is_none() || new_data.is_none() {
+                        // Switch cannot proceed (the outgoing task vanished from
+                        // the table, or — impossibly — the just-picked task did).
+                        // `ready_id` is still Ready but was dequeued by the pick
+                        // above; put it back so it is not lost, and log loudly so
+                        // the trigger is captured rather than silently wedging.
+                        let (still_ready, prio) = s.tasks.get(&ready_id)
+                            .map_or((false, 0u8), |t| {
+                                (t.state == TaskState::Ready, t.effective_priority())
+                            });
+                        if still_ready {
+                            PER_CPU_SCHED.enqueue(ready_id, prio, cpu);
+                        }
+                        serial_println!(
+                            "[sched] BUG: idle-fallback switch aborted (current {} \
+                             {}, ready {} {}) — re-enqueued ready task {}",
+                            current_id,
+                            if old_data.is_none() { "missing" } else { "present" },
+                            ready_id,
+                            if new_data.is_none() { "missing" } else { "present" },
+                            ready_id,
+                        );
+                        drop(s);
+                        continue;
+                    }
+
+                    // Both present — now it is safe to commit `ready_id` as the
+                    // running task (re-borrow; the raw pointer taken above stays
+                    // valid because no map entry is inserted/removed here).
+                    if let Some(task) = s.tasks.get_mut(&ready_id) {
+                        task.record_dispatch(crate::apic::tick_count());
+                        task.state = TaskState::Running;
+                        task.last_cpu = cpu;
+                    }
 
                     if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base, n_gs_base))) =
                         (old_data, new_data)
@@ -4926,9 +4968,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         return;
                     }
 
-                    // Context extraction failed (task reaped while we
-                    // were idling — shouldn't happen since reap checks
-                    // all CPUs, but handle gracefully).
+                    // Unreachable: the `old_data.is_none() || new_data.is_none()`
+                    // guard above already re-enqueued `ready_id` and `continue`d
+                    // on any extraction failure, so by construction both are
+                    // `Some` here.  Kept as a defensive no-op for the borrow
+                    // checker's exhaustiveness.
                     drop(s);
                 }
             }
@@ -4945,20 +4989,21 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
         next_id = picked_id;
 
-        // Mark the next task as Running and extract its metadata.
-        // We do this before extracting the old task's pointer because
-        // the mutable borrow ends when we're done with the task.
-        if let Some(next_task) = state.tasks.get_mut(&next_id) {
-            next_task.record_dispatch(crate::apic::tick_count());
-            next_task.state = TaskState::Running;
-            next_task.last_cpu = cpu;
-        }
-
         // Extract raw pointers and metadata for both tasks under this
         // single lock acquisition.  We get the old task's mutable pointer
         // first, then release that borrow, then get the new task's
         // read-only pointer.  Raw pointers are stable because no entries
         // are added or removed while we hold the lock.
+        //
+        // INVARIANT: `next_id` was just removed from the run queue by the
+        // pick above.  We must NOT mark it Running until BOTH context
+        // pointers are confirmed present — otherwise the failure branch would
+        // leave `next_id` orphaned (state=Running, not current, not enqueued),
+        // which nothing ever rescues (`check_starvation` only re-enqueues Ready
+        // tasks) and which drains the run queue and wedges the CPU.  See the
+        // matching note on the idle-fallback path above (B-PTHREAD-YIELDBUDGET
+        // "/bin/hello state=Running on an idle CPU" boot hang).  So: extract
+        // first, mark Running only on success, re-enqueue `next_id` on failure.
         //
         // SAFETY: The raw pointers point into BTreeMap node allocations.
         // No structural modification (insert/remove) occurs between
@@ -4989,6 +5034,14 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         if let (Some((old, old_fpu, o_pml4)), Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base, n_gs_base))) =
             (old_data, new_data)
         {
+            // Both present — commit `next_id` as the running task now that the
+            // switch is guaranteed (re-borrow; the raw pointer taken above stays
+            // valid because no map entry is inserted/removed here).
+            if let Some(next_task) = state.tasks.get_mut(&next_id) {
+                next_task.record_dispatch(crate::apic::tick_count());
+                next_task.state = TaskState::Running;
+                next_task.last_cpu = cpu;
+            }
             old_ctx_ptr = old;
             new_ctx_ptr = new;
             old_fpu_ptr = old_fpu;
@@ -5006,9 +5059,20 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 };
             }
         } else {
+            // Switch cannot proceed (outgoing task vanished from the table).
+            // `next_id` is still Ready but was dequeued by the pick above; put
+            // it back so it is not orphaned out of the run queue, then bail.
+            let (still_ready, prio) = state.tasks.get(&next_id)
+                .map_or((false, 0u8), |t| {
+                    (t.state == TaskState::Ready, t.effective_priority())
+                });
+            if still_ready {
+                PER_CPU_SCHED.enqueue(next_id, prio, cpu);
+            }
             serial_println!(
-                "[sched] BUG: context switch failed — task {} or {} not in table",
-                current_id, next_id
+                "[sched] BUG: context switch failed — task {} or {} not in table \
+                 (re-enqueued ready task {})",
+                current_id, next_id, next_id
             );
             return;
         }

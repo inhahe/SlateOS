@@ -967,6 +967,72 @@ freshly-exec'd binary's demand-paging path spins with IF=0) and remains **OPEN**
 next step is the dedicated-NMI-IST work below so an `inject-nmi` soak can finally
 dump its backtrace.
 
+**ORPHANED-`Running` LOST-DISPATCH WEDGE — ROOT-CAUSED AND FIXED 2026-07-03 (the
+BSP-*alive* lost-dispatch variant; distinct from the BSP-dead IF=0 spin above).**
+The dedicated-NMI-IST + monotonic-kick-staleness instrument finally caught the
+**BSP-alive** member of this family cleanly:
+`build/hang-catches/NMI-NOBOOTOK-iter-2.txt`. Decisive evidence: right after
+`[spawn] Process 220 running (thread 184 …)`, the box goes
+`[liveness] SYSTEM HANG … all CPUs idle-ticking` with **cpu0's heartbeat still
+advancing** (4251→4501 — the BSP is alive and idle-ticking, NOT wedged with IF=0,
+so this is a *different* wedge from the silent-spin one), and the task dump shows
+exactly three tasks:
+- `tid=184 /bin/hello state=Running` — a **phantom**: never executed a single
+  instruction (zero page faults for its entry `0x4000000000`, no output),
+- `tid=183 hello-init state=Dead`,
+- `tid=0 name="prctl-batch269" state=Ready` — the **idle/boot task, stranded Ready**.
+Critically there is **no** `[sched] BUG: context switch failed` line → the orphaning
+happened via the *silent* idle-fallback path, not the main dispatch path.
+
+**Mechanism (the dispatch invariant was violable).** In `schedule_inner`,
+`pick_next_local` **dequeues** the picked task, and the old code then marked it
+`state=Running` **before** confirming *both* context-switch pointers
+(`old_data` = outgoing/current task's saved-context slot, `new_data` = incoming
+task's) were successfully extracted from the task table. When extraction failed —
+`old_data` is `None` because the *current* task isn't found in `tasks` — the picked
+task (184) was left **orphaned**: `state=Running`, **not** current on any CPU, and
+**no longer in any run queue** (the dequeue already removed it). Nothing ever
+re-enqueues a `Running` task: `check_starvation` only rescues `Ready` tasks (and
+additionally skips `priority >= IDLE_PRIORITY`), so the run queue drains to empty →
+every CPU HLTs forever. Because the idle/boot task (task 0) is itself only `Ready`
+and stranded, it can never resume its yield loop → total hang. (This is the
+BSP-alive twin of the RESET-CAUGHT yield-budget PANIC: there the driver *could*
+resume and hit the `assert!(zombified)`; here it cannot resume at all.)
+
+**Structural fix (commit this session; `sched/mod.rs`, both dispatch sites) —
+restore the invariant "a task is marked `Running` only once its context switch is
+committed":**
+- **Idle-fallback path:** extract `old_data`/`new_data` **first**; if either is
+  `None`, re-enqueue the picked task iff it is still `Ready` (`PER_CPU_SCHED.enqueue`
+  with its effective priority), print `[sched] BUG: idle-fallback switch aborted …
+  re-enqueued ready task N`, `drop(s)` and `continue` the fallback loop. Only when
+  **both** are present is the picked task's `record_dispatch` + `state=Running` +
+  `last_cpu` committed. The old trailing "context extraction failed" block is now
+  unreachable (kept as a defensive no-op for the borrow checker).
+- **Main path:** the pre-extraction `Running` mark was **removed**; the
+  `record_dispatch`/`state=Running`/`last_cpu` write now lives **inside** the
+  `if let (Some(old_data), Some(new_data)) = …` success branch. The `else` branch
+  re-enqueues the picked task iff still `Ready` before returning, logging
+  `[sched] BUG: context switch failed — task C or N not in table (re-enqueued ready
+  task N)`.
+Re-borrowing `tasks.get_mut(&picked)` to set `Running` after taking `old_data`'s
+raw `&raw mut` context pointer is sound: raw pointers are not live borrows and no
+map insert/remove occurs in between, so the pointer stays valid. Builds clean
+(`cargo build -p kernel`, 50.6 s), 0 new clippy warnings in the edited range.
+
+**What this fixes / what remains.** This eliminates the *total hang* from the
+BSP-alive lost-dispatch: even when extraction fails, the picked task returns to the
+run queue instead of vanishing, and the new `BUG:` logs will pinpoint **why**
+`old_data`/the current task becomes `None` (the deeper trigger — how the *current*
+task drops out of `tasks` mid-dispatch — is not yet definitively identified; static
+analysis says the current task is reap-protected via `active_ids`, so the logs are
+the next lead). **Also noted (not the forward-progress blocker):** the idle task
+(task 0) being renamed to `"prctl-batch269"` by a userspace `PR_SET_NAME` implies
+`current_task_id()` returned 0 while a userspace task ran (or the boot self-test
+genuinely runs in task-0 context) — a cosmetic/desync concern flagged for later.
+The **BSP-dead IF=0 silent-spin** variant (freshly-exec'd binary demand-paging with
+IF=0) remains **OPEN** and is the next target once a soak captures its NMI backtrace.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

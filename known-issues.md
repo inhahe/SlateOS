@@ -915,6 +915,58 @@ the next armed soak should finally print `NMI WATCHDOG FIRED … rip=…` + back
 pinpointing where the freshly-exec'd binary's demand-paging path spins with IF=0.
 **Still OPEN** (the underlying wedge) — but no longer a blind heisenbug.
 
+**REGISTER-VS-RUNNABLE RACE — ROOT-CAUSED AND FIXED 2026-07-03 (the yield-budget
+PANIC variant; the silent IF=0 wedge is a SEPARATE bug, still open).** The reset
+experiment (`scripts/wdog-reset-experiment.sh`, `WATCHDOG_ACTION=reset`) caught a
+*non-silent* member of this family: `build/hang-catches/RESET-CAUGHT-iter-2.txt`
+— a fatal kernel PANIC at `container.rs:5370` `assert!(zombified, "exec'd hello
+did not exit within the yield budget")`. Decisive serial evidence (lines
+9119–9123): `[sched] Task 184 exiting` printed **before** `[sched] Spawned task
+184 …` and `[thread] Spawned thread (task 184) in process 220`, and **no**
+`[thread] Process 220 … now zombie` line ever appeared. I.e. the exec'd
+`/bin/hello` child ran to completion *before* its owning process/thread were
+registered, so the process was never zombified and the container self-test spun
+its 100 000-yield budget and fired the assert.
+
+*Mechanism (a classic register-vs-runnable race):* `thread::spawn`
+(`proc/thread.rs`) created the scheduler task via `sched::spawn`, which enqueues
+it **Ready and runnable and re-enables interrupts** (`without_interrupts` ends)
+*before* `thread::spawn` did `pcb::add_thread` + the `THREAD_OWNERS.insert`. On
+the uniprocessor a timer preemption in that window switches to the short-lived
+child, which prints and `exit()`s; `on_thread_exit` (`thread.rs:396`) then does
+`owners.remove(&task_id)?` → `None`, bails, and **skips the process's zombie
+transition entirely**. (The out-of-order serial — child exit logged before its
+own spawn/registration logs — is the exact fingerprint of this window.)
+
+*Proper structural fix (commit this session; `sched/mod.rs` + `proc/thread.rs`),
+SMP-correct — not a widened `without_interrupts` window:*
+- `sched::spawn_suspended()` creates the task **Blocked and NOT enqueued** (and
+  does not signal a CPU), sharing a new `spawn_inner(…, admit: bool)` with the
+  normal immediate-admit `spawn`/`spawn_with_affinity`.
+- `sched::admit()` (built on `wake()`) performs the Blocked→Ready transition and
+  enqueue once the caller is ready.
+- `thread::spawn` now: create the task **suspended**, complete **all** ownership
+  registration (`add_thread` + `THREAD_OWNERS` insert + `Creating→Running`)
+  *before* calling `admit()`. The child therefore cannot run until
+  `on_thread_exit` is guaranteed to find its owning process. Includes an
+  unwinding path (detach + kill) if `admit` ever fails.
+Builds clean, 0 new clippy warnings in the changed files.
+
+*Scope / what this does and does NOT fix.* This eliminates the **yield-budget
+PANIC variant** (a task that *ran and exited* but left an un-zombified process).
+It is analytically the same ordering hazard behind the "task `state=Running`,
+never executed" liveness catch (`CAUGHT-iter-1-liveness.txt`), which the fix also
+closes by construction (a task is registered before it is ever runnable). It does
+**NOT** fix the **dominant silent IF=0 wedge**: a 40-boot `reset`-action soak of
+the fixed kernel reproduced on **iteration 1** with a *different* signature —
+`build/hang-catches/RESET-CAUGHT-iter-1.txt`: pid 188 heavily demand-paging inode
+72 (`/bin/hello`) page-cache maps, then **total silence** at 47 s (no panic, no
+assert, no yield-budget line), i.e. cpu0 spun with IF=0, the BSP stopped kicking,
+and the i6300esb reset fired. That silent wedge is a separate mechanism (a
+freshly-exec'd binary's demand-paging path spins with IF=0) and remains **OPEN** —
+next step is the dedicated-NMI-IST work below so an `inject-nmi` soak can finally
+dump its backtrace.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

@@ -1090,6 +1090,56 @@ blocker above is narrower than thought).** Two decisive results this session:
    a slow-but-live boot will either reach BOOT_OK or trip the 200 s-armed
    `[liveness] BOOT DEADLINE EXCEEDED` task dump. Result pending.
 
+**ROOT-CAUSED + FIXED 2026-07-03: `TSC_FREQ` spinlock re-entry deadlock — this
+was the silent BSP-dead wedge.** The HMP-monitor RIP capture (new tooling, see
+below) caught a live wedge and, walking the frozen `RBP` chain, resolved it
+exactly:
+- **Frozen state:** `RIP=ffffffff800e1d46` = `spin_loop_hint+0x6` (spinning),
+  `RFL` with `IF=0`, `CPL=0` (kernel), `CR2=0x60000c7800`.
+- **Stack (RBP chain, innermost → outermost):**
+  `tsc_freq ← clock_monotonic ← kick_staleness_ns ← handle_nmi`.
+- **Mechanism (same class as B-ACCT-SPINLOCK-STALL below):** `bench::tsc_freq()`
+  read the write-once calibrated TSC frequency through a `spin::Mutex<u64>`
+  (`static TSC_FREQ: Mutex<u64>`). But `timekeeping::clock_monotonic()` calls
+  `tsc_freq()`, and `clock_monotonic()` runs on the normal hot path **and** from
+  timer-IRQ context (scheduler `bsp_heartbeat`) **and** from NMI context
+  (`hardlockup::classify_nmi`/`kick_staleness_ns`). On the uniprocessor, if a
+  timer IRQ or watchdog NMI fires while normal code is *inside*
+  `TSC_FREQ.lock()`, the handler re-enters `clock_monotonic → tsc_freq →
+  TSC_FREQ.lock()` and spins forever at `IF=0`. Silent BSP death, no ticks, all
+  timer-driven watchdogs blind.
+- **Why the NMI never dumped:** the watchdog NMI *was* delivered (`handle_nmi`
+  is on the frozen stack — this **inverts** the earlier "NMI never taken"
+  hypothesis above), but `classify_nmi`'s very first act is a
+  `kick_staleness_ns()` → `clock_monotonic()` → `tsc_freq()` → the same
+  `TSC_FREQ.lock()` that is *already held* by the interrupted normal-context
+  code. The NMI self-deadlocks in the identical lock before it can print. That
+  is why every catch was **silent** with zero watchdog output.
+- **Fix (commit 5f658336c):** `TSC_FREQ: Mutex<u64>` → `AtomicU64`. The value is
+  write-once at calibration and read-only forever after — it never needed a lock
+  at all. `calibrate_tsc()` does `TSC_FREQ.store(freq, Relaxed)`; `tsc_freq()`
+  does `TSC_FREQ.load(Relaxed)`. `clock_monotonic()` is now fully lock-free and
+  genuinely IRQ/NMI-safe (its doc comment's "no locks" claim is finally true),
+  and it's also faster on the hot clock path. This is the *proper* structural fix
+  (lock-free for a write-once value), not a band-aid.
+- **New tooling that caught it — HMP-monitor RIP capture.** No
+  addr2line/llvm-symbolizer exists in any toolchain, and the in-guest NMI dump
+  was itself deadlocked, so neither in-guest mechanism could see the wedged RIP.
+  `scripts/boot-test.sh` now attaches a QEMU HMP monitor
+  (`-monitor tcp:127.0.0.1:55123,server,nowait`, only under
+  `--hard-lockup-watchdog`) and, on timeout with no wait-marker, queries it over
+  bash `/dev/tcp` (`info registers` / `info cpus` / `info registers -a`) to read
+  the frozen CPU's registers straight from the emulator — bypassing in-guest NMI
+  delivery entirely. `resolve_kernel_symbol()` resolves RIP to the nearest
+  preceding symbol via `llvm-nm -nC --defined-only`, comparing **zero-padded
+  16-hex-digit strings** (NOT awk `strtonum`, whose doubles lose precision above
+  2^53 for higher-half ~1.8e19 addresses) and computing the offset in bash
+  64-bit arithmetic. `scripts/soak-nmi-check.sh` preserves the register dump
+  (`SNMI-CAUGHT-*-regs.txt`) alongside each serial catch. This RIP-capture path
+  is reusable for any future silent IF=0 wedge.
+- **Confirmation:** 12-iteration `--hard-lockup-watchdog` soak (300 s timeout)
+  running post-fix to prove non-recurrence.
+
 ### B-ACCT-SPINLOCK-STALL. `ACCT` (mm memory-accounting) spinlock self-deadlock — ROOT-CAUSED + FIXED 2026-07-03
 
 **STATUS: FIXED** (commit this session). Root cause confirmed by the

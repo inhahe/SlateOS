@@ -31,6 +31,7 @@ use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD, MAX_STACK_FRAMES};
 use crate::sched;
 use crate::serial_println;
+use crate::emergency_println;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -1429,12 +1430,14 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
     let iochan_check = port_b & 0x40 != 0;
 
     if parity_error || iochan_check {
-        serial_println!("EXCEPTION: NMI at {:#x} — hardware error", frame.rip);
+        // NMI context: use lock-free emergency output (the interrupted code may
+        // hold the global serial spinlock).
+        emergency_println!("EXCEPTION: NMI at {:#x} — hardware error", frame.rip);
         if parity_error {
-            serial_println!("  Memory parity error (possible bad RAM)");
+            emergency_println!("  Memory parity error (possible bad RAM)");
         }
         if iochan_check {
-            serial_println!("  I/O channel check error");
+            emergency_println!("  I/O channel check error");
         }
         crate::klog!(Error, "hw.nmi",
             "NMI hardware error at {:#x}: parity={}, iochan={}",
@@ -1457,7 +1460,8 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // read of the BSP kick-staleness clock, so an AP taking the broadcast
             // NMI cannot corrupt it — but only cpu0 is the authority on a
             // BSP-driven watchdog, so APs still just record context and return.
-            serial_println!(
+            // Lock-free: the wedged BSP may hold the global serial spinlock.
+            emergency_println!(
                 "[hardlockup] NMI on AP cpu={} rip={:#x} rflags={:#x}",
                 cpu, frame.rip, frame.rflags
             );
@@ -1485,15 +1489,27 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // wedge produced no diagnostic at all). Then emit the greppable
             // marker the soak harness keys on.
             HARDLOCKUP_DUMPED.store(true, core::sync::atomic::Ordering::Release);
-            serial_println!(
+            // Lock-free emergency output for the marker + backtrace: the whole
+            // point of this watchdog is to report from a wedged machine, and the
+            // wedged cpu0 may be holding the global serial spinlock (e.g. it
+            // froze mid-`serial_println!`). A normal `serial_println!` here would
+            // then spin forever on that held lock, producing the exact
+            // total-silence-with-no-dump we observed. `dump_kernel_backtrace`
+            // also uses emergency output internally.
+            emergency_println!(
                 "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={} kick_stale_ns={} — dumping backtrace + task table",
                 cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb, stale_ns
             );
             dump_kernel_backtrace(frame);
-            crate::sched::dump_task_table();
+            // klog and the task-table dump take other locks (structured-log
+            // buffer, scheduler) and are therefore best-effort — they run after
+            // the RIP + backtrace above, which are the irreplaceable data. If the
+            // wedge is holding one of those locks these may hang, but by then the
+            // marker has already escaped via the lock-free path.
             crate::klog!(Error, "hw.nmi",
                 "hardlockup NMI cpu={} rip={:#x} heartbeat={} kick_stale_ns={}",
                 cpu, frame.rip, hb, stale_ns);
+            crate::sched::dump_task_table();
         } else {
             // Spurious: the BSP is alive and still kicking. Take a one-shot
             // backtrace + task-table dump on the first such NMI (cheap, harmless,
@@ -1501,14 +1517,14 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             // watchdog and resume rather than latching a false catch. No greppable
             // marker.
             if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                serial_println!(
+                emergency_println!(
                     "[hardlockup] first (spurious) NMI on cpu={} rip={:#x} rflags={:#x} kick_stale_ns={} — dumping backtrace + task table",
                     cpu, frame.rip, frame.rflags, stale_ns
                 );
                 dump_kernel_backtrace(frame);
                 crate::sched::dump_task_table();
             }
-            serial_println!(
+            emergency_println!(
                 "[hardlockup] spurious NMI (BSP alive, heartbeat={} kick_stale_ns={}) at rip={:#x} — re-arming, resuming",
                 hb, stale_ns, frame.rip
             );
@@ -1585,19 +1601,21 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
     let cs = frame.cs;
 
     // Only meaningful for a ring-0 wedge; a ring-3 rsp is untrusted user memory.
+    // All output here uses the lock-free `emergency_println!` — this runs in the
+    // hard-lockup NMI path and the wedged code may hold the global serial lock.
     if cs & 0x3 != 0 {
-        serial_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped", cs);
+        emergency_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped", cs);
         return;
     }
     if rsp < HIGHER_HALF_MIN {
         // A sane kernel stack is in the higher-half; a low rsp means we can't
         // trust it (or the wedge corrupted it) — don't risk a fault.
-        serial_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped", rsp);
+        emergency_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped", rsp);
         return;
     }
 
-    serial_println!("[hardlockup] backtrace (rbp-chain walk):");
-    serial_println!("[hardlockup]   [rip]     {:#x}", rip);
+    emergency_println!("[hardlockup] backtrace (rbp-chain walk):");
+    emergency_println!("[hardlockup]   [rip]     {:#x}", rip);
 
     // Recover the interrupted RBP from the ISR stub's save area. The macro
     // `isr_stub_no_error!` pushes, in order below the CPU interrupt frame:
@@ -1621,7 +1639,7 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
     let mut prev: u64 = 0;
     loop {
         if depth >= MAX_DEPTH {
-            serial_println!("[hardlockup]   … (depth cap {} reached)", MAX_DEPTH);
+            emergency_println!("[hardlockup]   … (depth cap {} reached)", MAX_DEPTH);
             break;
         }
         if rbp < HIGHER_HALF_MIN || rbp & 0x7 != 0 {
@@ -1636,7 +1654,7 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
         let ret = unsafe { core::ptr::read_volatile((rbp as *const u64).add(1)) };
         let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
         if is_kernel_text(ret) {
-            serial_println!("[hardlockup]   [{:#x}] ret {:#x}", rbp, ret);
+            emergency_println!("[hardlockup]   [{:#x}] ret {:#x}", rbp, ret);
             depth = depth.wrapping_add(1);
         }
         prev = rbp;
@@ -1645,7 +1663,7 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
 
     // Backstop: conservative stack scan, filtered to real `.text` addresses.
     // Catches callers whose frames the RBP walk skipped (e.g. asm/naked stubs).
-    serial_println!("[hardlockup] backtrace (stack scan, .text words from rsp={:#x}):", rsp);
+    emergency_println!("[hardlockup] backtrace (stack scan, .text words from rsp={:#x}):", rsp);
     const MAX_WORDS: usize = 256;
     const MAX_HITS: u32 = 40;
     let mut hits: u32 = 0;
@@ -1660,15 +1678,15 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
         if is_kernel_text(val) {
             #[allow(clippy::arithmetic_side_effects)]
             let off = addr - rsp;
-            serial_println!("[hardlockup]   [rsp+{:#05x}] {:#x}", off, val);
+            emergency_println!("[hardlockup]   [rsp+{:#05x}] {:#x}", off, val);
             hits = hits.wrapping_add(1);
             if hits >= MAX_HITS {
-                serial_println!("[hardlockup]   … (hit cap {} reached)", MAX_HITS);
+                emergency_println!("[hardlockup]   … (hit cap {} reached)", MAX_HITS);
                 break;
             }
         }
     }
-    serial_println!("[hardlockup] backtrace end ({} scan candidate(s))", hits);
+    emergency_println!("[hardlockup] backtrace end ({} scan candidate(s))", hits);
 }
 
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.

@@ -49,6 +49,20 @@ impl SerialPort {
         Self { base }
     }
 
+    /// Create a throwaway COM1 handle for **lock-free emergency output**.
+    ///
+    /// Returns a bare [`SerialPort`] for COM1 that is *not* the Mutex-protected
+    /// global [`SERIAL`]. Writing through it polls the UART LSR and pushes bytes
+    /// to the THR directly, taking **no lock**, so it can never deadlock on the
+    /// global serial spinlock — the essential property for reporting from an
+    /// NMI / panic / hard-lockup context where the wedged code may be holding
+    /// that lock. Assumes the UART was already initialized by [`init`] (true
+    /// after early boot). See the [`emergency_println!`] macro.
+    #[must_use]
+    pub const fn emergency() -> Self {
+        Self::new(COM1_BASE)
+    }
+
     /// Initialize the UART hardware.
     ///
     /// Configures: 115200 baud, 8N1, FIFO enabled, no interrupts.
@@ -164,4 +178,36 @@ macro_rules! serial_print {
 macro_rules! serial_println {
     ()            => { $crate::serial_print!("\n") };
     ($($arg:tt)*) => { $crate::serial_print!("{}\n", format_args!($($arg)*)) };
+}
+
+/// Lock-free "emergency" serial output for NMI / panic / hard-lockup contexts.
+///
+/// Identical usage to [`serial_print!`], but writes through a throwaway COM1
+/// handle ([`crate::serial::SerialPort::emergency`]) instead of the global
+/// Mutex-protected [`SERIAL`]. It therefore acquires **no lock** and can never
+/// deadlock even if the wedged/interrupted code is holding the serial spinlock
+/// — the exact scenario a hard-lockup watchdog must survive to report the wedge.
+///
+/// On a uniprocessor the interrupted context is frozen while an NMI handler
+/// runs, so bytes cannot interleave; on SMP a concurrent normal writer could
+/// garble output, an acceptable tradeoff for guaranteed emergency visibility.
+#[macro_export]
+macro_rules! emergency_print {
+    ($($arg:tt)*) => {{
+        #[allow(unused_imports)]
+        use core::fmt::Write;
+        let mut serial = $crate::serial::SerialPort::emergency();
+        let _ = write!(serial, $($arg)*);
+    }};
+}
+
+/// Lock-free "emergency" serial output with a trailing newline.
+///
+/// See [`emergency_print!`]. Use this for the single most important line from a
+/// wedge — the watchdog "FIRED … rip=…" marker — so it always escapes even when
+/// the global serial lock is held.
+#[macro_export]
+macro_rules! emergency_println {
+    ()            => { $crate::emergency_print!("\n") };
+    ($($arg:tt)*) => { $crate::emergency_print!("{}\n", format_args!($($arg)*)) };
 }

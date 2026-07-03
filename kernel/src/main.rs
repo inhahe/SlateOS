@@ -35,7 +35,11 @@
 //! 22. Initialize Local APIC (calibrate timer via PIT, configure periodic mode
 //!     at 100 Hz, register timer ISR on vector 32).
 //! 23. Enable interrupts — preemptive scheduling is now active.
-//!     (self-test: verify timer ticks are observed).
+//!     (self-test: verify timer ticks are observed).  This happens *before*
+//!     the ring-3 integration self-test battery so those real Linux-ABI
+//!     processes run preemptively with interrupts on — the way userspace
+//!     actually runs — instead of monopolizing the BSP with IF=0 (which
+//!     starves the watchdog kick; see known-issues.md B-PTHREAD-YIELDBUDGET).
 //! 24. Spawn the userspace init process (PID 1) from an embedded ELF binary.
 //!     The init process runs in ring 3 with a minimal interactive shell.
 //!     The boot thread enters an idle loop after spawning init.
@@ -1263,6 +1267,54 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::fat::trim_self_test() {
         serial_println!("WARNING: FAT fstrim self-test failed: {:?}", e);
     }
+
+    // Step 21: Enable hardware interrupts — BEFORE the ring-3 self-test battery.
+    //
+    // Everything above this point is deterministic kernel/subsystem init and
+    // in-kernel self-tests that neither spawn ring-3 processes nor perform
+    // multi-second, data-proportional work.  Everything BELOW is the ring-3
+    // integration battery: dozens of real Linux-ABI processes that fork,
+    // CoW-clone, exec, demand-page file-backed mappings, run glibc/dash, and
+    // even compile C with gcc/make.  In a debug build (with heap poisoning)
+    // those operations are seconds-long and O(n)-over-large-data.
+    //
+    // Historically `sti()` was deferred until *after* the whole battery, so the
+    // battery ran with IF=0.  That is the "long operation under IRQs-disabled"
+    // anti-pattern (CLAUDE.md): with IF=0 the BSP takes no timer ticks, so the
+    // scheduler cannot preempt, the timer-driven liveness / hung-task watchdogs
+    // are blind, and the BSP-only hard-lockup watchdog kick
+    // (`sched::timer_tick` → `hardlockup::kick`) is starved — so a slow-but-live
+    // boot occasionally crossed the ~9.8 s watchdog / harness-timeout threshold
+    // and presented as the intermittent "BSP-dead total-silence hang"
+    // (known-issues.md B-PTHREAD-YIELDBUDGET).  Fixing each seconds-long IF=0
+    // operation one at a time (SHA-256 auto-versioning, page-fault file reads,
+    // heap poisoning …) was band-aid accumulation; the structural fix is to run
+    // the battery the way userspace actually runs — with interrupts enabled and
+    // preemption live.  This also makes the timer-driven watchdogs able to
+    // catch a *genuine* clone/CoW/reap deadlock during the battery instead of
+    // going silent.
+    //
+    // SAFETY: The IDT is fully populated (exceptions, timer vector 32, spurious
+    // vector 255), the Local APIC + I/O APIC are initialized and the timer is
+    // running (Step 20), and the scheduler is ready (Step 9).  The per-CPU IRQ
+    // stack is installed first so hardware IRQs never push their frame onto a
+    // near-full kernel task stack (B-DF1 / open-questions Q7, option A).
+    console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
+    idt::init_irq_stack(0);
+    // SAFETY: see the paragraph above — all interrupt infrastructure is ready.
+    unsafe {
+        cpu::sti();
+    }
+    serial_println!("[boot] Interrupts enabled — preemptive scheduling active");
+
+    // Verify the APIC timer is actually firing before the battery relies on it
+    // for preemption and watchdog kicks.  (Runs here, immediately after enable,
+    // rather than at its old post-battery location.)
+    if let Err(e) = apic::self_test() {
+        serial_println!("FATAL: APIC timer self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+    console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS
@@ -3151,46 +3203,25 @@ extern "C" fn kernel_main() -> ! {
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");
 
-    // Step 21: Enable hardware interrupts.
-    // From this point forward, the APIC timer fires periodically and
-    // the scheduler enforces time slices preemptively.
-    //
-    // SAFETY: The IDT is fully set up with handlers for exceptions,
-    // the timer (vector 32), and spurious interrupts (vector 255).
-    // The APIC is configured and the scheduler is ready.
-    console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
-    // Install the BSP's dedicated per-CPU IRQ stack before enabling
-    // interrupts, so hardware IRQs never push their frame onto a near-full
-    // kernel task stack (B-DF1 / open-questions Q7, option A).
-    idt::init_irq_stack(0);
-    unsafe {
-        cpu::sti();
-    }
-    serial_println!("[boot] Interrupts enabled — preemptive scheduling active");
-
-    // Verify the APIC timer is actually firing.
-    if let Err(e) = apic::self_test() {
-        serial_println!("FATAL: APIC timer self-test failed: {}", e);
-        cpu::halt_loop();
-    }
+    // Interrupts were already enabled earlier (Step 21, just before the ring-3
+    // self-test battery) so the battery runs preemptively.  The two validations
+    // below genuinely require interrupts to be live but do NOT need to run
+    // before the battery, so they stay here at the tail of boot.
 
     // Test sleep_ns (requires interrupts for hrtimer-based wake).
-    // Must run after interrupts are enabled because the hrtimer callback
-    // fires from the APIC timer ISR.
+    // Runs after interrupts are enabled because the hrtimer callback fires from
+    // the APIC timer ISR.
     if let Err(e) = sched::test_sleep_ns_postboot() {
         serial_println!("FATAL: sleep_ns self-test failed: {}", e);
         cpu::halt_loop();
     }
 
     // Softirq self-test — verify raise/process/reentry-guard work.
-    // Must be after interrupts are enabled (softirq processing does
-    // STI/CLI internally).
+    // Requires interrupts enabled (softirq processing does STI/CLI internally).
     if let Err(e) = softirq::self_test() {
         serial_println!("FATAL: Softirq self-test failed: {}", e);
         cpu::halt_loop();
     }
-
-    console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     // Step 22: Initialize PS/2 keyboard.
     // Unmasks IRQ 1, enables scan code translation.  Keypresses now

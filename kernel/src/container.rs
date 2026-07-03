@@ -3229,12 +3229,10 @@ pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> 
     // there, outside the table lock.
     let host_mount = alloc::format!("{TMPFS_ROOT}/{id}-{index}");
     crate::fs::vfs::Vfs::mkdir_all(&host_mount)?;
-    if let Err(e) = crate::fs::memfs::mount(&host_mount) {
-        // Leave the (empty) mountpoint dir behind on failure — harmless, and
-        // removing it here would race a concurrent mount attempt. Report the
-        // mount error so the caller can surface it.
-        return Err(e);
-    }
+    // On mount failure, leave the (empty) mountpoint dir behind — harmless, and
+    // removing it here would race a concurrent mount attempt. Propagate the
+    // mount error so the caller can surface it.
+    crate::fs::memfs::mount(&host_mount)?;
 
     // Record the mapping. If the container vanished or left Created state
     // between the checks above and here (single session: it won't), roll the

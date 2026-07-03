@@ -1464,7 +1464,7 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         // the interrupted kernel stack for return addresses recovers the call
         // chain so resolve-rip.sh can name the caller.
         if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            dump_kernel_backtrace(frame.rip, frame.rsp, frame.cs);
+            dump_kernel_backtrace(frame);
             crate::sched::dump_task_table();
         }
         crate::klog!(Error, "hw.nmi",
@@ -1488,51 +1488,124 @@ static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
 /// this threshold cleanly separates return addresses from HHDM data pointers.
 const KERNEL_TEXT_MIN: u64 = 0xffff_ffff_8000_0000;
 
-/// Best-effort kernel-stack backtrace for the hard-lockup NMI dump.
+// Linker-defined `.text` bounds, used to precisely classify a word as a real
+// return address (points *into* executable kernel code) versus stale data.
+unsafe extern "C" {
+    static __text_start: u8;
+    static __text_end: u8;
+}
+
+/// True iff `val` points into the kernel's executable `.text` section, i.e. it
+/// is a plausible return address. Bounds come from the linker script, so this
+/// rejects rodata/data/bss/stack pointers that a loose `>= KERNEL_TEXT_MIN`
+/// scan would wrongly report.
+fn is_kernel_text(val: u64) -> bool {
+    let lo = core::ptr::addr_of!(__text_start) as u64;
+    let hi = core::ptr::addr_of!(__text_end) as u64;
+    val >= lo && val < hi
+}
+
+/// Best-effort kernel backtrace for the hard-lockup NMI dump.
 ///
-/// The NMI is delivered with `ist=0`, so `rsp` is the *interrupted* kernel
-/// stack pointer and the stack below the base is intact. We can't unwind DWARF
-/// in NMI context, so we do a conservative scan: walk forward from `rsp` (toward
-/// the older frames at higher addresses — always mapped, since we came from
-/// there) and print every word that looks like a kernel-text return address.
-/// Some will be stale/spurious, but the real call chain is among them, and
-/// `scripts/resolve-rip.sh` maps each to `symbol+offset`, which is enough to
-/// identify the wedged loop's caller.
+/// The NMI is delivered with `ist=0`, so `frame.rsp` is the *interrupted*
+/// kernel stack pointer and the stack is intact. We can't unwind DWARF in NMI
+/// context, but every Rust kernel function compiled here keeps a frame pointer
+/// (`push rbp; mov rbp, rsp`), so we can walk the RBP chain precisely:
+///
+///   [rbp+8] = return address into the caller
+///   [rbp+0] = caller's saved RBP (the next frame, always higher on the stack)
+///
+/// The interrupted RBP is recovered from the ISR stub's register save area: the
+/// `isr_stub_no_error!` macro pushes the dummy error code + all 15 GP registers
+/// below the CPU-pushed interrupt frame, so the saved `rbp` sits 48 bytes (6
+/// words: error, rax, rcx, rdx, rbx, rbp) below the `frame` pointer — see the
+/// offset derivation at the read site below.
+///
+/// After the precise walk we also do the old conservative stack scan as a
+/// backstop (some frames may be `#[naked]`/asm with no RBP link), filtering to
+/// words that land inside `.text` so data pointers are not misreported.
 ///
 /// Skipped entirely if the interrupt came from ring 3 (`cs & 3 != 0`), where
-/// `rsp` is a user stack we must not treat as trusted kernel memory.
-fn dump_kernel_backtrace(rip: u64, rsp: u64, cs: u64) {
+/// the stack is untrusted user memory.
+fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
+    let rip = frame.rip;
+    let rsp = frame.rsp;
+    let cs = frame.cs;
+
     // Only meaningful for a ring-0 wedge; a ring-3 rsp is untrusted user memory.
     if cs & 0x3 != 0 {
-        serial_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), stack scan skipped", cs);
+        serial_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped", cs);
         return;
     }
     if rsp < KERNEL_TEXT_MIN {
         // A sane kernel stack is in the higher-half; a low rsp means we can't
         // trust it (or the wedge corrupted it) — don't risk a fault.
-        serial_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, scan skipped", rsp);
+        serial_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped", rsp);
         return;
     }
-    serial_println!("[hardlockup] backtrace (rip + kernel-text words on stack from rsp={:#x}):", rsp);
+
+    serial_println!("[hardlockup] backtrace (rbp-chain walk):");
     serial_println!("[hardlockup]   [rip]     {:#x}", rip);
-    // Scan a bounded window (192 words = 1536 bytes) of the stack. Higher
-    // addresses are older frames and are guaranteed mapped (we returned through
-    // them), so forward reads within a modest window cannot fault.
-    const MAX_WORDS: usize = 192;
-    const MAX_HITS: u32 = 32;
+
+    // Recover the interrupted RBP from the ISR stub's save area. The macro
+    // `isr_stub_no_error!` pushes, in order below the CPU interrupt frame:
+    //   dummy-error, rax, rcx, rdx, rbx, rbp, rsi, rdi, r8..r15
+    // and sets `rdi = rsp + 128` (the `frame` pointer). Counting down from
+    // `frame`: [frame-8]=error, [frame-16]=rax, [frame-24]=rcx, [frame-32]=rdx,
+    // [frame-40]=rbx, [frame-48]=rbp. So the saved RBP is 6 words below `frame`.
+    let frame_ptr = frame as *const InterruptStackFrame as *const u64;
+    // SAFETY: `frame_ptr` was produced by the ISR stub as `rsp+128`, so the six
+    // words below it are the pushed dummy-error + rax/rcx/rdx/rbx/rbp save slots
+    // — mapped, valid kernel stack. The read is 8-byte aligned and volatile.
+    let mut rbp = unsafe { core::ptr::read_volatile(frame_ptr.sub(6)) };
+
+    // Walk the frame-pointer chain. Each iteration validates `rbp` before
+    // dereferencing: it must be in the higher-half, 8-byte aligned, and (after
+    // the first hop) strictly greater than the previous frame — a monotonic
+    // increase toward the stack base guarantees termination and that every read
+    // targets already-mapped older-frame memory.
+    const MAX_DEPTH: u32 = 32;
+    let mut depth: u32 = 0;
+    let mut prev: u64 = 0;
+    loop {
+        if depth >= MAX_DEPTH {
+            serial_println!("[hardlockup]   … (depth cap {} reached)", MAX_DEPTH);
+            break;
+        }
+        if rbp < KERNEL_TEXT_MIN || rbp & 0x7 != 0 {
+            break;
+        }
+        if prev != 0 && rbp <= prev {
+            // Not monotonically increasing → chain is broken/corrupt; stop.
+            break;
+        }
+        // `rbp` and `rbp+8` are two words at a valid higher-half, aligned frame
+        // pointer; both lie in already-mapped stack. SAFETY as above.
+        let ret = unsafe { core::ptr::read_volatile((rbp as *const u64).add(1)) };
+        let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+        if is_kernel_text(ret) {
+            serial_println!("[hardlockup]   [{:#x}] ret {:#x}", rbp, ret);
+            depth = depth.wrapping_add(1);
+        }
+        prev = rbp;
+        rbp = next;
+    }
+
+    // Backstop: conservative stack scan, filtered to real `.text` addresses.
+    // Catches callers whose frames the RBP walk skipped (e.g. asm/naked stubs).
+    serial_println!("[hardlockup] backtrace (stack scan, .text words from rsp={:#x}):", rsp);
+    const MAX_WORDS: usize = 256;
+    const MAX_HITS: u32 = 40;
     let mut hits: u32 = 0;
     for i in 0..MAX_WORDS {
-        // Byte offset of this stack slot. `i` is bounded by MAX_WORDS so the
-        // multiply and add cannot overflow a u64 address.
+        // `i` is bounded by MAX_WORDS so the multiply/add cannot overflow.
         #[allow(clippy::arithmetic_side_effects)]
         let addr = rsp + (i as u64) * 8;
-        let ptr = addr as *const u64;
-        // SAFETY: `addr` is within a 1536-byte window at higher addresses than
-        // the interrupted `rsp`, i.e. older stack frames that are already mapped
-        // (control returned through them). Reads are 8-byte aligned by
-        // construction and volatile so the compiler cannot reorder/elide them.
-        let val = unsafe { core::ptr::read_volatile(ptr) };
-        if val >= KERNEL_TEXT_MIN {
+        // SAFETY: `addr` is within a 2 KiB window at higher addresses than the
+        // interrupted `rsp` (older, already-mapped stack frames). 8-byte aligned
+        // by construction; volatile so the read is not reordered/elided.
+        let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+        if is_kernel_text(val) {
             #[allow(clippy::arithmetic_side_effects)]
             let off = addr - rsp;
             serial_println!("[hardlockup]   [rsp+{:#05x}] {:#x}", off, val);
@@ -1543,7 +1616,7 @@ fn dump_kernel_backtrace(rip: u64, rsp: u64, cs: u64) {
             }
         }
     }
-    serial_println!("[hardlockup] backtrace end ({} candidate return address(es))", hits);
+    serial_println!("[hardlockup] backtrace end ({} scan candidate(s))", hits);
 }
 
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.

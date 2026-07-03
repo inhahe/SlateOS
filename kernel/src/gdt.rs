@@ -17,6 +17,8 @@
 //! Each CPU gets its own GDT and TSS.  The TSS contains per-CPU stacks:
 //! - **RSP0**: kernel stack for ring 3→0 transitions (interrupts, syscalls)
 //! - **IST1**: dedicated double-fault stack (catches kernel stack overflow)
+//! - **IST2**: dedicated NMI stack (hard-lockup watchdog — always usable even
+//!   when the interrupted context's stack is exhausted or wedged)
 //!
 //! The GDT code/data segments are identical across CPUs, but the TSS
 //! descriptor must point to each CPU's own TSS, so we need per-CPU GDTs.
@@ -110,7 +112,16 @@ pub struct TaskStateSegment {
     _reserved1: u64,
     /// Interrupt Stack Table entry 1 (double fault).
     pub ist1: u64,
-    /// Interrupt Stack Table entry 2 (reserved for future use).
+    /// Interrupt Stack Table entry 2 (NMI — hard-lockup watchdog).
+    ///
+    /// The NMI vector uses a dedicated IST stack so a non-maskable interrupt
+    /// delivered while the interrupted context is on a nearly-exhausted or
+    /// otherwise unusable stack (a stack-overflow wedge, or an IF=0 spin deep
+    /// in an IRQ handler) does not push its frame onto that bad stack and
+    /// triple-fault.  Hardware IST switches the stack *before* the CPU pushes
+    /// the interrupt frame, which a stub-level RSP switch (used by ordinary
+    /// IRQs) cannot do.  This is what lets `handle_nmi` reliably report the
+    /// hard-lockup wedge instead of vanishing into a triple fault.
     pub ist2: u64,
     pub ist3: u64,
     pub ist4: u64,
@@ -167,6 +178,16 @@ static mut PRIVILEGE_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
 ///
 /// Same per-CPU isolation rationale as `PRIVILEGE_STACKS`.
 static mut DOUBLE_FAULT_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
+    [[0; INTERRUPT_STACK_SIZE]; MAX_CPUS];
+
+/// Per-CPU stacks for IST2 (NMI / hard-lockup watchdog handling).
+///
+/// A dedicated NMI stack (separate from the double-fault stack) so the NMI
+/// handler always has a known-good stack even when the interrupted context's
+/// stack is exhausted or wedged — see `TaskStateSegment::ist2`.  Keeping it
+/// distinct from IST1 also means an NMI that arrives while a double fault is
+/// being handled (or vice versa) does not reuse the other's stack.
+static mut NMI_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
     [[0; INTERRUPT_STACK_SIZE]; MAX_CPUS];
 
 /// Per-CPU TSS instances.
@@ -263,6 +284,13 @@ unsafe fn init_cpu_gdt_tss(cpu: usize) {
             .cast::<u8>()
             .add(INTERRUPT_STACK_SIZE);
         (*addr_of_mut!(TSS_ARRAY[cpu])).ist1 = df_stack_top as u64;
+
+        // IST2: dedicated NMI stack (hard-lockup watchdog).  Must be set up
+        // before the IDT points the NMI vector at ist=2.
+        let nmi_stack_top = addr_of!(NMI_STACKS[cpu])
+            .cast::<u8>()
+            .add(INTERRUPT_STACK_SIZE);
+        (*addr_of_mut!(TSS_ARRAY[cpu])).ist2 = nmi_stack_top as u64;
 
         // Build TSS descriptor and write into this CPU's GDT.
         let tss_base = addr_of!(TSS_ARRAY[cpu]) as u64;

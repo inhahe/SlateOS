@@ -2439,7 +2439,11 @@ pub unsafe fn init() {
         // CPU exceptions (vectors 0–19).  Double fault uses IST1.
         idt.entries[0] = IdtEntry::new(isr_divide_error as *const () as u64, cs, 0, 0);
         idt.entries[1] = IdtEntry::new(isr_debug as *const () as u64, cs, 0, 0);
-        idt.entries[2] = IdtEntry::new(isr_nmi as *const () as u64, cs, 0, 0);
+        // NMI uses IST2: a dedicated, always-usable stack so the hard-lockup
+        // watchdog NMI can report even when the interrupted context's stack is
+        // exhausted or wedged (hardware IST switches the stack before pushing
+        // the frame — a stub-level RSP switch cannot).  See gdt::NMI_STACKS.
+        idt.entries[2] = IdtEntry::new(isr_nmi as *const () as u64, cs, 2, 0);
         idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 0);
         idt.entries[4] = IdtEntry::new(isr_overflow as *const () as u64, cs, 0, 0);
         idt.entries[5] = IdtEntry::new(isr_bound_range as *const () as u64, cs, 0, 0);

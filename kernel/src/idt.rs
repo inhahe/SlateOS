@@ -1509,10 +1509,15 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
                 crate::sched::dump_task_table();
             }
             serial_println!(
-                "[hardlockup] spurious NMI (BSP alive, heartbeat={} kick_stale_ns={}) at rip={:#x} — re-kicking, resuming",
+                "[hardlockup] spurious NMI (BSP alive, heartbeat={} kick_stale_ns={}) at rip={:#x} — re-arming, resuming",
                 hb, stale_ns, frame.rip
             );
-            crate::hardlockup::kick();
+            // Full re-arm, not a bare kick: QEMU's i6300esb resets (disables) the
+            // counter when it fires its action, so a mere RELOAD_PING would not
+            // restart it and the watchdog would be dead for the rest of the boot —
+            // exactly why an earlier spurious NMI let a later real wedge hang
+            // silently. rearm() re-enables the counter (NMI-safe, cached PCI addr).
+            crate::hardlockup::rearm();
         }
     } else {
         // No hardware error bits — likely a software NMI (debugger, watchdog,

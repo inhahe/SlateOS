@@ -76,8 +76,9 @@ const REG_RELOAD: u32 = 0x0c;
 const UNLOCK1: u32 = 0x80;
 /// Second unlock token, written to [`REG_RELOAD`] after [`UNLOCK1`].
 const UNLOCK2: u32 = 0x86;
-/// Reload/ping bit — restarts the counter at stage 1.
-const RELOAD_PING: u32 = 0x100;
+/// Reload/ping bit — restarts the counter at stage 1. Written as a 16-bit
+/// access (QEMU honors the RELOAD bit only in its `writew` handler).
+const RELOAD_PING: u16 = 0x100;
 
 // ---------------------------------------------------------------------------
 // PCI config-space registers
@@ -127,6 +128,13 @@ const STAGE_MS: u64 = (STAGE_PRELOAD as u64 * 983) / 1000;
 
 /// Mapped BAR0 virtual base address, or 0 if no device is present.
 static MMIO_BASE: AtomicU64 = AtomicU64::new(0);
+/// Cached PCI address (bus<<16 | device<<8 | function) of the watchdog, or
+/// [`DEV_BDF_NONE`] if absent. Recorded once at [`init`] so the counter can be
+/// re-enabled from **NMI context** (see [`rearm`]) without a bus scan or heap
+/// allocation (`pci::find_device` scans the bus into a `Vec` — not NMI-safe).
+static DEV_BDF: AtomicU32 = AtomicU32::new(DEV_BDF_NONE);
+/// Sentinel for "no watchdog device recorded".
+const DEV_BDF_NONE: u32 = u32::MAX;
 /// Whether the watchdog is currently armed (kicks are honored, NMI is "ours").
 static ARMED: AtomicBool = AtomicBool::new(false);
 /// Count of watchdog NMIs observed by `handle_nmi`. Lets the fire self-test
@@ -250,6 +258,30 @@ fn write_reg(offset: u32, value: u32) {
     }
 }
 
+/// Write a 16-bit MMIO register. No-op if no device is mapped.
+///
+/// **Required for the RELOAD register (0x0c).** QEMU's i6300esb dispatches MMIO
+/// writes by access size (`i6300esb_mem_writefn`): the RELOAD *ping* bit
+/// (`0x100`, which calls `i6300esb_restart_timer`) is honored **only** by the
+/// 16-bit `writew` handler. The 32-bit `writel` handler services just the
+/// TIMER1/TIMER2 preloads and silently drops a RELOAD write. So a reload/ping
+/// MUST be a genuine 16-bit access or the counter is never actually reloaded.
+#[inline]
+fn write_reg16(offset: u32, value: u16) {
+    let base = MMIO_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
+    let addr = base.wrapping_add(u64::from(offset)) as *mut u16;
+    // SAFETY: `base` is the virtual address of the i6300esb BAR0 MMIO region,
+    // mapped NO_CACHE during `init`; `offset` (here always REG_RELOAD = 0x0c)
+    // stays within the 16-byte register window and is 2-byte aligned. Volatile
+    // ensures the device sees the exact-width access it dispatches on.
+    unsafe {
+        core::ptr::write_volatile(addr, value);
+    }
+}
+
 /// Read a 32-bit MMIO register. Returns 0 if no device is mapped.
 #[inline]
 fn read_reg(offset: u32) -> u32 {
@@ -288,6 +320,13 @@ pub fn init(hhdm_offset: u64) {
         crate::serial_println!("[hardlockup] i6300esb not present (watchdog disabled)");
         return;
     };
+
+    // Cache the PCI address so the counter can be re-enabled from NMI context
+    // (rearm) without a bus scan / heap allocation.
+    DEV_BDF.store(
+        pack_bdf(dev.address.bus, dev.address.device, dev.address.function),
+        Ordering::Release,
+    );
 
     // Resolve BAR0 MMIO physical base (combine BAR1 for a 64-bit BAR).
     let Some(bar0_phys) = dev.bar0_mmio_addr() else {
@@ -329,23 +368,9 @@ pub fn init(hhdm_offset: u64) {
 
     MMIO_BASE.store(mmio_virt, Ordering::Release);
 
-    // Program CONFIG (16-bit PCI config): reboot action enabled (REBOOT bit
-    // CLEAR — inverted logic), 1 kHz mode (FREQ clear), stage-1 interrupt
-    // disabled (we only want the stage-2 NMI action).
-    // REBOOT=0 (enables action, inverted logic), FREQ=0 (1 kHz), INTTYPE=0b11
-    // (stage-1 interrupt disabled). See CONFIG_REBOOT / CONFIG_FREQ docs.
-    // Must use a genuine 16-bit access: QEMU's i6300esb only handles the
-    // CONFIG register on a 2-byte write (a 4-byte read-modify-write is ignored
-    // by the device model and never programs the config).
-    let config: u16 = CONFIG_INTTYPE_DISABLED;
-    pci::config_write16_native(dev.address.bus, dev.address.device, dev.address.function,
-        CFG_CONFIG, config);
-
-    // Program both stage preloads (each write needs a fresh unlock).
-    unlock();
-    write_reg(REG_TIMER1, STAGE_PRELOAD);
-    unlock();
-    write_reg(REG_TIMER2, STAGE_PRELOAD);
+    // Program CONFIG + both stage preloads. Shared with `rearm` so the same
+    // register state is restored after a stage-2 fire wipes it.
+    program_registers();
 
     crate::serial_println!(
         "[hardlockup] i6300esb armed-ready at {:#x} (phys {:#x}), ~{} ms/stage",
@@ -405,17 +430,63 @@ pub fn kick() {
     // wedge (timer dead) leaves it monotonically stale. Cheap: one rdtsc.
     LAST_KICK_NS.store(crate::timekeeping::clock_monotonic(), Ordering::Release);
     // Each honored register write needs a fresh unlock; the ping bit restarts
-    // the counter at stage 1.
+    // the counter at stage 1. The ping MUST be a 16-bit write — QEMU only
+    // services the RELOAD bit in its `writew` handler (see `write_reg16`).
     unlock();
-    write_reg(REG_RELOAD, RELOAD_PING);
+    write_reg16(REG_RELOAD, RELOAD_PING);
+}
+
+/// Pack a PCI bus/device/function triple into a single `u32` for atomic caching.
+#[inline]
+const fn pack_bdf(bus: u8, device: u8, function: u8) -> u32 {
+    ((bus as u32) << 16) | ((device as u32) << 8) | (function as u32)
+}
+
+/// Reprogram the watchdog CONFIG register and both stage preloads (NMI-safe).
+///
+/// Reproduces the register programming [`init`] performs, but using the PCI
+/// address cached in [`DEV_BDF`] (no bus scan / heap alloc) so it is safe to
+/// call from **NMI context** — required by [`rearm`], which runs after the
+/// hardware has fired and QEMU's `i6300esb_reset` has wiped the config and reset
+/// both preloads to `0xfffff`.
+///
+/// Does **not** enable the counter. Callers must invoke [`enable_counter(true)`]
+/// afterward, in that order: the LOCK.ENABLE 0→1 transition latches the
+/// *current* `timer1_preload`, so the preloads must already hold our short
+/// values before enabling or the first stage would count from `0xfffff`.
+fn program_registers() {
+    let bdf = DEV_BDF.load(Ordering::Acquire);
+    if bdf == DEV_BDF_NONE {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (bus, device, function) = ((bdf >> 16) as u8, (bdf >> 8) as u8, bdf as u8);
+    // CONFIG (16-bit PCI config): REBOOT bit CLEAR (enables the stage-2 action,
+    // inverted logic), FREQ clear (1 kHz), stage-1 interrupt disabled (we only
+    // want the stage-2 NMI). Must be a genuine 16-bit access: QEMU's i6300esb
+    // only handles CONFIG on a 2-byte write; a 4-byte access is ignored.
+    pci::config_write16_native(bus, device, function, CFG_CONFIG, CONFIG_INTTYPE_DISABLED);
+    // Program both stage preloads (each honored write needs a fresh unlock).
+    // These are 32-bit `writel` accesses — QEMU services the preloads only in
+    // its `writel` handler (mirror of the RELOAD-is-16-bit rule).
+    unlock();
+    write_reg(REG_TIMER1, STAGE_PRELOAD);
+    unlock();
+    write_reg(REG_TIMER2, STAGE_PRELOAD);
 }
 
 /// Enable or disable the hardware counter via the PCI LOCK register.
+///
+/// Uses the PCI address cached at [`init`] (not a fresh `pci::find_device` bus
+/// scan), so it is pure lock-free port I/O and therefore **NMI-safe** — required
+/// because [`rearm`] calls it from NMI context.
 fn enable_counter(enable: bool) {
-    let Some(dev) = pci::find_device(I6300ESB_VENDOR, I6300ESB_DEVICE) else {
+    let bdf = DEV_BDF.load(Ordering::Acquire);
+    if bdf == DEV_BDF_NONE {
         return;
-    };
-    let (bus, device, function) = (dev.address.bus, dev.address.device, dev.address.function);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (bus, device, function) = ((bdf >> 16) as u8, (bdf >> 8) as u8, bdf as u8);
     // The LOCK register is 8-bit at 0x68. QEMU's i6300esb only handles it on a
     // genuine 1-byte access — a 4-byte read-modify-write (config_write16) is
     // ignored by the device model, so the ENABLE bit never reaches
@@ -430,6 +501,36 @@ fn enable_counter(enable: bool) {
         byte &= !LOCK_ENABLE;
     }
     pci::config_write8(bus, device, function, CFG_LOCK, byte);
+}
+
+/// Fully re-arm the hardware counter after it has fired, from NMI context.
+///
+/// After a stage-2 fire the watchdog is dead until fully re-initialised, so a
+/// spurious mid-boot NMI (handled here) must restore it or a later genuine wedge
+/// would hang silently to the harness timeout with no armed watchdog to catch it.
+///
+/// QEMU's stage-2 handler runs `watchdog_perform_action()` (inject-NMI) and then
+/// calls `i6300esb_reset()`, which restores **power-on defaults**: `enabled = 0`,
+/// both preloads back to `0xfffff` (~17 min/stage), CONFIG cleared, `stage = 1`,
+/// `unlock_state = 0`. A bare re-enable would therefore count from `0xfffff` and
+/// effectively never fire again. So `rearm` must fully re-initialise the device —
+/// reprogram CONFIG + both short preloads, *then* enable (the ENABLE 0→1
+/// transition latches the current preloads) — exactly the [`init`]+[`arm`] path,
+/// minus the one-time BAR mapping which persists. All operations use lock-free
+/// port/MMIO I/O against the cached device address — NMI-safe.
+pub fn rearm() {
+    if !ARMED.load(Ordering::Acquire) || DEV_BDF.load(Ordering::Acquire) == DEV_BDF_NONE {
+        return;
+    }
+    // Restore CONFIG + short preloads that the fire's `i6300esb_reset` wiped,
+    // BEFORE enabling (enable latches the current preload).
+    program_registers();
+    // Re-enable the counter: the LOCK.ENABLE 0→1 transition starts stage 1 with
+    // the freshly-programmed preload.
+    enable_counter(true);
+    // Refresh the kick-staleness clock (BSP is alive on the spurious path) and
+    // issue a reload ping for good measure.
+    kick();
 }
 
 /// Deliberately force the watchdog to fire, to validate the NMI→dump path.
@@ -477,3 +578,4 @@ pub fn self_test_fire() {
         );
     }
 }
+

@@ -1455,11 +1455,16 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         crate::hardlockup::note_fired();
         let cpu = crate::sched::current_cpu_id();
         serial_println!(
-            "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x}",
-            cpu, frame.rip, frame.cs, frame.rflags
+            "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
+            cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss
         );
-        // One-shot full task-table dump (first arriver wins the latch).
+        // One-shot full task-table dump + stack backtrace (first arriver wins).
+        // The RIP alone often lands in a shared generic (e.g. a monomorphized
+        // `Range::next`), which doesn't reveal *which* loop is wedged; scanning
+        // the interrupted kernel stack for return addresses recovers the call
+        // chain so resolve-rip.sh can name the caller.
         if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            dump_kernel_backtrace(frame.rip, frame.rsp, frame.cs);
             crate::sched::dump_task_table();
         }
         crate::klog!(Error, "hw.nmi",
@@ -1476,6 +1481,70 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
 /// the injected NMI to every CPU.
 static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// Lowest address considered "kernel text" for backtrace filtering. Slate maps
+/// the kernel in the top −2 GiB of the address space (symbols observed at
+/// `0xffffffff81xxxxxx`); the HHDM lives far below at `0xffff8000_00000000`, so
+/// this threshold cleanly separates return addresses from HHDM data pointers.
+const KERNEL_TEXT_MIN: u64 = 0xffff_ffff_8000_0000;
+
+/// Best-effort kernel-stack backtrace for the hard-lockup NMI dump.
+///
+/// The NMI is delivered with `ist=0`, so `rsp` is the *interrupted* kernel
+/// stack pointer and the stack below the base is intact. We can't unwind DWARF
+/// in NMI context, so we do a conservative scan: walk forward from `rsp` (toward
+/// the older frames at higher addresses — always mapped, since we came from
+/// there) and print every word that looks like a kernel-text return address.
+/// Some will be stale/spurious, but the real call chain is among them, and
+/// `scripts/resolve-rip.sh` maps each to `symbol+offset`, which is enough to
+/// identify the wedged loop's caller.
+///
+/// Skipped entirely if the interrupt came from ring 3 (`cs & 3 != 0`), where
+/// `rsp` is a user stack we must not treat as trusted kernel memory.
+fn dump_kernel_backtrace(rip: u64, rsp: u64, cs: u64) {
+    // Only meaningful for a ring-0 wedge; a ring-3 rsp is untrusted user memory.
+    if cs & 0x3 != 0 {
+        serial_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), stack scan skipped", cs);
+        return;
+    }
+    if rsp < KERNEL_TEXT_MIN {
+        // A sane kernel stack is in the higher-half; a low rsp means we can't
+        // trust it (or the wedge corrupted it) — don't risk a fault.
+        serial_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, scan skipped", rsp);
+        return;
+    }
+    serial_println!("[hardlockup] backtrace (rip + kernel-text words on stack from rsp={:#x}):", rsp);
+    serial_println!("[hardlockup]   [rip]     {:#x}", rip);
+    // Scan a bounded window (192 words = 1536 bytes) of the stack. Higher
+    // addresses are older frames and are guaranteed mapped (we returned through
+    // them), so forward reads within a modest window cannot fault.
+    const MAX_WORDS: usize = 192;
+    const MAX_HITS: u32 = 32;
+    let mut hits: u32 = 0;
+    for i in 0..MAX_WORDS {
+        // Byte offset of this stack slot. `i` is bounded by MAX_WORDS so the
+        // multiply and add cannot overflow a u64 address.
+        #[allow(clippy::arithmetic_side_effects)]
+        let addr = rsp + (i as u64) * 8;
+        let ptr = addr as *const u64;
+        // SAFETY: `addr` is within a 1536-byte window at higher addresses than
+        // the interrupted `rsp`, i.e. older stack frames that are already mapped
+        // (control returned through them). Reads are 8-byte aligned by
+        // construction and volatile so the compiler cannot reorder/elide them.
+        let val = unsafe { core::ptr::read_volatile(ptr) };
+        if val >= KERNEL_TEXT_MIN {
+            #[allow(clippy::arithmetic_side_effects)]
+            let off = addr - rsp;
+            serial_println!("[hardlockup]   [rsp+{:#05x}] {:#x}", off, val);
+            hits = hits.wrapping_add(1);
+            if hits >= MAX_HITS {
+                serial_println!("[hardlockup]   … (hit cap {} reached)", MAX_HITS);
+                break;
+            }
+        }
+    }
+    serial_println!("[hardlockup] backtrace end ({} candidate return address(es))", hits);
+}
 
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.
 #[unsafe(no_mangle)]

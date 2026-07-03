@@ -172,6 +172,46 @@ static BUCKET_COUNTS: [AtomicU64; NUM_BUCKETS] = [
 static TOTAL_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
+// Always-on per-CPU last interrupted RIP (hang diagnostics)
+// ---------------------------------------------------------------------------
+//
+// Independent of the opt-in profiler above: every timer tick unconditionally
+// records the RIP the interrupt preempted into a per-CPU slot.  Cost is a
+// single relaxed store per tick (~1 ns), so it stays enabled at all times.
+//
+// The liveness watchdog's SYSTEM-HANG dump reads these to answer the one
+// question the task-table dump cannot: *where is each CPU actually executing*
+// while the system appears wedged (e.g. spinning in a context-switch path,
+// parked in the idle HLT loop, or stuck in a task that never yields).
+
+/// Maximum CPUs tracked — mirrors [`crate::smp::MAX_CPUS`].
+const MAX_CPUS: usize = 16;
+
+/// Per-CPU last interrupted RIP, updated every timer tick regardless of the
+/// profiler's enabled state.
+static LAST_RIP: [AtomicU64; MAX_CPUS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_CPUS]
+};
+
+/// Record the RIP a timer interrupt preempted on `cpu`.  Always on.
+///
+/// # Performance
+/// One relaxed atomic store.  Called unconditionally from the timer ISR.
+#[inline]
+pub fn record_last_rip(rip: u64, cpu: usize) {
+    if let Some(slot) = LAST_RIP.get(cpu) {
+        slot.store(rip, Ordering::Relaxed);
+    }
+}
+
+/// Read the last interrupted RIP recorded on `cpu` (0 if never sampled).
+#[must_use]
+pub fn last_rip(cpu: usize) -> u64 {
+    LAST_RIP.get(cpu).map_or(0, |slot| slot.load(Ordering::Relaxed))
+}
+
+// ---------------------------------------------------------------------------
 // Public API — recording (called from timer ISR)
 // ---------------------------------------------------------------------------
 

@@ -1012,6 +1012,11 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // instruction pointer at each timer tick for performance analysis.
     crate::rip_sample::record(frame.rip, crate::smp::current_cpu_index() as u8);
 
+    // Always-on per-CPU last-RIP snapshot for hang diagnostics (independent of
+    // the opt-in profiler above).  The liveness watchdog reads this to report
+    // *where* each CPU was executing at the moment the system wedged.
+    crate::rip_sample::record_last_rip(frame.rip, crate::smp::current_cpu_index());
+
     // --- ISR latency measurement: record entry TSC ---
     //
     // When benchmarking is active, capture the TSC at ISR entry and after

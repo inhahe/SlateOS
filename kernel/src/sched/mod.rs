@@ -2133,9 +2133,16 @@ fn dump_all_tasks_serial() {
             .get(cpu)
             .map_or(0, |c| c.load(Ordering::Relaxed));
         let has_work = PER_CPU_SCHED.local_has_real_work(cpu);
+        // Where was this CPU executing at its most recent timer tick?  This is
+        // the key diagnostic the task table alone cannot answer: it reveals
+        // whether the CPU is parked in the idle HLT loop, spinning in a
+        // context-switch/wait path, or stuck in a task that never yields.
+        let rip = crate::rip_sample::last_rip(cpu);
+        let class = crate::rip_sample::AddrClass::classify(rip).name();
         serial_println!(
-            "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={}",
-            cpu, hb, cs, has_work,
+            "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={} \
+             last_rip={:#x} ({})",
+            cpu, hb, cs, has_work, rip, class,
         );
     }
 

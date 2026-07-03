@@ -547,6 +547,34 @@ running to capture the wedge RIP; once captured, the RIP + task-table dump turn
 this heisenbug into a directly-diagnosable one. **This is the tool that finally
 makes blind spot 2 observable.**
 
+**Fire path validated & width-bug fixed 2026-07-02.** An early deliberate-fire
+self-test (`hardlockup::self_test_fire`: arm, then spin `IF=0` without kicking
+for ~15 s) initially FAILED — the counter never started, so no NMI. Root cause:
+QEMU's `i6300esb_config_write` decodes the *access width* — it only handles the
+CONFIG register (0x60) on a 2-byte write and the LOCK register (0x68) on a
+1-byte write — but `pci::config_write16` always emits a 32-bit `outl`
+(read-modify-write, len==4). Both the CONFIG program and the ENABLE bit fell
+through to default config storage, so `i6300esb_restart_timer` never ran. Fixed
+by adding true-width `pci::config_write8` (byte access to data-port lane
+`0xCFC + (offset&3)`) and `pci::config_write16_native` (`outw` to
+`0xCFC + (offset&2)`), used for LOCK and CONFIG respectively (commit
+`d0b6e648c`). Re-validated: with the fix the self-test PASSES — QEMU injects an
+NMI ~10 s into the `IF=0` spin, `handle_nmi` catches it despite `IF=0`, resolves
+`rip=kernel::cpu::delay_us` (exactly the spin), and dumps the task table. The
+instrument is now proven end-to-end; the temp self-test call was reverted before
+committing.
+
+**Wedge window narrowed from the newest catch (2026-07-01 tee-session).** That
+total-silence hang's last two serial lines were `[thread] Process 210 has no
+threads left — now zombie` (`proc/thread.rs:445`) then `[sched] Task 176 exiting`
+(`sched/mod.rs:1213`), then nothing. So the BSP wedges in the *tail of
+`task_exit`*, after that print: `notify_exit_hooks(current_id)` (exit hooks run
+lock-free) → `SCHED.lock()` to set `Dead` → `schedule_inner(false, Uncounted)`
+(the context switch, which runs with IF=0). The dead-BSP/IF=0 fingerprint points
+at the switch itself or a lock taken in an exit hook. The armed NMI soak will
+resolve *which* by giving the exact wedge RIP; no further static speculation
+until the catch lands.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

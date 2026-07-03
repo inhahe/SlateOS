@@ -689,6 +689,40 @@ kick + liveness heartbeat) across even a long demand-paging/CoW fault, closing
 the residual IF=0 window by construction. A 20-boot watchdog-armed soak is
 validating no NMI false-fire recurs.
 
+**REPRODUCED AS A FULL HANG 2026-07-02 — ping-pong livelock in the dash-redir
+ring-3 test (a liveness-watchdog blind spot).** The post-§56 armed soak caught a
+*total* boot hang on iteration 1: serial froze mid-`spawn_process` for the
+`spawn-test-dash-redir` child (`echo > file` redirection test) — last line
+`[thread] Spawned thread (task 133) in process …`, process 167 — and stayed
+silent for 6+ min with **no** NMI dump and **no** `[liveness] SYSTEM HANG` dump,
+until the 480 s harness timeout. Diagnosis:
+- **Not caused by §56.** The #PF `sti()` cannot cause a lock-held context switch:
+  timer-driven preemption defers when `preempt_count > 0` and refuses to re-enter
+  `SCHED` (`sched/mod.rs` ~L2342/2348), and tracked-lock ISRs use `try_lock`
+  (`sched/mod.rs` L355). So enabling interrupts mid-fault is within the existing
+  concurrency contract. This is the pre-existing dash-redir / ring-3 reap-futex
+  race (same family as B-DASH-STDIN-FLAKE), now manifesting as a *hang* instead
+  of a fast `InternalError` because live preemption (§55) changed the timing.
+- **Why neither watchdog fired.** The hard-lockup NMI needs IF=0 on cpu0 — but the
+  driver's `yield_now` loop re-enables IF between yields, so cpu0's `timer_tick`
+  keeps running (kicks hardlockup → no NMI). `liveness_check` runs *directly* from
+  `timer_tick` (L2165), so it *did* run every 5 s — but its two detectors are
+  blind here: the total-hang path needs `useful_work` frozen and the busy-livelock
+  path needs `ctx_switches` frozen, yet in a ping-pong livelock (driver re-schedules
+  the deadlocked child, child runs briefly and blocks, repeat) **both** counters
+  keep advancing, so neither trips.
+
+**Instrumentation fix (`sched/mod.rs` `liveness_check`):** added a purely
+time-based **boot-deadline backstop** — `LIVENESS_BOOT_DEADLINE_INTERVALS = 60`
+(× 5 s = 300 s from arming). A healthy boot disarms at BOOT_OK ~91 s after arming
+(>3× headroom, no false-fire risk), so if the watchdog is still armed 300 s after
+arming it dumps the full task table once (`[liveness] BOOT DEADLINE EXCEEDED`).
+This catches *any* hang mode — total, busy-livelock, or ping-pong livelock — that
+the progress-based detectors miss, giving the task-state breadcrumb needed to
+root-cause the dash-redir reap deadlock. Next armed soak should capture the dump;
+root-cause the named stuck task's wait state (child `blocked_on` / driver state)
+from it.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

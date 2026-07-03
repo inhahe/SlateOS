@@ -1799,6 +1799,36 @@ static LIVENESS_CTX_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// promptly.
 const LIVENESS_ALERT_COUNT: u64 = 3;
 
+/// Number of liveness intervals since arming (backstop deadline counter).
+///
+/// Incremented once per `liveness_check` while armed. Backs the absolute
+/// boot-deadline watchdog below, which fires regardless of the progress
+/// counters.
+static LIVENESS_ARMED_INTERVALS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the boot-deadline backstop already dumped (one-shot flag).
+static LIVENESS_DEADLINE_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Absolute boot-phase deadline, in liveness intervals.
+///
+/// The progress-based detectors above (total-hang: useful-work frozen;
+/// busy-livelock: context-switches frozen) are structurally blind to a
+/// *ping-pong livelock* — two or more tasks that keep context-switching and
+/// keep being charged useful-work ticks yet make no real boot progress (e.g.
+/// a spawned ring-3 child that deadlocks on a futex/reap while its driver
+/// keeps re-scheduling it). Both counters advance every interval, so neither
+/// detector ever trips, and the boot hangs silently (observed 2026-07-02:
+/// dash-redir ring-3 test wedged for 6+ min with no dump; see known-issues
+/// B-PTHREAD-YIELDBUDGET / B-DASH-STDIN-FLAKE).
+///
+/// This is a purely time-based backstop that catches *any* hang mode. A
+/// healthy boot disarms this watchdog at BOOT_OK ~91 s after arming, so a
+/// deadline of 60 intervals (× 5 s = 300 s) leaves >3× headroom and cannot
+/// false-fire, while still dumping the full task table well within the
+/// harness's 480 s boot-test timeout — giving us the breadcrumb the
+/// progress-based detectors cannot.
+const LIVENESS_BOOT_DEADLINE_INTERVALS: u64 = 60;
+
 /// Record forward progress for the liveness watchdog.
 ///
 /// Called from [`timer_tick`] when this tick is charged to a non-idle
@@ -1821,6 +1851,8 @@ pub fn liveness_arm() {
     LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_LAST_CTX.store(total_ctx_switches(), Ordering::Relaxed);
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+    LIVENESS_ARMED_INTERVALS.store(0, Ordering::Relaxed);
+    LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
     LIVENESS_ARMED.store(true, Ordering::Release);
 }
 
@@ -1859,6 +1891,31 @@ pub fn liveness_disarm() {
 fn liveness_check() {
     if !LIVENESS_ARMED.load(Ordering::Acquire) {
         return;
+    }
+
+    // Absolute boot-deadline backstop (see LIVENESS_BOOT_DEADLINE_INTERVALS).
+    // Runs first so it catches hang modes the progress-based detectors below
+    // are blind to (notably the ping-pong livelock where both useful-work and
+    // context-switch counters keep advancing). Purely time-based: increment a
+    // per-interval counter and, once it crosses the deadline, dump the task
+    // table exactly once. We do NOT disarm here — leaving the watchdog armed
+    // lets the progress-based detectors still fire if the hang later degrades
+    // into a total stall, and the one-shot flag prevents repeated dumps.
+    let intervals = LIVENESS_ARMED_INTERVALS
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    if intervals >= LIVENESS_BOOT_DEADLINE_INTERVALS
+        && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
+    {
+        let secs = intervals.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
+        serial_println!(
+            "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
+             The progress-based detectors did not trip, so this is a livelock or partial \
+             hang — some task(s) keep running/switching but boot is not advancing. \
+             Dumping task table:",
+            secs,
+        );
+        dump_all_tasks_serial();
     }
 
     let current = USEFUL_WORK_TICKS.load(Ordering::Relaxed);

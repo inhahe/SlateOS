@@ -1057,6 +1057,39 @@ NMI IST/vector setup, or the kick stops but the injected NMI is masked/lost unde
 TCG in this specific spin state) before the actual spawn/exec/reap or
 demand-paging spin can be root-caused.
 
+**NMI DELIVERY VALIDATED + NEW HANG LOCUS FOUND 2026-07-03 (the observability
+blocker above is narrower than thought).** Two decisive results this session:
+1. *The injected-NMI → dump chain WORKS end-to-end under our exact TCG harness.*
+   Temporarily wiring `hardlockup::self_test_fire()` (a deliberate ~15 s IF=0
+   no-kick spin, reproducing the BSP-dead condition) into `main.rs` right after
+   `hardlockup::arm()` and booting `--hard-lockup-watchdog` produced:
+   `[hardlockup] NMI WATCHDOG FIRED cpu=0 rip=0xffffffff814dbbe1 … kick_stale_ns=9899867054`
+   then `self-test-fire: PASS — NMI observed (fired 0 -> 1)`. So the i6300esb
+   inject-nmi fires under TCG, the NMI IST2 is good, and the current
+   monotonic-kick-staleness `classify_nmi` correctly returns REAL on the *first*
+   NMI of a 9.9 s-stale wedge. This means the *older* silent catches (pid 210/155)
+   were almost certainly on a kernel with the **pre-rewrite heartbeat-delta
+   classifier** that misclassified the wedge NMI as spurious — not a delivery
+   failure. (Probe reverted; kernel rebuilt clean.)
+2. *A fresh silent catch on the CURRENT kernel froze in KERNEL space, not the
+   ring-3 battery.* A bounded `--hard-lockup-watchdog` soak (`scripts/soak-nmi-check.sh`,
+   150 s timeout) caught on iteration 1 (`build/hang-catches/SNMI-CAUGHT-1-silent.txt`,
+   9340 lines): the last line is OCI self-test **Test 14** (`[oci]   metadata
+   instructions (VOLUME/STOPSIGNAL/SHELL/ONBUILD): OK`, `oci.rs:4079`), i.e. it
+   wedged in **Test 15 "multi-stage builds"** (`oci.rs:4082`), which does heavy
+   VFS + block-I/O (`build_image`/`load_image`/`extract_layer`/`read_file`/`rmdir`).
+   A single `[liveness] boot-window breadcrumb: 30s armed (…heartbeat=2398)` fired
+   but **no 60 s breadcrumb, no NMI, no SYSTEM HANG** — the BSP tick went dark
+   ~30 s into the armed window. This is a *different* locus from the ring-3
+   spawn/exec/reap hangs, suggesting the hang family is a **shared lower-level
+   primitive** (VFS path / block-device wait / a lock taken on both the OCI-build
+   and ring-3-spawn paths), not something specific to `clone`/CoW.
+   **Caveat / open:** the 150 s timeout may itself produce false "silent" catches
+   (a slow-but-live boot cut off early). A 300 s-timeout re-soak is running to
+   disambiguate: a real BSP-dead wedge will now fire the NMI (delivery proven), and
+   a slow-but-live boot will either reach BOOT_OK or trip the 200 s-armed
+   `[liveness] BOOT DEADLINE EXCEEDED` task dump. Result pending.
+
 ### B-ACCT-SPINLOCK-STALL. `ACCT` (mm memory-accounting) spinlock self-deadlock — ROOT-CAUSED + FIXED 2026-07-03
 
 **STATUS: FIXED** (commit this session). Root cause confirmed by the

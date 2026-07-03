@@ -4000,6 +4000,17 @@ extern "C" fn kernel_main() -> ! {
     // which would otherwise trip the watchdog. No-op if it was never present.
     hardlockup::disarm();
 
+    // Enable file-history auto-versioning now that boot is complete. It starts
+    // disabled (see fs::history's static HISTORY init) so that the boot-time
+    // staging of OS system files — which runs with interrupts disabled before
+    // "Step 21: Enable hardware interrupts" — does not trigger multi-megabyte
+    // SHA-256 hashes of overwritten content under IF=0. Such a hash starved the
+    // timer-driven hard-lockup watchdog kick and tripped a false-positive NMI
+    // that looked like an intermittent BSP-dead hang (known-issues.md
+    // B-PTHREAD-YIELDBUDGET). Past BOOT_OK the BSP is preemptible (IF=1) and OS
+    // staging is done, so auto-versioning of real user-data writes is safe.
+    fs::history::set_auto_version(true);
+
     // Show boot-complete on the framebuffer console too.
     console_println!();
     console_println!("=== Kernel boot complete ===");

@@ -140,7 +140,21 @@ static HISTORY: Mutex<HistoryInner> = Mutex::new(HistoryInner {
         max_versions_per_file: 16,
         max_total_entries: 10_000,
         enabled: true,
-        auto_version: true,
+        // Auto-versioning starts DISABLED and is turned on at BOOT_OK by
+        // `main.rs` (see `set_auto_version(true)` there). Rationale: during
+        // boot the kernel stages its own system files (e.g. the glibc tree for
+        // the Path Z self-tests) with interrupts disabled (IF=0), before
+        // "Step 21: Enable hardware interrupts". Auto-versioning would read and
+        // SHA-256-hash the *old* content of each overwritten file on that path;
+        // for a multi-megabyte file in a debug build that hash can run for
+        // several seconds. With IF=0 the timer-driven hard-lockup watchdog kick
+        // is starved, so under host-scheduling jitter the ~9.8 s watchdog fired
+        // a false positive that presented as an intermittent "BSP-dead
+        // total-silence hang" (known-issues.md B-PTHREAD-YIELDBUDGET). Versioning
+        // OS files as they are staged is also pointless — nobody rolls those
+        // back. Enabling only post-boot (IF=1, preemptible, staging complete)
+        // fixes both the latency defect and the wasted work.
+        auto_version: false,
     },
     evicted_versions: 0,
     record_count: 0,

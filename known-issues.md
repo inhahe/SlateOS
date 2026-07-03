@@ -575,6 +575,47 @@ at the switch itself or a lock taken in an exit hook. The armed NMI soak will
 resolve *which* by giving the exact wedge RIP; no further static speculation
 until the catch lands.
 
+**ROOT-CAUSED & FIXED 2026-07-02 — it was a false-positive watchdog trip on a
+multi-second IF=0 SHA-256, NOT a deadlock.** The armed NMI soak caught the wedge
+on the first iteration, and the new RBP-chain backtrace in `handle_nmi`
+(`idt.rs::dump_kernel_backtrace`) resolved the exact call chain:
+```
+kmain → kernel_main → proc::spawn::self_test_linux_real_glibc_full
+  → fs::vfs::Vfs::write_file → write_file_resolved
+    → fs::history::try_auto_record → record_version
+      → fs::cas::put → crypto::sha256 → crypto::Sha256::update  (rip in rotate_right)
+```
+The NMI fired at `rflags=0x10002` (**IF=0**) right as the glibc-full self-test
+began staging its files, and — decisively — the serial log **continues past the
+NMI dump to `BOOT_OK`**, so the machine was never actually deadlocked. What
+happened: file-history auto-versioning was **on by default** (`fs::history`
+static `HISTORY` had `auto_version: true`), so every boot-time overwrite of an
+OS system file (the glibc tree, staged for the Path Z self-tests) made
+`record_version` read the *old* content and SHA-256-hash it via `cas::put`.
+Crucially, the entire Path Z self-test block runs **before** "Step 21: Enable
+hardware interrupts" (`main.rs` `cpu::sti()`), i.e. with **IF=0**. In a debug
+(unoptimised) build, hashing a multi-megabyte glibc file takes several seconds;
+with IF=0 the BSP takes no timer ticks, so the timer-driven hard-lockup watchdog
+kick (`sched::timer_tick` → `hardlockup::kick`, BSP-only) is starved. Under
+host-scheduling jitter the ~9.8 s watchdog occasionally expired mid-hash,
+producing the intermittent "BSP-dead total-silence" fingerprint. It presented as
+a ~5% *hang* rather than 100% because the hash time sits near the watchdog
+threshold / the soak-harness boot timeout, and only the jitter tail crosses it.
+
+**Fix (proper, targeted):** file-history auto-versioning now starts **disabled**
+and is enabled only at `BOOT_OK` (`main.rs`, right after `hardlockup::disarm()`,
+via `fs::history::set_auto_version(true)`). Rationale: versioning OS files as
+they are staged during boot is pointless (nobody rolls them back) *and* running
+a seconds-long SHA-256 with IF=0 is the "long operation under IRQs-disabled"
+anti-pattern regardless of the watchdog. Past BOOT_OK the BSP is preemptible
+(IF=1) and OS staging is done, so auto-versioning real user-data writes is safe.
+The history self-test is unaffected — it calls `record_version()` explicitly on
+`/tmp` paths (which `should_auto_version` skips), independent of the flag.
+Follow-up perf note logged separately: auto-versioning being globally on means
+every user-data overwrite pays a read+rehash tax; capping by size or making it
+truly opt-in per-path (per the module's own "opt-in" design statement) is a
+worthwhile future optimisation, but it no longer gates boot liveness.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

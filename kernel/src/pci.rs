@@ -189,6 +189,52 @@ pub fn config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     ((dword >> shift) & 0xFF) as u8
 }
 
+/// Write an 8-bit value to PCI configuration space using a genuine byte
+/// access to the correct byte lane of the data port.
+///
+/// This differs from [`config_write16`]/[`config_write32`], which always
+/// emit a 32-bit `outl`. Some devices decode the *access width* on the
+/// data port and only act on writes of a specific width. The QEMU
+/// i6300esb watchdog is one such device: its LOCK register (config offset
+/// 0x68) is only handled when written with a 1-byte access. A 32-bit
+/// read-modify-write silently falls through to default config storage and
+/// never triggers the device's timer-enable side effect. Byte lane is
+/// selected by adding `offset & 3` to the data port base.
+// PCI config mechanism #1: byte lane = data port + (offset & 3).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
+    let addr = config_address(bus, device, function, offset);
+    // SAFETY: 0xCF8/0xCFC are the PCI config mechanism #1 ports. The
+    // aligned dword address is written first, then a byte access selects
+    // the target lane within the dword via (offset & 3).
+    unsafe {
+        port::outl(PCI_CONFIG_ADDR, addr);
+        port::outb(PCI_CONFIG_DATA + u16::from(offset & 3), value);
+    }
+}
+
+/// Write a 16-bit value to PCI configuration space using a genuine 16-bit
+/// access to the correct word lane of the data port.
+///
+/// Unlike [`config_write16`] (which read-modify-writes a full dword via a
+/// 32-bit `outl`), this emits a real `outw`. Width-sensitive devices such
+/// as the QEMU i6300esb watchdog only handle their CONFIG register
+/// (offset 0x60) on a 2-byte access; a 4-byte write is ignored by the
+/// device model. Word lane is selected by adding `offset & 2` to the data
+/// port base.
+// PCI config mechanism #1: word lane = data port + (offset & 2).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let addr = config_address(bus, device, function, offset);
+    // SAFETY: 0xCF8/0xCFC are the PCI config mechanism #1 ports. Writing
+    // the aligned dword address then a word access selects the target
+    // 16-bit lane within the dword via (offset & 2).
+    unsafe {
+        port::outl(PCI_CONFIG_ADDR, addr);
+        port::outw(PCI_CONFIG_DATA + u16::from(offset & 2), value);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bus scanning
 // ---------------------------------------------------------------------------

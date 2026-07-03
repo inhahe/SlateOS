@@ -1452,6 +1452,7 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         // Every CPU prints its own one-line RIP (the BSP's line is the prize);
         // the first CPU to arrive also dumps the whole task table. A greppable
         // marker lets the soak harness recognize a catch.
+        crate::hardlockup::note_fired();
         let cpu = crate::sched::current_cpu_id();
         serial_println!(
             "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x}",

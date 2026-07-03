@@ -44,7 +44,7 @@
 // boot flag, so not every path has an in-tree caller on a normal build.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::mm::frame::PhysFrame;
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
@@ -129,6 +129,22 @@ const STAGE_MS: u64 = (STAGE_PRELOAD as u64 * 983) / 1000;
 static MMIO_BASE: AtomicU64 = AtomicU64::new(0);
 /// Whether the watchdog is currently armed (kicks are honored, NMI is "ours").
 static ARMED: AtomicBool = AtomicBool::new(false);
+/// Count of watchdog NMIs observed by `handle_nmi`. Lets the fire self-test
+/// confirm the NMI→dump chain actually ran, and is a cheap tripwire in general.
+static FIRED: AtomicU32 = AtomicU32::new(0);
+
+/// Record that a hard-lockup watchdog NMI was observed (called from
+/// [`crate::idt::handle_nmi`] on the armed, no-hardware-error path).
+#[inline]
+pub fn note_fired() {
+    FIRED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Number of hard-lockup watchdog NMIs observed since boot.
+#[inline]
+pub fn fired_count() -> u32 {
+    FIRED.load(Ordering::Relaxed)
+}
 
 /// Returns `true` if the i6300esb device was found and mapped at init.
 #[inline]
@@ -248,8 +264,11 @@ pub fn init(hhdm_offset: u64) {
     // disabled (we only want the stage-2 NMI action).
     // REBOOT=0 (enables action, inverted logic), FREQ=0 (1 kHz), INTTYPE=0b11
     // (stage-1 interrupt disabled). See CONFIG_REBOOT / CONFIG_FREQ docs.
+    // Must use a genuine 16-bit access: QEMU's i6300esb only handles the
+    // CONFIG register on a 2-byte write (a 4-byte read-modify-write is ignored
+    // by the device model and never programs the config).
     let config: u16 = CONFIG_INTTYPE_DISABLED;
-    pci::config_write16(dev.address.bus, dev.address.device, dev.address.function,
+    pci::config_write16_native(dev.address.bus, dev.address.device, dev.address.function,
         CFG_CONFIG, config);
 
     // Program both stage preloads (each write needs a fresh unlock).
@@ -318,17 +337,64 @@ fn enable_counter(enable: bool) {
         return;
     };
     let (bus, device, function) = (dev.address.bus, dev.address.device, dev.address.function);
-    // The LOCK register is 8-bit at 0x68; read the containing 16-bit word,
-    // adjust only the low byte, and write it back.
-    let word = pci::config_read16(bus, device, function, CFG_LOCK);
-    let mut low = word & 0x00ff;
+    // The LOCK register is 8-bit at 0x68. QEMU's i6300esb only handles it on a
+    // genuine 1-byte access — a 4-byte read-modify-write (config_write16) is
+    // ignored by the device model, so the ENABLE bit never reaches
+    // i6300esb_restart_timer and the counter never starts. Read the current
+    // byte, adjust, and write it back with a true byte access.
+    let mut byte = pci::config_read8(bus, device, function, CFG_LOCK);
     if enable {
-        low |= u16::from(LOCK_ENABLE);
-        low &= !u16::from(LOCK_LOCK); // keep disarmable
-        low &= !u16::from(LOCK_FUNC); // one-shot mode
+        byte |= LOCK_ENABLE;
+        byte &= !LOCK_LOCK; // keep disarmable
+        byte &= !LOCK_FUNC; // one-shot mode
     } else {
-        low &= !u16::from(LOCK_ENABLE);
+        byte &= !LOCK_ENABLE;
     }
-    let new_word = (word & 0xff00) | low;
-    pci::config_write16(bus, device, function, CFG_LOCK, new_word);
+    pci::config_write8(bus, device, function, CFG_LOCK, byte);
+}
+
+/// Deliberately force the watchdog to fire, to validate the NMI→dump path.
+///
+/// This is a **diagnostic self-test**, not part of normal boot — it is never
+/// auto-invoked (calling it unconditionally would add a ~15 s stall to every
+/// watchdog boot and latch the one-shot dump, spoiling a real catch). Wire a
+/// temporary call in for a one-off validation, or trigger it from a debug
+/// path.
+///
+/// It arms the watchdog, then spins with interrupts disabled and **without**
+/// kicking for longer than the ~9.8 s timeout — reproducing the exact BSP-dead
+/// `IF=0` condition of the hang we hunt — so QEMU injects an NMI that
+/// [`crate::idt::handle_nmi`] must catch. Because the injected NMI is
+/// non-maskable it is delivered despite `IF=0`, and the TSC (hence
+/// [`crate::cpu::delay_us`]) keeps advancing, so the spin is bounded. Prints a
+/// PASS/FAIL verdict by comparing [`fired_count`] across the spin.
+///
+/// No-op (with a note) when the device is absent.
+pub fn self_test_fire() {
+    if !present() {
+        crate::serial_println!("[hardlockup] self-test-fire: no device present, skipping");
+        return;
+    }
+    arm();
+    let before = fired_count();
+    crate::serial_println!(
+        "[hardlockup] self-test-fire: BSP entering IF=0 no-kick spin (~15s); expect NMI ~10s in"
+    );
+    // Reproduce the BSP-dead condition: interrupts masked (so timer_tick — and
+    // thus kick() — cannot run) while we busy-wait past the watchdog timeout.
+    // without_interrupts restores the prior IF state afterward. The NMI fires
+    // *inside* this window; handle_nmi runs, dumps, and returns here.
+    crate::cpu::without_interrupts(|| {
+        crate::cpu::delay_us(15_000_000);
+    });
+    let after = fired_count();
+    if after > before {
+        crate::serial_println!(
+            "[hardlockup] self-test-fire: PASS — NMI observed (fired {before} -> {after})"
+        );
+    } else {
+        crate::serial_println!(
+            "[hardlockup] self-test-fire: FAIL — no NMI during 15s IF=0 spin (fired={after})"
+        );
+    }
 }

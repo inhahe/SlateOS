@@ -114,11 +114,134 @@ done
 #  * -action watchdog=inject-nmi
 #                            — on watchdog expiry, inject an NMI into the guest
 #                              (fires even with IF=0) instead of resetting it.
+#
+# The action is overridable via the WATCHDOG_ACTION env var (default
+# inject-nmi) purely as a *diagnostic* affordance: setting it to `reset`
+# (combined with the always-present -no-reboot) turns a stage-2 expiry into a
+# clean QEMU exit, which discriminates "the i6300esb counter fired but the NMI
+# was not delivered/handled" (VM exits during a wedge) from "the counter never
+# fired at all" (VM hangs the full timeout).  Normal runs never set it, so the
+# harness default is byte-for-byte unchanged.
+WATCHDOG_ACTION="${WATCHDOG_ACTION:-inject-nmi}"
 WATCHDOG_ARGS=()
+# Diagnostic HMP monitor for capturing the wedged guest RIP on timeout.  Only
+# attached alongside the hard-lockup watchdog (i.e. deliberate hang-repro runs),
+# so the default harness command line is byte-for-byte unchanged.  On timeout we
+# query `info registers`/`info cpus` over this socket BEFORE killing QEMU, which
+# captures the frozen CPU's RIP directly from the emulator — bypassing in-guest
+# NMI delivery entirely (the silent BSP-dead wedge never takes the injected NMI,
+# so the in-guest handler dump is blind; the emulator's own view is not).
+MONITOR_ARGS=()
+MONITOR_PORT="${MONITOR_PORT:-55123}"
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
-    WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action watchdog=inject-nmi)
-    echo "=== Hard-lockup watchdog ENABLED (i6300esb -> inject-nmi) ==="
+    WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action "watchdog=$WATCHDOG_ACTION")
+    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
+    echo "=== Hard-lockup watchdog ENABLED (i6300esb -> $WATCHDOG_ACTION) ==="
+    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT) ==="
 fi
+
+# Capture the frozen guest CPU state over the HMP monitor socket, then resolve
+# RIP to a kernel symbol.  Called on timeout (guest still running) so the RIP is
+# the wedged instruction pointer.  Best-effort: prints a warning and returns
+# non-zero if the monitor is unreachable or the shell lacks /dev/tcp support.
+#
+# Args: $1 = monitor TCP port, $2 = output file for the raw register dump.
+capture_guest_state() {
+    local port="$1" out="$2"
+    # HMP over a bash /dev/tcp socket.  Fire all queries, then `quit` so QEMU
+    # closes the socket and our reader hits EOF cleanly; `timeout` guards a hang.
+    if ! (exec 9<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+        echo "  (monitor unreachable on port $port; cannot capture RIP)"
+        return 1
+    fi
+    {
+        exec 9<>"/dev/tcp/127.0.0.1/$port" || return 1
+        # Order matters: dump registers (has RIP) and cpus BEFORE quit.
+        printf 'info registers\ninfo cpus\ninfo registers -a\nquit\n' >&9
+        timeout 5 cat <&9 > "$out" 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+    }
+    if [ ! -s "$out" ]; then
+        echo "  (monitor produced no output; cannot capture RIP)"
+        return 1
+    fi
+    echo "=== Guest register dump captured to: $out ==="
+    # Extract RIP from the HMP `info registers` output (line contains "RIP=...").
+    local rip
+    rip="$(grep -oiE 'RIP=[0-9a-f]+' "$out" | head -n1 | cut -d= -f2 || true)"
+    if [ -n "$rip" ]; then
+        echo "  Wedged RIP = 0x$rip"
+        resolve_kernel_symbol "$rip"
+    else
+        echo "  (no RIP= line in monitor output; see $out)"
+    fi
+    return 0
+}
+
+# Resolve a hex address to the nearest preceding kernel symbol.
+#
+# There is no addr2line/llvm-symbolizer in any installed toolchain on this box,
+# only llvm-nm/llvm-objdump.  So we do nearest-symbol resolution ourselves:
+# dump the sorted defined symbol table with llvm-nm and pick the last symbol
+# whose address is <= RIP (that is the function the RIP lies within).  This is
+# exactly what addr2line's symbol column would report, minus line numbers.
+resolve_kernel_symbol() {
+    local rip="$1"
+    if [ ! -f "$KERNEL_BIN" ]; then
+        echo "  (kernel ELF missing; resolve 0x$rip manually)"
+        return 1
+    fi
+    # Locate an llvm-nm: PATH first, then any rustup toolchain sysroot bin.
+    local nm=""
+    if command -v llvm-nm &>/dev/null; then
+        nm="llvm-nm"
+    else
+        local sr
+        sr="$(rustc --print sysroot 2>/dev/null || true)"
+        if [ -n "$sr" ]; then
+            local cand
+            cand="$(ls "$sr"/lib/rustlib/*/bin/llvm-nm* 2>/dev/null | head -n1 || true)"
+            [ -n "$cand" ] && nm="$cand"
+        fi
+    fi
+    if [ -z "$nm" ]; then
+        echo "  (no llvm-nm found; resolve 0x$rip manually against $KERNEL_BIN)"
+        return 1
+    fi
+    # llvm-nm -nC: numeric-sort, demangled.  Rows: "<hexaddr> <type> <name>".
+    # awk finds the last defined symbol with addr <= target.  We compare
+    # zero-padded 16-digit hex STRINGS (lexicographic == numeric for equal
+    # length) rather than strtonum(), because higher-half kernel addresses
+    # (~1.8e19) exceed a double's 2^53 exact-integer range and would compare
+    # imprecisely.  awk emits "<name>\t<besta_hex>"; bash computes the byte
+    # offset in exact 64-bit arithmetic.
+    local row name besta
+    row="$("$nm" -nC --defined-only "$KERNEL_BIN" 2>/dev/null | awk -v tgt="$rip" '
+        function pad(h,  n){ h = tolower(h); n = 16 - length(h); while (n-- > 0) h = "0" h; return h }
+        BEGIN { t = pad(tgt); best = ""; besta = "" }
+        NF >= 3 && $1 ~ /^[0-9a-fA-F]+$/ {
+            a = pad($1)
+            if (a <= t && a >= besta) {
+                besta = a
+                araw = $1
+                $1 = ""; $2 = ""; sub(/^  */, "")
+                best = $0
+            }
+        }
+        END { if (best != "") printf "%s\t%s", best, araw }
+    ')"
+    name="${row%$'\t'*}"
+    besta="${row##*$'\t'}"
+    if [ -n "$name" ] && [ -n "$besta" ]; then
+        # Exact 64-bit offset (bash arithmetic is 64-bit; both operands share
+        # the sign bit in the higher half, so the difference is a small +ve).
+        local off
+        off="$(( 0x$rip - 0x$besta ))"
+        printf '  Symbol: %s (+0x%x)\n' "$name" "$off"
+    else
+        echo "  (0x$rip below all symbols — likely userspace/ring-3 RIP, not kernel)"
+    fi
+}
 
 # Print the micro-benchmark result lines from the serial log.  The kernel emits
 # them as "[bench] <name>: <number>" plus PASS / "ABOVE TARGET" verdicts from a
@@ -287,6 +410,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
     "${WATCHDOG_ARGS[@]}" \
+    "${MONITOR_ARGS[@]}" \
     -device virtio-gpu-pci \
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
@@ -314,6 +438,18 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         exit 0
     fi
 done
+
+# Timed out (or QEMU died): the guest may be wedged.  If the diagnostic monitor
+# is attached and QEMU is still alive, capture the frozen RIP from the emulator
+# BEFORE we kill it.  This is the primary observability tool for the silent
+# BSP-dead hang, which never takes the injected NMI in-guest.
+if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+    if ! grep -q "$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
+        echo "=== Timeout with guest still running: capturing wedged RIP via HMP monitor ==="
+        RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
+        capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+    fi
+fi
 
 # Clean up
 kill "$QEMU_PID" 2>/dev/null || true

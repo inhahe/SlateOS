@@ -11507,8 +11507,12 @@ fn gen_properties() -> Vec<u8> {
 }
 
 /// Check if a task ID currently exists in the scheduler.
+///
+/// Uses the scheduler's cheap map lookup rather than building the full task
+/// list (which would allocate and scan every task's stack) just to test for
+/// membership.
 fn task_exists(task_id: u64) -> bool {
-    crate::sched::task_list().iter().any(|t| t.id == task_id)
+    crate::sched::task_exists(task_id)
 }
 
 // ---------------------------------------------------------------------------

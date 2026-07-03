@@ -3763,6 +3763,15 @@ pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
     })
 }
 
+/// Return `true` if a task with `task_id` currently exists in the scheduler.
+///
+/// A cheap map lookup — does not allocate and does not scan any stacks.
+/// Prefer this over `task_list().iter().any(...)` for existence checks.
+#[must_use]
+pub fn task_exists(task_id: TaskId) -> bool {
+    SCHED.lock().tasks.contains_key(&task_id)
+}
+
 /// Install a new scheduler task name ("comm") for `task_id`, returning
 /// `true` if the task exists (and `false` if it is unknown).
 ///

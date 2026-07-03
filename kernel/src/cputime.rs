@@ -213,6 +213,30 @@ pub fn exit_irq() {
     }
 }
 
+/// Current hardware-IRQ nesting depth on this CPU.
+///
+/// 0 = not in IRQ context, 1 = outermost IRQ handler, 2+ = a nested IRQ
+/// (an interrupt fired while another IRQ handler was running with
+/// interrupts re-enabled).  Call *after* [`enter_irq`] to test whether
+/// the current handler is the outermost (`== 1`) or nested (`> 1`).
+///
+/// Used by the LAPIC timer ISR to bound IRQ-stack nesting: only the
+/// outermost timer handler re-enables interrupts (softirq processing +
+/// preemption re-enable).  A nested timer handler runs entirely with
+/// interrupts disabled and returns immediately, so timer-on-timer
+/// nesting can never exceed depth 2 regardless of per-handler cost.
+/// Without this bound, a slow handler (e.g. the poison-debug heap) that
+/// exceeds the tick period lets timer IRQs pile up on the fixed-size
+/// per-CPU IRQ stack until it overflows the guard page.
+#[inline]
+#[must_use]
+pub fn irq_depth() -> u64 {
+    let cpu = smp::current_cpu_index();
+    CPU_TIME
+        .get(cpu)
+        .map_or(0, |data| data.irq_depth.load(Ordering::Relaxed))
+}
+
 // ---------------------------------------------------------------------------
 // Softirq context transitions
 // ---------------------------------------------------------------------------

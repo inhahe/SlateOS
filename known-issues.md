@@ -780,6 +780,63 @@ The genuine *never-recovers* dash-redir ping-pong livelock (offender #2, the 480
 no-BOOT_OK case) is still open; the discriminator above plus the boot-deadline
 backstop will capture its task dump on the next reproduction.
 
+**ROOT-CAUSED AND FIXED 2026-07-03 — it was NEVER a livelock/reap/futex race. It
+was a kernel IRQ-stack overflow from unbounded timer-on-timer nesting.** The
+first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a
+genuine wedge dumps its stack regardless of the spurious/real classification)
+finally caught the real wedge: `build/hang-catches/CAUGHT-iter-2-nobootok.txt`.
+Decisive evidence:
+- First NMI at `rip=0xffffffff80083956`, **`cs=0x8` (ring 0), `rflags=0x10002`
+  (IF=0)**, `rsp=0xffffffff…27a80` — i.e. cpu0 wedged in the kernel with
+  interrupts off, in Task 0 `"prctl-batch269"`.
+- The rbp chain + stack scan showed the LAPIC timer handler recursively nested on
+  the per-CPU IRQ stack: the cycle `isr_timer → irq_common_dispatch →
+  run_on_irq_stack → dispatch_vector → handle_timer_irq → timer_tick →
+  liveness_boot_deadline_check → clock_monotonic → tsc_freq` repeats many times,
+  under a task doing `spawn_process → load_interpreter → read_file → …read_through
+  → get_or_fill → fill_file_page → MemFs::read_at → touch_accessed_relatime →
+  metadata_now_ns → clock_realtime`.
+- It ended with `[fault] Guard page hit at 0xffffc10000028000 — stack overflow`,
+  `EXCEPTION: Page Fault (#PF) … address=0xffffc10000028000, error=0x0`, Task 0
+  `"prctl-batch269"`, `FATAL: Unrecoverable kernel page fault. Halting.` The IRQ
+  stack is exactly `0xffffc10000024000..0xffffc10000028000` (16 KiB, guard at
+  `0x28000`).
+
+**Mechanism.** `handle_timer_irq` (apic.rs) re-enables interrupts *while still
+running on the IRQ stack* — once inside `softirq::process_pending` (its internal
+`STI`) and once via an explicit `sti` before the deferred-preempt check. The
+softirq layer's `IN_SOFTIRQ` re-entry guard bounds softirq *work*, but NOT the raw
+interrupt re-enable. So whenever a timer handler takes longer than the ~10 ms tick
+period — trivially true in the **poison-debug build**, where the poison allocator
+makes `O(size)` heap ops multi-second and every file-page read does a
+`relatime → clock_monotonic → tsc_freq` clock call — the next timer IRQ fires while
+the previous handler is still on the IRQ stack, nests (grows *down* the same stack
+via `irq_common_dispatch`'s nested-IRQ branch), re-enables interrupts again, and so
+on. Depth grows without bound until the 16 KiB IRQ stack overflows its guard page →
+fatal kernel `#PF`. This is a *uniprocessor* bug (QEMU boots 1 CPU here), which is
+why "SMP timing race" framings never panned out. It is the same B-DF1 IRQ-stack
+design (Q7 option A) whose own note (below) warned *"A correct IRQ-stack
+implementation must therefore support nesting (or …)"* — nesting was supported but
+never *bounded*.
+
+**Structural fix (commit this session; `apic.rs` + `cputime.rs`).** Only the
+**outermost** timer handler may re-enable interrupts. `cputime` already keeps a
+per-CPU hardirq nesting depth (`irq_depth`, bumped in `enter_irq`); a new
+`cputime::irq_depth()` accessor exposes it, and `handle_timer_irq` computes
+`let nested = cputime::irq_depth() > 1;` right after `enter_irq()`. When `nested`,
+it **skips `process_pending`** and **skips the explicit pre-preempt `sti`**, so the
+nested handler runs its entire body with IF=0. Because the timer IDT entry is an
+**interrupt gate** (type `0x0E` → IF auto-cleared on entry) and the nested handler
+never sets IF back, *no further timer can fire until the nested frame returns* —
+hard-capping timer-on-timer nesting at **depth 2** regardless of how slow any
+single handler is. Softirq bits raised by a nested tick are drained by the outer
+frame's own `process_pending` loop (identical to the `IN_SOFTIRQ` short-circuit,
+but without ever toggling IF); preemption is unaffected (nested IRQs never run
+`do_deferred_preempt` anyway — the outermost frame owns it). Builds clean, 0 new
+clippy warnings. A 30-boot armed `--hard-lockup-watchdog` soak is running to
+confirm 0 reproductions (pre-fix rate ~5 %/boot); this note will record the final
+count when it finishes.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

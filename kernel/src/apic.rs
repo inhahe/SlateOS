@@ -984,6 +984,23 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // --- CPU time accounting: entering IRQ context ---
     crate::cputime::enter_irq();
 
+    // Are we a *nested* timer IRQ?  `enter_irq` has just bumped this CPU's
+    // hardirq depth, so depth > 1 means an outer IRQ handler was already
+    // running (with interrupts re-enabled) when this timer fired and nested
+    // on the same per-CPU IRQ stack.
+    //
+    // A nested timer handler MUST NOT re-enable interrupts: it skips softirq
+    // processing (the outer frame owns that) and skips the pre-preempt `sti`
+    // below, running its whole body with IF=0.  Because the timer IDT entry
+    // is an interrupt gate (IF cleared on entry) and we never set IF back,
+    // no further timer can fire until this nested frame returns — so
+    // timer-on-timer nesting is capped at depth 2 no matter how slow an
+    // individual handler is (e.g. the poison-debug heap).  Without this cap,
+    // a handler that exceeds the ~10 ms tick period lets timer IRQs pile up
+    // on the fixed 16 KiB IRQ stack until it overflows the guard page — a
+    // fatal kernel #PF (root cause of the intermittent boot wedge).
+    let nested = crate::cputime::irq_depth() > 1;
+
     // If the previous tick was shortened for hrtimer precision, restore
     // the full periodic rate immediately so subsequent ticks are normal.
     if TICK_SHORTENED.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1136,13 +1153,27 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // interrupts internally (STI), runs handlers, then disables them
     // again (CLI) before returning.
     //
+    // Only the OUTERMOST timer handler processes softirqs.  A nested timer
+    // must not re-enable interrupts (see the `nested` computation above),
+    // so we skip this entirely when nested — any bits we raised will be
+    // drained by the outer frame's own process_pending loop, exactly as if
+    // process_pending's internal IN_SOFTIRQ re-entry guard had short-
+    // circuited us, but without ever toggling IF.
+    //
     // SAFETY: EOI has been sent, assembly stub expects CLI on return
-    // (process_pending guarantees this).
-    unsafe {
-        crate::softirq::process_pending();
+    // (process_pending guarantees this; when skipped IF is already clear).
+    if !nested {
+        unsafe {
+            crate::softirq::process_pending();
+        }
     }
 
-    // Re-enable interrupts before potential preemption.
+    // Re-enable interrupts before potential preemption — OUTERMOST timer
+    // only.  A nested timer handler must stay IF=0 through its return so
+    // no further timer can fire before it unwinds (bounding IRQ-stack
+    // nesting to depth 2); it also never runs do_deferred_preempt (the
+    // outer IRQ frame owns preemption), so it has no reason to enable
+    // interrupts here.
     //
     // process_pending() returns with interrupts disabled (CLI).  If we
     // context-switch via preempt() below, switch_context saves the
@@ -1158,8 +1189,10 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // SAFETY: Interrupts are safe to enable — all ISR-critical work is
     // done, and the remaining code (preempt check + context switch) is
     // designed to run with interrupts enabled.
-    unsafe {
-        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+    if !nested {
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+        }
     }
 
     // --- CPU time accounting: leaving IRQ context ---

@@ -663,6 +663,32 @@ ever lands, root-cause the named lost thread's wait state. Until then this bug i
 downgraded from the ~5% intermittent hang to RESOLVED for the false-positive
 class; a 20-boot watchdog-armed soak is validating no NMI false-fire recurs.
 
+**FOLLOW-UP STRUCTURAL FIX 2026-07-02 — make page-fault resolution preemptible
+(the residual single IF=0 window).** The battery-wide reorder above eliminated
+the *seconds-long* IF=0 offenders, but a fresh 20-boot armed soak still caught
+one NMI false-fire on iteration 1 (still recovered → BOOT_OK, `ctx_switches=688`
+`heartbeat=1011`, so preemption was confirmed live). The NMI RIP resolved to
+`resolve_subpaged_fault::closure` behind an `isr_page_fault` asm boundary —
+i.e. the residual IF=0 window is a *single* page fault, not the battery. Root
+cause: **#PF is an interrupt gate (IDT type 0xE), so `handle_page_fault` ran
+with IF=0 for its entire duration.** A single fault can be long — demand-paging
+a subpaged file frame reads up to 16 KiB through the VFS, CoW/large copies touch
+many pages, and debug heap poisoning makes every alloc/free O(size) per-byte —
+so one slow fault could still hold IF=0 past the ~9.8 s threshold even with the
+rest of the battery preemptible. Holding IF=0 across that I/O-bound work is the
+same "long operation under IRQs-disabled" anti-pattern, just narrowed to one
+handler invocation.
+
+**Fix (`kernel/src/idt.rs` `handle_page_fault`):** mirror Linux `do_page_fault`
+— capture CR2 first (so a nested fault can't clobber it), then `cpu::sti()`
+*only when the faulting context's saved `RFLAGS.IF` was set*. Faults from an
+already-IF=0 context (ISR, scheduler, cli/raw-spin critical section) keep
+interrupts disabled, so we never widen interruptibility beyond what the
+interrupted code allowed. Now the timer keeps ticking (preemption + watchdog
+kick + liveness heartbeat) across even a long demand-paging/CoW fault, closing
+the residual IF=0 window by construction. A 20-boot watchdog-armed soak is
+validating no NMI false-fire recurs.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

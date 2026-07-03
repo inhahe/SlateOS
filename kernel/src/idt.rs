@@ -1949,6 +1949,38 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
     }
 
+    // Make page-fault resolution preemptible.  #PF is dispatched through an
+    // interrupt gate (IDT type 0xE), so we arrive here with IF=0.  Resolving a
+    // fault can be *long*: demand-paging a subpaged file frame reads up to
+    // 16 KiB through the VFS, and CoW/large-frame copies touch many pages —
+    // and in debug builds heap poisoning makes every alloc/free O(size) with
+    // per-byte volatile writes.  Holding IF=0 across all of that starves the
+    // timer tick on this CPU (no preemption, no watchdog kick, no liveness
+    // heartbeat) for the whole duration — the exact "IF=0 across a long
+    // operation" anti-pattern the design forbids, and the residual cause of
+    // the ~9.8 s hard-lockup NMI false-fires seen during the ring-3 battery.
+    //
+    // The fix mirrors Linux's `do_page_fault`, which calls `local_irq_enable()`
+    // as soon as it is safe: re-enable interrupts here, but ONLY when the
+    // faulting context itself had them enabled (saved RFLAGS.IF set).  Faults
+    // taken from an already-IF=0 context (inside an ISR, the scheduler, or any
+    // cli/raw-spin critical section) keep interrupts disabled, so we never
+    // widen the interruptible window beyond what the interrupted code allowed.
+    //
+    // Safety w.r.t. CR2: it is captured into `cr2` above *before* this point,
+    // so a nested page fault taken after re-enabling cannot clobber the value
+    // we resolve against — the nested handler reads and consumes its own CR2.
+    const RFLAGS_IF: u64 = 1 << 9;
+    if frame.rflags & RFLAGS_IF != 0 {
+        // SAFETY: the IDT is fully initialised (we are running its #PF
+        // handler), and CR2 has already been captured, so re-enabling
+        // interrupts here cannot lose fault state.  We only do so when the
+        // interrupted context had IF=1, preserving its interruptibility.
+        unsafe {
+            cpu::sti();
+        }
+    }
+
     // Attempt to resolve the fault via the memory manager (demand
     // paging for kernel VMAs).  If resolution succeeds, the CPU will
     // retry the faulting instruction after iretq.

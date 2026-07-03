@@ -723,6 +723,42 @@ root-cause the dash-redir reap deadlock. Next armed soak should capture the dump
 root-cause the named stuck task's wait state (child `blocked_on` / driver state)
 from it.
 
+**OFFENDER #3 ROOT-CAUSED & FIXED 2026-07-02 — `task_list()` stack-scan under
+SCHED on every task exit (another false-positive watchdog trip).** A fresh armed
+`--hard-lockup-watchdog` catch (`build/hang-catches/CAUGHT-iter-1-hardlockup.txt`,
+BOOT_OK=1 → recovered, so a false-positive not a deadlock) fired the NMI at
+`rip=0xffffffff814decc9 rflags=0x10282` (**IF=1**), and the RBP-chain backtrace
+resolved the wedge to `sys_exit → task_exit → notify_exit_hooks →
+pacct::on_task_exit → sched::task_list → …closure… → task.stack_usage_bytes →
+ptr::read_volatile → poison precondition_check`. Root cause: **`pacct::on_task_exit`
+(runs on *every* task exit) called `sched::task_list()`, which builds a heap `Vec`
+of *all* ~54 tasks under the `SCHED` lock and, for each, runs
+`stack_usage_bytes()` — an O(TASK_STACK_SIZE/8) *volatile* per-word stack scan —
+just to `.find()` **one** task by id** (and it doesn't even use stack usage). In
+the poison debug build every volatile read carries a per-byte precondition check,
+so the whole scan-all-stacks-under-SCHED took ~9.8 s, starving `timer_tick` (which
+needs `SCHED` briefly) and the BSP hard-lockup kick long enough for QEMU's ~9.8 s
+i6300esb countdown to expire under host jitter → the transient NMI. This is the
+same "long operation under a lock" anti-pattern; the catch dump line "could not
+acquire SCHED lock — a task is likely wedged holding it" is exactly this hold.
+
+**Fix (commits `acf9da4f9`, `d2da77e5c`):** added two cheap targeted lookups to
+`sched/mod.rs` and routed the hot callers through them so no exit/existence check
+ever scans all stacks under SCHED again:
+- `sched::task_info(task_id) -> Option<TaskInfo>` — acquires SCHED, looks up
+  exactly one task via `state.tasks.get(&id)`, extracts only the bookkeeping
+  fields, and **skips the volatile stack scan entirely** (`stack_used`/`stack_pct`
+  are `None`). `pacct::on_task_exit` now calls this instead of `task_list()`.
+- `sched::task_exists(task_id) -> bool` — a plain `tasks.contains_key(&id)` map
+  lookup; `procfs::task_exists` (called on many `/proc` pid-validation paths, ~14
+  sites) now uses it instead of `task_list().iter().any(...)`, which had likewise
+  built the full list with per-task stack scans just to test membership.
+Both build clean, 0 clippy errors. This removes offender #3 by construction (a map
+lookup holds SCHED for microseconds, not seconds). The genuine *never-recovers*
+dash-redir ping-pong livelock (offender #2, the 480 s no-BOOT_OK case) is still
+open; the boot-deadline backstop above will capture its task dump on the next
+reproduction.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

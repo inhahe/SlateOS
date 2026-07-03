@@ -1482,11 +1482,13 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
 static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Lowest address considered "kernel text" for backtrace filtering. Slate maps
-/// the kernel in the top −2 GiB of the address space (symbols observed at
-/// `0xffffffff81xxxxxx`); the HHDM lives far below at `0xffff8000_00000000`, so
-/// this threshold cleanly separates return addresses from HHDM data pointers.
-const KERNEL_TEXT_MIN: u64 = 0xffff_ffff_8000_0000;
+/// Lowest canonical higher-half address. Used to sanity-check stack/frame
+/// pointers before dereferencing them in the NMI backtrace. Kernel *stacks* are
+/// not confined to the top −2 GiB (where the kernel image / `.text` lives):
+/// per-task kernel stacks are allocated from the HHDM/vmalloc region (observed
+/// e.g. at `0xffffc10000…`), so the stack-validity floor must be the full
+/// higher-half base, not the text base.
+const HIGHER_HALF_MIN: u64 = 0xffff_8000_0000_0000;
 
 // Linker-defined `.text` bounds, used to precisely classify a word as a real
 // return address (points *into* executable kernel code) versus stale data.
@@ -1497,7 +1499,7 @@ unsafe extern "C" {
 
 /// True iff `val` points into the kernel's executable `.text` section, i.e. it
 /// is a plausible return address. Bounds come from the linker script, so this
-/// rejects rodata/data/bss/stack pointers that a loose `>= KERNEL_TEXT_MIN`
+/// rejects rodata/data/bss/stack pointers that a loose "any higher-half address"
 /// scan would wrongly report.
 fn is_kernel_text(val: u64) -> bool {
     let lo = core::ptr::addr_of!(__text_start) as u64;
@@ -1537,7 +1539,7 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
         serial_println!("[hardlockup] backtrace: ring-3 frame (cs={:#x}), skipped", cs);
         return;
     }
-    if rsp < KERNEL_TEXT_MIN {
+    if rsp < HIGHER_HALF_MIN {
         // A sane kernel stack is in the higher-half; a low rsp means we can't
         // trust it (or the wedge corrupted it) — don't risk a fault.
         serial_println!("[hardlockup] backtrace: rsp={:#x} not in higher-half, skipped", rsp);
@@ -1572,7 +1574,7 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
             serial_println!("[hardlockup]   … (depth cap {} reached)", MAX_DEPTH);
             break;
         }
-        if rbp < KERNEL_TEXT_MIN || rbp & 0x7 != 0 {
+        if rbp < HIGHER_HALF_MIN || rbp & 0x7 != 0 {
             break;
         }
         if prev != 0 && rbp <= prev {

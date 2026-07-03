@@ -1137,8 +1137,10 @@ exactly:
   64-bit arithmetic. `scripts/soak-nmi-check.sh` preserves the register dump
   (`SNMI-CAUGHT-*-regs.txt`) alongside each serial catch. This RIP-capture path
   is reusable for any future silent IF=0 wedge.
-- **Confirmation:** 12-iteration `--hard-lockup-watchdog` soak (300 s timeout)
-  running post-fix to prove non-recurrence.
+- **Confirmation (DONE):** 12-iteration `--hard-lockup-watchdog` soak (300 s
+  timeout) post-fix returned **12/12 clean BOOT_OK, zero catches** — no silent
+  wedge, no NMI dump, no liveness dump. Wedge no longer reproduces. Before the
+  fix, this soak caught a silent wedge within the first few iterations.
 
 ### B-ACCT-SPINLOCK-STALL. `ACCT` (mm memory-accounting) spinlock self-deadlock — ROOT-CAUSED + FIXED 2026-07-03
 

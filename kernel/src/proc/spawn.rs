@@ -11094,6 +11094,50 @@ fn stage_hosted_cc_support() -> KernelResult<bool> {
 /// exit code.  `tcc_elf` is the already-read `/bin/tcc` binary.  `label` tags
 /// diagnostics.  Returns `Err` on spawn failure or if tcc fails to exit within
 /// the compile budget (a hang).
+/// How often (in reap-loop yields) to emit a progress snapshot.  Power of two
+/// so the loop test is a cheap mask, not a division.
+const REAP_SNAPSHOT_INTERVAL: usize = 1 << 18; // 262_144
+
+/// Emit one progress snapshot for a tcc self-test reap loop.
+///
+/// The hosted tcc build occasionally wedges (~5% of boots): the child stops
+/// making progress while the parent spins its multi-million-yield reap budget.
+/// Because unrelated background tasks (mouse cursor, deferred benchmark) keep
+/// the liveness watchdog's counters advancing, the wedge produces *no* watchdog
+/// dump — it silently blocks `BOOT_OK` until the boot-test timeout kills QEMU.
+///
+/// To make that wedge diagnosable, the reap loops call this every
+/// [`REAP_SNAPSHOT_INTERVAL`] yields.  A *deadlocked* child shows frozen
+/// `sched_count`/fault counters across snapshots, and its `sched_state`
+/// localizes the bug: `Blocked` = a lost wakeup, `Ready` = scheduler
+/// starvation, `Running` = a half-completed context switch.  A merely-*slow*
+/// child shows those counters still climbing.
+fn log_reap_wait_progress(
+    label: &str,
+    phase: &str,
+    pid: ProcessId,
+    task_id: TaskId,
+    yields: usize,
+) {
+    let pstate = pcb::state(pid);
+    match crate::sched::task_info(task_id) {
+        Some(info) => serial_println!(
+            "[spawn]   {} {} reap: {} yields elapsed — child pid={} pstate={:?} \
+             sched_state={:?} last_cpu={} sched_count={} ticks={} min_flt={} maj_flt={} \
+             last_rip={:#x}",
+            label, phase, yields, pid, pstate,
+            info.state, info.last_cpu, info.schedule_count, info.total_ticks,
+            info.min_flt, info.maj_flt,
+            crate::rip_sample::last_rip(info.last_cpu),
+        ),
+        None => serial_println!(
+            "[spawn]   {} {} reap: {} yields elapsed — child pid={} pstate={:?} \
+             (task {} absent from sched table)",
+            label, phase, yields, pid, pstate, task_id,
+        ),
+    }
+}
+
 fn spawn_reap_tcc(
     tcc_elf: &[u8],
     argv: &[&[u8]],
@@ -11127,10 +11171,16 @@ fn spawn_reap_tcc(
     };
 
     let mut reaped = false;
-    for _ in 0..COMPILE_MAX_YIELDS {
+    for i in 0..COMPILE_MAX_YIELDS {
         if pcb::state(cc_result.pid) == Some(pcb::ProcessState::Zombie) {
             reaped = true;
             break;
+        }
+        // Periodic progress snapshot so an intermittent wedge (see
+        // `log_reap_wait_progress`) is diagnosable instead of silently
+        // blocking BOOT_OK until the boot-test timeout.
+        if i != 0 && (i & (REAP_SNAPSHOT_INTERVAL - 1)) == 0 {
+            log_reap_wait_progress(label, "compile", cc_result.pid, cc_result.task_id, i);
         }
         crate::sched::yield_now();
     }
@@ -11265,10 +11315,16 @@ fn run_dynamic_capture(
     }
 
     let mut reaped = false;
-    for _ in 0..RUN_MAX_YIELDS {
+    for i in 0..RUN_MAX_YIELDS {
         if pcb::state(run_result.pid) == Some(pcb::ProcessState::Zombie) {
             reaped = true;
             break;
+        }
+        // Periodic progress snapshot (see `log_reap_wait_progress`) so an
+        // intermittent ld.so/libc-init wedge in the freshly-built binary is
+        // diagnosable rather than silently blocking BOOT_OK.
+        if i != 0 && (i & (REAP_SNAPSHOT_INTERVAL - 1)) == 0 {
+            log_reap_wait_progress(label, "run", run_result.pid, run_result.task_id, i);
         }
         crate::sched::yield_now();
     }

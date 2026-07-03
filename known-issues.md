@@ -780,8 +780,30 @@ The genuine *never-recovers* dash-redir ping-pong livelock (offender #2, the 480
 no-BOOT_OK case) is still open; the discriminator above plus the boot-deadline
 backstop will capture its task dump on the next reproduction.
 
-**ROOT-CAUSED AND FIXED 2026-07-03 — it was NEVER a livelock/reap/futex race. It
-was a kernel IRQ-stack overflow from unbounded timer-on-timer nesting.** The
+**CORRECTION 2026-07-03 (later the same day): the IRQ-stack fix below is REAL but
+is NOT the (only) cause of this intermittent hang — there are (at least) TWO
+distinct wedges, and the DOMINANT one is still open.** A 30-boot armed soak run
+*after* the IRQ-stack fix reproduced a hang on **boot 1**, but with a completely
+different signature: `[liveness] SYSTEM HANG: no task-level forward progress …
+all CPUs idle-ticking`, **heartbeat still advancing** (so cpu0 is NOT wedged with
+IF=0 — this is not the IRQ-stack overflow). The task table showed a **container
+exec of `/bin/hello` (pid 220, task 184, inode 72)** marked `state=Running` on
+cpu0 while the CPU idle-ticks, having **never executed a single instruction** (zero
+page faults for its entry `0x4000000000`, no output). Saved:
+`build/hang-catches/CAUGHT-iter-1-liveness.txt` /
+`CAUGHT-iter14-liveness-lostwakeup.txt`. The prior session's `healthy-serial.txt`
+froze on the **same inode 72** (`/bin/hello`) mid page-cache-map — so this
+container-exec dispatch/wakeup hang is the recurring dominant failure and it
+**predates** the IRQ-stack fix (my fix did not introduce it, nor cure it). This is
+the genuine lost-wakeup / failed-dispatch race (B-PTHREAD-YIELDBUDGET /
+B-DASH-STDIN-FLAKE family): a container-exec'd task is left `Running`/current on an
+idle CPU. **STILL OPEN — root-cause the container exec dispatch path next.** The
+IRQ-stack fix remains committed on its own merits (unbounded nesting *will*
+overflow under a slow-enough handler; it was one genuine wedge — the
+`CAUGHT-iter-2-nobootok` IF=0 guard-page `#PF`).
+
+**IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
+The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a
 genuine wedge dumps its stack regardless of the spurious/real classification)
 finally caught the real wedge: `build/hang-catches/CAUGHT-iter-2-nobootok.txt`.
@@ -833,9 +855,12 @@ single handler is. Softirq bits raised by a nested tick are drained by the outer
 frame's own `process_pending` loop (identical to the `IN_SOFTIRQ` short-circuit,
 but without ever toggling IF); preemption is unaffected (nested IRQs never run
 `do_deferred_preempt` anyway — the outermost frame owns it). Builds clean, 0 new
-clippy warnings. A 30-boot armed `--hard-lockup-watchdog` soak is running to
-confirm 0 reproductions (pre-fix rate ~5 %/boot); this note will record the final
-count when it finishes.
+clippy warnings. NOTE: the post-fix soak did NOT reproduce the IRQ-stack overflow
+again, but it DID reproduce the *other* (dominant) wedge — the container-exec
+lost-wakeup described in the CORRECTION note above — so this fix cannot be
+soak-"verified" in isolation until that second wedge is also fixed. It stands on
+its analytical merits (bounded nesting by construction) plus the absence of any
+further IF=0 guard-page `#PF`.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

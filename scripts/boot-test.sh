@@ -148,19 +148,19 @@ fi
 # Args: $1 = monitor TCP port, $2 = output file for the raw register dump.
 capture_guest_state() {
     local port="$1" out="$2"
-    # HMP over a bash /dev/tcp socket.  Fire all queries, then `quit` so QEMU
-    # closes the socket and our reader hits EOF cleanly; `timeout` guards a hang.
-    if ! (exec 9<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    # HMP over a bash /dev/tcp socket.  Fire the read-only queries and let the
+    # `timeout` bound the read — we deliberately do NOT send `quit`: quitting
+    # provokes a QEMU shutdown that can hang mid-teardown (holding the monitor
+    # port and surviving the harness's later `kill`), which then blocks the
+    # NEXT boot from binding the port.  A single connection is opened (no
+    # pre-check probe, which would consume the single-client monitor slot).
+    if ! { exec 9<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null; then
         echo "  (monitor unreachable on port $port; cannot capture RIP)"
         return 1
     fi
-    {
-        exec 9<>"/dev/tcp/127.0.0.1/$port" || return 1
-        # Order matters: dump registers (has RIP) and cpus BEFORE quit.
-        printf 'info registers\ninfo cpus\ninfo registers -a\nquit\n' >&9
-        timeout 5 cat <&9 > "$out" 2>/dev/null || true
-        exec 9>&- 2>/dev/null || true
-    }
+    printf 'info registers\ninfo cpus\ninfo registers -a\n' >&9
+    timeout 5 cat <&9 > "$out" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     if [ ! -s "$out" ]; then
         echo "  (monitor produced no output; cannot capture RIP)"
         return 1

@@ -1469,22 +1469,37 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         // compute burst — the BSP is alive and still advancing its heartbeat).
         // See hardlockup::classify_nmi and known-issues.md B-PTHREAD-YIELDBUDGET.
         let hb = crate::sched::bsp_heartbeat();
+
+        // One-shot backtrace + task-table dump on the *first* armed cpu0 NMI,
+        // regardless of the spurious/real classification below. The classifier
+        // gives the first NMI benefit of the doubt (no prior heartbeat baseline
+        // to compare against), so a genuine wedge whose first — and, if the
+        // harness kills QEMU seconds later, only — NMI arrives right before the
+        // kill would otherwise be dismissed as spurious and dump nothing, losing
+        // the one stack trace that names the wedged lock/loop. A backtrace costs
+        // one stack scan and is harmless if the NMI really was spurious (we still
+        // re-kick and resume below), so we always take it. The RIP alone often
+        // lands in a shared generic (e.g. `spin_loop_hint`) that doesn't reveal
+        // *which* caller is spinning; scanning the interrupted kernel stack for
+        // return addresses recovers the call chain for resolve-rip.sh.
+        if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            serial_println!(
+                "[hardlockup] first NMI on cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={} — dumping backtrace + task table",
+                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb
+            );
+            dump_kernel_backtrace(frame);
+            crate::sched::dump_task_table();
+        }
+
         if crate::hardlockup::classify_nmi(hb) {
             // Real wedge. frame.rip is the wedged instruction we've been unable
             // to observe any other way. Emit the greppable marker the soak
-            // harness keys on, then one-shot dump the backtrace + task table.
+            // harness keys on. (The backtrace + task table were already dumped
+            // one-shot above.)
             serial_println!(
                 "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={}",
                 cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb
             );
-            // The RIP alone often lands in a shared generic (e.g. a monomorphized
-            // `Range::next`), which doesn't reveal *which* loop is wedged;
-            // scanning the interrupted kernel stack for return addresses recovers
-            // the call chain so resolve-rip.sh can name the caller.
-            if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                dump_kernel_backtrace(frame);
-                crate::sched::dump_task_table();
-            }
             crate::klog!(Error, "hw.nmi",
                 "hardlockup NMI cpu={} rip={:#x} heartbeat={}", cpu, frame.rip, hb);
         } else {

@@ -49,6 +49,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
 use spin::Mutex;
 
@@ -115,8 +116,19 @@ pub fn rdtsc_serialized() -> u64 {
 // TSC frequency calibration
 // ---------------------------------------------------------------------------
 
-/// TSC frequency in Hz, calibrated at boot.
-static TSC_FREQ: Mutex<u64> = Mutex::new(0);
+/// TSC frequency in Hz, calibrated once at boot.
+///
+/// A **lock-free `AtomicU64`**, not a `Mutex`: this is written exactly once by
+/// [`calibrate_tsc`] and read forever after, and — critically — it is read on
+/// the hot [`crate::timekeeping::clock_monotonic`] path, which is itself called
+/// from **interrupt and NMI context** (the timer tick's scheduler heartbeat and
+/// the hard-lockup watchdog's `classify_nmi`). A spinlock here self-deadlocks
+/// on a uniprocessor: if a timer IRQ or the watchdog NMI fires while non-IRQ
+/// code holds the lock, the re-entrant `clock_monotonic` → `tsc_freq` spins on
+/// the held lock forever with interrupts disabled — a silent BSP-dead hang with
+/// no further ticks (root cause of the boot-battery wedge; see known-issues.md).
+/// An atomic load has no such hazard and is also faster on the hot path.
+static TSC_FREQ: AtomicU64 = AtomicU64::new(0);
 
 /// Calibrate the TSC frequency using the PIT (Programmable Interval Timer).
 ///
@@ -176,7 +188,7 @@ pub fn calibrate_tsc() {
             .checked_div(PIT_COUNT as u64)
             .unwrap_or(0);
 
-        *TSC_FREQ.lock() = freq;
+        TSC_FREQ.store(freq, Ordering::Relaxed);
 
         serial_println!(
             "[bench] TSC calibrated: {} ticks in ~10ms → {:.1} MHz ({} Hz)",
@@ -195,7 +207,8 @@ pub fn calibrate_tsc() {
 /// Returns 0 if `calibrate_tsc()` has not been called.
 #[must_use]
 pub fn tsc_freq() -> u64 {
-    *TSC_FREQ.lock()
+    // Lock-free load: safe to call from IRQ/NMI context (see `TSC_FREQ`).
+    TSC_FREQ.load(Ordering::Relaxed)
 }
 
 /// Convert TSC cycles to nanoseconds using the calibrated frequency.

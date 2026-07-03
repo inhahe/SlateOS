@@ -1033,6 +1033,30 @@ genuinely runs in task-0 context) — a cosmetic/desync concern flagged for late
 The **BSP-dead IF=0 silent-spin** variant (freshly-exec'd binary demand-paging with
 IF=0) remains **OPEN** and is the next target once a soak captures its NMI backtrace.
 
+**POST-ACCT-FIX SOAK OBSERVATIONS 2026-07-03 (this silent wedge recurs — NOT
+caused by the ACCT `lock_irqsave` fix; two fresh data points).** After the
+B-ACCT-SPINLOCK-STALL fix (`lock_irqsave`, commit `b267b5e6f`) landed and was
+independently verified (a standalone boot reached BOOT_OK in ~80 s with **zero**
+`ACCT` stall signatures), a `scripts/hang-repro-loop.sh` soak (`--no-build
+--hard-lockup-watchdog`) reproduced this *pre-existing* silent total-hang on
+iteration 1 in two consecutive runs, freezing at different points in the ring-3
+glibc spawn/exec/reap battery: **soak-1 froze at pid 210, soak-2 at pid 155**
+(catch preserved: `build/hang-catches/SPAWN-SLOW-soak2-pid155.txt`). Both are the
+now-familiar **BSP-dead IF=0 silent-spin** fingerprint: cpu0 wedged with
+interrupts disabled, the BSP timer stopped ticking, **no** `[liveness] SYSTEM
+HANG` dump, **no** `[watchdog]`/`SPINLOCK STALL` line, and — critically — the
+i6300esb NMI hard-lockup watchdog **did not fire** either, so no backtrace was
+captured. Explicitly attributed to the pre-existing spawn-hang class above, **not**
+to the ACCT fix: the ACCT fix *prevents* the recursion (IF=0 during the short leaf
+hold blocks the re-entering interrupt) rather than silencing any symptom, and a
+clean standalone boot passed after it, so it is not a regression source. The open
+blocker is unchanged and now doubly-confirmed: **observability** — the NMI
+watchdog does not fire on this particular IF=0 BSP wedge, so the next step is to
+determine *why* the i6300esb → inject-NMI path fails to catch it (candidate: the
+NMI IST/vector setup, or the kick stops but the injected NMI is masked/lost under
+TCG in this specific spin state) before the actual spawn/exec/reap or
+demand-paging spin can be root-caused.
+
 ### B-ACCT-SPINLOCK-STALL. `ACCT` (mm memory-accounting) spinlock self-deadlock — ROOT-CAUSED + FIXED 2026-07-03
 
 **STATUS: FIXED** (commit this session). Root cause confirmed by the

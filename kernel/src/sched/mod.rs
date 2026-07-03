@@ -2138,7 +2138,13 @@ fn dump_all_tasks_serial() {
         // whether the CPU is parked in the idle HLT loop, spinning in a
         // context-switch/wait path, or stuck in a task that never yields.
         let rip = crate::rip_sample::last_rip(cpu);
-        let class = crate::rip_sample::AddrClass::classify(rip).name();
+        // rip==0 means no timer tick has sampled this CPU yet (e.g. very early
+        // boot); label it explicitly rather than misclassifying 0x0 as "user".
+        let class = if rip == 0 {
+            "no sample yet"
+        } else {
+            crate::rip_sample::AddrClass::classify(rip).name()
+        };
         serial_println!(
             "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={} \
              last_rip={:#x} ({})",

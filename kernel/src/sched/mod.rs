@@ -1087,6 +1087,67 @@ pub fn spawn_with_affinity(
     pml4_phys: u64,
     affinity_mask: u64,
 ) -> KernelResult<TaskId> {
+    spawn_inner(name, priority, entry, arg, pml4_phys, affinity_mask, true)
+}
+
+/// Spawn a task but leave it **suspended** — created and inserted into the
+/// task table in [`Blocked`](task::TaskState::Blocked) state, but *not*
+/// placed in any run queue, so it cannot be scheduled until the caller
+/// explicitly [`admit`]s it.
+///
+/// This exists to close a **register-vs-runnable race**: the ordinary
+/// [`spawn`]/[`spawn_with_affinity`] enqueue the new task immediately, so a
+/// timer preemption in the window between `spawn` returning and the caller
+/// finishing its bookkeeping can run the child to completion first.  For a
+/// process/thread that manifested as B-PTHREAD-YIELDBUDGET: a spawned
+/// `/bin/hello` could print and exit before `thread::spawn` registered it in
+/// `THREAD_OWNERS`, so `on_thread_exit`'s `owners.remove(&task_id)?` returned
+/// `None`, skipped the zombie transition, and the process was never
+/// zombified — hanging the container self-test's yield budget.
+///
+/// The correct structural fix (SMP-safe, unlike merely widening a
+/// `without_interrupts` window) is: create the task non-runnable, finish all
+/// registration that must precede first execution, then admit it.
+///
+/// # Errors
+///
+/// Same as [`spawn_with_affinity`].
+pub fn spawn_suspended(
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    pml4_phys: u64,
+) -> KernelResult<TaskId> {
+    spawn_inner(name, priority, entry, arg, pml4_phys, task::CPU_AFFINITY_ALL, false)
+}
+
+/// Admit a task previously created via [`spawn_suspended`], transitioning it
+/// from `Blocked` to `Ready` and enqueuing it so the scheduler can run it.
+///
+/// Returns `true` if the task was admitted.  Returns `false` if the task no
+/// longer exists or was not in the expected `Blocked` state (e.g. it was
+/// already killed).  Implemented on top of [`wake`], which already handles
+/// the Blocked→Ready transition, run-queue insertion, target-CPU selection,
+/// and the pending-wake race.
+pub fn admit(task_id: TaskId) -> bool {
+    wake(task_id)
+}
+
+/// Shared implementation of [`spawn_with_affinity`] and [`spawn_suspended`].
+///
+/// When `admit` is `true` the task is created `Ready` and enqueued
+/// immediately (the historical behavior).  When `false` it is created
+/// `Blocked` and left out of every run queue until [`admit`] is called.
+fn spawn_inner(
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    pml4_phys: u64,
+    affinity_mask: u64,
+    admit: bool,
+) -> KernelResult<TaskId> {
     if affinity_mask == 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -1115,6 +1176,11 @@ pub fn spawn_with_affinity(
         new_task.cpu_affinity = affinity_mask;
         new_task.cgroup_id = inherit_cgroup;
         new_task.ready_since_tick = crate::apic::tick_count();
+        // Suspended spawn: create the task non-runnable so it cannot be
+        // scheduled until the caller finishes registration and calls admit().
+        if !admit {
+            new_task.state = task::TaskState::Blocked;
+        }
         let id = new_task.id;
         let prio = new_task.priority;
         let target_cpu = choose_cpu_for_task(&new_task);
@@ -1125,7 +1191,11 @@ pub fn spawn_with_affinity(
             return Err(KernelError::NotSupported);
         }
         state.tasks.insert(id, Box::new(new_task));
-        PER_CPU_SCHED.enqueue(id, prio, target_cpu);
+        // Only enqueue when admitting immediately.  A suspended task is left
+        // out of every run queue; admit() (via wake()) enqueues it later.
+        if admit {
+            PER_CPU_SCHED.enqueue(id, prio, target_cpu);
+        }
         drop(state); // Release lock before re-enabling interrupts.
 
         Ok((id, prio, target_cpu))
@@ -1160,8 +1230,12 @@ pub fn spawn_with_affinity(
 
     // Wake the target CPU if it's idle (remote CPUs may be in HLT).
     // Done outside without_interrupts — signal_cpu sends an IPI which
-    // is fine with interrupts enabled.
-    signal_cpu(target_cpu);
+    // is fine with interrupts enabled.  Skipped for a suspended spawn:
+    // the task is not runnable yet, so there is nothing to wake a CPU for
+    // (admit() signals the target CPU when it actually enqueues the task).
+    if admit {
+        signal_cpu(target_cpu);
+    }
 
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     crate::ktrace::record(

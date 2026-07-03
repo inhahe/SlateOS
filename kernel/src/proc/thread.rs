@@ -131,14 +131,27 @@ pub fn spawn(
     let pml4 = pcb::get_pml4(pid)
         .ok_or(KernelError::InternalError)?;
 
-    // Create the scheduler task.
-    let task_id = sched::spawn(name, priority, entry, arg, pml4)?;
+    // Create the scheduler task **suspended** (not yet runnable).
+    //
+    // This closes a register-vs-runnable race (B-PTHREAD-YIELDBUDGET): the
+    // old code used `sched::spawn`, which enqueued the task immediately.  On
+    // the uniprocessor a timer preemption in the window between `spawn`
+    // returning and the `THREAD_OWNERS` insert below could run the child to
+    // exit *before* it was registered.  `on_thread_exit` then did
+    // `owners.remove(&task_id)?` → `None`, skipped the process's zombie
+    // transition, and the process was never zombified — hanging the
+    // container self-test's yield budget and firing its fatal assert.  We
+    // now register all process/thread ownership *before* admitting the task,
+    // which is also SMP-correct (another CPU cannot pick it up early).
+    let task_id = sched::spawn_suspended(name, priority, entry, arg, pml4)?;
 
     // Register the thread with the process.
     if let Err(e) = pcb::add_thread(pid, task_id) {
         // Process disappeared between our check and the add — very
         // unlikely with single-CPU, but handle defensively.
-        // Kill the orphaned scheduler task so its stack is freed.
+        // Kill the orphaned scheduler task so its stack is freed.  (Safe
+        // even though the task is only suspended: kill_task handles a
+        // Blocked/not-enqueued task by simply marking it Dead.)
         serial_println!(
             "[thread] Failed to register task {} with process {}: {:?}",
             task_id, pid, e
@@ -147,7 +160,8 @@ pub fn spawn(
         return Err(e);
     }
 
-    // Record the reverse mapping.
+    // Record the reverse mapping.  This MUST complete before the task is
+    // admitted, so `on_thread_exit` can always find the owning process.
     {
         let mut owners = THREAD_OWNERS.lock();
         owners.insert(task_id, pid);
@@ -163,6 +177,31 @@ pub fn spawn(
         "[thread] Spawned thread (task {}) in process {}",
         task_id, pid
     );
+
+    // All ownership is now registered — admit the task so it can be
+    // scheduled.  Only after this point can the child run (and possibly
+    // exit), guaranteeing `THREAD_OWNERS`/`add_thread` are already in place.
+    if !sched::admit(task_id) {
+        // The task should be exactly Blocked here (we just created it
+        // suspended and nothing else touched it).  If admit failed it means
+        // the task was concurrently killed; surface it as an internal error
+        // after unwinding the registration we just did.
+        serial_println!(
+            "[thread] Failed to admit task {} in process {}",
+            task_id, pid
+        );
+        {
+            let mut owners = THREAD_OWNERS.lock();
+            owners.remove(&task_id);
+        }
+        // Detach the thread we just registered.  The task never ran, so it
+        // accrued no CPU time / faults — zero accounting is exact.  Ignore
+        // the return: on this unwinding path there are no join waiters to
+        // wake (the child was never observable).
+        let _ = pcb::remove_thread(pid, task_id, pcb::ThreadExitAccounting::default());
+        sched::kill_task(task_id);
+        return Err(KernelError::InternalError);
+    }
 
     Ok(task_id)
 }

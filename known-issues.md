@@ -167,7 +167,7 @@ loss of real-`run()` coverage. Verified: clean build + green boot
 self-test. Production code is unaffected (a live process only ever
 resolves its *own* state inside its own syscall handler).
 
-### B-PTHREAD-YIELDBUDGET. `/bin/pthread` self-test (4 threads × 40 000 mutex ops) can exceed the 262 144-yield exit budget under heavy boot load — WATCH (non-fatal)
+### B-PTHREAD-YIELDBUDGET. Intermittent "BSP-dead total-silence hang" during boot ring-3 self-tests — RESOLVED 2026-07-02 (structural: interrupts now enabled before the battery; see the "STRUCTURAL ROOT FIX" note at the end of this entry). Original title: `/bin/pthread` self-test can exceed the 262 144-yield exit budget under heavy boot load — WATCH (non-fatal)
 
 **Where:** boot integration self-test that spawns `/bin/pthread`. The
 harness waits for the child to exit within a fixed yield budget
@@ -615,6 +615,53 @@ Follow-up perf note logged separately: auto-versioning being globally on means
 every user-data overwrite pays a read+rehash tax; capping by size or making it
 truly opt-in per-path (per the module's own "opt-in" design statement) is a
 worthwhile future optimisation, but it no longer gates boot liveness.
+
+**STRUCTURAL ROOT FIX 2026-07-02 — enable interrupts BEFORE the ring-3 self-test
+battery (RESOLVED).** Deferring auto-versioning (offender #1) did *not* stop the
+watchdog fires: the armed NMI soak caught a second, independent offender on the
+first iteration — a ring-0 (`cs=0x8`) IF=0 page fault resolved through
+`try_resolve_fault → resolve_subpaged_fault → fs::handle::read_at → drop(Vec) →
+slab_dealloc → mm::heap::poison_free`, RIP in the debug per-byte overflow
+precondition-check inside the poison loop (`rflags=0x10002`, IF=0, task tid≈133
+"dash-redir"), and — like offender #1 — the log **continued past the NMI dump to
+BOOT_OK**, i.e. another false-positive on slow-but-live IF=0 work. Two
+independent offenders in the same window meant fixing them one at a time was
+band-aid accumulation (CLAUDE.md: "if you find yourself patching around the same
+issue in multiple places, stop; redesign the underlying system").
+
+The underlying system: `main.rs` deferred `cpu::sti()` until *after* the entire
+ring-3 integration self-test battery (dozens of real Linux-ABI processes — glibc,
+dash, gcc/make — that fork, CoW-clone, exec, demand-page file-backed mappings),
+so the whole battery ran with **IF=0**. That is the "long operation under
+IRQs-disabled" anti-pattern: no timer ticks → no preemption, the timer-driven
+liveness/hung-task watchdogs are blind, and the BSP-only hard-lockup kick
+(`sched::timer_tick → hardlockup::kick`) is starved. In a debug build (heap
+poisoning on) the battery's O(n)-over-large-data ops are seconds-long, so
+host-scheduling jitter occasionally pushed a slow-but-live boot across the ~9.8 s
+watchdog / harness-timeout threshold → the intermittent "BSP-dead total-silence"
+fingerprint (~5%).
+
+**Fix (commit `c596b2fcc`):** move the Step-21 interrupt enable
+(`idt::init_irq_stack(0)` + `cpu::sti()` + APIC-timer verification) from *after*
+the battery to the init/test seam, immediately **before** the first ring-3 spawn
+self-test (`main.rs`, right after the fs/blkdev self-tests, before
+`self_test_linux_dynamic_interp`). The battery now runs the way userspace
+actually runs — interrupts on, preemption live. The two validations that must
+follow interrupt-enable but need not precede the battery (`sleep_ns`, `softirq`)
+stay at the tail of boot. Results: a clean boot reaches **BOOT_OK in 91 s** (vs
+the historical 161–229 s — ~2× faster, because ring-3 children now get
+timer-driven CPU + interrupt-driven I/O completion instead of cooperative
+`yield_now`-only slices), and the seconds-long IF=0 offenders are gone by
+construction (they run with IF=1, so the timer keeps kicking the watchdog).
+
+**Bonus:** the timer-driven liveness / hung-task watchdogs are now **live during
+the battery**, so if a *genuine* clone/CoW/reap deadlock (the still-unproven
+phenomenon #2 — the 480 s no-BOOT_OK total hang seen historically) ever recurs,
+it will now produce a `[liveness] SYSTEM HANG` task-table dump instead of silence,
+rather than being masked by the non-preemptive cooperative driver. If that dump
+ever lands, root-cause the named lost thread's wait state. Until then this bug is
+downgraded from the ~5% intermittent hang to RESOLVED for the false-positive
+class; a 20-boot watchdog-armed soak is validating no NMI false-fire recurs.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

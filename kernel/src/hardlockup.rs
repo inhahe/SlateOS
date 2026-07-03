@@ -133,26 +133,29 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 /// confirm the NMI→dump chain actually ran, and is a cheap tripwire in general.
 static FIRED: AtomicU32 = AtomicU32::new(0);
 
-/// BSP timer-tick heartbeat sampled at the previous watchdog NMI, or
-/// [`HEARTBEAT_SENTINEL`] if no NMI has been classified since the last [`arm`].
+/// Monotonic timestamp (ns since boot) of the most recent BSP watchdog *kick*,
+/// or 0 if no kick has happened since the last [`arm`].
 ///
-/// Used by [`classify_nmi`] to distinguish a real BSP-dead wedge from a
-/// spurious NMI: see that function for the full rationale.
-static PREV_NMI_HEARTBEAT: AtomicU64 = AtomicU64::new(HEARTBEAT_SENTINEL);
+/// Stamped by [`kick`], which runs at the top of the BSP `timer_tick`. It is
+/// therefore a direct "when did the BSP timer last tick?" clock. [`classify_nmi`]
+/// reads it to distinguish a real BSP-dead wedge (timer dead, stamp went stale)
+/// from a spurious NMI (timer alive, stamp fresh) — self-contained in a single
+/// NMI, with no dependence on a second NMI or a cross-burst baseline.
+static LAST_KICK_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Sentinel meaning "no prior NMI heartbeat recorded since arming".
-const HEARTBEAT_SENTINEL: u64 = u64::MAX;
-
-/// Minimum BSP heartbeat advance between two consecutive watchdog NMIs for the
-/// BSP to be considered *alive* (a spurious NMI rather than a real wedge).
+/// Staleness threshold: if the BSP timer has not kicked the watchdog for at
+/// least this long when an NMI arrives, the BSP is genuinely wedged.
 ///
-/// A genuine BSP-dead wedge spins with `IF=0`, so `timer_tick` never runs and
-/// the heartbeat is frozen — the delta between two consecutive NMIs is exactly
-/// 0. A live-but-busy BSP (heavy debug-build compute burst) still takes timer
-/// interrupts at TCG translation-block boundaries, so it advances the heartbeat
-/// by hundreds of ticks per ~9.8 s window. A threshold of 4 sits far below any
-/// live-BSP delta and far above the wedge's 0, so the classification is robust.
-const ALIVE_TICKS: u64 = 4;
+/// A live BSP kicks every timer tick (~10 ms), so `now - LAST_KICK_NS` stays
+/// well under 1 s even during a heavy debug-build compute burst that provokes a
+/// spurious TCG NMI. A real BSP-dead `IF=0` wedge stops kicking, so by the time
+/// the ~9.8 s hardware watchdog injects its NMI the stamp is ~9.8 s stale. A
+/// 2 s threshold sits comfortably above any legitimate inter-kick gap and far
+/// below the real wedge's staleness, so the classification is robust and — key
+/// improvement over the old across-NMI heartbeat-delta scheme — fires on the
+/// *first* NMI of the wedge, immune to a stale baseline left by an earlier
+/// spurious NMI.
+const WEDGE_STALE_NS: u64 = 2_000_000_000;
 
 /// Record that a hard-lockup watchdog NMI was observed (called from
 /// [`crate::idt::handle_nmi`] on the armed, no-hardware-error path).
@@ -169,31 +172,48 @@ pub fn fired_count() -> u32 {
 
 /// Classify a watchdog NMI as a real BSP-dead wedge vs. a spurious TCG NMI.
 ///
-/// `current_heartbeat` is the value read from [`crate::sched::bsp_heartbeat`]
-/// at the moment the NMI is handled. Returns `true` iff the BSP heartbeat has
-/// *not* advanced meaningfully since the previous watchdog NMI — i.e. the BSP
-/// is genuinely wedged (spinning with `IF=0`, so `timer_tick` cannot run and
-/// the heartbeat is frozen). Returns `false` for the first NMI since arming
-/// (benefit of the doubt) and for any NMI where the heartbeat has advanced by
-/// at least [`ALIVE_TICKS`] (a live-but-busy BSP that took a spurious NMI from
+/// Returns `true` iff the BSP timer has not kicked the watchdog for at least
+/// [`WEDGE_STALE_NS`] — i.e. `timer_tick` (which kicks at its top) has stopped
+/// running, the definition of a BSP-dead `IF=0` wedge. Returns `false` when the
+/// last kick is recent (a live-but-busy BSP that took a spurious NMI from
 /// QEMU/TCG virtual-clock-vs-APIC-timer divergence during a heavy compute
-/// burst).
+/// burst) or when no kick has been recorded since arming.
+///
+/// Unlike the previous across-NMI heartbeat-delta scheme, this is self-contained
+/// in a single NMI: it reads a monotonic-clock staleness measurement rather than
+/// comparing against the heartbeat sampled at a *previous* NMI. That earlier
+/// design could be defeated by a stale baseline — a spurious NMI minutes before
+/// the wedge left `PREV_NMI_HEARTBEAT` far below the wedge's frozen value, so the
+/// wedge's first NMI looked like a huge advance and was dismissed as spurious,
+/// and the catch then hinged on a *second* NMI that the hardware watchdog did not
+/// reliably re-inject. The staleness clock has no such baseline to poison and
+/// fires on the wedge's very first NMI.
 ///
 /// # NMI safety
 ///
-/// Runs entirely in NMI context. Touches only a single atomic swap and integer
-/// arithmetic — no locks, no allocation, no re-entrant paths.
+/// Runs entirely in NMI context. Touches only relaxed atomic loads, one `rdtsc`
+/// (via [`crate::timekeeping::clock_monotonic`]), and integer arithmetic — no
+/// locks, no allocation, no re-entrant paths.
 #[must_use]
-pub fn classify_nmi(current_heartbeat: u64) -> bool {
-    let prev = PREV_NMI_HEARTBEAT.swap(current_heartbeat, Ordering::AcqRel);
-    if prev == HEARTBEAT_SENTINEL {
-        // First NMI since arming: we have no baseline to compare against, so we
-        // extend the benefit of the doubt and treat it as spurious (re-kick and
-        // resume). A genuine wedge will fire a *second* NMI ~9.8 s later, and
-        // that one will show a frozen heartbeat and be caught.
+pub fn classify_nmi() -> bool {
+    let last_kick = LAST_KICK_NS.load(Ordering::Acquire);
+    if last_kick == 0 {
+        // No kick recorded since arming yet: we have no staleness reference, so
+        // extend the benefit of the doubt and treat this as spurious.
         return false;
     }
-    current_heartbeat.wrapping_sub(prev) < ALIVE_TICKS
+    let now = crate::timekeeping::clock_monotonic();
+    now.saturating_sub(last_kick) >= WEDGE_STALE_NS
+}
+
+/// Nanoseconds since the most recent BSP watchdog kick, for NMI diagnostics.
+#[must_use]
+pub fn kick_staleness_ns() -> u64 {
+    let last_kick = LAST_KICK_NS.load(Ordering::Acquire);
+    if last_kick == 0 {
+        return 0;
+    }
+    crate::timekeeping::clock_monotonic().saturating_sub(last_kick)
 }
 
 /// Returns `true` if the i6300esb device was found and mapped at init.
@@ -347,9 +367,10 @@ pub fn arm() {
     // FUNC and LOCK clear (one-shot, disarmable).
     enable_counter(true);
 
-    // Reset the NMI-classification baseline so the first NMI in this arming
-    // window gets the benefit of the doubt (see `classify_nmi`).
-    PREV_NMI_HEARTBEAT.store(HEARTBEAT_SENTINEL, Ordering::Release);
+    // Reset the kick-staleness clock so the first NMI in this arming window has
+    // no stale reference (see `classify_nmi`). The priming `kick()` below then
+    // stamps a fresh timestamp.
+    LAST_KICK_NS.store(0, Ordering::Release);
 
     // Prime the counter at stage 1 before we start relying on kicks.
     kick();
@@ -379,6 +400,10 @@ pub fn kick() {
     if !ARMED.load(Ordering::Acquire) {
         return;
     }
+    // Stamp the kick-staleness clock: this is the BSP timer's "I'm alive"
+    // heartbeat for `classify_nmi`. Recorded before the MMIO ping so a real
+    // wedge (timer dead) leaves it monotonically stale. Cheap: one rdtsc.
+    LAST_KICK_NS.store(crate::timekeeping::clock_monotonic(), Ordering::Release);
     // Each honored register write needs a fresh unlock; the ping bit restarts
     // the counter at stage 1.
     unlock();

@@ -1453,9 +1453,10 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
         if cpu != 0 {
             // AP context is informational only. Print a *non-greppable* line
             // (the harness looks for "NMI WATCHDOG FIRED", which we reserve for
-            // real BSP wedges classified below) and return without touching the
-            // classifier — `classify_nmi` must be called exactly once per event,
-            // by cpu0, or its swap-based heartbeat baseline is corrupted.
+            // real BSP wedges classified on cpu0). The classifier is now a pure
+            // read of the BSP kick-staleness clock, so an AP taking the broadcast
+            // NMI cannot corrupt it — but only cpu0 is the authority on a
+            // BSP-driven watchdog, so APs still just record context and return.
             serial_println!(
                 "[hardlockup] NMI on AP cpu={} rip={:#x} rflags={:#x}",
                 cpu, frame.rip, frame.rflags
@@ -1463,51 +1464,53 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             return;
         }
 
-        // cpu0: distinguish a genuine BSP-dead wedge (heartbeat frozen because a
-        // spin with IF=0 blocks `timer_tick`) from a spurious NMI (QEMU/TCG
-        // virtual-clock-vs-APIC-timer divergence during a heavy debug-build
-        // compute burst — the BSP is alive and still advancing its heartbeat).
-        // See hardlockup::classify_nmi and known-issues.md B-PTHREAD-YIELDBUDGET.
+        // cpu0: distinguish a genuine BSP-dead wedge (BSP timer stopped kicking
+        // because a spin with IF=0 blocks `timer_tick`) from a spurious NMI
+        // (QEMU/TCG virtual-clock-vs-APIC-timer divergence during a heavy
+        // debug-build compute burst — the BSP is alive and still kicking). The
+        // classifier reads a monotonic kick-staleness clock, so it fires on the
+        // wedge's *first* NMI with no dependence on a prior baseline.
+        // See hardlockup::classify_nmi and known-issues.md.
         let hb = crate::sched::bsp_heartbeat();
+        let stale_ns = crate::hardlockup::kick_staleness_ns();
+        let real = crate::hardlockup::classify_nmi();
 
-        // One-shot backtrace + task-table dump on the *first* armed cpu0 NMI,
-        // regardless of the spurious/real classification below. The classifier
-        // gives the first NMI benefit of the doubt (no prior heartbeat baseline
-        // to compare against), so a genuine wedge whose first — and, if the
-        // harness kills QEMU seconds later, only — NMI arrives right before the
-        // kill would otherwise be dismissed as spurious and dump nothing, losing
-        // the one stack trace that names the wedged lock/loop. A backtrace costs
-        // one stack scan and is harmless if the NMI really was spurious (we still
-        // re-kick and resume below), so we always take it. The RIP alone often
-        // lands in a shared generic (e.g. `spin_loop_hint`) that doesn't reveal
-        // *which* caller is spinning; scanning the interrupted kernel stack for
-        // return addresses recovers the call chain for resolve-rip.sh.
-        if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        if real {
+            // Real wedge. frame.rip is the wedged instruction we've been unable
+            // to observe any other way. Always dump the backtrace + task table
+            // here — unconditionally, ignoring the one-shot latch — so an earlier
+            // spurious NMI that consumed the latch cannot rob the real wedge of
+            // its stack trace (the exact failure mode observed in the make+tcc
+            // soak: a mid-boot spurious NMI took the one-shot dump, and the later
+            // wedge produced no diagnostic at all). Then emit the greppable
+            // marker the soak harness keys on.
+            HARDLOCKUP_DUMPED.store(true, core::sync::atomic::Ordering::Release);
             serial_println!(
-                "[hardlockup] first NMI on cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={} — dumping backtrace + task table",
-                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb
+                "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={} kick_stale_ns={} — dumping backtrace + task table",
+                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb, stale_ns
             );
             dump_kernel_backtrace(frame);
             crate::sched::dump_task_table();
-        }
-
-        if crate::hardlockup::classify_nmi(hb) {
-            // Real wedge. frame.rip is the wedged instruction we've been unable
-            // to observe any other way. Emit the greppable marker the soak
-            // harness keys on. (The backtrace + task table were already dumped
-            // one-shot above.)
-            serial_println!(
-                "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={}",
-                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb
-            );
             crate::klog!(Error, "hw.nmi",
-                "hardlockup NMI cpu={} rip={:#x} heartbeat={}", cpu, frame.rip, hb);
+                "hardlockup NMI cpu={} rip={:#x} heartbeat={} kick_stale_ns={}",
+                cpu, frame.rip, hb, stale_ns);
         } else {
-            // Spurious: the BSP is alive and progressing. Re-kick the watchdog
-            // and resume rather than latching a false catch. No greppable marker.
+            // Spurious: the BSP is alive and still kicking. Take a one-shot
+            // backtrace + task-table dump on the first such NMI (cheap, harmless,
+            // and occasionally useful for early diagnostics), then re-kick the
+            // watchdog and resume rather than latching a false catch. No greppable
+            // marker.
+            if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                serial_println!(
+                    "[hardlockup] first (spurious) NMI on cpu={} rip={:#x} rflags={:#x} kick_stale_ns={} — dumping backtrace + task table",
+                    cpu, frame.rip, frame.rflags, stale_ns
+                );
+                dump_kernel_backtrace(frame);
+                crate::sched::dump_task_table();
+            }
             serial_println!(
-                "[hardlockup] spurious NMI (BSP alive, heartbeat={} advancing) at rip={:#x} — re-kicking, resuming",
-                hb, frame.rip
+                "[hardlockup] spurious NMI (BSP alive, heartbeat={} kick_stale_ns={}) at rip={:#x} — re-kicking, resuming",
+                hb, stale_ns, frame.rip
             );
             crate::hardlockup::kick();
         }

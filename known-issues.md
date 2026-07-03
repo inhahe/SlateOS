@@ -862,6 +862,59 @@ soak-"verified" in isolation until that second wedge is also fixed. It stands on
 its analytical merits (bounded nesting by construction) plus the absence of any
 further IF=0 guard-page `#PF`.
 
+**NMI WATCHDOG BLIND-SPOT — ROOT-CAUSED AND FIXED 2026-07-03 (why the dominant
+wedge escaped with *zero* catchable NMIs).** After the IRQ-stack fix, three more
+armed soaks (`CAUGHT-iter-2-nobootok` make-cc pid 210 inode 126; a tcc-hosted
+catch pid 214; `soak5` `CAUGHT-iter-1-nobootok` pid 176 **inode 72** — a
+*different* binary again) all reproduced the dominant wedge as a `nobootok` with
+**no watchdog dump at all**, running silently to the 480 s harness kill. Decisive
+observations from those catches:
+- **The wedge is an IF=0 total-silence spin on cpu0** — the last serial line is
+  always a page-fault the handler *completes* (`[fault] … mapped/Demand-paged …`)
+  right as a freshly `exec`'d ld.so-linked Linux binary is demand-paging its early
+  pages, then nothing. `liveness_boot_deadline_check` emits a 30 s breadcrumb every
+  BSP tick while armed, and **zero breadcrumbs** appear after the wedge → the timer
+  IRQ stopped → cpu0 is spinning with IF=0 (only an NMI can preempt it).
+- **It is NOT make+tcc-specific.** Catches span inode 126 (tcc), inode 72
+  (`/bin/hello`-class), and make grandchildren — i.e. the common factor is
+  *spawning/exec'ing an ld.so-linked Linux binary and demand-paging it*, not any
+  one test. (Consequently the per-reap-loop `dump_task_table` instrumentation added
+  earlier this session **cannot** observe this wedge: the reap loop runs on the same
+  wedged cpu0 and is starved too. Only the NMI path can catch it.)
+- **Why the NMI watchdog stayed silent.** Two compounding defects in the *diagnostic
+  instrument* (not the bug itself): (1) the old `classify_nmi` compared the BSP
+  heartbeat between *consecutive* NMIs against a `PREV_NMI_HEARTBEAT` baseline. A
+  **mid-boot spurious TCG NMI** (seen in `CAUGHT-iter-2` at `heartbeat=997` during
+  the dash-test compute burst) set that baseline to 997; minutes later the wedge
+  froze the heartbeat at a large value H, so the wedge's first NMI saw `H − 997`
+  (huge) and was dismissed as spurious. Catching then depended on a *second* wedge
+  NMI (delta 0), which the QEMU i6300esb did not reliably re-inject after the first
+  fire → no catch, ever. (2) That same mid-boot spurious NMI consumed the *one-shot*
+  `HARDLOCKUP_DUMPED` latch, so even if the wedge had been classified real, the
+  backtrace/task-table dump was already spent.
+
+**Fix (commit this session; `hardlockup.rs` + `idt.rs`).** Replace the fragile
+across-NMI heartbeat-delta classifier with a **self-contained monotonic
+kick-staleness** check that fires on the wedge's *first* NMI, immune to any stale
+baseline:
+- `hardlockup::kick()` (called at the top of the BSP `timer_tick`) now stamps
+  `LAST_KICK_NS = clock_monotonic()` — a direct "when did the BSP timer last tick?"
+  clock. `clock_monotonic` is a pure `rdtsc` + relaxed loads, so it advances even
+  with IF=0 and is NMI-safe.
+- `classify_nmi()` (no args) returns real iff `clock_monotonic() − LAST_KICK_NS ≥
+  WEDGE_STALE_NS` (2 s). A live BSP kicks every ~10 ms → staleness ≪ 1 s → spurious;
+  a real wedge stopped kicking → by the ~9.8 s hardware fire the stamp is ~9.8 s
+  stale → real, on the *first* NMI. The old `PREV_NMI_HEARTBEAT`/`ALIVE_TICKS`
+  baseline machinery is removed.
+- `idt::handle_nmi` now, on a **real** verdict, dumps the backtrace + task table
+  **unconditionally** (ignoring the one-shot latch) so a prior spurious NMI can no
+  longer rob the real wedge of its stack trace; it logs `kick_stale_ns` for
+  confirmation. Spurious NMIs still take a one-shot early dump, re-kick, and resume.
+Builds clean, 0 new clippy warnings. This makes the dominant wedge **observable**:
+the next armed soak should finally print `NMI WATCHDOG FIRED … rip=…` + backtrace
+pinpointing where the freshly-exec'd binary's demand-paging path spins with IF=0.
+**Still OPEN** (the underlying wedge) — but no longer a blind heisenbug.
+
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 
 **Where:** the boot self-test that runs the REAL `dash` shell over a script fed

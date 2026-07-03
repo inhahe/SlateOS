@@ -723,41 +723,62 @@ root-cause the dash-redir reap deadlock. Next armed soak should capture the dump
 root-cause the named stuck task's wait state (child `blocked_on` / driver state)
 from it.
 
-**OFFENDER #3 ROOT-CAUSED & FIXED 2026-07-02 — `task_list()` stack-scan under
-SCHED on every task exit (another false-positive watchdog trip).** A fresh armed
-`--hard-lockup-watchdog` catch (`build/hang-catches/CAUGHT-iter-1-hardlockup.txt`,
-BOOT_OK=1 → recovered, so a false-positive not a deadlock) fired the NMI at
-`rip=0xffffffff814decc9 rflags=0x10282` (**IF=1**), and the RBP-chain backtrace
-resolved the wedge to `sys_exit → task_exit → notify_exit_hooks →
-pacct::on_task_exit → sched::task_list → …closure… → task.stack_usage_bytes →
-ptr::read_volatile → poison precondition_check`. Root cause: **`pacct::on_task_exit`
-(runs on *every* task exit) called `sched::task_list()`, which builds a heap `Vec`
-of *all* ~54 tasks under the `SCHED` lock and, for each, runs
-`stack_usage_bytes()` — an O(TASK_STACK_SIZE/8) *volatile* per-word stack scan —
-just to `.find()` **one** task by id** (and it doesn't even use stack usage). In
-the poison debug build every volatile read carries a per-byte precondition check,
-so the whole scan-all-stacks-under-SCHED took ~9.8 s, starving `timer_tick` (which
-needs `SCHED` briefly) and the BSP hard-lockup kick long enough for QEMU's ~9.8 s
-i6300esb countdown to expire under host jitter → the transient NMI. This is the
-same "long operation under a lock" anti-pattern; the catch dump line "could not
-acquire SCHED lock — a task is likely wedged holding it" is exactly this hold.
+**HARD-LOCKUP WATCHDOG NMIs ARE TCG FALSE POSITIVES — ROOT-CAUSED 2026-07-02.**
+_(Correcting an earlier note in this file that wrongly attributed the watchdog
+trips to `task_list()`-on-exit. The `task_list` change below is kept as a real
+optimization, but it was **not** the cause of the NMIs.)_ Two consecutive armed
+`--hard-lockup-watchdog` catches (offender #3: `rip=0xffffffff814decc9`; offender
+#4 / `build/hang-catches/CAUGHT-iter-1-hardlockup.txt`: `rip=0xffffffff80fc4248`,
+in `Vec<u8>::drop` during the glibc-staging self-test) both fired the NMI with
+`rflags` showing **IF=1**, in heavy debug-build compute, holding no
+interrupt-disabling lock, and **both recovered to BOOT_OK**. That is decisive:
+`hardlockup::kick()` sits at the *top* of `timer_tick` on cpu0, *before* any lock
+acquisition, so a live-and-ticking BSP always kicks — an NMI that fires while the
+BSP is demonstrably still executing `timer_tick`-eligible code and then recovers
+cannot be a genuine `IF=0` wedge. These are **spurious NMIs from QEMU/TCG
+virtual-clock-vs-APIC-timer divergence** during heavy debug-build compute bursts
+(the poison allocator makes `O(size)` drops multi-second, and the i6300esb counts
+in QEMU_CLOCK_VIRTUAL): the APIC timer that should keep kicking gets starved of
+TCG translation-block boundaries relative to the watchdog's virtual clock, so the
+countdown expires even though the BSP is fine. The genuine bug (offender #2) is a
+*permanent* wedge (480 s, never reaches BOOT_OK); it was never one of these
+catches — the spurious NMIs kept ending the soak before it could reproduce.
 
-**Fix (commits `acf9da4f9`, `d2da77e5c`):** added two cheap targeted lookups to
-`sched/mod.rs` and routed the hot callers through them so no exit/existence check
-ever scans all stacks under SCHED again:
-- `sched::task_info(task_id) -> Option<TaskInfo>` — acquires SCHED, looks up
-  exactly one task via `state.tasks.get(&id)`, extracts only the bookkeeping
-  fields, and **skips the volatile stack scan entirely** (`stack_used`/`stack_pct`
-  are `None`). `pacct::on_task_exit` now calls this instead of `task_list()`.
-- `sched::task_exists(task_id) -> bool` — a plain `tasks.contains_key(&id)` map
-  lookup; `procfs::task_exists` (called on many `/proc` pid-validation paths, ~14
-  sites) now uses it instead of `task_list().iter().any(...)`, which had likewise
-  built the full list with per-task stack scans just to test membership.
-Both build clean, 0 clippy errors. This removes offender #3 by construction (a map
-lookup holds SCHED for microseconds, not seconds). The genuine *never-recovers*
-dash-redir ping-pong livelock (offender #2, the 480 s no-BOOT_OK case) is still
-open; the boot-deadline backstop above will capture its task dump on the next
-reproduction.
+**Proper structural fix (this commit) — heartbeat-progress NMI discriminator.**
+Per CLAUDE.md's anti-band-aid rule, rather than keep chasing individual "offender"
+RIPs (each a red herring), the NMI handler now *distinguishes* a real wedge from a
+spurious NMI instead of treating every watchdog NMI as a catch:
+- `sched::bsp_heartbeat()` reads `WATCHDOG_HEARTBEAT[0]`, bumped every BSP
+  `timer_tick` (NMI-safe: one relaxed atomic load).
+- `hardlockup::classify_nmi(hb)` swaps `hb` into a `PREV_NMI_HEARTBEAT` baseline
+  (reset to a sentinel in `arm()`). First NMI since arming → benefit of the doubt
+  (spurious). Subsequent NMI whose heartbeat advanced `< ALIVE_TICKS` (=4) since
+  the previous NMI → **real wedge** (a spin with `IF=0` freezes `timer_tick`, so
+  the delta is exactly 0); advance ≥ 4 → spurious (live-but-busy BSP advances the
+  heartbeat by hundreds per ~9.8 s window).
+- `idt::handle_nmi` (armed branch): only **cpu0** classifies/acts (the watchdog is
+  driven solely by the cpu0 kick, and `classify_nmi`'s swap must run exactly once
+  per event); APs print a non-greppable info line and return. On a **real** verdict
+  cpu0 emits the greppable `NMI WATCHDOG FIRED` marker + one-shot backtrace/task
+  dump. On a **spurious** verdict it prints a distinct `spurious NMI … re-kicking`
+  line, re-kicks, and resumes — no latch, no false catch.
+This catches a genuine BSP-dead wedge on the *second* NMI (~20 s) instead of the
+480 s liveness timeout, and — crucially — lets the soak run *past* the spurious
+NMIs so offender #2 can finally reproduce. Builds clean, 0 new clippy warnings.
+
+**Kept optimization (commits `acf9da4f9`, `d2da77e5c`):** `pacct::on_task_exit`
+and `procfs::task_exists` no longer call `sched::task_list()` (which builds a heap
+`Vec` of *all* tasks and volatile-scans every stack under SCHED just to find/test
+one task). Added:
+- `sched::task_info(task_id) -> Option<TaskInfo>` — one `tasks.get(&id)`, skips the
+  stack scan (`stack_used`/`stack_pct` = `None`). Used by `pacct::on_task_exit`.
+- `sched::task_exists(task_id) -> bool` — a `tasks.contains_key(&id)`. Used by
+  `procfs::task_exists` (~14 pid-validation sites).
+These are genuinely wasteful patterns worth removing on their own merits (a map
+lookup holds SCHED for microseconds), but they were **not** the watchdog cause.
+The genuine *never-recovers* dash-redir ping-pong livelock (offender #2, the 480 s
+no-BOOT_OK case) is still open; the discriminator above plus the boot-deadline
+backstop will capture its task dump on the next reproduction.
 
 ### B-DASH-STDIN-FLAKE. `dash script-from-stdin` ring-3 self-test intermittently returns `InternalError` — WATCH 2026-07-01
 

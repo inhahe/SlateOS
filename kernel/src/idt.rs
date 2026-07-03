@@ -1441,34 +1441,61 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
             frame.rip, parity_error, iochan_check
         );
     } else if crate::hardlockup::is_armed() {
-        // No hardware-error bits and the hard-lockup watchdog is armed: this is
-        // almost certainly the i6300esb NMI fired because the BSP stopped
-        // kicking it (a BSP-dead total-silence wedge — see hardlockup.rs and
-        // known-issues.md B-PTHREAD-YIELDBUDGET). QEMU's inject-nmi broadcasts
-        // to every CPU, so the BSP — even spinning with IF=0 — takes this NMI,
-        // and frame.rip here is the wedged instruction we've been unable to
-        // observe any other way.
-        //
-        // Every CPU prints its own one-line RIP (the BSP's line is the prize);
-        // the first CPU to arrive also dumps the whole task table. A greppable
-        // marker lets the soak harness recognize a catch.
+        // No hardware-error bits and the hard-lockup watchdog is armed: the
+        // i6300esb NMI fired because cpu0 stopped kicking it. QEMU's inject-nmi
+        // broadcasts to every CPU, but this watchdog is driven *solely* by the
+        // BSP timer tick (kick() lives at the top of `timer_tick` on cpu0), so
+        // only a BSP that goes silent can trip it. That makes cpu0 the sole
+        // authority on whether this is a real wedge — APs just record context.
         crate::hardlockup::note_fired();
         let cpu = crate::sched::current_cpu_id();
-        serial_println!(
-            "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
-            cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss
-        );
-        // One-shot full task-table dump + stack backtrace (first arriver wins).
-        // The RIP alone often lands in a shared generic (e.g. a monomorphized
-        // `Range::next`), which doesn't reveal *which* loop is wedged; scanning
-        // the interrupted kernel stack for return addresses recovers the call
-        // chain so resolve-rip.sh can name the caller.
-        if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            dump_kernel_backtrace(frame);
-            crate::sched::dump_task_table();
+
+        if cpu != 0 {
+            // AP context is informational only. Print a *non-greppable* line
+            // (the harness looks for "NMI WATCHDOG FIRED", which we reserve for
+            // real BSP wedges classified below) and return without touching the
+            // classifier — `classify_nmi` must be called exactly once per event,
+            // by cpu0, or its swap-based heartbeat baseline is corrupted.
+            serial_println!(
+                "[hardlockup] NMI on AP cpu={} rip={:#x} rflags={:#x}",
+                cpu, frame.rip, frame.rflags
+            );
+            return;
         }
-        crate::klog!(Error, "hw.nmi",
-            "hardlockup NMI cpu={} rip={:#x}", cpu, frame.rip);
+
+        // cpu0: distinguish a genuine BSP-dead wedge (heartbeat frozen because a
+        // spin with IF=0 blocks `timer_tick`) from a spurious NMI (QEMU/TCG
+        // virtual-clock-vs-APIC-timer divergence during a heavy debug-build
+        // compute burst — the BSP is alive and still advancing its heartbeat).
+        // See hardlockup::classify_nmi and known-issues.md B-PTHREAD-YIELDBUDGET.
+        let hb = crate::sched::bsp_heartbeat();
+        if crate::hardlockup::classify_nmi(hb) {
+            // Real wedge. frame.rip is the wedged instruction we've been unable
+            // to observe any other way. Emit the greppable marker the soak
+            // harness keys on, then one-shot dump the backtrace + task table.
+            serial_println!(
+                "[hardlockup] NMI WATCHDOG FIRED cpu={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} heartbeat={}",
+                cpu, frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss, hb
+            );
+            // The RIP alone often lands in a shared generic (e.g. a monomorphized
+            // `Range::next`), which doesn't reveal *which* loop is wedged;
+            // scanning the interrupted kernel stack for return addresses recovers
+            // the call chain so resolve-rip.sh can name the caller.
+            if !HARDLOCKUP_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                dump_kernel_backtrace(frame);
+                crate::sched::dump_task_table();
+            }
+            crate::klog!(Error, "hw.nmi",
+                "hardlockup NMI cpu={} rip={:#x} heartbeat={}", cpu, frame.rip, hb);
+        } else {
+            // Spurious: the BSP is alive and progressing. Re-kick the watchdog
+            // and resume rather than latching a false catch. No greppable marker.
+            serial_println!(
+                "[hardlockup] spurious NMI (BSP alive, heartbeat={} advancing) at rip={:#x} — re-kicking, resuming",
+                hb, frame.rip
+            );
+            crate::hardlockup::kick();
+        }
     } else {
         // No hardware error bits — likely a software NMI (debugger, watchdog,
         // or performance monitoring).  Just log it.

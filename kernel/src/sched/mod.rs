@@ -1633,6 +1633,22 @@ static WATCHDOG_LAST_SEEN: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [ZERO; priority_rr::MAX_CPUS]
 };
 
+/// Read the bootstrap processor's timer-tick heartbeat counter.
+///
+/// Bumped once per BSP timer tick in [`timer_tick`]. Because the hard-lockup
+/// watchdog is kicked from that same tick, this counter advancing means the
+/// BSP is alive and taking timer interrupts (and therefore kicking). The NMI
+/// handler uses it to tell a *real* BSP-dead wedge (heartbeat frozen) apart
+/// from a *spurious* watchdog NMI caused by QEMU/TCG virtual-clock jitter
+/// during a heavy compute burst (heartbeat still advancing). Safe to call from
+/// NMI context — it is a single relaxed atomic load, no locks.
+#[must_use]
+pub fn bsp_heartbeat() -> u64 {
+    WATCHDOG_HEARTBEAT
+        .first()
+        .map_or(0, |hb| hb.load(Ordering::Relaxed))
+}
+
 /// Number of consecutive watchdog intervals a CPU has been stalled.
 ///
 /// Alert only after `WATCHDOG_ALERT_COUNT` consecutive failures to

@@ -615,6 +615,49 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// Acquire the lock with interrupts disabled for the whole hold
+    /// (`spin_lock_irqsave` semantics).
+    ///
+    /// Use this for any lock that is reachable from BOTH task context and
+    /// interrupt/exception context on the same CPU. A plain [`lock`](Self::lock)
+    /// only disables *preemption* (voluntary context switch); it leaves
+    /// hardware interrupts enabled, so if an IRQ or softirq that runs while the
+    /// lock is held re-enters the same lock, the CPU self-deadlocks (the holder
+    /// can never make progress to release it). Disabling interrupts for the
+    /// duration closes that window entirely.
+    ///
+    /// The previous interrupt-enable state is saved and restored on drop, so
+    /// this nests correctly: taking an irqsave lock inside an already
+    /// interrupts-off region leaves interrupts off on release.
+    ///
+    /// Keep the critical section short — interrupts are masked on this CPU for
+    /// the whole hold, so a long hold starves the timer tick and raises IRQ
+    /// latency. ACCT-style leaf locks (fixed-array counter updates) are the
+    /// intended use.
+    #[inline]
+    pub fn lock_irqsave(&self) -> MutexIrqGuard<'_, T> {
+        // Save-and-disable BEFORE acquiring: an interrupt landing between the
+        // acquire and the cli could itself re-enter the lock, which is exactly
+        // what we are preventing. Only touch the hardware / tracker when we are
+        // the transition edge (enabled → disabled) so nesting inside another
+        // interrupts-off region neither double-restores nor corrupts the
+        // single-slot irqoff tracker.
+        let were_enabled = crate::cpu::interrupts_enabled();
+        if were_enabled {
+            // SAFETY: interrupts are restored to their prior state when the
+            // returned guard drops; the IDT is live (interrupts were enabled).
+            unsafe {
+                crate::cpu::cli();
+            }
+            crate::cpu::irqoff_tracker::record_disable();
+        }
+        let inner = self.lock();
+        MutexIrqGuard {
+            inner: core::mem::ManuallyDrop::new(inner),
+            restore_if: were_enabled,
+        }
+    }
+
     /// Get the address used as the lockdep class identifier.
     #[inline]
     fn addr(&self) -> usize {
@@ -688,6 +731,64 @@ impl<T> Drop for MutexGuard<'_, T> {
             core::mem::ManuallyDrop::drop(&mut self.guard);
         }
         crate::sched::preempt_enable();
+    }
+}
+
+/// RAII guard for [`Mutex::lock_irqsave`].
+///
+/// Wraps a normal [`MutexGuard`] plus the saved interrupt-enable state. On
+/// drop it releases the inner lock (which also re-enables preemption) FIRST,
+/// then restores the interrupt flag — the exact reverse of the acquire order
+/// (`cli` → preempt-off → lock ⟹ unlock → preempt-on → `sti`). Restoring
+/// interrupts last guarantees no timer tick can preempt us while the physical
+/// lock is still held.
+pub struct MutexIrqGuard<'a, T> {
+    /// Inner guard in `ManuallyDrop` so we can force its drop (release lock +
+    /// re-enable preemption) before restoring interrupts.
+    inner: core::mem::ManuallyDrop<MutexGuard<'a, T>>,
+    /// Whether interrupts were enabled before we disabled them — if so, drop
+    /// re-enables them; if not (we were nested inside an interrupts-off
+    /// region), drop leaves them disabled.
+    restore_if: bool,
+}
+
+impl<T> Deref for MutexIrqGuard<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for MutexIrqGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> Drop for MutexIrqGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Release the physical lock and re-enable preemption first (the inner
+        // MutexGuard's own Drop does both, in the correct order).
+        //
+        // SAFETY: `inner` is never touched again after this point (dropped
+        // exactly once, here), so taking it out of ManuallyDrop is sound.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.inner);
+        }
+        // Now restore interrupts, but only if we were the disabling edge.
+        if self.restore_if {
+            crate::cpu::irqoff_tracker::record_enable();
+            // SAFETY: interrupts were enabled when we acquired (that is exactly
+            // what `restore_if` records), so the IDT is live and re-enabling
+            // simply returns to the caller's prior state.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
     }
 }
 

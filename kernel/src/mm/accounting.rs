@@ -30,6 +30,20 @@
 //! (if both are needed in the same path), and is held only briefly for
 //! counter updates.  No code holds ACCOUNTING while acquiring other locks.
 //!
+//! **IRQ safety.** Accounting is reachable from *both* task context (syscall
+//! map/unmap, CoW, process setup) *and* interrupt/softirq context — e.g. the
+//! frame allocator calls `compact::try_compact()` for higher-order allocations,
+//! and compaction calls [`tracked_count`]; a device IRQ or softirq that
+//! allocates a multi-order buffer therefore re-enters accounting. Crucially,
+//! the page-fault handler re-enables interrupts before resolving a fault (so a
+//! `charge`/`uncharge` on the fault path runs with IF=1). A plain spinlock that
+//! only disables preemption would let such an interrupt land while ACCOUNTING
+//! is held and re-acquire it → uniprocessor self-deadlock (observed as
+//! `B-ACCT-SPINLOCK-STALL`, "task N == spinner, RECURSIVE self-deadlock"). We
+//! therefore acquire ACCOUNTING via `lock_irqsave()`, masking interrupts for
+//! the (short, leaf-only) hold. This is the standard Linux `spin_lock_irqsave`
+//! discipline for any lock shared with interrupt context.
+//!
 //! ## Performance
 //!
 //! Each `charge`/`uncharge` call acquires the spinlock and does a linear
@@ -130,7 +144,7 @@ pub fn init_address_space(pml4_phys: u64) -> bool {
         return false;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
 
     // Check if already registered (idempotent).
     for entry in table.iter() {
@@ -167,7 +181,7 @@ pub fn destroy_address_space(pml4_phys: u64) {
         return;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
     for entry in table.iter_mut() {
         if entry.pml4_phys == pml4_phys {
             *entry = AccountingEntry::EMPTY;
@@ -199,7 +213,7 @@ pub fn try_charge(pml4_phys: u64, n: u64) -> bool {
         return true; // Kernel mappings always allowed.
     }
 
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     for entry in table.iter() {
         if entry.pml4_phys == pml4_phys {
             // No limit set → always allowed.
@@ -231,7 +245,7 @@ pub fn charge(pml4_phys: u64, n: u64) {
         return;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
     for entry in table.iter_mut() {
         if entry.pml4_phys == pml4_phys {
             entry.rss_frames = entry.rss_frames.saturating_add(n);
@@ -259,7 +273,7 @@ pub fn uncharge(pml4_phys: u64, n: u64) {
         return;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
     for entry in table.iter_mut() {
         if entry.pml4_phys == pml4_phys {
             entry.rss_frames = entry.rss_frames.saturating_sub(n);
@@ -281,7 +295,7 @@ pub fn reset_rss(pml4_phys: u64) {
         return;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
     for entry in table.iter_mut() {
         if entry.pml4_phys == pml4_phys {
             entry.rss_frames = 0;
@@ -310,7 +324,7 @@ pub fn set_rss_limit(pml4_phys: u64, limit_frames: u64) -> bool {
         return false;
     }
 
-    let mut table = ACCOUNTING.lock();
+    let mut table = ACCOUNTING.lock_irqsave();
     for entry in table.iter_mut() {
         if entry.pml4_phys == pml4_phys {
             entry.rss_limit_frames = limit_frames;
@@ -331,7 +345,7 @@ pub fn get_rss_limit(pml4_phys: u64) -> Option<u64> {
         return None;
     }
 
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     for entry in table.iter() {
         if entry.pml4_phys == pml4_phys {
             return Some(entry.rss_limit_frames);
@@ -384,7 +398,7 @@ pub fn query(pml4_phys: u64) -> Option<AddressSpaceStats> {
         return None;
     }
 
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     for entry in table.iter() {
         if entry.pml4_phys == pml4_phys {
             return Some(AddressSpaceStats {
@@ -407,7 +421,7 @@ pub fn query(pml4_phys: u64) -> Option<AddressSpaceStats> {
 /// Excludes address spaces with RSS == 0 (empty).
 #[must_use]
 pub fn largest_rss() -> Option<AddressSpaceStats> {
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     let mut best: Option<&AccountingEntry> = None;
 
     for entry in table.iter() {
@@ -436,7 +450,7 @@ pub fn largest_rss() -> Option<AddressSpaceStats> {
 #[must_use]
 #[allow(dead_code)] // Public API for procfs/OOM diagnostics.
 pub fn all_stats() -> alloc::vec::Vec<AddressSpaceStats> {
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     table.iter()
         .filter(|e| e.pml4_phys != 0)
         .map(|e| AddressSpaceStats {
@@ -452,7 +466,7 @@ pub fn all_stats() -> alloc::vec::Vec<AddressSpaceStats> {
 /// Number of address spaces currently tracked.
 #[must_use]
 pub fn tracked_count() -> usize {
-    let table = ACCOUNTING.lock();
+    let table = ACCOUNTING.lock_irqsave();
     table.iter().filter(|e| e.pml4_phys != 0).count()
 }
 

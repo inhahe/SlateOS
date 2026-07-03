@@ -357,7 +357,19 @@ pub struct Mutex<T> {
     /// Whether this lock has been registered in the global registry.
     /// Uses AtomicU64 instead of AtomicBool for const init compatibility.
     registered: AtomicU64,
+    /// Task id of the current holder (0 = unheld or held by the idle/boot
+    /// task 0). Written on every successful acquire and cleared to
+    /// [`OWNER_NONE`] on release. Purely diagnostic: [`Self::report_stall`]
+    /// prints it so a stuck lock reveals *who* holds it (recursion vs. a
+    /// guard leaked by a since-dead task), which lockdep's held-lock dump
+    /// cannot show once the holder is gone.
+    owner: AtomicU64,
 }
+
+/// Sentinel stored in [`Mutex::owner`] when the lock is not held. `u64::MAX`
+/// is used (not 0) because task id 0 is a real task (the idle/boot task), so
+/// 0 must remain distinguishable from "unheld".
+const OWNER_NONE: u64 = u64::MAX;
 
 // SAFETY: Mutex<T> is Send+Sync whenever T is Send (same as spin::Mutex).
 unsafe impl<T: Send> Send for Mutex<T> {}
@@ -371,6 +383,7 @@ impl<T> Mutex<T> {
             name: b"?",
             stats: ContentionStats::new(),
             registered: AtomicU64::new(0),
+            owner: AtomicU64::new(OWNER_NONE),
         }
     }
 
@@ -385,6 +398,7 @@ impl<T> Mutex<T> {
             name,
             stats: ContentionStats::new(),
             registered: AtomicU64::new(0),
+            owner: AtomicU64::new(OWNER_NONE),
         }
     }
 
@@ -425,12 +439,7 @@ impl<T> Mutex<T> {
             if let Some(guard) = self.inner.try_lock() {
                 self.stats.record_uncontended();
                 let acquire_tsc = crate::bench::rdtsc();
-                return MutexGuard {
-                    guard: core::mem::ManuallyDrop::new(guard),
-                    addr,
-                    stats: &self.stats,
-                    acquire_tsc,
-                };
+                return self.make_guard(guard, addr, acquire_tsc);
             }
 
             // Contended path: time the spin (with stall detection).
@@ -439,22 +448,12 @@ impl<T> Mutex<T> {
             let end = crate::bench::rdtsc();
             let wait = end.saturating_sub(start);
             self.stats.record_contended(wait);
-            return MutexGuard {
-                guard: core::mem::ManuallyDrop::new(guard),
-                addr,
-                stats: &self.stats,
-                acquire_tsc: end,
-            };
+            return self.make_guard(guard, addr, end);
         }
 
         // Tracking disabled: still bounded-spin so the stall detector runs.
         let guard = self.lock_contended();
-        MutexGuard {
-            guard: core::mem::ManuallyDrop::new(guard),
-            addr,
-            stats: &self.stats,
-            acquire_tsc: 0,
-        }
+        self.make_guard(guard, addr, 0)
     }
 
     /// Contended-path acquisition with a bounded-spin stall detector.
@@ -524,6 +523,7 @@ impl<T> Mutex<T> {
         let cpu = crate::sched::current_cpu_id();
         let tid = crate::sched::current_task_id();
         let name = core::str::from_utf8(self.name).unwrap_or("<non-utf8>");
+        let owner = self.owner.load(Ordering::Relaxed);
         serial_println!(
             "[sync] *** SPINLOCK STALL *** lock '{}' still not acquired after ~{}s of \
              spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
@@ -531,6 +531,30 @@ impl<T> Mutex<T> {
              disabled.",
             name, STALL_SECONDS, cpu, tid, iters
         );
+        // Name the holder: if `owner == tid`, this is a recursive self-deadlock
+        // (the spinning task already holds the lock); if `owner` is some other
+        // (possibly since-dead) task, the guard was leaked / the holder never
+        // released. `OWNER_NONE` means the physical lock shows free yet
+        // `try_lock` still fails — a lost-unlock / poisoned-flag desync.
+        if owner == OWNER_NONE {
+            serial_println!(
+                "[sync]   lock '{}' holder: NONE recorded (owner=unheld) — \
+                 lost-unlock or flag desync; spinner is task {} on cpu {}",
+                name, tid, cpu
+            );
+        } else if owner == tid {
+            serial_println!(
+                "[sync]   lock '{}' holder: task {} == spinner — RECURSIVE \
+                 self-deadlock (same task re-entered the lock)",
+                name, owner
+            );
+        } else {
+            serial_println!(
+                "[sync]   lock '{}' holder: task {} (spinner is task {}) — guard \
+                 held by another task; check whether it is still alive",
+                name, owner, tid
+            );
+        }
         // The single most useful clue: what else this CPU already holds.
         crate::lockdep::dump_held_locks(cpu);
     }
@@ -563,12 +587,32 @@ impl<T> Mutex<T> {
         } else {
             0
         };
-        Some(MutexGuard {
+        Some(self.make_guard(guard, addr, acquire_tsc))
+    }
+
+    /// Build a [`MutexGuard`] and record the acquiring task as the owner.
+    ///
+    /// Centralises the owner write so every acquisition path (fast, contended,
+    /// tracking-disabled, `try_lock`) stamps the holder identically. The store
+    /// is a single relaxed per-CPU read + write — negligible next to the CAS
+    /// and lockdep call already on this path — and is what makes a stuck lock
+    /// name its holder in [`Self::report_stall`].
+    #[inline]
+    fn make_guard<'a>(
+        &'a self,
+        guard: spin::MutexGuard<'a, T>,
+        addr: usize,
+        acquire_tsc: u64,
+    ) -> MutexGuard<'a, T> {
+        self.owner
+            .store(crate::sched::current_task_id(), Ordering::Relaxed);
+        MutexGuard {
             guard: core::mem::ManuallyDrop::new(guard),
             addr,
             stats: &self.stats,
             acquire_tsc,
-        })
+            owner: &self.owner,
+        }
     }
 
     /// Get the address used as the lockdep class identifier.
@@ -592,6 +636,9 @@ pub struct MutexGuard<'a, T> {
     stats: &'a ContentionStats,
     /// TSC at lock acquisition (0 if tracking disabled).
     acquire_tsc: u64,
+    /// Reference to the owning Mutex's `owner` field, cleared to
+    /// [`OWNER_NONE`] on release so a later stall names the *current* holder.
+    owner: &'a AtomicU64,
 }
 
 impl<T> Deref for MutexGuard<'_, T> {
@@ -623,6 +670,9 @@ impl<T> Drop for MutexGuard<'_, T> {
         // This way, if another CPU is spinning on this lock and acquires
         // it immediately after us, the ordering edges are correct.
         lockdep::lock_release(self.addr);
+        // Clear the diagnostic owner stamp before the physical unlock so a
+        // stall reporter can never observe a freed lock still naming us.
+        self.owner.store(OWNER_NONE, Ordering::Relaxed);
         // Ordering is critical for the preempt-disable invariant: the
         // *physical* lock must be released before we re-enable preemption.
         // If we re-enabled first, a timer tick landing in the tiny window

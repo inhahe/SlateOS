@@ -3720,6 +3720,49 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
         .collect()
 }
 
+/// Return a snapshot of a single task by id, without scanning any stacks.
+///
+/// This is the lightweight counterpart to [`task_list`]: it acquires the
+/// SCHED lock, looks up exactly one task by id, and extracts its bookkeeping
+/// fields.  Crucially it does **not** call `stack_usage_bytes` /
+/// `stack_usage_pct` — those are O(stack-size) volatile per-word scans, and
+/// building the *whole* list with a stack scan per task under the SCHED lock
+/// (as `task_list` does) can take seconds in the poison debug build, starving
+/// the timer tick of the lock and tripping the hard-lockup watchdog.
+///
+/// `stack_used`/`stack_pct` are therefore always `None` in the returned
+/// `TaskInfo`.  Callers that only need accounting fields (name, ticks,
+/// cycles, wait times, priority, cpu) should prefer this over `task_list`.
+#[must_use]
+pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map(|task| TaskInfo {
+        id: task_id,
+        name: task.name,
+        name_len: task.name_len,
+        state: task.state,
+        priority: task.priority,
+        total_ticks: task.total_ticks,
+        user_ticks: task.user_ticks,
+        sys_ticks: task.sys_ticks,
+        min_flt: task.min_flt,
+        maj_flt: task.maj_flt,
+        nvcsw: task.nvcsw,
+        nivcsw: task.nivcsw,
+        total_cycles: task.total_cycles,
+        schedule_count: task.schedule_count,
+        start_tick: task.start_tick,
+        last_cpu: task.last_cpu,
+        cpu_quota_pct: task.cpu_quota_pct,
+        throttled: task.throttled,
+        total_wait_ticks: task.total_wait_ticks,
+        max_wait_ticks: task.max_wait_ticks,
+        // Deliberately skip the volatile stack scan — see fn docs.
+        stack_used: None,
+        stack_pct: None,
+    })
+}
+
 /// Install a new scheduler task name ("comm") for `task_id`, returning
 /// `true` if the task exists (and `false` if it is unknown).
 ///

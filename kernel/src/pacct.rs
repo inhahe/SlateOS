@@ -141,12 +141,13 @@ pub fn init() {
 ///
 /// Looks up the task's resource usage and records it in the ring buffer.
 fn on_task_exit(task_id: u64) {
-    // Look up task info.  We use task_list() which is a bit heavy (allocates),
-    // but exit is infrequent enough that this is acceptable.  A more optimal
-    // path would be to query the task directly, but task_list gives us what
-    // we need without exposing more internal APIs.
-    let task_list = crate::sched::task_list();
-    let Some(info) = task_list.iter().find(|t| t.id == task_id) else {
+    // Look up just this one task.  We deliberately avoid task_list() here:
+    // that builds a heap Vec of *every* task and runs an O(stack-size)
+    // volatile stack scan per task — all under the SCHED lock.  In the poison
+    // debug build that can take seconds, starving the timer tick of the lock
+    // and tripping the hard-lockup watchdog.  task_info() looks up exactly one
+    // task and skips the stack scan (which we don't use anyway).
+    let Some(info) = crate::sched::task_info(task_id) else {
         return;
     };
 

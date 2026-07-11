@@ -1,0 +1,41 @@
+most of the things i want to get away from are minor bugs and annoyances, but there are some big things, such as the security model (this is capabilities based, and also only allows one way to automatically load programs at startup, not 7 ways that are impossible to find, both of which make it easier to avoid malware)
+one is to make finding files a lot  faster, like linux, dir /s is really slow, another is to allow dragging and dropping any app to and from the desktop, taskbar pins, and start menu, which windows doesn't totally allow, one is a file find feature (like windows' with the file content indexing) that has more options, one is to show directory sizes in the file explorer (cached so it doesn't have to recompute the whole thing every time), one is to make launching a pinned app create a new taskbar entry for it, not just convert the pined entry to a running entry, there was another thing i was going to mention that adds a lot more  features to some function, but i can't remembre
+one is columns available for use in the file explorer for every fact about various media and other file formats
+one is to allow programs to register processes for rendering thumbs for given file types in the  file explorer, one is to fall back file extension launhc associations to the previous associations when the program gets uninstalled
+(and fall back thumbnail rendering code in the same way)
+i mean the whole stack of fallbacks
+so if it falls back and then that program gets uninstalled too, it falls back to the one before it
+one is to bring back aero theme from windows 7
+and have some options for window style
+and it'll come with some apps that windows doesn't
+a long list
+and the start menu will be more like windows used to be - some basic things like settings, power off/logoff/etc options, and an applications dropdown, puls recently used applicaitons and pinned applications (and a find function like windows currently has)
+oh, and i want the ability to have animated wallpaper
+either as a video or a program
+oh, and no ability to make processes invisible (also makes it easier to get rid of malware), and also, tracks which programs are using resources (filesysttem i/o, network i/o, cpu, memory) when they use it via service processes so you can see that in the task manager
+and the ability to reboot the os without rebooting the computer
+(faster)
+oh, and if you try to load a file and it's locked by some program, the os volunteers the information of which process id, exe and application name is using the file
+and certain things about the memory management algorithm and maybe the task scheduler are configurable
+and the recycle bin is more configurable, such as you can have it retain files for a certain amount of time and then automatically delete them, and/or automatically delete the oldest files when free disk space gets below a certain amount
+and libraries don't get stored repeatedly for each application that uses them like on windows, and there's no dependency hell like on linux either, it works like, i forget which linux distro, i think nixos, where there are multiple frozen sets of libraries/dependencies
+but it works better than nixos too, nixos has to recompile every program i think whenever it changes which  frozen set is the active one
+this just has pointers to the active one that the programs read
+the main advantage of not doing it the windows way isn't even that it saves disk space, it's that libraries can get security updates without having to update each app if there are even updates and if the updates incorporate the library security fixes
+oh, and it goes without saying that my OS will never reboot without the user's permission for updates
+and updates are optional
+some of the extra options for file indexing and searching include using AI and OCR for images and contents search that's flexible based on natural language manipulation rather than having to be literal
+natural language manipulation and also literal similarity levels
+like how many specified words are in the content and how closely to each other they appear, etc
+i mean, there are libraries that can do that, so it uses them
+oh, and another minor change (but that's important to me) is that grouped apps in the taskbar (same program, different running instances) can be dragged and moved independently 
+on windows you can only drag a whole group
+another difference is a very  minimal amount of hotkeys are enabled by default for the os and apps
+there's so many hotkeys on windows and windows apps that every time i make any mistake typing, it does something i don't want it to, sometimes requiring several steps to get out of
+another differences is my OS encourages developers to make tooltips explaining why and how to resolve it whenever a menu option/button is disabled
+it's so annoying that apps don't do this
+and the OS itself will do it too, of course
+another difference will be it will support linux filesystems, not ntfs, ntfs isn't bad but the filesystems will include some that support snapshots/rollback and/or deduplication
+another advantage of using linux filesystems is that the linux support will be faster that windows' which has to translate between linux and ntfs
+oh, and i think my multiple frozen sets of dependencies is planned to have deduplication, too, which should save a lot of disk space compared to nixos. i don't remember for sure.
+another feature it will have that i don't think windows has is that there will be a bunch of capability-key-gated abilities to monitor/hook many things that another program does or read all of its memory, they're called debug capabilities but i suppose they could be used for other purposes too.

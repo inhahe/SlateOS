@@ -53,3 +53,31 @@ Desktop.ini
 
 # Local safety backup taken before the 2026-06-13 todo.txt issue migration
 todo.backup-*.txt
+
+# --- Build/test artifacts purged from history 2026-07-11 (never re-track) ---
+# The scratch build output dir: staged kernel, ELF/nm dumps, boot logs, etc.
+# Regenerated every build; must never be committed.
+/build/
+# ESP staging: the bootable kernel + firmware nvram are build outputs.
+# Keep esp/limine.conf and esp/EFI/BOOT/BOOTX64.EFI (config + bootloader);
+# ignore the regenerated binaries.
+esp/boot/kernel
+esp/EFI/BOOT/kernel.bin
+esp/NvVars
+# All log files are transient (serial captures, boot/clippy/qemu runs).
+*.log
+# Clippy / build stdout+stderr capture dumps written to the repo root.
+clippy_*.json
+clippy_err.txt
+clippy_out.txt
+clippy_output.txt
+clippy_sweep.txt
+clippy_warning_counts.txt
+build_check.txt
+build_err.txt
+build_out.txt
+build_out2.txt
+build_out3.txt
+build_output.txt
+boot_output.txt
+full_build.txt

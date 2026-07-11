@@ -19,7 +19,7 @@ These are the non-negotiable architectural decisions the system is built around:
 - **Case-sensitive filesystem**, `/` path separator, all bytes allowed except `/` and null. **ext4 first** (port battle-tested code rather than inventing a filesystem).
 - **Committed memory by default**, with lazy allocation opt-in (no silent overcommit).
 - **YAML** for configuration, **JSON-lines** for structured logs (no binary logs).
-- **No AI features in the OS itself** (except speech I/O), and no ads.
+- **No AI features in the OS itself** (except speech I/O, and optional on-device AI image indexing for the file finder), and no ads.
 
 Language policy: **Rust** for the kernel, drivers, compositor, and performance-critical services; **Python compiled ahead-of-time via [fastpy](https://github.com/inhahe/fastpy)** for userspace tools and applications (native speed, faster iteration); **C** only for porting existing code (ext4, Mesa, etc.); **Ada/SPARK** for safety-critical driver logic.
 

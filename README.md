@@ -15,6 +15,7 @@ These are the non-negotiable architectural decisions the system is built around:
 - **Capability-based security.** Every kernel object is accessed through unforgeable handles; no ambient authority.
 - **Channel IPC** (structured messages + capability transfer) as the primary IPC mechanism — not file descriptors, not Unix signals.
 - **Specialized syscalls** (Linux-style, many syscall numbers) with optional io_uring-style batched submission, and **versioned syscall tables** for ABI stability.
+- **Linux binary compatibility.** A Linux-compatible syscall ABI (baseline Linux 6.6, reported as `6.6.0-slateos`) lets unmodified Linux executables run alongside native SlateOS programs, in the style of FreeBSD's Linuxulator — implementing advertised syscalls/flags for real rather than silently no-oping them.
 - **No Unix signals for process control** — shutdown and similar events are IPC messages. Hardware exceptions surface as language-level exceptions (SEH-style), not signals.
 - **Case-sensitive filesystem**, `/` path separator, all bytes allowed except `/` and null. **ext4 first** (port battle-tested code rather than inventing a filesystem).
 - **Committed memory by default**, with lazy allocation opt-in (no silent overcommit).

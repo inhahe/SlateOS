@@ -4,6 +4,8 @@ SlateOS is a from-scratch **microkernel operating system for x86_64 desktops**, 
 
 The goal is a coherent, modern desktop OS — designed all-of-a-piece rather than accreted over decades — that is competitive with Linux, Windows, and macOS on the performance-critical paths, with capability-based security from day one.
 
+> **⚠️ Status: early and very far from complete.** SlateOS is an in-progress project, not a usable operating system yet. Substantial kernel and low-level userspace work exists, but large parts of the system — most of the GUI, the desktop, and applications — are unimplemented or in early stages, and it does not yet boot to a usable desktop. Expect things to be missing, incomplete, or in flux. See the roadmap below for what exists and what remains.
+
 ## Design principles
 
 These are the non-negotiable architectural decisions the system is built around:
@@ -27,6 +29,10 @@ Development is organized into phases (Phase 0 foundation → Phase 5 advanced fe
 
 - **[roadmap-detailed.md](roadmap-detailed.md) — the fine-grained feature inventory.** Every actionable feature derived from `design.txt`, tracked as a checkbox. Start here for a comprehensive view of what exists and what remains.
 - **[roadmap.md](roadmap.md)** — the higher-level phased task list and the live source of truth for task status/ordering and dependencies.
+
+### Design mockup
+
+**[Aero Desktop (offline).html](Aero%20Desktop%20%28offline%29.html)** is a self-contained HTML mockup of how parts of the shell and desktop are envisioned to look and behave. It is a visual/UX target — not the implemented UI — meant to convey the intended look and feel of the future desktop. (Download the file and open it in a browser to view it; GitHub shows `.html` as source rather than rendering it.)
 
 ## Repository layout
 

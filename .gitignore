@@ -81,3 +81,7 @@ build_out3.txt
 build_output.txt
 boot_output.txt
 full_build.txt
+
+# Exception: this saved page is intentionally tracked (reference kept in-repo),
+# even though the blanket *.html rule above ignores saved web pages.
+!Aero Desktop (offline).html

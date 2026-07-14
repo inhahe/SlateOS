@@ -341,6 +341,16 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::NetSocket => {
+            // Bump the socket-slot refcount so parent and child each own one
+            // reference to the same daemon connection (open-file-description
+            // semantics across fork) — same id.  The connection is torn down
+            // only when the last of them closes.
+            crate::net::socket::dup(
+                crate::net::socket::SocketHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -422,6 +432,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::Drm => {
             crate::drm::card_fd::close(
                 crate::drm::card_fd::DrmCardHandle::from_raw(id),
+            );
+        }
+        ResourceType::NetSocket => {
+            crate::net::socket::close(
+                crate::net::socket::SocketHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

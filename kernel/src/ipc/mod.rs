@@ -106,6 +106,15 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                     crate::drm::card_fd::DrmCardHandle::from_raw(handle_raw),
                 );
             }
+            ResourceType::NetSocket => {
+                // Drop this process's reference to the AF_INET socket's daemon
+                // connection.  The final owner's close runs `NetstackConn`
+                // teardown (a blocking daemon round-trip); safe in the
+                // exit-cleanup context (kernel thread, no locks held here).
+                crate::net::socket::close(
+                    crate::net::socket::SocketHandle::from_raw(handle_raw),
+                );
+            }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;
                 // closing here drops this process's single reference.  A

@@ -33,6 +33,39 @@ grant/transfer op) before any *untrusted* process is allowed to use
 apps. Until then, only kernel-mediated, trusted-daemon SHM sharing is
 safe. Where it bites: any future userspace-to-userspace SHM use.
 
+### D-NETSOCK-SYNC. Daemon-backed AF_INET stream sockets (migration 5.5) are synchronous, single-stream, and IPv4-only — TECH DEBT (logged 2026-07-14)
+
+**Where:** `kernel/src/net/socket.rs` + the switch-gated socket arms in
+`kernel/src/syscall/linux.rs` (`sys_socket`/`connect`/`sendto`/`recvfrom`/
+`getpeername`, `dispatch_socket_read`/`write`). All gated behind
+`net.userspace` (default off).
+
+Known limitations, all deliberate for the 5.5 increment and to be closed as
+Phase 5 progresses:
+
+- **`O_NONBLOCK` is not honoured.** The `NetstackConn` ring client is
+  synchronous — every `connect`/`send`/`recv` blocks until the daemon replies.
+  The flag round-trips correctly via the fd table (`fcntl` F_GETFL/F_SETFL) but
+  does not change blocking behaviour, and `poll`/`epoll` readiness for a
+  connected socket is reported *best-effort always-ready* (POLLIN|POLLOUT) so
+  the subsequent read/write does the real, possibly-blocking work. Proper fix:
+  async ring completions + a real readiness signal (eventfd/completion port)
+  when the always-on socket server lands.
+- **One connection per socket.** A socket wraps exactly one daemon TCP session;
+  there is no `listen`/`accept` (server sockets) — only client `connect`.
+- **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
+  source-address out-params (arg4/arg5) are left untouched (fine for a connected
+  stream socket, but not for datagram semantics).
+- **IPv6 unsupported.** `AF_INET6` passes `sys_socket` (Linux does too) but
+  `connect` on an `AF_INET6` sockaddr returns `EAFNOSUPPORT`; only IPv4 connect
+  works. `getsockname` returns `EBADF` (local address not tracked).
+- **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
+  recv ≤512 B per call (callers must loop). Not a correctness bug, but small.
+
+Proper fix path: 5.6+ makes the daemon persistent/always-on and grows the ring
+client to async multi-stream, at which point nonblock/poll/listen/IPv6 become
+implementable.
+
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 
 **Where:** `kernel/src/proc/pcb.rs` — `try_resolve_fault` (demand-paged

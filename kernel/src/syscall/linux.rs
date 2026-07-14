@@ -977,6 +977,9 @@ pub mod errno {
     pub const ESOCKTNOSUPPORT: i32 = 94;
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
+    pub const EISCONN: i32 = 106;
+    pub const ENOTCONN: i32 = 107;
+    pub const ECONNREFUSED: i32 = 111;
     pub const ETIMEDOUT: i32 = 110;
     pub const ECANCELED: i32 = 125;
     pub const ENODATA: i32 = 61;
@@ -1277,6 +1280,8 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::DeviceBusy => errno::EBUSY,
+        KernelError::ConnectionRefused => errno::ECONNREFUSED,
+        KernelError::NotConnected => errno::ENOTCONN,
     }
 }
 
@@ -3595,6 +3600,22 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::drm::card_fd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Socket => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/.../DrmCard arms above — then drop one
+            // refcount on the in-kernel socket slot (final close runs the
+            // daemon-connection teardown).
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::NetSocket,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+            crate::net::socket::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -3663,7 +3684,70 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
+        // AF_INET stream socket — `write(2)` is `send(2)` with no flags.
+        HandleKind::Socket => dispatch_socket_write(entry, buf, len),
     }
+}
+
+/// Socket write — copy up to `len` bytes from the user buffer and hand them to
+/// the daemon-backed stream socket via [`crate::net::socket::send`].  Returns
+/// the number of bytes the daemon accepted.
+///
+/// The daemon client is synchronous (one blocking round-trip per call) and caps
+/// a single request at its send-buffer size; [`crate::net::socket::send`]
+/// chunks larger buffers internally, so we forward the whole (bounded) request.
+fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    // Bound the staging buffer: a single write is capped to a page.  A larger
+    // request is a short write (well-defined for a stream socket) — the caller
+    // loops.  This keeps the kernel staging allocation bounded.
+    let cap = usize::try_from(len).unwrap_or(usize::MAX).min(4096);
+    if let Err(e) = crate::mm::user::validate_user_read(buf, cap) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kbuf = alloc::vec![0u8; cap];
+    // SAFETY: validate_user_read confirmed [buf, +cap) is readable;
+    // copy_from_user re-checks under SMAP.
+    let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), cap) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    match crate::net::socket::send(h, &kbuf) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Socket read — receive up to `cap` bytes from the daemon-backed stream socket
+/// via [`crate::net::socket::recv`] and copy them to the user buffer.  Returns
+/// the number of bytes received (`0` = peer closed / no data).
+fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX).min(4096);
+    if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kbuf = alloc::vec![0u8; cap_usize];
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let n = match crate::net::socket::recv(h, &mut kbuf) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let n_usize = usize::try_from(n).unwrap_or(0).min(cap_usize);
+    if n_usize > 0 {
+        // SAFETY: validate_user_write confirmed cap_usize bytes writable;
+        // n_usize <= cap_usize.  copy_to_user re-checks under SMAP.
+        let r = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n_usize) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(i64::from(n))
 }
 
 /// Memfd write — copy `len` bytes from user buffer into the memfd at
@@ -3940,6 +4024,8 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // output-only mixer has no real capture source, so we hand back
         // silence.  Reading a playback substream is EINVAL, matching Linux.
         HandleKind::AlsaPcm => dispatch_alsa_pcm_read(entry, buf, cap),
+        // AF_INET stream socket — `read(2)` is `recv(2)` with no flags.
+        HandleKind::Socket => dispatch_socket_read(entry, buf, cap),
     }
 }
 
@@ -4950,7 +5036,8 @@ fn fcntl_flock_apply(
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
-        | HandleKind::DrmCard => {
+        | HandleKind::DrmCard
+        | HandleKind::Socket => {
             return linux_err(errno::EBADF);
         }
     }
@@ -5085,7 +5172,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -15667,7 +15754,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
 
@@ -16561,7 +16648,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
-        | HandleKind::DrmCard => return linux_err(errno::EINVAL),
+        | HandleKind::DrmCard
+        | HandleKind::Socket => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -18418,6 +18506,7 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFIFO: u32 = 0o010000;
+const S_IFSOCK: u32 = 0o140000;
 const S_IFLNK: u32 = 0o120000;
 
 /// Derive the `st_mode` (file-type | permission) bits from VFS metadata.
@@ -18611,6 +18700,9 @@ fn fill_stat_for_fd(
         // DRM card / render node is a character device node under /dev/dri
         // (crw-rw---- root:video on Linux), like the ALSA nodes.
         HandleKind::DrmCard => (S_IFCHR | 0o660, 4096),
+        // A daemon-backed AF_INET stream socket: Linux stat reports
+        // S_IFSOCK with 0777 perms (srwxrwxrwx on the anon socket inode).
+        HandleKind::Socket => (S_IFSOCK | 0o777, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -18970,6 +19062,8 @@ fn fill_statx_for_fd(
         HandleKind::AlsaControl => ((S_IFCHR | 0o660) as u16, 4096),
         // DRM card / render node character device node under /dev/dri.
         HandleKind::DrmCard => ((S_IFCHR | 0o660) as u16, 4096),
+        // Daemon-backed AF_INET stream socket — S_IFSOCK | 0777, like Linux.
+        HandleKind::Socket => ((S_IFSOCK | 0o777) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -20614,7 +20708,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         }
         // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
         // be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
 
@@ -25862,6 +25956,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Socket => {
+            let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+            if crate::net::socket::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -25900,6 +26000,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
         HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+        HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
     if let Some(rt) = resource {
@@ -25978,6 +26079,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::DrmCard => {
             let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
             crate::drm::card_fd::close(h);
+        }
+        HandleKind::Socket => {
+            let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
+            crate::net::socket::close(h);
         }
     }
 }
@@ -28905,6 +29010,28 @@ fn poll_revents_from_entry(
                 0
             }
         }
+        HandleKind::Socket => {
+            // The daemon-backed stream socket is driven by a *synchronous*
+            // ring client (see known-issues.md: nonblock/readiness not yet
+            // wired), so we cannot cheaply probe for queued RX bytes without
+            // a blocking round-trip.  Best-effort readiness: a connected
+            // socket is reported both readable and writable (the subsequent
+            // read/write does the real, possibly-blocking work); an
+            // unconnected socket is writable only (connect may proceed).
+            match crate::net::socket::is_connected(
+                crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
+            ) {
+                Ok(true) => {
+                    poll_bits::POLLIN
+                        | poll_bits::POLLRDNORM
+                        | poll_bits::POLLOUT
+                        | poll_bits::POLLWRNORM
+                }
+                Ok(false) => poll_bits::POLLOUT | poll_bits::POLLWRNORM,
+                // Stale handle — surface an error condition to the poller.
+                Err(_) => poll_bits::POLLNVAL,
+            }
+        }
     };
 
     raw & mask
@@ -29807,7 +29934,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
-        | HandleKind::DrmCard => {}
+        | HandleKind::DrmCard
+        | HandleKind::Socket => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -33030,6 +33158,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::AlsaPcm => 10,
         HandleKind::AlsaControl => 11,
         HandleKind::DrmCard => 12,
+        HandleKind::Socket => 13,
     }
 }
 
@@ -34155,7 +34284,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -35518,6 +35647,65 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             _ => {}
         }
     }
+    // Path B userspace-netstack cutover (design-decisions.md §63/§66):
+    // when the `net.userspace` boot switch is set, an AF_INET/AF_INET6
+    // SOCK_STREAM socket becomes a real daemon-backed stream socket
+    // ([`crate::net::socket`]).  Every other family/type — and the entire
+    // socket surface when the switch is off — stays ENOSYS (staged cutover:
+    // the in-kernel resident stack is authoritative until the default flips).
+    // All the gate checks above have already validated (domain, type,
+    // protocol); by here a matching (2|10, SOCK_STREAM) has protocol 0 or TCP.
+    if matches!(domain, 2 | 10)
+        && sock_type == 1
+        && crate::net::netstack_client::userspace_enabled()
+    {
+        // A real caller is required — kernel context has no fd table.
+        let caller = match caller_pid() {
+            Some(p) => p,
+            None => return linux_err(errno::EBADF),
+        };
+        // O_NONBLOCK is recorded authoritatively in the fd-table status flags
+        // below (fcntl(F_GETFL/F_SETFL) reads/writes it there); the socket
+        // object itself does not track it.
+        let nonblock = sock_flags & 0o4000 != 0;
+        let cloexec = sock_flags & 0o2_000_000 != 0;
+        let handle = match crate::net::socket::create() {
+            Ok(h) => h,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        // Register in the per-process IPC handle list so process-exit cleanup
+        // releases the daemon connection and `fork()` refcount-dups it into the
+        // child — same rationale as the memfd path (see `sys_memfd_create`).
+        pcb::register_ipc_handle(
+            caller,
+            crate::cap::ResourceType::NetSocket,
+            handle.raw(),
+        );
+        let status_flags =
+            oflags::O_RDWR | if nonblock { oflags::O_NONBLOCK } else { 0 };
+        let fd_flags = if cloexec {
+            crate::proc::linux_fd::FD_CLOEXEC
+        } else {
+            0
+        };
+        let entry =
+            crate::proc::linux_fd::FdEntry::socket(handle.raw(), fd_flags, status_flags);
+        return match pcb::linux_fd_install(caller, entry, 0) {
+            Ok(fd) => SyscallResult::ok(i64::from(fd)),
+            Err(e) => {
+                // Install failed (e.g. table full).  Drop the just-registered
+                // ipc_handles entry and tear the socket down so the next fork
+                // doesn't see a phantom handle.
+                pcb::deregister_ipc_handle(
+                    caller,
+                    crate::cap::ResourceType::NetSocket,
+                    handle.raw(),
+                );
+                crate::net::socket::close(handle);
+                linux_err(linux_errno_for(e))
+            }
+        };
+    }
     // No networking yet → ENOSYS.
     linux_err(errno::ENOSYS)
 }
@@ -35976,7 +36164,54 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
     }
+    // Path B userspace-netstack cutover: a real daemon-backed AF_INET stream
+    // socket connects for real through [`crate::net::socket`].  When the switch
+    // is off (or the fd is not one of our sockets) fall through to the
+    // stubbed EBADF, preserving the pre-cutover behaviour.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        return socket_connect_from_user(entry, args.arg1, addr_len);
+    }
     linux_err(errno::EBADF)
+}
+
+/// Parse a user `struct sockaddr_in` and drive the daemon-backed connect.
+///
+/// AF_INET only for the first cut of the userspace-netstack cutover — the
+/// daemon ring protocol carries a 4-byte IPv4 endpoint.  AF_INET6 connects
+/// return `EAFNOSUPPORT` (documented limitation).
+fn socket_connect_from_user(entry: FdEntry, addr_ptr: u64, addr_len: i32) -> SyscallResult {
+    // `struct sockaddr_in` is 16 bytes.  The validation gate already confirmed
+    // [addr_ptr, +addr_len) is readable and addr_len >= 2; require the full
+    // sockaddr_in for a well-formed AF_INET connect.
+    #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+    if (addr_len as usize) < 16 {
+        return linux_err(errno::EINVAL);
+    }
+    let mut sa = [0u8; 16];
+    // SAFETY: the gate validated `addr_len` (>= 16) bytes readable at addr_ptr;
+    // copy_from_user re-checks under SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+        return linux_err(linux_errno_for(e));
+    }
+    // Destructure to avoid indexing: sa_family (host-endian u16), sin_port
+    // (network/BE u16), sin_addr (4 octets in network order), then padding.
+    let [f0, f1, p0, p1, a0, a1, a2, a3, ..] = sa;
+    let family = u16::from_ne_bytes([f0, f1]);
+    if family != 2 {
+        return linux_err(errno::EAFNOSUPPORT);
+    }
+    let port = u16::from_be_bytes([p0, p1]);
+    let ip = [a0, a1, a2, a3];
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    match crate::net::socket::connect(h, &ip, port) {
+        Ok(()) => SyscallResult::ok(0),
+        // Already connected → Linux EISCONN.
+        Err(crate::error::KernelError::AlreadyExists) => linux_err(errno::EISCONN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `getsockname(sockfd, addr*, addrlen*)`.
@@ -36061,7 +36296,80 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    // Path B: getpeername on a connected daemon-backed stream socket
+    // returns the remote endpoint the socket is connected to.  A socket
+    // that has not completed connect() reports ENOTCONN, matching Linux.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        return match crate::net::socket::peer(h) {
+            Ok((ip, port)) => socket_write_peer_addr(args.arg1, args.arg2, &ip, port),
+            Err(crate::error::KernelError::NotConnected) => linux_err(errno::ENOTCONN),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
     linux_err(errno::EBADF)
+}
+
+/// Serialise an IPv4 endpoint into the user's `struct sockaddr_in` for a
+/// `getpeername`/`getsockname`-style out-param, honouring the caller's
+/// supplied `*addrlen` (a short buffer is truncated, as Linux does) and
+/// writing back the full 16-byte address length.
+fn socket_write_peer_addr(
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+    ip: &[u8; 4],
+    port: u16,
+) -> SyscallResult {
+    // Build the 16-byte sockaddr_in: family (AF_INET=2, host-endian),
+    // port (big-endian), addr (network order), 8 bytes zero padding.
+    let mut sa = [0u8; 16];
+    let [f0, f1] = 2u16.to_ne_bytes();
+    sa[0] = f0;
+    sa[1] = f1;
+    let [p0, p1] = port.to_be_bytes();
+    sa[2] = p0;
+    sa[3] = p1;
+    sa[4] = ip[0];
+    sa[5] = ip[1];
+    sa[6] = ip[2];
+    sa[7] = ip[3];
+    // Read the caller-provided buffer length so we truncate rather than
+    // overflow a short buffer (move_addr_to_user semantics).
+    let mut lenbuf = [0u8; 4];
+    // SAFETY: validate_sockaddr_out already confirmed addrlen_ptr is a
+    // readable 4-byte user region.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(addrlen_ptr, lenbuf.as_mut_ptr(), 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let caller_len = u32::from_ne_bytes(lenbuf) as usize;
+    let copy_len = core::cmp::min(caller_len, sa.len());
+    if copy_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(addr_ptr, copy_len) {
+            return linux_err(linux_errno_for(e));
+        }
+        // SAFETY: validate_user_write above confirmed `copy_len` bytes at
+        // addr_ptr are writable for the caller.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(sa.as_ptr(), addr_ptr, copy_len)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Linux writes back the *full* address size (16) even when the buffer
+    // was too small — the caller detects truncation by len > bufsize.
+    let full = (sa.len() as u32).to_ne_bytes();
+    // SAFETY: validate_sockaddr_out confirmed addrlen_ptr is writable for 4 bytes.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_to_user(full.as_ptr(), addrlen_ptr, 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `sendto(sockfd, buf*, len, flags, dest_addr*, addrlen)`.
@@ -36136,6 +36444,17 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
             return r;
         }
     }
+    // Path B: `send(2)`/`sendto(2)` on a connected daemon-backed stream socket
+    // forwards the payload to the daemon.  A destination address on a connected
+    // stream socket is ignored (Linux ignores it too, or returns EISCONN — we
+    // take the permissive path and just send).  MSG_* flags (args.arg3) are not
+    // yet honoured (documented limitation).
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        return dispatch_socket_write(entry, buf, args.arg2);
+    }
     linux_err(errno::EBADF)
 }
 
@@ -36193,6 +36512,17 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     // and half-NULL cases.
     if let Err(r) = validate_sockaddr_out(args.arg4, args.arg5) {
         return r;
+    }
+    // Path B: `recv(2)`/`recvfrom(2)` on a connected daemon-backed stream socket
+    // returns bytes from the daemon.  The optional source-address out-params
+    // (args.arg4 / args.arg5) are left untouched — a connected stream socket's
+    // peer is fixed and most callers pass NULL (documented limitation).  MSG_*
+    // flags (args.arg3) are not yet honoured.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        return dispatch_socket_read(entry, buf, args.arg2);
     }
     linux_err(errno::EBADF)
 }
@@ -39267,7 +39597,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -39324,7 +39654,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -41122,7 +41452,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -41153,7 +41483,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -41215,7 +41545,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -41259,7 +41589,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
 
@@ -58385,6 +58715,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                 HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
                 HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+                HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
                 HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
             }
         };

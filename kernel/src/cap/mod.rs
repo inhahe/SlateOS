@@ -216,6 +216,20 @@ pub enum ResourceType {
     /// `resource_id` is reserved for future per-interface handles; currently
     /// checked via `has_capability_type` for "any NIC" access.
     NetRaw = 24,
+    /// An AF_INET/AF_INET6 `SOCK_STREAM` socket backed by the userspace
+    /// `net.stack` daemon (Path B userspace-netstack cutover — see
+    /// design-decisions.md §63/§66).
+    ///
+    /// A refcounted reference into [`crate::net::socket`] holding one daemon
+    /// connection (SHM ring + daemon TCP session); no capability is required to
+    /// create one — the handle itself is the authority (the [`Socket`]
+    /// capability gates *creating* an AF_INET socket, this type tracks the
+    /// per-open resource).  Tracked per-process so the connection is torn down
+    /// when an owning process dies, and so `fork()` knows to bump the refcount
+    /// in the child.
+    ///
+    /// [`Socket`]: ResourceType::Socket
+    NetSocket = 25,
 }
 
 // ---------------------------------------------------------------------------

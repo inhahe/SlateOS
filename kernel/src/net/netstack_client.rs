@@ -100,10 +100,6 @@ pub struct NetstackConn {
     handle: shm::ShmHandle,
     /// Region size in bytes (as passed to the daemon in each `OP_RING_TCP`).
     size: u32,
-    /// The mapped ring driver over `handle`. Re-attaching to the same VA is
-    /// stateless (the free-running indices live in the shared region), so this
-    /// owned struct is valid across every round-trip.
-    ring: netring::Ring,
     /// The single connection id this client drives.
     conn_id: u32,
     /// Next `user_data` tag to hand out.
@@ -111,10 +107,21 @@ pub struct NetstackConn {
     /// Whether a connection is currently open (a successful `connect` that has
     /// not yet been closed). Guards the teardown `OP_CLOSE`.
     connected: bool,
-    /// Whether the daemon still holds a session for our ring. Cleared once we
-    /// send `OP_STOP`, so teardown runs at most once.
+    /// Whether the daemon has served at least one round-trip for our ring (and
+    /// therefore may hold a session for it). Set the first time a submission
+    /// succeeds; cleared once we send `OP_STOP`. Guards teardown so a
+    /// created-but-never-used connection never contacts the daemon, and so
+    /// teardown runs at most once.
     session_open: bool,
 }
+
+// Note: every field is plain data (a `ShmHandle` u64 newtype, integers, bools),
+// so `NetstackConn` is automatically `Send + Sync`. Crucially it does *not* hold
+// an owned `Ring` view (whose raw `*mut u8` would make it `!Send`): the ring is
+// re-`attach`ed on demand from the shared-memory handle inside each operation.
+// This is what lets a `NetstackConn` live in the global socket table. Callers
+// that share one must still serialize access with their own lock, because the
+// daemon-side session is single-producer/single-consumer.
 
 impl NetstackConn {
     /// Allocate the shared ring and prepare a client. Does **not** contact the
@@ -143,25 +150,38 @@ impl NetstackConn {
         };
         // SAFETY: `kaddr` is valid and writable for `size` (>= need) bytes and is
         // exclusively ours until the daemon attaches during a submit round. The
-        // ring header is published with a release fence inside `init`.
-        let ring = match unsafe { netring::Ring::init(kaddr, size, SQ_ENTRIES, CQ_ENTRIES, DATA_LEN) }
-        {
-            Some(r) => r,
-            None => {
-                shm::close(handle);
-                return Err(KernelError::InternalError);
-            }
-        };
+        // ring header is published with a release fence inside `init`. We only
+        // need the header written here — the driver view is re-`attach`ed on
+        // demand per op (see `attach_ring`), so the `Ring` value is discarded.
+        if unsafe { netring::Ring::init(kaddr, size, SQ_ENTRIES, CQ_ENTRIES, DATA_LEN) }.is_none() {
+            shm::close(handle);
+            return Err(KernelError::InternalError);
+        }
         let size_u32 = u32::try_from(size).map_err(|_| KernelError::InternalError)?;
         Ok(Self {
             handle,
             size: size_u32,
-            ring,
             conn_id: CONN_ID,
             next_ud: UD_BASE,
             connected: false,
-            session_open: true,
+            session_open: false,
         })
+    }
+
+    /// Re-attach the ring driver view from the shared-memory handle.
+    ///
+    /// Attaching is stateless — the free-running SQ/CQ indices live in the shared
+    /// region, so re-deriving the view each op is correct (and avoids caching a
+    /// non-`Send` raw pointer in the struct). The header was published by
+    /// [`open`](Self::open)'s `init`.
+    fn attach_ring(&self) -> KernelResult<netring::Ring> {
+        let kaddr = shm::kernel_addr(self.handle)?;
+        let len = self.size as usize;
+        // SAFETY: `kaddr` is the stable kernel VA of our shm region, valid and
+        // aligned for `len` bytes for the region's lifetime; `attach` only reads
+        // the header (published by `open`) and bounds-checks the geometry, so it
+        // can never read/write outside the region.
+        unsafe { netring::Ring::attach(kaddr, len) }.ok_or(KernelError::InternalError)
     }
 
     /// Open the TCP connection to `ip:port`.
@@ -177,6 +197,7 @@ impl NetstackConn {
     /// completion, service-channel failure) — distinct from a `< 0` connect
     /// result, which is a normal "no upstream" outcome.
     pub fn connect(&mut self, ip: &[u8; 4], port: u16) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
         let ud = self.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_CONNECT,
@@ -185,7 +206,7 @@ impl NetstackConn {
             aux: netipc::ring::Sqe::pack_endpoint(ip, port),
             ..netipc::ring::Sqe::default()
         };
-        let res = self.submit_and_reap(&sqe)?;
+        let res = self.submit_and_reap(&ring, &sqe)?;
         if res >= 0 {
             self.connected = true;
         }
@@ -205,12 +226,13 @@ impl NetstackConn {
     ///
     /// Returns an error on a control-protocol fault (see [`connect`](Self::connect)).
     pub fn send(&mut self, buf: &[u8]) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
         let mut total: i32 = 0;
         let mut off = 0usize;
         while off < buf.len() {
             let end = off.saturating_add(SND_CAP as usize).min(buf.len());
             let chunk = buf.get(off..end).ok_or(KernelError::InternalError)?;
-            if !self.ring.write_data(SND_OFF as usize, chunk) {
+            if !ring.write_data(SND_OFF as usize, chunk) {
                 return Err(KernelError::InternalError);
             }
             let chunk_len = u32::try_from(chunk.len()).map_err(|_| KernelError::InternalError)?;
@@ -223,7 +245,7 @@ impl NetstackConn {
                 user_data: ud,
                 aux: 0,
             };
-            let res = self.submit_and_reap(&sqe)?;
+            let res = self.submit_and_reap(&ring, &sqe)?;
             if res < 0 {
                 // Peer gone mid-stream: report bytes already queued, or the raw
                 // negative result if nothing has been sent yet.
@@ -255,6 +277,7 @@ impl NetstackConn {
     /// Returns an error on a control-protocol fault (see [`connect`](Self::connect))
     /// or if the ring data window cannot be read back.
     pub fn recv(&mut self, buf: &mut [u8]) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
         let ud = self.next_ud();
@@ -266,13 +289,13 @@ impl NetstackConn {
             user_data: ud,
             aux: 0,
         };
-        let res = self.submit_and_reap(&sqe)?;
+        let res = self.submit_and_reap(&ring, &sqe)?;
         if res <= 0 {
             return Ok(res);
         }
         let n = usize::try_from(res).unwrap_or(0).min(want);
         let window = buf.get_mut(..n).ok_or(KernelError::InternalError)?;
-        if !self.ring.read_data(RCV_OFF as usize, window) {
+        if !ring.read_data(RCV_OFF as usize, window) {
             return Err(KernelError::InternalError);
         }
         Ok(res)
@@ -305,18 +328,26 @@ impl NetstackConn {
     /// Push one SQE, run one control round-trip, and reap exactly one completion,
     /// verifying it echoes the SQE's `user_data` and that no extra completion is
     /// posted. Returns the completion result.
-    fn submit_and_reap(&mut self, sqe: &netipc::ring::Sqe) -> KernelResult<i32> {
+    fn submit_and_reap(
+        &mut self,
+        ring: &netring::Ring,
+        sqe: &netipc::ring::Sqe,
+    ) -> KernelResult<i32> {
         let want_ud = sqe.user_data;
-        if !self.ring.sq_push(sqe) {
+        if !ring.sq_push(sqe) {
             return Err(KernelError::ResourceExhausted);
         }
         self.submit_round()?;
-        let cqe = self.ring.cq_pop().ok_or(KernelError::InternalError)?;
+        // The daemon served us, so it now holds a session for our ring — mark it
+        // so teardown emits an `OP_STOP`. (A created-but-never-submitted client
+        // leaves this false and never contacts the daemon.)
+        self.session_open = true;
+        let cqe = ring.cq_pop().ok_or(KernelError::InternalError)?;
         if cqe.user_data != want_ud {
             return Err(KernelError::InternalError);
         }
         // No SQE should ever produce more than one completion.
-        if self.ring.cq_pop().is_some() {
+        if ring.cq_pop().is_some() {
             return Err(KernelError::InternalError);
         }
         Ok(cqe.result)
@@ -356,6 +387,16 @@ impl NetstackConn {
         if !self.session_open {
             return;
         }
+        // Attach once for the whole teardown. If the region can't be attached
+        // (should not happen while the handle is live), give up cleanly — the
+        // daemon reaps idle sessions on its own deadline anyway.
+        let ring = match self.attach_ring() {
+            Ok(r) => r,
+            Err(_) => {
+                self.session_open = false;
+                return;
+            }
+        };
         if self.connected {
             let ud = self.next_ud();
             let close_sqe = netipc::ring::Sqe {
@@ -365,7 +406,7 @@ impl NetstackConn {
                 ..netipc::ring::Sqe::default()
             };
             // Best effort — the session is torn down next regardless.
-            let _ = self.submit_and_reap(&close_sqe);
+            let _ = self.submit_and_reap(&ring, &close_sqe);
             self.connected = false;
         }
         let ud = self.next_ud();
@@ -374,7 +415,7 @@ impl NetstackConn {
             user_data: ud,
             ..netipc::ring::Sqe::default()
         };
-        let _ = self.submit_and_reap(&stop_sqe);
+        let _ = self.submit_and_reap(&ring, &stop_sqe);
         self.session_open = false;
     }
 }

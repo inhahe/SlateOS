@@ -45,6 +45,7 @@ pub mod mdns;
 pub mod ntp;
 pub mod smtp;
 pub mod snmp;
+pub mod socket;
 pub mod socks;
 pub mod ssh;
 pub mod syslog;
@@ -372,6 +373,7 @@ pub fn self_test() -> KernelResult<()> {
     websocket::self_test()?;
     dhcpd::self_test()?;
     dashboard::self_test()?;
+    socket::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

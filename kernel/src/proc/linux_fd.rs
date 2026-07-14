@@ -171,6 +171,16 @@ pub enum HandleKind {
     /// (like `AlsaPcm`) and `needs_kernel_close()` returns `true` (close
     /// releases one refcount on the in-kernel `DRM_CARD_TABLE` entry).
     DrmCard,
+    /// AF_INET / AF_INET6 `SOCK_STREAM` socket backed by the userspace
+    /// `net.stack` daemon (Path B userspace-netstack cutover).  `raw_handle`
+    /// holds the `net::socket::SocketHandle` raw u64.  `read`/`write` map to
+    /// stream `recv`/`send` against the daemon connection; the socket is
+    /// driven `socket()` → `connect()` → `send`/`recv` → `close()`.  Shared
+    /// across `dup`/`fork` via the refcounted `SOCKET_TABLE`, so
+    /// `needs_kernel_close()` returns `true` (close releases one refcount and,
+    /// on the last fd, tears the daemon connection down).  Only created when
+    /// the `net.userspace` boot switch is set.
+    Socket,
 }
 
 impl HandleKind {
@@ -189,7 +199,8 @@ impl HandleKind {
             | Self::Timerfd
             | Self::Inotify
             | Self::AlsaPcm
-            | Self::DrmCard => true,
+            | Self::DrmCard
+            | Self::Socket => true,
         }
     }
 }
@@ -406,6 +417,22 @@ impl FdEntry {
         Self {
             kind: HandleKind::AlsaControl,
             raw_handle: 0,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an AF_INET/AF_INET6 `SOCK_STREAM` socket.
+    /// `raw_handle` is the `net::socket::SocketHandle` raw u64.  `fd_flags`
+    /// carries `FD_CLOEXEC` when created with `SOCK_CLOEXEC`; `status_flags`
+    /// carries `O_NONBLOCK` when created with `SOCK_NONBLOCK`.
+    #[must_use]
+    pub const fn socket(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Socket,
+            raw_handle: handle,
             fd_flags,
             status_flags,
             f_owner: 0,

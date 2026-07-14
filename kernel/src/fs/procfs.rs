@@ -3143,6 +3143,9 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
                 String::from("/dev/dri/card0")
             }
         }
+        // A daemon-backed AF_INET stream socket resolves to Linux's
+        // `socket:[inode]` label; we use the raw handle as the inode.
+        HandleKind::Socket => format!("socket:[{}]", entry.raw_handle),
     }
 }
 

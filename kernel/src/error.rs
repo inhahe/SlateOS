@@ -116,6 +116,15 @@ pub enum KernelError {
     NoSuchDevice = -601,
     /// The device is busy and cannot accept the operation right now.
     DeviceBusy = -602,
+
+    // --- Network (700 - 799) ---
+    /// A connection attempt was actively refused by the peer or the netstack
+    /// could not establish it (no upstream / RST).  Maps to `ECONNREFUSED`.
+    ConnectionRefused = -700,
+    /// The socket is not connected and the operation requires an established
+    /// connection (e.g. `send`/`recv` on an unconnected stream socket).  Maps
+    /// to `ENOTCONN`.
+    NotConnected = -701,
 }
 
 impl KernelError {
@@ -165,6 +174,8 @@ impl KernelError {
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",
+            Self::ConnectionRefused => "connection refused",
+            Self::NotConnected => "socket not connected",
         }
     }
 

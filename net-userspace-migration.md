@@ -219,7 +219,8 @@ daemon** — and the §64 switch is fundamentally about *NIC ownership at boot*.
   connect/send/recv/close ring-driving client currently inlined in the
   `spawn.rs` self-tests into a reusable kernel `netstack` client module. Add the
   `net.userspace` boot switch (default **off**). No syscall behavior change yet.
-- **5.5 — AF_INET SOCK_STREAM sockets over the daemon (switch-gated).** Give the
+- **5.5 — AF_INET SOCK_STREAM sockets over the daemon (switch-gated). [DONE]**
+  Give the
   kernel a socket-fd object (in the Linux fd table) backed by a daemon ring
   connection; wire `sys_socket`/`connect`/`sendto`/`recvfrom`/`read`/`write`/
   `close` for AF_INET SOCK_STREAM to it *when the switch is on*. Validate with a
@@ -606,3 +607,27 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   still proves session persistence — no duplicate ring test). No syscall behavior
   change. Next — 5.5: AF_INET SOCK_STREAM sockets in the Linux ABI backed by this
   client, switch-gated.
+- 2026-07-14: Phase 5 increment 5.5 landed — **AF_INET/AF_INET6 SOCK_STREAM
+  sockets in the Linux ABI, switch-gated.** New object layer
+  `kernel/src/net/socket.rs`: a `SocketHandle`/`SockState` stream socket wrapping
+  one `NetstackConn` behind an `Arc<Mutex<SocketInner>>` in a global
+  `SOCKET_TABLE`, with fd-refcounting (`create`/`dup`/`close`) and a strict lock
+  discipline (never hold the table lock across a blocking daemon round-trip; the
+  final `Arc` drop / teardown runs after the table lock is released). New
+  `HandleKind::Socket` fd kind and `ResourceType::NetSocket` per-process IPC
+  handle, so a socket's daemon connection is released on process exit
+  (`ipc::cleanup_handles`) and refcount-dup'd across `fork` (`fork::dup_one`) —
+  mirroring the memfd pattern exactly. Wired, **only when `net.userspace` is on**:
+  `sys_socket` (AF_INET/AF_INET6 + SOCK_STREAM → real fd; else unchanged ENOSYS),
+  `sys_connect` (parses `sockaddr_in`, AF_INET6 → EAFNOSUPPORT), `sys_sendto`/
+  `sys_recvfrom` (delegate to send/recv; MSG_* flags and the recvfrom src-addr
+  out-params ignored), `read`/`write`/`close` dispatch, and `getpeername`
+  (returns the connected peer). All ~21 exhaustive `HandleKind` match sites across
+  `linux.rs`/`procfs.rs` extended with a `Socket` arm (fstat → S_IFSOCK|0777,
+  fsync/ftruncate/etc → EINVAL/ESPIPE, poll → best-effort ready, kcmp ordering,
+  /proc/fd → `socket:[ino]`). `O_NONBLOCK` is tracked authoritatively in the fd
+  table (fcntl F_GETFL/F_SETFL), not duplicated in the socket. Added
+  `socket::self_test` (create/dup/close refcount + closed-handle error surface),
+  run in the net self-test aggregator. Switch off → syscall surface unchanged;
+  the in-kernel resident stack still owns the NIC. Next — 5.6: persistent daemon
+  spawn at boot + NIC ownership handoff.

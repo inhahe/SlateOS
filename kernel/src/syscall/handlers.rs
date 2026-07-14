@@ -9326,6 +9326,118 @@ pub fn sys_icmp_ping_wait(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Raw layer-2 NIC access (865-868) — userspace network stack (§63, Path B)
+// ---------------------------------------------------------------------------
+
+/// Minimum raw Ethernet frame length (dst+src MAC + EtherType).
+const RAW_FRAME_MIN: usize = 14;
+/// Maximum raw Ethernet frame length we accept on TX / require room for on RX.
+/// 1514 = 14-byte header + 1500 MTU; +8 slack for one/two 802.1Q VLAN tags.
+const RAW_FRAME_MAX: usize = 1522;
+
+/// `SYS_NET_RAW_OPEN` — claim exclusive raw L2 access to the physical NIC.
+///
+/// Requires a `NetRaw` capability with `WRITE` rights.  `arg0` (interface
+/// index) is reserved and must be 0.
+pub fn sys_net_raw_open(args: &SyscallArgs) -> SyscallResult {
+    // Capability gate: raw L2 access is strictly more privileged than a socket.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::NetRaw,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    if args.arg0 != 0 {
+        // Only the primary NIC (index 0) is supported for now.
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    match crate::net::raw::claim(pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_RAW_TX` — transmit one raw Ethernet frame.
+///
+/// `arg0`: frame pointer, `arg1`: length.  Caller must own the raw claim.
+pub fn sys_net_raw_tx(args: &SyscallArgs) -> SyscallResult {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    // Defense in depth: only the current raw owner may transmit, even if the
+    // process still holds the NetRaw capability.
+    if crate::net::raw::owner() != Some(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let len = args.arg1 as usize;
+    if !(RAW_FRAME_MIN..=RAW_FRAME_MAX).contains(&len) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: validated readable for `len` bytes above.
+    let frame = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, len) };
+    match crate::net::raw::transmit(frame) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NET_RAW_RX` — receive one raw Ethernet frame (non-blocking).
+///
+/// `arg0`: output buffer pointer, `arg1`: buffer capacity.  Caller must own the
+/// raw claim.  Returns the frame length on success, `WouldBlock` if idle.
+pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    if crate::net::raw::owner() != Some(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let cap = args.arg1 as usize;
+    // Require room for a full standard frame so a pending frame is never
+    // truncated or lost after being dequeued from the NIC.
+    if cap < RAW_FRAME_MAX {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, cap) {
+        return SyscallResult::err(e);
+    }
+    match crate::net::raw::receive() {
+        Some(frame) => {
+            let n = frame.len();
+            if n > cap {
+                // Jumbo frame that doesn't fit — drop it rather than corrupt
+                // the caller's buffer.  (Should not happen with a 1500 MTU.)
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+            // SAFETY: `args.arg0` validated writable for `cap` >= `n` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(frame.as_ptr(), args.arg0 as *mut u8, n);
+            }
+            SyscallResult::ok(n as i64)
+        }
+        None => SyscallResult::err(KernelError::WouldBlock),
+    }
+}
+
+/// `SYS_NET_RAW_CLOSE` — release the caller's raw NIC claim.  Idempotent.
+pub fn sys_net_raw_close(_args: &SyscallArgs) -> SyscallResult {
+    if let Some(pid) = caller_pid() {
+        // release() is a no-op for non-owners, so this is always safe.
+        let _ = crate::net::raw::release(pid);
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // Scheduler configuration (50–59)
 // ---------------------------------------------------------------------------
 

@@ -357,6 +357,8 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         // cloned capability table already carries the authority, and
         // these have no per-process cleanup of their own.  Skip them in
         // the child's IPC-handle list to avoid double-bookkeeping.
+        // NetRaw is a non-inheritable exclusive claim: a forked child must not
+        // silently co-own the physical NIC.  It re-opens explicitly if needed.
         ResourceType::Process
         | ResourceType::Thread
         | ResourceType::PortIo
@@ -364,6 +366,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::Socket
         | ResourceType::IoScheduler
         | ResourceType::Service
+        | ResourceType::NetRaw
         | ResourceType::Namespace => Ok(None),
     }
 }

@@ -205,6 +205,17 @@ pub enum ResourceType {
     /// instance is released when an owning process dies, and so `fork()` knows
     /// to bump the refcount in the child.
     Drm = 23,
+    /// Raw layer-2 network access to the physical NIC (for the userspace
+    /// `netstack` daemon — see design-decisions.md §63).
+    ///
+    /// Grants unfiltered Ethernet frame send/receive, bypassing the entire
+    /// protocol stack and firewall, so it is strictly more privileged than an
+    /// ordinary [`ResourceType::Socket`].  A process needs this type with
+    /// `Rights::WRITE` to open a raw NIC handle (`SYS_NET_RAW_OPEN`).
+    ///
+    /// `resource_id` is reserved for future per-interface handles; currently
+    /// checked via `has_capability_type` for "any NIC" access.
+    NetRaw = 24,
 }
 
 // ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ pub mod tls;
 pub mod udp;
 pub mod pcap;
 pub mod qos;
+pub mod raw;
 pub mod nat;
 pub mod traceroute;
 pub mod upnp;
@@ -91,19 +92,26 @@ pub fn init() {
 /// appropriate protocol handler.  Called from the shell or a timer.
 /// Tries both virtio-net and e1000 (whichever is active).
 pub fn poll() {
-    // Read all pending packets from the active NIC.
-    loop {
-        let frame = recv_frame();
-        match frame {
-            Some(data) => {
-                pcap::capture_rx(&data);
-                interface::record_rx(data.len());
-                if let Err(e) = ethernet::process_frame(&data, crate::netns::ROOT_NS) {
-                    interface::record_rx_drop();
-                    crate::serial_println!("[net] Error processing frame: {:?}", e);
+    // If a userspace raw owner (the `netstack` daemon) holds the NIC, the
+    // in-kernel stack must NOT drain physical-uplink frames — they belong to
+    // the daemon, which reads them via `sys_net_raw_rx`.  Skip the physical
+    // drain but keep servicing container-internal veth/bridge traffic and
+    // periodic maintenance below.  See net::raw / design-decisions.md §63.
+    if !raw::is_claimed() {
+        // Read all pending packets from the active NIC.
+        loop {
+            let frame = recv_frame();
+            match frame {
+                Some(data) => {
+                    pcap::capture_rx(&data);
+                    interface::record_rx(data.len());
+                    if let Err(e) = ethernet::process_frame(&data, crate::netns::ROOT_NS) {
+                        interface::record_rx_drop();
+                        crate::serial_println!("[net] Error processing frame: {:?}", e);
+                    }
                 }
+                None => break,
             }
-            None => break,
         }
     }
 

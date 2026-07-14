@@ -3082,6 +3082,57 @@ pub const SYS_NET_FW_DEL_RULE: u64 = 863;
 /// default policy.
 pub const SYS_NET_FW_FLUSH: u64 = 864;
 
+// Raw layer-2 NIC access (865-868) — foundation of the userspace network
+// stack migration (design-decisions.md §63, Path B).  Requires a
+// `ResourceType::NetRaw` capability with WRITE rights.  Grants unfiltered
+// Ethernet frame send/receive to a single exclusive owner (the `netstack`
+// daemon); while a raw handle is held, the in-kernel stack stops draining the
+// physical NIC (see `net::raw`).
+
+/// Open (claim) exclusive raw layer-2 access to the physical NIC.
+///
+/// Requires a `ResourceType::NetRaw` capability with `WRITE` rights.  The claim
+/// is exclusive: a second live process attempting to open fails with
+/// `DeviceBusy`.  Re-opening from the same process is idempotent.  The claim
+/// self-heals if the owner dies without closing.
+///
+/// - `arg0`: reserved (interface index; currently must be 0 = the primary NIC).
+///
+/// Returns: 0 on success (the raw handle is the process's NetRaw claim itself,
+/// referenced implicitly by subsequent `SYS_NET_RAW_*` calls); negative error
+/// otherwise.
+pub const SYS_NET_RAW_OPEN: u64 = 865;
+
+/// Transmit one raw Ethernet frame out the physical NIC.
+///
+/// The frame egresses verbatim — no protocol processing, no firewall.  The
+/// caller must hold the raw claim (via `SYS_NET_RAW_OPEN`).
+///
+/// - `arg0`: pointer to the frame bytes.
+/// - `arg1`: frame length (14..=1514 for standard Ethernet; must be >= 14).
+///
+/// Returns: 0 on success; `PermissionDenied` if the caller is not the raw
+/// owner; `InvalidArgument` for a malformed length; propagates driver errors.
+pub const SYS_NET_RAW_TX: u64 = 866;
+
+/// Receive one raw Ethernet frame from the physical NIC (non-blocking).
+///
+/// - `arg0`: pointer to the output buffer.
+/// - `arg1`: buffer capacity in bytes.
+///
+/// Returns: the frame length copied (> 0) on success; `WouldBlock` if no frame
+/// is pending; `PermissionDenied` if the caller is not the raw owner;
+/// `InvalidArgument` if the buffer is too small for the pending frame.
+pub const SYS_NET_RAW_RX: u64 = 867;
+
+/// Close (release) the raw NIC claim held by the caller.
+///
+/// Hands the physical NIC back to the in-kernel stack.  Idempotent; a non-owner
+/// calling this is a no-op.
+///
+/// Returns: 0 always.
+pub const SYS_NET_RAW_CLOSE: u64 = 868;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

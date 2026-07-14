@@ -4343,10 +4343,25 @@ memory and the daemon reads it in place (and vice-versa for recv).
 - *Pure, mapping-agnostic module.* `netipc/src/ring.rs` defines only the byte
   layout, entry (de)serialization, and index arithmetic — no atomics, no
   mapping. That keeps the shared crate `no_std`, dependency-free, and
-  `#![forbid(unsafe_code)]`; the acquire/release atomic accesses to the shared
-  indices and the SHM mapping live at the kernel and daemon integration sites
-  (the only places that legitimately need `unsafe`). Both sides link the one
-  module, so the ring ABI can't drift — same rationale as §64's shared schema.
+  `#![forbid(unsafe_code)]`. Both sides link the one module, so the ring ABI
+  can't drift — same rationale as §64's shared schema.
+- *Shared atomic driver in a separate `netring` crate (not duplicated at each
+  integration site).* The acquire/release atomic index accesses and the
+  `push`/`pop`/`write_data`/`read_data` bounds logic are the one genuinely
+  subtle, `unsafe`, easy-to-get-wrong part of the ring. Writing them **once** in
+  a `no_std` `netring` crate (which depends on `netipc` for the ABI) — rather
+  than hand-rolling the Acquire/Release dance separately in the kernel forwarder
+  and again in the daemon — means the memory-ordering correctness is written,
+  reviewed, and *host-tested* exactly once, then linked verbatim into both
+  sides. This directly answers the CLAUDE.md unsafe-policy rule ("isolate
+  `unsafe`, wrap it in a safe abstraction as close to the operation as
+  possible"): after `Ring::init`/`Ring::attach`, every hot-path method is safe
+  and bounds-checked against the length-validated geometry. `netipc` stays
+  `#![forbid(unsafe_code)]`; `netring` is the single audited home for the ring's
+  `unsafe`. The alternative — open-coding the atomics at both integration sites —
+  was rejected because two independent copies of Acquire/Release logic is exactly
+  where a subtle ordering bug (visible only under concurrent cross-address-space
+  contention, i.e. nearly untestable in situ) would hide.
 
 **Deferred sub-choice (flagged, not yet decided): recv/notification blocking.**
 When a `recv` SQE has no data yet, *how* the waiter is parked and woken — futex
@@ -4363,7 +4378,12 @@ inside `channel::Message` — the thing this whole decision exists to avoid.
 (c) Variable-length SQEs — parsing cost + harder slot math for no real gain at
 our opcode count.
 
-**Where it lives.** `netipc/src/ring.rs` (ABI + 10 host tests). Kernel- and
-daemon-side mapping/atomic drivers come in following Phase 4 increments; tracked
-in `net-userspace-migration.md`. Streaming-only limitations still noted under
+**Where it lives.** `netipc/src/ring.rs` (ABI + 10 host tests) and the
+`netring` crate (`netring/src/lib.rs` — the atomic driver + 9 host tests,
+including an end-to-end kernel-init → daemon-attach echo through the ring). Both
+are workspace-`exclude`d (built for `x86_64-unknown-none` as deps of the kernel
+and daemon; host-testable with an explicit `--target`). Wiring the ring into the
+kernel forwarder and the daemon (SHM region + `Ring::init`/`Ring::attach` +
+a ring-echo control op) comes in following Phase 4 increments; tracked in
+`net-userspace-migration.md`. Streaming-only limitations still noted under
 `known-issues.md` `D-NETSTACK-TCP-MINIMAL` until the ring is wired end-to-end.

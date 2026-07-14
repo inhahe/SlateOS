@@ -1,0 +1,17 @@
+[package]
+name = "netring"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no_std atomic SPSC driver over the SlateOS netstack shared-memory data ring (io_uring-style SQ/CQ). Wraps the pure `netipc::ring` ABI with the Acquire/Release memory-ordering logic used by both the kernel forwarders and the userspace netstack daemon."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std`, depends only on `netipc` for the ring ABI (layout constants, Sqe/Cqe
+# (de)serialization, pure SPSC index arithmetic). This crate adds the *unsafe*
+# atomic accesses to the shared indices — deliberately isolated here so
+# `netipc` can stay `#![forbid(unsafe_code)]`. Linked into both the bare-metal
+# `services/netstack` daemon (x86_64-unknown-none) and the kernel; inherits the
+# depending crate's target. Must never pull in `std` or an allocator.
+[dependencies]
+netipc = { path = "../netipc" }

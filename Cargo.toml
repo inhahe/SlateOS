@@ -54,6 +54,12 @@ exclude = [
     # rationale as netproto: linked into both the bare-metal daemon and the
     # kernel; excluded so the workspace-root target doesn't build it as std.
     "netipc",
+    # Shared no_std atomic SPSC ring driver over the netipc::ring ABI. Adds
+    # the *unsafe* Acquire/Release atomic index accesses that netipc
+    # (#![forbid(unsafe_code)]) can't host. Linked into both the bare-metal
+    # daemon and the kernel; excluded so the workspace-root target doesn't
+    # build it as std.
+    "netring",
     # Empty directory (incomplete crate); skip until populated.
     "userspace/cylance-cli",
     # nushell is a self-contained upstream workspace with its own member

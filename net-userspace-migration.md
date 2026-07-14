@@ -327,3 +327,35 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   caller *owns* the handle (consistent with existing `SYS_SHM_SIZE`/`CLOSE`) —
   fine for the kernel↔trusted-daemon path, but wants a capability check before
   untrusted processes use SHM.
+- 2026-07-14: Phase 4 increment 8 landed — **`netring`: the shared atomic SPSC
+  driver over the `netipc::ring` ABI.** New `no_std` crate (`netring/`,
+  workspace-`exclude`d, depends only on `netipc`) that adds the one piece the
+  pure ABI deliberately omits: the *unsafe* Acquire/Release atomic accesses to
+  the shared indices. `Ring::init` writes the header geometry and publishes the
+  magic **last** (release-store after a release fence) so a peer that
+  `Ring::attach`es and sees the magic is guaranteed to also see the geometry;
+  `attach` Acquire-loads the magic, checks the version, and re-derives the
+  canonical `sqe/cqe/data` offsets, rejecting any region whose stored offsets
+  disagree or whose declared size overflows the mapping (a corrupt/hostile
+  region can never make the driver read or write out of bounds). Hot-path
+  `sq_push`/`sq_pop`/`cq_push`/`cq_pop` follow the SPSC discipline from §65:
+  producer owns its tail (Relaxed) + observes the peer head (Acquire) + publishes
+  the tail (Release); consumer symmetric on the head — so the entry bytes and, for
+  `OP_SEND`, the data-area payload written before the push, are visible once the
+  peer Acquire-loads the index. `write_data`/`read_data` are bounds-checked
+  against the length-validated data area. All `unsafe` is isolated here (one
+  audited crate) so the memory-ordering logic is written, reviewed, and tested
+  once and linked verbatim into both the kernel forwarder and the daemon —
+  `netipc` stays `#![forbid(unsafe_code)]`. 9 host tests (init/attach geometry,
+  attach-rejects-uninitialised, power-of-two/overflow rejection, SQ/CQ
+  push-pop round-trips, fill-reports-full, 1000-iteration wrap through a 2-slot
+  ring, data-area bounds, and a full end-to-end echo: kernel `init` → submit
+  `OP_SEND "ping"` → daemon `attach` → read/upper-case in place → `cq_push` →
+  kernel `cq_pop` + reads back `"PING"`) — all green
+  (`cargo test --target x86_64-pc-windows-msvc`); clippy clean; builds for
+  `x86_64-unknown-none`. Design split recorded in design-decisions.md §65 (new
+  "shared atomic driver in a separate crate" sub-choice). Next: wire `netring`
+  into the kernel + daemon Cargo.toml, add a ring-echo control op (kernel creates
+  SHM + `Ring::init` + submits an SQE; daemon maps + `Ring::attach` + processes +
+  posts a CQE; kernel reaps the CQE), validated under a §64 bounded self-test +
+  boot test.

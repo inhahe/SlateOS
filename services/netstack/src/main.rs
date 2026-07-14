@@ -961,16 +961,30 @@ impl TcpConn {
         );
     }
 
+    /// True when the send window has no room: a previously-sent segment is still
+    /// unacknowledged (`snd_buf_len > 0`). Our sender keeps at most one segment in
+    /// flight, so this is the "window full" condition that gates a further send —
+    /// a non-blocking send returns EAGAIN, a blocking one waits for the peer's ACK
+    /// (which [`ingest_seg`](Self::ingest_seg) clears the window on).
+    fn send_window_full(&self) -> bool {
+        self.snd_buf_len > 0
+    }
+
     /// Send `payload` as a single PSH|ACK segment and advance `snd_nxt`. The
-    /// segment is buffered so [`recv`](Self::recv) can retransmit it. An empty
-    /// payload is a no-op (returns `Some(0)`); a payload larger than the send
-    /// buffer is rejected (`None`).
+    /// segment is buffered so a retransmit can resend it. An empty payload is a
+    /// no-op (returns `Some(0)`); a payload larger than the send buffer, or a send
+    /// while the window is full (a prior segment still unacknowledged), is rejected
+    /// (`None`) — the caller must not overwrite the outstanding retransmit buffer,
+    /// or a lost segment could never be recovered.
     fn send(&mut self, me: &IfInfo, payload: &[u8]) -> Option<usize> {
         if payload.is_empty() {
             return Some(0);
         }
         if payload.len() > TCP_SND_BUF {
             return None; // Beyond our single-segment send buffer.
+        }
+        if self.send_window_full() {
+            return None; // Window occupied by an unacked segment; caller must wait/EAGAIN.
         }
         self.ipid = self.ipid.wrapping_add(1);
         if !send_tcp(
@@ -1045,6 +1059,16 @@ impl TcpConn {
         if rx.flags & tcp::FLAG_RST != 0 {
             self.peer_fin = true; // Treat a reset as end-of-stream.
             return;
+        }
+        // Process the peer's cumulative ACK of our outstanding data. Our sender
+        // keeps at most one unacknowledged segment in flight; when the peer's ACK
+        // reaches `snd_nxt` it has accepted that whole segment, so we release the
+        // retransmit buffer and re-open the send window (`snd_buf_len == 0`). This
+        // is what lets a full-window send drain and a non-blocking send stop
+        // returning EAGAIN. A stale/duplicate ACK carries `rx.ack < snd_nxt`, so it
+        // never spuriously clears the window.
+        if self.snd_buf_len > 0 && rx.flags & tcp::FLAG_ACK != 0 && rx.ack == self.snd_nxt {
+            self.snd_buf_len = 0;
         }
         if rx.seq == self.rcv_nxt {
             // In-order segment: buffer any payload (up to capacity), then any FIN.
@@ -1926,14 +1950,7 @@ fn ring_tcp_process(
                     }
                 }
             }
-            netipc::ring::OP_SEND => match conns.get_mut(sqe.conn_id) {
-                // A send before the handshake completed is a protocol error on our
-                // minimal client (no send buffering across connect): reject it so the
-                // kernel surfaces ENOTCONN rather than us emitting a bad-seq segment.
-                Some(c) if !c.established => -1,
-                Some(c) => ring_tcp_send(ring, c, me, &sqe),
-                None => -1,
-            },
+            netipc::ring::OP_SEND => ring_tcp_send(ring, conns, sqe.conn_id, me, &sqe),
             netipc::ring::OP_RECV => ring_tcp_recv(ring, conns, sqe.conn_id, me, &sqe),
             netipc::ring::OP_POLL => ring_tcp_poll(conns, sqe.conn_id, me),
             netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
@@ -1954,9 +1971,72 @@ fn ring_tcp_process(
     (processed > 0, stop)
 }
 
-/// Execute an `OP_SEND` SQE: read the data window into a scratch buffer and send
-/// it on `conn`. Returns bytes accepted, or `-1` on a window/geometry error.
-fn ring_tcp_send(ring: &netring::Ring, conn: &mut TcpConn, me: &IfInfo, sqe: &netipc::ring::Sqe) -> i32 {
+/// Execute an `OP_SEND` SQE for connection `target_id`: read the data window into
+/// a scratch buffer and send it, honouring the single-outstanding-segment send
+/// window. Returns bytes accepted, [`netipc::ring::ERR_WOULD_BLOCK`] (non-blocking
+/// send on a full window), or `-1` on a missing/unestablished connection or a
+/// geometry error.
+///
+/// The window is *full* while a prior segment is still unacknowledged
+/// ([`TcpConn::send_window_full`]). We drain pending ACKs via [`ring_pump`] (which
+/// also serves sibling connections, so one blocked sender never starves another).
+/// - [`netipc::ring::SEND_NONBLOCK`] set: pump once; if the window is still full,
+///   report `ERR_WOULD_BLOCK` (kernel → `EAGAIN`) rather than waiting.
+/// - Blocking: pump/sleep up to the send deadline until the window drains, then
+///   send. If the peer never ACKs within the deadline, report `ERR_WOULD_BLOCK`
+///   so the caller can retry rather than us silently dropping the write.
+fn ring_tcp_send(
+    ring: &netring::Ring,
+    conns: &mut RingConns,
+    target_id: u32,
+    me: &IfInfo,
+    sqe: &netipc::ring::Sqe,
+) -> i32 {
+    match conns.get_mut(target_id) {
+        None => return -1, // no such connection
+        // A send before the handshake completed is a protocol error on our minimal
+        // client (no send buffering across connect): reject it so the kernel
+        // surfaces ENOTCONN rather than us emitting a bad-seq segment.
+        Some(c) if !c.established => return -1,
+        Some(_) => {}
+    }
+    let nonblock = sqe.aux & netipc::ring::SEND_NONBLOCK != 0;
+    // Drain any already-arrived ACKs so a window freed by the peer is visible.
+    ring_pump(conns, me);
+    if conns.get_mut(target_id).is_some_and(|c| c.send_window_full()) {
+        if nonblock {
+            return netipc::ring::ERR_WOULD_BLOCK; // kernel → EAGAIN
+        }
+        // Blocking send: wait for the outstanding segment to be ACKed, driving its
+        // retransmit while we wait. Bounded by the send deadline.
+        let mut idle = 0u32;
+        let mut retransmits = 0u32;
+        loop {
+            if idle >= TCP_DATA_ITERS {
+                break;
+            }
+            if ring_pump(conns, me) {
+                idle = 0;
+            } else {
+                idle = idle.saturating_add(1);
+                if conns
+                    .get_mut(target_id)
+                    .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
+                {
+                    idle = 0;
+                }
+                sleep_ns(POLL_SLEEP_NS);
+            }
+            match conns.get_mut(target_id) {
+                Some(c) if !c.send_window_full() => break, // window drained → send below
+                Some(_) => {}
+                None => return -1, // connection vanished mid-send
+            }
+        }
+        if conns.get_mut(target_id).is_some_and(|c| c.send_window_full()) {
+            return netipc::ring::ERR_WOULD_BLOCK; // deadline elapsed, still full
+        }
+    }
     let off = sqe.data_off as usize;
     let len = sqe.data_len as usize;
     let mut buf = [0u8; TCP_SND_BUF];
@@ -1967,8 +2047,11 @@ fn ring_tcp_send(ring: &netring::Ring, conn: &mut TcpConn, me: &IfInfo, sqe: &ne
     if !ring.read_data(off, window) {
         return -1;
     }
-    match conn.send(me, window) {
-        Some(n) => n as i32,
+    match conns.get_mut(target_id) {
+        Some(c) => match c.send(me, window) {
+            Some(n) => n as i32,
+            None => -1,
+        },
         None => -1,
     }
 }
@@ -2105,11 +2188,12 @@ fn ring_tcp_recv(
 /// [`POLL_ERR`](netipc::ring::POLL_ERR)), or `-1` if there is no such connection.
 ///
 /// A connection still completing a non-blocking handshake (SYN_SENT) is reported as
-/// *neither* readable nor writable — the kernel keeps waiting for `POLLOUT`. It
-/// becomes writable only once ESTABLISHED (an established connection can always
-/// accept a send — the single-outstanding-segment sender overwrites its send buffer
-/// on each `send`), and readable when it has buffered in-order bytes or the peer has
-/// closed (so a `recv` returns data / EOF promptly). If the connect failed (a RST or
+/// *neither* readable nor writable — the kernel keeps waiting for `POLLOUT`. Once
+/// ESTABLISHED it is writable *when the send window has room* (no unacknowledged
+/// segment outstanding — the single-outstanding-segment sender cannot take a new
+/// segment while a prior one is unacked), and readable when it has buffered in-order
+/// bytes or the peer has closed (so a `recv` returns data / EOF promptly). If the
+/// connect failed (a RST or
 /// exhausted SYN budget) it is reported as `POLL_ERR` **and** writable, mirroring
 /// Linux — a failed non-blocking connect wakes `poll(POLLOUT)`, then
 /// `getsockopt(SO_ERROR)` reveals the error.
@@ -2138,8 +2222,14 @@ fn ring_tcp_poll(conns: &mut RingConns, target_id: u32, me: &IfInfo) -> i32 {
             if !c.established {
                 return 0; // SYN_SENT: not yet writable, keep waiting for POLLOUT.
             }
-            // An established daemon connection can always accept a send (writable).
-            let mut bits = netipc::ring::POLL_WRITABLE;
+            // Writable only when the send window has room: our single-outstanding-
+            // segment sender cannot accept a new segment while a prior one is still
+            // unacknowledged, so reporting POLLOUT then would be a lie (the send
+            // would return EAGAIN). This makes poll honest for a full-window socket.
+            let mut bits = 0;
+            if !c.send_window_full() {
+                bits |= netipc::ring::POLL_WRITABLE;
+            }
             if c.rx_len > 0 || c.peer_fin {
                 bits |= netipc::ring::POLL_READABLE;
             }

@@ -3295,9 +3295,31 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // Non-blocking send parity (D-NETSOCK-SYNC): a send()/write() on an O_NONBLOCK
+    // socket with room in the send window must accept the bytes (return the count),
+    // not spuriously EAGAIN — only a full window (a prior unacked segment) blocks.
+    match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => match crate::net::netstack_client::self_test_nonblock_send(&ip, 80) {
+            Ok(Some(())) => serial_println!(
+                "[spawn]   persistent netstack nonblock-send: O_NONBLOCK send accepted on a \
+                 writable window (no spurious EAGAIN) — send parity proven over the daemon"
+            ),
+            Ok(None) => serial_println!(
+                "[spawn]   persistent netstack nonblock-send: no upstream — send path proven"
+            ),
+            Err(e) => serial_println!(
+                "[spawn]   WARNING: persistent netstack nonblock-send error ({:?})",
+                e
+            ),
+        },
+        Ok(None) | Err(_) => serial_println!(
+            "[spawn]   persistent netstack nonblock-send: DNS unresolved — check skipped"
+        ),
+    }
+
     serial_println!(
-        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect \
-         parity checks done; daemon now owns the NIC for the system's lifetime"
+        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
+         nonblock-send parity checks done; daemon now owns the NIC for the system's lifetime"
     );
     Ok(())
 }

@@ -774,3 +774,33 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   writable (`serial: "non-blocking connect resolved to writable (POLLOUT) — connect
   parity ok"`). Switch-off boot unchanged (new code is switch-gated). Remaining
   before the 5.7 flip: send-side EAGAIN, listen/accept, and IPv6 connect.
+
+- **[2026-07-14] Non-blocking send + honest POLLOUT (post-5.6, toward 5.7).**
+  Fourth D-NETSOCK-SYNC parity gap closed: `send()`/`write()` on an `O_NONBLOCK`
+  AF_INET stream socket now returns `EAGAIN` when the send window is full instead
+  of blocking on the daemon, and `poll(POLLOUT)` is honest about writability. Added
+  ring ABI `netipc::ring::SEND_NONBLOCK` (an `OP_SEND` `aux` flag, bit 1; reuses the
+  existing `ERR_WOULD_BLOCK` -11 sentinel). The daemon is a single-outstanding-
+  segment sender: `TcpConn::send_window_full()` is true while a prior segment is
+  unacknowledged (`snd_buf_len > 0`). `ingest_seg` now processes the peer's
+  cumulative ACK — when `rx.ack == snd_nxt` it releases the retransmit buffer
+  (`snd_buf_len = 0`), re-opening the window; a stale/duplicate ACK
+  (`rx.ack < snd_nxt`) never clears it. `send()` refuses to overwrite an
+  unacknowledged retransmit buffer (returns `None` on a full window rather than
+  losing recoverable data). `ring_tcp_send` was restructured to take `conns +
+  target_id` (mirroring `ring_tcp_recv`) so it can drive the shared RX pump: on
+  `SEND_NONBLOCK` it pumps once and returns `ERR_WOULD_BLOCK` if the window is still
+  full; blocking sends pump/sleep (driving retransmits) until the window drains or
+  the send deadline elapses. `ring_tcp_poll` now sets `POLL_WRITABLE` only when
+  `!send_window_full()`, so a poller doesn't wake on a false `POLLOUT` and then
+  `EAGAIN`. Kernel side: `NetstackConn::send(nonblock)` ORs the flag and maps
+  `ERR_WOULD_BLOCK → WouldBlock` (returning the partial count if bytes were already
+  accepted mid-stream, per Linux); `net::socket::send(_, nonblock)`;
+  `dispatch_socket_write` reads the fd's `O_NONBLOCK` (so both `write(2)` and
+  `sendto(2)` honour it). Boot-validated switch-on: the persistent-daemon parity
+  block runs `netstack_client::self_test_nonblock_send`, which connects to
+  `example.com:80`, confirms the socket is writable, and asserts a non-blocking send
+  is accepted without a spurious EAGAIN (`serial: "non-blocking send accepted N
+  bytes … — send parity ok"`). Switch-off boot unchanged (new code is
+  switch-gated). Remaining before the 5.7 flip: listen/accept server sockets, and
+  IPv6 connect (daemon is IPv4-only — needs IPv6 + neighbour discovery).

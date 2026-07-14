@@ -273,18 +273,24 @@ pub fn connect(
 
 /// Send `buf` on a connected socket. Returns the number of bytes accepted.
 ///
+/// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a send that would
+/// block on a full send window returns [`KernelError::WouldBlock`] (→ `EAGAIN`)
+/// instead of waiting for the peer's ACK; otherwise it blocks up to the daemon's
+/// send deadline.
+///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `NotConnected` — the socket is not connected (Linux `ENOTCONN`/`EPIPE`).
+/// - `WouldBlock` — `nonblock` was set and the window was full (→ `EAGAIN`).
 /// - protocol faults propagated from [`NetstackConn::send`].
-pub fn send(handle: SocketHandle, buf: &[u8]) -> KernelResult<i32> {
+pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.send(buf)
+    guard.conn.send(buf, nonblock)
 }
 
 /// Receive up to `buf.len()` bytes on a connected socket. Returns the number of

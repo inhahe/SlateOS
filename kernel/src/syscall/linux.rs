@@ -3710,9 +3710,13 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 /// the daemon-backed stream socket via [`crate::net::socket::send`].  Returns
 /// the number of bytes the daemon accepted.
 ///
-/// The daemon client is synchronous (one blocking round-trip per call) and caps
-/// a single request at its send-buffer size; [`crate::net::socket::send`]
-/// chunks larger buffers internally, so we forward the whole (bounded) request.
+/// The daemon client caps a single request at its send-buffer size;
+/// [`crate::net::socket::send`] chunks larger buffers internally, so we forward
+/// the whole (bounded) request.
+///
+/// Honours the fd's `O_NONBLOCK` status flag: when set, a send that would block on
+/// a full send window returns `-EAGAIN` (before any bytes are accepted) instead of
+/// waiting on the daemon.
 fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
     if len == 0 {
         return SyscallResult::ok(0);
@@ -3732,7 +3736,8 @@ fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    match crate::net::socket::send(h, &kbuf) {
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    match crate::net::socket::send(h, &kbuf, nonblock) {
         Ok(n) => SyscallResult::ok(i64::from(n)),
         Err(e) => linux_err(linux_errno_for(e)),
     }

@@ -148,6 +148,22 @@ pub const OP_POLL: u8 = 0x06;
 /// migration Phase 5, closing part of the `D-NETSOCK-SYNC` parity gap.
 pub const RECV_NONBLOCK: u64 = 1 << 0;
 
+/// [`OP_SEND`] `aux` flag: perform a **non-blocking** send.
+///
+/// The daemon is a single-outstanding-segment sender: only one unacknowledged
+/// segment may be in flight at a time (its retransmit buffer holds exactly one
+/// segment). When a prior segment is still unacknowledged the send window is
+/// *full*. With this flag set, the daemon drains any pending ACKs exactly once
+/// and, if the window is still full, completes with [`ERR_WOULD_BLOCK`] instead
+/// of waiting for the peer to ACK — this is how the kernel honours `O_NONBLOCK`
+/// on `send`/`write`. When clear, `OP_SEND` blocks (polls) until the window
+/// drains (or the send deadline elapses) as before.
+///
+/// Distinct bit from [`RECV_NONBLOCK`] purely for clarity; the two never share
+/// an SQE (a send and a recv are different opcodes), but keeping them on
+/// separate bits avoids any accidental aliasing if flags are ever combined.
+pub const SEND_NONBLOCK: u64 = 1 << 1;
+
 /// [`OP_CONNECT`] `aux` flag: perform a **non-blocking** connect.
 ///
 /// The endpoint is packed into the low 48 bits of `aux` (`[ip:4][port_be:2]`, see
@@ -419,6 +435,32 @@ mod tests {
         let blocking = Sqe { aux: 0, ..sqe };
         assert_eq!(blocking.aux & RECV_NONBLOCK, 0);
         // The would-block sentinel must not collide with EOF or the generic error.
+        assert_ne!(ERR_WOULD_BLOCK, 0);
+        assert_ne!(ERR_WOULD_BLOCK, -1);
+    }
+
+    #[test]
+    fn send_nonblock_flag_round_trips_and_is_distinct() {
+        // The non-blocking send flag rides in `aux` on an OP_SEND SQE and must
+        // survive serialization without disturbing the data window fields.
+        let sqe = Sqe {
+            op: OP_SEND,
+            conn_id: 2,
+            data_off: 2048,
+            data_len: 256,
+            user_data: 0x4e53_434c_0000_000a,
+            aux: SEND_NONBLOCK,
+        };
+        let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+        assert_eq!(back.aux & SEND_NONBLOCK, SEND_NONBLOCK);
+        assert_eq!(sqe, back);
+        // A cleared flag must not read as set (blocking send path).
+        let blocking = Sqe { aux: 0, ..sqe };
+        assert_eq!(blocking.aux & SEND_NONBLOCK, 0);
+        // SEND_NONBLOCK and RECV_NONBLOCK occupy different bits.
+        assert_ne!(SEND_NONBLOCK, RECV_NONBLOCK);
+        assert_eq!(SEND_NONBLOCK & RECV_NONBLOCK, 0);
+        // The would-block sentinel it produces is distinct from EOF / generic error.
         assert_ne!(ERR_WOULD_BLOCK, 0);
         assert_ne!(ERR_WOULD_BLOCK, -1);
     }

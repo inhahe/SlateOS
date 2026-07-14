@@ -242,11 +242,24 @@ impl NetstackConn {
     /// if the very first chunk fails, the negative daemon result is returned as-is
     /// so the caller can distinguish "peer gone" from a protocol fault.
     ///
+    /// When `nonblock` is set, the [`netipc::ring::SEND_NONBLOCK`] flag is passed to
+    /// the daemon: if the send window is full (a prior segment still unacknowledged)
+    /// the daemon returns [`netipc::ring::ERR_WOULD_BLOCK`] rather than waiting for
+    /// the peer's ACK. If that happens on the *first* chunk (nothing queued yet)
+    /// this method surfaces [`KernelError::WouldBlock`] (→ `EAGAIN`); if it happens
+    /// mid-stream after some bytes were accepted, it returns the partial total
+    /// (matching Linux `send(2)`, which returns the short count rather than EAGAIN
+    /// once it has made progress). When `nonblock` is clear, the daemon blocks
+    /// (polls) up to its send deadline for the window to drain.
+    ///
     /// # Errors
     ///
-    /// Returns an error on a control-protocol fault (see [`connect`](Self::connect)).
-    pub fn send(&mut self, buf: &[u8]) -> KernelResult<i32> {
+    /// - [`KernelError::WouldBlock`] — `nonblock` was set and the window was full
+    ///   before any bytes were accepted.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn send(&mut self, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
+        let send_aux = if nonblock { netipc::ring::SEND_NONBLOCK } else { 0 };
         let mut total: i32 = 0;
         let mut off = 0usize;
         while off < buf.len() {
@@ -263,9 +276,18 @@ impl NetstackConn {
                 data_off: SND_OFF,
                 data_len: chunk_len,
                 user_data: ud,
-                aux: 0,
+                aux: send_aux,
             };
             let res = self.submit_and_reap(&ring, &sqe)?;
+            if res == netipc::ring::ERR_WOULD_BLOCK {
+                // Non-blocking send hit a full window. Report progress if any bytes
+                // were already accepted (Linux returns the short count); otherwise
+                // surface EAGAIN so the caller's O_NONBLOCK write retries later.
+                if total > 0 {
+                    return Ok(total);
+                }
+                return Err(KernelError::WouldBlock);
+            }
             if res < 0 {
                 // Peer gone mid-stream: report bytes already queued, or the raw
                 // negative result if nothing has been sent yet.
@@ -535,7 +557,7 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
         return Ok(None);
     }
 
-    let send_res = conn.send(HTTP_REQ)?;
+    let send_res = conn.send(HTTP_REQ, false)?;
     if send_res < 0 {
         crate::serial_println!(
             "[netstack-client]   persisted-conn send failed (result {}) — session did not \
@@ -684,7 +706,7 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
     );
 
     // Solicit a response, then poll until the socket honestly reports readable.
-    let send_res = conn.send(HTTP_REQ)?;
+    let send_res = conn.send(HTTP_REQ, false)?;
     if send_res < 0 {
         conn.close()?;
         return Ok(None);
@@ -779,6 +801,67 @@ pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Optio
         Ok(Some(()))
     } else {
         // Handshake never completed in-window (slirp variance); path still ran.
+        Ok(None)
+    }
+}
+
+/// Boot self-test: prove the **non-blocking send** path (`send`/`write` with
+/// `O_NONBLOCK`), mirroring Linux (`D-NETSOCK-SYNC`).
+///
+/// On a socket whose send window has room, a non-blocking send must accept the
+/// bytes and return the count — exactly like a blocking send — rather than
+/// spuriously reporting `EAGAIN`. Only a *full* window (a prior segment still
+/// unacknowledged) yields [`KernelError::WouldBlock`]. This test connects, checks
+/// the socket is writable, then issues a non-blocking [`send`](NetstackConn::send)
+/// of a request and asserts the daemon accepted it (the window was empty, so the
+/// `SEND_NONBLOCK` flag must not have blocked it).
+///
+/// Returns `Ok(Some(()))` if the non-blocking send accepted the request, `Ok(None)`
+/// if there was no upstream (connect could not complete — network variance), and
+/// `Err` on a real control-protocol fault or an unexpected `WouldBlock` on an
+/// empty window (that would break `O_NONBLOCK` send parity).
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; reports a `WouldBlock` on a
+/// known-writable (empty-window) socket as an error.
+pub fn self_test_nonblock_send(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    const HTTP_REQ: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+
+    let mut conn = NetstackConn::open()?;
+
+    let connect_res = conn.connect(ip, port, false)?;
+    if connect_res < 0 {
+        conn.close()?;
+        return Ok(None); // no upstream — nothing to assert
+    }
+
+    // Fresh connection: the send window is empty, so a non-blocking send must
+    // succeed (accept the bytes), not return EAGAIN.
+    let send_res = match conn.send(HTTP_REQ, true) {
+        Ok(n) => n,
+        Err(KernelError::WouldBlock) => {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   non-blocking send on an empty window returned EAGAIN — send parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            conn.close()?;
+            return Err(e);
+        }
+    };
+    conn.close()?;
+
+    if send_res > 0 {
+        crate::serial_println!(
+            "[netstack-client]   non-blocking send accepted {} bytes on a writable socket (no spurious EAGAIN) — send parity ok",
+            send_res
+        );
+        Ok(Some(()))
+    } else {
+        // Peer gone between connect and send (slirp variance); path still ran.
         Ok(None)
     }
 }

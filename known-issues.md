@@ -63,9 +63,22 @@ Phase 5 progresses:
   one-shot). A repeated non-blocking `connect` while pending returns `EALREADY`;
   on an established socket, `EISCONN`. Boot-validated: `netstack_client::
   self_test_nonblock_connect` runs the EINPROGRESS→POLLOUT sequence over the live
-  daemon. **Still synchronous:** the *send* side blocks until the daemon replies
-  (send-side EAGAIN on a full window is not yet implemented); a send/recv on a
-  still-connecting socket is rejected (`ENOTCONN`) rather than buffered.
+  daemon. A send/recv on a still-connecting socket is rejected (`ENOTCONN`)
+  rather than buffered.
+- **Non-blocking `send` is honoured (5.6+).** A `send(2)`/`write(2)` on an
+  `O_NONBLOCK` socket whose send window is full (the single outstanding segment is
+  still unacknowledged) returns `EAGAIN` instead of blocking on the daemon; on a
+  window with room it accepts the bytes and returns the count, exactly like Linux.
+  Path: `dispatch_socket_write` reads the fd's `O_NONBLOCK` → `net::socket::send(_,
+  nonblock)` → `NetstackConn::send(_, nonblock)` (which ORs `netipc::ring::
+  SEND_NONBLOCK`); the daemon (`ring_tcp_send`) drains pending ACKs once and, if the
+  window is still full, returns `ERR_WOULD_BLOCK`. The window is re-opened by
+  `ingest_seg` when the peer's cumulative ACK reaches `snd_nxt` (a single
+  outstanding segment). `poll(POLLOUT)` is likewise honest now: `ring_tcp_poll`
+  reports `POLL_WRITABLE` only when the window has room. Boot-validated:
+  `netstack_client::self_test_nonblock_send`. **Still single-outstanding-segment:**
+  only one unacknowledged segment may be in flight; a full window blocks/EAGAINs
+  until it is ACKed (no send pipelining yet).
 - **`poll`/`epoll` read readiness is now honest (5.6+).** A connected socket's
   `POLLIN`/`POLLOUT` are computed from a real non-destructive probe rather than
   the old "always-ready" placeholder: `poll_revents_from_entry`'s `Socket` arm
@@ -98,10 +111,11 @@ Proper fix path: 5.6+ makes the daemon persistent/always-on and grows the ring
 client to async multi-stream, at which point nonblock/poll/listen/IPv6 become
 implementable. **Progress:** the persistent daemon landed (5.6); the `O_NONBLOCK`
 *receive* path is honoured; honest `poll`/`epoll` read readiness landed via the
-non-destructive `OP_POLL` peek; and **non-blocking `connect` (EINPROGRESS →
-`poll(POLLOUT)` → `getsockopt(SO_ERROR)`) now works** (see the updated bullets
-above). Remaining before the 5.7 default-flip: send-side EAGAIN, listen/accept
-server sockets, and IPv6 connect (needs IPv6 + neighbour discovery in the daemon,
+non-destructive `OP_POLL` peek; **non-blocking `connect` (EINPROGRESS →
+`poll(POLLOUT)` → `getsockopt(SO_ERROR)`) now works**; and **non-blocking `send`
+(EAGAIN on a full send window, honest `POLLOUT`) now works** (see the updated
+bullets above). Remaining before the 5.7 default-flip: listen/accept server
+sockets, and IPv6 connect (needs IPv6 + neighbour discovery in the daemon,
 currently IPv4-only).
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14

@@ -896,6 +896,26 @@ pub const SYS_SHM_SIZE: u64 = 231;
 /// When the last handle is closed, the region's physical memory is freed.
 pub const SYS_SHM_CLOSE: u64 = 232;
 
+/// Map a shared memory region into the calling process's address space.
+///
+/// `arg0`: shared memory handle.
+/// `arg1`: flags (`MAP_READ` | `MAP_WRITE`; execute is never granted).
+///
+/// Returns: user virtual address of the mapping on success. The region's
+/// physical frames are ref-counted, so the mapping keeps them alive even
+/// after every handle is closed; unmapping (via `munmap`/`SYS_SHM_UNMAP`
+/// or process exit) drops the reference.
+pub const SYS_SHM_MAP: u64 = 233;
+
+/// Unmap a shared memory region previously mapped with [`SYS_SHM_MAP`].
+///
+/// `arg0`: user virtual address returned by `SYS_SHM_MAP`.
+/// `arg1`: size in bytes (the region size, rounded up to frame boundary).
+///
+/// Returns: 0 on success. Idempotent-ish: unmapping frames that are not
+/// present is not an error.
+pub const SYS_SHM_UNMAP: u64 = 234;
+
 /// Create a new eventfd counter.
 ///
 /// `arg0`: initial counter value (typically 0).

@@ -2627,6 +2627,147 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_SHM_MAP` — map a shared memory region into the caller's address space.
+///
+/// `arg0`: shared memory handle.
+/// `arg1`: flags (`MAP_READ` | `MAP_WRITE`; execute is never granted — shared
+///          data regions are not executable).
+///
+/// Returns: user virtual address of the mapping.
+///
+/// The region's physical frames are ref-counted. Mapping bumps each frame's
+/// refcount (so the mapping keeps the memory alive even after every SHM handle
+/// is closed); unmapping — via [`sys_shm_unmap`]/`SYS_MUNMAP` or process exit,
+/// both of which use the refcount-aware `free_frame` — drops that reference.
+/// This is what lets two *different* address spaces (e.g. the kernel-side
+/// netstack forwarders and the ring-3 `netstack` daemon) share one region: the
+/// last reference dropped frees the frames, in any order.
+pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::VmaKind;
+    use crate::proc::{pcb, thread};
+    use super::number::{MAP_READ, MAP_WRITE};
+
+    let handle = ShmHandle::from_raw(args.arg0);
+    let flags = args.arg1;
+
+    // A mapping with no access requested is meaningless (and would map the
+    // region PROT_NONE — reject rather than silently create dead PTEs).
+    if flags & (MAP_READ | MAP_WRITE) == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Snapshot the region's backing frames (physical addresses, in order).
+    let frame_addrs = match shm::frame_addrs(handle) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if frame_addrs.is_empty() {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+
+    // The caller's address space.
+    let task_id = sched::current_task_id();
+    let pid = thread::owner_process(task_id).unwrap_or(0);
+    let pml4_phys = match pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+
+    // User page flags. Always PRESENT + USER + NO_EXECUTE; WRITABLE opt-in.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+    if flags & MAP_WRITE != 0 {
+        page_flags |= PageFlags::WRITABLE;
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_size = FRAME_SIZE as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
+    let size_aligned = (frame_addrs.len() as u64) * frame_size;
+
+    // Reserve a VA gap with a Fixed VMA (frames are pre-backed — a fault in
+    // this range is a bug, not demand paging). The reservation inserts the
+    // VMA atomically, so a rollback below must `remove_vma`.
+    let base = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
+    if base == 0 {
+        return SyscallResult::err(KernelError::OutOfMemory);
+    }
+
+    // Roll back frames [0, up_to): unmap each and drop the ref we added.
+    let rollback = |up_to: usize| {
+        for j in 0..up_to {
+            #[allow(clippy::arithmetic_side_effects)]
+            let va = base + (j as u64) * frame_size;
+            // SAFETY: these frames were just mapped by this function.
+            if let Ok(phys) = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
+                // SAFETY: refcount-aware; drops the ref_inc we added — the
+                // region still holds its own reference, so this never frees.
+                unsafe { let _ = frame::free_frame(phys); }
+            }
+        }
+        pcb::remove_vma(pid, base);
+    };
+
+    for (i, &pa) in frame_addrs.iter().enumerate() {
+        #[allow(clippy::arithmetic_side_effects)]
+        let va = base + (i as u64) * frame_size;
+        let phys = match PhysFrame::from_addr(pa) {
+            Some(f) => f,
+            None => {
+                rollback(i);
+                return SyscallResult::err(KernelError::InternalError);
+            }
+        };
+
+        // Bump the refcount BEFORE mapping so a concurrent `shm::close` can
+        // never free the frame out from under the new mapping.
+        // SAFETY: `pa` is a live frame of a region that existed a moment ago
+        // (frame_addrs came from a locked region lookup); ref_inc rejects a
+        // frame whose refcount already hit 0.
+        if let Err(e) = unsafe { frame::ref_inc(phys) } {
+            rollback(i);
+            return SyscallResult::err(e);
+        }
+
+        // SAFETY: pml4_phys is the caller's page table; phys is now a
+        // refcounted live frame; va is a freshly reserved user VA.
+        if let Err(e) = unsafe {
+            page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
+        } {
+            // Undo this frame's ref_inc (mapping never took), then roll back
+            // the earlier frames.
+            // SAFETY: refcount-aware; drops the ref we just added.
+            unsafe { let _ = frame::free_frame(phys); }
+            rollback(i);
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Charge the mapped frames to the process RSS (mirrors the committed
+    // mmap path; teardown resets RSS wholesale so no matching uncharge here).
+    #[allow(clippy::cast_possible_truncation)]
+    crate::mm::accounting::charge(pml4_phys, frame_addrs.len() as u64);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base as i64)
+}
+
+/// `SYS_SHM_UNMAP` — unmap a shared memory region previously mapped with
+/// [`sys_shm_map`].
+///
+/// `arg0`: user virtual address returned by `SYS_SHM_MAP`.
+/// `arg1`: size in bytes.
+///
+/// This is exactly [`sys_munmap`]: SHM frames are allocator-owned, so the
+/// generic munmap path unmaps each frame and drops its reference via the
+/// refcount-aware `free_frame` (freeing the backing memory only when the last
+/// mapper *and* every SHM handle are gone). Exposed under a distinct number so
+/// callers can express intent; behaviourally identical.
+pub fn sys_shm_unmap(args: &SyscallArgs) -> SyscallResult {
+    sys_munmap(args)
+}
+
 // ---------------------------------------------------------------------------
 // Eventfd handlers (240–249)
 // ---------------------------------------------------------------------------

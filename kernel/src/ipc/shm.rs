@@ -238,9 +238,9 @@ pub fn kernel_addr(handle: ShmHandle) -> KernelResult<*mut u8> {
 /// Get the physical frame addresses backing this region.
 ///
 /// Returns a list of physical addresses, one per frame, in order.
-/// Used by the future `mmap` implementation to map frames into a
-/// process's page table.
-#[allow(dead_code)]
+/// Used by `SYS_SHM_MAP` (`sys_shm_map`) to map the region's frames into a
+/// process's page table (each frame's refcount is bumped at map time so the
+/// mapping outlives the SHM handle).
 pub fn frame_addrs(handle: ShmHandle) -> KernelResult<Vec<u64>> {
     let table = SHM_TABLE.lock();
     let region = table

@@ -91,7 +91,8 @@ use super::number::{
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
-    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
+    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP,
+    SYS_SLEEP, SYS_TASK_ID,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_TRY_SEND, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_RECV_TIMEOUT,
@@ -330,6 +331,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);
     handlers[SYS_SHM_SIZE as usize] = Some(handlers::sys_shm_size);
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);
+    handlers[SYS_SHM_MAP as usize] = Some(handlers::sys_shm_map);
+    handlers[SYS_SHM_UNMAP as usize] = Some(handlers::sys_shm_unmap);
     handlers[SYS_SOCKETPAIR_CREATE as usize] = Some(handlers::sys_socketpair_create);
     handlers[SYS_SOCKETPAIR_SEND as usize] = Some(handlers::sys_socketpair_send);
     handlers[SYS_SOCKETPAIR_RECV as usize] = Some(handlers::sys_socketpair_recv);

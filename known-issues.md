@@ -14,6 +14,25 @@ work that should be done now."
 
 ## Active Bugs
 
+### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — TECH DEBT (logged 2026-07-14)
+
+`SYS_SHM_MAP` (kernel/src/syscall/handlers.rs `sys_shm_map`) maps a
+shared-memory region into the caller's address space given only the
+region's raw handle (which *is* the region ID — see `ShmHandle` in
+kernel/src/ipc/shm.rs). It does **not** check that the calling process
+created or was granted that region: any process that possesses (or
+guesses — IDs are a small monotonic counter) a handle can map another
+process's shared memory. `SYS_SHM_SIZE` and `SYS_SHM_CLOSE` have the same
+gap (pre-existing). This is currently *by design* for the netstack Phase-4
+bootstrap: the kernel creates the region and hands the handle to the
+trusted `netstack` daemon over the `net.stack` control channel, so both
+ends are trusted. **Proper fix:** gate SHM handles through the capability
+system (unforgeable, per-process handle table with an explicit
+grant/transfer op) before any *untrusted* process is allowed to use
+`SYS_SHM_MAP` — i.e. before Phase 5 exposes socket data rings to arbitrary
+apps. Until then, only kernel-mediated, trusted-daemon SHM sharing is
+safe. Where it bites: any future userspace-to-userspace SHM use.
+
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 
 **Where:** `kernel/src/proc/pcb.rs` — `try_resolve_fault` (demand-paged

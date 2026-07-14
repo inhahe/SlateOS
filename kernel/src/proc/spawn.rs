@@ -2845,6 +2845,15 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     // (the query is a static wire blob; we only check the response header).
     let udp_result = netstack_udp_dns_roundtrip(&ifinfo.dns.0);
 
+    // Fifth round-trip: shared-memory handshake (`OP_SHM_PING`). The kernel
+    // creates an SHM region, writes a request magic, and asks the daemon to map
+    // it (SYS_SHM_MAP), verify our magic, and write a response magic back. We
+    // then read that response magic through our own (kernel) view of the same
+    // frames. This proves cross-address-space SHM_MAP sharing end to end — the
+    // exact mechanism the Phase-5 data ring will use to hand the daemon its
+    // SQ/CQ/data region. No NIC involved, so it's independent of upstream.
+    let shm_result = netstack_shm_ping_roundtrip();
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
 
@@ -2873,6 +2882,17 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: UDP-exchange IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
+
+    match shm_result {
+        Ok(()) => serial_println!(
+            "[spawn]   netstack SHM-ping-over-IPC (ring 3): OK — cross-address-space \
+             SYS_SHM_MAP verified (daemon read kernel magic + kernel read daemon magic)"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SHM-ping IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
@@ -3096,6 +3116,107 @@ fn netstack_udp_dns_roundtrip(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 
     channel::close(client);
     result
+}
+
+/// Perform one `OP_SHM_PING` round-trip to the running `net.stack` daemon,
+/// validating cross-address-space `SYS_SHM_MAP` sharing.
+///
+/// The kernel creates a shared-memory region, writes
+/// [`netipc::SHM_PING_REQUEST_MAGIC`] at byte offset 0 (through its own HHDM
+/// view), and sends the region's handle+size to the daemon. The daemon maps the
+/// *same* physical frames into *its* ring-3 address space, confirms the request
+/// magic (proving it sees the kernel's write), writes
+/// [`netipc::SHM_PING_RESPONSE_MAGIC`] at offset 8, and unmaps. On `ST_OK` the
+/// kernel reads offset 8 back through its view and checks the response magic —
+/// proving the daemon's write is visible to the kernel. Both directions
+/// verified ⇒ the mapping is genuinely shared, not a private copy.
+///
+/// Returns `Ok(())` on a fully-verified round-trip, or `Err` on any transport
+/// failure, a `ST_FAIL` reply, or a magic mismatch. This is the bootstrap the
+/// Phase-5 data ring builds on.
+fn netstack_shm_ping_roundtrip() -> KernelResult<()> {
+    use crate::ipc::{channel, service, shm};
+
+    // Create a region (rounds up to one 16 KiB frame — ample for two magics).
+    let handle = shm::create(64)?;
+    let size = shm::size(handle)?;
+
+    // Helper to close the SHM handle on every exit path (RAII-ish).
+    let finish = |h: shm::ShmHandle, r: KernelResult<()>| -> KernelResult<()> {
+        shm::close(h);
+        r
+    };
+
+    // Write the request magic at offset 0 and clear the response slot at
+    // offset 8 through the kernel's HHDM view of the frames.
+    let kaddr = match shm::kernel_addr(handle) {
+        Ok(p) => p,
+        Err(e) => return finish(handle, Err(e)),
+    };
+    // SAFETY: kaddr is valid for `size` (>= 16) bytes; unaligned u64 writes to
+    // offsets 0 and 8 stay in bounds. No other CPU touches the region yet.
+    unsafe {
+        core::ptr::write_unaligned(kaddr.cast::<u64>(), netipc::SHM_PING_REQUEST_MAGIC);
+        core::ptr::write_unaligned(kaddr.add(8).cast::<u64>(), 0u64);
+    }
+
+    let client = match service::connect(b"net.stack") {
+        Ok(c) => c,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let size_u32 = size as u32;
+    let mut req = [0u8; 16];
+    let req_len = match netipc::encode_shm_ping(&mut req, handle.raw(), size_u32) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return finish(handle, Err(e));
+    }
+
+    let reply = match channel::recv_timeout(client, 5_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    channel::close(client);
+
+    // The daemon replies ST_OK (empty body) iff it verified our magic and wrote
+    // its response. Anything else is a failure of the handshake.
+    match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(_) => {}
+        netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    // Read the daemon's response magic back through the kernel view.
+    // SAFETY: same region, still mapped (handle open); offset 8 in bounds.
+    let resp = unsafe { core::ptr::read_unaligned(kaddr.add(8).cast::<u64>()) };
+    if resp == netipc::SHM_PING_RESPONSE_MAGIC {
+        finish(handle, Ok(()))
+    } else {
+        serial_println!(
+            "[spawn]   SHM-ping: response magic mismatch (got {:#x})",
+            resp
+        );
+        finish(handle, Err(KernelError::InternalError))
+    }
 }
 
 /// Ring-3 end-to-end test of the Linux `brk(2)` heap.

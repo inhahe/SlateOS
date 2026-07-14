@@ -43,7 +43,12 @@ const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CHANNEL_SEND: u64 = 201;
 const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
 const SYS_CHANNEL_CLOSE: u64 = 204;
+const SYS_SHM_MAP: u64 = 233;
+const SYS_SHM_UNMAP: u64 = 234;
 const SYS_SERVICE_REGISTER: u64 = 280;
+
+/// `SYS_SHM_MAP` flags: readable + writable (execute is never granted).
+const SHM_MAP_RW: u64 = (1 << 0) | (1 << 1);
 const SYS_SERVICE_ACCEPT_TIMEOUT: u64 = 284;
 const SYS_SERVICE_UNREGISTER: u64 = 285;
 const SYS_NOTIFY_READY: u64 = 508;
@@ -1078,9 +1083,57 @@ fn handle_request(
                 None => fail(out),
             }
         }
+        Some(netipc::Request::ShmPing { handle, size }) => {
+            // Shared-memory handshake: map the kernel-created region, verify the
+            // magic the kernel wrote, and write our response magic back. This is
+            // the bootstrap that proves cross-address-space SYS_SHM_MAP sharing
+            // — the mechanism the Phase-5 data ring uses to hand us its region.
+            if shm_ping(handle, size) {
+                netipc::encode_ok_bytes(out, &[]).unwrap_or_else(|| fail(out))
+            } else {
+                fail(out)
+            }
+        }
         // Unknown opcode or a structurally invalid request → uniform failure.
         Some(netipc::Request::Unknown(_)) | None => fail(out),
     }
+}
+
+/// Handle an [`netipc::OP_SHM_PING`] request: map the kernel-created shared
+/// region `handle` (`size` bytes) read-write, confirm the kernel's request
+/// magic is visible at offset 0 (proving we mapped the *same* physical frames),
+/// write our response magic at offset 8 (which the kernel then reads back), and
+/// unmap. Returns `true` iff the handshake succeeded.
+fn shm_ping(handle: u64, size: u32) -> bool {
+    // Need at least 16 bytes to hold the two u64 magics at offsets 0 and 8.
+    if (size as usize) < 16 {
+        return false;
+    }
+    let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
+    if va < 0 {
+        return false;
+    }
+    let base = va as u64 as *mut u8;
+
+    // SAFETY: SYS_SHM_MAP returned a valid mapping of at least `size` (>= 16)
+    // bytes; we only touch offsets 0..16, aligned reads/writes of u64.
+    let ok = unsafe {
+        let req = core::ptr::read_unaligned(base as *const u64);
+        if req != netipc::SHM_PING_REQUEST_MAGIC {
+            false
+        } else {
+            core::ptr::write_unaligned(
+                base.add(8) as *mut u64,
+                netipc::SHM_PING_RESPONSE_MAGIC,
+            );
+            true
+        }
+    };
+
+    // Drop our mapping regardless (refcount-aware; the kernel keeps its own
+    // reference until it closes the handle).
+    syscall2(SYS_SHM_UNMAP, va as u64, size as u64);
+    ok
 }
 
 /// Read argv[1] into `out`, returning the slice actually populated. Native

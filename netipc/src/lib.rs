@@ -53,6 +53,23 @@ pub const OP_TCP_FETCH: u8 = 0x03;
 /// API arrives with the Phase-5 shared-memory data ring.
 pub const OP_UDP_EXCHANGE: u8 = 0x04;
 
+/// Request: shared-memory handshake — map the shared-memory region identified
+/// by `handle` (of `size` bytes) into the daemon's address space, verify the
+/// [`SHM_PING_REQUEST_MAGIC`] the kernel wrote at offset 0, overwrite offset 8
+/// with [`SHM_PING_RESPONSE_MAGIC`], unmap, and reply. Operands:
+/// `[handle_le:8][size_le:4]`. Reply: [`ST_OK`] (magic verified + response
+/// written) or [`ST_FAIL`]. This is the bootstrap that proves cross-address-
+/// space `SYS_SHM_MAP` sharing — the exact mechanism the Phase-5 data ring
+/// uses to hand the daemon its SQ/CQ/data region.
+pub const OP_SHM_PING: u8 = 0x05;
+
+/// Magic the kernel writes at byte offset 0 of an [`OP_SHM_PING`] region; the
+/// daemon reads it back to confirm it mapped the *same* physical frames.
+pub const SHM_PING_REQUEST_MAGIC: u64 = 0x5348_4D50_494E_4751; // "SHMPINGQ"
+/// Magic the daemon writes at byte offset 8; the kernel reads it back to
+/// confirm the daemon's writes are visible in the kernel's view of the region.
+pub const SHM_PING_RESPONSE_MAGIC: u64 = 0x5348_4D50_4F4E_4752; // "SHMPONGR"
+
 /// Reply status: success. Any op-specific result bytes follow.
 pub const ST_OK: u8 = 0x00;
 /// Reply status: failure. No result bytes follow.
@@ -88,6 +105,14 @@ pub enum Request<'a> {
         /// Datagram payload to send (may be empty).
         payload: &'a [u8],
     },
+    /// Shared-memory handshake: map region `handle` (`size` bytes), verify the
+    /// request magic, write the response magic, unmap.
+    ShmPing {
+        /// Shared-memory region handle to map (a `ShmHandle` raw u64).
+        handle: u64,
+        /// Region size in bytes (as reported by `SYS_SHM_SIZE`).
+        size: u32,
+    },
     /// An opcode this build does not recognise (carries the raw byte).
     Unknown(u8),
 }
@@ -119,6 +144,14 @@ impl<'a> Request<'a> {
                 let port = u16::from_be_bytes([head[4], head[5]]);
                 let payload = rest.get(6..)?;
                 Some(Request::UdpExchange { ip, port, payload })
+            }
+            OP_SHM_PING => {
+                let head = rest.get(..12)?;
+                let handle = u64::from_le_bytes([
+                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
+                ]);
+                let size = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
+                Some(Request::ShmPing { handle, size })
             }
             other => Some(Request::Unknown(other)),
         }
@@ -158,6 +191,17 @@ pub fn encode_tcp_fetch(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8])
 #[must_use]
 pub fn encode_udp_exchange(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8]) -> Option<usize> {
     encode_ip_port_payload(out, OP_UDP_EXCHANGE, ip, port, payload)
+}
+
+/// Encode an [`OP_SHM_PING`] request (`[op][handle_le:8][size_le:4]`) into
+/// `out`. Returns bytes written (13), or `None` if `out` is too small.
+#[must_use]
+pub fn encode_shm_ping(out: &mut [u8], handle: u64, size: u32) -> Option<usize> {
+    let dst = out.get_mut(..13)?;
+    dst[0] = OP_SHM_PING;
+    dst[1..9].copy_from_slice(&handle.to_le_bytes());
+    dst[9..13].copy_from_slice(&size.to_le_bytes());
+    Some(13)
 }
 
 /// Shared encoder for the `[op][ip:4][port_be:2][payload]` request layout used
@@ -422,6 +466,27 @@ mod tests {
     fn short_udp_exchange_request_is_none() {
         // op + ip but no port bytes.
         assert!(Request::parse(&[OP_UDP_EXCHANGE, 9, 9, 9, 9, 0]).is_none());
+    }
+
+    #[test]
+    fn shm_ping_round_trip() {
+        let mut buf = [0u8; 32];
+        let n = encode_shm_ping(&mut buf, 0x1234_5678_9abc_def0, 16384).unwrap();
+        assert_eq!(n, 13);
+        assert_eq!(buf[0], OP_SHM_PING);
+        match Request::parse(&buf[..n]).unwrap() {
+            Request::ShmPing { handle, size } => {
+                assert_eq!(handle, 0x1234_5678_9abc_def0);
+                assert_eq!(size, 16384);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_shm_ping_request_is_none() {
+        // op + handle but truncated size field.
+        assert!(Request::parse(&[OP_SHM_PING, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0]).is_none());
     }
 
     #[test]

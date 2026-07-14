@@ -300,3 +300,30 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   into the kernel (`SYS_SHM_CREATE` + map into the daemon) and the daemon
   (persistent per-connection TCP state machines driving the ring), validated
   under §64 bounded self-tests.
+- 2026-07-14: Phase 4 increment 7 landed — **cross-address-space shared memory
+  (`SYS_SHM_MAP`/`SYS_SHM_UNMAP`) + SHM-ping handshake self-test.** Shared memory
+  was previously kernel-only (`shm::kernel_addr` HHDM view); a ring-3 process had
+  no way to map a region. Added `SYS_SHM_MAP` (233) — reserves a user VA gap with
+  a `Fixed` VMA, `ref_inc`s each backing frame, and maps them into the caller's
+  page table (never executable; RW opt-in) — and `SYS_SHM_UNMAP` (234), which
+  delegates to `sys_munmap` (SHM frames are allocator-owned, so the generic
+  refcount-aware `free_frame` path drops the mapping's reference correctly). The
+  frame refcount model makes every teardown ordering safe: mapping bumps refcount
+  1→2, so `shm::close` or daemon exit each just decrements — the last reference
+  (handle *or* mapping, in any order) frees the frames; no double-free, no leak.
+  New netipc control op `OP_SHM_PING` (`[handle_le:8][size_le:4]`) + magics: the
+  kernel creates a region, writes `SHM_PING_REQUEST_MAGIC` at offset 0, and asks
+  the daemon to map it, verify that magic (proving it mapped the *same* frames),
+  write `SHM_PING_RESPONSE_MAGIC` at offset 8, and unmap; the kernel then reads
+  offset 8 back through its own view and checks the response magic — both
+  directions verified ⇒ genuinely shared, not a private copy. 27 netipc host
+  tests (2 new). Boot-validated: "netstack SHM-ping-over-IPC (ring 3): OK —
+  cross-address-space SYS_SHM_MAP verified (daemon read kernel magic + kernel
+  read daemon magic)", clean 84s boot with all five netstack ops green. This is
+  the exact bootstrap the Phase-5 data ring uses to hand the daemon its
+  SQ/CQ/data region; next increment builds the ring drivers (RingHeader init +
+  atomic SQ/CQ producer/consumer over a mapped `netipc::ring` region) on top.
+  Known limitation logged in known-issues.md: `SYS_SHM_MAP` does not verify the
+  caller *owns* the handle (consistent with existing `SYS_SHM_SIZE`/`CLOSE`) —
+  fine for the kernel↔trusted-daemon path, but wants a capability check before
+  untrusted processes use SHM.

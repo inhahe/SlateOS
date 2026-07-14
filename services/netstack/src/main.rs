@@ -40,7 +40,14 @@
 const SYS_EXIT: u64 = 1;
 const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
+const SYS_CHANNEL_SEND: u64 = 201;
+const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
+const SYS_CHANNEL_CLOSE: u64 = 204;
+const SYS_SERVICE_REGISTER: u64 = 280;
+const SYS_SERVICE_ACCEPT_TIMEOUT: u64 = 284;
+const SYS_SERVICE_UNREGISTER: u64 = 285;
 const SYS_NOTIFY_READY: u64 = 508;
+const SYS_PROCESS_GET_ARGS: u64 = 519;
 const SYS_NET_IF_INFO: u64 = 842;
 const SYS_NET_RAW_OPEN: u64 = 865;
 const SYS_NET_RAW_TX: u64 = 866;
@@ -49,6 +56,30 @@ const SYS_NET_RAW_CLOSE: u64 = 868;
 
 /// `EAGAIN`/`WouldBlock`: raw RX had no frame ready.
 const E_WOULD_BLOCK: i64 = -4;
+
+// ---------------------------------------------------------------------------
+// netstack IPC control protocol (Phase 4)
+// ---------------------------------------------------------------------------
+//
+// A minimal, one-shot request/reply wire format carried over a Service-Registry
+// channel (`net.stack`). The kernel-side socket-syscall forwarders marshal a
+// request into a single `channel::Message` and block on the reply. This is the
+// *control* path; bulk TCP/UDP data will later ride a shared-memory ring.
+//
+// Request  = [opcode:u8][operands…]
+// Reply    = [status:u8][result…]
+//
+// Kept inline here for the first increment (DNS resolve). Once TCP/UDP control
+// ops land, this schema graduates into a shared `netipc` no_std crate that both
+// the kernel forwarders and this daemon depend on (mirroring `netproto`).
+
+/// Request: resolve an A record. Operands: the hostname bytes (ASCII, no NUL).
+/// Reply: `[status][ip0..ip3]` — status 0 = ok (4 IP bytes follow), 1 = failure.
+const OP_RESOLVE_A: u8 = 0x01;
+
+/// Reply status codes.
+const ST_OK: u8 = 0x00;
+const ST_FAIL: u8 = 0x01;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers
@@ -109,6 +140,48 @@ fn syscall2(nr: u64, arg0: u64, arg1: u64) -> i64 {
     ret
 }
 
+#[inline(always)]
+fn syscall3(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: see `syscall0`; args in rdi/rsi/rdx per the SlateOS syscall ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+fn syscall4(nr: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: see `syscall0`; args in rdi/rsi/rdx/r10 per the SlateOS syscall
+    // ABI (r10 is used for arg3 because rcx is clobbered by `syscall`).
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 fn print(s: &str) {
     syscall2(SYS_CONSOLE_WRITE, s.as_ptr() as u64, s.len() as u64);
 }
@@ -156,8 +229,27 @@ fn raw_rx(buf: &mut [u8]) -> i64 {
 
 struct IfInfo {
     ip: [u8; 4],
+    mask: [u8; 4],
     gateway: [u8; 4],
+    dns: [u8; 4],
     mac: [u8; 6],
+}
+
+impl IfInfo {
+    /// Next-hop IP toward `dst`: the destination itself if it is on our local
+    /// subnet (per the netmask), otherwise the default gateway. This is the L3
+    /// routing decision needed to pick the ARP target for outbound frames.
+    fn next_hop(&self, dst: &[u8; 4]) -> [u8; 4] {
+        let mut on_link = true;
+        let mut i = 0;
+        while i < 4 {
+            if (self.ip[i] & self.mask[i]) != (dst[i] & self.mask[i]) {
+                on_link = false;
+            }
+            i += 1;
+        }
+        if on_link { *dst } else { self.gateway }
+    }
 }
 
 fn query_if_info() -> Option<IfInfo> {
@@ -168,7 +260,9 @@ fn query_if_info() -> Option<IfInfo> {
     }
     Some(IfInfo {
         ip: [rec[0], rec[1], rec[2], rec[3]],
+        mask: [rec[4], rec[5], rec[6], rec[7]],
         gateway: [rec[8], rec[9], rec[10], rec[11]],
+        dns: [rec[12], rec[13], rec[14], rec[15]],
         mac: [rec[16], rec[17], rec[18], rec[19], rec[20], rec[21]],
     })
 }
@@ -182,7 +276,7 @@ fn query_if_info() -> Option<IfInfo> {
 // of truth for frame layout and the RFC 1071 checksum. This daemon only wires
 // those parsers/builders to the raw-frame syscalls and the interface config.
 
-use netproto::{arp, ethernet, icmp, ipv4};
+use netproto::{arp, dns, ethernet, icmp, ipv4, udp};
 
 /// Maximum standard Ethernet frame we handle (jumbo frames are out of scope).
 const MAX_FRAME: usize = 1522;
@@ -293,6 +387,304 @@ fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req: &icmp::Echo, me: &I
 }
 
 // ---------------------------------------------------------------------------
+// DNS-over-UDP resolver (Phase 4 control op)
+// ---------------------------------------------------------------------------
+//
+// The daemon serves `OP_RESOLVE_A` by doing a real DNS query over its raw NIC:
+// ARP-resolve the next hop, build a DNS/UDP/IPv4/Ethernet frame stack via
+// `netproto`, transmit it, and poll raw RX for the matching response. This is
+// the userspace analogue of the in-kernel `net::dns::resolve` the Phase-4
+// `sys_dns_resolve` forwarder will delegate to.
+
+/// Fixed ephemeral UDP source port for our DNS queries. A single-shot resolver
+/// doesn't need a port table; any high port distinct from well-known ones works.
+const EPHEMERAL_PORT: u16 = 0xC000;
+
+/// Per-resolution RX poll budget (iterations * `POLL_SLEEP_NS`).
+const RESOLVE_POLL_ITERS: u32 = 120; // 120 * 5ms = 600ms
+
+/// ARP-resolve `target_ip` on the local link: broadcast a request and poll raw
+/// RX for the reply, returning the sender's MAC. `None` on timeout.
+fn arp_resolve(target_ip: &[u8; 4], me: &IfInfo) -> Option<[u8; 6]> {
+    let req = arp::request(&me.mac, &me.ip, target_ip);
+    if raw_tx(&req) < 0 {
+        return None;
+    }
+    let mut buf = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut buf);
+            if n < 0 {
+                break; // WouldBlock or error — sleep and retry.
+            }
+            let len = n as usize;
+            if len > buf.len() {
+                continue;
+            }
+            if let Some(mac) = arp_reply_mac(&buf[..len], target_ip) {
+                return Some(mac);
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
+}
+
+/// If `frame` is an ARP reply from `target_ip`, return its sender MAC.
+fn arp_reply_mac(frame: &[u8], target_ip: &[u8; 4]) -> Option<[u8; 6]> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_ARP {
+        return None;
+    }
+    let pkt = arp::Packet::parse(eth.payload)?;
+    if matches!(pkt.op, arp::Op::Reply) && pkt.sender_ip == *target_ip {
+        Some(pkt.sender_mac)
+    } else {
+        None
+    }
+}
+
+/// Resolve `hostname`'s first A record via DNS-over-UDP. `next_hop_mac` is the
+/// L2 destination for outbound frames toward the DNS server. `txid` disambiguates
+/// concurrent queries (we use a monotonic counter). Returns the IPv4 on success.
+fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
+    // Build the DNS query into a scratch buffer.
+    let mut qbuf = [0u8; 300];
+    let qlen = dns::write_query(&mut qbuf, txid, hostname, dns::TYPE_A)?;
+
+    // Assemble Ethernet | IPv4 | UDP | DNS directly in the TX frame.
+    let mut frame = [0u8; MAX_FRAME];
+    let udp_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
+    let udp_len = udp::write(
+        &mut frame[udp_off..],
+        &me.ip,
+        &me.dns,
+        EPHEMERAL_PORT,
+        53,
+        &qbuf[..qlen],
+    )?;
+
+    let ip_hdr = ipv4::Builder {
+        dscp_ecn: 0,
+        id: txid,
+        flags_frag: 0x4000, // Don't Fragment
+        ttl: 64,
+        protocol: ipv4::PROTO_UDP,
+        src: me.ip,
+        dst: me.dns,
+    }
+    .build_header(udp_len as u16);
+    frame[ethernet::HEADER_LEN..udp_off].copy_from_slice(&ip_hdr);
+    ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
+
+    let total = udp_off + udp_len;
+    if raw_tx(&frame[..total]) < 0 {
+        return None;
+    }
+
+    // Poll raw RX for the matching DNS response.
+    let mut buf = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut buf);
+            if n < 0 {
+                break;
+            }
+            let len = n as usize;
+            if len > buf.len() {
+                continue;
+            }
+            if let Some(ip) = parse_dns_response(&buf[..len], me, txid) {
+                return Some(ip);
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
+}
+
+/// Extract the first A-record IPv4 from a received frame if it is the DNS
+/// response to our query (`txid`, our ephemeral port, from our DNS server).
+fn parse_dns_response(frame: &[u8], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip || ip.src != me.dns {
+        return None;
+    }
+    let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
+    if dg.src_port != 53 || dg.dst_port != EPHEMERAL_PORT {
+        return None;
+    }
+    let msg = dns::Message::parse(dg.payload)?;
+    if msg.id != txid || !msg.is_response() {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    if msg.first_ipv4(&mut out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service mode (Phase 4): serve socket-syscall requests over `net.stack`
+// ---------------------------------------------------------------------------
+//
+// Bounded-lifetime service loop (see `design-decisions.md` §64): the daemon
+// claims the NIC, registers `net.stack`, serves control requests over accepted
+// channels until an idle deadline, then unregisters and releases the NIC. It is
+// NOT a permanent NIC takeover — while the kernel-resident stack is still the
+// live path (until Phase 5), the daemon must yield the NIC back. Persistent
+// operation lands in Phase 5, when the kernel stack is deleted.
+
+const SERVICE_NAME: &[u8] = b"net.stack";
+
+/// Accept-timeout for one service iteration (ns). Long enough to absorb the
+/// kernel client's connect latency; short enough to re-check the deadline.
+const ACCEPT_TIMEOUT_NS: u64 = 500_000_000; // 500ms
+
+/// Total idle budget: after this long with no new connection, the daemon exits.
+const SERVICE_IDLE_ITERS: u32 = 6; // 6 * 500ms = 3s
+
+/// Maximum control-message size we accept/produce.
+const MSG_CAP: usize = 512;
+
+/// Run the Phase-4 DNS-over-IPC service. Returns the process exit code.
+fn run_dns_service(me: &IfInfo) -> i64 {
+    // Register first (fast) so a waiting client can connect immediately and then
+    // block on the reply, rather than spinning while we do slow network I/O.
+    let listener = syscall2(SYS_SERVICE_REGISTER, SERVICE_NAME.as_ptr() as u64, SERVICE_NAME.len() as u64);
+    if listener < 0 {
+        print("[netstack] FAIL: could not register net.stack service\n");
+        return 5;
+    }
+    print("[netstack] registered net.stack service\n");
+    syscall0(SYS_NOTIFY_READY);
+
+    // Now resolve the next hop toward the DNS server. If it fails, every resolve
+    // reports ST_FAIL (the client sees a definite failure reply, not a hang).
+    let next_hop = me.next_hop(&me.dns);
+    let next_hop_mac = arp_resolve(&next_hop, me);
+    if next_hop_mac.is_some() {
+        print("[netstack] resolved next-hop MAC toward DNS server\n");
+    } else {
+        print("[netstack] WARN: could not ARP-resolve DNS next hop\n");
+    }
+
+    let mut txid: u16 = 0x1000;
+    let mut served: u32 = 0;
+    let mut idle_ticks: u32 = 0;
+
+    while idle_ticks < SERVICE_IDLE_ITERS {
+        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS as u64);
+        if ch < 0 {
+            idle_ticks += 1; // Timed out (or transient) — count toward idle exit.
+            continue;
+        }
+        idle_ticks = 0;
+        let ch = ch as u64;
+
+        // One request per connection (one-shot control path).
+        let mut req = [0u8; MSG_CAP];
+        let rlen = syscall4(
+            SYS_CHANNEL_RECV_TIMEOUT,
+            ch,
+            req.as_mut_ptr() as u64,
+            req.len() as u64,
+            ACCEPT_TIMEOUT_NS as u64,
+        );
+        if rlen > 0 {
+            let req = &req[..rlen as usize];
+            let reply = handle_request(req, &next_hop_mac, me, &mut txid);
+            let _ = syscall3(SYS_CHANNEL_SEND, ch, reply.0.as_ptr() as u64, reply.1 as u64);
+            served += 1;
+        }
+        syscall1(SYS_CHANNEL_CLOSE, ch);
+    }
+
+    let _ = syscall1(SYS_SERVICE_UNREGISTER, listener as u64);
+    if served > 0 {
+        print("[netstack] served DNS-over-IPC request(s); unregistered\n");
+    } else {
+        print("[netstack] no requests before idle deadline; unregistered\n");
+    }
+    0
+}
+
+/// Handle one control request, returning `(reply_buf, reply_len)`.
+fn handle_request(
+    req: &[u8],
+    next_hop_mac: &Option<[u8; 6]>,
+    me: &IfInfo,
+    txid: &mut u16,
+) -> ([u8; 5], usize) {
+    let mut reply = [0u8; 5];
+    match req.first().copied() {
+        Some(OP_RESOLVE_A) => {
+            let hostname = &req[1..];
+            let ip = match next_hop_mac {
+                Some(mac) if !hostname.is_empty() => {
+                    *txid = txid.wrapping_add(1);
+                    resolve_dns(hostname, mac, me, *txid)
+                }
+                _ => None,
+            };
+            match ip {
+                Some(addr) => {
+                    reply[0] = ST_OK;
+                    reply[1..5].copy_from_slice(&addr);
+                    (reply, 5)
+                }
+                None => {
+                    reply[0] = ST_FAIL;
+                    (reply, 1)
+                }
+            }
+        }
+        _ => {
+            reply[0] = ST_FAIL; // Unknown opcode.
+            (reply, 1)
+        }
+    }
+}
+
+/// Read argv[1] into `out`, returning the slice actually populated. Native
+/// SlateOS processes fetch argv via `SYS_PROCESS_GET_ARGS` (the stack is bare):
+/// a `SpawnArgsHeader` (argc:u32, envc:u32, argv_len:u32, envp_len:u32) followed
+/// by packed NUL-terminated argv strings, then envp strings.
+fn read_argv1(out: &mut [u8; 32]) -> usize {
+    let mut raw = [0u8; 256];
+    let n = syscall2(SYS_PROCESS_GET_ARGS, raw.as_mut_ptr() as u64, raw.len() as u64);
+    if n < 16 {
+        return 0; // No args or header didn't fit.
+    }
+    let argc = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    if argc < 2 {
+        return 0;
+    }
+    // Walk past argv[0] (first NUL-terminated string) in the packed argv data.
+    let mut off = 16usize;
+    let end = (n as usize).min(raw.len());
+    // Skip argv[0].
+    while off < end && raw[off] != 0 {
+        off += 1;
+    }
+    off += 1; // step over the NUL
+    // Copy argv[1].
+    let mut i = 0;
+    while off < end && raw[off] != 0 && i < out.len() {
+        out[i] = raw[off];
+        off += 1;
+        i += 1;
+    }
+    i
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -302,7 +694,7 @@ const POLL_SLEEP_NS: u64 = 5_000_000;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    print("[netstack] starting (Phase 2 skeleton)\n");
+    print("[netstack] starting\n");
 
     let me = match query_if_info() {
         Some(i) => i,
@@ -317,6 +709,19 @@ pub extern "C" fn _start() -> ! {
         exit(3);
     }
     print("[netstack] claimed raw NIC\n");
+
+    // Mode selection via argv[1]. Default = Phase-2 ARP round-trip self-test;
+    // `serve-dns` = Phase-4 DNS-over-IPC service (register `net.stack`, resolve
+    // hostnames for kernel clients, then release the NIC at the idle deadline).
+    let mut arg = [0u8; 32];
+    let arglen = read_argv1(&mut arg);
+    if &arg[..arglen] == b"serve-dns" {
+        print("[netstack] mode: serve-dns (Phase 4 DNS-over-IPC)\n");
+        let code = run_dns_service(&me);
+        raw_close();
+        print("[netstack] released raw NIC\n");
+        exit(code);
+    }
 
     // Signal readiness now that we own the NIC and can serve.
     syscall0(SYS_NOTIFY_READY);

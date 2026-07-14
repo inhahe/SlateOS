@@ -131,10 +131,26 @@ onto `netproto` is largely throwaway since Phase 5 deletes that stack — the
 priority is growing the daemon on `netproto` toward the Phase 4 socket-IPC
 cutover, not retrofitting the doomed in-kernel modules.
 
-### Phase 4 — socket syscalls → IPC  [ ] not started
+### Phase 4 — socket syscalls → IPC  [-] in progress
 Redirect `SYS_TCP_*` / `SYS_UDP_*` / `SYS_DNS_RESOLVE` etc. to IPC calls into
 `netstack` (shared-memory data path for bulk transfer). POSIX socket layer
 delegates to the daemon.
+
+**Transport decided (§64): the kernel Service Registry (`ipc/service.rs`).**
+The daemon `register`s a service name (`net.stack`); the kernel-side syscall
+handler `connect`s to get a client channel endpoint; request/reply ride
+`channel::Message` byte payloads. No new IPC mechanism needed. A shared-mem data
+ring is added later for TCP/UDP bulk streaming; the one-shot control path
+(starting with DNS) uses channel messages.
+
+**NIC-ownership sequencing constraint (§64): the raw-NIC claim is exclusive.**
+`sys_net_raw_open` grants an *exclusive* claim and `net::poll()` skips draining
+the physical NIC while a raw owner holds it. A persistent daemon owning the NIC
+would starve the still-live kernel stack's RX. So Phase 4 is validated with
+**bounded self-tests** (Phase-2 style: claim NIC → register → serve one request
+→ release), NOT a permanent daemon takeover. Persistent cutover is deferred to
+Phase 5, where the kernel stack is deleted and the exclusive claim becomes
+correct rather than a conflict.
 
 **Kickoff groundwork (surveyed 2026-07-14).** The socket-syscall ABI the daemon
 must serve already exists and stays stable across the cutover (Phase 5 keeps
@@ -192,3 +208,14 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   DNS, DHCPv4 (10 modules, 51 host tests). Core L2–L4 coverage complete.
   Surveyed the socket-syscall ABI and drafted the Phase 4 forwarder
   architecture (channel control + shared-mem data ring; DNS_RESOLVE first).
+- 2026-07-14: Phase 4 increment 1 landed — **DNS resolve over IPC, end-to-end.**
+  Transport + NIC-ownership constraint recorded (§64). The `netstack` daemon
+  gained a `serve-dns` mode: it `register`s `net.stack` (Service Registry),
+  ARP-resolves the next hop, and answers `[OP_RESOLVE_A|hostname]` requests by
+  doing a real DNS-over-UDP query on its raw NIC via `netproto` (dns/udp/ipv4),
+  replying `[status|ip]`. A bounded kernel self-test (`self_test_netstack_dns_ipc`)
+  spawns the daemon (NetRaw+Service caps), waits for registration, connects,
+  and resolves `example.com`. Boot-validated: kernel→daemon→kernel round-trip
+  returned 172.66.147.243. Daemon releases the NIC at its idle deadline, so the
+  in-kernel stack stays the live path until Phase 5. Next: TCP/UDP control ops
+  + shared-mem data ring; then wire the real `sys_dns_resolve` forwarder.

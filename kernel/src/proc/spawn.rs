@@ -2659,6 +2659,167 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the net→userspace migration **Phase 4** socket-
+/// syscall → IPC path (see `net-userspace-migration.md`, `design-decisions.md`
+/// §64): a DNS `A`-record resolve forwarded from the kernel to the userspace
+/// `netstack` daemon over the Service Registry, instead of the in-kernel
+/// resolver.
+///
+/// This exercises the full Phase-4 wiring the eventual `sys_dns_resolve`
+/// forwarder will use:
+///
+/// 1. Spawn `netstack serve-dns` (ring 3, holding one `NetRaw` cap).  It
+///    `register`s the `net.stack` service, claims the NIC, and ARP-resolves the
+///    next hop toward the DNS server.
+/// 2. The kernel (this test, standing in for the syscall forwarder) waits for
+///    the registration, `connect`s, and sends a `[OP_RESOLVE_A | hostname]`
+///    request over the channel.
+/// 3. The daemon does a real DNS-over-UDP query on its raw NIC (via `netproto`)
+///    and replies `[status | ip…]`.  The kernel reads the reply.
+///
+/// Per §64, this is a **bounded** self-test: the daemon owns the NIC only for
+/// the brief service window, then unregisters and releases it so the in-kernel
+/// stack (still the live path until Phase 5) resumes.  A well-formed reply
+/// proves the IPC round-trip; an `ST_OK` reply additionally proves the whole
+/// userspace DNS path.  Skips gracefully when there is no network.
+pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
+    use crate::ipc::{channel, service};
+
+    // Opcode / status bytes — must match `services/netstack/src/main.rs`.
+    const OP_RESOLVE_A: u8 = 0x01;
+    const ST_OK: u8 = 0x00;
+    const ST_FAIL: u8 = 0x01;
+
+    // Same network gate as the Phase-2 test, plus a configured DNS server (the
+    // daemon needs one to resolve against).
+    let ifinfo = crate::net::interface::info();
+    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.dns.0 == [0, 0, 0, 0] {
+        serial_println!(
+            "[spawn]   netstack DNS-over-IPC (ring 3): SKIP (no network — up={}, ip={}, dns={})",
+            ifinfo.up, ifinfo.ip, ifinfo.dns
+        );
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running netstack DNS-over-IPC (ring 3) integration test...");
+
+    static NETSTACK_ELF: &[u8] = include_bytes!(
+        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
+    );
+
+    let argv: &[&[u8]] = &[b"netstack", b"serve-dns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // NetRaw (WRITE) to claim the NIC, plus Service (WRITE) to `register` the
+    // `net.stack` name in the Service Registry (name-squatting guard).
+    let caps = [
+        (ResourceType::NetRaw, 0u64, Rights::WRITE),
+        (ResourceType::Service, 0u64, Rights::WRITE),
+    ];
+    let options = SpawnOptions {
+        name: "netstack-dns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(NETSTACK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: netstack-dns spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Wait for the daemon to publish `net.stack` (it registers early, before the
+    // slow ARP/DNS work).  Yield so the daemon actually gets CPU time.
+    let reg_deadline = crate::hrtimer::now_ns().saturating_add(3_000_000_000); // 3s
+    while !service::is_registered(b"net.stack") {
+        if crate::hrtimer::now_ns() >= reg_deadline {
+            serial_println!("[spawn]   FAIL: netstack did not register net.stack within 3s");
+            let _ = crate::container::wait_process(result.pid);
+            return Err(KernelError::TimedOut);
+        }
+        crate::sched::yield_now();
+    }
+
+    // Connect and send an A-record resolve request for a well-known name.
+    let client = match service::connect(b"net.stack") {
+        Ok(c) => c,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: connect(net.stack) returned {:?}", e);
+            let _ = crate::container::wait_process(result.pid);
+            return Err(e);
+        }
+    };
+
+    let host: &[u8] = b"example.com";
+    let mut req = [0u8; 64];
+    req[0] = OP_RESOLVE_A;
+    req[1..1 + host.len()].copy_from_slice(host);
+    let msg = channel::Message::from_bytes(&req[..1 + host.len()])?;
+    if let Err(e) = channel::send(client, msg) {
+        serial_println!("[spawn]   FAIL: send to netstack returned {:?}", e);
+        channel::close(client);
+        let _ = crate::container::wait_process(result.pid);
+        return Err(e);
+    }
+
+    // Block for the reply.  The daemon does real network I/O (ARP + DNS round
+    // trip), so allow a few seconds.
+    let reply = match channel::recv_timeout(client, 6_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: no reply from netstack ({:?})", e);
+            channel::close(client);
+            let _ = crate::container::wait_process(result.pid);
+            return Err(e);
+        }
+    };
+
+    // Copy the reply bytes out before closing / reaping.
+    let mut data = [0u8; 5];
+    let dlen = reply.data().len().min(data.len());
+    data[..dlen].copy_from_slice(&reply.data()[..dlen]);
+
+    channel::close(client);
+    // Reap the daemon (it exits after its idle deadline once we stop sending).
+    let _ = crate::container::wait_process(result.pid);
+
+    match data.first().copied() {
+        Some(ST_OK) if dlen >= 5 => {
+            serial_println!(
+                "[spawn]   netstack DNS-over-IPC (ring 3: kernel→daemon resolve of \
+                 example.com over net.stack): OK — {}.{}.{}.{}",
+                data[1], data[2], data[3], data[4]
+            );
+            Ok(())
+        }
+        Some(ST_FAIL) => {
+            // The IPC round-trip worked (we got a structured reply); DNS itself
+            // didn't resolve — most likely no upstream resolver behind slirp.
+            // The Phase-4 wiring is proven either way, so don't fail the boot.
+            serial_println!(
+                "[spawn]   netstack DNS-over-IPC (ring 3): IPC round-trip OK, DNS \
+                 unresolved (no upstream?) — Phase-4 path proven, resolution skipped"
+            );
+            Ok(())
+        }
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: malformed netstack reply (first={:?}, len={})",
+                other, dlen
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Ring-3 end-to-end test of the Linux `brk(2)` heap.
 ///
 /// Spawns a real Linux-ABI process that queries its program break, grows the

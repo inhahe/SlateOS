@@ -1420,6 +1420,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}", e);
     }
 
+    // Net→userspace migration Phase 4: forward a DNS resolve from the kernel to
+    // the userspace `netstack` daemon over the Service Registry (`net.stack`),
+    // proving the socket-syscall → IPC path end-to-end. Bounded self-test (the
+    // daemon owns the NIC only briefly); skips gracefully with no network.
+    if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
+        serial_println!("WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of the Linux brk(2) heap: a real Linux-ABI
     // process queries its program break, grows the heap by 32 KiB, writes a
     // sentinel into the second frame, reads it back, and exits with that byte

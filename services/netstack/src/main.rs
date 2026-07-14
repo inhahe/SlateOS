@@ -174,80 +174,18 @@ fn query_if_info() -> Option<IfInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol constants + frame builders
+// Protocol handling (via the shared `netproto` crate)
 // ---------------------------------------------------------------------------
+//
+// All wire-format parsing and construction lives in `netproto` — the same
+// no_std crate the kernel stack will migrate onto, so there is a single source
+// of truth for frame layout and the RFC 1071 checksum. This daemon only wires
+// those parsers/builders to the raw-frame syscalls and the interface config.
 
-const ETH_HDR: usize = 14;
-const ETHERTYPE_ARP: u16 = 0x0806;
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
-
-const ARP_HW_ETHERNET: u16 = 1;
-const ARP_PROTO_IPV4: u16 = 0x0800;
-const ARP_REQUEST: u16 = 1;
-const ARP_REPLY: u16 = 2;
-
-const IP_PROTO_ICMP: u8 = 1;
-const ICMP_ECHO_REQUEST: u8 = 8;
-const ICMP_ECHO_REPLY: u8 = 0;
+use netproto::{arp, ethernet, icmp, ipv4};
 
 /// Maximum standard Ethernet frame we handle (jumbo frames are out of scope).
 const MAX_FRAME: usize = 1522;
-
-/// Write the 14-byte Ethernet header into `out[..14]`.
-fn write_eth_header(out: &mut [u8], dst: &[u8; 6], src: &[u8; 6], ethertype: u16) {
-    out[0..6].copy_from_slice(dst);
-    out[6..12].copy_from_slice(src);
-    out[12..14].copy_from_slice(&ethertype.to_be_bytes());
-}
-
-/// Build an ARP frame (request or reply) into a fixed 42-byte buffer.
-fn build_arp(
-    op: u16,
-    src_mac: &[u8; 6],
-    src_ip: &[u8; 4],
-    dst_mac: &[u8; 6],
-    dst_ip: &[u8; 4],
-    eth_dst: &[u8; 6],
-) -> [u8; ETH_HDR + 28] {
-    let mut f = [0u8; ETH_HDR + 28];
-    write_eth_header(&mut f, eth_dst, src_mac, ETHERTYPE_ARP);
-    let a = &mut f[ETH_HDR..];
-    a[0..2].copy_from_slice(&ARP_HW_ETHERNET.to_be_bytes());
-    a[2..4].copy_from_slice(&ARP_PROTO_IPV4.to_be_bytes());
-    a[4] = 6; // hw addr len
-    a[5] = 4; // proto addr len
-    a[6..8].copy_from_slice(&op.to_be_bytes());
-    a[8..14].copy_from_slice(src_mac);
-    a[14..18].copy_from_slice(src_ip);
-    a[18..24].copy_from_slice(dst_mac);
-    a[24..28].copy_from_slice(dst_ip);
-    f
-}
-
-// ---------------------------------------------------------------------------
-// Internet checksum (RFC 1071)
-// ---------------------------------------------------------------------------
-
-fn checksum16(data: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < data.len() {
-        sum = sum.wrapping_add(u16::from_be_bytes([data[i], data[i + 1]]) as u32);
-        i += 2;
-    }
-    if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
-    }
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
-// ---------------------------------------------------------------------------
-// Frame handling
-// ---------------------------------------------------------------------------
 
 /// Result of processing one received frame.
 enum Handled {
@@ -260,78 +198,60 @@ enum Handled {
 /// Process one received Ethernet frame. Answers ARP requests + ICMP echo
 /// addressed to us, and detects the gateway ARP reply.
 fn handle_frame(frame: &[u8], me: &IfInfo) -> Handled {
-    if frame.len() < ETH_HDR {
-        return Handled::Other;
-    }
-    let mut src_mac = [0u8; 6];
-    src_mac.copy_from_slice(&frame[6..12]);
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    let payload = &frame[ETH_HDR..];
-    match ethertype {
-        ETHERTYPE_ARP => handle_arp(payload, me),
-        ETHERTYPE_IPV4 => {
-            handle_ipv4(payload, &src_mac, me);
+    let eth = match ethernet::Frame::parse(frame) {
+        Some(f) => f,
+        None => return Handled::Other,
+    };
+    match eth.ethertype {
+        ethernet::ETHERTYPE_ARP => handle_arp(eth.payload, me),
+        ethernet::ETHERTYPE_IPV4 => {
+            handle_ipv4(eth.payload, &eth.src, me);
             Handled::Other
         }
         _ => Handled::Other,
     }
 }
 
-fn handle_arp(arp: &[u8], me: &IfInfo) -> Handled {
-    if arp.len() < 28 {
-        return Handled::Other;
-    }
-    let op = u16::from_be_bytes([arp[6], arp[7]]);
-    let mut sender_mac = [0u8; 6];
-    sender_mac.copy_from_slice(&arp[8..14]);
-    let sender_ip = [arp[14], arp[15], arp[16], arp[17]];
-    let target_ip = [arp[24], arp[25], arp[26], arp[27]];
-
-    if op == ARP_REPLY {
-        // Did the gateway answer our request?
-        if sender_ip == me.gateway {
-            print("[netstack] ARP reply: gateway resolved\n");
-            return Handled::GatewayResolved;
+fn handle_arp(body: &[u8], me: &IfInfo) -> Handled {
+    let pkt = match arp::Packet::parse(body) {
+        Some(p) => p,
+        None => return Handled::Other,
+    };
+    match pkt.op {
+        arp::Op::Reply => {
+            // Did the gateway answer our request?
+            if pkt.sender_ip == me.gateway {
+                print("[netstack] ARP reply: gateway resolved\n");
+                return Handled::GatewayResolved;
+            }
         }
-        return Handled::Other;
-    }
-
-    if op == ARP_REQUEST && target_ip == me.ip {
-        // Answer: tell the requester our MAC.
-        let reply = build_arp(
-            ARP_REPLY,
-            &me.mac,
-            &me.ip,
-            &sender_mac,
-            &sender_ip,
-            &sender_mac,
-        );
-        let _ = raw_tx(&reply);
-        print("[netstack] answered ARP request for our IP\n");
+        arp::Op::Request => {
+            if pkt.target_ip == me.ip {
+                // Answer: tell the requester our MAC (unicast back to it).
+                if let Some(reply) = arp::reply_to(&pkt, &me.mac) {
+                    let _ = raw_tx(&reply);
+                    print("[netstack] answered ARP request for our IP\n");
+                }
+            }
+        }
     }
     Handled::Other
 }
 
-fn handle_ipv4(ip: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
-    if ip.len() < 20 {
+fn handle_ipv4(body: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
+    let pkt = match ipv4::Packet::parse(body) {
+        Some(p) => p,
+        None => return,
+    };
+    if pkt.protocol != ipv4::PROTO_ICMP || pkt.dst != me.ip {
         return;
     }
-    let ihl = ((ip[0] & 0x0F) as usize) * 4;
-    if ihl < 20 || ip.len() < ihl {
-        return;
-    }
-    let proto = ip[9];
-    let dst_ip = [ip[16], ip[17], ip[18], ip[19]];
-    if proto != IP_PROTO_ICMP || dst_ip != me.ip {
-        return;
-    }
-    let mut src_ip = [0u8; 4];
-    src_ip.copy_from_slice(&ip[12..16]);
-    let icmp = &ip[ihl..];
-    if icmp.len() < 8 || icmp[0] != ICMP_ECHO_REQUEST {
-        return;
-    }
-    reply_icmp_echo(&src_ip, src_mac, icmp, me);
+    // Only answer echo *requests* addressed to us.
+    let echo = match icmp::Echo::parse(pkt.payload) {
+        Some(e) if e.is_request => e,
+        _ => return,
+    };
+    reply_icmp_echo(&pkt.src, src_mac, &echo, me);
 }
 
 /// Build and transmit an ICMP echo reply for a received echo request.
@@ -339,43 +259,35 @@ fn handle_ipv4(ip: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
 /// `dst_mac` is the requester's L2 source address (taken straight from the
 /// received Ethernet header), so the reply is unicast back to whoever pinged
 /// us — no ARP lookup needed for the reply path.
-fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req_icmp: &[u8], me: &IfInfo) {
-    let icmp_len = req_icmp.len();
-    let total_ip = 20 + icmp_len;
-    let total = ETH_HDR + total_ip;
-    if total > MAX_FRAME {
-        return; // Oversized; drop.
-    }
+fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req: &icmp::Echo, me: &IfInfo) {
     let mut buf = [0u8; MAX_FRAME];
+    let icmp_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
 
-    // Unicast the reply straight back to the requester's MAC.
-    write_eth_header(&mut buf, dst_mac, &me.mac, ETHERTYPE_IPV4);
+    // ICMP reply first (it sits after the Ethernet + IPv4 headers). This also
+    // gives us the exact ICMP length for the IPv4 total-length field.
+    let icmp_len = match icmp::reply_to(&mut buf[icmp_off..], req) {
+        Some(n) => n,
+        None => return, // Oversized or not a request; drop.
+    };
 
-    // IPv4 header.
-    let ip = &mut buf[ETH_HDR..ETH_HDR + 20];
-    ip[0] = 0x45; // version 4, IHL 5
-    ip[1] = 0; // DSCP/ECN
-    ip[2..4].copy_from_slice(&(total_ip as u16).to_be_bytes());
-    ip[4..6].copy_from_slice(&0u16.to_be_bytes()); // id
-    ip[6..8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
-    ip[8] = 64; // TTL
-    ip[9] = IP_PROTO_ICMP;
-    ip[10..12].copy_from_slice(&0u16.to_be_bytes()); // checksum placeholder
-    ip[12..16].copy_from_slice(&me.ip);
-    ip[16..20].copy_from_slice(src_ip);
-    let ip_csum = checksum16(&buf[ETH_HDR..ETH_HDR + 20]);
-    buf[ETH_HDR + 10..ETH_HDR + 12].copy_from_slice(&ip_csum.to_be_bytes());
+    // IPv4 header (DF set, TTL 64), carrying `icmp_len` bytes of ICMP.
+    let ip_hdr = ipv4::Builder {
+        dscp_ecn: 0,
+        id: 0,
+        flags_frag: 0x4000, // Don't Fragment
+        ttl: 64,
+        protocol: ipv4::PROTO_ICMP,
+        src: me.ip,
+        dst: *src_ip,
+    }
+    .build_header(icmp_len as u16);
+    buf[ethernet::HEADER_LEN..ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN]
+        .copy_from_slice(&ip_hdr);
 
-    // ICMP payload: copy the request, flip type to reply, recompute checksum.
-    let icmp_off = ETH_HDR + 20;
-    buf[icmp_off..icmp_off + icmp_len].copy_from_slice(req_icmp);
-    buf[icmp_off] = ICMP_ECHO_REPLY;
-    buf[icmp_off + 1] = 0; // code
-    buf[icmp_off + 2] = 0; // checksum placeholder
-    buf[icmp_off + 3] = 0;
-    let icmp_csum = checksum16(&buf[icmp_off..icmp_off + icmp_len]);
-    buf[icmp_off + 2..icmp_off + 4].copy_from_slice(&icmp_csum.to_be_bytes());
+    // Ethernet header: unicast the reply straight back to the requester's MAC.
+    ethernet::write_header(&mut buf, dst_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
 
+    let total = icmp_off + icmp_len;
     let _ = raw_tx(&buf[..total]);
     print("[netstack] answered ICMP echo request\n");
 }
@@ -410,14 +322,7 @@ pub extern "C" fn _start() -> ! {
     syscall0(SYS_NOTIFY_READY);
 
     // Broadcast an ARP request for the gateway to prove TX + RX end-to-end.
-    let arp_req = build_arp(
-        ARP_REQUEST,
-        &me.mac,
-        &me.ip,
-        &[0u8; 6],
-        &me.gateway,
-        &BROADCAST_MAC,
-    );
+    let arp_req = arp::request(&me.mac, &me.ip, &me.gateway);
     if raw_tx(&arp_req) < 0 {
         print("[netstack] FAIL: raw TX of ARP request failed\n");
         raw_close();
@@ -437,10 +342,10 @@ pub extern "C" fn _start() -> ! {
                 break; // Other error — back off.
             }
             let len = n as usize;
-            if len <= buf.len() {
-                if let Handled::GatewayResolved = handle_frame(&buf[..len], &me) {
-                    resolved = true;
-                }
+            if len <= buf.len()
+                && let Handled::GatewayResolved = handle_frame(&buf[..len], &me)
+            {
+                resolved = true;
             }
         }
         if resolved {

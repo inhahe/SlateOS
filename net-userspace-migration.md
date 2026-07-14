@@ -63,10 +63,37 @@ Deferred to later increments (not blocking Phase 2):
   the daemon (this skeleton hand-builds only ARP/ICMP frames); a shared
   `no_std` protocol crate; batched raw TX/RX.
 
-### Phase 3 — port protocol layers  [ ] not started
+### Phase 3 — port protocol layers  [-] in progress
 Move parsers/state machines into the daemon (or a shared crate): Ethernet, ARP,
 IPv4, IPv6, ICMP(v6), UDP, TCP, DHCP(v6), DNS, fragmentation, firewall/conntrack.
 Most of `kernel/src/net/*.rs` is privilege-free and moves largely as-is.
+
+**Increment 1 — shared `netproto` crate + netstack cutover  [x] landed 2026-07-14**
+Created `netproto/` at the repo root: a dependency-free, `no_std`,
+`#![forbid(unsafe_code)]` crate holding the privilege-free wire-format logic as
+a single source of truth for both the daemon and (later) the kernel stack.
+Modules landed this increment:
+- `checksum` — RFC 1071 Internet checksum (`internet`, plus `accumulate`/`fold`/
+  `internet_continue` for split pseudo-header + payload sums).
+- `ethernet` — Ethernet II `Frame::parse` + `write_header`, EtherType consts,
+  broadcast/multicast predicates.
+- `arp` — RFC 826 `Packet` parse/serialize, `request()` and `reply_to()` frame
+  builders (broadcast request; unicast reply).
+- `ipv4` — RFC 791 fixed-header parse (verifies the header checksum, clamps the
+  payload to `total_len`, IHL>5 options tolerated) + `Builder::build_header`.
+- `icmp` — ICMPv4 echo `Echo::parse` + `write_echo`/`reply_to` (checksum-verified).
+
+22 host unit tests pass (`cd netproto && cargo test --target x86_64-pc-windows-gnu`);
+crate also builds clean for `x86_64-unknown-none`. Added `netproto` to the
+workspace `exclude` list. `services/netstack` now takes a path dependency on it
+and its hand-rolled Ethernet/ARP/IPv4/ICMP framing + checksum (~200 lines) was
+deleted in favour of the shared parsers/builders. Re-validated end-to-end in
+QEMU: the daemon claimed the NIC, ARP-resolved the gateway, and exited SUCCESS
+on the netproto code path; BOOT_OK, no regression.
+
+Remaining Phase 3 increments: UDP, TCP, IPv6, ICMPv6, DHCP(v6), DNS,
+fragmentation, firewall/conntrack parsers; then migrate the kernel stack
+(`kernel/src/net/*.rs`) onto `netproto` so there is one wire-format implementation.
 
 ### Phase 4 — socket syscalls → IPC  [ ] not started
 Redirect `SYS_TCP_*` / `SYS_UDP_*` / `SYS_DNS_RESOLVE` etc. to IPC calls into
@@ -79,3 +106,6 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
 
 ## Status log
 - 2026-07-14: Decision recorded (§63, Path B). Plan drafted. Starting Phase 1.
+- 2026-07-14: Phase 1 (raw-frame boundary) + Phase 2 (netstack daemon skeleton)
+  landed. Phase 3 increment 1: `netproto` shared crate created; netstack cut
+  over onto it (hand-rolled framing deleted). Boot-validated end-to-end.

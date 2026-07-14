@@ -43,6 +43,13 @@ exclude = [
     # build-std blast radius. Each services/* crate is built
     # independently with its own per-crate .cargo/config.toml.
     "services",
+    # Shared no_std protocol crate (Ethernet/ARP/IPv4/ICMP parsers +
+    # RFC 1071 checksum) used by the userspace netstack daemon and,
+    # later, the kernel stack. Built for x86_64-unknown-none as a
+    # dependency of services/netstack; host-testable with an explicit
+    # `--target`. Excluded so the workspace-root target doesn't try to
+    # build it as a std crate.
+    "netproto",
     # Empty directory (incomplete crate); skip until populated.
     "userspace/cylance-cli",
     # nushell is a self-contained upstream workspace with its own member

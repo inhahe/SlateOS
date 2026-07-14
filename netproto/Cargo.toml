@@ -1,0 +1,13 @@
+[package]
+name = "netproto"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no_std L2/L3/L4 packet parsers and builders for SlateOS networking (kernel stack + userspace netstack daemon)."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std`: this crate is linked into both
+# the bare-metal `services/netstack` daemon (x86_64-unknown-none) and,
+# eventually, the kernel. It must never pull in `std` or an allocator.
+[dependencies]

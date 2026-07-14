@@ -1178,39 +1178,61 @@ fn ring_echo(handle: u64, size: u32) -> bool {
     ok
 }
 
-/// Pop the kernel's `OP_SEND` SQE, upper-case its payload window in place, and
-/// post the completion. Split out so the `unsafe` attach site stays small.
+/// Drain the whole submission queue, dispatching each SQE by opcode and posting
+/// exactly one completion per entry (the io_uring batched-submission model). The
+/// kernel submits a batch of SQEs in one pass; the daemon processes them FIFO and
+/// posts CQEs in the same order, so the kernel can match completions to
+/// submissions by position or by echoed `user_data`. Split out so the `unsafe`
+/// attach site stays small.
+///
+/// Per-opcode semantics (the mechanical foundation the real socket dispatch will
+/// build on — connect/send/recv/close land here later):
+/// - [`netipc::ring::OP_NOP`]: complete immediately with `result = 0`.
+/// - [`netipc::ring::OP_SEND`]: read the SQE's `(data_off, data_len)` window,
+///   ASCII-upper-case it in place, complete with `result = len`.
+/// - any other opcode: complete with `result = -1` (unsupported) so the kernel
+///   still gets a completion rather than a hang.
+///
+/// Returns `true` iff at least one SQE was processed and every completion was
+/// posted (the CQ never overflowed).
 fn ring_echo_process(ring: &netring::Ring) -> bool {
-    let sqe = match ring.sq_pop() {
-        Some(s) => s,
-        None => return false,
-    };
-    if sqe.op != netipc::ring::OP_SEND {
-        return false;
+    let mut processed = 0u32;
+    while let Some(sqe) = ring.sq_pop() {
+        let result = match sqe.op {
+            netipc::ring::OP_NOP => 0,
+            netipc::ring::OP_SEND => ring_send_transform(ring, &sqe),
+            _ => -1, // unsupported opcode: report failure, still complete
+        };
+        let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };
+        if !ring.cq_push(&cqe) {
+            return false; // CQ full — would drop a completion; treat as failure
+        }
+        processed = processed.saturating_add(1);
     }
+    processed > 0
+}
+
+/// Apply the `OP_SEND` transform: read the SQE's data window, upper-case it in
+/// place, and return the byte count as the completion `result` (or `-1` if the
+/// window is out of range or larger than our scratch buffer).
+fn ring_send_transform(ring: &netring::Ring, sqe: &netipc::ring::Sqe) -> i32 {
     let off = sqe.data_off as usize;
     let len = sqe.data_len as usize;
-    // Read the payload out of the shared data area, transform, write it back.
     let mut buf = [0u8; 64];
     let window = match buf.get_mut(..len) {
         Some(w) => w,
-        None => return false, // payload larger than our scratch buffer
+        None => return -1, // payload larger than our scratch buffer
     };
     if !ring.read_data(off, window) {
-        return false;
+        return -1;
     }
     for b in window.iter_mut() {
         *b = b.to_ascii_uppercase();
     }
     if !ring.write_data(off, window) {
-        return false;
+        return -1;
     }
-    let cqe = netipc::ring::Cqe {
-        user_data: sqe.user_data,
-        result: len as i32,
-        flags: 0,
-    };
-    ring.cq_push(&cqe)
+    len as i32
 }
 
 /// Read argv[1] into `out`, returning the slice actually populated. Native

@@ -386,3 +386,24 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   Phase 4/5 work builds persistent per-connection TCP/UDP state machines that
   drive this ring for real streaming `send`/`recv`, replacing the one-shot
   `OP_TCP_FETCH`/`OP_UDP_EXCHANGE` control ops.
+- 2026-07-14: Phase 4 increment 10 landed — **batched SQ drain + per-opcode
+  completion dispatch (the io_uring submission model, cross-address-space).** The
+  daemon's ring handler was a single `sq_pop`; it now **drains the whole SQ** in a
+  loop, dispatching each SQE by opcode (`OP_NOP` → complete `result=0`; `OP_SEND`
+  → upper-case the data window, `result=len`; unknown → `result=-1`) and posting
+  one CQE per entry in FIFO order (`ring_echo_process` loop + `ring_send_transform`
+  helper). The kernel self-test now submits a **3-SQE batch in one pass**
+  (`OP_SEND` + two `OP_NOP`s, each with a distinct `user_data = base+index`) and
+  reaps all three CQEs, asserting FIFO ordering (echoed `user_data` matches
+  submission order), the expected per-op `result`, no stray extra completion, and
+  the upper-cased payload. This proves the core io_uring value prop — many SQEs
+  submitted/completed per round-trip — works across the address-space boundary,
+  and is the mechanical foundation the real socket dispatch (connect/send/recv/
+  close as distinct opcodes over the ring) will build on. Daemon + kernel build
+  clean; clippy clean; boot-validated: "netstack ring-echo-over-IPC (ring 3): OK —
+  SQ/CQ driver verified (kernel submitted 3-SQE batch + daemon drained SQ + kernel
+  reaped 3 CQEs in order)", clean 85s boot with all six netstack ops green. Next:
+  give the ring the real socket opcodes (`OP_CONNECT` w/ endpoint in `aux` via
+  `pack_endpoint`, `OP_SEND`/`OP_RECV` streaming through the data window,
+  `OP_CLOSE`) driving a live TCP transaction — the ring-native equivalent of the
+  one-shot `OP_TCP_FETCH` control op, self-tested in the §64 bounded model.

@@ -2911,7 +2911,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     match ring_result {
         Ok(()) => serial_println!(
             "[spawn]   netstack ring-echo-over-IPC (ring 3): OK — SQ/CQ driver verified \
-             (kernel submitted SQE + daemon transformed payload + kernel reaped CQE)"
+             (kernel submitted 3-SQE batch + daemon drained SQ + kernel reaped 3 CQEs in order)"
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: ring-echo IPC round-trip error ({:?})", e);
@@ -3246,18 +3246,22 @@ fn netstack_shm_ping_roundtrip() -> KernelResult<()> {
 ///
 /// The kernel creates a shared-memory region, lays it out as an io_uring-style
 /// ring with [`netring::Ring::init`] (through its own HHDM view), writes a fixed
-/// ASCII payload into the data area, and submits one `OP_SEND` SQE stamped with
-/// [`netipc::RING_ECHO_USER_DATA`]. It then hands the region's handle+size to the
-/// daemon, which maps the *same* frames, [`netring::Ring::attach`]es, pops the
-/// SQE, upper-cases the payload in place, and pushes a completion. On `ST_OK` the
-/// kernel reaps the CQE through its view and verifies (a) the echoed `user_data`,
-/// (b) the byte count in `result`, and (c) that the data-area payload is now the
-/// upper-cased form — proving the full producer→consumer→producer ring path and
-/// the zero-copy data window both work across two address spaces.
+/// ASCII payload into the data area, and submits a *batch* of three SQEs in one
+/// pass — an `OP_SEND` (carrying the payload window) followed by two `OP_NOP`s,
+/// each stamped with a distinct `user_data` (base + index). It then hands the
+/// region's handle+size to the daemon, which maps the *same* frames,
+/// [`netring::Ring::attach`]es, and **drains the whole SQ**, dispatching each
+/// entry by opcode and posting one completion per SQE in FIFO order. On `ST_OK`
+/// the kernel reaps all three CQEs through its view and verifies, for each, the
+/// echoed `user_data` and expected `result` (payload length for the SEND, 0 for
+/// the NOPs), that no stray extra completion remains, and that the data-area
+/// payload is now the upper-cased form — proving batched submission, FIFO
+/// completion ordering, and the zero-copy data window all work across two
+/// address spaces.
 ///
 /// Returns `Ok(())` on a fully-verified round-trip, or `Err` on any transport
-/// failure, a `ST_FAIL` reply, a missing/mismatched completion, or wrong echoed
-/// bytes. This is the data path the Phase-5 socket API rides on.
+/// failure, a `ST_FAIL` reply, a missing/out-of-order/mismatched completion, or
+/// wrong echoed bytes. This is the data path the Phase-5 socket API rides on.
 fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
     use crate::ipc::{channel, service, shm};
 
@@ -3265,8 +3269,8 @@ fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
     // observable; kept short so it fits comfortably in one 16 KiB frame.
     const PAYLOAD: &[u8] = b"ring-echo-payload";
 
-    // Ring geometry: tiny SQ/CQ (one submission, one completion) + a small data
-    // area. region_size stays well under one 16 KiB frame.
+    // Ring geometry: small SQ/CQ (4 slots each — room for the 3-SQE batch below)
+    // + a small data area. region_size stays well under one 16 KiB frame.
     let sq_entries: u32 = 4;
     let cq_entries: u32 = 4;
     let data_len: u32 = 256;
@@ -3299,16 +3303,35 @@ fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
     }
     #[allow(clippy::cast_possible_truncation)]
     let payload_len = PAYLOAD.len() as u32;
-    let sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_SEND,
-        conn_id: 1,
-        data_off: 0,
-        data_len: payload_len,
-        user_data: netipc::RING_ECHO_USER_DATA,
-        aux: 0,
-    };
-    if !ring.sq_push(&sqe) {
-        return finish(handle, Err(KernelError::InternalError));
+    // Submit a *batch* of three SQEs in one pass (the io_uring model): an OP_SEND
+    // carrying the payload window, then two OP_NOPs. The daemon drains the whole
+    // SQ and posts one CQE per entry in FIFO order; we reap all three below. Each
+    // SQE gets a distinct user_data (base+index) so we can confirm the daemon
+    // preserved submission order. `sq_entries` (4) has room for all three.
+    let batch = [
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_SEND,
+            conn_id: 1,
+            data_off: 0,
+            data_len: payload_len,
+            user_data: netipc::RING_ECHO_USER_DATA,
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_NOP,
+            user_data: netipc::RING_ECHO_USER_DATA.wrapping_add(1),
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_NOP,
+            user_data: netipc::RING_ECHO_USER_DATA.wrapping_add(2),
+            ..netipc::ring::Sqe::default()
+        },
+    ];
+    for sqe in &batch {
+        if !ring.sq_push(sqe) {
+            return finish(handle, Err(KernelError::InternalError));
+        }
     }
 
     let client = match service::connect(b"net.stack") {
@@ -3354,26 +3377,42 @@ fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
         }
     }
 
-    // Reap the completion the daemon posted and verify it end to end.
-    let cqe = match ring.cq_pop() {
-        Some(c) => c,
-        None => {
-            serial_println!("[spawn]   ring-echo: no completion posted");
+    // Reap all three completions the daemon posted. They must come back in FIFO
+    // (submission) order, each carrying the SQE's echoed user_data:
+    //   [0] OP_SEND → result = payload_len
+    //   [1] OP_NOP  → result = 0
+    //   [2] OP_NOP  → result = 0
+    let expected_results: [(u64, i32); 3] = [
+        (netipc::RING_ECHO_USER_DATA, payload_len as i32),
+        (netipc::RING_ECHO_USER_DATA.wrapping_add(1), 0),
+        (netipc::RING_ECHO_USER_DATA.wrapping_add(2), 0),
+    ];
+    for (i, &(want_ud, want_res)) in expected_results.iter().enumerate() {
+        let cqe = match ring.cq_pop() {
+            Some(c) => c,
+            None => {
+                serial_println!("[spawn]   ring-echo: missing completion {}", i);
+                return finish(handle, Err(KernelError::InternalError));
+            }
+        };
+        if cqe.user_data != want_ud {
+            serial_println!(
+                "[spawn]   ring-echo: completion {} user_data mismatch (got {:#x}, want {:#x})",
+                i, cqe.user_data, want_ud
+            );
             return finish(handle, Err(KernelError::InternalError));
         }
-    };
-    if cqe.user_data != netipc::RING_ECHO_USER_DATA {
-        serial_println!(
-            "[spawn]   ring-echo: user_data mismatch (got {:#x})",
-            cqe.user_data
-        );
-        return finish(handle, Err(KernelError::InternalError));
+        if cqe.result != want_res {
+            serial_println!(
+                "[spawn]   ring-echo: completion {} result mismatch (got {}, want {})",
+                i, cqe.result, want_res
+            );
+            return finish(handle, Err(KernelError::InternalError));
+        }
     }
-    if cqe.result != payload_len as i32 {
-        serial_println!(
-            "[spawn]   ring-echo: result length mismatch (got {})",
-            cqe.result
-        );
+    // The daemon must have drained the whole SQ — no stray extra completions.
+    if ring.cq_pop().is_some() {
+        serial_println!("[spawn]   ring-echo: unexpected extra completion");
         return finish(handle, Err(KernelError::InternalError));
     }
 

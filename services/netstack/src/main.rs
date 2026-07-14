@@ -585,6 +585,14 @@ const TCP_SYN_ATTEMPTS: u32 = 5;
 /// request/response transactions this client serves.
 const TCP_SND_BUF: usize = 1024;
 
+/// Per-connection receive buffer: in-order stream bytes are accumulated here as
+/// segments arrive and are drained on `OP_RECV`/`recv`. Sized to hold a response
+/// window comfortably (the ring recv windows are <= `MSG_CAP`). This buffer is
+/// what lets the shared RX pump route a sibling connection's inbound frames into
+/// *its* connection while another connection is the one blocked in `recv` — the
+/// data waits here instead of being dropped.
+const TCP_RCV_BUF: usize = 1024;
+
 /// Metadata copied out of one received TCP segment (avoids borrowing the RX
 /// frame buffer across the poll loop).
 struct TcpRx {
@@ -688,6 +696,58 @@ fn recv_tcp_seg(
     Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
 }
 
+/// Outcome of one non-filtered NIC read for the multiplexed RX pump.
+enum RawRx {
+    /// No frame available (`WOULD_BLOCK`) or a read error — draining is done.
+    None,
+    /// A frame arrived but is not a TCP segment addressed to us — skip it, but
+    /// keep draining (there may be more).
+    Ignore,
+    /// A TCP segment addressed to us: peer identity `(src_ip, src_port, dst_port)`
+    /// for routing to the owning connection, plus the parsed segment metadata. The
+    /// payload has been copied into the caller's `pl` buffer (`payload_len` bytes).
+    Seg([u8; 4], u16, u16, TcpRx),
+}
+
+/// Read one frame off the NIC without filtering to a specific connection's
+/// 4-tuple, so the caller can *route* it to whichever connection owns it. This is
+/// the shared-RX-demux counterpart to [`recv_tcp_seg`]: where that function drops
+/// any frame not matching one connection, this one hands back the peer identity so
+/// a sibling connection's frames are delivered to *it* instead of being lost.
+fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
+    let n = raw_rx(frame);
+    if n < 0 {
+        return RawRx::None; // WOULD_BLOCK or error → drain complete.
+    }
+    let len = n as usize;
+    if len > frame.len() {
+        return RawRx::Ignore;
+    }
+    let parsed = (|| {
+        let eth = ethernet::Frame::parse(frame.get(..len)?)?;
+        if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+            return None;
+        }
+        let ip = ipv4::Packet::parse(eth.payload)?;
+        if ip.protocol != ipv4::PROTO_TCP || ip.dst != me.ip {
+            return None;
+        }
+        let seg = tcp::Segment::parse(ip.payload, &ip.src, &ip.dst)?;
+        let cplen = seg.payload.len().min(pl.len());
+        pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
+        Some((
+            ip.src,
+            seg.src_port,
+            seg.dst_port,
+            TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
+        ))
+    })();
+    match parsed {
+        Some((src_ip, src_port, dst_port, rx)) => RawRx::Seg(src_ip, src_port, dst_port, rx),
+        None => RawRx::Ignore,
+    }
+}
+
 /// A single live TCP client connection. Holds the sequence-number and IP-ident
 /// state that must persist across the connect / send / recv / close phases, so
 /// the same state machine backs both the one-shot [`tcp_fetch`] control op and
@@ -719,6 +779,13 @@ struct TcpConn {
     snd_buf: [u8; TCP_SND_BUF],
     /// Valid length of `snd_buf` (0 = nothing buffered to retransmit).
     snd_buf_len: usize,
+    /// In-order received stream bytes awaiting delivery to the caller. Filled by
+    /// [`ingest_seg`](Self::ingest_seg) (whether this connection is the one in
+    /// `recv` or a sibling routed here by the shared RX pump) and drained by
+    /// [`take_rx`](Self::take_rx).
+    rx_buf: [u8; TCP_RCV_BUF],
+    /// Valid length of `rx_buf`.
+    rx_len: usize,
 }
 
 impl TcpConn {
@@ -793,6 +860,8 @@ impl TcpConn {
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
+            rx_buf: [0u8; TCP_RCV_BUF],
+            rx_len: 0,
         })
     }
 
@@ -829,80 +898,127 @@ impl TcpConn {
         Some(payload.len())
     }
 
+    /// Ingest one parsed TCP segment into this connection's receive state: buffer
+    /// in-order payload into `rx_buf`, advance the cumulative ACK point, honor a
+    /// FIN or RST, and emit an ACK as needed. This is the single point of TCP
+    /// receive logic, shared by the one-connection [`recv`](Self::recv) loop and
+    /// the multiplexed [`ring_pump`] — so a segment routed here by the shared RX
+    /// demux is processed identically whether or not this connection is the one
+    /// currently blocked in a receive. `payload` is the segment's data bytes
+    /// (length equals `rx.payload_len`).
+    fn ingest_seg(&mut self, me: &IfInfo, rx: &TcpRx, payload: &[u8]) {
+        if self.peer_fin {
+            return; // Stream already ended; ignore stragglers.
+        }
+        if rx.flags & tcp::FLAG_RST != 0 {
+            self.peer_fin = true; // Treat a reset as end-of-stream.
+            return;
+        }
+        if rx.seq == self.rcv_nxt {
+            // In-order segment: buffer any payload (up to capacity), then any FIN.
+            if rx.payload_len > 0 {
+                let room = TCP_RCV_BUF.saturating_sub(self.rx_len);
+                let take = payload.len().min(room);
+                self.rx_buf[self.rx_len..self.rx_len + take].copy_from_slice(&payload[..take]);
+                self.rx_len += take;
+                // Advance past the whole in-order segment even if our buffer was
+                // full (matches the prior client's cumulative-ACK behaviour: the
+                // overflow is ACKed and dropped rather than stalling the peer).
+                self.rcv_nxt = self.rcv_nxt.wrapping_add(rx.payload_len as u32);
+            }
+            if rx.flags & tcp::FLAG_FIN != 0 {
+                self.rcv_nxt = self.rcv_nxt.wrapping_add(1); // FIN occupies one seq.
+                self.peer_fin = true;
+            }
+            if rx.payload_len > 0 || self.peer_fin {
+                self.ipid = self.ipid.wrapping_add(1);
+                send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
+            }
+        } else if rx.payload_len > 0 {
+            // Out-of-order data: dup-ACK to prompt the peer to retransmit.
+            self.ipid = self.ipid.wrapping_add(1);
+            send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
+        }
+    }
+
+    /// Drain up to `out.len()` buffered in-order bytes into `out`, shifting any
+    /// remainder to the front of `rx_buf`. Returns the number of bytes delivered.
+    fn take_rx(&mut self, out: &mut [u8]) -> usize {
+        let n = self.rx_len.min(out.len());
+        out[..n].copy_from_slice(&self.rx_buf[..n]);
+        if n < self.rx_len {
+            self.rx_buf.copy_within(n..self.rx_len, 0);
+        }
+        self.rx_len -= n;
+        n
+    }
+
+    /// Early in an idle window (nothing received yet), retransmit the buffered
+    /// send segment up to three times in case our request was lost. Returns `true`
+    /// if it retransmitted (the caller then resets its idle counter). Shared by
+    /// both receive paths.
+    fn maybe_retransmit(&mut self, me: &IfInfo, idle: u32, retransmits: &mut u32) -> bool {
+        if self.snd_buf_len > 0
+            && self.rcv_nxt == self.server_isn.wrapping_add(1)
+            && idle == 40
+            && *retransmits < 3
+        {
+            *retransmits += 1;
+            self.ipid = self.ipid.wrapping_add(1);
+            let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
+            send_tcp(
+                me,
+                &self.mac,
+                &self.dst_ip,
+                self.dst_port,
+                self.local_port,
+                seq,
+                self.rcv_nxt,
+                tcp::FLAG_PSH | tcp::FLAG_ACK,
+                &self.snd_buf[..self.snd_buf_len],
+                self.ipid,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Receive up to `out.len()` bytes of in-order stream data, cumulative-ACKing
     /// and honoring the peer's FIN. Retransmits the buffered send segment a few
     /// times early in the idle window if nothing comes back. Returns the number
     /// of bytes written to `out` (0 is valid: empty response or immediate EOF).
+    ///
+    /// This is the single-connection path (used by the one-shot [`tcp_fetch`]
+    /// control op, where no sibling connections exist to demux for). The ring
+    /// socket path uses [`ring_tcp_recv`] + [`ring_pump`], which route to multiple
+    /// connections but share the same [`ingest_seg`](Self::ingest_seg) core.
     fn recv(&mut self, me: &IfInfo, out: &mut [u8]) -> usize {
         let mut frame = [0u8; MAX_FRAME];
         let mut pl = [0u8; MAX_FRAME];
 
-        let mut written = 0usize;
         let mut idle = 0u32;
         let mut retransmits = 0u32;
         while idle < TCP_DATA_ITERS && !self.peer_fin {
             let mut got = false;
             while let Some(rx) = recv_tcp_seg(me, &self.dst_ip, self.local_port, self.dst_port, &mut frame, &mut pl) {
                 got = true;
-                if rx.flags & tcp::FLAG_RST != 0 {
-                    self.peer_fin = true; // Treat a reset as end-of-stream.
+                self.ingest_seg(me, &rx, &pl[..rx.payload_len]);
+                if self.peer_fin {
                     break;
-                }
-                if rx.seq == self.rcv_nxt {
-                    // In-order segment: consume any payload, then any FIN.
-                    if rx.payload_len > 0 {
-                        let room = out.len().saturating_sub(written);
-                        let take = rx.payload_len.min(room);
-                        out[written..written + take].copy_from_slice(&pl[..take]);
-                        written += take;
-                        self.rcv_nxt = self.rcv_nxt.wrapping_add(rx.payload_len as u32);
-                    }
-                    if rx.flags & tcp::FLAG_FIN != 0 {
-                        self.rcv_nxt = self.rcv_nxt.wrapping_add(1); // FIN occupies one seq.
-                        self.peer_fin = true;
-                    }
-                    if rx.payload_len > 0 || self.peer_fin {
-                        self.ipid = self.ipid.wrapping_add(1);
-                        send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
-                    }
-                } else if rx.payload_len > 0 {
-                    // Out-of-order data: dup-ACK to prompt the peer to retransmit.
-                    self.ipid = self.ipid.wrapping_add(1);
-                    send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
                 }
             }
             if got {
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
-                // If nothing has come back and our data may have been lost,
-                // retransmit the buffered segment a few times early in the window.
-                if self.snd_buf_len > 0
-                    && self.rcv_nxt == self.server_isn.wrapping_add(1)
-                    && idle == 40
-                    && retransmits < 3
-                {
-                    retransmits += 1;
+                if self.maybe_retransmit(me, idle, &mut retransmits) {
                     idle = 0;
-                    self.ipid = self.ipid.wrapping_add(1);
-                    let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
-                    send_tcp(
-                        me,
-                        &self.mac,
-                        &self.dst_ip,
-                        self.dst_port,
-                        self.local_port,
-                        seq,
-                        self.rcv_nxt,
-                        tcp::FLAG_PSH | tcp::FLAG_ACK,
-                        &self.snd_buf[..self.snd_buf_len],
-                        self.ipid,
-                    );
                 }
                 sleep_ns(POLL_SLEEP_NS);
             }
         }
-        written
+        self.take_rx(out)
     }
 
     /// Gracefully close: send our FIN|ACK and briefly drain the peer's final ACK
@@ -1470,6 +1586,24 @@ impl RingConns {
             .map(|(_, c)| c)
     }
 
+    /// Borrow the connection whose 4-tuple matches an inbound frame's peer
+    /// identity — i.e. the connection this frame belongs to. Used by the shared
+    /// RX pump to route each received segment to its owner. `src_ip`/`src_port`
+    /// are the frame's source (our peer); `dst_port` is the frame's destination
+    /// port (our connection's local ephemeral port).
+    fn find_by_tuple(
+        &mut self,
+        src_ip: &[u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Option<&mut TcpConn> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .map(|(_, c)| c)
+            .find(|c| c.dst_ip == *src_ip && c.dst_port == src_port && c.local_port == dst_port)
+    }
+
     /// Reserve the free slot that should hold `id`, if `id` is not already in use
     /// and the table has room. Returns a mutable handle to the empty slot for the
     /// caller to fill (`*slot = Some((id, conn))`), or `None` on a duplicate id or
@@ -1565,9 +1699,10 @@ impl RingSession {
 /// - [`netipc::ring::OP_SEND`]: look up `sqe.conn_id`, read the SQE's data window
 ///   and send it; completion `result` = bytes accepted, or `-1` (no such conn /
 ///   window error).
-/// - [`netipc::ring::OP_RECV`]: look up `sqe.conn_id`, receive into a scratch
-///   buffer, copy the response into the SQE's data window; completion `result` =
-///   bytes received, or `-1`.
+/// - [`netipc::ring::OP_RECV`]: receive for `sqe.conn_id` via the shared RX pump
+///   ([`ring_pump`]) — so sibling connections' frames are routed to *them* rather
+///   than dropped — then copy the response into the SQE's data window; completion
+///   `result` = bytes received, or `-1`.
 /// - [`netipc::ring::OP_CLOSE`]: look up and evict `sqe.conn_id`, graceful
 ///   teardown; completion `result = 0`, or `-1` if no such connection.
 /// - [`netipc::ring::OP_NOP`]: complete with `result = 0`.
@@ -1623,10 +1758,7 @@ fn ring_tcp_process(
                 Some(c) => ring_tcp_send(ring, c, me, &sqe),
                 None => -1,
             },
-            netipc::ring::OP_RECV => match conns.get_mut(sqe.conn_id) {
-                Some(c) => ring_tcp_recv(ring, c, me, &sqe),
-                None => -1,
-            },
+            netipc::ring::OP_RECV => ring_tcp_recv(ring, conns, sqe.conn_id, me, &sqe),
             netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
                 Some(mut c) => {
                     c.close(me);
@@ -1664,19 +1796,96 @@ fn ring_tcp_send(ring: &netring::Ring, conn: &mut TcpConn, me: &IfInfo, sqe: &ne
     }
 }
 
-/// Execute an `OP_RECV` SQE: receive into a scratch buffer, then copy the
-/// received bytes back into the SQE's data window so the kernel can read them.
-/// Returns bytes received (0 = empty response / EOF), or `-1` on a window error.
-fn ring_tcp_recv(ring: &netring::Ring, conn: &mut TcpConn, me: &IfInfo, sqe: &netipc::ring::Sqe) -> i32 {
+/// Drain *every* frame currently queued on the NIC, routing each TCP segment to
+/// the connection that owns its 4-tuple (via [`RingConns::find_by_tuple`]) and
+/// feeding it through the shared [`ingest_seg`](TcpConn::ingest_seg) core. This is
+/// the shared RX demux: because one NIC delivers frames for *all* connections on
+/// the ring, a naive per-connection read would discard a sibling's frames. The
+/// pump instead buffers each segment into its owner so no connection loses data
+/// while another is blocked in a receive. Segments for unknown tuples are dropped.
+/// Returns `true` if at least one frame was processed (the caller resets its idle
+/// counter so it keeps polling while traffic is flowing).
+fn ring_pump(conns: &mut RingConns, me: &IfInfo) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    let mut pl = [0u8; MAX_FRAME];
+    let mut any = false;
+    loop {
+        match recv_tcp_any(me, &mut frame, &mut pl) {
+            RawRx::None => break, // WOULD_BLOCK / error → NIC drained.
+            RawRx::Ignore => {
+                any = true; // A frame arrived but wasn't ours; keep draining.
+            }
+            RawRx::Seg(src_ip, src_port, dst_port, rx) => {
+                any = true;
+                if let Some(c) = conns.find_by_tuple(&src_ip, src_port, dst_port) {
+                    let plen = rx.payload_len.min(pl.len());
+                    if let Some(payload) = pl.get(..plen) {
+                        c.ingest_seg(me, &rx, payload);
+                    }
+                }
+                // Unknown tuple: no owning connection → drop (nothing to do).
+            }
+        }
+    }
+    any
+}
+
+/// Execute an `OP_RECV` SQE for connection `target_id`: poll the shared RX pump
+/// (so sibling connections' frames are delivered to *them*, not dropped) until the
+/// target has data / hits EOF / times out, then copy the target's buffered bytes
+/// back into the SQE's data window. Returns bytes received (0 = empty response /
+/// EOF), or `-1` on a missing connection or window error.
+///
+/// Unlike the single-connection [`TcpConn::recv`], this routes through
+/// [`ring_pump`] rather than a 4-tuple-filtered read, so concurrent connections on
+/// the same ring can all receive without starving one another (D-NETSTACK-RX-DEMUX).
+fn ring_tcp_recv(
+    ring: &netring::Ring,
+    conns: &mut RingConns,
+    target_id: u32,
+    me: &IfInfo,
+    sqe: &netipc::ring::Sqe,
+) -> i32 {
+    if conns.get_mut(target_id).is_none() {
+        return -1; // no such connection
+    }
+    let mut idle = 0u32;
+    let mut retransmits = 0u32;
+    loop {
+        // Stop once the target's stream has ended or we've waited long enough.
+        match conns.get_mut(target_id) {
+            Some(c) if c.peer_fin => break,
+            Some(_) => {}
+            None => break, // connection vanished (shouldn't happen mid-recv)
+        }
+        if idle >= TCP_DATA_ITERS {
+            break;
+        }
+        if ring_pump(conns, me) {
+            idle = 0;
+        } else {
+            idle = idle.saturating_add(1);
+            if conns
+                .get_mut(target_id)
+                .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
+            {
+                idle = 0;
+            }
+            sleep_ns(POLL_SLEEP_NS);
+        }
+    }
     let off = sqe.data_off as usize;
-    let len = sqe.data_len as usize;
-    let mut buf = [0u8; MSG_CAP];
-    let window = match buf.get_mut(..len) {
+    let cap = (sqe.data_len as usize).min(MSG_CAP);
+    let mut scratch = [0u8; MSG_CAP];
+    let out = match scratch.get_mut(..cap) {
         Some(w) => w,
         None => return -1, // recv window larger than our buffer
     };
-    let n = conn.recv(me, window);
-    if n > 0 && !ring.write_data(off, &window[..n]) {
+    let n = match conns.get_mut(target_id) {
+        Some(c) => c.take_rx(out),
+        None => return -1,
+    };
+    if n > 0 && !ring.write_data(off, &out[..n]) {
         return -1;
     }
     n as i32

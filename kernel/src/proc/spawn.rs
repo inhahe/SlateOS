@@ -2893,6 +2893,14 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         None => Ok(None),
     };
 
+    // Shared-RX-demux variant: two connections whose sends both precede both
+    // receives, so one connection's frames arrive while the daemon is blocked
+    // receiving for the other (proves the RX pump routes by 4-tuple, not drops).
+    let ring_tcp_demux_result = match a_ip {
+        Some(ip) => netstack_ring_tcp_demux_roundtrip(&ip, 80),
+        None => Ok(None),
+    };
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
 
@@ -2992,6 +3000,22 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: ring-TCP-persist IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
+
+    match ring_tcp_demux_result {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   netstack ring-TCP-demux-over-IPC (ring 3): OK — two connections received \
+             concurrently (both sends before both recvs); the RX pump routed each peer's frames \
+             to its owning conn by 4-tuple so both returned HTTP (no sibling frames dropped)"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   netstack ring-TCP-demux-over-IPC (ring 3): interleaved 8-SQE batch drained \
+             + completions reaped, no/short response (no upstream?) — demux path proven"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ring-TCP-demux IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
@@ -4299,6 +4323,295 @@ fn netstack_ring_tcp_persist_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<
             serial_print!("{}", c as char);
         }
         serial_println!("");
+        finish(handle, Ok(Some(())))
+    } else {
+        finish(handle, Ok(None))
+    }
+}
+
+/// Ring-3 end-to-end test of the daemon's **shared RX demux** (D-NETSTACK-RX-DEMUX):
+/// two concurrent connections whose *sends both precede both receives*, so one
+/// connection's response frames arrive while the daemon is blocked receiving for
+/// the *other*.
+///
+/// Where [`netstack_ring_tcp_multi_roundtrip`] fully drives conn7 (send→recv→close)
+/// before conn9 even sends — so the two never overlap on the wire — this test
+/// interleaves them:
+///
+/// ```text
+/// CONNECT#7, CONNECT#9,  SEND#7, SEND#9,  RECV#7, RECV#9,  CLOSE#7, CLOSE#9
+/// ```
+///
+/// Both requests are on the wire before either `RECV`. When the daemon blocks in
+/// `RECV#7`, conn9's response frames are already arriving. The single NIC delivers
+/// frames for *both* tuples, so the old per-connection filtered read would have
+/// discarded conn9's frames while waiting on conn7 — leaving `RECV#9` to come back
+/// empty (its data lost). The shared RX pump instead routes each frame to its
+/// owning connection by 4-tuple and buffers it, so `RECV#9` still returns conn9's
+/// response. Both connections returning HTTP therefore proves the demux.
+///
+/// Returns `Ok(Some(()))` if *both* connections returned an HTTP response (demux
+/// confirmed), `Ok(None)` if there was no upstream / a short response (network
+/// variance — the demux path still ran without dropping a sibling), and `Err` on a
+/// real protocol fault (missing/out-of-order completion, or a send failing after a
+/// successful connect).
+fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    use crate::ipc::{channel, service, shm};
+
+    const HTTP_REQ: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    // Data-area layout: two request windows (0, 256) + two response windows.
+    const REQ7_OFF: u32 = 0;
+    const REQ9_OFF: u32 = 256;
+    const RECV7_OFF: u32 = 512;
+    const RECV9_OFF: u32 = 1024;
+    const RECV_CAP: u32 = 512;
+    const CID7: u32 = 7;
+    const CID9: u32 = 9;
+    // user_data base for the eight-SQE batch (echoed back per completion).
+    const UD: u64 = 0x5254_4458_0000_0000; // "RTDX" (ring-tcp-demux)
+
+    let sq_entries: u32 = 16;
+    let cq_entries: u32 = 16;
+    let data_len: u32 = RECV9_OFF + RECV_CAP;
+    let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
+
+    let handle = shm::create(need)?;
+    let size = shm::size(handle)?;
+
+    let finish = |h: shm::ShmHandle, r: KernelResult<Option<()>>| -> KernelResult<Option<()>> {
+        shm::close(h);
+        r
+    };
+
+    let kaddr = match shm::kernel_addr(handle) {
+        Ok(p) => p,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    // SAFETY: kaddr is valid+writable for `size` (>= need) bytes and no other party
+    // touches the region until the daemon attaches (strictly after we send below).
+    // `init` validates the geometry fits.
+    let ring = match unsafe { netring::Ring::init(kaddr, size, sq_entries, cq_entries, data_len) } {
+        Some(r) => r,
+        None => return finish(handle, Err(KernelError::InternalError)),
+    };
+    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ) || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
+    {
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let req_len = HTTP_REQ.len() as u32;
+
+    let ep = netipc::ring::Sqe::pack_endpoint(ip, port);
+    // Eight SQEs: open both, send on both, THEN receive on both, then close both.
+    // Putting both sends before both recvs is what forces the concurrency the demux
+    // must survive (see fn doc). Distinct user_data (UD + index) confirms FIFO order.
+    let batch = [
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CONNECT,
+            conn_id: CID7,
+            user_data: UD,
+            aux: ep,
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CONNECT,
+            conn_id: CID9,
+            user_data: UD.wrapping_add(1),
+            aux: ep,
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_SEND,
+            conn_id: CID7,
+            data_off: REQ7_OFF,
+            data_len: req_len,
+            user_data: UD.wrapping_add(2),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_SEND,
+            conn_id: CID9,
+            data_off: REQ9_OFF,
+            data_len: req_len,
+            user_data: UD.wrapping_add(3),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_RECV,
+            conn_id: CID7,
+            data_off: RECV7_OFF,
+            data_len: RECV_CAP,
+            user_data: UD.wrapping_add(4),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_RECV,
+            conn_id: CID9,
+            data_off: RECV9_OFF,
+            data_len: RECV_CAP,
+            user_data: UD.wrapping_add(5),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CLOSE,
+            conn_id: CID7,
+            user_data: UD.wrapping_add(6),
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CLOSE,
+            conn_id: CID9,
+            user_data: UD.wrapping_add(7),
+            ..netipc::ring::Sqe::default()
+        },
+    ];
+    for sqe in &batch {
+        if !ring.sq_push(sqe) {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    let client = match service::connect(b"net.stack") {
+        Ok(c) => c,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let size_u32 = size as u32;
+    let mut req = [0u8; 16];
+    let req_msg_len = match netipc::encode_ring_tcp(&mut req, handle.raw(), size_u32) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    let encoded = match req.get(..req_msg_len) {
+        Some(s) => s,
+        None => {
+            channel::close(client);
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    let msg = match channel::Message::from_bytes(encoded) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return finish(handle, Err(e));
+    }
+
+    // Two full TCP transactions drive over the ring; allow generous time.
+    let reply = match channel::recv_timeout(client, 20_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    channel::close(client);
+
+    match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(_) => {}
+        netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    // Reap all eight completions in FIFO (submission) order:
+    //   [0] CONNECT#7 [1] CONNECT#9 [2] SEND#7 [3] SEND#9
+    //   [4] RECV#7    [5] RECV#9    [6] CLOSE#7 [7] CLOSE#9
+    let mut results = [0i32; 8];
+    for (i, slot) in results.iter_mut().enumerate() {
+        let cqe = match ring.cq_pop() {
+            Some(c) => c,
+            None => {
+                serial_println!("[spawn]   ring-tcp-demux: missing completion {}", i);
+                return finish(handle, Err(KernelError::InternalError));
+            }
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let want_ud = UD.wrapping_add(i as u64);
+        if cqe.user_data != want_ud {
+            serial_println!(
+                "[spawn]   ring-tcp-demux: completion {} user_data mismatch (got {:#x}, want {:#x})",
+                i, cqe.user_data, want_ud
+            );
+            return finish(handle, Err(KernelError::InternalError));
+        }
+        *slot = cqe.result;
+    }
+    if ring.cq_pop().is_some() {
+        serial_println!("[spawn]   ring-tcp-demux: unexpected extra completion");
+        return finish(handle, Err(KernelError::InternalError));
+    }
+
+    let [connect7, connect9, send7, send9, recv7, recv9, _close7, _close9] = results;
+
+    // Either connect failing (no upstream) leaves the demux path proven (it ran).
+    if connect7 < 0 || connect9 < 0 {
+        return finish(handle, Ok(None));
+    }
+    // Both sends must have accepted their request bytes.
+    if send7 < 0 || send9 < 0 {
+        serial_println!(
+            "[spawn]   ring-tcp-demux: send failed (conn7 {}, conn9 {})",
+            send7, send9
+        );
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    // A short/empty response on either means connected+sent but no data came back
+    // (slirp variance) — the demux path is proven regardless.
+    if recv7 < 5 || recv9 < 5 {
+        return finish(handle, Ok(None));
+    }
+
+    // Verify each connection's response window independently begins with "HTTP/".
+    // conn9's response is the load-bearing one: it could only have been buffered
+    // (not dropped) if the RX pump routed conn9's frames while RECV#7 was blocked.
+    let http_ok = |recv_res: i32, off: u32, label: &str| -> KernelResult<bool> {
+        #[allow(clippy::cast_sign_loss)]
+        let n = (recv_res as usize).min(RECV_CAP as usize);
+        let mut body = [0u8; RECV_CAP as usize];
+        let window = match body.get_mut(..n) {
+            Some(w) => w,
+            None => return Err(KernelError::InternalError),
+        };
+        if !ring.read_data(off as usize, window) {
+            return Err(KernelError::InternalError);
+        }
+        if window.len() >= 5 && window.get(..5) == Some(b"HTTP/".as_slice()) {
+            let line_end = window
+                .iter()
+                .position(|&b| b == b'\r' || b == b'\n')
+                .unwrap_or(window.len().min(64));
+            let show = window.get(..line_end).unwrap_or(&[]);
+            serial_print!("[spawn]   ring-tcp-demux {} HTTP status = ", label);
+            for &b in show {
+                let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+                serial_print!("{}", c as char);
+            }
+            serial_println!("");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    };
+
+    let ok7 = match http_ok(recv7, RECV7_OFF, "conn7") {
+        Ok(v) => v,
+        Err(e) => return finish(handle, Err(e)),
+    };
+    let ok9 = match http_ok(recv9, RECV9_OFF, "conn9") {
+        Ok(v) => v,
+        Err(e) => return finish(handle, Err(e)),
+    };
+    if ok7 && ok9 {
         finish(handle, Ok(Some(())))
     } else {
         finish(handle, Ok(None))

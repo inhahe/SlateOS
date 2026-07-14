@@ -522,3 +522,31 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   hosts the shared per-4-tuple RX pump (D-NETSTACK-RX-DEMUX), so concurrent
   connections can receive; then — gated on Q22 — the socket-syscall forwarders +
   kernel-stack deletion.
+
+- 2026-07-14: Phase 5 increment 3 landed — **shared RX demux (D-NETSTACK-RX-DEMUX
+  resolved).** Removed the last barrier to genuinely concurrent connections: the
+  receive path no longer reads one NIC frame filtered to a single 4-tuple (dropping
+  any sibling's frame). A new `ring_pump(conns, me)` drains *every* pending NIC
+  frame and routes each TCP segment to its owning `TcpConn` by 4-tuple —
+  `recv_tcp_any` parses a frame and returns the peer identity `(src_ip, src_port,
+  dst_port)` instead of pass/fail, and `RingConns::find_by_tuple` locates the owner.
+  All TCP-receive logic now lives in one shared core, `TcpConn::ingest_seg`: buffer
+  in-order payload into the conn's own `rx_buf` (new per-conn `rx_buf`/`rx_len`),
+  advance `rcv_nxt`, emit the cumulative ACK, honor FIN/RST; out-of-order → dup-ACK.
+  `OP_RECV` (`ring_tcp_recv`) now polls `ring_pump` until the *target* conn has data
+  / EOF / times out, then `take_rx`s the target's buffer into the SQE window — so
+  while it waits, a sibling's inbound frames are delivered to *that* sibling instead
+  of being discarded. The single-connection `TcpConn::recv` (one-shot `tcp_fetch`
+  control op) shares the identical `ingest_seg`/`take_rx`/`maybe_retransmit` core —
+  one TCP implementation, no duplication. New kernel self-test
+  `netstack_ring_tcp_demux_roundtrip` (spawn.rs) submits an interleaved 8-SQE batch
+  `CONNECT#7, CONNECT#9, SEND#7, SEND#9, RECV#7, RECV#9, CLOSE#7, CLOSE#9` — **both
+  sends before both recvs**, so conn9's response arrives while the daemon is blocked
+  in conn7's RECV (the exact concurrency the old filtered read broke). Boot-
+  validated: "netstack ring-TCP-demux-over-IPC (ring 3): OK — two connections
+  received concurrently … no sibling frames dropped"; both conn7 and conn9 returned
+  `HTTP/1.1 200 OK`, clean 101s boot with every netstack op green (multi + persist
+  still pass), kernel + daemon build and clippy clean. Next — gated on Q22 (still
+  open) — the socket-syscall forwarders + kernel-stack deletion; the daemon now has
+  the persistent-lifetime shape *and* the concurrent-receive demux the always-on
+  socket server needs.

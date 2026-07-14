@@ -11,9 +11,17 @@ name = "netproto"
 version = "0.1.0"
 
 [[package]]
+name = "netring"
+version = "0.1.0"
+dependencies = [
+ "netipc",
+]
+
+[[package]]
 name = "netstack"
 version = "0.1.0"
 dependencies = [
  "netipc",
  "netproto",
+ "netring",
 ]

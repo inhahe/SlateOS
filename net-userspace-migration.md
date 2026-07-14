@@ -359,3 +359,30 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   SHM + `Ring::init` + submits an SQE; daemon maps + `Ring::attach` + processes +
   posts a CQE; kernel reaps the CQE), validated under a §64 bounded self-test +
   boot test.
+- 2026-07-14: Phase 4 increment 9 landed — **`netring` wired end-to-end: the
+  `OP_RING_ECHO` ring self-test drives the SQ/CQ across the address-space
+  boundary.** Added `netring` as a path dep of both the kernel and the daemon
+  (same crate on both sides ⇒ ring driver written/tested once). New netipc
+  control op `OP_RING_ECHO` (`[handle_le:8][size_le:4]`, shared operand layout
+  with `OP_SHM_PING` via new `parse_handle_size`/`encode_handle_size` helpers) +
+  `Request::RingEcho` + `encode_ring_echo` + `RING_ECHO_USER_DATA`. Kernel side
+  (`netstack_ring_echo_roundtrip` in spawn.rs): `shm::create(region_size(4,4,256))`,
+  `Ring::init` through the HHDM view, `write_data` a fixed lowercase payload,
+  `sq_push` one `OP_SEND` SQE stamped with `RING_ECHO_USER_DATA`, then ask the
+  daemon to process; after `ST_OK`, `cq_pop` the completion and verify (a) echoed
+  `user_data`, (b) `result` == payload length, (c) the data window now holds the
+  upper-cased bytes. Daemon side (`ring_echo`/`ring_echo_process` in
+  services/netstack): `SYS_SHM_MAP` the region RW, `Ring::attach`, `sq_pop`,
+  `read_data` → ASCII-upper-case → `write_data`, `cq_push` the completion,
+  `SYS_SHM_UNMAP`. This proves the whole zero-copy data path — kernel produces →
+  daemon consumes/transforms → kernel reaps — with no socket bytes copied through
+  the control channel (only the 13-byte handle+size request is). 29 netipc host
+  tests (2 new: ring_echo_round_trip + short_ring_echo_request_is_none), all
+  green; kernel + daemon build clean; clippy clean on both new crates and no new
+  kernel warnings. Boot-validated: "netstack ring-echo-over-IPC (ring 3): OK —
+  SQ/CQ driver verified (kernel submitted SQE + daemon transformed payload +
+  kernel reaped CQE)", clean 84s boot with all six netstack ops green (DNS, TCP,
+  UDP, SHM-ping, ring-echo, reverse-DNS). The ring transport is now proven; next
+  Phase 4/5 work builds persistent per-connection TCP/UDP state machines that
+  drive this ring for real streaming `send`/`recv`, replacing the one-shot
+  `OP_TCP_FETCH`/`OP_UDP_EXCHANGE` control ops.

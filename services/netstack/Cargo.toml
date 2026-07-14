@@ -15,3 +15,7 @@ netproto = { path = "../../netproto" }
 # Shared kernel<->daemon control-message schema (opcodes, status codes,
 # request/reply encode/decode). Single source of truth with the kernel side.
 netipc = { path = "../../netipc" }
+# Shared atomic SPSC driver over the netipc::ring ABI (Acquire/Release SQ/CQ
+# index accesses + bounds-checked data-area copies). Same driver the kernel
+# links, so the ring memory-ordering logic is written and tested once.
+netring = { path = "../../netring" }

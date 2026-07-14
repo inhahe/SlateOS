@@ -13,6 +13,10 @@ log = "0.4"
 # request/reply encode/decode). Single source of truth with the daemon side;
 # no_std, dependency-free, so it builds cleanly for the kernel's custom target.
 netipc = { path = "../netipc" }
+# Shared atomic SPSC ring driver over the netipc::ring ABI. Adds the unsafe
+# Acquire/Release SQ/CQ index accesses the forbid-unsafe netipc can't host; the
+# daemon links the same crate, so the ring memory-ordering logic lives once.
+netring = { path = "../netring" }
 
 [lints]
 workspace = true

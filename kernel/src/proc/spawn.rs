@@ -2854,6 +2854,17 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     // SQ/CQ/data region. No NIC involved, so it's independent of upstream.
     let shm_result = netstack_shm_ping_roundtrip();
 
+    // Sixth round-trip: shared-memory *ring* echo (`OP_RING_ECHO`). The kernel
+    // creates an SHM region, lays it out as an io_uring-style SQ/CQ ring
+    // (`Ring::init`), writes a payload into the data area, and submits one
+    // OP_SEND SQE. It then asks the daemon to map the region, attach, pop the
+    // SQE, upper-case the payload in place, and post a completion. The kernel
+    // reaps the CQE and verifies the echoed user_data, result length, and the
+    // transformed bytes. This is the first end-to-end exercise of the netring
+    // driver across the address-space boundary — the zero-copy data path the
+    // Phase-5 socket API rides on. No NIC involved.
+    let ring_result = netstack_ring_echo_roundtrip();
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
 
@@ -2893,6 +2904,17 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: SHM-ping IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
+
+    match ring_result {
+        Ok(()) => serial_println!(
+            "[spawn]   netstack ring-echo-over-IPC (ring 3): OK — SQ/CQ driver verified \
+             (kernel submitted SQE + daemon transformed payload + kernel reaped CQE)"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ring-echo IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
@@ -3215,6 +3237,159 @@ fn netstack_shm_ping_roundtrip() -> KernelResult<()> {
             "[spawn]   SHM-ping: response magic mismatch (got {:#x})",
             resp
         );
+        finish(handle, Err(KernelError::InternalError))
+    }
+}
+
+/// End-to-end IPC + shared-memory *ring* self-test — the first exercise of the
+/// [`netring`] SQ/CQ driver across the address-space boundary (`OP_RING_ECHO`).
+///
+/// The kernel creates a shared-memory region, lays it out as an io_uring-style
+/// ring with [`netring::Ring::init`] (through its own HHDM view), writes a fixed
+/// ASCII payload into the data area, and submits one `OP_SEND` SQE stamped with
+/// [`netipc::RING_ECHO_USER_DATA`]. It then hands the region's handle+size to the
+/// daemon, which maps the *same* frames, [`netring::Ring::attach`]es, pops the
+/// SQE, upper-cases the payload in place, and pushes a completion. On `ST_OK` the
+/// kernel reaps the CQE through its view and verifies (a) the echoed `user_data`,
+/// (b) the byte count in `result`, and (c) that the data-area payload is now the
+/// upper-cased form — proving the full producer→consumer→producer ring path and
+/// the zero-copy data window both work across two address spaces.
+///
+/// Returns `Ok(())` on a fully-verified round-trip, or `Err` on any transport
+/// failure, a `ST_FAIL` reply, a missing/mismatched completion, or wrong echoed
+/// bytes. This is the data path the Phase-5 socket API rides on.
+fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
+    use crate::ipc::{channel, service, shm};
+
+    // Fixed payload the daemon upper-cases. Lowercase so the transform is
+    // observable; kept short so it fits comfortably in one 16 KiB frame.
+    const PAYLOAD: &[u8] = b"ring-echo-payload";
+
+    // Ring geometry: tiny SQ/CQ (one submission, one completion) + a small data
+    // area. region_size stays well under one 16 KiB frame.
+    let sq_entries: u32 = 4;
+    let cq_entries: u32 = 4;
+    let data_len: u32 = 256;
+    let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
+
+    let handle = shm::create(need)?;
+    let size = shm::size(handle)?;
+
+    // Close the SHM handle on every exit path.
+    let finish = |h: shm::ShmHandle, r: KernelResult<()>| -> KernelResult<()> {
+        shm::close(h);
+        r
+    };
+
+    let kaddr = match shm::kernel_addr(handle) {
+        Ok(p) => p,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    // Lay out the region as a ring and submit the OP_SEND SQE.
+    // SAFETY: kaddr is valid+writable for `size` (>= need) bytes and no other
+    // party touches the region until the daemon attaches (which happens strictly
+    // after we send the request below). `init` validates the geometry fits.
+    let ring = match unsafe { netring::Ring::init(kaddr, size, sq_entries, cq_entries, data_len) } {
+        Some(r) => r,
+        None => return finish(handle, Err(KernelError::InternalError)),
+    };
+    if !ring.write_data(0, PAYLOAD) {
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let payload_len = PAYLOAD.len() as u32;
+    let sqe = netipc::ring::Sqe {
+        op: netipc::ring::OP_SEND,
+        conn_id: 1,
+        data_off: 0,
+        data_len: payload_len,
+        user_data: netipc::RING_ECHO_USER_DATA,
+        aux: 0,
+    };
+    if !ring.sq_push(&sqe) {
+        return finish(handle, Err(KernelError::InternalError));
+    }
+
+    let client = match service::connect(b"net.stack") {
+        Ok(c) => c,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let size_u32 = size as u32;
+    let mut req = [0u8; 16];
+    let req_len = match netipc::encode_ring_echo(&mut req, handle.raw(), size_u32) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return finish(handle, Err(e));
+    }
+
+    let reply = match channel::recv_timeout(client, 5_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    channel::close(client);
+
+    match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(_) => {}
+        netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    // Reap the completion the daemon posted and verify it end to end.
+    let cqe = match ring.cq_pop() {
+        Some(c) => c,
+        None => {
+            serial_println!("[spawn]   ring-echo: no completion posted");
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    if cqe.user_data != netipc::RING_ECHO_USER_DATA {
+        serial_println!(
+            "[spawn]   ring-echo: user_data mismatch (got {:#x})",
+            cqe.user_data
+        );
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    if cqe.result != payload_len as i32 {
+        serial_println!(
+            "[spawn]   ring-echo: result length mismatch (got {})",
+            cqe.result
+        );
+        return finish(handle, Err(KernelError::InternalError));
+    }
+
+    // Read the transformed payload back and confirm it is the upper-cased form.
+    let mut echoed = [0u8; PAYLOAD.len()];
+    if !ring.read_data(0, &mut echoed) {
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    let mut expected = [0u8; PAYLOAD.len()];
+    for (dst, src) in expected.iter_mut().zip(PAYLOAD.iter()) {
+        *dst = src.to_ascii_uppercase();
+    }
+    if echoed == expected {
+        finish(handle, Ok(()))
+    } else {
+        serial_println!("[spawn]   ring-echo: transformed payload mismatch");
         finish(handle, Err(KernelError::InternalError))
     }
 }

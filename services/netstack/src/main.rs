@@ -1094,6 +1094,17 @@ fn handle_request(
                 fail(out)
             }
         }
+        Some(netipc::Request::RingEcho { handle, size }) => {
+            // Shared-memory *ring* handshake: map the kernel-created region,
+            // attach as a Ring, pop the kernel's OP_SEND SQE, upper-case its
+            // payload in place, and post a completion. First end-to-end
+            // exercise of the SQ/CQ driver the Phase-5 socket API rides on.
+            if ring_echo(handle, size) {
+                netipc::encode_ok_bytes(out, &[]).unwrap_or_else(|| fail(out))
+            } else {
+                fail(out)
+            }
+        }
         // Unknown opcode or a structurally invalid request → uniform failure.
         Some(netipc::Request::Unknown(_)) | None => fail(out),
     }
@@ -1134,6 +1145,72 @@ fn shm_ping(handle: u64, size: u32) -> bool {
     // reference until it closes the handle).
     syscall2(SYS_SHM_UNMAP, va as u64, size as u64);
     ok
+}
+
+/// Handle an [`netipc::OP_RING_ECHO`] request: map the kernel-created ring
+/// region `handle` (`size` bytes) read-write, attach as a [`netring::Ring`], pop
+/// the single `OP_SEND` SQE the kernel submitted, ASCII-upper-case its data-area
+/// payload in place, push a completion carrying the echoed `user_data` and the
+/// byte count as `result`, and unmap. Returns `true` iff a well-formed SQE was
+/// consumed and a completion posted.
+fn ring_echo(handle: u64, size: u32) -> bool {
+    let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
+    if va < 0 {
+        return false;
+    }
+    let base = va as u64 as *mut u8;
+
+    // SAFETY: SYS_SHM_MAP returned a valid, writable mapping of at least `size`
+    // bytes; `attach` re-validates the ring geometry against that length and
+    // never reads/writes outside the mapping. We are the sole consumer of the SQ
+    // and sole producer of the CQ (the kernel is the other party), satisfying the
+    // Ring SPSC contract.
+    let ok = unsafe {
+        match netring::Ring::attach(base, size as usize) {
+            Some(ring) => ring_echo_process(&ring),
+            None => false,
+        }
+    };
+
+    // Drop our mapping regardless (refcount-aware; the kernel keeps its own
+    // reference until it closes the handle).
+    syscall2(SYS_SHM_UNMAP, va as u64, size as u64);
+    ok
+}
+
+/// Pop the kernel's `OP_SEND` SQE, upper-case its payload window in place, and
+/// post the completion. Split out so the `unsafe` attach site stays small.
+fn ring_echo_process(ring: &netring::Ring) -> bool {
+    let sqe = match ring.sq_pop() {
+        Some(s) => s,
+        None => return false,
+    };
+    if sqe.op != netipc::ring::OP_SEND {
+        return false;
+    }
+    let off = sqe.data_off as usize;
+    let len = sqe.data_len as usize;
+    // Read the payload out of the shared data area, transform, write it back.
+    let mut buf = [0u8; 64];
+    let window = match buf.get_mut(..len) {
+        Some(w) => w,
+        None => return false, // payload larger than our scratch buffer
+    };
+    if !ring.read_data(off, window) {
+        return false;
+    }
+    for b in window.iter_mut() {
+        *b = b.to_ascii_uppercase();
+    }
+    if !ring.write_data(off, window) {
+        return false;
+    }
+    let cqe = netipc::ring::Cqe {
+        user_data: sqe.user_data,
+        result: len as i32,
+        flags: 0,
+    };
+    ring.cq_push(&cqe)
 }
 
 /// Read argv[1] into `out`, returning the slice actually populated. Native

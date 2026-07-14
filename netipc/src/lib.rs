@@ -70,6 +70,24 @@ pub const SHM_PING_REQUEST_MAGIC: u64 = 0x5348_4D50_494E_4751; // "SHMPINGQ"
 /// confirm the daemon's writes are visible in the kernel's view of the region.
 pub const SHM_PING_RESPONSE_MAGIC: u64 = 0x5348_4D50_4F4E_4752; // "SHMPONGR"
 
+/// Request: shared-memory **ring** handshake — the first end-to-end exercise of
+/// the [`ring`] SQ/CQ driver across the address-space boundary. The kernel has
+/// laid out the region identified by `handle` (of `size` bytes) as a ring
+/// (`Ring::init`), written a payload into the data area, and submitted one
+/// `OP_SEND` SQE. The daemon maps the region, `Ring::attach`es, pops the SQE,
+/// reads the payload, ASCII-upper-cases it in place, pushes a completion
+/// ([`ring::Cqe`]) carrying the echoed `user_data` and the byte count as
+/// `result`, unmaps, and replies. Operands: `[handle_le:8][size_le:4]` (same
+/// layout as [`OP_SHM_PING`]). Reply: [`ST_OK`] (SQE consumed + completion
+/// posted) or [`ST_FAIL`]. This validates the whole zero-copy data path the
+/// Phase-5 socket API rides on: kernel produces → daemon consumes/transforms →
+/// kernel reaps, with no bytes copied through the control channel.
+pub const OP_RING_ECHO: u8 = 0x06;
+
+/// `user_data` the kernel stamps on the [`OP_RING_ECHO`] SQE; the daemon echoes
+/// it back in the completion so the kernel can confirm it reaped the right one.
+pub const RING_ECHO_USER_DATA: u64 = 0x5249_4E47_4543_484F; // "RINGECHO"
+
 /// Reply status: success. Any op-specific result bytes follow.
 pub const ST_OK: u8 = 0x00;
 /// Reply status: failure. No result bytes follow.
@@ -113,6 +131,15 @@ pub enum Request<'a> {
         /// Region size in bytes (as reported by `SYS_SHM_SIZE`).
         size: u32,
     },
+    /// Shared-memory ring echo: map region `handle` (`size` bytes), attach as a
+    /// [`ring::Ring`], pop the kernel's `OP_SEND` SQE, upper-case its payload in
+    /// place, push a completion, unmap.
+    RingEcho {
+        /// Shared-memory region handle to map (a `ShmHandle` raw u64).
+        handle: u64,
+        /// Region size in bytes (as reported by `SYS_SHM_SIZE`).
+        size: u32,
+    },
     /// An opcode this build does not recognise (carries the raw byte).
     Unknown(u8),
 }
@@ -146,12 +173,12 @@ impl<'a> Request<'a> {
                 Some(Request::UdpExchange { ip, port, payload })
             }
             OP_SHM_PING => {
-                let head = rest.get(..12)?;
-                let handle = u64::from_le_bytes([
-                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
-                ]);
-                let size = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
+                let (handle, size) = parse_handle_size(rest)?;
                 Some(Request::ShmPing { handle, size })
+            }
+            OP_RING_ECHO => {
+                let (handle, size) = parse_handle_size(rest)?;
+                Some(Request::RingEcho { handle, size })
             }
             other => Some(Request::Unknown(other)),
         }
@@ -197,11 +224,37 @@ pub fn encode_udp_exchange(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u
 /// `out`. Returns bytes written (13), or `None` if `out` is too small.
 #[must_use]
 pub fn encode_shm_ping(out: &mut [u8], handle: u64, size: u32) -> Option<usize> {
+    encode_handle_size(out, OP_SHM_PING, handle, size)
+}
+
+/// Encode an [`OP_RING_ECHO`] request (`[op][handle_le:8][size_le:4]`) into
+/// `out`. Returns bytes written (13), or `None` if `out` is too small.
+#[must_use]
+pub fn encode_ring_echo(out: &mut [u8], handle: u64, size: u32) -> Option<usize> {
+    encode_handle_size(out, OP_RING_ECHO, handle, size)
+}
+
+/// Shared encoder for the `[op][handle_le:8][size_le:4]` request layout used by
+/// both [`OP_SHM_PING`] and [`OP_RING_ECHO`].
+#[must_use]
+fn encode_handle_size(out: &mut [u8], op: u8, handle: u64, size: u32) -> Option<usize> {
     let dst = out.get_mut(..13)?;
-    dst[0] = OP_SHM_PING;
+    dst[0] = op;
     dst[1..9].copy_from_slice(&handle.to_le_bytes());
     dst[9..13].copy_from_slice(&size.to_le_bytes());
     Some(13)
+}
+
+/// Shared decoder for the `[handle_le:8][size_le:4]` operand layout (the `rest`
+/// after the opcode) used by both [`OP_SHM_PING`] and [`OP_RING_ECHO`].
+#[must_use]
+fn parse_handle_size(rest: &[u8]) -> Option<(u64, u32)> {
+    let head = rest.get(..12)?;
+    let handle = u64::from_le_bytes([
+        head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
+    ]);
+    let size = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
+    Some((handle, size))
 }
 
 /// Shared encoder for the `[op][ip:4][port_be:2][payload]` request layout used
@@ -487,6 +540,27 @@ mod tests {
     fn short_shm_ping_request_is_none() {
         // op + handle but truncated size field.
         assert!(Request::parse(&[OP_SHM_PING, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn ring_echo_round_trip() {
+        let mut buf = [0u8; 32];
+        let n = encode_ring_echo(&mut buf, 0x0fed_cba9_8765_4321, 65536).unwrap();
+        assert_eq!(n, 13);
+        assert_eq!(buf[0], OP_RING_ECHO);
+        match Request::parse(&buf[..n]).unwrap() {
+            Request::RingEcho { handle, size } => {
+                assert_eq!(handle, 0x0fed_cba9_8765_4321);
+                assert_eq!(size, 65536);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_ring_echo_request_is_none() {
+        // op + handle but truncated size field.
+        assert!(Request::parse(&[OP_RING_ECHO, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0]).is_none());
     }
 
     #[test]

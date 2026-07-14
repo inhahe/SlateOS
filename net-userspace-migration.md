@@ -22,19 +22,25 @@ independently testable.
 
 ## Phases
 
-### Phase 1 — kernel raw-frame boundary  [ ] not started
-Expose the NIC to userspace without moving the driver:
-- `sys_net_raw_open(if_index, flags) -> raw_handle` (capability-checked).
-- `sys_net_raw_tx(handle, frame_ptr, len)` — single + batched variant.
-- `sys_net_raw_rx(handle, buf_ptr, cap, flags) -> len` — blocking/non-blocking,
-  batched variant.
-- `sys_net_if_query()` — enumerate interfaces (index, name, MAC, MTU, flags).
-- RX demux: while the in-kernel stack still runs, a raw handle must get a *copy*
-  of frames (promiscuous tap) OR claim exclusive ownership of the NIC. Decision
-  for Phase 1: raw handle = **exclusive** claim of one interface (the daemon owns
-  it); the in-kernel stack binds the other/none. Simplest correct first step.
-- Tests: userspace sends an ARP request via `raw_tx`, receives the reply via
-  `raw_rx`; `if_query` returns the virtio-net MAC/MTU.
+### Phase 1 — kernel raw-frame boundary  [x] landed 2026-07-14 (commit 89f37fb05)
+Expose the NIC to userspace without moving the driver. Implemented:
+- `net::raw` shim (`kernel/src/net/raw.rs`): exclusive NIC claim with atomic
+  owner PID + self-healing reclamation on owner death; `transmit`/`receive`.
+- `SYS_NET_RAW_OPEN/TX/RX/CLOSE` (865-868), capability-gated on the new
+  `ResourceType::NetRaw`, owner-checked, user-pointer validated, frame-size
+  bounded (14..=1522).
+- `net::poll()` skips the physical-NIC drain while a raw owner holds the claim
+  (exclusive-ownership model chosen over a promiscuous tap — simplest correct
+  first step; the in-kernel stack stays the active path until a daemon claims).
+- fork/ipc-cleanup arms: NetRaw is non-inheritable and needs no fd cleanup.
+
+Deferred to later increments (not blocking Phase 2):
+- Batched TX/RX (io_uring-style) — single-frame per syscall for now.
+- `sys_net_if_query` (MAC/MTU enumeration) — Phase 2 reuses existing
+  `SYS_NET_IF_INFO` (842) for the MAC; MTU is fixed at 1500 for now.
+- End-to-end ARP send/recv test — arrives with the Phase 2 daemon that drives
+  the raw path. This commit's validation is: build clean + boot test confirms
+  the `poll()` gate did not regress in-kernel networking (no raw owner present).
 
 ### Phase 2 — `netstack` daemon skeleton  [ ] not started
 - New `netstack/` userspace crate (Rust, `no_std`? — runs as a normal user

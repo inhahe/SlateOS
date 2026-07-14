@@ -260,3 +260,21 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   ring + full per-connection state machine. Next: UDP send/recv control op, then
   the shared-mem data ring + wiring the real `sys_dns_resolve`/`sys_tcp_*`
   forwarders ahead of Phase 5 cutover.
+- 2026-07-14: Phase 4 increment 5 landed — **generic UDP exchange over IPC.**
+  Rounds out core L4 control-path coverage: the daemon serves
+  `netipc::Request::UdpExchange {ip, port, payload}` → `[status|response-bytes]`
+  (new `OP_UDP_EXCHANGE` + `encode_udp_exchange`, shared `[op][ip:4][port:2]
+  [payload]` layout factored with `encode_tcp_fetch`; 15 netipc host tests). The
+  daemon `udp_exchange` sends one datagram via the generalized `send_ipv4` helper
+  and returns the first matching response datagram — the generic sibling of the
+  DNS-specific resolve op (suits NTP/STUN/custom request-response UDP). Kernel
+  self-test (`netstack_udp_dns_roundtrip`) sends a static DNS/A query blob for
+  example.com to the configured resolver on :53 and validates the returned
+  datagram is a DNS *response* (echoed ID + QR bit) — no DNS logic duplicated in
+  the kernel, just the generic UDP path exercised. Boot-validated end-to-end
+  (`netstack UDP-exchange-over-IPC (ring 3): OK — DNS response datagram returned`;
+  one flaky boot hit the pre-existing intermittent prctl-batch spawn-dispatch
+  race — see known-issues.md — and an immediate re-run passed in 88s with all
+  four ops green). Control-path L4 coverage (DNS A/PTR, TCP fetch, UDP exchange)
+  is now complete; next is the Phase-5 shared-memory data ring for streaming +
+  wiring the real socket-syscall forwarders.

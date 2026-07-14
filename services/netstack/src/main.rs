@@ -845,6 +845,77 @@ fn tcp_fetch(
 }
 
 // ---------------------------------------------------------------------------
+// One-shot UDP client (Phase 4 control op `OP_UDP_EXCHANGE`)
+// ---------------------------------------------------------------------------
+//
+// Send one datagram to `ip:port` and return the first response datagram. This
+// is the generic sibling of the DNS resolver (which is UDP under the hood but
+// DNS-specific); it suits any request/response UDP protocol (NTP, STUN, custom).
+
+/// If `frame` is a UDP datagram from `src_ip:src_port` addressed to us on our
+/// ephemeral port, return its payload (borrows `frame`).
+fn udp_response<'a>(
+    frame: &'a [u8],
+    me: &IfInfo,
+    src_ip: &[u8; 4],
+    src_port: u16,
+) -> Option<&'a [u8]> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip || ip.src != *src_ip {
+        return None;
+    }
+    let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
+    if dg.src_port != src_port || dg.dst_port != EPHEMERAL_PORT {
+        return None;
+    }
+    Some(dg.payload)
+}
+
+/// Perform a one-shot UDP exchange: send `payload` as a single datagram to
+/// `dst_ip:dst_port` and return the first matching response datagram's payload
+/// in `out`. Returns bytes written (0 is a valid empty response), or `None` on
+/// TX failure or receive timeout.
+fn udp_exchange(
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    next_hop_mac: &[u8; 6],
+    me: &IfInfo,
+    id: u16,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
+    let dlen = udp::write(&mut dgram, &me.ip, dst_ip, EPHEMERAL_PORT, dst_port, payload)?;
+    if !send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_UDP, &dgram[..dlen], id) {
+        return None;
+    }
+    let mut frame = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut frame);
+            if n < 0 {
+                break;
+            }
+            let len = n as usize;
+            if len > frame.len() {
+                continue;
+            }
+            if let Some(pl) = udp_response(&frame[..len], me, dst_ip, dst_port) {
+                let take = pl.len().min(out.len());
+                out[..take].copy_from_slice(&pl[..take]);
+                return Some(take);
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Service mode (Phase 4): serve socket-syscall requests over `net.stack`
 // ---------------------------------------------------------------------------
 //
@@ -982,6 +1053,22 @@ fn handle_request(
                 Some(mac) => {
                     *txid = txid.wrapping_add(1);
                     tcp_fetch(&ip, port, mac, me, *txid, payload, &mut body[..cap])
+                }
+                None => None,
+            };
+            match got {
+                Some(n) => netipc::encode_ok_bytes(out, body.get(..n).unwrap_or(&[]))
+                    .unwrap_or_else(|| fail(out)),
+                None => fail(out),
+            }
+        }
+        Some(netipc::Request::UdpExchange { ip, port, payload }) => {
+            let mut body = [0u8; MSG_CAP];
+            let cap = MSG_CAP - 1;
+            let got = match next_hop_mac {
+                Some(mac) => {
+                    *txid = txid.wrapping_add(1);
+                    udp_exchange(&ip, port, mac, me, *txid, payload, &mut body[..cap])
                 }
                 None => None,
             };

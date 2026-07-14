@@ -43,6 +43,14 @@ pub const OP_RESOLVE_PTR: u8 = 0x02;
 /// streaming socket API arrives with the Phase-5 shared-memory data ring.
 pub const OP_TCP_FETCH: u8 = 0x03;
 
+/// Request: one-shot UDP exchange — send `payload` as a single datagram to
+/// `ip:port`, wait for one response datagram, and return it. Operands:
+/// `[ip:4][port_be:2][payload…]` (same layout as [`OP_TCP_FETCH`]). Reply:
+/// [`ST_OK`] + the response datagram payload (possibly empty), or [`ST_FAIL`].
+/// Suits request/response UDP protocols (DNS, NTP, STUN); a streaming socket
+/// API arrives with the Phase-5 shared-memory data ring.
+pub const OP_UDP_EXCHANGE: u8 = 0x04;
+
 /// Reply status: success. Any op-specific result bytes follow.
 pub const ST_OK: u8 = 0x00;
 /// Reply status: failure. No result bytes follow.
@@ -66,6 +74,16 @@ pub enum Request<'a> {
         /// Destination TCP port.
         port: u16,
         /// Bytes to send once the connection is established (may be empty).
+        payload: &'a [u8],
+    },
+    /// One-shot UDP exchange with `ip:port`, sending the borrowed `payload` as a
+    /// single datagram and returning the first response datagram.
+    UdpExchange {
+        /// Destination IPv4 address.
+        ip: [u8; 4],
+        /// Destination UDP port.
+        port: u16,
+        /// Datagram payload to send (may be empty).
         payload: &'a [u8],
     },
     /// An opcode this build does not recognise (carries the raw byte).
@@ -92,6 +110,13 @@ impl<'a> Request<'a> {
                 let port = u16::from_be_bytes([head[4], head[5]]);
                 let payload = rest.get(6..)?;
                 Some(Request::TcpFetch { ip, port, payload })
+            }
+            OP_UDP_EXCHANGE => {
+                let head = rest.get(..6)?;
+                let ip = [head[0], head[1], head[2], head[3]];
+                let port = u16::from_be_bytes([head[4], head[5]]);
+                let payload = rest.get(6..)?;
+                Some(Request::UdpExchange { ip, port, payload })
             }
             other => Some(Request::Unknown(other)),
         }
@@ -123,9 +148,29 @@ pub fn encode_resolve_ptr(out: &mut [u8], ip: &[u8; 4]) -> Option<usize> {
 /// `out`. Returns bytes written, or `None` if `out` is too small.
 #[must_use]
 pub fn encode_tcp_fetch(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8]) -> Option<usize> {
+    encode_ip_port_payload(out, OP_TCP_FETCH, ip, port, payload)
+}
+
+/// Encode an [`OP_UDP_EXCHANGE`] request (`[op][ip:4][port_be:2][payload]`) into
+/// `out`. Returns bytes written, or `None` if `out` is too small.
+#[must_use]
+pub fn encode_udp_exchange(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8]) -> Option<usize> {
+    encode_ip_port_payload(out, OP_UDP_EXCHANGE, ip, port, payload)
+}
+
+/// Shared encoder for the `[op][ip:4][port_be:2][payload]` request layout used
+/// by both [`OP_TCP_FETCH`] and [`OP_UDP_EXCHANGE`].
+#[must_use]
+fn encode_ip_port_payload(
+    out: &mut [u8],
+    op: u8,
+    ip: &[u8; 4],
+    port: u16,
+    payload: &[u8],
+) -> Option<usize> {
     let total = payload.len().checked_add(7)?;
     let dst = out.get_mut(..total)?;
-    dst[0] = OP_TCP_FETCH;
+    dst[0] = op;
     dst[1..5].copy_from_slice(ip);
     dst[5..7].copy_from_slice(&port.to_be_bytes());
     dst[7..].copy_from_slice(payload);
@@ -354,6 +399,27 @@ mod tests {
     fn short_tcp_fetch_request_is_none() {
         // op + ip but no port bytes.
         assert!(Request::parse(&[OP_TCP_FETCH, 1, 2, 3, 4, 0]).is_none());
+    }
+
+    #[test]
+    fn udp_exchange_round_trip() {
+        let mut buf = [0u8; 64];
+        let n = encode_udp_exchange(&mut buf, &[8, 8, 8, 8], 53, b"query").unwrap();
+        assert_eq!(buf[0], OP_UDP_EXCHANGE);
+        match Request::parse(&buf[..n]).unwrap() {
+            Request::UdpExchange { ip, port, payload } => {
+                assert_eq!(ip, [8, 8, 8, 8]);
+                assert_eq!(port, 53);
+                assert_eq!(payload, b"query");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_udp_exchange_request_is_none() {
+        // op + ip but no port bytes.
+        assert!(Request::parse(&[OP_UDP_EXCHANGE, 9, 9, 9, 9, 0]).is_none());
     }
 
     #[test]

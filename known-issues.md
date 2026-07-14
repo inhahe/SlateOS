@@ -865,6 +865,20 @@ runs** (`renderD128 GETPARAM(3D_FEATURES)==0, honest no-3D reporting: OK`), with
 boot progressing hundreds of processes past it each time. Q18 committed on this
 basis. **STILL OPEN — root-cause the container-exec / ring-3 spawn-dispatch race.**
 
+**OCCURRENCE 2026-07-14 (netstack Phase 4 increment 5, UDP-exchange-over-IPC).**
+One `boot-test.sh --no-build` run timed out at `BOOT_OK not found within 480s`
+with the same signature: `[liveness] SYSTEM HANG: no task-level forward progress
+for 15+ seconds (useful_work=13, all CPUs idle-ticking)`, cpu0 heartbeat still
+advancing (2501), the current task `tid=0 name="prctl-batch269"` `state=Running`
+`last_rip` in `kernel_text`. QEMU also printed a one-off `Incorrect order for
+descriptors` (virtio) on stderr. Boot had progressed to ~line 4147/4175 (~99%),
+well past the netstack self-tests, which **all passed cleanly** (A resolve, PTR
+`dns.google`, TCP `HTTP/1.1 200 OK`, and the new UDP-exchange DNS datagram — all
+OK at serial lines 1822–1831). An **immediate re-run passed in 88s** with every
+netstack op OK and no hang/virtio error — the definitive tell of the timing race,
+not a regression from the UDP-exchange change. Increment 5 committed on this
+basis. **STILL OPEN.**
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

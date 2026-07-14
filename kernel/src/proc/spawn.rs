@@ -2837,6 +2837,14 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         None => Ok(None),
     };
 
+    // Fourth round-trip: generic one-shot UDP exchange over IPC. Send a fixed
+    // DNS/A query for example.com to the configured resolver on :53 and verify
+    // the datagram we get back is a matching DNS *response*. This exercises the
+    // daemon's generic UDP path (`OP_UDP_EXCHANGE`) — distinct from the
+    // DNS-specific resolve op — without duplicating DNS logic in the kernel
+    // (the query is a static wire blob; we only check the response header).
+    let udp_result = netstack_udp_dns_roundtrip(&ifinfo.dns.0);
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
 
@@ -2850,6 +2858,21 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: TCP-fetch IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
+
+    match udp_result {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   netstack UDP-exchange-over-IPC (ring 3): OK — DNS response datagram \
+             returned"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   netstack UDP-exchange-over-IPC (ring 3): IPC round-trip OK, no \
+             response (no upstream?) — path proven"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: UDP-exchange IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
@@ -2994,6 +3017,77 @@ fn netstack_tcp_fetch_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<
                 serial_print!("{}", c as char);
             }
             serial_println!("");
+            Ok(Some(()))
+        }
+        netipc::BytesReply::Ok(_) | netipc::BytesReply::Fail => Ok(None),
+        netipc::BytesReply::Malformed => Err(KernelError::InternalError),
+    };
+
+    channel::close(client);
+    result
+}
+
+/// Perform one `OP_UDP_EXCHANGE` round-trip to the running `net.stack` daemon:
+/// send a fixed DNS/A query for `example.com` to `dns_ip:53` and verify the
+/// datagram returned is a matching DNS *response*. Returns `Ok(Some(()))` on a
+/// valid response, `Ok(None)` if the daemon replied `ST_FAIL` or an unexpected
+/// datagram (IPC fine, no upstream), or `Err` on a transport failure. The query
+/// is a static wire blob so the kernel side carries no DNS logic — the point is
+/// to exercise the daemon's *generic* UDP path, not to resolve a name.
+fn netstack_udp_dns_roundtrip(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
+    use crate::ipc::{channel, service};
+
+    // Fixed DNS query: ID=0xABCD, RD set, one A/IN question for "example.com".
+    #[rustfmt::skip]
+    const DNS_QUERY: [u8; 29] = [
+        0xAB, 0xCD,             // ID
+        0x01, 0x00,             // flags: RD
+        0x00, 0x01,             // QDCOUNT = 1
+        0x00, 0x00,             // ANCOUNT = 0
+        0x00, 0x00,             // NSCOUNT = 0
+        0x00, 0x00,             // ARCOUNT = 0
+        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        0x03, b'c', b'o', b'm',
+        0x00,                   // root label
+        0x00, 0x01,             // QTYPE = A
+        0x00, 0x01,             // QCLASS = IN
+    ];
+
+    let client = service::connect(b"net.stack")?;
+
+    let mut req = [0u8; 7 + DNS_QUERY.len()];
+    let req_len = match netipc::encode_udp_exchange(&mut req, dns_ip, 53, &DNS_QUERY) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return Err(KernelError::InternalError);
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return Err(e);
+    }
+
+    let reply = match channel::recv_timeout(client, 6_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+
+    let result = match netipc::parse_bytes_reply(reply.data()) {
+        // A valid DNS response echoes our ID and has the QR (response) bit set.
+        netipc::BytesReply::Ok(dg)
+            if dg.len() >= 12 && dg[0] == 0xAB && dg[1] == 0xCD && (dg[2] & 0x80) != 0 =>
+        {
             Ok(Some(()))
         }
         netipc::BytesReply::Ok(_) | netipc::BytesReply::Fail => Ok(None),

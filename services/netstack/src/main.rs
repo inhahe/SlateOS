@@ -542,12 +542,11 @@ fn resolve_ptr(
             if len > buf.len() {
                 continue;
             }
-            if let Some(msg) = dns_response_msg(&buf[..len], me, txid) {
-                if let Some(w) = msg.first_ptr(out) {
-                    if w > 0 {
-                        return Some(w);
-                    }
-                }
+            if let Some(msg) = dns_response_msg(&buf[..len], me, txid)
+                && let Some(w) = msg.first_ptr(out)
+                && w > 0
+            {
+                return Some(w);
             }
         }
         sleep_ns(POLL_SLEEP_NS);
@@ -1076,7 +1075,7 @@ fn run_dns_service(me: &IfInfo) -> i64 {
     let mut idle_ticks: u32 = 0;
 
     while idle_ticks < SERVICE_IDLE_ITERS {
-        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS as u64);
+        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS);
         if ch < 0 {
             idle_ticks += 1; // Timed out (or transient) — count toward idle exit.
             continue;
@@ -1091,7 +1090,7 @@ fn run_dns_service(me: &IfInfo) -> i64 {
             ch,
             req.as_mut_ptr() as u64,
             req.len() as u64,
-            ACCEPT_TIMEOUT_NS as u64,
+            ACCEPT_TIMEOUT_NS,
         );
         if rlen > 0 {
             let req = &req[..rlen as usize];
@@ -1390,24 +1389,101 @@ fn ring_tcp(handle: u64, size: u32, me: &IfInfo, next_hop_mac: &[u8; 6], seed_ip
     ok
 }
 
-/// Drain the submission queue, driving a single [`TcpConn`] through the socket
-/// opcodes and posting exactly one completion per SQE (the io_uring batched
-/// model). This is the ring-native equivalent of [`tcp_fetch`]: the kernel
-/// submits `OP_CONNECT` → `OP_SEND` → `OP_RECV` → `OP_CLOSE`, and the request/
-/// response bytes flow through the ring data window instead of the control
-/// channel.
+/// Maximum concurrent TCP connections one ring session can multiplex.
+///
+/// Each live [`TcpConn`] carries a `TCP_SND_BUF` (1 KiB) send buffer plus
+/// bookkeeping, so this is a deliberate cap: 8 slots ≈ 8–9 KiB of connection
+/// state — comfortable on the daemon's stack while covering the fan-out a
+/// socket-forwarding client needs (one live `TcpConn` per userspace socket).
+const MAX_RING_CONNS: usize = 8;
+
+/// A `conn_id`-keyed table of live TCP connections for one ring session.
+///
+/// The io_uring socket opcodes address a connection by the [`netipc::ring::Sqe`]
+/// `conn_id` field, chosen by the client (in the Phase-5 socket-forwarding design
+/// it is the identity of the userspace socket). `OP_CONNECT` installs a
+/// [`TcpConn`] under its `conn_id`; a later `OP_SEND`/`OP_RECV`/`OP_CLOSE` looks
+/// it up; `OP_CLOSE` evicts it. This is what turns the one-shot fetch into a
+/// multiplexed socket server — the Phase-5 prerequisite the socket-syscall
+/// forwarders build on.
+///
+/// # Concurrency limitation
+///
+/// The underlying receive path ([`recv_tcp_seg`]) reads one frame directly off
+/// the shared NIC and *drops* it if it does not match the connection's 4-tuple.
+/// So two connections must not be *simultaneously* in their `OP_RECV` phase on
+/// one ring — a sibling connection's inbound frames would be discarded. The
+/// current model is therefore safe for connections whose active phases do not
+/// overlap (one fully handshakes/sends/receives/closes before the next receives).
+/// True concurrent multiplexing needs a shared RX demux that buffers per-4-tuple
+/// frames; that is tracked in `known-issues.md` (D-NETSTACK-RX-DEMUX) as the next
+/// receive-path piece and is partly shaped by the Q22b persistent-daemon lifecycle.
+struct RingConns {
+    slots: [Option<(u32, TcpConn)>; MAX_RING_CONNS],
+}
+
+impl RingConns {
+    /// An empty table (all slots free).
+    fn new() -> Self {
+        Self { slots: core::array::from_fn(|_| None) }
+    }
+
+    /// Borrow the live connection registered under `id`, if any.
+    fn get_mut(&mut self, id: u32) -> Option<&mut TcpConn> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|(sid, _)| *sid == id)
+            .map(|(_, c)| c)
+    }
+
+    /// Reserve the free slot that should hold `id`, if `id` is not already in use
+    /// and the table has room. Returns a mutable handle to the empty slot for the
+    /// caller to fill (`*slot = Some((id, conn))`), or `None` on a duplicate id or
+    /// a full table. Reserving before moving the connection lets the caller retain
+    /// ownership on failure (to close it gracefully) without a large-`Err` Result.
+    fn reserve(&mut self, id: u32) -> Option<&mut Option<(u32, TcpConn)>> {
+        if self.slots.iter().flatten().any(|(sid, _)| *sid == id) {
+            return None; // duplicate conn_id
+        }
+        self.slots.iter_mut().find(|s| s.is_none())
+    }
+
+    /// Remove and return the connection registered under `id`, if present, freeing
+    /// its slot for reuse.
+    fn remove(&mut self, id: u32) -> Option<TcpConn> {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|(sid, _)| *sid == id) {
+                return slot.take().map(|(_, c)| c);
+            }
+        }
+        None
+    }
+}
+
+/// Drain the submission queue, driving one or more [`TcpConn`]s through the
+/// socket opcodes and posting exactly one completion per SQE (the io_uring
+/// batched model). This is the ring-native equivalent of [`tcp_fetch`]: the
+/// kernel submits `OP_CONNECT` → `OP_SEND` → `OP_RECV` → `OP_CLOSE` (per
+/// connection), and the request/response bytes flow through the ring data window
+/// instead of the control channel. Connections are addressed by the SQE
+/// `conn_id`, so a single ring can multiplex several sockets (see [`RingConns`]).
 ///
 /// Per-opcode semantics:
 /// - [`netipc::ring::OP_CONNECT`]: unpack the endpoint from `aux`, open the
-///   connection; completion `result = 0` on success (single connection, so no
-///   distinct id needed), or `-1`.
-/// - [`netipc::ring::OP_SEND`]: read the SQE's data window and send it;
-///   completion `result` = bytes accepted, or `-1`.
-/// - [`netipc::ring::OP_RECV`]: receive into a scratch buffer, copy the response
-///   into the SQE's data window; completion `result` = bytes received, or `-1`.
-/// - [`netipc::ring::OP_CLOSE`]: graceful teardown; completion `result = 0`.
+///   connection, and install it under `sqe.conn_id`; completion `result = 0` on
+///   success, or `-1` (peer refused, or the `conn_id` is a duplicate / the table
+///   is full).
+/// - [`netipc::ring::OP_SEND`]: look up `sqe.conn_id`, read the SQE's data window
+///   and send it; completion `result` = bytes accepted, or `-1` (no such conn /
+///   window error).
+/// - [`netipc::ring::OP_RECV`]: look up `sqe.conn_id`, receive into a scratch
+///   buffer, copy the response into the SQE's data window; completion `result` =
+///   bytes received, or `-1`.
+/// - [`netipc::ring::OP_CLOSE`]: look up and evict `sqe.conn_id`, graceful
+///   teardown; completion `result = 0`, or `-1` if no such connection.
 /// - [`netipc::ring::OP_NOP`]: complete with `result = 0`.
-/// - any op before a connection exists (or unknown): `result = -1`.
+/// - any unknown opcode: `result = -1`.
 ///
 /// Returns `true` iff at least one SQE was processed and the CQ never overflowed.
 fn ring_tcp_process(
@@ -1416,7 +1492,7 @@ fn ring_tcp_process(
     next_hop_mac: &[u8; 6],
     seed_ipid: u16,
 ) -> bool {
-    let mut conn: Option<TcpConn> = None;
+    let mut conns = RingConns::new();
     let mut ipid = seed_ipid;
     let mut processed = 0u32;
     while let Some(sqe) = ring.sq_pop() {
@@ -1424,26 +1500,36 @@ fn ring_tcp_process(
             netipc::ring::OP_NOP => 0,
             netipc::ring::OP_CONNECT => {
                 let (ip, port) = netipc::ring::Sqe::unpack_endpoint(sqe.aux);
-                // Advance the ident seed well past the handshake's own increments.
+                // Advance the ident seed well past the handshake's own increments
+                // so each connection gets a distinct ephemeral port + ISN.
                 ipid = ipid.wrapping_add(0x10);
                 match TcpConn::connect(me, ip, port, *next_hop_mac, ipid) {
-                    Some(c) => {
-                        conn = Some(c);
-                        0
-                    }
+                    Some(mut c) => match conns.reserve(sqe.conn_id) {
+                        Some(slot) => {
+                            *slot = Some((sqe.conn_id, c));
+                            0
+                        }
+                        None => {
+                            // Duplicate id or table full: tear the fresh conn down
+                            // gracefully rather than leaking the peer's half-open
+                            // connection, then report failure.
+                            c.close(me);
+                            -1
+                        }
+                    },
                     None => -1,
                 }
             }
-            netipc::ring::OP_SEND => match conn.as_mut() {
+            netipc::ring::OP_SEND => match conns.get_mut(sqe.conn_id) {
                 Some(c) => ring_tcp_send(ring, c, me, &sqe),
                 None => -1,
             },
-            netipc::ring::OP_RECV => match conn.as_mut() {
+            netipc::ring::OP_RECV => match conns.get_mut(sqe.conn_id) {
                 Some(c) => ring_tcp_recv(ring, c, me, &sqe),
                 None => -1,
             },
-            netipc::ring::OP_CLOSE => match conn.as_mut() {
-                Some(c) => {
+            netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
+                Some(mut c) => {
                     c.close(me);
                     0
                 }

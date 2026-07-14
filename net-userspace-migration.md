@@ -445,3 +445,46 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   (multiple send/recv SQEs against a live `TcpConn` across separate ring
   submissions, not a one-shot batch) and begins Phase 5 cutover (persistent
   daemon, delete `kernel/src/net/`, keep the NIC shim).
+
+### Phase 5 — cut over + delete kernel stack  [-] in progress
+Flip default from in-kernel to daemon; remove `kernel/src/net/` protocol modules;
+keep only the thin NIC shim + raw-frame syscalls. Two forks in this phase have no
+obviously-correct answer and are costly/irreversible, so they're queued for the
+operator as **open-questions.md Q22** (deletion scope: L2–L4-only vs. delete-all
+vs. phased; cutover mechanism: big-bang vs. staged-behind-a-flag; Claude's
+recommendation: phased + staged). Work that is unblocked under *any* answer — the
+persistent multi-connection socket server the forwarders need — proceeds now.
+
+- 2026-07-14: Phase 5 increment 1 landed — **`conn_id`-keyed multiplexed
+  connection table (the socket-server foundation).** The daemon's ring handler
+  drove a single `Option<TcpConn>`; it now owns a fixed 8-slot `RingConns` table
+  keyed by the SQE `conn_id` (client-chosen — in the forwarder design, the
+  identity of a userspace socket). `ring_tcp_process` dispatches: `OP_CONNECT`
+  reserves a free slot and installs the fresh `TcpConn` under `sqe.conn_id`
+  (`result=0`; `-1` + graceful close on duplicate id / full table — no leaked
+  half-open peer connection); `OP_SEND`/`OP_RECV` look the conn up by `conn_id`;
+  `OP_CLOSE` evicts it, freeing the slot for reuse. `RingConns::reserve` hands
+  back a `&mut` to the empty slot *before* the connection is moved in, so a
+  rejected connect keeps ownership to close cleanly without a large-`Err` Result
+  (dodges `clippy::result_large_err` on the 1 KiB `TcpConn`). New kernel self-test
+  `netstack_ring_tcp_multi_roundtrip` (spawn.rs): one ring, two request + two
+  response windows, an **8-SQE batch** that opens *both* connections (conn_id 7 &
+  9) before tearing either down — `CONNECT#7, CONNECT#9, SEND#7, RECV#7, CLOSE#7,
+  SEND#9, RECV#9, CLOSE#9` — so the two `TcpConn`s genuinely **coexist** in the
+  daemon's table, each returning HTTP through its own ring data window; the kernel
+  reaps all 8 CQEs in FIFO order and verifies both windows begin with `HTTP/`.
+  Boot-validated: "netstack ring-TCP-multi-over-IPC (ring 3): OK — two connections
+  multiplexed over one ring by conn_id"; both conn7 and conn9 returned
+  `HTTP/1.1 200 OK`, clean 98s boot with every netstack op green. Daemon clippy is
+  now fully clean (also fixed 3 pre-existing warnings: 1 collapsible-if + 2
+  unnecessary-cast); kernel builds clean. **Known limitation (logged
+  known-issues.md D-NETSTACK-RX-DEMUX):** the receive path reads one NIC frame and
+  drops it if it doesn't match the *current* connection's 4-tuple — there is no
+  shared RX demux, so two connections must not be in their `OP_RECV` phase
+  simultaneously. The self-test's ordering (peers silent between handshake and
+  request) respects this; the proper fix is a shared per-4-tuple RX pump in the
+  daemon's top-level poll loop, whose structure the Q22b cutover mechanism decides
+  — so it's built as part of (or just before) the persistent socket-server work,
+  not now. Next (unblocked): persistence *across separate ring submissions* (the
+  table survives multiple `OP_RING_TCP` batches / the daemon's poll loop), then —
+  gated on Q22 — the socket-syscall forwarders + kernel-stack deletion.

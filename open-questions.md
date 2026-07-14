@@ -23,9 +23,99 @@ Format for each entry:
 
 ---
 
-No open questions. All deferred operator decisions (Q1–Q21) have been resolved —
-see the "Recently resolved" list below and `design-decisions.md` for full
-rationale. New decisions should be appended above this line as `## Q22 …`.
+## Q22 — netstack userspace migration Phase 5: deletion scope + cutover strategy
+
+**Status:** OPEN
+
+**Context.** §63 (Path B) is settled: the TCP/IP protocol stack moves to the
+userspace `netstack` daemon behind the thin capability-gated kernel NIC shim
+(`kernel/src/net/raw.rs` + `SYS_NET_RAW_*`). Phases 1–4 are done — the daemon can
+already claim the NIC, register `net.stack`, and serve real DNS/TCP/UDP ops over
+the channel + zero-copy SHM ring (bounded self-test model, §64: the exclusive NIC
+claim would starve the still-live in-kernel stack, so the daemon claims → serves →
+releases → exits rather than running persistently). Phase 5 is the cutover: make
+the daemon persistent, forward the POSIX/Linux socket syscalls to it, and delete
+the kernel-resident stack. Two forks in Phase 5 have no obviously-correct answer
+and are costly/irreversible (deleting a ~60 K-line subsystem), so I'm flagging
+them rather than deciding unilaterally. **I am not blocked** — the daemon must
+grow a persistent multi-connection socket server under *either* answer, so I'm
+building that prerequisite now (see "Where it bites"); these questions only gate
+the final deletion + wiring step.
+
+**Q22a — deletion scope.** `kernel/src/net/` is ~60 K lines / ~48 modules. Only a
+subset (`ethernet, arp, ipv4/ipv6, icmp/icmpv6, tcp, udp, dns, dhcp, frag,
+interface, ndisc`) is the L2–L4 stack the daemon replaces. The rest are
+*application-level* protocol servers/clients that happen to live in-kernel today:
+`ssh` (2713 lines), `httpd`/`http`, `ftp`, `smtp`, `snmp`, `telnet`, `tftp`,
+`ntp`, `dhcpd`, `syslog`, `socks`, `upnp`, `mdns`, `lldp`, `iperf`, `netcat`,
+`traceroute`, `tls`, `websocket`, `nat`, `firewall`, `bridge`, `veth`, `vlan`,
+`qos`, `igmp`, `mld`, `wol`, `pcap`, `dashboard`, `netstat`. The migration doc
+says literally "remove `kernel/src/net/` protocol modules; keep only the thin NIC
+shim" — taken at face value that deletes *all* of the above, silently dropping
+every one of those features.
+
+- **Option A — L2–L4 only.** Delete just the core stack the daemon replaces;
+  keep the app-protocol modules compiling in-kernel for now, migrate/delete them
+  in later dedicated tasks. *Pros:* no feature regression; smallest blast radius;
+  each app protocol gets a real userspace re-home instead of vanishing. *Cons:*
+  `kernel/src/net/` still large; those app modules still call the L2–L4 APIs
+  being deleted, so they'd need to be rewired onto the daemon's socket API too —
+  which means they can't actually stay as-is (they depend on in-kernel `tcp`/
+  `udp`). This may not be cleanly separable.
+- **Option B — delete everything, accept regression.** Follow the doc literally:
+  delete all of `kernel/src/net/` except the NIC shim; the app protocols come
+  back later as userspace daemons/tools. *Pros:* clean, matches the stated Phase-5
+  goal, forces the microkernel end-state. *Cons:* large, temporary functional
+  regression (ssh/http/ftp/… servers gone until re-homed); irreversible in one
+  step.
+- **Option C — phased deletion.** Persistent daemon reaches L4 parity; forward
+  socket syscalls; delete the L2–L4 core first (Option A's scope), then delete
+  each app module in its own follow-up as it's re-homed to userspace. *Pros:*
+  incremental, always-buildable, no big regression window. *Cons:* longest
+  calendar span; a transitional period where the kernel hosts app protocols over
+  a daemon-provided socket API (added coupling).
+
+**Q22b — cutover mechanism (given §64 exclusive claim).** Once the daemon holds
+the NIC persistently, the in-kernel stack cannot reach the uplink, so socket
+syscalls must forward to the daemon the moment it goes persistent — there is no
+clean dual-stack. Options: **(i) big-bang** — one commit flips persistence +
+forwarding + deletion together (matches the doc, but a huge untestable step); or
+**(ii) staged** — land a persistent daemon + socket-forwarding path behind a
+boot flag / config default while the kernel stack remains the compiled fallback,
+flip the default once the daemon proves parity in QEMU, then delete. Staged is
+far more testable but needs a temporary "which stack owns the NIC" switch that
+§64 says can't be a true concurrent dual-stack (only one owns the NIC at a time,
+selected at boot).
+
+**Claude's recommendation.** **Q22a → Option C** (phased: core first, app modules
+re-homed individually) and **Q22b → (ii) staged** (persistent daemon + forwarding
+behind a default-off switch, flip after QEMU parity, then delete). This keeps
+every step buildable and boot-testable and avoids a giant irreversible regression,
+at the cost of more increments. **Meanwhile** (unblocked under any answer) I'm
+building the daemon's persistent multi-connection socket server — evolving the
+one-shot ring batch (`ring_tcp_process`, single `Option<TcpConn>`) into a
+`conn_id`-keyed connection table so send/recv/close SQEs act on a live connection
+across separate submissions and multiple sockets coexist. That is the shared
+prerequisite for the socket-syscall forwarders regardless of scope/mechanism.
+
+**Where it bites.**
+- Daemon: `services/netstack/src/main.rs` (`ring_tcp_process`, `run_dns_service`,
+  `TcpConn`, the NIC-claim lifecycle in `main`).
+- Kernel shim: `kernel/src/net/raw.rs`, `SYS_NET_RAW_*`.
+- Socket forwarders: `kernel/src/syscall/linux.rs` (`sys_socket`/`sys_connect`/
+  `sys_sendto`/`sys_recvfrom`/`sys_bind`/`sys_listen`/`sys_accept`/… at
+  ~35139–36546), which today dispatch into `kernel/src/net/{tcp,udp,...}`.
+- Deletion target: `kernel/src/net/` (`mod.rs` + the module list above).
+- Persistent-spawn path: how init/the service manager launches the daemon at boot
+  (today it's spawned only by the bounded kernel self-test in
+  `kernel/src/proc/spawn.rs`).
+
+---
+
+No further open questions beyond Q22. Earlier deferred operator decisions (Q1–Q21)
+have been resolved — see the "Recently resolved" list below and
+`design-decisions.md` for full rationale. New decisions should be appended above
+this line as `## Q23 …`.
 
 ---
 

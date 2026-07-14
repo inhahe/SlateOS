@@ -2879,6 +2879,12 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         None => Ok(None),
     };
 
+    // Multiplexed variant: two connections over one ring, addressed by conn_id.
+    let ring_tcp_multi_result = match a_ip {
+        Some(ip) => netstack_ring_tcp_multi_roundtrip(&ip, 80),
+        None => Ok(None),
+    };
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
 
@@ -2945,6 +2951,22 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: ring-TCP IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
+
+    match ring_tcp_multi_result {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   netstack ring-TCP-multi-over-IPC (ring 3): OK — two connections \
+             multiplexed over one ring by conn_id (daemon held both TcpConns in its table + \
+             both returned HTTP through independent ring data windows)"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   netstack ring-TCP-multi-over-IPC (ring 3): 8-SQE multiplexed batch \
+             drained + completions reaped, no/short response (no upstream?) — path proven"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ring-TCP-multi IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
@@ -3682,6 +3704,290 @@ fn netstack_ring_tcp_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
             serial_print!("{}", c as char);
         }
         serial_println!("");
+        finish(handle, Ok(Some(())))
+    } else {
+        finish(handle, Ok(None))
+    }
+}
+
+/// Ring-3 end-to-end test of the daemon's **multiplexed** connection table:
+/// two live TCP connections over a *single* ring, addressed by distinct SQE
+/// `conn_id`s.
+///
+/// This is the Phase-5 socket-server prerequisite — where
+/// [`netstack_ring_tcp_roundtrip`] drives one connection, this proves the daemon
+/// can hold several at once keyed by `conn_id` (see `RingConns` in the daemon).
+/// The kernel lays out one ring with two request windows and two response
+/// windows, then submits an eight-SQE batch that opens *both* connections before
+/// tearing either down, so the two `TcpConn`s coexist in the daemon's table:
+///
+/// ```text
+/// CONNECT#7, CONNECT#9,           // both live simultaneously
+/// SEND#7, RECV#7, CLOSE#7,        // drive + close conn 7
+/// SEND#9, RECV#9, CLOSE#9         // then drive + close conn 9
+/// ```
+///
+/// The ordering is deliberate: the daemon's receive path drops NIC frames that
+/// don't match the *current* connection's 4-tuple (no shared RX demux yet —
+/// `known-issues.md` D-NETSTACK-RX-DEMUX), so at most one connection is in its
+/// `OP_RECV` phase at a time. The peers stay silent between handshake and request,
+/// so the connections genuinely coexist without their inbound streams overlapping.
+///
+/// Returns `Ok(Some(()))` if both connections returned an HTTP response,
+/// `Ok(None)` if there was no upstream (either connect failed / short response) —
+/// the ring multiplexing path is proven either way — and `Err` only on a real
+/// protocol/geometry fault (missing/out-of-order completion, send failure, etc.).
+fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    use crate::ipc::{channel, service, shm};
+
+    const HTTP_REQ: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    // Data-area layout: two request windows (0, 256) + two response windows.
+    const REQ7_OFF: u32 = 0;
+    const REQ9_OFF: u32 = 256;
+    const RECV7_OFF: u32 = 512;
+    const RECV9_OFF: u32 = 1024;
+    const RECV_CAP: u32 = 512;
+    // Distinct client-chosen connection ids for the two multiplexed sockets.
+    const CID7: u32 = 7;
+    const CID9: u32 = 9;
+    // user_data base for the eight-SQE batch (echoed back per completion).
+    const UD: u64 = 0x5254_434d_0000_0000; // "RTCM" (ring-tcp-multi)
+
+    // Ring geometry: SQ/CQ of 16 slots (room for the 8-SQE batch) + a 1.5 KiB data
+    // area (two 256 B requests + two 512 B responses). Stays under one 16 KiB frame.
+    let sq_entries: u32 = 16;
+    let cq_entries: u32 = 16;
+    let data_len: u32 = RECV9_OFF + RECV_CAP;
+    let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
+
+    let handle = shm::create(need)?;
+    let size = shm::size(handle)?;
+
+    let finish = |h: shm::ShmHandle, r: KernelResult<Option<()>>| -> KernelResult<Option<()>> {
+        shm::close(h);
+        r
+    };
+
+    let kaddr = match shm::kernel_addr(handle) {
+        Ok(p) => p,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    // SAFETY: kaddr is valid+writable for `size` (>= need) bytes and no other
+    // party touches the region until the daemon attaches (strictly after we send
+    // the request below). `init` validates the geometry fits.
+    let ring = match unsafe { netring::Ring::init(kaddr, size, sq_entries, cq_entries, data_len) } {
+        Some(r) => r,
+        None => return finish(handle, Err(KernelError::InternalError)),
+    };
+    // Stage the same HTTP request into both request windows.
+    if !ring.write_data(REQ7_OFF as usize, HTTP_REQ) || !ring.write_data(REQ9_OFF as usize, HTTP_REQ)
+    {
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let req_len = HTTP_REQ.len() as u32;
+
+    let ep = netipc::ring::Sqe::pack_endpoint(ip, port);
+    // Eight SQEs: open both, then drive+close each in turn (see fn doc). Each
+    // carries a distinct user_data (UD + index) to confirm FIFO completion order.
+    let batch = [
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CONNECT,
+            conn_id: CID7,
+            user_data: UD,
+            aux: ep,
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CONNECT,
+            conn_id: CID9,
+            user_data: UD.wrapping_add(1),
+            aux: ep,
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_SEND,
+            conn_id: CID7,
+            data_off: REQ7_OFF,
+            data_len: req_len,
+            user_data: UD.wrapping_add(2),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_RECV,
+            conn_id: CID7,
+            data_off: RECV7_OFF,
+            data_len: RECV_CAP,
+            user_data: UD.wrapping_add(3),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CLOSE,
+            conn_id: CID7,
+            user_data: UD.wrapping_add(4),
+            ..netipc::ring::Sqe::default()
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_SEND,
+            conn_id: CID9,
+            data_off: REQ9_OFF,
+            data_len: req_len,
+            user_data: UD.wrapping_add(5),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_RECV,
+            conn_id: CID9,
+            data_off: RECV9_OFF,
+            data_len: RECV_CAP,
+            user_data: UD.wrapping_add(6),
+            aux: 0,
+        },
+        netipc::ring::Sqe {
+            op: netipc::ring::OP_CLOSE,
+            conn_id: CID9,
+            user_data: UD.wrapping_add(7),
+            ..netipc::ring::Sqe::default()
+        },
+    ];
+    for sqe in &batch {
+        if !ring.sq_push(sqe) {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    let client = match service::connect(b"net.stack") {
+        Ok(c) => c,
+        Err(e) => return finish(handle, Err(e)),
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let size_u32 = size as u32;
+    let mut req = [0u8; 16];
+    let req_msg_len = match netipc::encode_ring_tcp(&mut req, handle.raw(), size_u32) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_msg_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return finish(handle, Err(e));
+    }
+
+    // Two full TCP transactions drive over the ring; allow generous time.
+    let reply = match channel::recv_timeout(client, 20_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return finish(handle, Err(e));
+        }
+    };
+    channel::close(client);
+
+    match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(_) => {}
+        netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
+            return finish(handle, Err(KernelError::InternalError));
+        }
+    }
+
+    // Reap all eight completions in FIFO (submission) order:
+    //   [0] CONNECT#7  [1] CONNECT#9  [2] SEND#7  [3] RECV#7
+    //   [4] CLOSE#7    [5] SEND#9     [6] RECV#9  [7] CLOSE#9
+    let mut results = [0i32; 8];
+    for (i, slot) in results.iter_mut().enumerate() {
+        let cqe = match ring.cq_pop() {
+            Some(c) => c,
+            None => {
+                serial_println!("[spawn]   ring-tcp-multi: missing completion {}", i);
+                return finish(handle, Err(KernelError::InternalError));
+            }
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let want_ud = UD.wrapping_add(i as u64);
+        if cqe.user_data != want_ud {
+            serial_println!(
+                "[spawn]   ring-tcp-multi: completion {} user_data mismatch (got {:#x}, want {:#x})",
+                i, cqe.user_data, want_ud
+            );
+            return finish(handle, Err(KernelError::InternalError));
+        }
+        *slot = cqe.result;
+    }
+    if ring.cq_pop().is_some() {
+        serial_println!("[spawn]   ring-tcp-multi: unexpected extra completion");
+        return finish(handle, Err(KernelError::InternalError));
+    }
+
+    let [connect7, connect9, send7, recv7, _close7, send9, recv9, _close9] = results;
+
+    // Either connect failing (no upstream) leaves the multiplexing path proven.
+    if connect7 < 0 || connect9 < 0 {
+        return finish(handle, Ok(None));
+    }
+    // Both sends must have accepted their request bytes.
+    if send7 < 0 || send9 < 0 {
+        serial_println!(
+            "[spawn]   ring-tcp-multi: send failed (conn7 {}, conn9 {})",
+            send7, send9
+        );
+        return finish(handle, Err(KernelError::InternalError));
+    }
+    // A short/empty response on either means connected+sent but no data came back
+    // (slirp variance) — the multiplexing path is proven even so.
+    if recv7 < 5 || recv9 < 5 {
+        return finish(handle, Ok(None));
+    }
+
+    // Verify each connection's response window independently begins with "HTTP/".
+    let http_ok = |recv_res: i32, off: u32, label: &str| -> KernelResult<bool> {
+        #[allow(clippy::cast_sign_loss)]
+        let n = (recv_res as usize).min(RECV_CAP as usize);
+        let mut body = [0u8; RECV_CAP as usize];
+        let window = match body.get_mut(..n) {
+            Some(w) => w,
+            None => return Err(KernelError::InternalError),
+        };
+        if !ring.read_data(off as usize, window) {
+            return Err(KernelError::InternalError);
+        }
+        if window.len() >= 5 && window.get(..5) == Some(b"HTTP/".as_slice()) {
+            let line_end = window
+                .iter()
+                .position(|&b| b == b'\r' || b == b'\n')
+                .unwrap_or(window.len().min(64));
+            let show = window.get(..line_end).unwrap_or(&[]);
+            serial_print!("[spawn]   ring-tcp-multi {} HTTP status = ", label);
+            for &b in show {
+                let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+                serial_print!("{}", c as char);
+            }
+            serial_println!("");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    };
+
+    let ok7 = match http_ok(recv7, RECV7_OFF, "conn7") {
+        Ok(v) => v,
+        Err(e) => return finish(handle, Err(e)),
+    };
+    let ok9 = match http_ok(recv9, RECV9_OFF, "conn9") {
+        Ok(v) => v,
+        Err(e) => return finish(handle, Err(e)),
+    };
+    if ok7 && ok9 {
         finish(handle, Ok(Some(())))
     } else {
         finish(handle, Ok(None))

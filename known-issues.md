@@ -14,6 +14,40 @@ work that should be done now."
 
 ## Active Bugs
 
+### D-NETSTACK-RX-DEMUX. The netstack daemon has no shared RX demux — concurrent connections can't safely receive at once — TECH DEBT (logged 2026-07-14)
+
+The daemon's TCP receive path (`services/netstack/src/main.rs`
+`recv_tcp_seg`, used by `TcpConn::connect`/`recv`/`close`) reads **one raw
+Ethernet frame directly off the NIC** (`raw_rx`) and, if it does not match
+*that* connection's 4-tuple (`ip.dst == me.ip && ip.src == dst_ip &&
+seg.dst_port == local_port && seg.src_port == remote_port`), **drops it and
+returns `None`**. There is no shared, per-connection RX queue. The Phase-5
+`conn_id`-keyed connection table (`RingConns`, added 2026-07-14) lets one
+ring *hold* several live `TcpConn`s and *dispatch* SQEs to them by
+`conn_id`, but if two connections are in their `OP_RECV` phase
+simultaneously, connection A's receive loop will pop and discard
+connection B's inbound frames — corrupting B's stream (missing segments,
+stalled ACKs). **Current safe envelope:** at most one connection actively
+receiving at a time. The multiplexed self-test
+(`netstack_ring_tcp_multi_roundtrip` in `kernel/src/proc/spawn.rs`)
+respects this — it opens two connections so they coexist in the table, but
+sequences their send/recv/close so their receive phases never overlap, and
+the peers stay silent between handshake and request. **Proper fix:** a
+shared RX pump in the daemon that reads *all* pending NIC frames, classifies
+each by (proto, 4-tuple) — including non-TCP (ARP replies, ICMP) — and
+appends the payload to the matching connection's in-order byte buffer
+(advancing that conn's `rcv_nxt`, generating its cumulative ACK, honoring
+its FIN), with unmatched frames buffered briefly rather than dropped. Each
+`TcpConn::recv` then drains its *own* buffer instead of touching the NIC.
+This centralizes segment demux/ACK generation across all connections — the
+real requirement for the persistent socket server. Partly shaped by the
+Q22b persistent-daemon lifecycle (open-questions.md): the pump belongs in
+the daemon's top-level poll loop, whose structure the cutover mechanism
+decides, so build it as part of (or immediately before) the persistent
+socket-server work rather than now. Where it bites: any workload driving ≥2
+concurrent netstack connections through the ring (the socket-syscall
+forwarders will, as soon as an app opens two sockets at once).
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — TECH DEBT (logged 2026-07-14)
 
 `SYS_SHM_MAP` (kernel/src/syscall/handlers.rs `sys_shm_map`) maps a

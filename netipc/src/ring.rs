@@ -150,6 +150,18 @@ pub const OP_LISTEN: u8 = 0x07;
 /// listener socket is treated as non-blocking at the ring layer; the kernel blocks
 /// by re-submitting / polling). `-1` = unknown listener or data window too small.
 pub const OP_ACCEPT: u8 = 0x08;
+/// Open a TCP connection to an **IPv6** endpoint. Unlike [`OP_CONNECT`], a
+/// 16-byte IPv6 address does not fit in `aux`, so the destination address is
+/// passed in the data window: `data_off` points at the 16 address octets
+/// (`data_len` must be ≥ 16) and the low 16 bits of `aux` carry the destination
+/// port (host byte order). `conn_id` is the caller-chosen id to install the new
+/// connection under (as with [`OP_CONNECT`]). [`CONNECT_NONBLOCK`] (bit 48 of
+/// `aux`) has the same non-blocking semantics as for the IPv4 opcode. Completion
+/// `result` is `0` on success, [`ERR_IN_PROGRESS`] for a pending non-blocking
+/// handshake, or a negative errno (`-1` = could not start / no slot / data
+/// window too small). Migration Phase 5, closing the IPv6-connect part of the
+/// `D-NETSOCK-SYNC` parity gap.
+pub const OP_CONNECT6: u8 = 0x09;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -577,6 +589,35 @@ mod tests {
         // from the generic -1 (unknown listener / window too small) and success 0.
         assert_ne!(ERR_WOULD_BLOCK, 0);
         assert_ne!(ERR_WOULD_BLOCK, -1);
+    }
+
+    #[test]
+    fn connect6_opcode_carries_port_in_aux_and_addr_in_window() {
+        // OP_CONNECT6 must not collide with any prior opcode.
+        let existing = [
+            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
+        ];
+        for other in existing {
+            assert_ne!(OP_CONNECT6, other, "OP_CONNECT6 aliases another opcode");
+        }
+        // The destination port rides the low 16 bits of `aux`; the address is
+        // carried in the data window (data_off/data_len), not in `aux`.
+        let port = 443u16;
+        let sqe = Sqe {
+            op: OP_CONNECT6,
+            conn_id: 5,
+            data_off: 8192,
+            data_len: 16, // 16 address octets
+            user_data: 0x4e53_434c_0000_000d,
+            aux: u64::from(port) | CONNECT_NONBLOCK,
+        };
+        let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+        assert_eq!(sqe, back);
+        assert_eq!((back.aux & 0xFFFF) as u16, port);
+        // The non-blocking flag still lives above the port bits and round-trips.
+        assert_eq!(back.aux & CONNECT_NONBLOCK, CONNECT_NONBLOCK);
+        // The 16-bit port field and the bit-48 flag never overlap.
+        assert_eq!(CONNECT_NONBLOCK & 0xFFFF, 0);
     }
 
     #[test]

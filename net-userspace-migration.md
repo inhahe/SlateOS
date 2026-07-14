@@ -195,9 +195,46 @@ daemon share the wire format), then implement `SYS_DNS_RESOLVE` end-to-end as
 the simplest one-shot op (no per-connection state) to prove the channel path
 before tackling TCP/UDP streaming.
 
-### Phase 5 — cut over + delete kernel stack  [ ] not started
+### Phase 5 — cut over + delete kernel stack  [-] in progress
 Flip default from in-kernel to daemon; remove `kernel/src/net/` protocol modules;
 keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
+
+**Cutover strategy (design-decisions.md §66, operator-approved 2026-07-14):**
+Q22a → **Option C, phased deletion** (delete the L2–L4 core first, re-home each
+app-protocol server/client — ssh/httpd/ftp/… — to userspace in its own follow-up).
+Q22b → **(ii) staged cutover** behind a default-off boot switch; prove parity in
+QEMU with the switch on, flip the default, then delete.
+
+**Key discovery (2026-07-14):** the Linux socket syscalls (`sys_socket`/`connect`/
+`sendto`/`recvfrom`/… in `kernel/src/syscall/linux.rs`) are today **pure errno-
+gating stubs that return `ENOSYS`** — there is *no* AF_INET socket object and no
+dispatch into `kernel/src/net/`. The in-kernel `net/` stack is reached only by the
+in-kernel app servers via their own internal API, not via the POSIX/Linux socket
+ABI. So "forward the socket syscalls to the daemon" is really **implementing
+AF_INET/AF_INET6 sockets in the Linux ABI for the first time, backed by the
+daemon** — and the §64 switch is fundamentally about *NIC ownership at boot*.
+
+**Increment plan (each buildable + boot-testable):**
+- **5.4 — persistent daemon lifetime + kernel ring-client refactor.** Extract the
+  connect/send/recv/close ring-driving client currently inlined in the
+  `spawn.rs` self-tests into a reusable kernel `netstack` client module. Add the
+  `net.userspace` boot switch (default **off**). No syscall behavior change yet.
+- **5.5 — AF_INET SOCK_STREAM sockets over the daemon (switch-gated).** Give the
+  kernel a socket-fd object (in the Linux fd table) backed by a daemon ring
+  connection; wire `sys_socket`/`connect`/`sendto`/`recvfrom`/`read`/`write`/
+  `close` for AF_INET SOCK_STREAM to it *when the switch is on*. Validate with a
+  real ring-3 Linux process doing `socket()`/`connect()`/`write()`/`read()` to
+  fetch HTTP, run inside the bounded daemon window. Switch off → unchanged
+  (`ENOSYS`), in-kernel stack still owns the NIC.
+- **5.6 — persistent daemon spawn at boot + NIC ownership handoff.** When the
+  switch is on, init/service-manager launches the daemon persistently at boot; it
+  claims the NIC and the in-kernel stack does not. Prove full parity in QEMU
+  (DNS + TCP + UDP over the daemon) with the switch on.
+- **5.7 — flip the default** to the daemon once parity holds.
+- **5.8 — delete the L2–L4 core** (`ethernet, arp, ipv4/ipv6, icmp/icmpv6, tcp,
+  udp, dns, dhcp, frag, interface, ndisc`), keeping the NIC shim; then re-home
+  each app-protocol module (ssh/httpd/…) to userspace in its own follow-up,
+  deleting it from `kernel/src/net/` as it lands (Q22a → C).
 
 ## Status log
 - 2026-07-14: Decision recorded (§63, Path B). Plan drafted. Starting Phase 1.

@@ -30,6 +30,7 @@ pub mod checksum;
 pub mod ethernet;
 pub mod icmp;
 pub mod ipv4;
+pub mod udp;
 
 /// A 6-byte Ethernet MAC address.
 pub type MacAddr = [u8; 6];

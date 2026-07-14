@@ -7,9 +7,11 @@
 //! borrow the response buffer. The message rides inside a UDP datagram (see
 //! [`crate::udp`]).
 //!
-//! Full name *decoding* (materialising the dotted name) is intentionally not
-//! provided: a resolver matching a known question only needs to skip answer
-//! names to reach the record data, which this module does safely.
+//! Forward resolution walks the answer section by *skipping* names (via the
+//! compression pointers) to reach record data. Reverse resolution (`PTR`)
+//! additionally *decodes* a name into a dotted ASCII string — see
+//! [`read_name`] and [`Message::first_ptr`] — with a jump-count guard against
+//! maliciously self-referential compression pointers.
 
 /// Fixed DNS header length (id, flags, and the four section counts).
 pub const HEADER_LEN: usize = 12;
@@ -18,8 +20,15 @@ pub const HEADER_LEN: usize = 12;
 pub const TYPE_A: u16 = 1;
 /// Resource-record type: IPv6 address (`AAAA`).
 pub const TYPE_AAAA: u16 = 28;
+/// Resource-record type: pointer / reverse name (`PTR`).
+pub const TYPE_PTR: u16 = 12;
 /// Resource-record class: Internet (`IN`).
 pub const CLASS_IN: u16 = 1;
+
+/// Upper bound on compression-pointer jumps while decoding a name. RFC 1035
+/// names are at most 255 bytes, so a legitimate name needs far fewer jumps;
+/// this cap stops a self-referential pointer chain from looping forever.
+const MAX_NAME_JUMPS: u32 = 128;
 
 /// Maximum length of a single DNS label (RFC 1035 §2.3.4).
 const MAX_LABEL: usize = 63;
@@ -75,6 +84,53 @@ fn skip_name(buf: &[u8], mut off: usize) -> Option<usize> {
         if off > buf.len() {
             return None;
         }
+    }
+}
+
+/// Decode a (possibly compressed) DNS name at offset `start` in `buf` into a
+/// dotted-ASCII string written to `out` (no trailing dot, no NUL). Returns the
+/// number of bytes written, or `None` on a malformed name, an out-of-bounds
+/// read, an over-long / self-referential pointer chain, or if `out` is too
+/// small. Compression pointers (RFC 1035 §4.1.4) are followed transparently.
+#[must_use]
+pub fn read_name(buf: &[u8], start: usize, out: &mut [u8]) -> Option<usize> {
+    let mut off = start;
+    let mut written = 0usize;
+    let mut jumps = 0u32;
+    let mut first = true;
+    loop {
+        let len = *buf.get(off)?;
+        if len & 0xC0 == 0xC0 {
+            // Compression pointer: 14-bit offset from the low bits + next byte.
+            let b2 = *buf.get(off.checked_add(1)?)?;
+            let ptr = (((len & 0x3F) as usize) << 8) | b2 as usize;
+            jumps = jumps.checked_add(1)?;
+            if jumps > MAX_NAME_JUMPS {
+                return None;
+            }
+            off = ptr;
+            continue;
+        }
+        if len == 0 {
+            return Some(written); // root terminator: name complete
+        }
+        let label_len = len as usize;
+        let label_start = off.checked_add(1)?;
+        let label_end = label_start.checked_add(label_len)?;
+        if label_end > buf.len() {
+            return None;
+        }
+        if !first {
+            *out.get_mut(written)? = b'.';
+            written = written.checked_add(1)?;
+        }
+        first = false;
+        for i in 0..label_len {
+            let c = *buf.get(label_start.checked_add(i)?)?;
+            *out.get_mut(written)? = c;
+            written = written.checked_add(1)?;
+        }
+        off = label_end;
     }
 }
 
@@ -164,6 +220,47 @@ impl<'a> Message<'a> {
             }
         }
         false
+    }
+
+    /// Decode the first `PTR` answer record's name into `out` (dotted ASCII),
+    /// returning the number of bytes written. Used for reverse DNS. The record
+    /// rdata is a name that may use compression back into the question, so this
+    /// walks records with offset awareness (rather than via [`Answers`], which
+    /// only exposes the raw rdata slice) and hands the rdata offset to
+    /// [`read_name`]. Returns `None` if there is no `PTR` answer or the message
+    /// is malformed.
+    #[must_use]
+    pub fn first_ptr(&self, out: &mut [u8]) -> Option<usize> {
+        let mut off = self.answers_start()?;
+        for _ in 0..self.ancount {
+            let after_name = skip_name(self.buf, off)?;
+            // Fixed RR fields: type(2) class(2) ttl(4) rdlength(2) = 10 bytes.
+            let fixed_end = after_name.checked_add(10)?;
+            if fixed_end > self.buf.len() {
+                return None;
+            }
+            let atype = u16::from_be_bytes([
+                *self.buf.get(after_name)?,
+                *self.buf.get(after_name.checked_add(1)?)?,
+            ]);
+            let class = u16::from_be_bytes([
+                *self.buf.get(after_name.checked_add(2)?)?,
+                *self.buf.get(after_name.checked_add(3)?)?,
+            ]);
+            let rdlen = u16::from_be_bytes([
+                *self.buf.get(after_name.checked_add(8)?)?,
+                *self.buf.get(after_name.checked_add(9)?)?,
+            ]) as usize;
+            let rd_end = fixed_end.checked_add(rdlen)?;
+            if rd_end > self.buf.len() {
+                return None;
+            }
+            if atype == TYPE_PTR && class == CLASS_IN {
+                return read_name(self.buf, fixed_end, out);
+            }
+            off = rd_end;
+        }
+        None
     }
 }
 
@@ -266,6 +363,43 @@ pub fn write_query(out: &mut [u8], id: u16, qname: &[u8], qtype: u16) -> Option<
     out[pos..pos + 2].copy_from_slice(&qtype.to_be_bytes());
     out[pos + 2..pos + 4].copy_from_slice(&CLASS_IN.to_be_bytes());
     Some(end)
+}
+
+/// Write `val` as minimal decimal ASCII (no leading zeros) into `out[pos..]`.
+/// Returns the offset just past the digits, or `None` if `out` is too small.
+fn write_u8_dec(out: &mut [u8], pos: usize, val: u8) -> Option<usize> {
+    let mut pos = pos;
+    if val >= 100 {
+        *out.get_mut(pos)? = b'0' + val / 100;
+        pos = pos.checked_add(1)?;
+    }
+    if val >= 10 {
+        *out.get_mut(pos)? = b'0' + (val / 10) % 10;
+        pos = pos.checked_add(1)?;
+    }
+    *out.get_mut(pos)? = b'0' + val % 10;
+    pos.checked_add(1)
+}
+
+/// Build a reverse-DNS (`PTR`) query for IPv4 address `ip`, i.e. a query for the
+/// name `d.c.b.a.in-addr.arpa` (RFC 1035 §3.5), with transaction id `id`,
+/// writing into `out`. Returns the number of bytes written, or `None` if `out`
+/// is too small.
+#[must_use]
+pub fn write_ptr_query(out: &mut [u8], id: u16, ip: &[u8; 4]) -> Option<usize> {
+    // Longest reverse name: "255.255.255.255.in-addr.arpa" = 28 bytes.
+    let mut name = [0u8; 32];
+    let mut pos = 0usize;
+    for i in (0..4).rev() {
+        pos = write_u8_dec(&mut name, pos, *ip.get(i)?)?;
+        *name.get_mut(pos)? = b'.';
+        pos = pos.checked_add(1)?;
+    }
+    for &b in b"in-addr.arpa" {
+        *name.get_mut(pos)? = b;
+        pos = pos.checked_add(1)?;
+    }
+    write_query(out, id, name.get(..pos)?, TYPE_PTR)
 }
 
 #[cfg(test)]
@@ -387,5 +521,113 @@ mod tests {
         let mut out = [0u8; 128];
         let long = [b'a'; 64]; // 64 > 63
         assert!(write_query(&mut out, 1, &long, TYPE_A).is_none());
+    }
+
+    #[test]
+    fn ptr_query_encodes_reverse_name() {
+        let mut buf = [0u8; 64];
+        let n = write_ptr_query(&mut buf, 0x2A2A, &[8, 8, 4, 4]).unwrap();
+        let m = Message::parse(&buf[..n]).unwrap();
+        assert_eq!(m.id, 0x2A2A);
+        assert_eq!(m.qdcount, 1);
+        // Reverse name is "4.4.8.8.in-addr.arpa": first label "4".
+        assert_eq!(buf[12], 1);
+        assert_eq!(buf[13], b'4');
+        // qtype PTR trails the encoded name + root byte.
+        let name_end = skip_name(&buf, 12).unwrap();
+        assert_eq!(
+            u16::from_be_bytes([buf[name_end], buf[name_end + 1]]),
+            TYPE_PTR
+        );
+    }
+
+    #[test]
+    fn ptr_query_multi_digit_octets() {
+        let mut buf = [0u8; 64];
+        let n = write_ptr_query(&mut buf, 1, &[192, 168, 1, 254]).unwrap();
+        // "254.1.168.192.in-addr.arpa" — first label "254" (len 3).
+        assert_eq!(buf[12], 3);
+        assert_eq!(&buf[13..16], b"254");
+        assert!(Message::parse(&buf[..n]).is_some());
+    }
+
+    #[test]
+    fn read_name_decodes_uncompressed() {
+        // A bare encoded name at offset 0: 3"one" 3"two" 0.
+        let name = [3, b'o', b'n', b'e', 3, b't', b'w', b'o', 0];
+        let mut out = [0u8; 32];
+        let n = read_name(&name, 0, &mut out).unwrap();
+        assert_eq!(&out[..n], b"one.two");
+    }
+
+    #[test]
+    fn read_name_follows_compression_pointer() {
+        // buf: [pad][3"com"][0] at 1..6, then a pointer at 6 -> offset 1.
+        let mut buf = [0u8; 16];
+        buf[1] = 3;
+        buf[2..5].copy_from_slice(b"com");
+        buf[5] = 0;
+        // Pointer to offset 1.
+        buf[6] = 0xC0;
+        buf[7] = 0x01;
+        let mut out = [0u8; 32];
+        let n = read_name(&buf, 6, &mut out).unwrap();
+        assert_eq!(&out[..n], b"com");
+    }
+
+    #[test]
+    fn read_name_rejects_pointer_loop() {
+        // A pointer at offset 0 that points to itself.
+        let buf = [0xC0u8, 0x00];
+        let mut out = [0u8; 32];
+        assert!(read_name(&buf, 0, &mut out).is_none());
+    }
+
+    #[test]
+    fn read_name_out_too_small() {
+        let name = [5, b'h', b'e', b'l', b'l', b'o', 0];
+        let mut out = [0u8; 3];
+        assert!(read_name(&name, 0, &mut out).is_none());
+    }
+
+    /// Build a synthetic PTR response: the reverse question, plus one PTR answer
+    /// (name = compression pointer to the question) whose rdata is a name that
+    /// itself uses compression back to the question's suffix.
+    #[test]
+    fn first_ptr_decodes_answer() {
+        let mut buf = [0u8; 128];
+        let qend = write_ptr_query(&mut buf, 0xBEEF, &[1, 1, 1, 1]).unwrap();
+        // Make it a response with 1 answer.
+        buf[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        buf[6..8].copy_from_slice(&1u16.to_be_bytes());
+        let mut off = qend;
+        // Answer name: pointer to question name at offset 12.
+        buf[off] = 0xC0;
+        buf[off + 1] = 0x0C;
+        off += 2;
+        buf[off..off + 2].copy_from_slice(&TYPE_PTR.to_be_bytes());
+        buf[off + 2..off + 4].copy_from_slice(&CLASS_IN.to_be_bytes());
+        buf[off + 4..off + 8].copy_from_slice(&300u32.to_be_bytes());
+        // rdata: 3"dns" 0  (an uncompressed PTR target for simplicity).
+        let rdata = [3u8, b'd', b'n', b's', 0];
+        buf[off + 8..off + 10].copy_from_slice(&(rdata.len() as u16).to_be_bytes());
+        off += 10;
+        buf[off..off + rdata.len()].copy_from_slice(&rdata);
+        off += rdata.len();
+
+        let m = Message::parse(&buf[..off]).unwrap();
+        assert!(m.is_response());
+        assert_eq!(m.ancount, 1);
+        let mut out = [0u8; 64];
+        let n = m.first_ptr(&mut out).unwrap();
+        assert_eq!(&out[..n], b"dns");
+    }
+
+    #[test]
+    fn first_ptr_none_without_ptr_answer() {
+        let (buf, len) = synth_response(TYPE_A, &[1, 2, 3, 4]);
+        let m = Message::parse(&buf[..len]).unwrap();
+        let mut out = [0u8; 64];
+        assert!(m.first_ptr(&mut out).is_none());
     }
 }

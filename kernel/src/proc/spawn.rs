@@ -48,6 +48,7 @@ use crate::proc::{elf, pcb, thread};
 use crate::proc::pcb::ProcessId;
 use crate::sched::task::{TaskId, DEFAULT_PRIORITY};
 use crate::serial_println;
+use crate::serial_print;
 
 /// Exit code set when exec fails after tearing down the old address space.
 ///
@@ -2782,14 +2783,11 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         }
     };
 
-    // Copy the reply bytes out before closing / reaping.
+    // Copy the reply bytes out before closing.
     let mut data = [0u8; 5];
     let dlen = reply.data().len().min(data.len());
     data[..dlen].copy_from_slice(&reply.data()[..dlen]);
-
     channel::close(client);
-    // Reap the daemon (it exits after its idle deadline once we stop sending).
-    let _ = crate::container::wait_process(result.pid);
 
     match data.first().copied() {
         Some(ST_OK) if dlen >= 5 => {
@@ -2798,26 +2796,119 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
                  example.com over net.stack): OK — {}.{}.{}.{}",
                 data[1], data[2], data[3], data[4]
             );
-            Ok(())
         }
         Some(ST_FAIL) => {
             // The IPC round-trip worked (we got a structured reply); DNS itself
             // didn't resolve — most likely no upstream resolver behind slirp.
             // The Phase-4 wiring is proven either way, so don't fail the boot.
             serial_println!(
-                "[spawn]   netstack DNS-over-IPC (ring 3): IPC round-trip OK, DNS \
+                "[spawn]   netstack DNS-over-IPC (ring 3): A IPC round-trip OK, DNS \
                  unresolved (no upstream?) — Phase-4 path proven, resolution skipped"
             );
-            Ok(())
         }
         other => {
             serial_println!(
-                "[spawn]   FAIL: malformed netstack reply (first={:?}, len={})",
+                "[spawn]   FAIL: malformed netstack A reply (first={:?}, len={})",
                 other, dlen
             );
-            Err(KernelError::InternalError)
+            let _ = crate::container::wait_process(result.pid);
+            return Err(KernelError::InternalError);
         }
     }
+
+    // Second round-trip: reverse (PTR) resolve a well-known address with a
+    // stable PTR record (8.8.8.8 → dns.google) so the decode path exercises
+    // when the upstream resolver answers. (Cloudflare-fronted A results like
+    // example.com's often have no PTR, which wouldn't test the decoder.)
+    let ptr_ip: [u8; 4] = [8, 8, 8, 8];
+    let ptr_result = netstack_ptr_roundtrip(&ptr_ip);
+
+    // Reap the daemon (it exits after its idle deadline once we stop sending).
+    let _ = crate::container::wait_process(result.pid);
+
+    match ptr_result {
+        Ok(Some(())) => {
+            serial_println!(
+                "[spawn]   netstack reverse-DNS-over-IPC (ring 3): OK — PTR name decoded \
+                 for {}.{}.{}.{}",
+                ptr_ip[0], ptr_ip[1], ptr_ip[2], ptr_ip[3]
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            // IPC worked but no PTR record (common under slirp / for many IPs).
+            serial_println!(
+                "[spawn]   netstack reverse-DNS-over-IPC (ring 3): PTR IPC round-trip OK, \
+                 no name (no upstream / no PTR) — path proven"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: PTR IPC round-trip error ({:?})", e);
+            Err(e)
+        }
+    }
+}
+
+/// Perform one `OP_RESOLVE_PTR` round-trip to the running `net.stack` daemon for
+/// IPv4 `ip`. Returns `Ok(Some(()))` if a hostname was decoded, `Ok(None)` if
+/// the daemon replied `ST_FAIL` (IPC fine, no PTR), or `Err` on a transport
+/// failure (connect/send/recv/malformed). Kept separate from the A path so the
+/// self-test body stays readable.
+fn netstack_ptr_roundtrip(ip: &[u8; 4]) -> KernelResult<Option<()>> {
+    use crate::ipc::{channel, service};
+    const OP_RESOLVE_PTR: u8 = 0x02;
+    const ST_OK: u8 = 0x00;
+    const ST_FAIL: u8 = 0x01;
+
+    let client = service::connect(b"net.stack")?;
+
+    let mut req = [0u8; 5];
+    req[0] = OP_RESOLVE_PTR;
+    req[1..5].copy_from_slice(ip);
+    let msg = match channel::Message::from_bytes(&req) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return Err(e);
+    }
+
+    let reply = match channel::recv_timeout(client, 6_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+
+    let data = reply.data();
+    let status = data.first().copied();
+    // Log a short prefix of the decoded name for eyeball verification.
+    let name = data.get(1..).unwrap_or(&[]);
+    let result = match status {
+        Some(ST_OK) if !name.is_empty() => {
+            // Print the name (ASCII) so a human can sanity-check the decode.
+            let show = name.get(..name.len().min(64)).unwrap_or(&[]);
+            serial_print!("[spawn]   PTR name = ");
+            for &b in show {
+                // Printable ASCII only; substitute others with '.'.
+                let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+                serial_print!("{}", c as char);
+            }
+            serial_println!("");
+            Ok(Some(()))
+        }
+        Some(ST_OK) | Some(ST_FAIL) => Ok(None),
+        _ => Err(KernelError::InternalError),
+    };
+
+    channel::close(client);
+    result
 }
 
 /// Ring-3 end-to-end test of the Linux `brk(2)` heap.

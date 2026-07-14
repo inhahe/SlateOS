@@ -219,3 +219,12 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   returned 172.66.147.243. Daemon releases the NIC at its idle deadline, so the
   in-kernel stack stays the live path until Phase 5. Next: TCP/UDP control ops
   + shared-mem data ring; then wire the real `sys_dns_resolve` forwarder.
+- 2026-07-14: Phase 4 increment 2 landed — **reverse DNS (PTR) over IPC.**
+  Added permanent name-*decoding* to `netproto::dns`: `read_name` (compression-
+  pointer decompression with a 128-jump loop guard), `Message::first_ptr`,
+  `write_ptr_query` (`d.c.b.a.in-addr.arpa`) + `TYPE_PTR` — 9 new host tests
+  (16 total in dns). The daemon serves `[OP_RESOLVE_PTR|4 IP bytes]` →
+  `[status|dotted-name]` via a shared DNS transport (`tx_dns_query` /
+  `dns_response_msg`, refactored out of `resolve_dns`). Kernel self-test adds a
+  second round-trip reverse-resolving 8.8.8.8. Boot-validated end-to-end: the
+  daemon decoded `dns.google` and the kernel logged `PTR name = dns.google`.

@@ -77,6 +77,11 @@ const E_WOULD_BLOCK: i64 = -4;
 /// Reply: `[status][ip0..ip3]` — status 0 = ok (4 IP bytes follow), 1 = failure.
 const OP_RESOLVE_A: u8 = 0x01;
 
+/// Request: reverse-resolve (PTR) an IPv4 address. Operands: 4 IP bytes.
+/// Reply: `[status][name…]` — status 0 = ok (dotted-ASCII hostname follows,
+/// no trailing dot/NUL), 1 = failure.
+const OP_RESOLVE_PTR: u8 = 0x02;
+
 /// Reply status codes.
 const ST_OK: u8 = 0x00;
 const ST_FAIL: u8 = 0x01;
@@ -444,29 +449,19 @@ fn arp_reply_mac(frame: &[u8], target_ip: &[u8; 4]) -> Option<[u8; 6]> {
     }
 }
 
-/// Resolve `hostname`'s first A record via DNS-over-UDP. `next_hop_mac` is the
-/// L2 destination for outbound frames toward the DNS server. `txid` disambiguates
-/// concurrent queries (we use a monotonic counter). Returns the IPv4 on success.
-fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
-    // Build the DNS query into a scratch buffer.
-    let mut qbuf = [0u8; 300];
-    let qlen = dns::write_query(&mut qbuf, txid, hostname, dns::TYPE_A)?;
-
-    // Assemble Ethernet | IPv4 | UDP | DNS directly in the TX frame.
+/// Frame a DNS query payload `qbuf` as Ethernet | IPv4 | UDP toward `me.dns`
+/// (from our ephemeral port to port 53) and transmit it on the raw NIC. `id`
+/// seeds the IPv4 identification field. Returns `true` on a successful TX.
+fn tx_dns_query(qbuf: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, id: u16) -> bool {
     let mut frame = [0u8; MAX_FRAME];
     let udp_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
-    let udp_len = udp::write(
-        &mut frame[udp_off..],
-        &me.ip,
-        &me.dns,
-        EPHEMERAL_PORT,
-        53,
-        &qbuf[..qlen],
-    )?;
-
+    let udp_len = match udp::write(&mut frame[udp_off..], &me.ip, &me.dns, EPHEMERAL_PORT, 53, qbuf) {
+        Some(l) => l,
+        None => return false,
+    };
     let ip_hdr = ipv4::Builder {
         dscp_ecn: 0,
-        id: txid,
+        id,
         flags_frag: 0x4000, // Don't Fragment
         ttl: 64,
         protocol: ipv4::PROTO_UDP,
@@ -476,36 +471,14 @@ fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) 
     .build_header(udp_len as u16);
     frame[ethernet::HEADER_LEN..udp_off].copy_from_slice(&ip_hdr);
     ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
-
     let total = udp_off + udp_len;
-    if raw_tx(&frame[..total]) < 0 {
-        return None;
-    }
-
-    // Poll raw RX for the matching DNS response.
-    let mut buf = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
-        loop {
-            let n = raw_rx(&mut buf);
-            if n < 0 {
-                break;
-            }
-            let len = n as usize;
-            if len > buf.len() {
-                continue;
-            }
-            if let Some(ip) = parse_dns_response(&buf[..len], me, txid) {
-                return Some(ip);
-            }
-        }
-        sleep_ns(POLL_SLEEP_NS);
-    }
-    None
+    raw_tx(&frame[..total]) >= 0
 }
 
-/// Extract the first A-record IPv4 from a received frame if it is the DNS
-/// response to our query (`txid`, our ephemeral port, from our DNS server).
-fn parse_dns_response(frame: &[u8], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
+/// Validate a received frame as *our* DNS response (matching `txid`, our
+/// ephemeral port, sourced from `me.dns`) and return the parsed DNS message.
+/// The message borrows `frame`.
+fn dns_response_msg<'a>(frame: &'a [u8], me: &IfInfo, txid: u16) -> Option<dns::Message<'a>> {
     let eth = ethernet::Frame::parse(frame)?;
     if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
         return None;
@@ -522,12 +495,78 @@ fn parse_dns_response(frame: &[u8], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
     if msg.id != txid || !msg.is_response() {
         return None;
     }
-    let mut out = [0u8; 4];
-    if msg.first_ipv4(&mut out) {
-        Some(out)
-    } else {
-        None
+    Some(msg)
+}
+
+/// Resolve `hostname`'s first A record via DNS-over-UDP. `next_hop_mac` is the
+/// L2 destination for outbound frames toward the DNS server. `txid` disambiguates
+/// concurrent queries (we use a monotonic counter). Returns the IPv4 on success.
+fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) -> Option<[u8; 4]> {
+    let mut qbuf = [0u8; 300];
+    let qlen = dns::write_query(&mut qbuf, txid, hostname, dns::TYPE_A)?;
+    if !tx_dns_query(&qbuf[..qlen], next_hop_mac, me, txid) {
+        return None;
     }
+    let mut buf = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut buf);
+            if n < 0 {
+                break;
+            }
+            let len = n as usize;
+            if len > buf.len() {
+                continue;
+            }
+            if let Some(msg) = dns_response_msg(&buf[..len], me, txid) {
+                let mut out = [0u8; 4];
+                if msg.first_ipv4(&mut out) {
+                    return Some(out);
+                }
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
+}
+
+/// Reverse-resolve `ip` (PTR record) via DNS-over-UDP, writing the decoded
+/// dotted-ASCII hostname into `out` and returning its length. Same transport
+/// as [`resolve_dns`]; differs only in query type and response decoding.
+fn resolve_ptr(
+    ip: &[u8; 4],
+    next_hop_mac: &[u8; 6],
+    me: &IfInfo,
+    txid: u16,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut qbuf = [0u8; 300];
+    let qlen = dns::write_ptr_query(&mut qbuf, txid, ip)?;
+    if !tx_dns_query(&qbuf[..qlen], next_hop_mac, me, txid) {
+        return None;
+    }
+    let mut buf = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut buf);
+            if n < 0 {
+                break;
+            }
+            let len = n as usize;
+            if len > buf.len() {
+                continue;
+            }
+            if let Some(msg) = dns_response_msg(&buf[..len], me, txid) {
+                if let Some(w) = msg.first_ptr(out) {
+                    if w > 0 {
+                        return Some(w);
+                    }
+                }
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -599,8 +638,9 @@ fn run_dns_service(me: &IfInfo) -> i64 {
         );
         if rlen > 0 {
             let req = &req[..rlen as usize];
-            let reply = handle_request(req, &next_hop_mac, me, &mut txid);
-            let _ = syscall3(SYS_CHANNEL_SEND, ch, reply.0.as_ptr() as u64, reply.1 as u64);
+            let mut reply = [0u8; MSG_CAP];
+            let reply_len = handle_request(req, &next_hop_mac, me, &mut txid, &mut reply);
+            let _ = syscall3(SYS_CHANNEL_SEND, ch, reply.as_ptr() as u64, reply_len as u64);
             served += 1;
         }
         syscall1(SYS_CHANNEL_CLOSE, ch);
@@ -615,14 +655,15 @@ fn run_dns_service(me: &IfInfo) -> i64 {
     0
 }
 
-/// Handle one control request, returning `(reply_buf, reply_len)`.
+/// Handle one control request, writing the reply into `out` and returning its
+/// length. `out` must be at least `MSG_CAP` bytes.
 fn handle_request(
     req: &[u8],
     next_hop_mac: &Option<[u8; 6]>,
     me: &IfInfo,
     txid: &mut u16,
-) -> ([u8; 5], usize) {
-    let mut reply = [0u8; 5];
+    out: &mut [u8],
+) -> usize {
     match req.first().copied() {
         Some(OP_RESOLVE_A) => {
             let hostname = &req[1..];
@@ -635,19 +676,41 @@ fn handle_request(
             };
             match ip {
                 Some(addr) => {
-                    reply[0] = ST_OK;
-                    reply[1..5].copy_from_slice(&addr);
-                    (reply, 5)
+                    out[0] = ST_OK;
+                    out[1..5].copy_from_slice(&addr);
+                    5
                 }
                 None => {
-                    reply[0] = ST_FAIL;
-                    (reply, 1)
+                    out[0] = ST_FAIL;
+                    1
+                }
+            }
+        }
+        Some(OP_RESOLVE_PTR) => {
+            // Operand: 4 IPv4 bytes to reverse-resolve.
+            let name_len = match next_hop_mac {
+                Some(mac) if req.len() >= 5 => {
+                    let ip = [req[1], req[2], req[3], req[4]];
+                    *txid = txid.wrapping_add(1);
+                    // Reserve out[0] for the status byte; write the name after it.
+                    resolve_ptr(&ip, mac, me, *txid, &mut out[1..])
+                }
+                _ => None,
+            };
+            match name_len {
+                Some(w) => {
+                    out[0] = ST_OK;
+                    1 + w
+                }
+                None => {
+                    out[0] = ST_FAIL;
+                    1
                 }
             }
         }
         _ => {
-            reply[0] = ST_FAIL; // Unknown opcode.
-            (reply, 1)
+            out[0] = ST_FAIL; // Unknown opcode.
+            1
         }
     }
 }

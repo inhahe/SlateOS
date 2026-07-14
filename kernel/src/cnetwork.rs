@@ -735,6 +735,119 @@ pub fn release_container(container_id: u32) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime connect / disconnect (Docker multi-network parity, §60)
+// ---------------------------------------------------------------------------
+
+/// Connect a container to a user-defined network at runtime (`network
+/// connect`, §60).
+///
+/// Orchestrates the full attach sequence, holding no registry lock across the
+/// steps (each helper takes its own lock):
+///
+/// 1. Allocate an address on `network`, bound to `container_id`.
+/// 2. Stand up a fresh veth interface in the container's netns (via
+///    [`crate::container::attach_network`]) with a connected route for the
+///    subnet.
+/// 3. Attach the host-side veth to the network's shared L2 bridge.
+/// 4. Register the container's embedded-DNS names on the network.
+///
+/// Every step rolls back the earlier ones on failure, so a partial connect
+/// never leaks an address, interface, or bridge port.
+///
+/// # Errors
+/// - [`KernelError::AlreadyExists`] if the container is already on the network.
+/// - [`KernelError::NotFound`] if the network or container does not exist.
+/// - Propagates IPAM / veth / bridge exhaustion errors.
+pub fn connect_container(
+    network: &str,
+    container_id: u32,
+    dns_names: &[&str],
+) -> KernelResult<Lease> {
+    // Docker rejects connecting a container to a network it is already on.
+    if crate::container::is_member_of(container_id, network) {
+        return Err(KernelError::AlreadyExists);
+    }
+
+    // 1. Allocate the address (bound to the container so removal reclaims it).
+    let lease = allocate(network, Some(container_id))?;
+
+    // Fetch the subnet for the container's connected route.
+    let info = match inspect(network) {
+        Some(i) => i,
+        None => {
+            let _ = release(network, lease.ip);
+            return Err(KernelError::NotFound);
+        }
+    };
+
+    // 2. Create the interface + route in the container's netns.
+    let vp = match crate::container::attach_network(
+        container_id,
+        network,
+        lease.ip,
+        info.network_addr,
+        info.prefix_len,
+        lease.gateway,
+    ) {
+        Ok(vp) => vp,
+        Err(e) => {
+            let _ = release(network, lease.ip);
+            return Err(e);
+        }
+    };
+
+    // 3. Attach the host-side veth to the network's L2 bridge (binds the veth
+    //    to the allocation for later cleanup).
+    if let Err(e) = attach_container_veth(network, container_id, vp) {
+        let _ = crate::container::detach_network(container_id, network);
+        let _ = release(network, lease.ip);
+        return Err(e);
+    }
+
+    // 4. Register embedded-DNS names (non-fatal: connectivity works without it).
+    if !dns_names.is_empty() {
+        if let Err(e) = register_dns_names(network, container_id, dns_names) {
+            crate::serial_println!(
+                "[cnetwork] connect '{}' -> container {}: DNS registration failed: {:?}",
+                network, container_id, e
+            );
+        }
+    }
+
+    Ok(lease)
+}
+
+/// Disconnect a container from a user-defined network at runtime (`network
+/// disconnect`, §60).
+///
+/// Releases the container's address on `network` (which detaches its bridged
+/// veth and frees its embedded-DNS names), then tears down the interface +
+/// connected route in the container's netns. The create-time *primary* network
+/// cannot be disconnected (its interface is owned by the container lifecycle);
+/// attempting to does nothing and returns [`KernelError::InvalidArgument`].
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the container is not a member of `network`.
+/// - [`KernelError::InvalidArgument`] if `network` is the container's primary
+///   network.
+pub fn disconnect_container(network: &str, container_id: u32) -> KernelResult<()> {
+    // Look up the membership first so we can refuse the primary WITHOUT having
+    // already released its lease / detached its bridge port.
+    let (ip, is_primary) =
+        crate::container::network_membership(container_id, network).ok_or(KernelError::NotFound)?;
+    if is_primary {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Release the lease (detaches the veth from the bridge + frees DNS names).
+    let _ = release(network, ip);
+
+    // Tear down the interface + route + membership.
+    crate::container::detach_network(container_id, network)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

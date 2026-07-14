@@ -67549,8 +67549,20 @@ fn cmd_container(args: &str) {
                 } else {
                     alloc::string::String::from("null")
                 };
+                // User-defined-network memberships (Docker multi-network, §60).
+                let mut networks_json = alloc::string::String::from("[");
+                for (i, m) in ci.memberships.iter().enumerate() {
+                    if i > 0 {
+                        networks_json.push(',');
+                    }
+                    networks_json.push_str(&alloc::format!(
+                        "{{\"name\":\"{}\",\"ip\":\"{}\",\"veth\":{}}}",
+                        esc(&m.network_name), fmt_ipv4(m.ip), m.veth_pair
+                    ));
+                }
+                networks_json.push(']');
                 crate::console_println!(
-                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"labels\":{}}}",
+                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"networks\":{},\"labels\":{}}}",
                     id,
                     esc(&ci.name),
                     ci.state,
@@ -67569,6 +67581,7 @@ fn cmd_container(args: &str) {
                     ci.net_ns,
                     ci.cgroup_id,
                     ci.created_seq,
+                    networks_json,
                     labels_json,
                 );
                 return;
@@ -67633,6 +67646,16 @@ fn cmd_container(args: &str) {
             }
             if let Some(pair_id) = ci.veth_pair {
                 crate::console_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
+            }
+            // User-defined-network memberships (Docker multi-network, §60).
+            if !ci.memberships.is_empty() {
+                crate::console_println!("  Networks:");
+                for m in &ci.memberships {
+                    crate::console_println!(
+                        "    {} -> ip {} (veth {})",
+                        m.network_name, fmt_ipv4(m.ip), m.veth_pair
+                    );
+                }
             }
             if let Some(s) = crate::netns::stats(ci.net_ns) {
                 if s.iface_up {
@@ -68766,6 +68789,21 @@ fn fmt_ipv4(ip: [u8; 4]) -> alloc::string::String {
     alloc::format!("{a}.{b}.{c}.{d}")
 }
 
+/// Resolve a container name or numeric id to a [`crate::container::ContainerId`]
+/// (Docker accepts either). A numeric reference is preferred when it names a
+/// live container; otherwise the reference is matched against container names.
+fn resolve_container_ref(reference: &str) -> Option<crate::container::ContainerId> {
+    if let Ok(id) = reference.parse::<crate::container::ContainerId>() {
+        if crate::container::info(id).is_some() {
+            return Some(id);
+        }
+    }
+    crate::container::list()
+        .into_iter()
+        .find(|(_, name, _)| name == reference)
+        .map(|(id, _, _)| id)
+}
+
 /// `container network <create|ls|rm|inspect|prune>` — manage user-defined
 /// container networks with IPAM (Docker `docker network`). `parts` is the
 /// whitespace-split `container network ...` argv (so `parts[0]` == "network").
@@ -68934,10 +68972,66 @@ fn cmd_container_network(parts: &[&str]) {
                 ),
             }
         }
+        "connect" => {
+            // container network connect NET CONTAINER — join a running/created
+            // container to an additional user-defined network (Docker parity, §60).
+            let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
+                crate::console_println!("Usage: container network connect NET CONTAINER");
+                return;
+            };
+            let Some(ct_id) = resolve_container_ref(ctref) else {
+                crate::console_println!("Container '{}' not found", ctref);
+                return;
+            };
+            // Embedded-DNS names for the new network: the container's name plus
+            // its hostname (when set and distinct), matching the create-time flow.
+            let cinfo = crate::container::info(ct_id);
+            let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+            if let Some(ci) = cinfo.as_ref() {
+                if !ci.name.is_empty() {
+                    names.push(ci.name.as_str());
+                }
+                if !ci.hostname.is_empty() && !ci.hostname.eq_ignore_ascii_case(&ci.name) {
+                    names.push(ci.hostname.as_str());
+                }
+            }
+            match crate::cnetwork::connect_container(net, ct_id, &names) {
+                Ok(lease) => {
+                    let peers = crate::cnetwork::inspect(net)
+                        .map_or(0, |i| i.allocations.len());
+                    crate::console_println!(
+                        "{} connected to '{}' (ip {}, {} member{})",
+                        ctref, net, fmt_ipv4(lease.ip), peers,
+                        if peers == 1 { "" } else { "s" }
+                    );
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "disconnect" => {
+            // container network disconnect NET CONTAINER — leave a network (§60).
+            let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
+                crate::console_println!("Usage: container network disconnect NET CONTAINER");
+                return;
+            };
+            let Some(ct_id) = resolve_container_ref(ctref) else {
+                crate::console_println!("Container '{}' not found", ctref);
+                return;
+            };
+            match crate::cnetwork::disconnect_container(net, ct_id) {
+                Ok(()) => crate::console_println!("{} disconnected from '{}'", ctref, net),
+                Err(crate::error::KernelError::InvalidArgument) => crate::console_println!(
+                    "Cannot disconnect '{}' from its primary network '{}' (created with --network); \
+                     delete the container to release it",
+                    ctref, net
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
         other => {
             crate::console_println!("Unknown network action '{}'", other);
             crate::console_println!(
-                "Usage: container network <create|ls|rm|inspect|prune|resolve> NAME [--subnet CIDR] [--gateway IP]"
+                "Usage: container network <create|ls|rm|inspect|prune|resolve|connect|disconnect> NAME [--subnet CIDR] [--gateway IP]"
             );
         }
     }
@@ -70165,6 +70259,15 @@ fn cmd_oci(args: &str) {
                                             "  L2 bridge:    {} ({} member{})",
                                             nn, peers, if peers == 1 { "" } else { "s" }
                                         );
+                                        // Record the create-time primary network as a
+                                        // membership (§60) so `inspect`/`ps` list it
+                                        // alongside any runtime `network connect`s. It
+                                        // reuses the primary veth just attached above.
+                                        if let Some(ni) = crate::cnetwork::inspect(nn) {
+                                            let _ = crate::container::record_primary_membership(
+                                                ct_id, nn, ip, ni.network_addr, ni.prefix_len,
+                                            );
+                                        }
                                     }
                                     Err(e) => crate::console_println!(
                                         "[oci] Warning: could not attach to network '{}' bridge: {:?}",

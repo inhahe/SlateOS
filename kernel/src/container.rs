@@ -519,6 +519,39 @@ impl ContainerConfig {
 // Per-container data
 // ---------------------------------------------------------------------------
 
+/// A container's membership in one user-defined network (§60).
+///
+/// Each membership is a distinct interface into the container's netns: its
+/// own veth pair (host end attaches to the network's L2 bridge) and its own
+/// IPAM-assigned address. Docker allows a container to be on many networks at
+/// once; this generalises the old one-veth-per-container model.
+#[derive(Clone)]
+struct NetworkMembership {
+    /// The user-defined network's name (unique within the container).
+    network_name: String,
+    /// The veth pair providing this network's interface into the container's
+    /// netns. For the create-time primary network this equals the container's
+    /// [`Container::veth_pair`]; runtime attachments own a fresh pair.
+    veth_pair: crate::net::veth::VethPairId,
+    /// The container's IPv4 address on this network.
+    ip: [u8; 4],
+    /// The network's subnet address (host bits zero) and prefix length, kept so
+    /// the connected route can be removed on detach.
+    subnet: [u8; 4],
+    prefix_len: u8,
+}
+
+/// Read-only view of one network membership (for `inspect`/`ps`, §60).
+#[derive(Debug, Clone)]
+pub struct NetworkAttachment {
+    /// The user-defined network's name.
+    pub network_name: String,
+    /// The veth pair backing this membership's interface.
+    pub veth_pair: crate::net::veth::VethPairId,
+    /// The container's IPv4 address on this network.
+    pub ip: [u8; 4],
+}
+
 /// Tracks all the kernel objects that make up a container.
 struct Container {
     /// Whether this slot is active.
@@ -539,7 +572,19 @@ struct Container {
     ///
     /// End A stays in ROOT_NS (host side), end B is moved to the
     /// container's net namespace.  `None` if no network was configured.
+    /// This is the container's *primary* interface (created at [`create`]
+    /// time from `ContainerConfig::net_ip`); additional user-defined-network
+    /// interfaces attached at runtime live in [`memberships`](Self::memberships).
     veth_pair: Option<crate::net::veth::VethPairId>,
+    /// User-defined-network memberships (Docker multi-network parity, §60).
+    ///
+    /// A container can be attached to N user-defined networks, each with its
+    /// own veth interface into the container's netns, its own IPAM address, and
+    /// its own embedded-DNS scope. The create-time primary network (if any) is
+    /// recorded here too, reusing [`veth_pair`](Self::veth_pair); runtime
+    /// `network connect` appends a membership with a fresh veth. Empty when the
+    /// container is on no user-defined network.
+    memberships: Vec<NetworkMembership>,
     /// Process IDs running in this container (global PIDs).
     pids: Vec<u64>,
     /// The container's init process (PID 1 inside the container), i.e. the
@@ -726,6 +771,7 @@ impl Container {
             net_ns: 0,
             cgroup_id: 0,
             veth_pair: None,
+            memberships: Vec::new(),
             pids: Vec::new(),
             init_pid: None,
             root_path: String::new(),
@@ -786,6 +832,9 @@ pub struct ContainerInfo {
     pub cgroup_id: u32,
     /// Veth pair ID connecting to the host (None if no network configured).
     pub veth_pair: Option<crate::net::veth::VethPairId>,
+    /// User-defined-network memberships (Docker multi-network parity, §60).
+    /// Empty when the container is attached to no user-defined network.
+    pub memberships: Vec<NetworkAttachment>,
     /// Number of processes.
     pub nr_procs: usize,
     /// The container's init process (global PID), or `None` if the
@@ -1256,6 +1305,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.net_ns = net_ns;
         ct.cgroup_id = cgroup_id;
         ct.veth_pair = veth_pair;
+        ct.memberships.clear();
         ct.pids.clear();
         // Record the container's own IP so published-port NAT rules know
         // where to forward (the `-p host:container` target).
@@ -1551,7 +1601,7 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name, rootfs_mount, tmpfs_mounts, log_path) =
+    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pairs, name, rootfs_mount, tmpfs_mounts, log_path) =
         with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -1562,8 +1612,21 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         }
 
         let ct = &table.containers[idx];
+        // Collect every veth to destroy: the primary interface plus each
+        // user-defined-network membership's interface, de-duplicated (the
+        // create-time primary network's membership reuses `veth_pair`, so we
+        // must not destroy the same pair twice).
+        let mut veth_pairs: Vec<crate::net::veth::VethPairId> = Vec::new();
+        if let Some(vp) = ct.veth_pair {
+            veth_pairs.push(vp);
+        }
+        for m in &ct.memberships {
+            if !veth_pairs.contains(&m.veth_pair) {
+                veth_pairs.push(m.veth_pair);
+            }
+        }
         let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
-                      ct.veth_pair, ct.name.clone(), ct.rootfs_mount.clone(),
+                      veth_pairs, ct.name.clone(), ct.rootfs_mount.clone(),
                       ct.tmpfs_mounts.clone(),
                       ct.log_path.clone());
 
@@ -1571,6 +1634,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         table.containers[idx].active = false;
         table.containers[idx].name.clear();
         table.containers[idx].veth_pair = None;
+        table.containers[idx].memberships.clear();
         table.containers[idx].pids.clear();
         table.containers[idx].init_pid = None;
         table.containers[idx].root_path.clear();
@@ -1588,9 +1652,10 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Ignore errors — the sub-resources may have already been cleaned up
     // if a partial failure occurred during create.
     //
-    // Destroy veth pair first (before netns) since the endpoint lives
-    // in the namespace.
-    if let Some(pair_id) = veth_pair {
+    // Destroy veth pairs first (before netns) since the endpoints live
+    // in the namespace. This covers the primary interface and every
+    // user-defined-network membership (§60).
+    for pair_id in veth_pairs {
         let _ = crate::net::veth::destroy_pair(pair_id);
     }
     // Tear down this namespace's ARP cache (idempotent; no-op if never
@@ -3342,6 +3407,11 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             net_ns: ct.net_ns,
             cgroup_id: ct.cgroup_id,
             veth_pair: ct.veth_pair,
+            memberships: ct.memberships.iter().map(|m| NetworkAttachment {
+                network_name: m.network_name.clone(),
+                veth_pair: m.veth_pair,
+                ip: m.ip,
+            }).collect(),
             nr_procs: ct.pids.len(),
             init_pid: ct.init_pid,
             root_path: ct.root_path.clone(),
@@ -3363,6 +3433,232 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             health_fail_streak: ct.health_fail_streak,
         })
     })
+}
+
+// ---------------------------------------------------------------------------
+// Public API: user-defined-network membership (Docker multi-network, §60)
+// ---------------------------------------------------------------------------
+
+/// Record the container's *create-time primary* network membership.
+///
+/// The primary interface (`ContainerConfig::net_ip`) is created inside
+/// [`create`] and its veth pair stored in [`Container::veth_pair`]; this call
+/// registers the corresponding user-defined-network membership so `inspect`/`ps`
+/// list it alongside any runtime-attached networks (§60). It reuses the existing
+/// primary `veth_pair` rather than creating a new interface.
+///
+/// Idempotent per network name: re-recording the same network updates the
+/// address in place rather than duplicating the membership.
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the id is invalid or its slot is inactive, or
+///   the container has no primary veth pair to associate.
+pub fn record_primary_membership(
+    id: ContainerId,
+    network_name: &str,
+    ip: [u8; 4],
+    subnet: [u8; 4],
+    prefix_len: u8,
+) -> KernelResult<()> {
+    with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::NotFound);
+        }
+        let ct = &mut table.containers[idx];
+        let vp = ct.veth_pair.ok_or(KernelError::NotFound)?;
+        if let Some(m) = ct.memberships.iter_mut().find(|m| m.network_name == network_name) {
+            m.ip = ip;
+            m.subnet = subnet;
+            m.prefix_len = prefix_len;
+            m.veth_pair = vp;
+        } else {
+            ct.memberships.push(NetworkMembership {
+                network_name: String::from(network_name),
+                veth_pair: vp,
+                ip,
+                subnet,
+                prefix_len,
+            });
+        }
+        Ok(())
+    })
+}
+
+/// Whether the container is already a member of `network_name`.
+#[must_use]
+pub fn is_member_of(id: ContainerId, network_name: &str) -> bool {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return false;
+        }
+        table.containers[idx]
+            .memberships
+            .iter()
+            .any(|m| m.network_name == network_name)
+    })
+}
+
+/// Look up the container's membership on `network_name`.
+///
+/// Returns `(ip, is_primary)` where `is_primary` is true when this membership
+/// reuses the create-time primary interface (see [`detach_network`], which
+/// refuses to detach the primary). Returns `None` if the id/slot is invalid or
+/// the container is not a member of the network.
+#[must_use]
+pub fn network_membership(id: ContainerId, network_name: &str) -> Option<([u8; 4], bool)> {
+    with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return None;
+        }
+        let ct = &table.containers[idx];
+        let primary = ct.veth_pair;
+        ct.memberships
+            .iter()
+            .find(|m| m.network_name == network_name)
+            .map(|m| (m.ip, Some(m.veth_pair) == primary))
+    })
+}
+
+/// Runtime-attach the container to another user-defined network (`network
+/// connect`, §60).
+///
+/// Creates a *fresh* veth pair into the container's netns (distinct from the
+/// primary interface and from any other network's interface), brings it up,
+/// installs a directly-connected route for the network's subnet, and records
+/// the membership. The returned veth pair id is the host-side interface the
+/// caller attaches to the network's L2 bridge (via
+/// [`crate::cnetwork::attach_container_veth`]).
+///
+/// On any failure the partially-created veth is torn down so no interface is
+/// leaked. If the container is already a member of `network_name`,
+/// [`KernelError::AlreadyExists`] is returned (Docker rejects a duplicate
+/// connect).
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the id is invalid or its slot is inactive.
+/// - [`KernelError::AlreadyExists`] if already a member of the network.
+/// - Propagates veth/netns setup errors (e.g. [`KernelError::ResourceExhausted`]
+///   if veth slots are exhausted).
+pub fn attach_network(
+    id: ContainerId,
+    network_name: &str,
+    ip: [u8; 4],
+    subnet: [u8; 4],
+    prefix_len: u8,
+    gateway: [u8; 4],
+) -> KernelResult<crate::net::veth::VethPairId> {
+    // Read the container's netns while validating membership state.
+    let net_ns = with_table_ref(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::NotFound);
+        }
+        if table.containers[idx].memberships.iter().any(|m| m.network_name == network_name) {
+            return Err(KernelError::AlreadyExists);
+        }
+        Ok(table.containers[idx].net_ns)
+    })?;
+
+    // Create + wire up a fresh interface into the container's netns.
+    let vp = setup_container_veth(net_ns)?;
+
+    // Install a directly-connected route for the network's subnet so traffic
+    // to peers on this network is sent out the new interface (gateway 0.0.0.0 =
+    // on-link). Non-fatal: a route-table-full condition should not fail the
+    // whole attach, but we roll the veth back on a genuine namespace error.
+    let dest = crate::netns::Ipv4Addr(subnet);
+    let mask = crate::netns::Ipv4Addr(prefix_to_mask(prefix_len));
+    let gw = crate::netns::Ipv4Addr(gateway);
+    if let Err(e) = crate::netns::add_route(net_ns, dest, mask, gw, 1) {
+        // Only unwind on a hard namespace error; a full route table is tolerable.
+        if e == KernelError::InvalidArgument {
+            let _ = crate::net::veth::destroy_pair(vp);
+            return Err(e);
+        }
+    }
+
+    // Record the membership (re-checking the slot is still valid under the lock).
+    let recorded = with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return false;
+        }
+        table.containers[idx].memberships.push(NetworkMembership {
+            network_name: String::from(network_name),
+            veth_pair: vp,
+            ip,
+            subnet,
+            prefix_len,
+        });
+        true
+    });
+    if !recorded {
+        let _ = crate::netns::remove_route(net_ns, dest, mask);
+        let _ = crate::net::veth::destroy_pair(vp);
+        return Err(KernelError::NotFound);
+    }
+    Ok(vp)
+}
+
+/// Runtime-detach the container from a user-defined network (`network
+/// disconnect`, §60).
+///
+/// Removes the membership for `network_name`, tears down its connected route,
+/// and destroys its veth pair. The caller must first detach the veth from the
+/// network's L2 bridge and release its IPAM lease (see
+/// [`crate::cnetwork::disconnect_container`], which orchestrates the full
+/// sequence). Returns the container's address that was on that network.
+///
+/// Detaching the create-time *primary* network is refused with
+/// [`KernelError::InvalidArgument`]: the primary interface is owned by the
+/// container lifecycle and torn down at [`delete`], not by `disconnect` (this
+/// matches Docker, which will not disconnect a container from the network it
+/// was `run` on if that would leave it unreachable — here we simply protect the
+/// primary veth from being destroyed out from under the container).
+///
+/// # Errors
+/// - [`KernelError::NotFound`] if the id/slot is invalid or the container is not
+///   a member of `network_name`.
+/// - [`KernelError::InvalidArgument`] if `network_name` is the primary network.
+pub fn detach_network(id: ContainerId, network_name: &str) -> KernelResult<[u8; 4]> {
+    let (net_ns, veth_pair, ip, subnet, prefix_len) = with_table(|table| {
+        let idx = id as usize;
+        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+            return Err(KernelError::NotFound);
+        }
+        let ct = &mut table.containers[idx];
+        let primary = ct.veth_pair;
+        let pos = ct
+            .memberships
+            .iter()
+            .position(|m| m.network_name == network_name)
+            .ok_or(KernelError::NotFound)?;
+        // Refuse to detach the primary interface (its veth is destroyed at delete).
+        if Some(ct.memberships[pos].veth_pair) == primary {
+            return Err(KernelError::InvalidArgument);
+        }
+        let m = ct.memberships.remove(pos);
+        Ok((ct.net_ns, m.veth_pair, m.ip, m.subnet, m.prefix_len))
+    })?;
+
+    // Tear down the connected route and the interface (best-effort; the
+    // membership is already gone, so these must not fail the operation).
+    let dest = crate::netns::Ipv4Addr(subnet);
+    let mask = crate::netns::Ipv4Addr(prefix_to_mask(prefix_len));
+    let _ = crate::netns::remove_route(net_ns, dest, mask);
+    let _ = crate::net::veth::destroy_pair(veth_pair);
+    Ok(ip)
+}
+
+/// Expand an IPv4 prefix length (0..=32) into a dotted netmask.
+fn prefix_to_mask(prefix_len: u8) -> [u8; 4] {
+    let n = prefix_len.min(32);
+    // 32-bit mask with the top `n` bits set. Guard the `>> 32` UB when n == 0.
+    let bits: u32 = if n == 0 { 0 } else { u32::MAX << (32u8.saturating_sub(n)) };
+    bits.to_be_bytes()
 }
 
 /// Configure (or clear) a container's healthcheck (Docker `HEALTHCHECK`).
@@ -4600,6 +4896,60 @@ pub fn self_test() {
         delete(ct_plain).expect("delete plain ct");
     }
     serial_println!("[container]   Veth auto-setup: OK");
+
+    // Test 15b: multi-network membership (§60) — a container can be attached to
+    // N user-defined networks, each with its own veth interface + address.
+    {
+        let mut mn_cfg = ContainerConfig::new("test-multinet");
+        mn_cfg.net_ip = Some([10, 90, 0, 2]);
+        mn_cfg.net_mask = Some([255, 255, 255, 0]);
+        mn_cfg.net_gateway = Some([10, 90, 0, 1]);
+        let ct = create(&mn_cfg).expect("create multinet ct");
+
+        // Record the create-time primary membership (the kshell run flow does
+        // this after attaching the primary veth to the bridge).
+        record_primary_membership(ct, "primary-net", [10, 90, 0, 2], [10, 90, 0, 0], 24)
+            .expect("record primary membership");
+        assert!(is_member_of(ct, "primary-net"));
+        assert_eq!(info(ct).expect("info").memberships.len(), 1, "one membership after primary");
+        // The primary membership reuses the container's primary veth.
+        assert_eq!(network_membership(ct, "primary-net").map(|(_, p)| p), Some(true));
+
+        // Attach a second network at runtime — a fresh, distinct interface.
+        let vp2 = attach_network(
+            ct, "second-net", [10, 91, 0, 5], [10, 91, 0, 0], 24, [10, 91, 0, 1],
+        )
+        .expect("attach second net");
+        assert!(is_member_of(ct, "second-net"));
+        assert_eq!(info(ct).expect("info").memberships.len(), 2, "two memberships");
+        assert_ne!(
+            Some(vp2), info(ct).expect("info").veth_pair,
+            "runtime interface distinct from primary veth"
+        );
+        assert_eq!(network_membership(ct, "second-net").map(|(_, p)| p), Some(false));
+
+        // A duplicate attach to the same network is rejected.
+        assert!(matches!(
+            attach_network(ct, "second-net", [10, 91, 0, 6], [10, 91, 0, 0], 24, [10, 91, 0, 1]),
+            Err(KernelError::AlreadyExists)
+        ));
+
+        // The primary network cannot be detached (owned by the lifecycle).
+        assert!(matches!(detach_network(ct, "primary-net"), Err(KernelError::InvalidArgument)));
+
+        // Detach the runtime network — membership + interface torn down.
+        let freed_ip = detach_network(ct, "second-net").expect("detach second net");
+        assert_eq!(freed_ip, [10, 91, 0, 5]);
+        assert!(!is_member_of(ct, "second-net"));
+        assert_eq!(info(ct).expect("info").memberships.len(), 1, "back to one membership");
+
+        // Detaching a network the container is not on is NotFound.
+        assert!(matches!(detach_network(ct, "no-such-net"), Err(KernelError::NotFound)));
+
+        // Delete destroys the primary + any remaining membership veths.
+        delete(ct).expect("cleanup multinet ct");
+    }
+    serial_println!("[container]   Multi-network membership (attach/detach): OK");
 
     // Test 16: add_process sets task's net_ns, remove_process resets it.
     {

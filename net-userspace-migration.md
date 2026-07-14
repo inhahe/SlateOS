@@ -804,3 +804,35 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   bytes … — send parity ok"`). Switch-off boot unchanged (new code is
   switch-gated). Remaining before the 5.7 flip: listen/accept server sockets, and
   IPv6 connect (daemon is IPv4-only — needs IPv6 + neighbour discovery).
+
+- **[2026-07-14] Listen/accept server sockets over the daemon (post-5.6, toward
+  5.7).** Fifth D-NETSOCK-SYNC parity gap closed: the daemon now supports the
+  *passive* (server) side of TCP — a `bind`+`listen` registers a listener and
+  `accept` dequeues an established connection — proving both ends of a connection
+  can live in one daemon session. Added ring ABI opcodes
+  `netipc::ring::OP_LISTEN` (0x07; `aux` low 16 bits = local port) and `OP_ACCEPT`
+  (0x08; `aux` low 32 bits = caller-chosen new conn id; writes the 6-byte peer
+  address `[ip:4][port_be:2]` to the data window; returns `ERR_WOULD_BLOCK` on an
+  empty backlog). Daemon side: `TcpConn` gained a `passive` flag and a passive-open
+  path — `accept_syn()` builds a SYN_RCVD conn and emits the SYN-ACK; `ingest_seg`
+  splits into passive (dup-SYN resends SYN-ACK; completes on the peer's bare ACK
+  where `rx.ack == isn+1`) vs. active branches, reusing the one TCP core. New
+  `Listener`/`Listeners` tables key backlogs by 4-tuple; `ring_pump` routes a
+  segment to a connection by tuple else to a listener (`route_seg` ingests a
+  backlog match or accepts a fresh SYN). Because slirp drops host-to-self packets,
+  the daemon also grew an **in-process software loopback**: `raw_tx` diverts any
+  IPv4 frame addressed to its own `me.ip` into an internal RX FIFO that `raw_rx`
+  drains ahead of the NIC, so a connection to `me.ip:port` reaches a listener in
+  the *same* session (both ends coexist, demuxed by 4-tuple). Kernel side:
+  `NetstackConn` gained `listen(listener_id, port)` and
+  `accept(listener_id, new_conn_id, &mut [u8;6])`, plus conn-parameterized
+  `send_on`/`recv_on` cores (the public `send`/`recv` are the `CONN_ID`
+  specializations) so one ring can drive both a client and a server-accepted conn.
+  Boot-validated switch-on: `netstack_client::self_test_listen_accept` registers a
+  loopback listener, issues a **non-blocking** connect to `me.ip` (one `OP_CONNECT`
+  pump drives the whole 3-way handshake for both ends), accepts the queued
+  connection, and echoes data both directions (`serial: "accepted loopback
+  connection from 10.0.2.15:53309"` + `"listen/accept + bidirectional data over
+  loopback ok — server-socket parity ok"`). Switch-off boot unchanged (new code is
+  switch-gated). Remaining before the 5.7 flip: IPv6 connect (daemon is IPv4-only —
+  needs IPv6 parsing/building + NDP neighbour discovery).

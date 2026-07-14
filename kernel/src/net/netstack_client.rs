@@ -258,6 +258,21 @@ impl NetstackConn {
     ///   before any bytes were accepted.
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn send(&mut self, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
+        let cid = self.conn_id;
+        self.send_on(cid, buf, nonblock)
+    }
+
+    /// Send `buf` on an explicit connection id (see [`send`](Self::send)).
+    ///
+    /// Used to drive a *server-side* accepted connection whose id differs from the
+    /// client's fixed [`CONN_ID`] within the same ring session (the listen/accept
+    /// loopback self-test). The public [`send`](Self::send) is the `self.conn_id`
+    /// specialization.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`send`](Self::send).
+    fn send_on(&mut self, conn_id: u32, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let send_aux = if nonblock { netipc::ring::SEND_NONBLOCK } else { 0 };
         let mut total: i32 = 0;
@@ -272,7 +287,7 @@ impl NetstackConn {
             let ud = self.next_ud();
             let sqe = netipc::ring::Sqe {
                 op: netipc::ring::OP_SEND,
-                conn_id: self.conn_id,
+                conn_id,
                 data_off: SND_OFF,
                 data_len: chunk_len,
                 user_data: ud,
@@ -327,6 +342,21 @@ impl NetstackConn {
     /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
     ///   read back the ring data window.
     pub fn recv(&mut self, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
+        let cid = self.conn_id;
+        self.recv_on(cid, buf, nonblock)
+    }
+
+    /// Receive on an explicit connection id (see [`recv`](Self::recv)).
+    ///
+    /// The server-side counterpart to [`send_on`](Self::send_on): reads from an
+    /// accepted connection whose id differs from the client's fixed [`CONN_ID`]
+    /// within one ring session. The public [`recv`](Self::recv) is the
+    /// `self.conn_id` specialization.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`recv`](Self::recv).
+    fn recv_on(&mut self, conn_id: u32, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
@@ -334,7 +364,7 @@ impl NetstackConn {
         let aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_RECV,
-            conn_id: self.conn_id,
+            conn_id,
             data_off: RCV_OFF,
             data_len: want_u32,
             user_data: ud,
@@ -398,6 +428,75 @@ impl NetstackConn {
         let writable = res & netipc::ring::POLL_WRITABLE != 0;
         let error = res & netipc::ring::POLL_ERR != 0;
         Ok((readable, writable, error))
+    }
+
+    /// Register a passive TCP listener on `port` under `listener_id`
+    /// (daemon [`OP_LISTEN`](netipc::ring::OP_LISTEN)).
+    ///
+    /// `listener_id` is a session-local id distinct from any connection id; the
+    /// daemon keys the listener table by it. The low 16 bits of the SQE `aux`
+    /// carry the local port (host byte order). Returns `0` on success or `-1` if
+    /// the listener table is full / the id is already in use.
+    ///
+    /// This is the server-side entry point for the userspace-netstack cutover:
+    /// a `bind`+`listen` on an AF_INET socket maps to one `OP_LISTEN`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn listen(&mut self, listener_id: u32, port: u16) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_LISTEN,
+            conn_id: listener_id,
+            user_data: ud,
+            aux: u64::from(port),
+            ..netipc::ring::Sqe::default()
+        };
+        self.submit_and_reap(&ring, &sqe)
+    }
+
+    /// Dequeue one established connection from `listener_id`'s backlog into
+    /// `new_conn_id` (daemon [`OP_ACCEPT`](netipc::ring::OP_ACCEPT)).
+    ///
+    /// The low 32 bits of the SQE `aux` carry `new_conn_id` — the id under which
+    /// the daemon installs the accepted connection so later `send`/`recv` can
+    /// address it. On success (`0`) the 6-byte peer address `[ip:4][port_be:2]`
+    /// is written into `peer`. Returns:
+    /// - `0` — an established connection was accepted (`peer` filled).
+    /// - [`netipc::ring::ERR_WOULD_BLOCK`] — the backlog is empty (no completed
+    ///   handshake waiting); a non-blocking `accept(2)` maps this to `EAGAIN`.
+    /// - `-1` — unknown listener id, or the accepted-conn id could not be
+    ///   installed (id already in use / table full).
+    ///
+    /// # Errors
+    ///
+    /// Returns a control-protocol fault (see [`connect`](Self::connect)), or a
+    /// failure to read back the peer-address window.
+    pub fn accept(
+        &mut self,
+        listener_id: u32,
+        new_conn_id: u32,
+        peer: &mut [u8; 6],
+    ) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        // Reuse the recv-landing window for the 6-byte peer address: accept is
+        // issued before any data recv on this ring, so there is no clash.
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_ACCEPT,
+            conn_id: listener_id,
+            data_off: RCV_OFF,
+            data_len: 6,
+            user_data: ud,
+            aux: u64::from(new_conn_id),
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == 0 && !ring.read_data(RCV_OFF as usize, peer) {
+            return Err(KernelError::InternalError);
+        }
+        Ok(res)
     }
 
     /// Close the connection and end the daemon session.
@@ -864,4 +963,234 @@ pub fn self_test_nonblock_send(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
         // Peer gone between connect and send (slirp variance); path still ran.
         Ok(None)
     }
+}
+
+/// Boot self-test: prove the **server-socket** path (`listen`/`accept`) over the
+/// daemon, closing the last `D-NETSOCK-SYNC` parity gap before the `net.userspace`
+/// default can be flipped (increment 5.7).
+///
+/// Unlike the client self-tests above, this needs *both* ends of a TCP connection
+/// — a listener and a connecting peer — but there is no external server to talk
+/// to under slirp (which drops host-to-self packets). It therefore drives the
+/// daemon's **in-process software loopback**: a connection opened to the daemon's
+/// own `me.ip` is diverted into an internal RX FIFO and delivered to a listener in
+/// the *same* daemon session. Because a blocking connect cannot pump the listener
+/// (its tight RX loop only reads its own 4-tuple), the connect here is
+/// **non-blocking** — a single `OP_CONNECT` pump drives the entire 3-way handshake
+/// for *both* ends, leaving the client established and the passive server
+/// connection established and queued in the listener's backlog. `OP_ACCEPT` then
+/// dequeues it, and a bidirectional data exchange proves the accepted connection
+/// is a real, addressable socket within the one ring session.
+///
+/// The whole exchange happens over one [`NetstackConn`] ring: the listener id and
+/// the accepted-connection id are session-local ids distinct from the client's
+/// fixed [`CONN_ID`], all demuxed by the daemon by 4-tuple.
+///
+/// Returns `Ok(Some(()))` if the listen→connect→accept→data round-trip completed,
+/// `Ok(None)` if the interface has no IPv4 address yet (no DHCP lease — loopback
+/// needs a non-zero `me.ip`, nothing to assert), and `Err` on a real
+/// control-protocol fault or a parity break (listen/accept/connect failing over
+/// loopback, or the echoed data mismatching).
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; reports a failed
+/// listen/connect/accept over loopback, or a data mismatch, as an error.
+pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
+    /// Session-local listener id (distinct from any connection id).
+    const LISTENER_ID: u32 = 100;
+    /// Id under which the accepted server-side connection is installed.
+    const ACCEPTED_ID: u32 = 101;
+    /// Loopback listen port (arbitrary, unused elsewhere).
+    const PORT: u16 = 9099;
+    const CLIENT_MSG: &[u8] = b"slate-listen-accept:ping";
+    const SERVER_MSG: &[u8] = b"slate-listen-accept:pong";
+
+    let me_ip = crate::net::interface::ip().0;
+    if me_ip == [0, 0, 0, 0] {
+        // No lease yet — the loopback divert keys on a non-zero me.ip.
+        return Ok(None);
+    }
+
+    let mut conn = NetstackConn::open()?;
+
+    // 1. Register the passive listener BEFORE connecting, so the SYN routed over
+    //    the loopback FIFO finds a listening port.
+    let listen_res = conn.listen(LISTENER_ID, PORT)?;
+    if listen_res != 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   listen(port={}) failed on a fresh session (result {}) — server-socket parity broken",
+            PORT,
+            listen_res
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Non-blocking connect to our own IP: one OP_CONNECT pump drives the full
+    //    handshake for both ends over the software loopback.
+    let connect_res = conn.connect(&me_ip, PORT, true)?;
+    if connect_res != 0 && connect_res != netipc::ring::ERR_IN_PROGRESS {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   loopback connect failed (result {}) — server-socket parity broken",
+            connect_res
+        );
+        return Err(KernelError::InternalError);
+    }
+    // If the handshake did not complete inside the connect's single pump, drive it
+    // to writable (each poll pumps once). Loopback normally completes immediately.
+    if connect_res == netipc::ring::ERR_IN_PROGRESS {
+        let mut writable = false;
+        for _ in 0..16u32 {
+            let (_r, w, err) = conn.poll_ready()?;
+            if err {
+                conn.close()?;
+                crate::serial_println!(
+                    "[netstack-client]   loopback connect reported POLL_ERR — server-socket parity broken"
+                );
+                return Err(KernelError::InternalError);
+            }
+            if w {
+                writable = true;
+                break;
+            }
+        }
+        if !writable {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   loopback connect never resolved to writable — server-socket parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 3. Accept the passive connection queued in the backlog. Each accept pumps
+    //    once, so retry a few times in case the final ACK needs another pump.
+    let mut peer = [0u8; 6];
+    let mut accepted = false;
+    for _ in 0..16u32 {
+        let ares = conn.accept(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
+        if ares == 0 {
+            accepted = true;
+            break;
+        }
+        if ares != netipc::ring::ERR_WOULD_BLOCK {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   accept failed (result {}) — server-socket parity broken",
+                ares
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if !accepted {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   accept never dequeued the loopback connection — server-socket parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The accepted peer's source IP must be our own (the loopback client's src).
+    let peer_ip = peer.get(..4).unwrap_or(&[]);
+    if peer_ip != me_ip {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   accepted peer ip {}.{}.{}.{} != local ip — demux broken",
+            peer.first().copied().unwrap_or(0),
+            peer.get(1).copied().unwrap_or(0),
+            peer.get(2).copied().unwrap_or(0),
+            peer.get(3).copied().unwrap_or(0),
+        );
+        return Err(KernelError::InternalError);
+    }
+    let peer_port = u16::from_be_bytes([
+        peer.get(4).copied().unwrap_or(0),
+        peer.get(5).copied().unwrap_or(0),
+    ]);
+    crate::serial_println!(
+        "[netstack-client]   accepted loopback connection from {}.{}.{}.{}:{}",
+        me_ip[0],
+        me_ip[1],
+        me_ip[2],
+        me_ip[3],
+        peer_port
+    );
+
+    // 4. Client → server: send on CONN_ID, receive on the accepted id.
+    let sent = conn.send(CLIENT_MSG, false)?;
+    if sent <= 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   loopback client send returned {} — server-socket parity broken",
+            sent
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !recv_exact(&mut conn, ACCEPTED_ID, CLIENT_MSG)? {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   server did not receive the client's message intact — parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 5. Server → client: send on the accepted id, receive on CONN_ID.
+    let sent2 = conn.send_on(ACCEPTED_ID, SERVER_MSG, false)?;
+    if sent2 <= 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   loopback server send returned {} — server-socket parity broken",
+            sent2
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !recv_exact(&mut conn, CONN_ID, SERVER_MSG)? {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   client did not receive the server's message intact — parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    conn.close()?;
+    crate::serial_println!(
+        "[netstack-client]   listen/accept + bidirectional data over loopback ok — server-socket parity ok"
+    );
+    Ok(Some(()))
+}
+
+/// Blocking-receive helper for the listen/accept self-test: read from `conn_id`
+/// (looping over ≤`RCV_CAP` chunks) until `expect.len()` bytes have arrived, then
+/// verify they match `expect` byte-for-byte. Returns `Ok(true)` on an exact match,
+/// `Ok(false)` on a mismatch, short read, or premature EOF.
+fn recv_exact(conn: &mut NetstackConn, conn_id: u32, expect: &[u8]) -> KernelResult<bool> {
+    let mut got = [0u8; 128];
+    let cap = got.len().min(expect.len());
+    let mut filled = 0usize;
+    for _ in 0..32u32 {
+        if filled >= cap {
+            break;
+        }
+        let slot = match got.get_mut(filled..cap) {
+            Some(s) => s,
+            None => break,
+        };
+        let n = conn.recv_on(conn_id, slot, false)?;
+        if n < 0 {
+            return Ok(false);
+        }
+        if n == 0 {
+            // No data this round and stream still open, or EOF; try a couple more
+            // pumps then give up.
+            continue;
+        }
+        let added = usize::try_from(n).unwrap_or(0).min(cap.saturating_sub(filled));
+        filled = filled.saturating_add(added);
+    }
+    if filled != expect.len() {
+        return Ok(false);
+    }
+    Ok(got.get(..filled) == Some(expect))
 }

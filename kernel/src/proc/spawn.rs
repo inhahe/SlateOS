@@ -3317,9 +3317,30 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // Server-socket parity (D-NETSOCK-SYNC): listen()/accept() over the daemon.
+    // There is no external server to accept from under slirp, so this drives the
+    // daemon's in-process software loopback — a connection to our own me.ip is
+    // diverted to a listener in the same session. A single non-blocking connect
+    // completes the handshake for both ends; accept then dequeues the passive
+    // connection and a bidirectional data exchange proves it is a real socket.
+    match crate::net::netstack_client::self_test_listen_accept() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack listen/accept: server socket accepted a loopback \
+             connection and echoed data both ways — server-socket parity proven over the daemon"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack listen/accept: no IPv4 lease — check skipped"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack listen/accept error ({:?})",
+            e
+        ),
+    }
+
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send parity checks done; daemon now owns the NIC for the system's lifetime"
+         nonblock-send/listen-accept parity checks done; daemon now owns the NIC for the \
+         system's lifetime"
     );
     Ok(())
 }

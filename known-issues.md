@@ -96,8 +96,14 @@ Phase 5 progresses:
   socket server (below) will replace it with an edge-triggered readiness signal.
   Proper fix for the remaining gap: async ring completions + a real readiness
   signal (eventfd/completion port) when the always-on socket server lands.
-- **One connection per socket.** A socket wraps exactly one daemon TCP session;
-  there is no `listen`/`accept` (server sockets) — only client `connect`.
+- **Server sockets: daemon+ring done, socket-fd wiring pending.** The daemon and
+  the ring client now support the passive side — `NetstackConn::listen`/`accept`
+  drive ring `OP_LISTEN`/`OP_ACCEPT`, and both ends of a connection can live in one
+  daemon session (validated by the loopback `self_test_listen_accept`). What is
+  *not* yet wired is the AF_INET socket-fd layer: `sys_bind`/`sys_listen`/
+  `sys_accept4` do not route to the daemon and `net::socket` has no
+  `SockState::Listening`, so a userspace `listen(2)`/`accept(2)` on a daemon-backed
+  socket still isn't served. That syscall wiring is the remaining follow-on.
 - **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
   source-address out-params (arg4/arg5) are left untouched (fine for a connected
   stream socket, but not for datagram semantics).
@@ -112,11 +118,15 @@ client to async multi-stream, at which point nonblock/poll/listen/IPv6 become
 implementable. **Progress:** the persistent daemon landed (5.6); the `O_NONBLOCK`
 *receive* path is honoured; honest `poll`/`epoll` read readiness landed via the
 non-destructive `OP_POLL` peek; **non-blocking `connect` (EINPROGRESS →
-`poll(POLLOUT)` → `getsockopt(SO_ERROR)`) now works**; and **non-blocking `send`
-(EAGAIN on a full send window, honest `POLLOUT`) now works** (see the updated
-bullets above). Remaining before the 5.7 default-flip: listen/accept server
-sockets, and IPv6 connect (needs IPv6 + neighbour discovery in the daemon,
-currently IPv4-only).
+`poll(POLLOUT)` → `getsockopt(SO_ERROR)`) now works**; **non-blocking `send`
+(EAGAIN on a full send window, honest `POLLOUT`) now works**; and **listen/accept
+server sockets now work at the daemon+ring layer** (ring `OP_LISTEN`/`OP_ACCEPT`,
+passive-open TCP, in-daemon software loopback; validated by
+`self_test_listen_accept`) (see the updated bullets above). Remaining before the
+5.7 default-flip: (a) route the AF_INET socket-fd layer's `bind`/`listen`/`accept`
+to the daemon (`SockState::Listening` + `sys_bind`/`sys_listen`/`sys_accept4`), and
+(b) IPv6 connect (needs IPv6 + neighbour discovery in the daemon, currently
+IPv4-only).
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 

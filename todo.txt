@@ -8023,6 +8023,25 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
+- (2026-07-14) netstack migration 5.5 — DEFERRED the ring-3 socket-syscall HTTP
+  fetch capstone to increment 5.6. The 5.5 plan called for "a real ring-3 Linux
+  process doing socket()/connect()/write()/read() to fetch HTTP." The daemon
+  test harness (spawn.rs `netstack_selftests`) only spawns the daemon in a
+  *bounded window* driven from kernel context, and the socket syscalls are gated
+  behind `net.userspace` (default off) — a ring-3 process would need the switch
+  on AND the daemon alive for the whole of its own run, which is exactly what
+  5.6 (persistent daemon spawn at boot + NIC handoff) provides. Interim coverage
+  proves the path without a bespoke test ELF: (a) `netstack_client::self_test_http`
+  drives the identical `NetstackConn` client the sockets wrap through
+  connect→send→recv→close over the live daemon, and (b) `socket::self_test`
+  validates the object/refcount/close-error layer. The syscall arms are thin
+  delegations over those two. Proper follow-up: once 5.6 makes the daemon
+  persistent and the switch can be turned on for a boot, add a ring-3 ELF that
+  does the raw socket syscalls end-to-end. Where it bites: until then the
+  syscall *dispatch* wiring (user-pointer copies, fd install, errno mapping) is
+  only exercised by code review + the thin-delegation argument, not a live
+  ring-3 call.
+
 - (2026-06-20) Removed the redundant `userspace/mount-cli` tool. It was a
   multi-personality demo (mount/umount/findmnt) that printed *fabricated*
   mount listings (hardcoded /dev/sda2, /dev/sda3, etc.) and fake-succeeded on

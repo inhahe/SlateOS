@@ -263,6 +263,35 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool) -> KernelResul
     guard.conn.recv(buf, nonblock)
 }
 
+/// Non-destructively probe a stream socket's readiness for the poll/epoll engine.
+///
+/// Returns `(readable, writable)`:
+/// - A **connected** socket queries the daemon (via
+///   [`NetstackConn::poll_ready`]) for its honest state: `readable` iff it has
+///   buffered bytes or the peer has closed (so a `recv` returns data/EOF
+///   promptly), `writable` iff the connection can accept a send. This replaces
+///   the former "always ready" placeholder so `POLLIN` no longer spins a poller
+///   that then reads `EAGAIN`.
+/// - An **unconnected** but live socket (never connected, or a failed connect) is
+///   reported writable-only: a `connect` may still proceed, but there is nothing
+///   to read.
+///
+/// Does not consume buffered data — a subsequent [`recv`] still returns it.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - protocol faults propagated from [`NetstackConn::poll_ready`].
+pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool)> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    match guard.state {
+        SockState::Connected => guard.conn.poll_ready(),
+        // Not connected: a connect may still proceed (writable), nothing to read.
+        _ => Ok((false, true)),
+    }
+}
+
 /// Whether the socket is currently connected.
 ///
 /// # Errors

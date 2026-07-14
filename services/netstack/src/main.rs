@@ -1714,6 +1714,9 @@ impl RingSession {
 ///   ([`ring_pump`]) — so sibling connections' frames are routed to *them* rather
 ///   than dropped — then copy the response into the SQE's data window; completion
 ///   `result` = bytes received, or `-1`.
+/// - [`netipc::ring::OP_POLL`]: non-destructively report `sqe.conn_id`'s readiness
+///   via [`ring_tcp_poll`]; completion `result` is a [`POLL_READABLE`]/
+///   [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE) bitmask, or `-1` (no such conn).
 /// - [`netipc::ring::OP_CLOSE`]: look up and evict `sqe.conn_id`, graceful
 ///   teardown; completion `result = 0`, or `-1` if no such connection.
 /// - [`netipc::ring::OP_NOP`]: complete with `result = 0`.
@@ -1770,6 +1773,7 @@ fn ring_tcp_process(
                 None => -1,
             },
             netipc::ring::OP_RECV => ring_tcp_recv(ring, conns, sqe.conn_id, me, &sqe),
+            netipc::ring::OP_POLL => ring_tcp_poll(conns, sqe.conn_id, me),
             netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
                 Some(mut c) => {
                     c.close(me);
@@ -1919,6 +1923,39 @@ fn ring_tcp_recv(
         return -1;
     }
     n as i32
+}
+
+/// Execute an `OP_POLL` SQE for connection `target_id`: report its readiness
+/// **without consuming any buffered data**. The RX pump is drained exactly once
+/// (like the non-blocking `OP_RECV` probe) so arrived frames are routed to their
+/// owning connections and the target's buffered state reflects the wire, then the
+/// target is inspected in place — no bytes are copied into the data window and the
+/// receive buffer is left untouched, so a subsequent `OP_RECV` still returns them.
+///
+/// Returns a non-negative readiness bitmask
+/// ([`POLL_READABLE`](netipc::ring::POLL_READABLE) |
+/// [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE)), or `-1` if there is no such
+/// connection. A live connection is always writable (the single-outstanding-segment
+/// sender overwrites its send buffer on each `send`); it is readable when it has
+/// buffered in-order bytes or the peer has closed (so a `recv` returns data / EOF
+/// promptly).
+fn ring_tcp_poll(conns: &mut RingConns, target_id: u32, me: &IfInfo) -> i32 {
+    if conns.get_mut(target_id).is_none() {
+        return -1; // no such connection
+    }
+    // Non-destructive: route any arrived frames into their owners, then peek.
+    ring_pump(conns, me);
+    match conns.get_mut(target_id) {
+        Some(c) => {
+            // A live daemon connection can always accept a send (writable).
+            let mut bits = netipc::ring::POLL_WRITABLE;
+            if c.rx_len > 0 || c.peer_fin {
+                bits |= netipc::ring::POLL_READABLE;
+            }
+            bits
+        }
+        None => -1,
+    }
 }
 
 /// Read argv[1] into `out`, returning the slice actually populated. Native

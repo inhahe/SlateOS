@@ -717,3 +717,28 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   code is switch-gated). Still synchronous, remaining before the 5.7 flip:
   non-blocking connect/send, honest poll/epoll readiness (needs a non-destructive
   peek op), listen/accept, and IPv6 connect.
+
+- **[2026-07-14] Honest poll/epoll read readiness (post-5.6, toward 5.7).** Second
+  D-NETSOCK-SYNC parity gap closed: `poll`/`epoll` now report an *honest* `POLLIN`
+  for a daemon-backed stream socket instead of the old "connected ⇒ always
+  readable+writable" placeholder (which would spin a poller that woke on a false
+  `POLLIN` and then read `EAGAIN`). Added a non-destructive readiness opcode
+  `netipc::ring::OP_POLL` plus `POLL_READABLE`/`POLL_WRITABLE` bitmask constants.
+  The daemon's new `ring_tcp_poll` drains the shared RX pump exactly once (so
+  arrived frames are routed to their owning connections) and then *peeks* the
+  target connection **without consuming any bytes** — it reports readable when
+  `rx_len > 0 || peer_fin` and writable whenever the connection is live — so a
+  subsequent `OP_RECV` still returns the same buffered bytes. The kernel plumbs it
+  through `NetstackConn::poll_ready` → `net::socket::poll_ready` →
+  `poll_revents_from_entry`'s `HandleKind::Socket` arm (replacing the
+  `is_connected` placeholder). Boot-validated switch-on: the persistent-daemon
+  parity block runs `netstack_client::self_test_poll_ready`, which connects to
+  `example.com:80`, polls the idle socket (`serial: "poll on idle socket:
+  readable=false writable=true"`), sends a `HEAD` request, and polls until the
+  socket reports readable (`serial: "poll reported POLLIN once the HTTP response
+  arrived (honest readiness)"`). Switch-off boot unchanged (daemon not spawned;
+  new code is switch-gated). Caveat: each poll of a socket fd is one daemon
+  control round-trip (the poll engine re-probes per ~10 ms wait slice) — fine for
+  parity, to be replaced by an edge-triggered readiness signal when the
+  async-completion socket server lands. Remaining before the 5.7 flip: non-blocking
+  connect/send, listen/accept, and IPv6 connect.

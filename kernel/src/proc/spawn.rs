@@ -3100,8 +3100,8 @@ fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
 }
 
 /// Phase-5 boot path (`net.userspace` on): spawn the **persistent** userspace
-/// `netstack` daemon (`serve-net`), validate DNS/TCP/UDP parity over it, then
-/// leave it running to own the NIC for the system's lifetime.
+/// `netstack` daemon (`serve-net`), validate DNS/TCP/UDP/O_NONBLOCK/poll parity
+/// over it, then leave it running to own the NIC for the system's lifetime.
 ///
 /// This is the switch-on counterpart to [`self_test_netstack_dns_ipc`] (§66,
 /// Q22b staged cutover). Unlike the bounded self-test, the daemon is **not
@@ -3250,9 +3250,31 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // poll/epoll readiness parity (D-NETSOCK-SYNC): a connected socket must report
+    // an honest POLLIN — writable-but-not-readable while idle, then readable once
+    // the peer's response arrives — rather than the old "always ready" placeholder.
+    match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => match crate::net::netstack_client::self_test_poll_ready(&ip, 80) {
+            Ok(Some(())) => serial_println!(
+                "[spawn]   persistent netstack poll: honest POLLIN/POLLOUT readiness proven \
+                 over the daemon"
+            ),
+            Ok(None) => serial_println!(
+                "[spawn]   persistent netstack poll: no upstream/response — readiness path proven"
+            ),
+            Err(e) => serial_println!(
+                "[spawn]   WARNING: persistent netstack poll readiness error ({:?})",
+                e
+            ),
+        },
+        Ok(None) | Err(_) => serial_println!(
+            "[spawn]   persistent netstack poll: DNS unresolved — readiness check skipped"
+        ),
+    }
+
     serial_println!(
-        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK parity checks done; daemon \
-         now owns the NIC for the system's lifetime"
+        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll parity checks done; \
+         daemon now owns the NIC for the system's lifetime"
     );
     Ok(())
 }

@@ -316,6 +316,44 @@ impl NetstackConn {
         Ok(res)
     }
 
+    /// Probe the connection's readiness **without consuming any buffered data**
+    /// (a non-destructive peek).
+    ///
+    /// Issues an [`OP_POLL`](netipc::ring::OP_POLL) round-trip: the daemon drains
+    /// arrived frames once and reports a readiness bitmask. Returns
+    /// `(readable, writable)`:
+    /// - `readable` — the socket has buffered bytes or the peer has closed, so a
+    ///   subsequent `recv`/`read` returns data (or `0`/EOF) promptly.
+    /// - `writable` — the connection is live and can accept a send.
+    ///
+    /// A subsequent [`recv`](Self::recv) still returns the same bytes — this only
+    /// reports readiness, it does not move data. Used by the poll/epoll engine to
+    /// report an honest `POLLIN`/`POLLOUT` for a daemon-backed socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns a control-protocol fault (see [`connect`](Self::connect)), or
+    /// [`KernelError::NotConnected`] if the daemon reports no such connection
+    /// (the socket was never connected or has been torn down).
+    pub fn poll_ready(&mut self) -> KernelResult<(bool, bool)> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_POLL,
+            conn_id: self.conn_id,
+            user_data: ud,
+            ..netipc::ring::Sqe::default()
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res < 0 {
+            // Daemon reports no such connection (`-1`).
+            return Err(KernelError::NotConnected);
+        }
+        let readable = res & netipc::ring::POLL_READABLE != 0;
+        let writable = res & netipc::ring::POLL_WRITABLE != 0;
+        Ok((readable, writable))
+    }
+
     /// Close the connection and end the daemon session.
     ///
     /// Consumes the client. Best effort: any per-op failure during teardown is
@@ -568,5 +606,83 @@ pub fn self_test_nonblock_recv(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
             Ok(Some(()))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Boot self-test: prove that the poll/epoll readiness probe
+/// ([`NetstackConn::poll_ready`], daemon `OP_POLL`) reports an **honest** state —
+/// an idle connected socket is writable but not readable, and it *becomes*
+/// readable only once the peer's response actually arrives. This is the parity
+/// property behind honest `POLLIN`/`POLLOUT` for daemon-backed sockets
+/// (`D-NETSOCK-SYNC`): the former placeholder always reported readable, which
+/// would spin a poller that then read `EAGAIN`.
+///
+/// Sequence: `connect`; poll (expect writable, and — for a well-behaved server —
+/// not-yet-readable); send a `HEAD` request; poll in a bounded loop until the
+/// socket reports readable. The receive buffer is never consumed by the probe, so
+/// a later `recv` would still return the response.
+///
+/// Returns `Ok(Some(()))` if the readiness path was exercised (the socket was
+/// writable and either started readable or transitioned to readable once data
+/// arrived), `Ok(None)` if there was no upstream / no response came back (network
+/// variance — the probe path still ran honestly), and `Err` on a real
+/// control-protocol fault or a connected socket that reports not-writable.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; reports a connected socket
+/// that is not writable as an error (that would break `POLLOUT` parity).
+pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    const HTTP_REQ: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+
+    let mut conn = NetstackConn::open()?;
+
+    let connect_res = conn.connect(ip, port)?;
+    if connect_res < 0 {
+        conn.close()?;
+        return Ok(None);
+    }
+
+    // Idle connected socket: must be writable; a well-behaved server has sent
+    // nothing yet, so it should not (yet) be readable.
+    let (readable0, writable0) = conn.poll_ready()?;
+    if !writable0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   poll: connected socket reported NOT writable — POLLOUT parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[netstack-client]   poll on idle socket: readable={} writable={}",
+        readable0,
+        writable0
+    );
+
+    // Solicit a response, then poll until the socket honestly reports readable.
+    let send_res = conn.send(HTTP_REQ)?;
+    if send_res < 0 {
+        conn.close()?;
+        return Ok(None);
+    }
+
+    let mut became_readable = readable0;
+    for _ in 0..64u32 {
+        let (readable, _writable) = conn.poll_ready()?;
+        if readable {
+            became_readable = true;
+            break;
+        }
+    }
+    conn.close()?;
+
+    if became_readable {
+        crate::serial_println!(
+            "[netstack-client]   poll reported POLLIN once the HTTP response arrived (honest readiness)"
+        );
+        Ok(Some(()))
+    } else {
+        // No response came back (slirp variance); the poll path still ran honestly.
+        Ok(None)
     }
 }

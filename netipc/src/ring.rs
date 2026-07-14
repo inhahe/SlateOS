@@ -112,6 +112,17 @@ pub const OP_CLOSE: u8 = 0x04;
 /// submissions so `OP_CONNECT` in one round and `OP_SEND`/`OP_RECV` in a later
 /// round drive the *same* connection). Completes with `result = 0`.
 pub const OP_STOP: u8 = 0x05;
+/// Report the readiness of connection `conn_id` **without consuming any data**
+/// (a non-destructive peek). The daemon drains any already-arrived frames into
+/// the connection's receive buffer exactly once (like the non-blocking `OP_RECV`
+/// probe) and then completes with a non-negative readiness bitmask built from
+/// [`POLL_READABLE`] / [`POLL_WRITABLE`], or a negative errno (`-1` = unknown
+/// connection). No bytes are moved into the data area and the receive buffer is
+/// left intact, so a subsequent `OP_RECV` still returns the same bytes. This is
+/// what lets the kernel report an *honest* `POLLIN`/`POLLOUT` for a daemon-backed
+/// socket instead of the old "always ready" placeholder — migration Phase 5,
+/// closing part of the `D-NETSOCK-SYNC` parity gap.
+pub const OP_POLL: u8 = 0x06;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -138,6 +149,16 @@ pub const RECV_NONBLOCK: u64 = 1 << 0;
 /// reports as the `EAGAIN` errno. Distinct from `0` (peer EOF) and from the
 /// generic `-1` transport error so the three cases never alias.
 pub const ERR_WOULD_BLOCK: i32 = -11;
+
+/// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
+/// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
+/// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
+pub const POLL_READABLE: i32 = 1 << 0;
+
+/// [`OP_POLL`] readiness bit: the connection is **writable** — it is connected
+/// and has room to accept at least some bytes for sending. Mirrors the sense of
+/// Linux `POLLOUT`.
+pub const POLL_WRITABLE: i32 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 // Entry structs
@@ -362,6 +383,31 @@ mod tests {
         // The would-block sentinel must not collide with EOF or the generic error.
         assert_ne!(ERR_WOULD_BLOCK, 0);
         assert_ne!(ERR_WOULD_BLOCK, -1);
+    }
+
+    #[test]
+    fn poll_opcode_and_readiness_bits_are_distinct() {
+        // OP_POLL must not collide with any other opcode.
+        for other in [OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP] {
+            assert_ne!(OP_POLL, other, "OP_POLL aliases another opcode");
+        }
+        // An OP_POLL SQE round-trips through serialization unchanged.
+        let sqe = Sqe {
+            op: OP_POLL,
+            conn_id: 1,
+            user_data: 0x4e53_434c_0000_0009,
+            ..Sqe::default()
+        };
+        assert_eq!(Sqe::from_bytes(&sqe.to_bytes()).unwrap(), sqe);
+        // Readiness bits are single, distinct, non-overlapping, and positive so a
+        // combined mask never looks like a negative errno.
+        assert_ne!(POLL_READABLE, POLL_WRITABLE);
+        assert_eq!(POLL_READABLE & POLL_WRITABLE, 0);
+        assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0);
+        assert!(POLL_READABLE | POLL_WRITABLE > 0);
+        // A daemon readiness bitmask is non-negative, unlike the -1 error / EAGAIN.
+        assert_ne!(POLL_READABLE | POLL_WRITABLE, ERR_WOULD_BLOCK);
+        assert_ne!(POLL_READABLE | POLL_WRITABLE, -1);
     }
 
     #[test]

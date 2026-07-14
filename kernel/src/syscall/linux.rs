@@ -29015,24 +29015,29 @@ fn poll_revents_from_entry(
             }
         }
         HandleKind::Socket => {
-            // The daemon-backed stream socket is driven by a *synchronous*
-            // ring client (see known-issues.md: nonblock/readiness not yet
-            // wired), so we cannot cheaply probe for queued RX bytes without
-            // a blocking round-trip.  Best-effort readiness: a connected
-            // socket is reported both readable and writable (the subsequent
-            // read/write does the real, possibly-blocking work); an
-            // unconnected socket is writable only (connect may proceed).
-            match crate::net::socket::is_connected(
+            // Honest readiness for the daemon-backed stream socket: a single
+            // non-destructive `OP_POLL` round-trip asks the daemon whether the
+            // connection has buffered RX bytes / hit EOF (POLLIN) and whether it
+            // can accept a send (POLLOUT), without consuming any data.  This
+            // replaces the former "connected ⇒ always readable+writable"
+            // placeholder, so a poller that sleeps on an idle socket no longer
+            // wakes on a false POLLIN only to read EAGAIN.  (The probe is bounded
+            // — the daemon drains the NIC once and answers — so it is safe to run
+            // per poll slice.)
+            match crate::net::socket::poll_ready(
                 crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
             ) {
-                Ok(true) => {
-                    poll_bits::POLLIN
-                        | poll_bits::POLLRDNORM
-                        | poll_bits::POLLOUT
-                        | poll_bits::POLLWRNORM
+                Ok((readable, writable)) => {
+                    let mut r = 0u16;
+                    if readable {
+                        r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+                    }
+                    if writable {
+                        r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+                    }
+                    r
                 }
-                Ok(false) => poll_bits::POLLOUT | poll_bits::POLLWRNORM,
-                // Stale handle — surface an error condition to the poller.
+                // Stale handle / protocol fault — surface an error to the poller.
                 Err(_) => poll_bits::POLLNVAL,
             }
         }

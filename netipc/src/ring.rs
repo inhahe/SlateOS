@@ -129,6 +129,27 @@ pub const OP_STOP: u8 = 0x05;
 /// socket instead of the old "always ready" placeholder — migration Phase 5,
 /// closing part of the `D-NETSOCK-SYNC` parity gap.
 pub const OP_POLL: u8 = 0x06;
+/// Begin **passively listening** for inbound TCP connections. `conn_id` is the
+/// caller-chosen id for the *listener* object (distinct from the ids of the
+/// connections it later yields via [`OP_ACCEPT`]); the low 16 bits of `aux` carry
+/// the local port to bind (host byte order). The daemon registers a listener on
+/// that port so that inbound SYNs are demultiplexed to it (a passive open:
+/// `LISTEN` → `SYN_RCVD` → `ESTABLISHED`), queuing each completed connection on
+/// the listener's accept queue. Completion `result` is `0` on success, or a
+/// negative errno (`-1` = no slot / port already bound). Server-socket support —
+/// migration Phase 5, closing the listen/accept part of the `D-NETSOCK-SYNC`
+/// parity gap.
+pub const OP_LISTEN: u8 = 0x07;
+/// **Accept** the next queued inbound connection from the listener named by
+/// `conn_id`. The low 32 bits of `aux` carry the caller-chosen id to assign to the
+/// newly-accepted connection (it becomes an ordinary connection id usable with
+/// [`OP_SEND`]/[`OP_RECV`]/[`OP_POLL`]/[`OP_CLOSE`]). On success the peer address is
+/// written to the data window at `data_off` as `[ip:4][port_be:2]` (6 bytes; the
+/// window must be at least that large) and completion `result` is `0`. If the
+/// accept queue is empty the daemon completes with [`ERR_WOULD_BLOCK`] (the
+/// listener socket is treated as non-blocking at the ring layer; the kernel blocks
+/// by re-submitting / polling). `-1` = unknown listener or data window too small.
+pub const OP_ACCEPT: u8 = 0x08;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -513,6 +534,49 @@ mod tests {
         // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
         assert!(POLL_ERR > 0);
         assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
+    }
+
+    #[test]
+    fn listen_accept_opcodes_round_trip_and_are_distinct() {
+        // OP_LISTEN / OP_ACCEPT must not collide with any prior opcode or each other.
+        let existing = [OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL];
+        for other in existing {
+            assert_ne!(OP_LISTEN, other, "OP_LISTEN aliases another opcode");
+            assert_ne!(OP_ACCEPT, other, "OP_ACCEPT aliases another opcode");
+        }
+        assert_ne!(OP_LISTEN, OP_ACCEPT);
+
+        // An OP_LISTEN SQE carries the local port in the low 16 bits of `aux`.
+        let port = 8080u16;
+        let listen = Sqe {
+            op: OP_LISTEN,
+            conn_id: 100,
+            user_data: 0x4e53_434c_0000_000b,
+            aux: u64::from(port),
+            ..Sqe::default()
+        };
+        let back = Sqe::from_bytes(&listen.to_bytes()).unwrap();
+        assert_eq!(listen, back);
+        assert_eq!((back.aux & 0xFFFF) as u16, port);
+
+        // An OP_ACCEPT SQE carries the desired new conn id in the low 32 bits of
+        // `aux` and points its data window where the peer address will be written.
+        let new_id = 101u32;
+        let accept = Sqe {
+            op: OP_ACCEPT,
+            conn_id: 100,
+            data_off: 4096,
+            data_len: 6,
+            user_data: 0x4e53_434c_0000_000c,
+            aux: u64::from(new_id),
+        };
+        let ab = Sqe::from_bytes(&accept.to_bytes()).unwrap();
+        assert_eq!(accept, ab);
+        assert_eq!((ab.aux & 0xFFFF_FFFF) as u32, new_id);
+        // An empty accept queue completes with the would-block sentinel, distinct
+        // from the generic -1 (unknown listener / window too small) and success 0.
+        assert_ne!(ERR_WOULD_BLOCK, 0);
+        assert_ne!(ERR_WOULD_BLOCK, -1);
     }
 
     #[test]

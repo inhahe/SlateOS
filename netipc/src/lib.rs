@@ -36,6 +36,13 @@ pub const OP_RESOLVE_A: u8 = 0x01;
 /// Reply: [`ST_OK`] + dotted-ASCII hostname (no trailing dot/NUL), or [`ST_FAIL`].
 pub const OP_RESOLVE_PTR: u8 = 0x02;
 
+/// Request: one-shot TCP fetch — connect to `ip:port`, send `payload`, read the
+/// response, and close. Operands: `[ip:4][port_be:2][payload…]`. Reply:
+/// [`ST_OK`] + the received response bytes (possibly empty), or [`ST_FAIL`].
+/// This collapses a whole TCP transaction into a single control round-trip; a
+/// streaming socket API arrives with the Phase-5 shared-memory data ring.
+pub const OP_TCP_FETCH: u8 = 0x03;
+
 /// Reply status: success. Any op-specific result bytes follow.
 pub const ST_OK: u8 = 0x00;
 /// Reply status: failure. No result bytes follow.
@@ -52,6 +59,15 @@ pub enum Request<'a> {
     ResolveA(&'a [u8]),
     /// Reverse-resolve the given IPv4 address (`PTR`).
     ResolvePtr([u8; 4]),
+    /// One-shot TCP fetch to `ip:port`, sending the borrowed `payload`.
+    TcpFetch {
+        /// Destination IPv4 address.
+        ip: [u8; 4],
+        /// Destination TCP port.
+        port: u16,
+        /// Bytes to send once the connection is established (may be empty).
+        payload: &'a [u8],
+    },
     /// An opcode this build does not recognise (carries the raw byte).
     Unknown(u8),
 }
@@ -69,6 +85,13 @@ impl<'a> Request<'a> {
             OP_RESOLVE_PTR => {
                 let ip = rest.get(..4)?;
                 Some(Request::ResolvePtr([ip[0], ip[1], ip[2], ip[3]]))
+            }
+            OP_TCP_FETCH => {
+                let head = rest.get(..6)?;
+                let ip = [head[0], head[1], head[2], head[3]];
+                let port = u16::from_be_bytes([head[4], head[5]]);
+                let payload = rest.get(6..)?;
+                Some(Request::TcpFetch { ip, port, payload })
             }
             other => Some(Request::Unknown(other)),
         }
@@ -96,6 +119,19 @@ pub fn encode_resolve_ptr(out: &mut [u8], ip: &[u8; 4]) -> Option<usize> {
     Some(5)
 }
 
+/// Encode an [`OP_TCP_FETCH`] request (`[op][ip:4][port_be:2][payload]`) into
+/// `out`. Returns bytes written, or `None` if `out` is too small.
+#[must_use]
+pub fn encode_tcp_fetch(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8]) -> Option<usize> {
+    let total = payload.len().checked_add(7)?;
+    let dst = out.get_mut(..total)?;
+    dst[0] = OP_TCP_FETCH;
+    dst[1..5].copy_from_slice(ip);
+    dst[5..7].copy_from_slice(&port.to_be_bytes());
+    dst[7..].copy_from_slice(payload);
+    Some(total)
+}
+
 // ---------------------------------------------------------------------------
 // Replies
 // ---------------------------------------------------------------------------
@@ -110,15 +146,23 @@ pub fn encode_ok_ipv4(out: &mut [u8], ip: &[u8; 4]) -> Option<usize> {
     Some(5)
 }
 
-/// Encode a success reply carrying a name (the [`OP_RESOLVE_PTR`] result) into
-/// `out`. Returns bytes written, or `None` if `out` is too small.
+/// Encode a success reply carrying an arbitrary byte payload (`[ST_OK][bytes]`)
+/// into `out`. Returns bytes written, or `None` if `out` is too small.
 #[must_use]
-pub fn encode_ok_name(out: &mut [u8], name: &[u8]) -> Option<usize> {
-    let total = name.len().checked_add(1)?;
+pub fn encode_ok_bytes(out: &mut [u8], bytes: &[u8]) -> Option<usize> {
+    let total = bytes.len().checked_add(1)?;
     let dst = out.get_mut(..total)?;
     dst[0] = ST_OK;
-    dst[1..].copy_from_slice(name);
+    dst[1..].copy_from_slice(bytes);
     Some(total)
+}
+
+/// Encode a success reply carrying a name (the [`OP_RESOLVE_PTR`] result) into
+/// `out`. Alias for [`encode_ok_bytes`] with name-specific intent. Returns bytes
+/// written, or `None` if `out` is too small.
+#[must_use]
+pub fn encode_ok_name(out: &mut [u8], name: &[u8]) -> Option<usize> {
+    encode_ok_bytes(out, name)
 }
 
 /// Encode a failure reply into `out`. Returns bytes written (1), or `None` if
@@ -172,6 +216,28 @@ pub fn parse_name_reply(bytes: &[u8]) -> NameReply<'_> {
         Some(ST_OK) => NameReply::Ok(bytes.get(1..).unwrap_or(&[])),
         Some(ST_FAIL) => NameReply::Fail,
         _ => NameReply::Malformed,
+    }
+}
+
+/// Decoded outcome of a reply whose OK payload is arbitrary bytes (e.g. the
+/// [`OP_TCP_FETCH`] response). Borrows the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BytesReply<'a> {
+    /// Success: the payload bytes (may be empty).
+    Ok(&'a [u8]),
+    /// The daemon reported failure ([`ST_FAIL`]).
+    Fail,
+    /// The reply was malformed (unknown status byte).
+    Malformed,
+}
+
+/// Decode a reply carrying an arbitrary byte payload (e.g. [`OP_TCP_FETCH`]).
+#[must_use]
+pub fn parse_bytes_reply(bytes: &[u8]) -> BytesReply<'_> {
+    match bytes.first().copied() {
+        Some(ST_OK) => BytesReply::Ok(bytes.get(1..).unwrap_or(&[])),
+        Some(ST_FAIL) => BytesReply::Fail,
+        _ => BytesReply::Malformed,
     }
 }
 
@@ -252,6 +318,53 @@ mod tests {
         assert_eq!(parse_ipv4_reply(&[]), Ipv4Reply::Malformed);
         // OK status but truncated address.
         assert_eq!(parse_ipv4_reply(&[ST_OK, 1, 2]), Ipv4Reply::Malformed);
+    }
+
+    #[test]
+    fn tcp_fetch_round_trip() {
+        let mut buf = [0u8; 64];
+        let n = encode_tcp_fetch(&mut buf, &[93, 184, 216, 34], 80, b"GET /\r\n").unwrap();
+        assert_eq!(buf[0], OP_TCP_FETCH);
+        match Request::parse(&buf[..n]).unwrap() {
+            Request::TcpFetch { ip, port, payload } => {
+                assert_eq!(ip, [93, 184, 216, 34]);
+                assert_eq!(port, 80);
+                assert_eq!(payload, b"GET /\r\n");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_fetch_empty_payload_ok() {
+        let mut buf = [0u8; 16];
+        let n = encode_tcp_fetch(&mut buf, &[1, 2, 3, 4], 443, b"").unwrap();
+        assert_eq!(n, 7);
+        match Request::parse(&buf[..n]).unwrap() {
+            Request::TcpFetch { ip, port, payload } => {
+                assert_eq!(ip, [1, 2, 3, 4]);
+                assert_eq!(port, 443);
+                assert!(payload.is_empty());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_tcp_fetch_request_is_none() {
+        // op + ip but no port bytes.
+        assert!(Request::parse(&[OP_TCP_FETCH, 1, 2, 3, 4, 0]).is_none());
+    }
+
+    #[test]
+    fn bytes_reply_round_trip() {
+        let mut buf = [0u8; 32];
+        let n = encode_ok_bytes(&mut buf, b"HTTP/1.1 200").unwrap();
+        assert_eq!(parse_bytes_reply(&buf[..n]), BytesReply::Ok(b"HTTP/1.1 200"));
+        let n = encode_fail(&mut buf).unwrap();
+        assert_eq!(parse_bytes_reply(&buf[..n]), BytesReply::Fail);
+        assert_eq!(parse_bytes_reply(&[ST_OK]), BytesReply::Ok(b""));
+        assert_eq!(parse_bytes_reply(&[0x42]), BytesReply::Malformed);
     }
 
     #[test]

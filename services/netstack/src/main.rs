@@ -262,7 +262,7 @@ fn query_if_info() -> Option<IfInfo> {
 // of truth for frame layout and the RFC 1071 checksum. This daemon only wires
 // those parsers/builders to the raw-frame syscalls and the interface config.
 
-use netproto::{arp, dns, ethernet, icmp, ipv4, udp};
+use netproto::{arp, dns, ethernet, icmp, ipv4, tcp, udp};
 
 /// Maximum standard Ethernet frame we handle (jumbo frames are out of scope).
 const MAX_FRAME: usize = 1522;
@@ -551,6 +551,300 @@ fn resolve_ptr(
 }
 
 // ---------------------------------------------------------------------------
+// One-shot TCP client (Phase 4 control op `OP_TCP_FETCH`)
+// ---------------------------------------------------------------------------
+//
+// A deliberately minimal TCP client for the reliable QEMU-slirp path: open a
+// connection to `ip:port`, send a request payload, read the response into a
+// caller buffer, and close. It implements just enough of RFC 793 to be correct
+// on a loss-free link — SYN/SYN-ACK/ACK handshake, in-order data reception with
+// cumulative ACKs, SYN/payload retransmission, and a graceful FIN close. It has
+// NO congestion control, NO window management beyond a fixed advertised window,
+// NO out-of-order reassembly (out-of-order data is dup-ACKed to trigger a
+// retransmit), and NO segmentation of the outbound request (it must fit one
+// segment). These limits are acceptable for the bounded self-test / control
+// path; a full streaming socket API arrives with the Phase-5 data ring. See
+// `todo.txt` for the tracked limitations.
+
+/// Advertised receive window for our segments (bytes). Fixed; we drain promptly.
+const TCP_WINDOW: u16 = 64240;
+
+/// Per-attempt RX poll budget for the data phase (iterations * `POLL_SLEEP_NS`).
+/// 400 * 5ms = 2s of quiescence before we give up on more data.
+const TCP_DATA_ITERS: u32 = 400;
+
+/// Number of SYN / payload (re)transmission attempts before giving up.
+const TCP_SYN_ATTEMPTS: u32 = 5;
+
+/// Metadata copied out of one received TCP segment (avoids borrowing the RX
+/// frame buffer across the poll loop).
+struct TcpRx {
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload_len: usize,
+}
+
+/// Frame an arbitrary L4 payload as Ethernet | IPv4 toward `dst_ip` and transmit
+/// it on the raw NIC. Generalizes [`tx_dns_query`]'s framing for any IP protocol.
+/// Returns `true` on a successful TX.
+fn send_ipv4(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    proto: u8,
+    l4: &[u8],
+    id: u16,
+) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    let l4_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
+    let total = match l4_off.checked_add(l4.len()) {
+        Some(t) if t <= frame.len() => t,
+        _ => return false,
+    };
+    frame[l4_off..total].copy_from_slice(l4);
+    let ip_hdr = ipv4::Builder {
+        dscp_ecn: 0,
+        id,
+        flags_frag: 0x4000, // Don't Fragment
+        ttl: 64,
+        protocol: proto,
+        src: me.ip,
+        dst: *dst_ip,
+    }
+    .build_header(l4.len() as u16);
+    frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
+    ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
+    raw_tx(&frame[..total]) >= 0
+}
+
+/// Build and transmit one TCP segment for our connection.
+#[allow(clippy::too_many_arguments)]
+fn send_tcp(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    src_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+    id: u16,
+) -> bool {
+    // TCP segment sits inside the IPv4 payload; bound it by the framing headroom.
+    let mut seg = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
+    let builder = tcp::Builder { src_port, dst_port, seq, ack, flags, window: TCP_WINDOW };
+    let n = match builder.write(&mut seg, &me.ip, dst_ip, payload) {
+        Some(n) => n,
+        None => return false,
+    };
+    send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_TCP, &seg[..n], id)
+}
+
+/// Try to receive one TCP segment addressed to our connection (matching the
+/// local/remote ports and endpoint IPs). On a match, copies the payload into
+/// `pl` and returns the segment metadata; returns `None` when no matching frame
+/// is currently queued (caller sleeps and retries).
+fn recv_tcp_seg(
+    me: &IfInfo,
+    dst_ip: &[u8; 4],
+    local_port: u16,
+    remote_port: u16,
+    frame: &mut [u8],
+    pl: &mut [u8],
+) -> Option<TcpRx> {
+    let n = raw_rx(frame);
+    if n < 0 {
+        return None;
+    }
+    let len = n as usize;
+    if len > frame.len() {
+        return None;
+    }
+    let eth = ethernet::Frame::parse(&frame[..len])?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_TCP || ip.dst != me.ip || ip.src != *dst_ip {
+        return None;
+    }
+    let seg = tcp::Segment::parse(ip.payload, &ip.src, &ip.dst)?;
+    if seg.src_port != remote_port || seg.dst_port != local_port {
+        return None;
+    }
+    let cplen = seg.payload.len().min(pl.len());
+    pl[..cplen].copy_from_slice(&seg.payload[..cplen]);
+    Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
+}
+
+/// Perform a one-shot TCP fetch: connect to `dst_ip:dst_port`, send `payload`,
+/// read the response into `out`, and close gracefully. `id` seeds the IPv4
+/// identification counter. Returns the number of response bytes written to
+/// `out` (0 is a valid result for an empty response), or `None` if the
+/// connection could not be established.
+fn tcp_fetch(
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    next_hop_mac: &[u8; 6],
+    me: &IfInfo,
+    id: u16,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    let local_port = EPHEMERAL_PORT;
+    let isn: u32 = 0x0001_0000;
+    let mut ipid = id;
+
+    let mut frame = [0u8; MAX_FRAME];
+    let mut pl = [0u8; MAX_FRAME];
+
+    // --- Handshake: (re)transmit SYN until a SYN-ACK arrives. ---
+    let mut server_isn = 0u32;
+    let mut established = false;
+    'syn: for _ in 0..TCP_SYN_ATTEMPTS {
+        ipid = ipid.wrapping_add(1);
+        if !send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[], ipid) {
+            return None;
+        }
+        for _ in 0..RESOLVE_POLL_ITERS {
+            while let Some(rx) = recv_tcp_seg(me, dst_ip, local_port, dst_port, &mut frame, &mut pl) {
+                if rx.flags & tcp::FLAG_RST != 0 {
+                    return None; // Connection refused.
+                }
+                if rx.flags & tcp::FLAG_SYN != 0
+                    && rx.flags & tcp::FLAG_ACK != 0
+                    && rx.ack == isn.wrapping_add(1)
+                {
+                    server_isn = rx.seq;
+                    established = true;
+                    break 'syn;
+                }
+            }
+            sleep_ns(POLL_SLEEP_NS);
+        }
+    }
+    if !established {
+        return None;
+    }
+
+    let snd_nxt = isn.wrapping_add(1); // Our SYN consumed one sequence number.
+    let mut rcv_nxt = server_isn.wrapping_add(1); // Their SYN consumed one.
+
+    // ACK the SYN-ACK, completing the handshake.
+    ipid = ipid.wrapping_add(1);
+    send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, snd_nxt, rcv_nxt, tcp::FLAG_ACK, &[], ipid);
+
+    // --- Send the request payload (single segment; must fit one MSS). ---
+    // `snd_final` is the sequence number just past our data; a later FIN uses it.
+    if !payload.is_empty() {
+        ipid = ipid.wrapping_add(1);
+        send_tcp(
+            me,
+            next_hop_mac,
+            dst_ip,
+            dst_port,
+            local_port,
+            snd_nxt,
+            rcv_nxt,
+            tcp::FLAG_PSH | tcp::FLAG_ACK,
+            payload,
+            ipid,
+        );
+    }
+    let snd_final = snd_nxt.wrapping_add(payload.len() as u32);
+
+    // --- Receive loop: accept in-order data, cumulative-ACK, honor FIN. ---
+    let mut written = 0usize;
+    let mut peer_fin = false;
+    let mut idle = 0u32;
+    let mut retransmits = 0u32;
+    while idle < TCP_DATA_ITERS && !peer_fin {
+        let mut got = false;
+        while let Some(rx) = recv_tcp_seg(me, dst_ip, local_port, dst_port, &mut frame, &mut pl) {
+            got = true;
+            if rx.flags & tcp::FLAG_RST != 0 {
+                peer_fin = true; // Treat a reset as end-of-stream.
+                break;
+            }
+            if rx.seq == rcv_nxt {
+                // In-order segment: consume any payload, then any FIN.
+                if rx.payload_len > 0 {
+                    let room = out.len().saturating_sub(written);
+                    let take = rx.payload_len.min(room);
+                    out[written..written + take].copy_from_slice(&pl[..take]);
+                    written += take;
+                    rcv_nxt = rcv_nxt.wrapping_add(rx.payload_len as u32);
+                }
+                if rx.flags & tcp::FLAG_FIN != 0 {
+                    rcv_nxt = rcv_nxt.wrapping_add(1); // FIN occupies one seq.
+                    peer_fin = true;
+                }
+                if rx.payload_len > 0 || peer_fin {
+                    ipid = ipid.wrapping_add(1);
+                    send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, snd_final, rcv_nxt, tcp::FLAG_ACK, &[], ipid);
+                }
+            } else if rx.payload_len > 0 {
+                // Out-of-order data: dup-ACK to prompt the peer to retransmit.
+                ipid = ipid.wrapping_add(1);
+                send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, snd_final, rcv_nxt, tcp::FLAG_ACK, &[], ipid);
+            }
+        }
+        if got {
+            idle = 0;
+        } else {
+            idle = idle.saturating_add(1);
+            // If nothing has come back and our data may have been lost, retransmit
+            // the request payload a few times early in the idle window.
+            if !payload.is_empty()
+                && rcv_nxt == server_isn.wrapping_add(1)
+                && idle == 40
+                && retransmits < 3
+            {
+                retransmits += 1;
+                idle = 0;
+                ipid = ipid.wrapping_add(1);
+                send_tcp(
+                    me,
+                    next_hop_mac,
+                    dst_ip,
+                    dst_port,
+                    local_port,
+                    snd_nxt,
+                    rcv_nxt,
+                    tcp::FLAG_PSH | tcp::FLAG_ACK,
+                    payload,
+                    ipid,
+                );
+            }
+            sleep_ns(POLL_SLEEP_NS);
+        }
+    }
+
+    // --- Graceful close: send our FIN, briefly drain the peer's final ACK. ---
+    ipid = ipid.wrapping_add(1);
+    send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, snd_final, rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[], ipid);
+    for _ in 0..40 {
+        let mut any = false;
+        while let Some(rx) = recv_tcp_seg(me, dst_ip, local_port, dst_port, &mut frame, &mut pl) {
+            any = true;
+            // A late FIN from the peer still needs an ACK for a clean teardown.
+            if rx.flags & tcp::FLAG_FIN != 0 && rx.seq == rcv_nxt {
+                rcv_nxt = rcv_nxt.wrapping_add(rx.payload_len as u32).wrapping_add(1);
+                ipid = ipid.wrapping_add(1);
+                send_tcp(me, next_hop_mac, dst_ip, dst_port, local_port, snd_final.wrapping_add(1), rcv_nxt, tcp::FLAG_ACK, &[], ipid);
+            }
+        }
+        if !any {
+            sleep_ns(POLL_SLEEP_NS);
+        }
+    }
+
+    Some(written)
+}
+
+// ---------------------------------------------------------------------------
 // Service mode (Phase 4): serve socket-syscall requests over `net.stack`
 // ---------------------------------------------------------------------------
 //
@@ -676,6 +970,24 @@ fn handle_request(
                     netipc::encode_ok_name(out, name.get(..w).unwrap_or(&[]))
                         .unwrap_or_else(|| fail(out))
                 }
+                None => fail(out),
+            }
+        }
+        Some(netipc::Request::TcpFetch { ip, port, payload }) => {
+            // One-shot TCP transaction into a scratch buffer, then frame the
+            // response bytes. Cap the fetch to leave room for the ST_OK byte.
+            let mut body = [0u8; MSG_CAP];
+            let cap = MSG_CAP - 1;
+            let got = match next_hop_mac {
+                Some(mac) => {
+                    *txid = txid.wrapping_add(1);
+                    tcp_fetch(&ip, port, mac, me, *txid, payload, &mut body[..cap])
+                }
+                None => None,
+            };
+            match got {
+                Some(n) => netipc::encode_ok_bytes(out, body.get(..n).unwrap_or(&[]))
+                    .unwrap_or_else(|| fail(out)),
                 None => fail(out),
             }
         }

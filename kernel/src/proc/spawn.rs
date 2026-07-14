@@ -2792,6 +2792,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     data[..dlen].copy_from_slice(&reply.data()[..dlen]);
     channel::close(client);
 
+    let mut a_ip: Option<[u8; 4]> = None;
     match netipc::parse_ipv4_reply(&data[..dlen]) {
         netipc::Ipv4Reply::Ok(ip) => {
             serial_println!(
@@ -2799,6 +2800,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
                  example.com over net.stack): OK — {}.{}.{}.{}",
                 ip[0], ip[1], ip[2], ip[3]
             );
+            a_ip = Some(ip);
         }
         netipc::Ipv4Reply::Fail => {
             // The IPC round-trip worked (we got a structured reply); DNS itself
@@ -2826,8 +2828,31 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     let ptr_ip: [u8; 4] = [8, 8, 8, 8];
     let ptr_result = netstack_ptr_roundtrip(&ptr_ip);
 
+    // Third round-trip: one-shot TCP fetch over IPC. Reuse the A-resolved address
+    // for example.com and issue an HTTP/1.0 HEAD (small, header-only response
+    // that fits the control-path reply). This exercises the daemon's full
+    // userspace TCP client (handshake → data → FIN) end to end from the kernel.
+    let tcp_result = match a_ip {
+        Some(ip) => netstack_tcp_fetch_roundtrip(&ip, 80),
+        None => Ok(None),
+    };
+
     // Reap the daemon (it exits after its idle deadline once we stop sending).
     let _ = crate::container::wait_process(result.pid);
+
+    match tcp_result {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   netstack TCP-fetch-over-IPC (ring 3): OK — HTTP response received"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   netstack TCP-fetch-over-IPC (ring 3): IPC round-trip OK, no/short \
+             response (no upstream?) — path proven"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: TCP-fetch IPC round-trip error ({:?})", e);
+            return Err(e);
+        }
+    }
 
     match ptr_result {
         Ok(Some(())) => {
@@ -2906,6 +2931,73 @@ fn netstack_ptr_roundtrip(ip: &[u8; 4]) -> KernelResult<Option<()>> {
         }
         netipc::NameReply::Ok(_) | netipc::NameReply::Fail => Ok(None),
         netipc::NameReply::Malformed => Err(KernelError::InternalError),
+    };
+
+    channel::close(client);
+    result
+}
+
+/// Perform one `OP_TCP_FETCH` round-trip to the running `net.stack` daemon: ask
+/// it to connect to `ip:port`, send a minimal HTTP/1.0 HEAD, and return the
+/// response. Returns `Ok(Some(()))` if a plausible HTTP response arrived,
+/// `Ok(None)` if the daemon replied `ST_FAIL` or an empty/short body (IPC fine,
+/// no upstream), or `Err` on a transport failure. Validates the reply looks like
+/// an HTTP status line so the whole userspace-TCP path is actually exercised.
+fn netstack_tcp_fetch_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    use crate::ipc::{channel, service};
+
+    let client = service::connect(b"net.stack")?;
+
+    // HTTP/1.0 HEAD: header-only response keeps us within the control-path cap.
+    let payload: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    let mut req = [0u8; 96];
+    let req_len = match netipc::encode_tcp_fetch(&mut req, ip, port, payload) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return Err(KernelError::InternalError);
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return Err(e);
+    }
+
+    // The daemon does a full TCP transaction (handshake + data + close); allow
+    // generous time before giving up.
+    let reply = match channel::recv_timeout(client, 10_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+
+    let result = match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(body) if body.len() >= 5 && &body[..5] == b"HTTP/" => {
+            // Echo the status line (up to CRLF) for a human sanity-check.
+            let line_end = body
+                .iter()
+                .position(|&b| b == b'\r' || b == b'\n')
+                .unwrap_or(body.len().min(64));
+            let show = body.get(..line_end).unwrap_or(&[]);
+            serial_print!("[spawn]   TCP HTTP status = ");
+            for &b in show {
+                let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+                serial_print!("{}", c as char);
+            }
+            serial_println!("");
+            Ok(Some(()))
+        }
+        netipc::BytesReply::Ok(_) | netipc::BytesReply::Fail => Ok(None),
+        netipc::BytesReply::Malformed => Err(KernelError::InternalError),
     };
 
     channel::close(client);

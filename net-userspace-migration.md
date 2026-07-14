@@ -242,3 +242,21 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   custom target). This is the "first concrete Phase 4 step" the plan called for,
   now that two ops justify the abstraction. Boot-validated: A resolve + PTR
   `dns.google` still decode end-to-end.
+- 2026-07-14: Phase 4 increment 4 landed — **one-shot TCP fetch over IPC.** The
+  daemon gained a minimal userspace TCP client (`tcp_fetch`/`send_tcp`/
+  `recv_tcp_seg` + a generalized `send_ipv4` framing helper) built on
+  `netproto::tcp` (wire-format `Builder`/`Segment`): SYN/SYN-ACK/ACK handshake,
+  in-order data reception with cumulative ACKs, bounded SYN + request-payload
+  retransmit, and a graceful FIN close. It serves `netipc::Request::TcpFetch
+  {ip, port, payload}` → `[status|response-bytes]` (new `OP_TCP_FETCH` +
+  `encode_ok_bytes`/`parse_bytes_reply` in `netipc`, 4 new host tests, 13 total).
+  Kernel self-test (`netstack_tcp_fetch_roundtrip`) reuses the A-resolved
+  example.com address, issues an HTTP/1.0 HEAD, and validates the reply is an
+  HTTP status line. Boot-validated end-to-end: kernel→daemon→real TCP handshake
+  to example.com:80 (104.20.23.154)→HTTP HEAD→`HTTP/1.1 200 OK` back over IPC.
+  Client limitations (no reassembly / congestion control / outbound segmentation
+  / multi-socket; 512 B response cap) are documented in known-issues.md
+  (D-NETSTACK-TCP-MINIMAL) — they all resolve with the Phase-5 shared-mem data
+  ring + full per-connection state machine. Next: UDP send/recv control op, then
+  the shared-mem data ring + wiring the real `sys_dns_resolve`/`sys_tcp_*`
+  forwarders ahead of Phase 5 cutover.

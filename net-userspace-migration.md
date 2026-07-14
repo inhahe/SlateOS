@@ -278,3 +278,25 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   four ops green). Control-path L4 coverage (DNS A/PTR, TCP fetch, UDP exchange)
   is now complete; next is the Phase-5 shared-memory data ring for streaming +
   wiring the real socket-syscall forwarders.
+- 2026-07-14: Phase 4 increment 6 landed — **shared-memory data-ring ABI**
+  (`netipc/src/ring.rs`, wired via `pub mod ring;`). Defines the io_uring-style
+  zero-copy bulk path that streaming `send`/`recv` will use instead of per-call
+  channel copies (the control path stays on channel messages). One SHM region =
+  header + SQ (kernel→daemon: connect/send/recv/close) + CQ (daemon→kernel:
+  result + echoed `user_data`) + separate bulk data area; SQE/CQE carry only a
+  `(data_off,data_len)` window so no stream bytes cross the channel. Fixed 32 B
+  `Sqe` / 16 B `Cqe` with byte (de)serialization, free-running u32 indices with
+  power-of-two `slot = index & (entries-1)` masking, four indices on separate
+  cache lines (`HEADER_LEN=320`, 5 lines) to kill producer/consumer false
+  sharing, and pure region-sizing/layout helpers. Module is deliberately
+  mapping-agnostic and atomic-free — keeps `netipc` `no_std`, dependency-free,
+  `#![forbid(unsafe_code)]`; the acquire/release atomics + SHM mapping live at
+  the kernel/daemon integration sites (next increments). 10 new host tests
+  (sqe/cqe round-trips, short-slice None, SPSC empty/full/wrap incl. u32-boundary
+  wrap, slot-is-modulo, power-of-two, region layout, cache-line separation) —
+  25 netipc tests total, all green (`cargo test --target x86_64-pc-windows-msvc`).
+  Design rationale + the deferred recv-notification sub-choice (futex vs eventfd
+  vs channel-signal) recorded in design-decisions.md §65. Next: wire the ring
+  into the kernel (`SYS_SHM_CREATE` + map into the daemon) and the daemon
+  (persistent per-connection TCP state machines driving the ring), validated
+  under §64 bounded self-tests.

@@ -27,6 +27,7 @@
 
 pub mod arp;
 pub mod checksum;
+pub mod dns;
 pub mod ethernet;
 pub mod icmp;
 pub mod ipv4;

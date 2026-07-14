@@ -488,16 +488,24 @@ pub const DRM_IOCTL_VIRTGPU_CONTEXT_INIT: u32 =
 /// The value our virtio-gpu render node reports for a `VIRTGPU_PARAM_*` query,
 /// or `None` for an unknown parameter (the ioctl returns `EINVAL`).
 ///
-/// This is the *pure policy* the `GETPARAM` handler will consult once wired.
-/// Values reflect what the backing driver can actually do today: 3D features
-/// and the capset-query fix are advertised (virglrenderer path), while blob /
-/// host-visible / cross-device / context-init are reported unsupported until
-/// their handlers land — advertising a feature before its ioctl works would
-/// make Mesa take a path the driver can't service.
+/// This is the *pure policy* the `GETPARAM` handler consults. Per the Q18
+/// resolution (design-decisions §59, operator option B) it reports **honestly**:
+/// the plain virtio-gpu device our headless CI exposes advertises **no**
+/// `VIRTIO_GPU_F_VIRGL` (observed feature bits `0x30000002` — EDID only), so
+/// `3D_FEATURES` is `0` and every other capability that presupposes a working
+/// render/blob path is `0` too. `CAPSET_QUERY_FIX` stays `1` because that flag
+/// describes the *capset-query ABI shape* (which we implement correctly — it
+/// simply returns "no capsets"), not a 3D capability. Advertising a feature we
+/// cannot service would make Mesa take a path the driver can't complete; honest
+/// zeros make it fall back cleanly. When a virgl-capable backend + the Mesa port
+/// land (deferred half of Q18) these flip to reflect real capability.
 #[must_use]
 pub fn param_value(param: u64) -> Option<u64> {
     match param {
-        VIRTGPU_PARAM_3D_FEATURES => Some(1),
+        // Honest no-3D reporting until a virgl backend exists (§59).
+        VIRTGPU_PARAM_3D_FEATURES => Some(0),
+        // The capset-query ioctl behaves per-ABI (returns "no capsets"); this
+        // flag is about that ABI shape, not 3D, so it is truthfully 1.
         VIRTGPU_PARAM_CAPSET_QUERY_FIX => Some(1),
         VIRTGPU_PARAM_RESOURCE_BLOB => Some(0),
         VIRTGPU_PARAM_HOST_VISIBLE => Some(0),
@@ -507,6 +515,23 @@ pub fn param_value(param: u64) -> Option<u64> {
         VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME => Some(0),
         _ => None,
     }
+}
+
+/// Number of capability sets the render node advertises via `GET_CAPS`.
+///
+/// Zero until a virgl/venus backend exists — the honest counterpart to
+/// [`param_value`]'s `3D_FEATURES = 0`. A `GET_CAPS` for any capset id therefore
+/// fails with `EINVAL` (matching Linux's virtio-gpu, which rejects a capset
+/// query when `num_capsets == 0` or the id is unknown).
+pub const NUM_CAPSETS: u32 = 0;
+
+/// Whether the render node can service the given capset id. Always `false`
+/// today (see [`NUM_CAPSETS`]); provided so the ioctl handler expresses intent
+/// rather than hard-coding `false`.
+#[must_use]
+pub const fn capset_supported(_cap_set_id: u32) -> bool {
+    // No capsets advertised until a virgl backend lands (§59).
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -665,12 +690,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         ioc_nr(DRM_IOCTL_VIRTGPU_EXECBUFFER)
     );
 
-    // --- GETPARAM policy -------------------------------------------------
-    check!(param_value(VIRTGPU_PARAM_3D_FEATURES) == Some(1), "3D_FEATURES param");
+    // --- GETPARAM policy (honest no-3D reporting, §59) -------------------
+    check!(param_value(VIRTGPU_PARAM_3D_FEATURES) == Some(0), "3D_FEATURES must be 0 (no virgl)");
     check!(param_value(VIRTGPU_PARAM_CAPSET_QUERY_FIX) == Some(1), "CAPSET_QUERY_FIX param");
     check!(param_value(VIRTGPU_PARAM_RESOURCE_BLOB) == Some(0), "RESOURCE_BLOB param");
     check!(param_value(VIRTGPU_PARAM_CONTEXT_INIT) == Some(0), "CONTEXT_INIT param");
     check!(param_value(0xDEAD_BEEF).is_none(), "unknown param should be None");
+
+    // --- GET_CAPS policy: no capsets advertised until a virgl backend ---
+    check!(NUM_CAPSETS == 0, "NUM_CAPSETS must be 0 until virgl lands");
+    check!(!capset_supported(VIRTGPU_DRM_CAPSET_VIRGL), "virgl capset must be unsupported");
+    check!(!capset_supported(VIRTGPU_DRM_CAPSET_VENUS), "venus capset must be unsupported");
 
     serial_println!("[virtgpu-uapi] virtio-gpu DRM uAPI ABI self-test PASSED");
     Ok(())

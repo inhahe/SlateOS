@@ -1587,6 +1587,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux fallocate(mode=0 grow) (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 regression test for the virtio-gpu GETPARAM render ioctl on
+    // /dev/dri/renderD128 (honest no-3D reporting; Q18/§59). Skips cleanly when
+    // no DRM device is bound.
+    if let Err(e) = proc::spawn::self_test_linux_virtgpu_getparam() {
+        serial_println!("WARNING: virtio-gpu GETPARAM (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

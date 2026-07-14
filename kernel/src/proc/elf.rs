@@ -2979,6 +2979,172 @@ pub fn build_linux_fchmodat2_emptypath_test_elf(
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the **virtio-gpu
+/// `DRM_IOCTL_VIRTGPU_GETPARAM`** render ioctl on `/dev/dri/renderD128` from
+/// ring 3 — the honest "no-3D" path landed for Q18 (design-decisions §59):
+///
+/// ```text
+///   open("/dev/dri/renderD128", O_RDWR, 0)     ; render node fd
+///   test rax,rax ; js open_fail                ; fd < 0 on error
+///   mov r8, rax                                ; save fd
+///   sub rsp, 64                                ; scratch on the stack
+///   mov [rsp]    = 0xFFFF_FFFF_FFFF_FFFF        ; result sentinel
+///   mov [rsp+8]  = VIRTGPU_PARAM_3D_FEATURES(1) ; getparam.param
+///   mov [rsp+16] = rsp                          ; getparam.value -> result slot
+///   ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, rsp+8)
+///   test rax,rax ; jnz ioctl_fail              ; GETPARAM must succeed (ret 0)
+///   mov rax, [rsp] ; test rax,rax ; jnz value_fail ; kernel must write 0 (no 3D)
+///   exit(0)
+///   open_fail:  exit(0xE1)
+///   ioctl_fail: exit(0xE2)
+///   value_fail: exit(0xE3)
+/// ```
+///
+/// A clean `exit(0)` proves the full ring-3 path: `open(renderD128)` →
+/// `drm_card_ioctl` → `virtgpu_render_ioctl` → `virtgpu_getparam_ioctl`, with
+/// the honest policy value (`3D_FEATURES = 0`) copied back to userspace. The
+/// distinct sentinels let the harness tell an open failure from an ioctl
+/// failure from a wrong reported value. Tagged `ELFOSABI_GNU` so the loader
+/// treats it as Linux-ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_virtgpu_getparam_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // DRM_IOCTL_VIRTGPU_GETPARAM request number (asserted in virtgpu_uapi).
+    let getparam_ioctl = crate::drm::virtgpu_uapi::DRM_IOCTL_VIRTGPU_GETPARAM;
+    // VIRTGPU_PARAM_3D_FEATURES.
+    let param_3d = crate::drm::virtgpu_uapi::VIRTGPU_PARAM_3D_FEATURES;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // open("/dev/dri/renderD128", O_RDWR, 0)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xBE, 0x02, 0x00, 0x00, 0x00]); // mov esi, 2 (O_RDWR)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (mode 0)
+    code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,2; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js open_fail
+    let js_open_rel = code.len() - 1;
+    code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (save fd)
+
+    // Stack scratch: result slot at [rsp], getparam struct at [rsp+8].
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x40]); // sub rsp, 64
+    // result slot = all-ones sentinel (detect that the kernel writes 0).
+    code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]); // mov rax, -1
+    code.extend_from_slice(&[0x48, 0x89, 0x04, 0x24]); // mov [rsp], rax
+    // getparam.param = VIRTGPU_PARAM_3D_FEATURES (a small u64, fits imm32).
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x08]); // mov qword [rsp+8], imm32
+    code.extend_from_slice(&(param_3d as u32).to_le_bytes());
+    // getparam.value = rsp (address of the result slot).
+    code.extend_from_slice(&[0x48, 0x89, 0x64, 0x24, 0x10]); // mov [rsp+16], rsp
+
+    // ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &getparam)
+    code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+    code.push(0xBE); // mov esi, imm32 (ioctl request; zero-extended to rsi)
+    code.extend_from_slice(&getparam_ioctl.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x08]); // lea rdx, [rsp+8]
+    code.extend_from_slice(&[0xB8, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,16; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz ioctl_fail
+    let jnz_ioctl_rel = code.len() - 1;
+
+    // Verify the kernel wrote the honest 3D_FEATURES value (0) into the slot.
+    code.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz value_fail
+    let jnz_value_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // open_fail: exit(0xE1)
+    let open_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xE1, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    // ioctl_fail: exit(0xE2)
+    let ioctl_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xE2, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    // value_fail: exit(0xE3)
+    let value_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xE3, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the three forward rel8 jumps.
+    let js_open_disp = (open_fail as isize) - (js_open_rel as isize + 1);
+    let jnz_ioctl_disp = (ioctl_fail as isize) - (jnz_ioctl_rel as isize + 1);
+    let jnz_value_disp = (value_fail as isize) - (jnz_value_rel as isize + 1);
+    code[js_open_rel] = js_open_disp as u8;
+    code[jnz_ioctl_rel] = jnz_ioctl_disp as u8;
+    code[jnz_value_rel] = jnz_value_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let path: &[u8] = b"/dev/dri/renderD128\0";
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises
 /// **`fallocate(2)` mode 0 (posix_fallocate grow)** (Linux syscall #285)
 /// from ring 3 — the fd-targeted path whose backing resolution goes

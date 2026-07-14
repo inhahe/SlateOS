@@ -4683,6 +4683,101 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **virtio-gpu `DRM_IOCTL_VIRTGPU_GETPARAM`**
+/// render ioctl — the honest "no-3D" reporting landed for Q18
+/// (design-decisions §59).
+///
+/// The harness spawns [`elf::build_linux_virtgpu_getparam_test_elf`], a
+/// self-contained Linux-ABI payload that `open(O_RDWR)`s `/dev/dri/renderD128`,
+/// issues `GETPARAM(VIRTGPU_PARAM_3D_FEATURES)`, and asserts the ioctl succeeds
+/// **and** the kernel copies back the honest value `0` (no virgl backend). A
+/// clean `exit(0)` proves the full ring-3 path `open(renderD128)` →
+/// `drm_card_ioctl` → `virtgpu_render_ioctl` → `virtgpu_getparam_ioctl` with the
+/// policy value delivered to userspace. Exit sentinels: `0xE1` open failed,
+/// `0xE2` GETPARAM ioctl failed, `0xE3` wrong reported value.
+///
+/// If no DRM device is bound (a build/boot without `-device virtio-gpu-pci`),
+/// there is nothing to open, so the test is **skipped** (returns `Ok`) rather
+/// than reported as a failure.
+pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
+    const MAX_YIELDS: usize = 256;
+
+    if crate::drm::device_count() == 0 {
+        serial_println!(
+            "[spawn] Skipping virtio-gpu GETPARAM (ring 3) test — no DRM device bound."
+        );
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Running virtio-gpu GETPARAM render-ioctl test (ring 3, /dev/dri/renderD128)..."
+    );
+
+    let exe_elf = elf::build_linux_virtgpu_getparam_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-virtgpu-getparam"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // Opening the render node needs no capability (try_open_drm gates only on a
+    // bound device + a live caller pid), so no caps are granted.
+    let options = SpawnOptions {
+        name: "spawn-test-linux-virtgpu-getparam",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: virtgpu-getparam spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-getparam (ring 3) — process not a zombie after {} yields, \
+             got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-getparam (ring 3) — expected exit 0, got {:?} (0xE1/225 = \
+             open(renderD128) failed; 0xE2/226 = GETPARAM ioctl failed; 0xE3/227 = wrong reported \
+             3D_FEATURES value)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   virtio-gpu GETPARAM (ring 3: renderD128 GETPARAM(3D_FEATURES)==0, honest \
+         no-3D reporting): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test for **`fallocate(2)` mode 0 (posix_fallocate
 /// grow)** (Linux #285) against the writable memfs root.
 ///

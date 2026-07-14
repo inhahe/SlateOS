@@ -802,6 +802,22 @@ IRQ-stack fix remains committed on its own merits (unbounded nesting *will*
 overflow under a slow-enough handler; it was one genuine wedge — the
 `CAUGHT-iter-2-nobootok` IF=0 guard-page `#PF`).
 
+**OCCURRENCE 2026-07-14 (two back-to-back boots during Q18/§59 virtio-gpu work).**
+Two consecutive `boot-test.sh` runs both timed out at `BOOT_OK not found within
+480s`, but at **different, non-deterministic points**: run 1 froze at **process
+211** (a `/lib64/ld-linux-x86-64.so.2` interpreter exec), run 2 froze at
+**process 226** — the last serial line cut off mid-write `[spawn] Process 226
+running (thread 190, e`, immediately after the container-exec sub-tests passed
+(`[container] exec + wait (exec_path/wait_process): OK`), on a plain
+`entry=0x4000000000` `/bin/hello`-style spawn. Total silence after, heartbeat
+family (same lost-wakeup / failed-dispatch signature above). The **moving hang
+location run-to-run** is the definitive tell that this is the timing-dependent
+race, not a code regression: the Q18 change under test (virtio-gpu GETPARAM
+render ioctl) runs *far earlier* at process 146 and **passed cleanly in both
+runs** (`renderD128 GETPARAM(3D_FEATURES)==0, honest no-3D reporting: OK`), with
+boot progressing hundreds of processes past it each time. Q18 committed on this
+basis. **STILL OPEN — root-cause the container-exec / ring-3 spawn-dispatch race.**
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

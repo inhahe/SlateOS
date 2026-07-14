@@ -9321,8 +9321,77 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_page_flip(handle, argp)
         }
+        // --- virtio-gpu driver-specific ioctls (render-allowed) ---
+        //
+        // These are the `virtgpu_drm.h` render ioctls Mesa's virgl/venus drivers
+        // issue. Per the Q18 resolution (§59) we answer them *honestly* on the
+        // 2D-only device our CI exposes: GETPARAM reports its policy values
+        // (3D_FEATURES = 0), GET_CAPS advertises no capsets (EINVAL), and every
+        // 3D-requiring ioctl returns ENOSYS ("no virgl backend"). Allowed on both
+        // node types (DRM_RENDER_ALLOW) — a render node is exactly their home.
+        _ if crate::drm::virtgpu_uapi::ioc_nr(request)
+            >= crate::drm::virtgpu_uapi::DRM_COMMAND_BASE =>
+        {
+            virtgpu_render_ioctl(request, argp)
+        }
         _ => linux_err(errno::ENOTTY),
     }
+}
+
+/// Dispatch a virtio-gpu driver-specific (`DRM_COMMAND_BASE`-range) render
+/// ioctl. See [`crate::drm::virtgpu_uapi`] for the ABI and design-decisions §59
+/// (Q18) for the honest "no-3D" policy this implements.
+fn virtgpu_render_ioctl(request: u32, argp: u64) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    match request {
+        // GETPARAM: answer per policy. 3D_FEATURES = 0 and friends make Mesa
+        // fall back cleanly instead of taking a 3D path we can't service.
+        vg::DRM_IOCTL_VIRTGPU_GETPARAM => virtgpu_getparam_ioctl(argp),
+        // GET_CAPS: we advertise no capsets, so any query is EINVAL — exactly
+        // Linux virtio-gpu's behaviour when `num_capsets == 0`.
+        vg::DRM_IOCTL_VIRTGPU_GET_CAPS => linux_err(errno::EINVAL),
+        // Every remaining virtgpu ioctl needs a working 3D/virgl backend we do
+        // not have yet (deferred Mesa half of Q18). Report ENOSYS — "not
+        // implemented on this device" — rather than pretending success.
+        vg::DRM_IOCTL_VIRTGPU_MAP
+        | vg::DRM_IOCTL_VIRTGPU_EXECBUFFER
+        | vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE
+        | vg::DRM_IOCTL_VIRTGPU_RESOURCE_INFO
+        | vg::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST
+        | vg::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST
+        | vg::DRM_IOCTL_VIRTGPU_WAIT
+        | vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB
+        | vg::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => linux_err(errno::ENOSYS),
+        // A 'd'-magic ioctl in the driver-private nr range that isn't a defined
+        // virtgpu command — no such ioctl.
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// `DRM_IOCTL_VIRTGPU_GETPARAM` — copy in the `(param, value_ptr)` request,
+/// look the parameter up in [`crate::drm::virtgpu_uapi::param_value`], and write
+/// the policy value to the userspace `__u64` at `value`. Unknown parameters
+/// report `EINVAL` (Linux convention). See §59.
+fn virtgpu_getparam_ioctl(argp: u64) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    let gp = match read_user_struct::<vg::DrmVirtgpuGetparam>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let Some(val) = vg::param_value(gp.param) else {
+        return linux_err(errno::EINVAL);
+    };
+    // `value` is a userspace pointer to a single `__u64` receiving the result.
+    if gp.value == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let bytes = val.to_ne_bytes();
+    // SAFETY: `bytes` is a valid 8-byte kernel buffer; `copy_to_user` validates
+    // the user destination range `[gp.value, gp.value+8)` and handles SMAP.
+    if unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), gp.value, bytes.len()) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(0)
 }
 
 /// Copy one variable-length string field out for `DRM_IOCTL_VERSION` /

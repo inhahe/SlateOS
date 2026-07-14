@@ -5351,10 +5351,17 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     container's namespaces + cgroup and, foreground, blocks on its exit via
     `wait_process`) and image `HEALTHCHECK` (parsed from OCI config, driven by
     a non-blocking hrtimer→workqueue supervisor, surfaced in `inspect`/`ps`)
-    both shipped. Remaining: Dockerfile `RUN` execution (still gated on
-    operator decision Q17, see open-questions.md) and runtime `network
-    connect/disconnect` (gated on the single-vs-multi-network model decision
-    Q19).
+    both shipped. Per operator decision Q17 (§58, option B): the netns-debug
+    `container exec` facade is kept AND real rootfs-binary exec is added under a
+    distinct verb (`container run-in` / `container exec --rootfs`); the `docker
+    exec` delegate routes to the real path. Dockerfile `RUN` now executes via
+    the real in-container exec pipeline (materialize lower rootfs → overlay
+    create+mount → ephemeral container → `exec_path_env` → `wait_process` →
+    capture the overlay upper as the new layer; failures map to
+    `RunLaunch`/`RunFailed`), and Dockerfile `HEALTHCHECK` is parsed and
+    serialized into the image config (`ImageSpec.healthcheck`, Go-duration flags,
+    NONE/CMD/CMD-SHELL forms, FROM inheritance). Remaining: runtime `network
+    connect/disconnect` (Q19/§60 — generalise to multi-network membership).
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

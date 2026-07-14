@@ -1,3 +1,11 @@
+add roadmap-detailed.md that the chromium port should name its processes so that when the user views them in the process explorer, he can tell which process belongs to which tab.
+
+add to roadmap-detailed: a cmd.exe and maybe even powershell emulator.
+
+Tell Fable 5 to analyze the most critical parts of the OS (memory management, task scheduling, IPC, what else? capability robustness?) and optimize them.
+
+write to roadmap-detailed: if a mass move or delete option gets interrupted (crash, restart, accidental abort, etc.), it remembers it was running and maybe reminds the user later when it can, and there's also a place that the user can go to to see interrupted things like these and resume them.
+
 in file save dialog, remember default filename for the user to use again if he/she accidentally changes it while trying to type in a path
 
 make sure that in the file explorer, there's a way to view filenames, dates, and/or sizes for files even when using thumbnail mode if the user wants.

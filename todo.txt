@@ -53467,3 +53467,30 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   before the kernel compiles. Keep artifacts out of git; make the build
 ##   reproducible instead. Deferred (matches the existing hello/ticker pattern),
 ##   but the gap is real and grows with each embedded service.
+
+## [2026-07-14] Net→userspace endgame sequencing (post-5.6) — strategy note
+##   5.6 is DONE and the net.userspace cutover switch now genuinely works at
+##   runtime (limine kernel-file request-ID fix + init_defaults-at-boot; proven
+##   via the real Limine cmdline). Remaining Phase-5 endgame:
+##     5.7 flip the default → 5.8 delete the kernel L2–L4 core.
+##   DO NOT flip the default (5.7) yet: the daemon-backed socket path is strictly
+##   less capable than the mature in-kernel stack (known-issues D-NETSOCK-SYNC:
+##   IPv4-only connect, no true O_NONBLOCK / poll-epoll readiness, no
+##   listen/accept). Flipping now would regress DEFAULT networking. Correct
+##   order: close D-NETSOCK-SYNC parity gaps behind the (default-off) switch,
+##   THEN flip (5.7), THEN delete (5.8). Operator already approved the overall
+##   staged cutover (§66 Q22b: prove parity, flip, delete) — this is just being
+##   careful not to regress on the flip.
+##   KEY BLOCKER for that parity work: reliable switch-ON boot validation is
+##   undermined by the still-open moving-location container-exec / ring-3
+##   spawn-dispatch race (known-issues B-PTHREAD-YIELDBUDGET family). Every
+##   switch-on socket-parity increment needs a clean switch-on boot to validate,
+##   and those boots intermittently hang at moving Path-Z locations. So the
+##   single highest-leverage next task for the whole endgame (5.7 validation AND
+##   the deferred ring-3 glibc socket-syscall HTTP capstone) is root-causing that
+##   race. Prior negative results (known-issues): futex primitive is sound (not
+##   the bug); prime suspects are untracked `spin::Mutex` in the buddy frame
+##   allocator (mm/frame.rs) and rmap (mm/rmap.rs) — a cfg(feature="lockdep_mm")
+##   migration to the tracked crate::sync::Mutex would let lockdep catch a latent
+##   AB-BA inversion deterministically (hot-path cost is why it must be feature-
+##   gated). That is the recommended next concrete tool to build.

@@ -107,12 +107,29 @@ owns per-connection state. (33 tests.)
 upper-layer checksums. Extension headers left to the caller; no L3 checksum.
 (37 tests.)
 
-Remaining Phase 3 increments: ICMPv6, DHCP(v6), DNS, fragmentation,
-firewall/conntrack parsers. Note: migrating the *kernel* stack
-(`kernel/src/net/*.rs`) onto `netproto` is largely throwaway since Phase 5
-deletes that stack — the priority is growing the daemon's own protocol
-coverage on `netproto` toward the Phase 4 socket-IPC cutover, not retrofitting
-the doomed in-kernel modules.
+**Increment 5 — DNS  [x] landed 2026-07-14**
+`dns` module: `write_query()` (standard recursive A/AAAA query) + `Message`
+answer-section walk that transparently follows compression pointers
+(RFC 1035 §4.1.4); `first_ipv4()`/`first_ipv6()` extract the first address
+record. Allocation-free; the answer iterator stops rather than panics on
+truncated/malformed records. Foundation for `SYS_DNS_RESOLVE`. (45 tests.)
+
+**Increment 6 — DHCPv4 client  [x] landed 2026-07-14**
+`dhcp` module: `build_discover()`/`build_request()` + `Message` option TLV
+walk (msg type, subnet mask, router, DNS, lease, server id) for the
+DISCOVER→OFFER→REQUEST→ACK exchange. Lets the daemon own interface config
+in later phases. (51 tests.)
+
+**netproto core L2–L4 coverage is now essentially complete** for the
+daemon's needs: `checksum, ethernet, arp, ipv4, ipv6, icmp, udp, tcp, dns,
+dhcp` (10 modules, 51 host tests, builds for `x86_64-unknown-none`).
+
+Remaining Phase 3 increments are specialized and can land as-needed:
+ICMPv6/NDP (IPv6 ARP analogue), IPv4/IPv6 fragmentation reassembly, and
+firewall/conntrack. Note: migrating the *kernel* stack (`kernel/src/net/*.rs`)
+onto `netproto` is largely throwaway since Phase 5 deletes that stack — the
+priority is growing the daemon on `netproto` toward the Phase 4 socket-IPC
+cutover, not retrofitting the doomed in-kernel modules.
 
 ### Phase 4 — socket syscalls → IPC  [ ] not started
 Redirect `SYS_TCP_*` / `SYS_UDP_*` / `SYS_DNS_RESOLVE` etc. to IPC calls into

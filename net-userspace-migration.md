@@ -91,9 +91,28 @@ deleted in favour of the shared parsers/builders. Re-validated end-to-end in
 QEMU: the daemon claimed the NIC, ARP-resolved the gateway, and exited SUCCESS
 on the netproto code path; BOOT_OK, no regression.
 
-Remaining Phase 3 increments: UDP, TCP, IPv6, ICMPv6, DHCP(v6), DNS,
-fragmentation, firewall/conntrack parsers; then migrate the kernel stack
-(`kernel/src/net/*.rs`) onto `netproto` so there is one wire-format implementation.
+**Increment 2 — UDP  [x] landed 2026-07-14**
+`udp` module: RFC 768 datagram parse/write over IPv4 with the pseudo-header
+checksum (built on `checksum::accumulate`/`fold`). Honours the RFC 768 zero-
+checksum conventions and validates the length field. (28 tests.)
+
+**Increment 3 — TCP segment header  [x] landed 2026-07-14**
+`tcp` module: RFC 793 segment header parse/write over IPv4 with the pseudo-
+header checksum — ports, seq/ack, flag bits, window, urgent pointer; options
+tolerated. Wire format only; the connection state machine stays with whoever
+owns per-connection state. (33 tests.)
+
+**Increment 4 — IPv6 base header  [x] landed 2026-07-14**
+`ipv6` module: RFC 8200 base-header parse/build + `pseudo_header_sum()` for
+upper-layer checksums. Extension headers left to the caller; no L3 checksum.
+(37 tests.)
+
+Remaining Phase 3 increments: ICMPv6, DHCP(v6), DNS, fragmentation,
+firewall/conntrack parsers. Note: migrating the *kernel* stack
+(`kernel/src/net/*.rs`) onto `netproto` is largely throwaway since Phase 5
+deletes that stack — the priority is growing the daemon's own protocol
+coverage on `netproto` toward the Phase 4 socket-IPC cutover, not retrofitting
+the doomed in-kernel modules.
 
 ### Phase 4 — socket syscalls → IPC  [ ] not started
 Redirect `SYS_TCP_*` / `SYS_UDP_*` / `SYS_DNS_RESOLVE` etc. to IPC calls into

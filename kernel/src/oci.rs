@@ -1003,6 +1003,9 @@ pub struct ImageSpec {
     pub shell: Vec<String>,
     /// Deferred `ONBUILD` trigger instructions (stored verbatim).
     pub onbuild: Vec<String>,
+    /// Container healthcheck (Dockerfile `HEALTHCHECK`), if set.  `None` = no
+    /// healthcheck; `Some` with `Test: ["NONE"]` = an explicit disable.
+    pub healthcheck: Option<HealthcheckConfig>,
     /// Layers, bottom-to-top (Dockerfile `COPY`/`ADD` produce these).
     pub layers: Vec<BuildLayer>,
     /// Build history (OCI config `history[]`), oldest first.  Entries with
@@ -1028,6 +1031,7 @@ impl ImageSpec {
             stop_signal: String::new(),
             shell: Vec::new(),
             onbuild: Vec::new(),
+            healthcheck: None,
             layers: Vec::new(),
             history: Vec::new(),
         }
@@ -1234,6 +1238,26 @@ fn build_config_json(spec: &ImageSpec, diff_ids: &[String]) -> String {
     if !spec.onbuild.is_empty() {
         out.push_str(",\"OnBuild\":");
         out.push_str(&json_string_array(&spec.onbuild));
+    }
+    // HEALTHCHECK → Healthcheck object (Test array + ns durations + retries).
+    // Durations/retries are emitted only when non-zero (0 means "Docker
+    // default", which the loader's `effective_*` accessors reapply).
+    if let Some(hc) = &spec.healthcheck {
+        out.push_str(",\"Healthcheck\":{\"Test\":");
+        out.push_str(&json_string_array(&hc.test));
+        if hc.interval_ns != 0 {
+            out.push_str(&format!(",\"Interval\":{}", hc.interval_ns));
+        }
+        if hc.timeout_ns != 0 {
+            out.push_str(&format!(",\"Timeout\":{}", hc.timeout_ns));
+        }
+        if hc.start_period_ns != 0 {
+            out.push_str(&format!(",\"StartPeriod\":{}", hc.start_period_ns));
+        }
+        if hc.retries != 0 {
+            out.push_str(&format!(",\"Retries\":{}", hc.retries));
+        }
+        out.push('}');
     }
     out.push('}'); // close config
     out.push_str(",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":");
@@ -1952,6 +1976,7 @@ pub fn commit_image(
     spec.stop_signal = base.config.stop_signal.clone();
     spec.shell = base.config.shell.clone();
     spec.onbuild = base.config.onbuild.clone();
+    spec.healthcheck = base.config.healthcheck.clone();
     spec.history = base.config.history.clone();
 
     create_layout_skeleton(dest_dir);
@@ -2253,6 +2278,141 @@ fn parse_json_str_array(rest: &str) -> Option<Vec<String>> {
         items.push(String::from(e.as_str()?));
     }
     Some(items)
+}
+
+/// Parse a Go-style duration string (as Docker's `HEALTHCHECK --interval` etc.
+/// accept) into nanoseconds. Supports a sequence of `<number><unit>` terms with
+/// units `ns`, `us`/`µs`, `ms`, `s`, `m`, `h` and fractional numbers
+/// (e.g. `"1h30m"`, `"1.5s"`, `"100ms"`). Returns `None` on any malformed input.
+fn parse_go_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // A bare "0" means zero duration.
+    if s == "0" {
+        return Some(0);
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut total_ns: u64 = 0;
+    while i < bytes.len() {
+        // Parse the numeric part (digits with an optional single '.').
+        let num_start = i;
+        let mut seen_dot = false;
+        while let Some(&c) = bytes.get(i) {
+            if c.is_ascii_digit() {
+                i = i.checked_add(1)?;
+            } else if c == b'.' && !seen_dot {
+                seen_dot = true;
+                i = i.checked_add(1)?;
+            } else {
+                break;
+            }
+        }
+        if i == num_start {
+            return None; // a unit with no preceding number
+        }
+        let num_str = s.get(num_start..i)?;
+        let value: f64 = num_str.parse().ok()?;
+        // Parse the unit.
+        let unit_start = i;
+        while let Some(&c) = bytes.get(i) {
+            if c.is_ascii_digit() || c == b'.' {
+                break;
+            }
+            i = i.checked_add(1)?;
+        }
+        let unit = s.get(unit_start..i)?;
+        let unit_ns: f64 = match unit {
+            "ns" => 1.0,
+            "us" | "µs" | "μs" => 1_000.0,
+            "ms" => 1_000_000.0,
+            "s" => 1_000_000_000.0,
+            "m" => 60_000_000_000.0,
+            "h" => 3_600_000_000_000.0,
+            _ => return None,
+        };
+        let term = value * unit_ns;
+        if !term.is_finite() || term < 0.0 {
+            return None;
+        }
+        total_ns = total_ns.checked_add(term as u64)?;
+    }
+    Some(total_ns)
+}
+
+/// Parse a Dockerfile `HEALTHCHECK` instruction body into a [`HealthcheckConfig`].
+///
+/// Accepts `HEALTHCHECK NONE` (disable) and
+/// `HEALTHCHECK [--interval=D] [--timeout=D] [--start-period=D] [--retries=N]
+/// CMD <command>`, where `<command>` is exec-form (`["exe","arg"]` → `CMD` +
+/// argv) or shell-form (`cmd arg` → `CMD-SHELL` + the whole line). Returns the
+/// 1-based-line-agnostic error message on malformed input.
+fn parse_healthcheck(rest: &str) -> Result<HealthcheckConfig, String> {
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("HEALTHCHECK requires NONE or CMD"));
+    }
+    if trimmed.eq_ignore_ascii_case("NONE") {
+        return Ok(HealthcheckConfig {
+            test: alloc::vec![String::from("NONE")],
+            ..HealthcheckConfig::default()
+        });
+    }
+
+    let mut hc = HealthcheckConfig::default();
+    // Consume leading `--flag=value` options until the CMD token.
+    let mut remainder = trimmed;
+    loop {
+        let tok_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
+        let tok = &remainder[..tok_end];
+        if let Some(opt) = tok.strip_prefix("--") {
+            let (key, val) = opt.split_once('=').ok_or_else(|| {
+                format!("HEALTHCHECK option '{tok}' needs a value (--key=value)")
+            })?;
+            match key {
+                "interval" => {
+                    hc.interval_ns =
+                        parse_go_duration(val).ok_or_else(|| format!("bad --interval '{val}'"))?;
+                }
+                "timeout" => {
+                    hc.timeout_ns =
+                        parse_go_duration(val).ok_or_else(|| format!("bad --timeout '{val}'"))?;
+                }
+                "start-period" => {
+                    hc.start_period_ns = parse_go_duration(val)
+                        .ok_or_else(|| format!("bad --start-period '{val}'"))?;
+                }
+                "retries" => {
+                    hc.retries =
+                        val.parse().map_err(|_| format!("bad --retries '{val}'"))?;
+                }
+                other => return Err(format!("unknown HEALTHCHECK option '--{other}'")),
+            }
+            remainder = remainder[tok_end..].trim_start();
+        } else {
+            break;
+        }
+    }
+
+    // The verb must be CMD (Docker only supports CMD after the options).
+    let verb_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
+    let verb = &remainder[..verb_end];
+    if !verb.eq_ignore_ascii_case("CMD") {
+        return Err(format!("HEALTHCHECK expects CMD (or NONE), found '{verb}'"));
+    }
+    let cmd_rest = remainder[verb_end..].trim();
+    if cmd_rest.is_empty() {
+        return Err(String::from("HEALTHCHECK CMD requires a command"));
+    }
+    // Exec-form → CMD + argv; shell-form → CMD-SHELL + the whole line.
+    if let Some(argv) = parse_json_str_array(cmd_rest) {
+        hc.test = core::iter::once(String::from("CMD")).chain(argv).collect();
+    } else {
+        hc.test = alloc::vec![String::from("CMD-SHELL"), String::from(cmd_rest)];
+    }
+    Ok(hc)
 }
 
 /// Normalise a Dockerfile destination/path into an archive-relative path
@@ -3259,6 +3419,9 @@ fn build_one_stage_inner(
                     spec.volumes = base.config.volumes.clone();
                     spec.stop_signal = base.config.stop_signal.clone();
                     spec.shell = base.config.shell.clone();
+                    // Healthcheck is inherited config (a child may override it
+                    // with its own HEALTHCHECK or disable via HEALTHCHECK NONE).
+                    spec.healthcheck = base.config.healthcheck.clone();
                     // Seed vars with the inherited ENV so `${VAR}` sees them.
                     for e in &base.config.env {
                         if let Some((k, v)) = e.split_once('=') {
@@ -3568,6 +3731,16 @@ fn build_one_stage_inner(
                     });
                 }
                 spec.onbuild.push(String::from(trigger));
+            }
+            "HEALTHCHECK" => {
+                // Container liveness probe (Docker `HEALTHCHECK`). Stored in the
+                // image config so the runtime health monitor (container::
+                // start_health_monitor / health_tick) picks it up when the image
+                // is run. Var-expanded like the other config instructions.
+                let expanded = expand_vars(rest_raw, &vars);
+                let hc = parse_healthcheck(&expanded)
+                    .map_err(|msg| BuildError::Parse { line, msg })?;
+                spec.healthcheck = Some(hc);
             }
             "MAINTAINER" => {
                 // Deprecated; record as the conventional label.
@@ -4183,6 +4356,50 @@ CMD ["--serve"]
         assert_eq!(ba.config.working_dir, "/prod", "--build-arg overrode ARG default");
         assert!(ba.config.labels.iter().any(|(k, v)| k == "built" && v == "prod"));
         cleanup_image_dir(img3);
+
+        // HEALTHCHECK: parse options + command, serialize into the image
+        // config, and round-trip through load_image (§58/Q17). Exec-form CMD.
+        let img4 = "/tmp/oci_build_img4";
+        cleanup_image_dir(img4);
+        let df4 = b"FROM scratch\nHEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD [\"/bin/health\",\"-q\"]\n";
+        build_image(df4, ctx, img4).map_err(|e| {
+            serial_println!("[oci] healthcheck build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let hc_img = load_image(img4)?;
+        let hc = hc_img.config.healthcheck.as_ref().expect("built healthcheck present");
+        assert_eq!(hc.test, alloc::vec![
+            String::from("CMD"), String::from("/bin/health"), String::from("-q"),
+        ], "exec-form CMD → CMD + argv");
+        assert_eq!(hc.interval_ns, 30_000_000_000, "30s interval");
+        assert_eq!(hc.timeout_ns, 5_000_000_000, "5s timeout");
+        assert_eq!(hc.retries, 3, "retries=3");
+        assert!(hc.is_runnable() && !hc.is_shell(), "runnable exec-form probe");
+
+        // Shell-form HEALTHCHECK → CMD-SHELL + the whole line; and a child image
+        // may disable it with HEALTHCHECK NONE (must override the inherited one).
+        let img5 = "/tmp/oci_build_img5";
+        cleanup_image_dir(img5);
+        let df5 = b"FROM /tmp/oci_build_img4\nHEALTHCHECK NONE\n";
+        build_image(df5, ctx, img5).map_err(|e| {
+            serial_println!("[oci] healthcheck-none build failed: {}", e.describe());
+            KernelError::InternalError
+        })?;
+        let none_img = load_image(img5)?;
+        let nhc = none_img.config.healthcheck.as_ref().expect("NONE healthcheck present");
+        assert!(nhc.is_disabled(), "HEALTHCHECK NONE disables the inherited probe");
+        cleanup_image_dir(img5);
+        cleanup_image_dir(img4);
+
+        // parse_go_duration unit coverage.
+        assert_eq!(parse_go_duration("0"), Some(0));
+        assert_eq!(parse_go_duration("100ms"), Some(100_000_000));
+        assert_eq!(parse_go_duration("1h30m"), Some(5_400_000_000_000));
+        assert_eq!(parse_go_duration("1.5s"), Some(1_500_000_000));
+        assert_eq!(parse_go_duration("500us"), Some(500_000));
+        assert_eq!(parse_go_duration("nonsense"), None);
+        assert_eq!(parse_go_duration("10x"), None);
+        serial_println!("[oci]   build HEALTHCHECK + durations: OK");
 
         // Clean up.
         let _ = Vfs::remove(&format!("{ext}/srv/app/run.sh"));

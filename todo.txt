@@ -53415,3 +53415,16 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## runs it, asserting the include-path resolution + preprocessor + glibc link all
 ## work end to end. Until the header tree is stageable from this environment, this
 ## rung cannot be implemented or validated here.
+
+## [LIMITATION 2026-07-14] OCI build-time RUN starts at rootfs root, not WORKDIR
+## exec_build_run (kernel/src/oci.rs) launches a Dockerfile `RUN` command via
+## container::exec_path_env, which has no working-directory argument — so the
+## process starts at "/" inside the merged rootfs rather than the image's
+## `WORKDIR`. RUN commands that use absolute paths (the common case) are
+## unaffected; a RUN relying on a relative cwd (e.g. `RUN ./configure`) would
+## resolve against "/" instead of WORKDIR.
+##   PROPER FIX: add an optional cwd to proc::spawn::SpawnOptions (set the new
+## process's initial cwd) and thread it through container::exec_path_env (a
+## `cwd: Option<&[u8]>` param); exec_build_run then passes spec.working_dir.
+## Also apply it to `container run-in` / `docker exec` for parity. Low risk,
+## small refactor — deferred only to keep the §58 RUN landing focused.

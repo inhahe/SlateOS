@@ -61,30 +61,11 @@ const E_WOULD_BLOCK: i64 = -4;
 // netstack IPC control protocol (Phase 4)
 // ---------------------------------------------------------------------------
 //
-// A minimal, one-shot request/reply wire format carried over a Service-Registry
-// channel (`net.stack`). The kernel-side socket-syscall forwarders marshal a
-// request into a single `channel::Message` and block on the reply. This is the
-// *control* path; bulk TCP/UDP data will later ride a shared-memory ring.
-//
-// Request  = [opcode:u8][operands…]
-// Reply    = [status:u8][result…]
-//
-// Kept inline here for the first increment (DNS resolve). Once TCP/UDP control
-// ops land, this schema graduates into a shared `netipc` no_std crate that both
-// the kernel forwarders and this daemon depend on (mirroring `netproto`).
-
-/// Request: resolve an A record. Operands: the hostname bytes (ASCII, no NUL).
-/// Reply: `[status][ip0..ip3]` — status 0 = ok (4 IP bytes follow), 1 = failure.
-const OP_RESOLVE_A: u8 = 0x01;
-
-/// Request: reverse-resolve (PTR) an IPv4 address. Operands: 4 IP bytes.
-/// Reply: `[status][name…]` — status 0 = ok (dotted-ASCII hostname follows,
-/// no trailing dot/NUL), 1 = failure.
-const OP_RESOLVE_PTR: u8 = 0x02;
-
-/// Reply status codes.
-const ST_OK: u8 = 0x00;
-const ST_FAIL: u8 = 0x01;
+// The request/reply wire schema (opcodes, status codes, encode/decode) lives in
+// the shared `netipc` crate — the single source of truth linked into both this
+// daemon and the kernel socket-syscall forwarders. Messages ride a Service-
+// Registry channel (`net.stack`) as one-shot request/reply pairs; bulk TCP/UDP
+// data will later add a shared-memory data ring alongside this control path.
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers
@@ -656,7 +637,8 @@ fn run_dns_service(me: &IfInfo) -> i64 {
 }
 
 /// Handle one control request, writing the reply into `out` and returning its
-/// length. `out` must be at least `MSG_CAP` bytes.
+/// length. `out` must be at least `MSG_CAP` bytes. The request/reply schema is
+/// owned by the shared `netipc` crate.
 fn handle_request(
     req: &[u8],
     next_hop_mac: &Option<[u8; 6]>,
@@ -664,9 +646,9 @@ fn handle_request(
     txid: &mut u16,
     out: &mut [u8],
 ) -> usize {
-    match req.first().copied() {
-        Some(OP_RESOLVE_A) => {
-            let hostname = &req[1..];
+    let fail = |out: &mut [u8]| netipc::encode_fail(out).unwrap_or(0);
+    match netipc::Request::parse(req) {
+        Some(netipc::Request::ResolveA(hostname)) => {
             let ip = match next_hop_mac {
                 Some(mac) if !hostname.is_empty() => {
                     *txid = txid.wrapping_add(1);
@@ -675,43 +657,30 @@ fn handle_request(
                 _ => None,
             };
             match ip {
-                Some(addr) => {
-                    out[0] = ST_OK;
-                    out[1..5].copy_from_slice(&addr);
-                    5
-                }
-                None => {
-                    out[0] = ST_FAIL;
-                    1
-                }
+                Some(addr) => netipc::encode_ok_ipv4(out, &addr).unwrap_or_else(|| fail(out)),
+                None => fail(out),
             }
         }
-        Some(OP_RESOLVE_PTR) => {
-            // Operand: 4 IPv4 bytes to reverse-resolve.
+        Some(netipc::Request::ResolvePtr(ip)) => {
+            // Reverse-resolve into a scratch name buffer, then frame the reply.
+            let mut name = [0u8; MSG_CAP];
             let name_len = match next_hop_mac {
-                Some(mac) if req.len() >= 5 => {
-                    let ip = [req[1], req[2], req[3], req[4]];
+                Some(mac) => {
                     *txid = txid.wrapping_add(1);
-                    // Reserve out[0] for the status byte; write the name after it.
-                    resolve_ptr(&ip, mac, me, *txid, &mut out[1..])
+                    resolve_ptr(&ip, mac, me, *txid, &mut name)
                 }
-                _ => None,
+                None => None,
             };
             match name_len {
                 Some(w) => {
-                    out[0] = ST_OK;
-                    1 + w
+                    netipc::encode_ok_name(out, name.get(..w).unwrap_or(&[]))
+                        .unwrap_or_else(|| fail(out))
                 }
-                None => {
-                    out[0] = ST_FAIL;
-                    1
-                }
+                None => fail(out),
             }
         }
-        _ => {
-            out[0] = ST_FAIL; // Unknown opcode.
-            1
-        }
+        // Unknown opcode or a structurally invalid request → uniform failure.
+        Some(netipc::Request::Unknown(_)) | None => fail(out),
     }
 }
 

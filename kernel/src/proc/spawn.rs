@@ -2686,10 +2686,7 @@ pub fn self_test_userspace_netstack() -> KernelResult<()> {
 pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     use crate::ipc::{channel, service};
 
-    // Opcode / status bytes — must match `services/netstack/src/main.rs`.
-    const OP_RESOLVE_A: u8 = 0x01;
-    const ST_OK: u8 = 0x00;
-    const ST_FAIL: u8 = 0x01;
+    // The request/reply schema is shared with the daemon via the `netipc` crate.
 
     // Same network gate as the Phase-2 test, plus a configured DNS server (the
     // daemon needs one to resolve against).
@@ -2761,9 +2758,15 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
 
     let host: &[u8] = b"example.com";
     let mut req = [0u8; 64];
-    req[0] = OP_RESOLVE_A;
-    req[1..1 + host.len()].copy_from_slice(host);
-    let msg = channel::Message::from_bytes(&req[..1 + host.len()])?;
+    let req_len = match netipc::encode_resolve_a(&mut req, host) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            let _ = crate::container::wait_process(result.pid);
+            return Err(KernelError::InternalError);
+        }
+    };
+    let msg = channel::Message::from_bytes(&req[..req_len])?;
     if let Err(e) = channel::send(client, msg) {
         serial_println!("[spawn]   FAIL: send to netstack returned {:?}", e);
         channel::close(client);
@@ -2783,21 +2786,21 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         }
     };
 
-    // Copy the reply bytes out before closing.
+    // Copy the reply bytes out before closing, then decode via the shared schema.
     let mut data = [0u8; 5];
     let dlen = reply.data().len().min(data.len());
     data[..dlen].copy_from_slice(&reply.data()[..dlen]);
     channel::close(client);
 
-    match data.first().copied() {
-        Some(ST_OK) if dlen >= 5 => {
+    match netipc::parse_ipv4_reply(&data[..dlen]) {
+        netipc::Ipv4Reply::Ok(ip) => {
             serial_println!(
                 "[spawn]   netstack DNS-over-IPC (ring 3: kernel→daemon resolve of \
                  example.com over net.stack): OK — {}.{}.{}.{}",
-                data[1], data[2], data[3], data[4]
+                ip[0], ip[1], ip[2], ip[3]
             );
         }
-        Some(ST_FAIL) => {
+        netipc::Ipv4Reply::Fail => {
             // The IPC round-trip worked (we got a structured reply); DNS itself
             // didn't resolve — most likely no upstream resolver behind slirp.
             // The Phase-4 wiring is proven either way, so don't fail the boot.
@@ -2806,10 +2809,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
                  unresolved (no upstream?) — Phase-4 path proven, resolution skipped"
             );
         }
-        other => {
+        netipc::Ipv4Reply::Malformed => {
             serial_println!(
-                "[spawn]   FAIL: malformed netstack A reply (first={:?}, len={})",
-                other, dlen
+                "[spawn]   FAIL: malformed netstack A reply (len={})",
+                dlen
             );
             let _ = crate::container::wait_process(result.pid);
             return Err(KernelError::InternalError);
@@ -2857,16 +2860,18 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
 /// self-test body stays readable.
 fn netstack_ptr_roundtrip(ip: &[u8; 4]) -> KernelResult<Option<()>> {
     use crate::ipc::{channel, service};
-    const OP_RESOLVE_PTR: u8 = 0x02;
-    const ST_OK: u8 = 0x00;
-    const ST_FAIL: u8 = 0x01;
 
     let client = service::connect(b"net.stack")?;
 
-    let mut req = [0u8; 5];
-    req[0] = OP_RESOLVE_PTR;
-    req[1..5].copy_from_slice(ip);
-    let msg = match channel::Message::from_bytes(&req) {
+    let mut req = [0u8; 8];
+    let req_len = match netipc::encode_resolve_ptr(&mut req, ip) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return Err(KernelError::InternalError);
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
         Ok(m) => m,
         Err(e) => {
             channel::close(client);
@@ -2886,12 +2891,8 @@ fn netstack_ptr_roundtrip(ip: &[u8; 4]) -> KernelResult<Option<()>> {
         }
     };
 
-    let data = reply.data();
-    let status = data.first().copied();
-    // Log a short prefix of the decoded name for eyeball verification.
-    let name = data.get(1..).unwrap_or(&[]);
-    let result = match status {
-        Some(ST_OK) if !name.is_empty() => {
+    let result = match netipc::parse_name_reply(reply.data()) {
+        netipc::NameReply::Ok(name) if !name.is_empty() => {
             // Print the name (ASCII) so a human can sanity-check the decode.
             let show = name.get(..name.len().min(64)).unwrap_or(&[]);
             serial_print!("[spawn]   PTR name = ");
@@ -2903,8 +2904,8 @@ fn netstack_ptr_roundtrip(ip: &[u8; 4]) -> KernelResult<Option<()>> {
             serial_println!("");
             Ok(Some(()))
         }
-        Some(ST_OK) | Some(ST_FAIL) => Ok(None),
-        _ => Err(KernelError::InternalError),
+        netipc::NameReply::Ok(_) | netipc::NameReply::Fail => Ok(None),
+        netipc::NameReply::Malformed => Err(KernelError::InternalError),
     };
 
     channel::close(client);

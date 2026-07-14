@@ -50,6 +50,10 @@ exclude = [
     # `--target`. Excluded so the workspace-root target doesn't try to
     # build it as a std crate.
     "netproto",
+    # Shared no_std IPC schema (kernel<->netstack control messages). Same
+    # rationale as netproto: linked into both the bare-metal daemon and the
+    # kernel; excluded so the workspace-root target doesn't build it as std.
+    "netipc",
     # Empty directory (incomplete crate); skip until populated.
     "userspace/cylance-cli",
     # nushell is a self-contained upstream workspace with its own member

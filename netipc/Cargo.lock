@@ -5,15 +5,3 @@ version = 4
 [[package]]
 name = "netipc"
 version = "0.1.0"
-
-[[package]]
-name = "netproto"
-version = "0.1.0"
-
-[[package]]
-name = "netstack"
-version = "0.1.0"
-dependencies = [
- "netipc",
- "netproto",
-]

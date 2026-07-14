@@ -228,3 +228,17 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   `dns_response_msg`, refactored out of `resolve_dns`). Kernel self-test adds a
   second round-trip reverse-resolving 8.8.8.8. Boot-validated end-to-end: the
   daemon decoded `dns.google` and the kernel logged `PTR name = dns.google`.
+- 2026-07-14: Phase 4 increment 3 landed — **shared `netipc` schema crate.**
+  Extracted the kernel↔daemon control-message wire format (the previously-inline
+  opcodes/status codes + hand-rolled encode/decode, which had drifted into magic
+  constants duplicated in the daemon *and* the kernel self-test) into a new
+  dependency-free `no_std` `#![forbid(unsafe_code)]` `netipc` crate — the single
+  source of truth both sides link, mirroring `netproto`. It exposes `OP_*`/`ST_*`
+  consts, `Request` (parse), `encode_resolve_a`/`encode_resolve_ptr`,
+  `encode_ok_ipv4`/`encode_ok_name`/`encode_fail`, and typed reply decoders
+  `parse_ipv4_reply` (`Ipv4Reply`) / `parse_name_reply` (`NameReply`); 9 host
+  tests. Daemon `handle_request` and both kernel round-trips now go through it;
+  the kernel gained its first `netipc` path-dependency (builds clean for the
+  custom target). This is the "first concrete Phase 4 step" the plan called for,
+  now that two ops justify the abstraction. Boot-validated: A resolve + PTR
+  `dns.google` still decode end-to-end.

@@ -9,6 +9,10 @@ description = "Microkernel for x86_64 desktop OS"
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lazy", "once"] }
 bitflags = "2"
 log = "0.4"
+# Shared kernel<->netstack IPC control-message schema (opcodes, status codes,
+# request/reply encode/decode). Single source of truth with the daemon side;
+# no_std, dependency-free, so it builds cleanly for the kernel's custom target.
+netipc = { path = "../netipc" }
 
 [lints]
 workspace = true

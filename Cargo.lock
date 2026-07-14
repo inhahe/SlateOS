@@ -4943,6 +4943,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "log",
+ "netipc",
  "spin",
 ]
 
@@ -6726,6 +6727,10 @@ version = "0.1.0"
 
 [[package]]
 name = "nethogs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netipc"
 version = "0.1.0"
 
 [[package]]

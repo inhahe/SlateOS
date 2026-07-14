@@ -12,3 +12,6 @@ path = "src/main.rs"
 # checksum). netproto inherits this crate's x86_64-unknown-none target when
 # built as a dependency, so its own .cargo config (host tests) doesn't apply.
 netproto = { path = "../../netproto" }
+# Shared kernel<->daemon control-message schema (opcodes, status codes,
+# request/reply encode/decode). Single source of truth with the kernel side.
+netipc = { path = "../../netipc" }

@@ -3272,9 +3272,32 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // Non-blocking connect parity (D-NETSOCK-SYNC): a connect() on an O_NONBLOCK
+    // socket must return EINPROGRESS immediately and complete in the background,
+    // with poll(POLLOUT) waking once the handshake resolves (and POLLERR/SO_ERROR
+    // on failure) — matching Linux. Uses the same DNS-resolved address.
+    match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => match crate::net::netstack_client::self_test_nonblock_connect(&ip, 80) {
+            Ok(Some(())) => serial_println!(
+                "[spawn]   persistent netstack nonblock-connect: EINPROGRESS→POLLOUT connect \
+                 parity proven over the daemon"
+            ),
+            Ok(None) => serial_println!(
+                "[spawn]   persistent netstack nonblock-connect: no upstream — connect path proven"
+            ),
+            Err(e) => serial_println!(
+                "[spawn]   WARNING: persistent netstack nonblock-connect error ({:?})",
+                e
+            ),
+        },
+        Ok(None) | Err(_) => serial_println!(
+            "[spawn]   persistent netstack nonblock-connect: DNS unresolved — check skipped"
+        ),
+    }
+
     serial_println!(
-        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll parity checks done; \
-         daemon now owns the NIC for the system's lifetime"
+        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect \
+         parity checks done; daemon now owns the NIC for the system's lifetime"
     );
     Ok(())
 }

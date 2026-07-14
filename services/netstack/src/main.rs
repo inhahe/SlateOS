@@ -773,6 +773,21 @@ struct TcpConn {
     server_isn: u32,
     /// IPv4 identification counter (incremented per emitted datagram).
     ipid: u16,
+    /// Our initial sequence number (the SYN's seq). Retained so a non-blocking
+    /// connect's handshake can validate the SYN-ACK's `ack` (`== isn + 1`) when it
+    /// completes later, in [`ingest_seg`](Self::ingest_seg), rather than inline.
+    isn: u32,
+    /// `true` once the TCP handshake has completed (ESTABLISHED). A synchronous
+    /// `connect` returns already-established; a non-blocking connect starts in
+    /// `SYN_SENT` (`false`) and flips to `true` when the SYN-ACK is processed.
+    established: bool,
+    /// `true` if the connect attempt failed after `connect_start` (a RST, or the
+    /// SYN retransmit budget was exhausted with no SYN-ACK). Surfaced to the kernel
+    /// as a `POLL_ERR` readiness bit → `getsockopt(SO_ERROR) = ECONNREFUSED`.
+    connect_failed: bool,
+    /// Number of SYNs transmitted so far (non-blocking handshake). Bounds the
+    /// per-poll SYN retransmit at [`TCP_SYN_ATTEMPTS`].
+    syn_sends: u32,
     /// Set once the peer's FIN (or an RST) has ended the receive stream.
     peer_fin: bool,
     /// The most recently sent segment, retained for retransmission.
@@ -857,12 +872,93 @@ impl TcpConn {
             rcv_nxt,
             server_isn,
             ipid,
+            isn,
+            established: true,
+            connect_failed: false,
+            syn_sends: 0,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
         })
+    }
+
+    /// Start a **non-blocking** connect: transmit the SYN and return a connection
+    /// in the `SYN_SENT` state (`established == false`) *without* waiting for the
+    /// SYN-ACK. The handshake is completed later by [`ingest_seg`](Self::ingest_seg)
+    /// when the SYN-ACK arrives (driven by the RX pump on a subsequent `OP_POLL` /
+    /// `OP_RECV`), and [`poll_connect`](Self::poll_connect) retransmits the SYN a
+    /// bounded number of times if it is lost. Returns `None` only if the SYN could
+    /// not be transmitted at all.
+    fn connect_start(
+        me: &IfInfo,
+        dst_ip: [u8; 4],
+        dst_port: u16,
+        mac: [u8; 6],
+        seed_ipid: u16,
+    ) -> Option<Self> {
+        // Same ephemeral-port / ISN derivation as the synchronous path so a
+        // non-blocking connect to a server recently torn down still avoids a
+        // TIME_WAIT 4-tuple clash.
+        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
+        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let ipid = seed_ipid.wrapping_add(1);
+        if !send_tcp(me, &mac, &dst_ip, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[], ipid) {
+            return None;
+        }
+        Some(TcpConn {
+            dst_ip,
+            dst_port,
+            local_port,
+            mac,
+            // Provisional; recomputed from `isn` when the handshake completes.
+            snd_nxt: isn.wrapping_add(1),
+            rcv_nxt: 0,
+            server_isn: 0,
+            ipid,
+            isn,
+            established: false,
+            connect_failed: false,
+            syn_sends: 1,
+            peer_fin: false,
+            snd_buf: [0u8; TCP_SND_BUF],
+            snd_buf_len: 0,
+            rx_buf: [0u8; TCP_RCV_BUF],
+            rx_len: 0,
+        })
+    }
+
+    /// Advance a non-blocking connect's handshake: if still `SYN_SENT` and the SYN
+    /// retransmit budget ([`TCP_SYN_ATTEMPTS`]) is not yet spent, retransmit the
+    /// SYN (in case it or the SYN-ACK was lost); if the budget is exhausted without
+    /// a SYN-ACK, mark the attempt failed. The actual handshake *completion* (on a
+    /// received SYN-ACK) happens in [`ingest_seg`](Self::ingest_seg); this is only
+    /// the retransmit/timeout driver, called once per `OP_POLL`. No-op once the
+    /// connection is established or already failed.
+    fn poll_connect(&mut self, me: &IfInfo) {
+        if self.established || self.connect_failed {
+            return;
+        }
+        if self.syn_sends >= TCP_SYN_ATTEMPTS {
+            // Exhausted the SYN budget with no SYN-ACK → treat as refused/timed out.
+            self.connect_failed = true;
+            return;
+        }
+        self.ipid = self.ipid.wrapping_add(1);
+        self.syn_sends = self.syn_sends.saturating_add(1);
+        send_tcp(
+            me,
+            &self.mac,
+            &self.dst_ip,
+            self.dst_port,
+            self.local_port,
+            self.isn,
+            0,
+            tcp::FLAG_SYN,
+            &[],
+            self.ipid,
+        );
     }
 
     /// Send `payload` as a single PSH|ACK segment and advance `snd_nxt`. The
@@ -907,6 +1003,42 @@ impl TcpConn {
     /// currently blocked in a receive. `payload` is the segment's data bytes
     /// (length equals `rx.payload_len`).
     fn ingest_seg(&mut self, me: &IfInfo, rx: &TcpRx, payload: &[u8]) {
+        if !self.established {
+            // Non-blocking connect still in SYN_SENT: complete the handshake here
+            // rather than inline in `connect_start`, so a SYN-ACK that arrives
+            // between polls (routed via the RX pump) is what flips us to
+            // ESTABLISHED. Ignore anything but a matching SYN-ACK or a RST.
+            if self.connect_failed {
+                return;
+            }
+            if rx.flags & tcp::FLAG_RST != 0 {
+                self.connect_failed = true; // Refused → surfaces as POLL_ERR.
+                return;
+            }
+            if rx.flags & tcp::FLAG_SYN != 0
+                && rx.flags & tcp::FLAG_ACK != 0
+                && rx.ack == self.isn.wrapping_add(1)
+            {
+                self.server_isn = rx.seq;
+                self.snd_nxt = self.isn.wrapping_add(1); // Our SYN consumed one seq.
+                self.rcv_nxt = rx.seq.wrapping_add(1); // Their SYN consumed one.
+                self.ipid = self.ipid.wrapping_add(1);
+                send_tcp(
+                    me,
+                    &self.mac,
+                    &self.dst_ip,
+                    self.dst_port,
+                    self.local_port,
+                    self.snd_nxt,
+                    self.rcv_nxt,
+                    tcp::FLAG_ACK,
+                    &[],
+                    self.ipid,
+                );
+                self.established = true;
+            }
+            return; // While SYN_SENT we never buffer data.
+        }
         if self.peer_fin {
             return; // Stream already ended; ignore stragglers.
         }
@@ -1751,24 +1883,54 @@ fn ring_tcp_process(
                 // Advance the ident seed well past the handshake's own increments
                 // so each connection gets a distinct ephemeral port + ISN.
                 *ipid = ipid.wrapping_add(0x10);
-                match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid) {
-                    Some(mut c) => match conns.reserve(sqe.conn_id) {
-                        Some(slot) => {
-                            *slot = Some((sqe.conn_id, c));
-                            0
-                        }
-                        None => {
-                            // Duplicate id or table full: tear the fresh conn down
-                            // gracefully rather than leaking the peer's half-open
-                            // connection, then report failure.
-                            c.close(me);
-                            -1
-                        }
-                    },
-                    None => -1,
+                if sqe.aux & netipc::ring::CONNECT_NONBLOCK != 0 {
+                    // Non-blocking connect: transmit the SYN and install the conn in
+                    // SYN_SENT without waiting for the SYN-ACK. Pump once so a SYN-ACK
+                    // that has already arrived can complete the handshake immediately
+                    // (a loopback/fast peer), letting us report success synchronously.
+                    match TcpConn::connect_start(me, ip, port, *next_hop_mac, *ipid) {
+                        Some(c) => match conns.reserve(sqe.conn_id) {
+                            Some(slot) => {
+                                *slot = Some((sqe.conn_id, c));
+                                ring_pump(conns, me);
+                                match conns.get_mut(sqe.conn_id) {
+                                    Some(c) if c.established => 0,
+                                    Some(_) => netipc::ring::ERR_IN_PROGRESS,
+                                    None => -1,
+                                }
+                            }
+                            None => {
+                                // Duplicate id or table full: nothing installed yet
+                                // (we only sent a SYN); report failure.
+                                -1
+                            }
+                        },
+                        None => -1,
+                    }
+                } else {
+                    match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid) {
+                        Some(mut c) => match conns.reserve(sqe.conn_id) {
+                            Some(slot) => {
+                                *slot = Some((sqe.conn_id, c));
+                                0
+                            }
+                            None => {
+                                // Duplicate id or table full: tear the fresh conn down
+                                // gracefully rather than leaking the peer's half-open
+                                // connection, then report failure.
+                                c.close(me);
+                                -1
+                            }
+                        },
+                        None => -1,
+                    }
                 }
             }
             netipc::ring::OP_SEND => match conns.get_mut(sqe.conn_id) {
+                // A send before the handshake completed is a protocol error on our
+                // minimal client (no send buffering across connect): reject it so the
+                // kernel surfaces ENOTCONN rather than us emitting a bad-seq segment.
+                Some(c) if !c.established => -1,
                 Some(c) => ring_tcp_send(ring, c, me, &sqe),
                 None => -1,
             },
@@ -1866,8 +2028,13 @@ fn ring_tcp_recv(
     me: &IfInfo,
     sqe: &netipc::ring::Sqe,
 ) -> i32 {
-    if conns.get_mut(target_id).is_none() {
-        return -1; // no such connection
+    match conns.get_mut(target_id) {
+        None => return -1, // no such connection
+        // A recv before the handshake completed cannot return stream data; reject so
+        // the kernel surfaces ENOTCONN rather than us spinning the whole receive
+        // deadline on a half-open connection.
+        Some(c) if !c.established => return -1,
+        Some(_) => {}
     }
     if sqe.aux & netipc::ring::RECV_NONBLOCK != 0 {
         // Non-blocking receive (kernel honouring O_NONBLOCK): drain whatever has
@@ -1934,20 +2101,44 @@ fn ring_tcp_recv(
 ///
 /// Returns a non-negative readiness bitmask
 /// ([`POLL_READABLE`](netipc::ring::POLL_READABLE) |
-/// [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE)), or `-1` if there is no such
-/// connection. A live connection is always writable (the single-outstanding-segment
-/// sender overwrites its send buffer on each `send`); it is readable when it has
-/// buffered in-order bytes or the peer has closed (so a `recv` returns data / EOF
-/// promptly).
+/// [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE) |
+/// [`POLL_ERR`](netipc::ring::POLL_ERR)), or `-1` if there is no such connection.
+///
+/// A connection still completing a non-blocking handshake (SYN_SENT) is reported as
+/// *neither* readable nor writable — the kernel keeps waiting for `POLLOUT`. It
+/// becomes writable only once ESTABLISHED (an established connection can always
+/// accept a send — the single-outstanding-segment sender overwrites its send buffer
+/// on each `send`), and readable when it has buffered in-order bytes or the peer has
+/// closed (so a `recv` returns data / EOF promptly). If the connect failed (a RST or
+/// exhausted SYN budget) it is reported as `POLL_ERR` **and** writable, mirroring
+/// Linux — a failed non-blocking connect wakes `poll(POLLOUT)`, then
+/// `getsockopt(SO_ERROR)` reveals the error.
+///
+/// Each poll also advances the handshake's retransmit/timeout driver
+/// ([`poll_connect`](TcpConn::poll_connect)) so a lost SYN is resent and an
+/// unanswered handshake eventually fails rather than hanging forever.
 fn ring_tcp_poll(conns: &mut RingConns, target_id: u32, me: &IfInfo) -> i32 {
     if conns.get_mut(target_id).is_none() {
         return -1; // no such connection
     }
-    // Non-destructive: route any arrived frames into their owners, then peek.
+    // Non-destructive: route any arrived frames into their owners (this completes a
+    // pending handshake via `ingest_seg` if the SYN-ACK has arrived), then peek.
     ring_pump(conns, me);
+    // Drive the SYN retransmit / connect timeout for a still-pending handshake.
+    if let Some(c) = conns.get_mut(target_id) {
+        c.poll_connect(me);
+    }
     match conns.get_mut(target_id) {
         Some(c) => {
-            // A live daemon connection can always accept a send (writable).
+            if c.connect_failed {
+                // Failed connect: signal POLLOUT (so poll wakes) with the error bit;
+                // the kernel then reports getsockopt(SO_ERROR) = ECONNREFUSED.
+                return netipc::ring::POLL_ERR | netipc::ring::POLL_WRITABLE;
+            }
+            if !c.established {
+                return 0; // SYN_SENT: not yet writable, keep waiting for POLLOUT.
+            }
+            // An established daemon connection can always accept a send (writable).
             let mut bits = netipc::ring::POLL_WRITABLE;
             if c.rx_len > 0 || c.peer_fin {
                 bits |= netipc::ring::POLL_READABLE;

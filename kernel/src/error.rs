@@ -125,6 +125,13 @@ pub enum KernelError {
     /// connection (e.g. `send`/`recv` on an unconnected stream socket).  Maps
     /// to `ENOTCONN`.
     NotConnected = -701,
+    /// A non-blocking `connect` has started but the TCP handshake is not yet
+    /// complete.  Maps to `EINPROGRESS`: the caller should `poll`/`epoll` for
+    /// `POLLOUT` and then check `getsockopt(SO_ERROR)` for the outcome.
+    InProgress = -702,
+    /// A `connect` is already in progress on this socket (a repeated non-blocking
+    /// `connect` before the first handshake resolved).  Maps to `EALREADY`.
+    ConnectAlready = -703,
 }
 
 impl KernelError {
@@ -176,6 +183,8 @@ impl KernelError {
             Self::DeviceBusy => "device busy",
             Self::ConnectionRefused => "connection refused",
             Self::NotConnected => "socket not connected",
+            Self::InProgress => "operation now in progress",
+            Self::ConnectAlready => "connection already in progress",
         }
     }
 

@@ -84,11 +84,28 @@ impl SocketHandle {
 pub enum SockState {
     /// Created (`socket()`) but not yet connected. No daemon session exists.
     Created,
+    /// A **non-blocking** `connect()` has started (SYN sent) but the TCP handshake
+    /// has not yet completed. The daemon holds a half-open connection; the socket
+    /// resolves to [`Connected`](SockState::Connected) or
+    /// [`Failed`](SockState::Failed) on a later [`poll_ready`]. Linux reports this
+    /// state's `connect` as `EINPROGRESS` and a repeated `connect` as `EALREADY`.
+    Connecting,
     /// A `connect()` succeeded; the daemon holds a live TCP connection.
     Connected,
     /// A prior `connect()` failed, or the peer/connection is gone. Terminal for
     /// this handle (Linux would require a fresh socket to retry).
     Failed,
+}
+
+/// Outcome of a [`connect`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectOutcome {
+    /// The connection is established (a blocking connect, or a non-blocking connect
+    /// whose handshake completed synchronously). Maps to a `0` `connect` return.
+    Established,
+    /// A non-blocking connect started but the handshake is still pending. Maps to
+    /// `EINPROGRESS`; the caller polls for `POLLOUT` then checks `SO_ERROR`.
+    InProgress,
 }
 
 /// Per-socket mutable state. Guarded by its own mutex (see module lock
@@ -102,6 +119,10 @@ struct SocketInner {
     peer_ip: [u8; 4],
     /// Remembered peer port.
     peer_port: u16,
+    /// Whether the latched `SO_ERROR` has already been consumed by a
+    /// `getsockopt(SO_ERROR)` read. `SO_ERROR` is one-shot in Linux: the first read
+    /// after a failed connect returns the errno, subsequent reads return `0`.
+    so_error_read: bool,
 }
 
 /// One entry in the global socket table: the shared per-socket state plus the
@@ -135,6 +156,7 @@ pub fn create() -> KernelResult<SocketHandle> {
         state: SockState::Created,
         peer_ip: [0; 4],
         peer_port: 0,
+        so_error_read: false,
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
@@ -199,22 +221,46 @@ fn inner_of(handle: SocketHandle) -> KernelResult<Arc<Mutex<SocketInner>>> {
 
 /// Connect the socket to `ip:port` via the daemon.
 ///
-/// Returns `Ok(())` on success. Maps a daemon "no upstream" / refused result to
-/// `ECONNREFUSED` and marks the socket `Failed`.
+/// When `nonblock` is clear, this is a **blocking** connect: it returns
+/// [`ConnectOutcome::Established`] on success, or maps a daemon "no upstream" /
+/// refused result to `ECONNREFUSED` (marking the socket `Failed`).
+///
+/// When `nonblock` is set, the connect is issued non-blocking: if the handshake
+/// completes synchronously (fast/loopback peer) it returns
+/// [`ConnectOutcome::Established`]; otherwise it returns
+/// [`ConnectOutcome::InProgress`] (the socket enters [`SockState::Connecting`]) and
+/// the caller polls for `POLLOUT` then checks `SO_ERROR` ([`take_so_error`]).
 ///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `AlreadyExists` — the socket is already connected (Linux `EISCONN`).
+/// - `ConnectAlready` — a non-blocking connect is already in progress (Linux
+///   `EALREADY`).
 /// - `ConnectionRefused` — the daemon could not establish the connection.
 /// - protocol faults propagated from [`NetstackConn::connect`].
-pub fn connect(handle: SocketHandle, ip: &[u8; 4], port: u16) -> KernelResult<()> {
+pub fn connect(
+    handle: SocketHandle,
+    ip: &[u8; 4],
+    port: u16,
+    nonblock: bool,
+) -> KernelResult<ConnectOutcome> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
-    if guard.state == SockState::Connected {
-        return Err(KernelError::AlreadyExists);
+    match guard.state {
+        SockState::Connected => return Err(KernelError::AlreadyExists), // EISCONN
+        SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
+        _ => {}
     }
-    let res = guard.conn.connect(ip, port)?;
+    let res = guard.conn.connect(ip, port, nonblock)?;
+    if res == netipc::ring::ERR_IN_PROGRESS {
+        // Non-blocking handshake pending: remember the peer now so getpeername works
+        // once it resolves, and enter Connecting.
+        guard.state = SockState::Connecting;
+        guard.peer_ip = *ip;
+        guard.peer_port = port;
+        return Ok(ConnectOutcome::InProgress);
+    }
     if res < 0 {
         guard.state = SockState::Failed;
         return Err(KernelError::ConnectionRefused);
@@ -222,7 +268,7 @@ pub fn connect(handle: SocketHandle, ip: &[u8; 4], port: u16) -> KernelResult<()
     guard.state = SockState::Connected;
     guard.peer_ip = *ip;
     guard.peer_port = port;
-    Ok(())
+    Ok(ConnectOutcome::Established)
 }
 
 /// Send `buf` on a connected socket. Returns the number of bytes accepted.
@@ -265,16 +311,21 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool) -> KernelResul
 
 /// Non-destructively probe a stream socket's readiness for the poll/epoll engine.
 ///
-/// Returns `(readable, writable)`:
-/// - A **connected** socket queries the daemon (via
-///   [`NetstackConn::poll_ready`]) for its honest state: `readable` iff it has
-///   buffered bytes or the peer has closed (so a `recv` returns data/EOF
-///   promptly), `writable` iff the connection can accept a send. This replaces
-///   the former "always ready" placeholder so `POLLIN` no longer spins a poller
-///   that then reads `EAGAIN`.
-/// - An **unconnected** but live socket (never connected, or a failed connect) is
-///   reported writable-only: a `connect` may still proceed, but there is nothing
-///   to read.
+/// Returns `(readable, writable, error)`:
+/// - A **connected** socket queries the daemon (via [`NetstackConn::poll_ready`])
+///   for its honest state: `readable` iff it has buffered bytes or the peer has
+///   closed (so a `recv` returns data/EOF promptly), `writable` iff the connection
+///   can accept a send. This replaces the former "always ready" placeholder so
+///   `POLLIN` no longer spins a poller that then reads `EAGAIN`.
+/// - A **connecting** socket (non-blocking connect in flight) queries the daemon
+///   and, when the handshake resolves, transitions to `Connected` (writable, no
+///   error) or `Failed` (writable **and** error — Linux wakes `POLLOUT`+`POLLERR`
+///   for a failed non-blocking connect). While still pending it is neither
+///   readable nor writable.
+/// - An **unconnected**/`Created` socket is reported writable-only: a `connect` may
+///   still proceed, but there is nothing to read.
+/// - A **failed** socket is reported writable **and** error (the error is latched
+///   until read via [`take_so_error`]).
 ///
 /// Does not consume buffered data — a subsequent [`recv`] still returns it.
 ///
@@ -282,13 +333,52 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool) -> KernelResul
 ///
 /// - `InvalidHandle` — closed handle.
 /// - protocol faults propagated from [`NetstackConn::poll_ready`].
-pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool)> {
+pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     match guard.state {
         SockState::Connected => guard.conn.poll_ready(),
-        // Not connected: a connect may still proceed (writable), nothing to read.
-        _ => Ok((false, true)),
+        SockState::Connecting => {
+            let (readable, writable, error) = guard.conn.poll_ready()?;
+            // Resolve the pending handshake: an error latches Failed; becoming
+            // writable (with no error) means ESTABLISHED. Otherwise stay Connecting.
+            if error {
+                guard.state = SockState::Failed;
+            } else if writable {
+                guard.state = SockState::Connected;
+            }
+            Ok((readable, writable, error))
+        }
+        // A failed connect: writable + error so poll(POLLOUT) wakes and the caller
+        // reads SO_ERROR.
+        SockState::Failed => Ok((false, true, true)),
+        // Created but never connected: a connect may still proceed (writable),
+        // nothing to read, no error.
+        SockState::Created => Ok((false, true, false)),
+    }
+}
+
+/// Read and clear the pending socket error (`getsockopt(SOL_SOCKET, SO_ERROR)`).
+///
+/// Returns the Linux errno for the socket's current error condition and clears it
+/// (a `Failed` socket is left `Failed` — Linux keeps the socket unusable — but
+/// SO_ERROR is a one-shot read, so a second call returns `0`):
+/// - a `Failed` socket returns `ECONNREFUSED` (111) once, then `0`;
+/// - a `Connecting` socket (handshake still pending) returns `0` (no error yet);
+/// - any other state returns `0`.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn take_so_error(handle: SocketHandle) -> KernelResult<i32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.state == SockState::Failed && !guard.so_error_read {
+        guard.so_error_read = true;
+        // ECONNREFUSED — the only failure our synchronous/handshake path surfaces.
+        Ok(111)
+    } else {
+        Ok(0)
     }
 }
 

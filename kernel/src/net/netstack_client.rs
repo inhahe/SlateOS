@@ -188,28 +188,46 @@ impl NetstackConn {
 
     /// Open the TCP connection to `ip:port`.
     ///
-    /// Returns the daemon's connect result: `>= 0` on success (connection now
-    /// live), `< 0` if the connect failed (no upstream / refused). A non-negative
-    /// result marks the client connected so a later [`send`](Self::send) drives
-    /// the same persisted connection.
+    /// When `nonblock` is clear, this performs a **blocking** connect: the daemon
+    /// completes the TCP handshake synchronously and the result is `>= 0` on success
+    /// (connection now live) or `< 0` if it failed (no upstream / refused).
+    ///
+    /// When `nonblock` is set, the [`netipc::ring::CONNECT_NONBLOCK`] flag is passed
+    /// to the daemon, which transmits the SYN and returns immediately:
+    /// - `0` — the handshake already completed (a fast/loopback peer answered within
+    ///   the one RX pump the daemon does before replying); the socket is established.
+    /// - [`netipc::ring::ERR_IN_PROGRESS`] — the handshake is still pending; the
+    ///   caller should `poll(POLLOUT)` and then check
+    ///   [`take_so_error`](Self::poll_ready)-style readiness / `getsockopt(SO_ERROR)`.
+    /// - `< 0` (other) — the connect could not even be started.
+    ///
+    /// A non-negative result *or* `ERR_IN_PROGRESS` marks the client connected so a
+    /// later [`send`](Self::send) / [`poll_ready`](Self::poll_ready) drives the same
+    /// persisted connection.
     ///
     /// # Errors
     ///
     /// Returns an error on a control-protocol fault (ring full, missing/misordered
     /// completion, service-channel failure) — distinct from a `< 0` connect
     /// result, which is a normal "no upstream" outcome.
-    pub fn connect(&mut self, ip: &[u8; 4], port: u16) -> KernelResult<i32> {
+    pub fn connect(&mut self, ip: &[u8; 4], port: u16, nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let ud = self.next_ud();
+        let mut aux = netipc::ring::Sqe::pack_endpoint(ip, port);
+        if nonblock {
+            aux |= netipc::ring::CONNECT_NONBLOCK;
+        }
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_CONNECT,
             conn_id: self.conn_id,
             user_data: ud,
-            aux: netipc::ring::Sqe::pack_endpoint(ip, port),
+            aux,
             ..netipc::ring::Sqe::default()
         };
         let res = self.submit_and_reap(&ring, &sqe)?;
-        if res >= 0 {
+        // Both an established (`res >= 0`) and an in-progress non-blocking connect
+        // leave a live connection installed in the daemon session.
+        if res >= 0 || res == netipc::ring::ERR_IN_PROGRESS {
             self.connected = true;
         }
         Ok(res)
@@ -321,21 +339,26 @@ impl NetstackConn {
     ///
     /// Issues an [`OP_POLL`](netipc::ring::OP_POLL) round-trip: the daemon drains
     /// arrived frames once and reports a readiness bitmask. Returns
-    /// `(readable, writable)`:
+    /// `(readable, writable, error)`:
     /// - `readable` — the socket has buffered bytes or the peer has closed, so a
     ///   subsequent `recv`/`read` returns data (or `0`/EOF) promptly.
-    /// - `writable` — the connection is live and can accept a send.
+    /// - `writable` — the connection is established and can accept a send. A
+    ///   non-blocking connect still in its handshake reports *not* writable until it
+    ///   completes (so `poll(POLLOUT)` waits for the connect to resolve).
+    /// - `error` — the connection has an error condition (a non-blocking connect
+    ///   that was refused / timed out). Linux wakes `POLLOUT` **and** `POLLERR` in
+    ///   this case; `getsockopt(SO_ERROR)` then reports `ECONNREFUSED`.
     ///
     /// A subsequent [`recv`](Self::recv) still returns the same bytes — this only
     /// reports readiness, it does not move data. Used by the poll/epoll engine to
-    /// report an honest `POLLIN`/`POLLOUT` for a daemon-backed socket.
+    /// report an honest `POLLIN`/`POLLOUT`/`POLLERR` for a daemon-backed socket.
     ///
     /// # Errors
     ///
     /// Returns a control-protocol fault (see [`connect`](Self::connect)), or
     /// [`KernelError::NotConnected`] if the daemon reports no such connection
     /// (the socket was never connected or has been torn down).
-    pub fn poll_ready(&mut self) -> KernelResult<(bool, bool)> {
+    pub fn poll_ready(&mut self) -> KernelResult<(bool, bool, bool)> {
         let ring = self.attach_ring()?;
         let ud = self.next_ud();
         let sqe = netipc::ring::Sqe {
@@ -351,7 +374,8 @@ impl NetstackConn {
         }
         let readable = res & netipc::ring::POLL_READABLE != 0;
         let writable = res & netipc::ring::POLL_WRITABLE != 0;
-        Ok((readable, writable))
+        let error = res & netipc::ring::POLL_ERR != 0;
+        Ok((readable, writable, error))
     }
 
     /// Close the connection and end the daemon session.
@@ -504,7 +528,7 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
 
     let mut conn = NetstackConn::open()?;
 
-    let connect_res = conn.connect(ip, port)?;
+    let connect_res = conn.connect(ip, port, false)?;
     if connect_res < 0 {
         // No upstream — the client round-trip path still ran; report cleanly.
         conn.close()?;
@@ -576,7 +600,7 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
 pub fn self_test_nonblock_recv(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
     let mut conn = NetstackConn::open()?;
 
-    let connect_res = conn.connect(ip, port)?;
+    let connect_res = conn.connect(ip, port, false)?;
     if connect_res < 0 {
         // No upstream — nothing to assert; the client path still ran.
         conn.close()?;
@@ -637,7 +661,7 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
 
     let mut conn = NetstackConn::open()?;
 
-    let connect_res = conn.connect(ip, port)?;
+    let connect_res = conn.connect(ip, port, false)?;
     if connect_res < 0 {
         conn.close()?;
         return Ok(None);
@@ -645,7 +669,7 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
 
     // Idle connected socket: must be writable; a well-behaved server has sent
     // nothing yet, so it should not (yet) be readable.
-    let (readable0, writable0) = conn.poll_ready()?;
+    let (readable0, writable0, _err0) = conn.poll_ready()?;
     if !writable0 {
         conn.close()?;
         crate::serial_println!(
@@ -668,7 +692,7 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
 
     let mut became_readable = readable0;
     for _ in 0..64u32 {
-        let (readable, _writable) = conn.poll_ready()?;
+        let (readable, _writable, _err) = conn.poll_ready()?;
         if readable {
             became_readable = true;
             break;
@@ -683,6 +707,78 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
         Ok(Some(()))
     } else {
         // No response came back (slirp variance); the poll path still ran honestly.
+        Ok(None)
+    }
+}
+
+/// Boot self-test: prove the **non-blocking connect** path (`connect` with
+/// `O_NONBLOCK` → `EINPROGRESS` → `poll(POLLOUT)` → `getsockopt(SO_ERROR)`),
+/// mirroring Linux (`D-NETSOCK-SYNC`).
+///
+/// Sequence: open a client, issue a non-blocking [`connect`](NetstackConn::connect)
+/// (which returns `0` if the handshake already completed within the daemon's single
+/// post-SYN pump, or [`netipc::ring::ERR_IN_PROGRESS`] if it is still pending), then
+/// drive [`poll_ready`](NetstackConn::poll_ready) in a bounded loop until the socket
+/// reports **writable** (the connect resolved) — checking that it never reports the
+/// error bit for a good endpoint. A writable, error-free result is the parity
+/// property: a `poll(POLLOUT)` waiter is woken exactly when the connect completes.
+///
+/// Returns `Ok(Some(()))` if the non-blocking-connect readiness path was exercised
+/// (connect started and the socket became writable without error), `Ok(None)` if
+/// there was no upstream (the connect could not start or never resolved — network
+/// variance, nothing to assert), and `Err` on a real control-protocol fault or a
+/// socket that reported the error bit against a known-good endpoint.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; reports an unexpected
+/// `POLL_ERR` on a good endpoint as an error (that would break connect parity).
+pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    let mut conn = NetstackConn::open()?;
+
+    let connect_res = conn.connect(ip, port, true)?;
+    if connect_res < 0 && connect_res != netipc::ring::ERR_IN_PROGRESS {
+        // Could not even start the connect (no route / no upstream). Nothing to
+        // assert; the non-blocking-connect path still ran end to end.
+        conn.close()?;
+        return Ok(None);
+    }
+
+    if connect_res == 0 {
+        crate::serial_println!(
+            "[netstack-client]   non-blocking connect completed synchronously (fast peer)"
+        );
+    } else {
+        crate::serial_println!(
+            "[netstack-client]   non-blocking connect returned EINPROGRESS; polling for POLLOUT"
+        );
+    }
+
+    // Poll for writable (POLLOUT), exactly as a userspace non-blocking connect would.
+    let mut writable = false;
+    for _ in 0..64u32 {
+        let (_readable, w, error) = conn.poll_ready()?;
+        if error {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   non-blocking connect reported POLL_ERR against a good endpoint"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if w {
+            writable = true;
+            break;
+        }
+    }
+    conn.close()?;
+
+    if writable {
+        crate::serial_println!(
+            "[netstack-client]   non-blocking connect resolved to writable (POLLOUT) — connect parity ok"
+        );
+        Ok(Some(()))
+    } else {
+        // Handshake never completed in-window (slirp variance); path still ran.
         Ok(None)
     }
 }

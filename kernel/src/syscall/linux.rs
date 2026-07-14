@@ -977,12 +977,27 @@ pub mod errno {
     pub const ESOCKTNOSUPPORT: i32 = 94;
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
+    pub const EALREADY: i32 = 114;
+    pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
     pub const ENOTCONN: i32 = 107;
     pub const ECONNREFUSED: i32 = 111;
     pub const ETIMEDOUT: i32 = 110;
     pub const ECANCELED: i32 = 125;
     pub const ENODATA: i32 = 61;
+}
+
+/// `setsockopt`/`getsockopt` option levels (Linux `SOL_*`).
+mod sol {
+    /// Socket-level options (`SOL_SOCKET`).
+    pub const SOL_SOCKET: i32 = 1;
+}
+
+/// `SOL_SOCKET`-level option names (Linux `SO_*`).
+mod so {
+    /// `SO_ERROR` — read and clear the pending socket error (an `int`). Used by a
+    /// non-blocking `connect()`er after `poll(POLLOUT)` to learn the outcome.
+    pub const SO_ERROR: i32 = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1297,8 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::DeviceBusy => errno::EBUSY,
         KernelError::ConnectionRefused => errno::ECONNREFUSED,
         KernelError::NotConnected => errno::ENOTCONN,
+        KernelError::InProgress => errno::EINPROGRESS,
+        KernelError::ConnectAlready => errno::EALREADY,
     }
 }
 
@@ -29027,13 +29044,18 @@ fn poll_revents_from_entry(
             match crate::net::socket::poll_ready(
                 crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
             ) {
-                Ok((readable, writable)) => {
+                Ok((readable, writable, error)) => {
                     let mut r = 0u16;
                     if readable {
                         r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
                     }
                     if writable {
                         r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+                    }
+                    if error {
+                        // A failed (non-blocking) connect: Linux wakes POLLERR (and
+                        // POLLOUT) so the poller then reads getsockopt(SO_ERROR).
+                        r |= poll_bits::POLLERR;
                     }
                     r
                 }
@@ -36215,10 +36237,18 @@ fn socket_connect_from_user(entry: FdEntry, addr_ptr: u64, addr_len: i32) -> Sys
     let port = u16::from_be_bytes([p0, p1]);
     let ip = [a0, a1, a2, a3];
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    match crate::net::socket::connect(h, &ip, port) {
-        Ok(()) => SyscallResult::ok(0),
+    // Honour the fd's O_NONBLOCK: a non-blocking connect returns EINPROGRESS
+    // immediately and the handshake completes in the background (the caller then
+    // poll(POLLOUT)s and reads getsockopt(SO_ERROR)).
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    match crate::net::socket::connect(h, &ip, port, nonblock) {
+        Ok(crate::net::socket::ConnectOutcome::Established) => SyscallResult::ok(0),
+        // Non-blocking handshake pending → Linux EINPROGRESS.
+        Ok(crate::net::socket::ConnectOutcome::InProgress) => linux_err(errno::EINPROGRESS),
         // Already connected → Linux EISCONN.
         Err(crate::error::KernelError::AlreadyExists) => linux_err(errno::EISCONN),
+        // A non-blocking connect already in progress → Linux EALREADY.
+        Err(crate::error::KernelError::ConnectAlready) => linux_err(errno::EALREADY),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
@@ -36865,6 +36895,48 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 4) {
         return linux_err(linux_errno_for(e));
+    }
+    // Path B userspace-netstack cutover: for a real daemon-backed AF_INET socket,
+    // serve getsockopt(SOL_SOCKET, SO_ERROR) — the getsockopt a non-blocking
+    // connect()er issues after poll(POLLOUT) to learn the handshake outcome.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let optname = args.arg2 as i32;
+    if crate::net::netstack_client::userspace_enabled()
+        && level == sol::SOL_SOCKET
+        && optname == so::SO_ERROR
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        // optval must be able to hold an int (4 bytes).
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        let so_err = match crate::net::socket::take_so_error(h) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        // Write the errno (int) into optval and set *optlen = 4.
+        let err_bytes = so_err.to_ne_bytes();
+        // SAFETY: validated 4 writable bytes at optval above; copy_to_user re-checks.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(err_bytes.as_ptr(), args.arg3, 4)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let four = 4u32.to_ne_bytes();
+        // SAFETY: validated 4 writable bytes at optlen above; copy_to_user re-checks.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(four.as_ptr(), args.arg4, 4)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        return SyscallResult::ok(0);
     }
     // optval is optional (we'd need to read *optlen to know how much
     // to validate — skip the buffer check in kernel context).

@@ -43,18 +43,29 @@ safe. Where it bites: any future userspace-to-userspace SHM use.
 Known limitations, all deliberate for the 5.5 increment and to be closed as
 Phase 5 progresses:
 
-- **`O_NONBLOCK` receive is now honoured (5.6+); send/connect still block.** The
-  read side no longer stalls: `recvfrom`/`read` on a socket with `O_NONBLOCK` set
-  pass the new `netipc::ring::RECV_NONBLOCK` flag to the daemon, which drains
+- **`O_NONBLOCK` receive and connect are now honoured (5.6+); send still blocks.**
+  The read side no longer stalls: `recvfrom`/`read` on a socket with `O_NONBLOCK`
+  set pass the new `netipc::ring::RECV_NONBLOCK` flag to the daemon, which drains
   already-arrived frames once and returns `ERR_WOULD_BLOCK` (→ `KernelError::
   WouldBlock` → `EAGAIN`) rather than polling for the full receive deadline
   (`dispatch_socket_read` → `net::socket::recv(_, nonblock)` →
-  `NetstackConn::recv(_, nonblock)`; daemon `ring_tcp_recv`). Boot-validated: the
-  persistent-daemon parity check does a non-blocking recv on a freshly-connected
-  idle socket and gets `WouldBlock` promptly (`netstack_client::
-  self_test_nonblock_recv`). **Still synchronous:** `connect` and `send` block
-  until the daemon replies (a non-blocking connect/EINPROGRESS handshake and
-  send-side EAGAIN are not yet implemented).
+  `NetstackConn::recv(_, nonblock)`; daemon `ring_tcp_recv`). **Non-blocking
+  connect is now implemented (5.6+):** `connect` on an `O_NONBLOCK` socket passes
+  `netipc::ring::CONNECT_NONBLOCK`; the daemon transmits the SYN and returns
+  `ERR_IN_PROGRESS` (→ `EINPROGRESS`) without waiting, holding the connection in
+  `SYN_SENT`. It completes the handshake in the background (the SYN-ACK is
+  processed by `ingest_seg` via the RX pump on a later `OP_POLL`/`OP_RECV`, and
+  `poll_connect` retransmits a lost SYN up to `TCP_SYN_ATTEMPTS`). The socket
+  enters `SockState::Connecting`; a `poll(POLLOUT)` re-probes via `OP_POLL`, whose
+  new `POLL_ERR`/`POLL_WRITABLE` bits drive the transition to `Connected`
+  (writable) or `Failed` (writable+`POLLERR`). `getsockopt(SOL_SOCKET, SO_ERROR)`
+  then reports `0` (success) or `ECONNREFUSED` (`net::socket::take_so_error`,
+  one-shot). A repeated non-blocking `connect` while pending returns `EALREADY`;
+  on an established socket, `EISCONN`. Boot-validated: `netstack_client::
+  self_test_nonblock_connect` runs the EINPROGRESS→POLLOUT sequence over the live
+  daemon. **Still synchronous:** the *send* side blocks until the daemon replies
+  (send-side EAGAIN on a full window is not yet implemented); a send/recv on a
+  still-connecting socket is rejected (`ENOTCONN`) rather than buffered.
 - **`poll`/`epoll` read readiness is now honest (5.6+).** A connected socket's
   `POLLIN`/`POLLOUT` are computed from a real non-destructive probe rather than
   the old "always-ready" placeholder: `poll_revents_from_entry`'s `Socket` arm
@@ -85,12 +96,13 @@ Phase 5 progresses:
 
 Proper fix path: 5.6+ makes the daemon persistent/always-on and grows the ring
 client to async multi-stream, at which point nonblock/poll/listen/IPv6 become
-implementable. **Progress:** the persistent daemon landed (5.6) and the
-`O_NONBLOCK` *receive* path is now honoured, and honest `poll`/`epoll` read
-readiness landed via the non-destructive `OP_POLL` peek (see the updated bullets
-above); remaining before the 5.7 default-flip: non-blocking connect/send,
-listen/accept server sockets, and IPv6 connect (needs IPv6 + neighbour discovery
-in the daemon, currently IPv4-only).
+implementable. **Progress:** the persistent daemon landed (5.6); the `O_NONBLOCK`
+*receive* path is honoured; honest `poll`/`epoll` read readiness landed via the
+non-destructive `OP_POLL` peek; and **non-blocking `connect` (EINPROGRESS →
+`poll(POLLOUT)` → `getsockopt(SO_ERROR)`) now works** (see the updated bullets
+above). Remaining before the 5.7 default-flip: send-side EAGAIN, listen/accept
+server sockets, and IPv6 connect (needs IPv6 + neighbour discovery in the daemon,
+currently IPv4-only).
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 

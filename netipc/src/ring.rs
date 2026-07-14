@@ -94,7 +94,11 @@ pub const CQE_SIZE: usize = 16;
 /// No-op submission (used by tests / keepalive); completes with result 0.
 pub const OP_NOP: u8 = 0x00;
 /// Open a TCP connection to `aux` (`[ip:4][port_be:2]` in the low 6 bytes).
-/// Completion `result` is the new connection id, or a negative errno.
+/// Completion `result` is `0` on success (connection established), or a negative
+/// errno. If [`CONNECT_NONBLOCK`] is set in `aux` (bit 48, above the endpoint
+/// bytes), the daemon starts the handshake and returns immediately: `0` if it
+/// completed synchronously, else [`ERR_IN_PROGRESS`] (the caller then polls the
+/// connection via [`OP_POLL`] for `POLL_WRITABLE`/`POLL_ERR`).
 pub const OP_CONNECT: u8 = 0x01;
 /// Send `data_len` bytes (at `data_off`) on connection `conn_id`.
 /// Completion `result` is bytes accepted, or a negative errno.
@@ -115,10 +119,12 @@ pub const OP_STOP: u8 = 0x05;
 /// Report the readiness of connection `conn_id` **without consuming any data**
 /// (a non-destructive peek). The daemon drains any already-arrived frames into
 /// the connection's receive buffer exactly once (like the non-blocking `OP_RECV`
-/// probe) and then completes with a non-negative readiness bitmask built from
-/// [`POLL_READABLE`] / [`POLL_WRITABLE`], or a negative errno (`-1` = unknown
-/// connection). No bytes are moved into the data area and the receive buffer is
-/// left intact, so a subsequent `OP_RECV` still returns the same bytes. This is
+/// probe) — which also drives an in-flight non-blocking connect's handshake to
+/// completion — and then completes with a non-negative readiness bitmask built
+/// from [`POLL_READABLE`] / [`POLL_WRITABLE`] / [`POLL_ERR`], or a negative errno
+/// (`-1` = unknown connection). No bytes are moved into the data area and the
+/// receive buffer is left intact, so a subsequent `OP_RECV` still returns the
+/// same bytes. This is
 /// what lets the kernel report an *honest* `POLLIN`/`POLLOUT` for a daemon-backed
 /// socket instead of the old "always ready" placeholder — migration Phase 5,
 /// closing part of the `D-NETSOCK-SYNC` parity gap.
@@ -142,6 +148,23 @@ pub const OP_POLL: u8 = 0x06;
 /// migration Phase 5, closing part of the `D-NETSOCK-SYNC` parity gap.
 pub const RECV_NONBLOCK: u64 = 1 << 0;
 
+/// [`OP_CONNECT`] `aux` flag: perform a **non-blocking** connect.
+///
+/// The endpoint is packed into the low 48 bits of `aux` (`[ip:4][port_be:2]`, see
+/// [`Sqe::pack_endpoint`]), leaving the high 16 bits free for flags. This flag
+/// lives in bit 48. When set, the daemon transmits the SYN, registers the
+/// connection in the `SYN_SENT` state, and completes immediately with either `0`
+/// (handshake already finished) or [`ERR_IN_PROGRESS`]; the handshake is then
+/// driven to completion by the RX pump on subsequent [`OP_POLL`] / [`OP_RECV`]
+/// submissions. When clear, `OP_CONNECT` blocks until the handshake resolves (or
+/// fails) as before.
+///
+/// This is what lets the kernel honour `O_NONBLOCK` on `connect(2)` for a
+/// daemon-backed stream socket (returning `EINPROGRESS`, then `POLLOUT` +
+/// `getsockopt(SO_ERROR)`) — migration Phase 5, closing part of the
+/// `D-NETSOCK-SYNC` parity gap.
+pub const CONNECT_NONBLOCK: u64 = 1 << 48;
+
 /// Completion `result` sentinel: the operation would have blocked and the SQE
 /// requested non-blocking behaviour (e.g. [`OP_RECV`] with [`RECV_NONBLOCK`] set
 /// and no data available). Numerically mirrors Linux `-EAGAIN`; the kernel client
@@ -150,6 +173,13 @@ pub const RECV_NONBLOCK: u64 = 1 << 0;
 /// generic `-1` transport error so the three cases never alias.
 pub const ERR_WOULD_BLOCK: i32 = -11;
 
+/// Completion `result` sentinel: a non-blocking [`OP_CONNECT`]
+/// ([`CONNECT_NONBLOCK`]) has started the handshake but it is not yet complete.
+/// Numerically mirrors Linux `-EINPROGRESS`; the kernel maps it to
+/// `KernelError::InProgress` → the `connect(2)` `EINPROGRESS` errno. Distinct
+/// from `0` (established) and `-1` (could not start / no slot).
+pub const ERR_IN_PROGRESS: i32 = -115;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -157,8 +187,16 @@ pub const POLL_READABLE: i32 = 1 << 0;
 
 /// [`OP_POLL`] readiness bit: the connection is **writable** — it is connected
 /// and has room to accept at least some bytes for sending. Mirrors the sense of
-/// Linux `POLLOUT`.
+/// Linux `POLLOUT`. Also set once a non-blocking connect has *resolved* (whether
+/// it succeeded or failed) so a `POLLOUT`-waiting `connect(2)` wakes up.
 pub const POLL_WRITABLE: i32 = 1 << 1;
+
+/// [`OP_POLL`] readiness bit: the connection has an **error** condition — most
+/// commonly a non-blocking connect that was refused (RST) or timed out. Mirrors
+/// the sense of Linux `POLLERR`; the kernel surfaces the concrete error via
+/// `getsockopt(SO_ERROR)`. A `SYN_SENT` connection whose handshake is still in
+/// flight reports *neither* [`POLL_WRITABLE`] nor this bit (not yet ready).
+pub const POLL_ERR: i32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // Entry structs
@@ -408,6 +446,31 @@ mod tests {
         // A daemon readiness bitmask is non-negative, unlike the -1 error / EAGAIN.
         assert_ne!(POLL_READABLE | POLL_WRITABLE, ERR_WOULD_BLOCK);
         assert_ne!(POLL_READABLE | POLL_WRITABLE, -1);
+    }
+
+    #[test]
+    fn connect_nonblock_flag_and_progress_sentinel_are_distinct() {
+        // The CONNECT_NONBLOCK flag lives above the packed endpoint bits, so it
+        // must not disturb the endpoint round-trip and must survive serialization.
+        let ip = [93, 184, 216, 34];
+        let port = 443u16;
+        let aux = Sqe::pack_endpoint(&ip, port) | CONNECT_NONBLOCK;
+        let sqe = Sqe { op: OP_CONNECT, conn_id: 3, user_data: 7, aux, ..Sqe::default() };
+        let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+        assert_eq!(back.aux & CONNECT_NONBLOCK, CONNECT_NONBLOCK);
+        // The endpoint still unpacks correctly with the flag ORed in.
+        let (uip, uport) = Sqe::unpack_endpoint(back.aux);
+        assert_eq!(uip, ip);
+        assert_eq!(uport, port);
+        // The flag occupies a bit above the 48-bit endpoint window.
+        assert_eq!(CONNECT_NONBLOCK & 0x0000_FFFF_FFFF_FFFF, 0);
+        // The in-progress sentinel is distinct from all other result codes.
+        assert_ne!(ERR_IN_PROGRESS, 0);
+        assert_ne!(ERR_IN_PROGRESS, -1);
+        assert_ne!(ERR_IN_PROGRESS, ERR_WOULD_BLOCK);
+        // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
+        assert!(POLL_ERR > 0);
+        assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
     }
 
     #[test]

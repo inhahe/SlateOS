@@ -742,3 +742,35 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   parity, to be replaced by an edge-triggered readiness signal when the
   async-completion socket server lands. Remaining before the 5.7 flip: non-blocking
   connect/send, listen/accept, and IPv6 connect.
+
+- **[2026-07-14] Non-blocking connect (post-5.6, toward 5.7).** Third
+  D-NETSOCK-SYNC parity gap closed: `connect()` on an `O_NONBLOCK` AF_INET stream
+  socket now follows the Linux `EINPROGRESS → poll(POLLOUT) → getsockopt(SO_ERROR)`
+  dance instead of blocking through the handshake. Added ring ABI:
+  `netipc::ring::CONNECT_NONBLOCK` (an `OP_CONNECT` `aux` flag, bit 48 — above the
+  packed endpoint), `ERR_IN_PROGRESS` (-115, mirrors `-EINPROGRESS`), and a
+  `POLL_ERR` readiness bit. The daemon grew an async connect state machine: a new
+  `TcpConn::connect_start` transmits the SYN and returns a connection in `SYN_SENT`
+  (`established=false`) without waiting; `ingest_seg` gained a SYN_SENT branch that
+  completes the handshake when the SYN-ACK arrives (validated `ack == isn+1`, sends
+  the ACK, flips to established) or latches `connect_failed` on a RST; and
+  `poll_connect` retransmits a lost SYN up to `TCP_SYN_ATTEMPTS`, failing the
+  attempt when the budget is spent. `ring_tcp_poll` drives `poll_connect` each poll
+  and reports `POLL_ERR|POLL_WRITABLE` on failure, `POLL_WRITABLE`-only once
+  established, and neither while pending. On the kernel side: `NetstackConn::
+  connect(nonblock)` ORs the flag and treats `ERR_IN_PROGRESS` as a live
+  connection; `poll_ready` now returns `(readable, writable, error)`;
+  `net::socket` gained `SockState::Connecting`, a `connect(_, nonblock)` returning
+  `ConnectOutcome::{Established,InProgress}` (`EISCONN`/`EALREADY` for repeat
+  connects), a `poll_ready` that resolves `Connecting → Connected/Failed`, and
+  `take_so_error` (one-shot `SO_ERROR`, `Failed → ECONNREFUSED`). Syscalls:
+  `sys_connect` reads the fd's `O_NONBLOCK` and maps `InProgress → EINPROGRESS`;
+  `sys_getsockopt` serves `SOL_SOCKET/SO_ERROR` (writes the errno int + `optlen=4`);
+  the poll `Socket` arm sets `POLLERR` on the error bit; added errno
+  `EINPROGRESS=115`/`EALREADY=114`. Boot-validated switch-on: the persistent-daemon
+  parity block runs `netstack_client::self_test_nonblock_connect`, which issues a
+  non-blocking connect to `example.com:80` (`serial: "non-blocking connect returned
+  EINPROGRESS; polling for POLLOUT"` or `"…completed synchronously"`) and polls to
+  writable (`serial: "non-blocking connect resolved to writable (POLLOUT) — connect
+  parity ok"`). Switch-off boot unchanged (new code is switch-gated). Remaining
+  before the 5.7 flip: send-side EAGAIN, listen/accept, and IPv6 connect.

@@ -43,14 +43,24 @@ safe. Where it bites: any future userspace-to-userspace SHM use.
 Known limitations, all deliberate for the 5.5 increment and to be closed as
 Phase 5 progresses:
 
-- **`O_NONBLOCK` is not honoured.** The `NetstackConn` ring client is
-  synchronous — every `connect`/`send`/`recv` blocks until the daemon replies.
-  The flag round-trips correctly via the fd table (`fcntl` F_GETFL/F_SETFL) but
-  does not change blocking behaviour, and `poll`/`epoll` readiness for a
-  connected socket is reported *best-effort always-ready* (POLLIN|POLLOUT) so
-  the subsequent read/write does the real, possibly-blocking work. Proper fix:
-  async ring completions + a real readiness signal (eventfd/completion port)
-  when the always-on socket server lands.
+- **`O_NONBLOCK` receive is now honoured (5.6+); send/connect still block.** The
+  read side no longer stalls: `recvfrom`/`read` on a socket with `O_NONBLOCK` set
+  pass the new `netipc::ring::RECV_NONBLOCK` flag to the daemon, which drains
+  already-arrived frames once and returns `ERR_WOULD_BLOCK` (→ `KernelError::
+  WouldBlock` → `EAGAIN`) rather than polling for the full receive deadline
+  (`dispatch_socket_read` → `net::socket::recv(_, nonblock)` →
+  `NetstackConn::recv(_, nonblock)`; daemon `ring_tcp_recv`). Boot-validated: the
+  persistent-daemon parity check does a non-blocking recv on a freshly-connected
+  idle socket and gets `WouldBlock` promptly (`netstack_client::
+  self_test_nonblock_recv`). **Still synchronous:** `connect` and `send` block
+  until the daemon replies (a non-blocking connect/EINPROGRESS handshake and
+  send-side EAGAIN are not yet implemented). And `poll`/`epoll` readiness for a
+  connected socket is still reported *best-effort always-ready* (POLLIN|POLLOUT):
+  there is no non-destructive readiness/peek op yet, so a poll-driven caller
+  relies on the now-correct `O_NONBLOCK` recv returning `EAGAIN` on a spurious
+  wakeup. Proper fix for the remaining gap: async ring completions + a real
+  readiness signal (eventfd/completion port) when the always-on socket server
+  lands.
 - **One connection per socket.** A socket wraps exactly one daemon TCP session;
   there is no `listen`/`accept` (server sockets) — only client `connect`.
 - **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
@@ -64,7 +74,12 @@ Phase 5 progresses:
 
 Proper fix path: 5.6+ makes the daemon persistent/always-on and grows the ring
 client to async multi-stream, at which point nonblock/poll/listen/IPv6 become
-implementable.
+implementable. **Progress:** the persistent daemon landed (5.6) and the
+`O_NONBLOCK` *receive* path is now honoured (see the updated bullet above);
+remaining before the 5.7 default-flip: non-blocking connect/send, honest
+poll/epoll readiness (needs a peek/readiness op), listen/accept server sockets,
+and IPv6 connect (needs IPv6 + neighbour discovery in the daemon, currently
+IPv4-only).
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 

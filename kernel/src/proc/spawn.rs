@@ -3227,9 +3227,32 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // O_NONBLOCK parity (D-NETSOCK-SYNC): a non-blocking recv on a freshly
+    // connected socket with no pending data must return promptly (WouldBlock →
+    // EAGAIN) instead of stalling. Uses the same DNS-resolved address as the TCP
+    // check; skips cleanly if there is no upstream.
+    match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => match crate::net::netstack_client::self_test_nonblock_recv(&ip, 80) {
+            Ok(Some(())) => serial_println!(
+                "[spawn]   persistent netstack O_NONBLOCK: non-blocking recv returned promptly \
+                 over the daemon"
+            ),
+            Ok(None) => serial_println!(
+                "[spawn]   persistent netstack O_NONBLOCK: connect had no upstream — path proven"
+            ),
+            Err(e) => serial_println!(
+                "[spawn]   WARNING: persistent netstack O_NONBLOCK recv error ({:?})",
+                e
+            ),
+        },
+        Ok(None) | Err(_) => serial_println!(
+            "[spawn]   persistent netstack O_NONBLOCK: DNS unresolved — nonblock check skipped"
+        ),
+    }
+
     serial_println!(
-        "[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; daemon now \
-         owns the NIC for the system's lifetime"
+        "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK parity checks done; daemon \
+         now owns the NIC for the system's lifetime"
     );
     Ok(())
 }

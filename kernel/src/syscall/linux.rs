@@ -3724,6 +3724,9 @@ fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 /// Socket read — receive up to `cap` bytes from the daemon-backed stream socket
 /// via [`crate::net::socket::recv`] and copy them to the user buffer.  Returns
 /// the number of bytes received (`0` = peer closed / no data).
+///
+/// Honours the fd's `O_NONBLOCK` status flag: when set, a receive with no data
+/// ready returns `-EAGAIN` instead of blocking on the daemon.
 fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     if cap == 0 {
         return SyscallResult::ok(0);
@@ -3734,7 +3737,8 @@ fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     }
     let mut kbuf = alloc::vec![0u8; cap_usize];
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    let n = match crate::net::socket::recv(h, &mut kbuf) {
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let n = match crate::net::socket::recv(h, &mut kbuf, nonblock) {
         Ok(v) => v,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
@@ -36514,10 +36518,11 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
         return r;
     }
     // Path B: `recv(2)`/`recvfrom(2)` on a connected daemon-backed stream socket
-    // returns bytes from the daemon.  The optional source-address out-params
-    // (args.arg4 / args.arg5) are left untouched — a connected stream socket's
-    // peer is fixed and most callers pass NULL (documented limitation).  MSG_*
-    // flags (args.arg3) are not yet honoured.
+    // returns bytes from the daemon.  The fd's `O_NONBLOCK` status flag is honoured
+    // (no data ready → EAGAIN, via dispatch_socket_read).  The optional
+    // source-address out-params (args.arg4 / args.arg5) are left untouched — a
+    // connected stream socket's peer is fixed and most callers pass NULL
+    // (documented limitation).  MSG_* flags (args.arg3) are not yet honoured.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket

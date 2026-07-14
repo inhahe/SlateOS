@@ -1847,6 +1847,11 @@ fn ring_pump(conns: &mut RingConns, me: &IfInfo) -> bool {
 /// back into the SQE's data window. Returns bytes received (0 = empty response /
 /// EOF), or `-1` on a missing connection or window error.
 ///
+/// If `sqe.aux` has [`netipc::ring::RECV_NONBLOCK`] set, the receive is
+/// non-blocking: the RX pump is drained exactly once and, if the target still has
+/// no buffered data and the stream is open, [`netipc::ring::ERR_WOULD_BLOCK`] is
+/// returned instead of polling — this is how the kernel honours `O_NONBLOCK`.
+///
 /// Unlike the single-connection [`TcpConn::recv`], this routes through
 /// [`ring_pump`] rather than a 4-tuple-filtered read, so concurrent connections on
 /// the same ring can all receive without starving one another (D-NETSTACK-RX-DEMUX).
@@ -1860,29 +1865,43 @@ fn ring_tcp_recv(
     if conns.get_mut(target_id).is_none() {
         return -1; // no such connection
     }
-    let mut idle = 0u32;
-    let mut retransmits = 0u32;
-    loop {
-        // Stop once the target's stream has ended or we've waited long enough.
+    if sqe.aux & netipc::ring::RECV_NONBLOCK != 0 {
+        // Non-blocking receive (kernel honouring O_NONBLOCK): drain whatever has
+        // already arrived exactly once, then decide immediately — never poll for
+        // the full receive deadline. If nothing is buffered and the stream is
+        // still open, report WOULD_BLOCK so the kernel returns EAGAIN; a buffered
+        // segment (or EOF) falls through to the shared copy-out below.
+        ring_pump(conns, me);
         match conns.get_mut(target_id) {
-            Some(c) if c.peer_fin => break,
+            Some(c) if c.rx_len == 0 && !c.peer_fin => return netipc::ring::ERR_WOULD_BLOCK,
             Some(_) => {}
-            None => break, // connection vanished (shouldn't happen mid-recv)
+            None => return -1,
         }
-        if idle >= TCP_DATA_ITERS {
-            break;
-        }
-        if ring_pump(conns, me) {
-            idle = 0;
-        } else {
-            idle = idle.saturating_add(1);
-            if conns
-                .get_mut(target_id)
-                .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
-            {
-                idle = 0;
+    } else {
+        let mut idle = 0u32;
+        let mut retransmits = 0u32;
+        loop {
+            // Stop once the target's stream has ended or we've waited long enough.
+            match conns.get_mut(target_id) {
+                Some(c) if c.peer_fin => break,
+                Some(_) => {}
+                None => break, // connection vanished (shouldn't happen mid-recv)
             }
-            sleep_ns(POLL_SLEEP_NS);
+            if idle >= TCP_DATA_ITERS {
+                break;
+            }
+            if ring_pump(conns, me) {
+                idle = 0;
+            } else {
+                idle = idle.saturating_add(1);
+                if conns
+                    .get_mut(target_id)
+                    .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
+                {
+                    idle = 0;
+                }
+                sleep_ns(POLL_SLEEP_NS);
+            }
         }
     }
     let off = sqe.data_off as usize;

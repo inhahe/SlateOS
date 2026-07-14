@@ -114,6 +114,32 @@ pub const OP_CLOSE: u8 = 0x04;
 pub const OP_STOP: u8 = 0x05;
 
 // ---------------------------------------------------------------------------
+// Op flags (carried in [`Sqe::aux`]) and result sentinels
+// ---------------------------------------------------------------------------
+
+/// [`OP_RECV`] `aux` flag: perform a **non-blocking** receive.
+///
+/// When set, the daemon drains any already-arrived frames exactly once and then
+/// returns immediately: if the connection has buffered in-order bytes (or has hit
+/// EOF) it completes normally (bytes received, or `0` on EOF); otherwise — no data
+/// yet, stream still open — it completes with [`ERR_WOULD_BLOCK`] instead of
+/// polling for the full receive deadline. When clear, `OP_RECV` blocks (polls) up
+/// to the daemon's receive deadline as before.
+///
+/// This is what lets the kernel honour `O_NONBLOCK` on a daemon-backed stream
+/// socket (`recv`/`read` return `EAGAIN` rather than stalling the caller) —
+/// migration Phase 5, closing part of the `D-NETSOCK-SYNC` parity gap.
+pub const RECV_NONBLOCK: u64 = 1 << 0;
+
+/// Completion `result` sentinel: the operation would have blocked and the SQE
+/// requested non-blocking behaviour (e.g. [`OP_RECV`] with [`RECV_NONBLOCK`] set
+/// and no data available). Numerically mirrors Linux `-EAGAIN`; the kernel client
+/// maps it to `KernelError::WouldBlock`, which the `recv(2)`/`read(2)` path
+/// reports as the `EAGAIN` errno. Distinct from `0` (peer EOF) and from the
+/// generic `-1` transport error so the three cases never alias.
+pub const ERR_WOULD_BLOCK: i32 = -11;
+
+// ---------------------------------------------------------------------------
 // Entry structs
 // ---------------------------------------------------------------------------
 
@@ -313,6 +339,29 @@ mod tests {
     #[test]
     fn sqe_from_short_is_none() {
         assert!(Sqe::from_bytes(&[0u8; SQE_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn recv_nonblock_flag_round_trips_and_is_distinct() {
+        // The non-blocking flag rides in `aux`, orthogonal to the endpoint
+        // packing used by OP_CONNECT, and must survive serialization.
+        let sqe = Sqe {
+            op: OP_RECV,
+            conn_id: 1,
+            data_off: 1024,
+            data_len: 512,
+            user_data: 0x4e53_434c_0000_0007,
+            aux: RECV_NONBLOCK,
+        };
+        let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+        assert_eq!(back.aux & RECV_NONBLOCK, RECV_NONBLOCK);
+        assert_eq!(sqe, back);
+        // A cleared flag must not read as set (blocking recv path).
+        let blocking = Sqe { aux: 0, ..sqe };
+        assert_eq!(blocking.aux & RECV_NONBLOCK, 0);
+        // The would-block sentinel must not collide with EOF or the generic error.
+        assert_ne!(ERR_WOULD_BLOCK, 0);
+        assert_ne!(ERR_WOULD_BLOCK, -1);
     }
 
     #[test]

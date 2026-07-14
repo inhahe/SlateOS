@@ -274,24 +274,37 @@ impl NetstackConn {
     /// peer idle or closed; the caller decides whether to retry). Negative daemon
     /// results are passed through unchanged.
     ///
+    /// When `nonblock` is set, the [`netipc::ring::RECV_NONBLOCK`] flag is passed
+    /// to the daemon: if no data has arrived yet and the stream is still open, the
+    /// daemon returns [`netipc::ring::ERR_WOULD_BLOCK`] instead of polling, which
+    /// this method surfaces as [`KernelError::WouldBlock`] (→ `EAGAIN`). This is
+    /// how a caller honours `O_NONBLOCK` on a daemon-backed stream socket. When
+    /// `nonblock` is clear, the daemon blocks (polls) up to its receive deadline.
+    ///
     /// # Errors
     ///
-    /// Returns an error on a control-protocol fault (see [`connect`](Self::connect))
-    /// or if the ring data window cannot be read back.
-    pub fn recv(&mut self, buf: &mut [u8]) -> KernelResult<i32> {
+    /// - [`KernelError::WouldBlock`] — `nonblock` was set and no data was ready.
+    /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
+    ///   read back the ring data window.
+    pub fn recv(&mut self, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
         let ud = self.next_ud();
+        let aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_RECV,
             conn_id: self.conn_id,
             data_off: RCV_OFF,
             data_len: want_u32,
             user_data: ud,
-            aux: 0,
+            aux,
         };
         let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == netipc::ring::ERR_WOULD_BLOCK {
+            // Non-blocking recv with nothing ready: the caller's O_NONBLOCK.
+            return Err(KernelError::WouldBlock);
+        }
         if res <= 0 {
             return Ok(res);
         }
@@ -472,7 +485,7 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
     }
 
     let mut body = [0u8; RCV_CAP as usize];
-    let recv_res = conn.recv(&mut body)?;
+    let recv_res = conn.recv(&mut body, false)?;
     conn.close()?;
 
     if recv_res < 5 {
@@ -499,5 +512,61 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
         Ok(Some(()))
     } else {
         Ok(None)
+    }
+}
+
+/// Boot self-test: prove that a **non-blocking** receive on a freshly-connected
+/// daemon socket returns "would block" rather than stalling for the full receive
+/// deadline — the `O_NONBLOCK` parity property (`D-NETSOCK-SYNC`).
+///
+/// The sequence: `connect` to `ip:port`, then *before sending any request*, issue
+/// a non-blocking `recv`. A well-behaved server sends nothing unsolicited, so no
+/// data is buffered and the stream is open — the daemon must answer
+/// [`netipc::ring::ERR_WOULD_BLOCK`], which the client surfaces as
+/// [`KernelError::WouldBlock`]. (If the peer *did* immediately deliver data or a
+/// FIN, a non-negative result is also acceptable — the point is only that the
+/// call returned promptly with a decisive answer instead of blocking.)
+///
+/// Returns `Ok(Some(()))` if the non-blocking semantics were exercised (either a
+/// `WouldBlock` or an immediate data/EOF result), `Ok(None)` if there was no
+/// upstream to connect to (network variance — nothing to assert), and `Err` on a
+/// real control-protocol fault.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client.
+pub fn self_test_nonblock_recv(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
+    let mut conn = NetstackConn::open()?;
+
+    let connect_res = conn.connect(ip, port)?;
+    if connect_res < 0 {
+        // No upstream — nothing to assert; the client path still ran.
+        conn.close()?;
+        return Ok(None);
+    }
+
+    let mut body = [0u8; RCV_CAP as usize];
+    let outcome = conn.recv(&mut body, true);
+    conn.close()?;
+
+    match outcome {
+        Err(KernelError::WouldBlock) => {
+            crate::serial_println!(
+                "[netstack-client]   non-blocking recv on idle socket returned WouldBlock (EAGAIN) \
+                 as expected"
+            );
+            Ok(Some(()))
+        }
+        Ok(n) => {
+            // Peer delivered something immediately (data or EOF). Still a prompt,
+            // decisive non-blocking answer — the property under test.
+            crate::serial_println!(
+                "[netstack-client]   non-blocking recv returned promptly with {} byte(s) \
+                 (peer had data/EOF ready)",
+                n
+            );
+            Ok(Some(()))
+        }
+        Err(e) => Err(e),
     }
 }

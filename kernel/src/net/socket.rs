@@ -120,8 +120,9 @@ static SOCKET_TABLE: Mutex<BTreeMap<SocketId, SocketSlot>> = Mutex::new(BTreeMap
 /// Allocates the SHM ring backing the daemon connection but does **not** contact
 /// the daemon yet — that happens on [`connect`]. The `O_NONBLOCK` flag is *not*
 /// tracked here: it lives authoritatively in the Linux fd table's status flags
-/// (`fcntl(F_GETFL/F_SETFL)`), and — because the daemon client is currently
-/// synchronous — does not yet alter blocking behaviour (see known-issues).
+/// (`fcntl(F_GETFL/F_SETFL)`). It now alters *receive* behaviour — a nonblocking
+/// `recv`/`read` returns `EAGAIN` rather than blocking (see [`recv`]) — but
+/// `connect`/`send` are still synchronous (see known-issues D-NETSOCK-SYNC).
 ///
 /// # Errors
 ///
@@ -243,18 +244,23 @@ pub fn send(handle: SocketHandle, buf: &[u8]) -> KernelResult<i32> {
 /// Receive up to `buf.len()` bytes on a connected socket. Returns the number of
 /// bytes copied (`0` = peer closed / no data).
 ///
+/// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a receive with no
+/// data ready returns [`KernelError::WouldBlock`] (→ `EAGAIN`) instead of blocking
+/// on the daemon; otherwise it blocks up to the daemon's receive deadline.
+///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `NotConnected` — the socket is not connected.
+/// - `WouldBlock` — `nonblock` was set and no data was ready.
 /// - protocol faults propagated from [`NetstackConn::recv`].
-pub fn recv(handle: SocketHandle, buf: &mut [u8]) -> KernelResult<i32> {
+pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.recv(buf)
+    guard.conn.recv(buf, nonblock)
 }
 
 /// Whether the socket is currently connected.

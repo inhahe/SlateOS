@@ -694,3 +694,26 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   DNS+TCP+UDP parity is green with the NIC owned for the system's lifetime;
   with the cmdline removed the switch reads **off** and the resident stack stays
   authoritative — both paths pass all boot self-tests.
+
+- **[2026-07-14] O_NONBLOCK receive parity (post-5.6, toward 5.7).** First
+  D-NETSOCK-SYNC parity gap closed: the daemon-backed stream socket now honours
+  `O_NONBLOCK` on the *receive* side. Previously the ring client was fully
+  synchronous — a `recv` on a socket with `O_NONBLOCK` set still blocked the
+  caller until the daemon's receive deadline. Added a `netipc::ring::RECV_NONBLOCK`
+  flag (carried in the `OP_RECV` SQE `aux`, orthogonal to `OP_CONNECT`'s endpoint
+  packing) and an `ERR_WOULD_BLOCK` (-11) completion sentinel. The daemon's
+  `ring_tcp_recv` reads the flag: on a non-blocking recv it drains the shared RX
+  pump exactly once, and if the target connection has no buffered in-order bytes
+  and the stream is still open it returns `ERR_WOULD_BLOCK` instead of polling.
+  The kernel plumbs it through `NetstackConn::recv(_, nonblock)` →
+  `net::socket::recv(_, nonblock)` → `dispatch_socket_read` (which reads the fd's
+  `O_NONBLOCK` status flag), mapping the sentinel to `KernelError::WouldBlock` →
+  `EAGAIN`. Boot-validated switch-on: the persistent-daemon parity block runs a
+  new `netstack_client::self_test_nonblock_recv` that connects to `example.com:80`
+  and, before sending any request, issues a non-blocking recv — the server sends
+  nothing unsolicited, so the daemon returns WouldBlock and the socket reports
+  EAGAIN promptly (`serial: "non-blocking recv on idle socket returned WouldBlock
+  (EAGAIN) as expected"`). Switch-off boot unchanged (daemon not spawned; new
+  code is switch-gated). Still synchronous, remaining before the 5.7 flip:
+  non-blocking connect/send, honest poll/epoll readiness (needs a non-destructive
+  peek op), listen/accept, and IPv6 connect.

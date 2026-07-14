@@ -2885,11 +2885,13 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         None => Ok(None),
     };
 
-    // Persistent-session variant: one connection driven across THREE separate
-    // OP_RING_TCP control calls (connect / send+recv / close+stop), proving the
-    // daemon's ring session survives between submissions.
+    // Persistent-session variant, driven through the reusable kernel
+    // `NetstackConn` client: one connection driven across separate OP_RING_TCP
+    // control calls (connect / send / recv / close), proving the daemon's ring
+    // session survives between submissions. This exercises the same reusable
+    // client the AF_INET socket layer (increment 5.5) will sit on.
     let ring_tcp_persist_result = match a_ip {
-        Some(ip) => netstack_ring_tcp_persist_roundtrip(&ip, 80),
+        Some(ip) => crate::net::netstack_client::self_test_http(&ip, 80),
         None => Ok(None),
     };
 
@@ -2989,20 +2991,27 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
 
     match ring_tcp_persist_result {
         Ok(Some(())) => serial_println!(
-            "[spawn]   netstack ring-TCP-persist-over-IPC (ring 3): OK — one connection driven \
-             across three separate OP_RING_TCP calls (daemon kept the ring session + TcpConn \
-             alive between submissions; connect in round 1, send/recv in round 2, close in \
-             round 3)"
+            "[spawn]   netstack client-persist-over-IPC (ring 3): OK — one connection driven \
+             through the reusable NetstackConn client across separate OP_RING_TCP calls \
+             (connect / send / recv / close; the daemon kept the ring session + TcpConn alive \
+             between submissions)"
         ),
         Ok(None) => serial_println!(
-            "[spawn]   netstack ring-TCP-persist-over-IPC (ring 3): session persisted across 3 \
+            "[spawn]   netstack client-persist-over-IPC (ring 3): session persisted across \
              submissions, no/short response (no upstream?) — path proven"
         ),
         Err(e) => {
-            serial_println!("[spawn]   FAIL: ring-TCP-persist IPC round-trip error ({:?})", e);
+            serial_println!("[spawn]   FAIL: client-persist IPC round-trip error ({:?})", e);
             return Err(e);
         }
     }
+
+    // Report the staged-cutover boot switch (design-decisions.md §66, Q22b).
+    // Default off: the kernel keeps its resident stack until this is flipped.
+    serial_println!(
+        "[spawn]   net.userspace cutover switch: {} (default off; resident stack still authoritative)",
+        if crate::net::netstack_client::userspace_enabled() { "ON" } else { "off" }
+    );
 
     match ring_tcp_demux_result {
         Ok(Some(())) => serial_println!(
@@ -4037,292 +4046,6 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
         Err(e) => return finish(handle, Err(e)),
     };
     if ok7 && ok9 {
-        finish(handle, Ok(Some(())))
-    } else {
-        finish(handle, Ok(None))
-    }
-}
-
-/// Ring-3 end-to-end test of the daemon's **persistent ring session**: a single
-/// connection driven across *three separate* `OP_RING_TCP` control calls.
-///
-/// Where [`netstack_ring_tcp_roundtrip`] submits the whole connect→send→recv→close
-/// batch in one control call, this proves the daemon keeps the mapped ring and its
-/// per-connection table (`RingSession`) alive *between* calls, so a connection
-/// opened in one submission is still addressable in the next:
-///
-/// ```text
-/// round 1 (OP_RING_TCP): CONNECT#7                 // open the connection
-/// round 2 (OP_RING_TCP): SEND#7, RECV#7            // drive the SAME conn
-/// round 3 (OP_RING_TCP): CLOSE#7, OP_STOP          // close conn + end session
-/// ```
-///
-/// Each round is a fresh `net.stack` service connection; the kernel keeps the one
-/// shared ring mapped across all three. The load-bearing assertion is that round
-/// 2's `SEND#7` succeeds: if the daemon had torn its session down after round 1
-/// (the old one-shot behaviour), `conn_id 7` would be gone and the send would
-/// complete `-1` (no such connection). A non-negative send therefore proves the
-/// session persisted across submissions — the shape the persistent socket daemon
-/// needs.
-///
-/// Returns `Ok(Some(()))` if the persisted connection returned an HTTP response,
-/// `Ok(None)` if there was no upstream (connect failed / short response) — the
-/// persistence path is still proven — and `Err` on a real protocol fault
-/// (missing/out-of-order completion, a lost connection between rounds, etc.).
-fn netstack_ring_tcp_persist_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
-    use crate::ipc::{channel, service, shm};
-
-    const HTTP_REQ: &[u8] = b"HEAD / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
-    const RECV_OFF: u32 = 512;
-    const RECV_CAP: u32 = 512;
-    // Single connection reused across all three rounds.
-    const CID: u32 = 7;
-    // user_data base ("RTCS" = ring-TCP-session); each SQE gets UD + a distinct
-    // index so we can confirm FIFO completion order within each round.
-    const UD: u64 = 0x5254_4353_0000_0000;
-
-    let sq_entries: u32 = 8;
-    let cq_entries: u32 = 8;
-    let data_len: u32 = RECV_OFF + RECV_CAP;
-    let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
-
-    let handle = shm::create(need)?;
-    let size = shm::size(handle)?;
-    let finish = |h: shm::ShmHandle, r: KernelResult<Option<()>>| -> KernelResult<Option<()>> {
-        shm::close(h);
-        r
-    };
-
-    let kaddr = match shm::kernel_addr(handle) {
-        Ok(p) => p,
-        Err(e) => return finish(handle, Err(e)),
-    };
-
-    // SAFETY: kaddr is valid+writable for `size` (>= need) bytes; no other party
-    // touches the region until the daemon attaches (strictly after each send).
-    let ring = match unsafe { netring::Ring::init(kaddr, size, sq_entries, cq_entries, data_len) } {
-        Some(r) => r,
-        None => return finish(handle, Err(KernelError::InternalError)),
-    };
-    if !ring.write_data(0, HTTP_REQ) {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let req_len = HTTP_REQ.len() as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let size_u32 = size as u32;
-
-    // Drive one OP_RING_TCP control round over a fresh service channel: the daemon
-    // drains whatever SQEs we have queued into the shared ring — against its
-    // *persistent* session — and posts one completion each.
-    let submit_round = || -> KernelResult<()> {
-        let client = service::connect(b"net.stack")?;
-        let mut req = [0u8; 16];
-        let n = match netipc::encode_ring_tcp(&mut req, handle.raw(), size_u32) {
-            Some(n) => n,
-            None => {
-                channel::close(client);
-                return Err(KernelError::InternalError);
-            }
-        };
-        let encoded = match req.get(..n) {
-            Some(s) => s,
-            None => {
-                channel::close(client);
-                return Err(KernelError::InternalError);
-            }
-        };
-        let msg = match channel::Message::from_bytes(encoded) {
-            Ok(m) => m,
-            Err(e) => {
-                channel::close(client);
-                return Err(e);
-            }
-        };
-        if let Err(e) = channel::send(client, msg) {
-            channel::close(client);
-            return Err(e);
-        }
-        let reply = match channel::recv_timeout(client, 12_000_000_000) {
-            Ok(m) => m,
-            Err(e) => {
-                channel::close(client);
-                return Err(e);
-            }
-        };
-        channel::close(client);
-        match netipc::parse_bytes_reply(reply.data()) {
-            netipc::BytesReply::Ok(_) => Ok(()),
-            netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
-                Err(KernelError::InternalError)
-            }
-        }
-    };
-
-    // Reap exactly one completion, verifying its echoed user_data.
-    let reap = |want_ud: u64| -> KernelResult<i32> {
-        let cqe = match ring.cq_pop() {
-            Some(c) => c,
-            None => return Err(KernelError::InternalError),
-        };
-        if cqe.user_data != want_ud {
-            return Err(KernelError::InternalError);
-        }
-        Ok(cqe.result)
-    };
-
-    // A best-effort STOP round so the daemon drops its session on early exits
-    // (it also tears down on its own idle deadline, so ignore any error here).
-    let stop_session = |ud: u64| {
-        let stop = netipc::ring::Sqe {
-            op: netipc::ring::OP_STOP,
-            user_data: ud,
-            ..netipc::ring::Sqe::default()
-        };
-        if ring.sq_push(&stop) && submit_round().is_ok() {
-            let _ = ring.cq_pop(); // discard the STOP completion
-        }
-    };
-
-    // ---- Round 1: open the connection (CONNECT#7). ------------------------
-    let connect_sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_CONNECT,
-        conn_id: CID,
-        user_data: UD,
-        aux: netipc::ring::Sqe::pack_endpoint(ip, port),
-        ..netipc::ring::Sqe::default()
-    };
-    if !ring.sq_push(&connect_sqe) {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    if let Err(e) = submit_round() {
-        return finish(handle, Err(e));
-    }
-    let connect_res = match reap(UD) {
-        Ok(r) => r,
-        Err(e) => return finish(handle, Err(e)),
-    };
-    if ring.cq_pop().is_some() {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    // No upstream: the connect failed. The persistence path (session survives the
-    // control call) is still exercised — close the session and report "no upstream".
-    if connect_res < 0 {
-        stop_session(UD.wrapping_add(9));
-        return finish(handle, Ok(None));
-    }
-
-    // ---- Round 2: drive the SAME connection (SEND#7, RECV#7). -------------
-    let send_sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_SEND,
-        conn_id: CID,
-        data_off: 0,
-        data_len: req_len,
-        user_data: UD.wrapping_add(1),
-        aux: 0,
-    };
-    let recv_sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_RECV,
-        conn_id: CID,
-        data_off: RECV_OFF,
-        data_len: RECV_CAP,
-        user_data: UD.wrapping_add(2),
-        aux: 0,
-    };
-    if !ring.sq_push(&send_sqe) || !ring.sq_push(&recv_sqe) {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    if let Err(e) = submit_round() {
-        return finish(handle, Err(e));
-    }
-    let send_res = match reap(UD.wrapping_add(1)) {
-        Ok(r) => r,
-        Err(e) => return finish(handle, Err(e)),
-    };
-    let recv_res = match reap(UD.wrapping_add(2)) {
-        Ok(r) => r,
-        Err(e) => return finish(handle, Err(e)),
-    };
-    if ring.cq_pop().is_some() {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    // The load-bearing assertion: a persisted connection must still accept the
-    // send. A negative result here means conn_id 7 was gone — i.e. the session did
-    // NOT survive between rounds — which is a real regression, not "no upstream".
-    if send_res < 0 {
-        serial_println!(
-            "[spawn]   ring-tcp-persist: send on persisted conn failed (result {}) — \
-             session did not survive across submissions",
-            send_res
-        );
-        stop_session(UD.wrapping_add(9));
-        return finish(handle, Err(KernelError::InternalError));
-    }
-
-    // ---- Round 3: close the connection + end the session. ----------------
-    let close_sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_CLOSE,
-        conn_id: CID,
-        user_data: UD.wrapping_add(3),
-        ..netipc::ring::Sqe::default()
-    };
-    let stop_sqe = netipc::ring::Sqe {
-        op: netipc::ring::OP_STOP,
-        user_data: UD.wrapping_add(4),
-        ..netipc::ring::Sqe::default()
-    };
-    if !ring.sq_push(&close_sqe) || !ring.sq_push(&stop_sqe) {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    if let Err(e) = submit_round() {
-        return finish(handle, Err(e));
-    }
-    let close_res = match reap(UD.wrapping_add(3)) {
-        Ok(r) => r,
-        Err(e) => return finish(handle, Err(e)),
-    };
-    let _stop_res = match reap(UD.wrapping_add(4)) {
-        Ok(r) => r,
-        Err(e) => return finish(handle, Err(e)),
-    };
-    if ring.cq_pop().is_some() {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    if close_res < 0 {
-        serial_println!("[spawn]   ring-tcp-persist: close failed (result {})", close_res);
-        return finish(handle, Err(KernelError::InternalError));
-    }
-
-    // A short/empty response means connected+sent but no data came back (slirp
-    // variance) — the persistence path is proven regardless.
-    if recv_res < 5 {
-        return finish(handle, Ok(None));
-    }
-
-    // Read the response the persisted connection produced in round 2 and verify
-    // it's HTTP.
-    #[allow(clippy::cast_sign_loss)]
-    let n = (recv_res as usize).min(RECV_CAP as usize);
-    let mut body = [0u8; RECV_CAP as usize];
-    let window = match body.get_mut(..n) {
-        Some(w) => w,
-        None => return finish(handle, Err(KernelError::InternalError)),
-    };
-    if !ring.read_data(RECV_OFF as usize, window) {
-        return finish(handle, Err(KernelError::InternalError));
-    }
-    if window.len() >= 5 && window.get(..5) == Some(b"HTTP/".as_slice()) {
-        let line_end = window
-            .iter()
-            .position(|&b| b == b'\r' || b == b'\n')
-            .unwrap_or(window.len().min(64));
-        let show = window.get(..line_end).unwrap_or(&[]);
-        serial_print!("[spawn]   ring-tcp-persist HTTP status = ");
-        for &b in show {
-            let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
-            serial_print!("{}", c as char);
-        }
-        serial_println!("");
         finish(handle, Ok(Some(())))
     } else {
         finish(handle, Ok(None))

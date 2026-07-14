@@ -39,6 +39,7 @@ pub mod ipv6;
 pub mod lldp;
 pub mod ndisc;
 pub mod netcat;
+pub mod netstack_client;
 pub mod netstat;
 pub mod mdns;
 pub mod ntp;

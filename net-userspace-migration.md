@@ -587,3 +587,22 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   open) — the socket-syscall forwarders + kernel-stack deletion; the daemon now has
   the persistent-lifetime shape *and* the concurrent-receive demux the always-on
   socket server needs.
+- 2026-07-14: Phase 5 increment 5.4 landed — **reusable kernel netstack client +
+  `net.userspace` boot switch.** Extracted the connect/send/recv/close ring-driving
+  logic that was hand-inlined in the `spawn.rs` persist self-test into a reusable
+  kernel module `kernel/src/net/netstack_client.rs`: a `NetstackConn` type owning
+  one SHM ring + one daemon TCP connection, with `open`/`connect`/`send`/`recv`/
+  `close` methods, each op a single `OP_RING_TCP` control round-trip against the
+  daemon's persistent session. Send chunks to ≤`SND_CAP`=1024 (daemon `TCP_SND_BUF`);
+  recv returns ≤`RCV_CAP`=512 (daemon `MSG_CAP`) per call; fixed data window
+  (SND_OFF=0/RCV_OFF=1024/data_len=1536, sq=cq=8). `Drop` tears the daemon session
+  down (best effort) and always releases the SHM. Added the staged-cutover boot
+  switch `netstack_client::userspace_enabled()` → `kernparam::is_set("net.userspace")`
+  (default **off**; §66 Q22b) — recorded/surfaced by the boot self-test only, no
+  socket routing yet. The single-connection persist self-test
+  (`netstack_ring_tcp_persist_roundtrip`) was **deleted** and replaced by
+  `netstack_client::self_test_http`, which drives the same connect→send→recv→close
+  through the reusable client (a successful send after a separate-round connect
+  still proves session persistence — no duplicate ring test). No syscall behavior
+  change. Next — 5.5: AF_INET SOCK_STREAM sockets in the Linux ABI backed by this
+  client, switch-gated.

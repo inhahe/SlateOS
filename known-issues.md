@@ -1326,7 +1326,20 @@ no recurrence. No unexpected WARNING/failed lines this boot (the only
 cycle detections, each followed by `OK`). **2026-07-02 (TD31 landed):** 4 further
 consecutive green boots (190/182/181/185 s) with zero self-test-failure lines —
 the dash script-from-stdin test passed on every one; no `InternalError`/`TimedOut`
-recurrence even with the added spawn/reap CGROUP traffic.
+recurrence even with the added spawn/reap CGROUP traffic. **2026-07-14 (bad
+flake streak under host load): 3 consecutive `--no-build` boots HUNG** (no BOOT_OK
+within 480 s) at three *different* spawn/reap points — run 1 mid ring-3 `dash`
+dirstat test, run 2 after the `test-restart-ct` container-init spawn (line 9289;
+same wedge the TD "symmetric cgroup accounting" entry documents), run 3 at a
+glibc-dynamic-exec page-cache fault for pid 165 (before any container code) — then
+**run 4 reached BOOT_OK in 136 s clean**. The three hangs were the pre-existing
+spawn/force-kill/reap SMP race, *not* a code regression: run 3 wedged before the
+container subsystem even ran, and the runs were competing for host CPU with
+concurrent cargo builds + overlapping QEMU instances (the race is host-timing
+sensitive, so heavy host load raises its incidence). The Q19/§60 multi-network
+self-test (`Multi-network membership (attach/detach): OK`) passed on every run
+that reached it (runs 2 and 4). Takeaway: **run boot tests one at a time on an
+unloaded host** — overlapping QEMUs materially worsen this flake.
 
 ### TD-EDITOR-UTF8. Text editors reject non-UTF-8 files (`fs::read_to_string`) — LOW PRIORITY / graceful failure 2026-07-02
 

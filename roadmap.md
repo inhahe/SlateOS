@@ -5360,8 +5360,18 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     capture the overlay upper as the new layer; failures map to
     `RunLaunch`/`RunFailed`), and Dockerfile `HEALTHCHECK` is parsed and
     serialized into the image config (`ImageSpec.healthcheck`, Go-duration flags,
-    NONE/CMD/CMD-SHELL forms, FROM inheritance). Remaining: runtime `network
-    connect/disconnect` (Q19/§60 — generalise to multi-network membership).
+    NONE/CMD/CMD-SHELL forms, FROM inheritance). Runtime `network
+    connect/disconnect` shipped (Q19/§60, option B): the container network model
+    is generalised to N-interface multi-network membership — a `Container` keeps
+    its create-time primary veth plus a `memberships[]` list of named-network
+    attachments (each with its own veth pair, IP, and connected route), exposed
+    via `container network connect/disconnect <net> <ctr>` (+ `docker network
+    connect/disconnect` delegate), surfaced in `container info`/`inspect`
+    (`networks[]`), and covered by the `Multi-network membership (attach/detach)`
+    boot self-test. Disconnecting the primary network is refused (its veth is
+    lifecycle-owned). Honest limitation: the netns L3 config still tracks only the
+    primary interface; additional networks provide L2 bridge reachability + IPAM
+    lease + embedded DNS + a connected route.
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

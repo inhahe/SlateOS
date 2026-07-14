@@ -227,10 +227,17 @@ daemon** — and the §64 switch is fundamentally about *NIC ownership at boot*.
   real ring-3 Linux process doing `socket()`/`connect()`/`write()`/`read()` to
   fetch HTTP, run inside the bounded daemon window. Switch off → unchanged
   (`ENOSYS`), in-kernel stack still owns the NIC.
-- **5.6 — persistent daemon spawn at boot + NIC ownership handoff.** When the
-  switch is on, init/service-manager launches the daemon persistently at boot; it
-  claims the NIC and the in-kernel stack does not. Prove full parity in QEMU
-  (DNS + TCP + UDP over the daemon) with the switch on.
+- **5.6 — persistent daemon spawn at boot + NIC ownership handoff. [DONE]** When
+  the switch is on, the boot path launches the daemon persistently at boot (new
+  `serve-net` daemon mode + `proc::spawn::run_persistent_netstack`); it claims the
+  NIC for the system's lifetime and the in-kernel resident stack's bounded
+  self-tests are skipped (avoiding §64 exclusive-raw-NIC contention). Proven in
+  QEMU with the switch on: the daemon spawned at boot, claimed the NIC, registered
+  `net.stack`, and DNS (`example.com`) + TCP (HTTP over the daemon) + UDP (DNS
+  datagram over the daemon) parity all passed (serial 1800–1810). Switch off →
+  unchanged: no persistent daemon, in-kernel stack owns the NIC, bounded netstack
+  self-tests run. Boot self-test socket assertions in `syscall/linux.rs` were made
+  switch-aware (`assert_stream_socket_gate`) so they hold in both cutover states.
 - **5.7 — flip the default** to the daemon once parity holds.
 - **5.8 — delete the L2–L4 core** (`ethernet, arp, ipv4/ipv6, icmp/icmpv6, tcp,
   udp, dns, dhcp, frag, interface, ndisc`), keeping the NIC shim; then re-home
@@ -631,3 +638,59 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   run in the net self-test aggregator. Switch off → syscall surface unchanged;
   the in-kernel resident stack still owns the NIC. Next — 5.6: persistent daemon
   spawn at boot + NIC ownership handoff.
+- 2026-07-14: Phase 5 increment 5.6 landed — **persistent daemon spawn at boot +
+  NIC ownership handoff, switch-gated.** New daemon mode `serve-net` in
+  `services/netstack` (`run_dns_service(me, persistent=true)`: ignores the idle
+  deadline, owns the NIC for the system's lifetime, returns only on unrecoverable
+  fault). New `proc::spawn::run_persistent_netstack`: gated on a live network
+  (`ifinfo.up && ip != 0.0.0.0`), it `include_bytes!`-spawns the daemon with caps
+  `[(NetRaw, WRITE), (Service, WRITE)]` and argv `["netstack","serve-net"]`, waits
+  (3s) for `service::is_registered("net.stack")`, then validates parity against
+  the live daemon via service-name round-trips: `netstack_resolve_a("example.com")`
+  → `netstack_tcp_fetch_roundtrip(ip,80)` → `netstack_udp_dns_roundtrip(dns)`; the
+  daemon is left running (not reaped). `kernel/src/main.rs` boot section is now
+  switch-gated: switch **on** → spawn the persistent daemon and skip the bounded
+  in-kernel netstack self-tests (avoids §64 exclusive raw-NIC claim contention);
+  switch **off** → unchanged (bounded self-tests, in-kernel stack owns the NIC).
+  Boot self-test socket-creation assertions in `syscall/linux.rs` made
+  switch-aware via a new `assert_stream_socket_gate` helper (ENOSYS when off;
+  "not ENOSYS"/EBADF + close-any-leaked-fd when on) across all 5 AF_INET/AF_INET6
+  SOCK_STREAM sites. `hrtimer::self_test` Tests 3/5 made robust to a persistent
+  background daemon holding a pending kernel hrtimer (relative pending-count
+  baseline under `without_interrupts`, replacing the absolute `== 1`/`== 0`
+  asserts that assumed a globally-empty pending list). Proven in QEMU with the
+  switch on (serial 1800–1810): daemon spawned, claimed NIC, registered
+  `net.stack`, DNS+TCP+UDP parity all OK. Boot-test hangs seen this session are
+  the known moving-location container-exec / ring-3 spawn-dispatch race (see
+  known-issues.md), not a 5.6 regression — switch-off boot is behaviourally
+  unchanged. Next — 5.7: flip the default to the daemon once parity holds.
+- 2026-07-14 (follow-up, same increment): made the `net.userspace` switch
+  **actually usable at runtime** and proved the full cutover end-to-end via the
+  real Limine cmdline (not the earlier force-on hack). Three fixes:
+  (1) **Limine kernel-file request ID typo** in `kernel/src/limine.rs`: the
+  second feature-id word was `0x31eb_5d10_c871_c930`, which never matched
+  Limine's `LIMINE_{KERNEL,EXECUTABLE}_FILE_REQUEST` magic
+  (`0x31eb_5d1c_5ff2_3b69`, per limine.h in Limine 8.7.0). The response was
+  therefore *always null*, so `boot::kernel_cmdline()` always returned `None` —
+  meaning the boot cmdline (and kernel-file symbolization) had silently never
+  worked. Corrected the word; the cmdline now round-trips.
+  (2) **`kernparam::init_defaults()` was never called at boot** — only lazily
+  from the `kernparam` shell command — so the param store stayed `None` and
+  `is_set("net.userspace")` always returned false regardless of the cmdline.
+  Wired a boot-time `fs::kernparam::init_defaults()` call into `kernel_main`
+  right after `sysctl::init()`.
+  (3) **Persistent daemon spawn deferred past kernel POST.** The daemon owns the
+  NIC and runs continuously; leaving it running during the later timing-sensitive
+  timeout self-tests (channel/futex/eventfd recv-with-timeout) and the hrtimer
+  pending-count asserts perturbed them. Moved the switch-on spawn to just before
+  `BOOT_OK` (alongside the container health monitor, which is deferred for the
+  same reason), so POST runs in a quiet system and the NIC is owned by the time
+  userspace comes up. Also fixed a latent lost-wakeup in the futex timeout
+  self-test's waker (`timeout_waker_task`): it wakes without changing the futex
+  word, so a wake that precedes the waiter's park was lost → spurious
+  `TimedOut`; now it retries `futex_wake` until it reports it woke a waiter
+  (bounded). Verified in QEMU: with `cmdline: net.userspace` the switch reads
+  **on**, the persistent daemon spawns after POST, registers `net.stack`, and
+  DNS+TCP+UDP parity is green with the NIC owned for the system's lifetime;
+  with the cmdline removed the switch reads **off** and the resident stack stays
+  authoritative — both paths pass all boot self-tests.

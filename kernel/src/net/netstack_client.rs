@@ -81,9 +81,11 @@ const RECV_TIMEOUT_NS: u64 = 12_000_000_000;
 /// **Default off.** Absent the flag, the kernel keeps using its in-kernel
 /// resident stack. This is the staged-cutover gate from `design-decisions.md`
 /// §66 (Q22b → staged): prove daemon parity in QEMU behind the switch, flip the
-/// default, then delete the resident stack. Nothing routes real socket traffic
-/// on this yet (that is increment 5.5); today it only records boot-time intent
-/// and is surfaced by the boot self-test.
+/// default, then delete the resident stack. When set: the persistent userspace
+/// netstack daemon is spawned at boot and claims the NIC (increment 5.6), and
+/// AF_INET/AF_INET6 `SOCK_STREAM` sockets route to it (increment 5.5). The
+/// default has not been flipped yet (increment 5.7), so today this only fires
+/// when the operator explicitly passes `net.userspace` on the kernel cmdline.
 #[must_use]
 pub fn userspace_enabled() -> bool {
     crate::fs::kernparam::is_set("net.userspace")

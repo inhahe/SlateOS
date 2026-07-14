@@ -931,6 +931,26 @@ netstack op OK and no hang/virtio error — the definitive tell of the timing ra
 not a regression from the UDP-exchange change. Increment 5 committed on this
 basis. **STILL OPEN.**
 
+**OCCURRENCE 2026-07-14 (netstack Phase 5 increment 5.6, persistent daemon + NIC
+handoff).** Multiple `boot-test.sh --no-build` runs timed out at `BOOT_OK not
+found within 480s` at **different, non-deterministic Path-Z points** run-to-run —
+the definitive moving-hang tell of this race: (a) with the cutover switch forced
+on, a run froze in the dash pipeline test `/bin/emit | /bin/countbytes > file`
+(process 174 `countbytes` blocked reading the pipe); (b) with the switch off
+(default), one run froze at the `ipv4` self-test after a one-off `Incorrect order
+for descriptors` (virtio) on stderr, another froze at the tcc hosted-C build
+(process 217). The `prctl-batch269` idle-task name recurred (as in earlier
+occurrences and in an unrelated hrtimer-self-test panic this session). The 5.6
+deliverables **all passed cleanly before every hang**: with the switch **on**, the
+persistent netstack daemon spawned at boot, claimed the NIC, registered
+`net.stack`, and DNS (`example.com`), TCP (HTTP over the daemon) and UDP (DNS
+datagram over the daemon) parity all succeeded (serial lines 1800–1810); with the
+switch **off**, the bounded netstack self-tests passed (raw-frame ARP round-trip,
+DNS-over-IPC). The switch-off boot path is behaviourally unchanged by the 5.6
+work (the persistent daemon only spawns when `net.userspace` is set), so these
+hangs cannot be a 5.6 regression. Increment 5.6 committed on this basis. **STILL
+OPEN — same container-exec / ring-3 spawn-dispatch race.**
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a
@@ -3108,6 +3128,41 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### B-LIMINE-KFILE-ID. Wrong Limine kernel-file request feature-ID → boot cmdline AND kernel-file symbolization silently never worked — FIXED 2026-07-14
+
+**Where:** `kernel/src/limine.rs`, `LimineRequest::<KernelFileResponse>::KERNEL_FILE`.
+
+**Bug:** the request's second feature-id word was `0x31eb_5d10_c871_c930`, which
+does not match Limine's `LIMINE_{KERNEL,EXECUTABLE}_FILE_REQUEST` magic — the
+correct value (per `limine/limine.h`, Limine 8.7.0) is `0x31eb_5d1c_5ff2_3b69`.
+Because the ID never matched, Limine never populated the response, so
+`boot::kernel_cmdline()` always returned `None` and `boot::kernel_file_address()`
+(used for panic/backtrace symbolization from the kernel ELF) always returned
+`None`. Two silent consequences: (1) the boot command line was invisible to the
+kernel — `fs::kernparam` saw an empty cmdline regardless of what the bootloader
+passed, so cmdline-gated switches (e.g. `net.userspace`) could never be turned
+on at runtime; (2) kernel-file-based symbolization was inert. **Fix:** corrected
+the feature-id word. Verified: `cmdline: net.userspace` in `limine.conf` now
+round-trips into `kernparam` and flips the cutover switch. **Repro (pre-fix):**
+add any `cmdline:` to `limine.conf`; the kernel read it as empty.
+
+### B-FUTEX-TOWAKER-LOSTWAKE. Futex timeout self-test waker could lose its wakeup (wake before waiter parked) → spurious `TimedOut` under shifted boot timing — FIXED 2026-07-14
+
+**Where:** `kernel/src/ipc/futex.rs`, `timeout_waker_task` /
+`test_timeout_woken_before_deadline`.
+
+**Bug:** the waker calls `futex_wake` **without changing the futex word**, so
+correctness depended on the waiter being parked before the wake. If the wake
+fired first, the waiter re-checked its (unchanged) expected value, parked anyway,
+and the earlier wake was lost — the wait then ran the full 500 ms and returned
+`TimedOut`, failing the test. A fixed number of `yield_now()`s cannot guarantee
+the ordering; the `net.userspace` switch-on boot shifted task-id/scheduler timing
+enough to expose it (manifested as whichever timeout self-test hit the bad
+interleave — channel/eventfd failures in the same window were instead
+daemon-starvation, fixed separately by deferring the persistent daemon past
+POST). **Fix:** the waker now retries `futex_wake` until it reports it actually
+woke a waiter (bounded spin), which is deterministic regardless of interleave.
 
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 

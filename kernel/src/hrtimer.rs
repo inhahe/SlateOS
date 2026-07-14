@@ -519,11 +519,23 @@ pub fn self_test() {
     }
 
     CANCEL_FIRED.store(0, Ordering::Release);
-    let h = schedule_ns(999_999_999_999, cancel_cb, 0xBAD); // Far future.
-    assert_eq!(pending_count(), 1, "Timer not added to pending list");
-    let cancelled = cancel(h);
+    // The pending list is NOT globally empty at this point in boot: a
+    // persistent userspace daemon (e.g. the userspace netstack daemon
+    // blocked in a timed accept-wait) keeps one or more kernel hrtimers
+    // pending. So verify our own timer is added/removed *relative* to the
+    // ambient baseline rather than asserting an absolute count of 1/0.
+    // without_interrupts closes the window in which the periodic APIC-timer
+    // ISR could reap an ambient timer between capturing `base` and the
+    // asserts and skew the baseline (same race class as Test 2's fix).
+    let cancelled = crate::cpu::without_interrupts(|| {
+        let base = pending_count();
+        let h = schedule_ns(999_999_999_999, cancel_cb, 0xBAD); // Far future.
+        assert_eq!(pending_count(), base + 1, "Timer not added to pending list");
+        let cancelled = cancel(h);
+        assert_eq!(pending_count(), base, "Timer not removed after cancel");
+        cancelled
+    });
     assert!(cancelled, "cancel() returned false for valid handle");
-    assert_eq!(pending_count(), 0, "Timer not removed after cancel");
     // Verify it doesn't fire.
     process_expired();
     assert_eq!(CANCEL_FIRED.load(Ordering::Acquire), 0, "Cancelled timer still fired");
@@ -556,12 +568,20 @@ pub fn self_test() {
     }
 
     REPEAT_COUNT.store(0, Ordering::Relaxed);
-    let rh = schedule_repeating(0, 1_000_000, repeat_cb, 0); // 1ms interval, fire immediately
-    process_expired(); // First fire.
-    assert_eq!(REPEAT_COUNT.load(Ordering::Relaxed), 1, "Repeating timer didn't fire");
-    assert_eq!(pending_count(), 1, "Repeating timer not re-scheduled");
-    cancel(rh);
-    assert_eq!(pending_count(), 0, "Repeating timer not cancelled");
+    // Same ambient-baseline reasoning as Test 3. Drain any expired ambient
+    // timers first so `base` is stable, then check the repeating timer's
+    // re-schedule/cancel relative to it — all with interrupts off so the
+    // ISR can't reap an ambient timer mid-check.
+    crate::cpu::without_interrupts(|| {
+        process_expired(); // Stabilise the baseline (reap ambient expiries).
+        let base = pending_count();
+        let rh = schedule_repeating(0, 1_000_000, repeat_cb, 0); // 1ms interval, fire immediately
+        process_expired(); // First fire (re-schedules our repeating timer).
+        assert_eq!(REPEAT_COUNT.load(Ordering::Relaxed), 1, "Repeating timer didn't fire");
+        assert_eq!(pending_count(), base + 1, "Repeating timer not re-scheduled");
+        cancel(rh);
+        assert_eq!(pending_count(), base, "Repeating timer not cancelled");
+    });
     serial_println!("[hrtimer]   Repeating timer: OK (fired once, re-scheduled, cancelled)");
 
     // Test 6: Statistics.

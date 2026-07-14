@@ -370,5 +370,11 @@ pub struct KernelFileResponse {
 
 impl LimineRequest<KernelFileResponse> {
     /// Limine Kernel File feature request ID.
-    pub const KERNEL_FILE: Self = Self::new([0xad97_e90e_83f1_ed67, 0x31eb_5d10_c871_c930]);
+    // NOTE: the second feature-id word MUST be 0x31eb_5d1c_5ff2_3b69, not the
+    // 0x31eb_5d10_c871_c930 value used previously — that earlier value was a
+    // typo that never matched Limine's Kernel/Executable-File feature magic, so
+    // the response was silently always null (breaking both the boot cmdline and
+    // kernel-file symbolization). Matches LIMINE_{KERNEL,EXECUTABLE}_FILE_REQUEST
+    // in limine.h (Limine 8.7.0).
+    pub const KERNEL_FILE: Self = Self::new([0xad97_e90e_83f1_ed67, 0x31eb_5d1c_5ff2_3b69]);
 }

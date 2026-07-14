@@ -3053,6 +3053,187 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     }
 }
 
+/// Resolve an A record for `host` against the already-running `net.stack`
+/// daemon. Returns `Ok(Some(ip))` on success, `Ok(None)` if the daemon replied
+/// `ST_FAIL` (IPC fine, DNS unresolved — common under slirp), or `Err` on a
+/// transport fault. Service-name based, so it works against any live daemon
+/// (bounded self-test or the persistent boot daemon).
+fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
+    use crate::ipc::{channel, service};
+
+    let client = service::connect(b"net.stack")?;
+    let mut req = [0u8; 64];
+    let req_len = match netipc::encode_resolve_a(&mut req, host) {
+        Some(n) => n,
+        None => {
+            channel::close(client);
+            return Err(KernelError::InternalError);
+        }
+    };
+    let msg = match channel::Message::from_bytes(&req[..req_len]) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+    if let Err(e) = channel::send(client, msg) {
+        channel::close(client);
+        return Err(e);
+    }
+    let reply = match channel::recv_timeout(client, 6_000_000_000) {
+        Ok(m) => m,
+        Err(e) => {
+            channel::close(client);
+            return Err(e);
+        }
+    };
+    let mut data = [0u8; 5];
+    let dlen = reply.data().len().min(data.len());
+    data[..dlen].copy_from_slice(&reply.data()[..dlen]);
+    channel::close(client);
+    match netipc::parse_ipv4_reply(&data[..dlen]) {
+        netipc::Ipv4Reply::Ok(ip) => Ok(Some(ip)),
+        netipc::Ipv4Reply::Fail => Ok(None),
+        netipc::Ipv4Reply::Malformed => Err(KernelError::InternalError),
+    }
+}
+
+/// Phase-5 boot path (`net.userspace` on): spawn the **persistent** userspace
+/// `netstack` daemon (`serve-net`), validate DNS/TCP/UDP parity over it, then
+/// leave it running to own the NIC for the system's lifetime.
+///
+/// This is the switch-on counterpart to [`self_test_netstack_dns_ipc`] (§66,
+/// Q22b staged cutover). Unlike the bounded self-test, the daemon is **not
+/// reaped**: it keeps the exclusive raw-NIC claim so the in-kernel stack stands
+/// down (its physical-NIC RX is skipped while a raw owner holds the claim, §64)
+/// and all AF_INET socket traffic (increment 5.5) routes to the daemon.
+///
+/// Skips gracefully (returns `Ok(())`) when there's no network. A genuine
+/// spawn/registration fault returns `Err`; per-check network variance (no
+/// upstream) is logged as a non-fatal WARNING but never fails the boot, since a
+/// persistent daemon cannot be cleanly torn down here.
+pub fn run_persistent_netstack() -> KernelResult<()> {
+    use crate::ipc::service;
+
+    let ifinfo = crate::net::interface::info();
+    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] {
+        serial_println!(
+            "[spawn]   persistent netstack daemon: SKIP (no network — up={}, ip={})",
+            ifinfo.up,
+            ifinfo.ip
+        );
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Starting persistent userspace netstack daemon (net.userspace on)..."
+    );
+
+    static NETSTACK_ELF: &[u8] = include_bytes!(
+        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
+    );
+
+    let argv: &[&[u8]] = &[b"netstack", b"serve-net"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // NetRaw (WRITE) to claim the NIC persistently, plus Service (WRITE) to
+    // register `net.stack`.
+    let caps = [
+        (ResourceType::NetRaw, 0u64, Rights::WRITE),
+        (ResourceType::Service, 0u64, Rights::WRITE),
+    ];
+    let options = SpawnOptions {
+        name: "netstack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(NETSTACK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: persistent netstack spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Wait for the daemon to publish `net.stack` (it registers early, before the
+    // slow ARP work). Yield so the daemon actually gets CPU time.
+    let reg_deadline = crate::hrtimer::now_ns().saturating_add(3_000_000_000); // 3s
+    while !service::is_registered(b"net.stack") {
+        if crate::hrtimer::now_ns() >= reg_deadline {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack did not register net.stack within 3s"
+            );
+            return Err(KernelError::TimedOut);
+        }
+        crate::sched::yield_now();
+    }
+    serial_println!(
+        "[spawn]   persistent netstack daemon registered net.stack (pid {})",
+        result.pid
+    );
+
+    // Parity validation over the live persistent daemon: DNS → TCP, then UDP.
+    match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => {
+            serial_println!(
+                "[spawn]   persistent netstack DNS: example.com -> {}.{}.{}.{}",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
+            );
+            match netstack_tcp_fetch_roundtrip(&ip, 80) {
+                Ok(Some(())) => serial_println!(
+                    "[spawn]   persistent netstack TCP: HTTP response received over the daemon"
+                ),
+                Ok(None) => serial_println!(
+                    "[spawn]   persistent netstack TCP: round-trip OK, no/short response \
+                     (no upstream?) — path proven"
+                ),
+                Err(e) => serial_println!(
+                    "[spawn]   WARNING: persistent netstack TCP round-trip error ({:?})",
+                    e
+                ),
+            }
+        }
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack DNS: IPC OK, example.com unresolved (no upstream?)"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack DNS resolve error ({:?})",
+            e
+        ),
+    }
+
+    match netstack_udp_dns_roundtrip(&ifinfo.dns.0) {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack UDP: DNS response datagram returned over the daemon"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack UDP: round-trip OK, no response (no upstream?) — \
+             path proven"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack UDP round-trip error ({:?})",
+            e
+        ),
+    }
+
+    serial_println!(
+        "[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; daemon now \
+         owns the NIC for the system's lifetime"
+    );
+    Ok(())
+}
+
 /// Perform one `OP_RESOLVE_PTR` round-trip to the running `net.stack` daemon for
 /// IPv4 `ip`. Returns `Ok(Some(()))` if a hostname was decoded, `Ok(None)` if
 /// the daemon replied `ST_FAIL` (IPC fine, no PTR), or `Err` on a transport

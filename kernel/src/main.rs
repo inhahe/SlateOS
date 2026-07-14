@@ -587,6 +587,17 @@ extern "C" fn kernel_main() -> ! {
     sysctl::init();
     sysctl::self_test();
 
+    // Step 9b′: Populate the kernel-parameter store from the Limine command
+    // line. This MUST run during boot (previously it was only invoked lazily
+    // from the `kernparam` shell command), because boot-time consumers —
+    // notably the `net.userspace` cutover switch that decides whether the
+    // userspace netstack daemon owns the NIC — call `kernparam::is_set()`
+    // long before any shell exists. Without this, the param store stays
+    // `None` at boot and every `is_set()` returns false regardless of what
+    // the bootloader actually passed, making the switch unusable at runtime.
+    // Idempotent: a no-op if the store was already populated.
+    fs::kernparam::init_defaults();
+
     // Step 9c: Initialize swap subsystem (zram initially).
     // The in-memory compressed (zram) backend is always available.
     // We'll try to upgrade to disk-backed swap after virtio-blk
@@ -1412,20 +1423,38 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}", e);
     }
 
-    // Net→userspace migration Phase 2: spawn the real `services/netstack`
-    // daemon (ring 3), which claims the NIC via the capability-gated
-    // SYS_NET_RAW_* syscalls and proves the raw-frame TX/RX path end-to-end
-    // with an ARP round-trip. Skips gracefully when there's no network.
-    if let Err(e) = proc::spawn::self_test_userspace_netstack() {
-        serial_println!("WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}", e);
-    }
+    // Net→userspace migration (Path B, §63/§66). The `net.userspace` boot switch
+    // selects NIC ownership at boot (§64):
+    //
+    //   * switch OFF (default): the in-kernel resident stack owns the NIC. Run the
+    //     bounded daemon self-tests here — each briefly claims the NIC, proves a
+    //     path, then releases it back so the kernel stack's RX resumes.
+    //   * switch ON (Phase-5 cutover): the PERSISTENT userspace daemon owns the
+    //     NIC for the system's lifetime and serves all AF_INET socket traffic
+    //     (increment 5.5/5.6). Its spawn is DEFERRED to just before BOOT_OK
+    //     (alongside the container health monitor) — a lifetime service that
+    //     runs continuously would perturb the timing-sensitive timeout
+    //     self-tests below (channel/futex/eventfd recv-with-timeout) and the
+    //     hrtimer self-test's pending-count assertions. Kernel POST must run in
+    //     a quiet system; services start only once self-verification is done.
+    //     The bounded self-tests are also skipped under the switch — they would
+    //     contend for the exclusive raw-NIC claim the daemon will hold (§64).
+    if !crate::net::netstack_client::userspace_enabled() {
+        // Phase 2: spawn the real `services/netstack` daemon (ring 3), which
+        // claims the NIC via the capability-gated SYS_NET_RAW_* syscalls and
+        // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
+        // Skips gracefully when there's no network.
+        if let Err(e) = proc::spawn::self_test_userspace_netstack() {
+            serial_println!("WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}", e);
+        }
 
-    // Net→userspace migration Phase 4: forward a DNS resolve from the kernel to
-    // the userspace `netstack` daemon over the Service Registry (`net.stack`),
-    // proving the socket-syscall → IPC path end-to-end. Bounded self-test (the
-    // daemon owns the NIC only briefly); skips gracefully with no network.
-    if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
-        serial_println!("WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}", e);
+        // Phase 4: forward a DNS resolve from the kernel to the userspace
+        // `netstack` daemon over the Service Registry (`net.stack`), proving the
+        // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
+        // owns the NIC only briefly); skips gracefully with no network.
+        if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
+            serial_println!("WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}", e);
+        }
     }
 
     // Ring-3 end-to-end test of the Linux brk(2) heap: a real Linux-ABI
@@ -4025,6 +4054,26 @@ extern "C" fn kernel_main() -> ! {
             Err(e) => {
                 serial_println!("[boot] WARNING: failed to spawn cgroup e2e task: {:?}", e);
             }
+        }
+    }
+
+    // Net→userspace cutover (§63/§66), switch-ON branch. Deferred to here — past
+    // every boot self-test — for the same reason as the health monitor below:
+    // the persistent daemon owns the NIC and runs continuously, which would
+    // perturb the timing-sensitive timeout self-tests (channel/futex/eventfd
+    // recv-with-timeout) and the hrtimer pending-count assertions if it were
+    // already running while they execute. Spawning it here — after POST, before
+    // BOOT_OK and before any userspace process — means the NIC is owned for the
+    // system's lifetime by the time init/shell come up, while kernel
+    // self-verification still ran in a quiet system. Skipped when the switch is
+    // off (the in-kernel resident stack owns the NIC; bounded net self-tests
+    // already ran earlier).
+    if crate::net::netstack_client::userspace_enabled() {
+        if let Err(e) = proc::spawn::run_persistent_netstack() {
+            serial_println!(
+                "WARNING: persistent userspace netstack (ring 3) startup failed: {:?}",
+                e
+            );
         }
     }
 

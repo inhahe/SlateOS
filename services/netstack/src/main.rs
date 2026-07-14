@@ -1164,8 +1164,17 @@ const SERVICE_IDLE_ITERS: u32 = 6; // 6 * 500ms = 3s
 /// Maximum control-message size we accept/produce.
 const MSG_CAP: usize = 512;
 
-/// Run the Phase-4 DNS-over-IPC service. Returns the process exit code.
-fn run_dns_service(me: &IfInfo) -> i64 {
+/// Run the netstack IPC service (DNS/TCP/UDP over the `net.stack` channel).
+///
+/// When `persistent` is false (the Phase-4 bounded self-test path, argv
+/// `serve-dns`) the daemon exits after [`SERVICE_IDLE_ITERS`] idle iterations and
+/// releases the NIC, so the still-live kernel stack regains it (§64). When
+/// `persistent` is true (the Phase-5 boot daemon, argv `serve-net`) the idle
+/// deadline is ignored: the daemon owns the NIC for the lifetime of the system
+/// and serves socket clients indefinitely — correct only once the kernel stack
+/// has stood down (the `net.userspace` switch is on). Returns the process exit
+/// code (a persistent daemon only returns on an unrecoverable service fault).
+fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     // Register first (fast) so a waiting client can connect immediately and then
     // block on the reply, rather than spinning while we do slow network I/O.
     let listener = syscall2(SYS_SERVICE_REGISTER, SERVICE_NAME.as_ptr() as u64, SERVICE_NAME.len() as u64);
@@ -1193,7 +1202,9 @@ fn run_dns_service(me: &IfInfo) -> i64 {
     // calls so a connection opened in one call is addressable in later ones.
     let mut ring_session = RingSession::new();
 
-    while idle_ticks < SERVICE_IDLE_ITERS {
+    // Persistent mode ignores the idle deadline and serves for the system's
+    // lifetime; bounded mode exits after SERVICE_IDLE_ITERS idle iterations.
+    while persistent || idle_ticks < SERVICE_IDLE_ITERS {
         let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS);
         if ch < 0 {
             idle_ticks += 1; // Timed out (or transient) — count toward idle exit.
@@ -1950,15 +1961,27 @@ pub extern "C" fn _start() -> ! {
     print("[netstack] claimed raw NIC\n");
 
     // Mode selection via argv[1]. Default = Phase-2 ARP round-trip self-test;
-    // `serve-dns` = Phase-4 DNS-over-IPC service (register `net.stack`, resolve
-    // hostnames for kernel clients, then release the NIC at the idle deadline).
+    // `serve-dns` = Phase-4 bounded DNS/TCP/UDP-over-IPC service (register
+    // `net.stack`, serve kernel clients, then release the NIC at the idle
+    // deadline); `serve-net` = Phase-5 persistent boot daemon (same service, but
+    // owns the NIC for the system's lifetime and never idles out — used once the
+    // kernel stack has stood down under the `net.userspace` switch).
     let mut arg = [0u8; 32];
     let arglen = read_argv1(&mut arg);
     if &arg[..arglen] == b"serve-dns" {
-        print("[netstack] mode: serve-dns (Phase 4 DNS-over-IPC)\n");
-        let code = run_dns_service(&me);
+        print("[netstack] mode: serve-dns (Phase 4 bounded DNS/TCP/UDP-over-IPC)\n");
+        let code = run_dns_service(&me, false);
         raw_close();
         print("[netstack] released raw NIC\n");
+        exit(code);
+    }
+    if &arg[..arglen] == b"serve-net" {
+        print("[netstack] mode: serve-net (Phase 5 persistent netstack daemon)\n");
+        // Persistent: owns the NIC for the system's lifetime. Only returns on an
+        // unrecoverable service fault, in which case release the NIC and exit.
+        let code = run_dns_service(&me, true);
+        raw_close();
+        print("[netstack] persistent service returned; released raw NIC\n");
         exit(code);
     }
 

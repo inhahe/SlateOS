@@ -53015,6 +53015,36 @@ fn self_test_default_rlimits() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// Assert that an `AF_INET`/`AF_INET6` `SOCK_STREAM` `socket()` self-test call
+/// returned the answer appropriate for the current `net.userspace` cutover
+/// switch (design-decisions.md §63/§66), and clean up any leaked fd.
+///
+/// * switch **OFF** (default — in-kernel resident stack authoritative): the whole
+///   AF_INET stream-socket surface is still `ENOSYS`, so `r` must be `-ENOSYS`.
+/// * switch **ON** (Path B cutover, increment 5.5+): the `ENOSYS` stub is gone —
+///   `sys_socket` routes to the daemon-backed socket object. In *kernel-context*
+///   self-tests there is no caller fd table, so `sys_socket` reports `EBADF`
+///   (no `caller_pid`) rather than installing an fd; either way the result is
+///   simply "not `ENOSYS`". Real switch-on socket creation is validated from a
+///   ring-3 process against the live persistent daemon.
+///
+/// Returns `true` when `r` matches the switch-appropriate expectation. Never
+/// leaks a socket: if an fd was somehow installed, it is closed here.
+fn assert_stream_socket_gate(r: i64) -> bool {
+    if crate::net::netstack_client::userspace_enabled() {
+        if r == -i64::from(errno::ENOSYS) {
+            return false;
+        }
+        if let Ok(fd) = u64::try_from(r) {
+            let c = SyscallArgs { arg0: fd, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let _ = dispatch_linux(nr::CLOSE, &c);
+        }
+        true
+    } else {
+        r == -i64::from(errno::ENOSYS)
+    }
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -80125,10 +80155,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: socket bad flag not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // socket AF_INET SOCK_STREAM -> ENOSYS.
+        // socket(AF_INET, SOCK_STREAM): the answer depends on the
+        // `net.userspace` cutover switch (design-decisions.md §63/§66).
+        //   * switch OFF (default — in-kernel resident stack authoritative):
+        //     the whole AF_INET socket surface is still ENOSYS.
+        //   * switch ON (Path B cutover, increment 5.5): the ENOSYS stub is
+        //     gone — sys_socket routes to the daemon-backed socket object. In
+        //     *this* kernel-context self-test there is no caller fd table, so
+        //     sys_socket reports EBADF (no caller_pid) rather than installing an
+        //     fd. Real switch-on socket creation is validated from a ring-3
+        //     process against the live persistent daemon (run_persistent_netstack).
+        // Assert the switch-appropriate answer so the boot self-test is correct
+        // in both cutover states; never leak a socket if one is somehow created.
         let a = SyscallArgs { arg0: 2, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: socket valid not ENOSYS");
+        if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+            serial_println!("[syscall/linux]   FAIL: socket(AF_INET,SOCK_STREAM) gate mismatch");
             return Err(KernelError::InternalError);
         }
 
@@ -87392,13 +87433,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // E: AF_INET SOCK_STREAM IPPROTO_TCP -> ENOSYS (accept).
+            // E: AF_INET SOCK_STREAM IPPROTO_TCP -> ENOSYS (accept), or
+            // daemon-routed when the net.userspace switch is on.
             let a = SyscallArgs {
                 arg0: 2, arg1: 1, arg2: 6, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -87526,13 +87568,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             // F: AF_INET / SOCK_STREAM acceptance regression
-            // check — STREAM is supported, ENOSYS.
+            // check — STREAM is ENOSYS off, daemon-routed on.
             let a = SyscallArgs {
                 arg0: 2, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM) regression not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM) regression gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -87803,13 +87845,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             // G: regression — AF_INET / STREAM / TCP=6
-            // still accepted.
+            // ENOSYS off, daemon-routed on.
             let a = SyscallArgs {
                 arg0: 2, arg1: 1, arg2: 6, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) regression not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) regression gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -88456,11 +88498,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg0: 2, arg1: 1, arg2: 0,
                 arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value
-                != -i64::from(errno::ENOSYS)
-            {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,0) regression not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,0) regression gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }

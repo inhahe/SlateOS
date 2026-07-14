@@ -3858,14 +3858,33 @@ fn test_timeout_expires() -> KernelResult<()> {
     Ok(())
 }
 
-/// Task that wakes a futex after a short delay.
+/// Task that wakes a futex once the waiter is actually parked.
+///
+/// The test's waker does NOT change the futex word (it only calls
+/// `futex_wake`), so correctness depends on the waiter being parked *before*
+/// the wake — otherwise the waiter re-checks its (unchanged) expected value,
+/// parks anyway, and the earlier wake is lost, making it wait the full timeout
+/// and spuriously report `TimedOut`. A fixed number of `yield_now()`s cannot
+/// guarantee that ordering under all boot-time interleavings (the switch-on
+/// cutover shifts task-id/scheduler timing enough to occasionally lose it),
+/// so instead retry `futex_wake` until it reports it actually woke a waiter.
+/// `futex_wake` returns the number of waiters woken; a `0` means the waiter
+/// has not parked yet, so we yield and try again. Bounded so a genuinely
+/// broken wake path can never wedge boot.
 extern "C" fn timeout_waker_task(addr_raw: u64) {
-    // Brief delay to let the main task block.
-    sched::yield_now();
-    sched::yield_now();
-
-    // Wake the waiter.
-    futex_wake(addr_raw, 1);
+    let mut spins: u32 = 0;
+    loop {
+        if futex_wake(addr_raw, 1) >= 1 {
+            break;
+        }
+        spins = spins.saturating_add(1);
+        if spins >= 1_000_000 {
+            // Waiter never parked — leave RESULT at 0 so the test fails loudly
+            // rather than hanging.
+            return;
+        }
+        sched::yield_now();
+    }
     TIMEOUT_TEST_RESULT.store(1, Ordering::SeqCst);
 }
 

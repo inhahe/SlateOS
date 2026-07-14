@@ -4034,3 +4034,141 @@ context, which is the intent.
 **Where it lives.** `kernel/src/apic.rs` `handle_timer_irq` (the `nested` guard on
 `process_pending` and on the pre-preempt `sti`); `kernel/src/cputime.rs`
 `irq_depth()` accessor.
+
+---
+
+## 58. `container exec` semantics (Q17) — keep the netns-debug facade AND add real rootfs-binary exec under a distinct verb (option B)
+
+**Date:** 2026-07-14
+**Decided by:** Operator (Claude recommended B).
+
+**Context.** Our shipped `container exec <id> <builtin>` switches into the
+container's **network namespace** and runs a **kshell builtin** there — a
+network-debugging facade, not Docker's `docker exec` (which spawns a **new
+program from the container's own rootfs** inside the running container's
+namespaces + cgroup). The netns-debug facility is genuinely useful and would be
+*lost* if `exec` were simply replaced. `docker build`'s `RUN`/`HEALTHCHECK`
+instructions need the *real* rootfs exec.
+
+**Decision.** Build **both, under distinct verbs.** `container exec` keeps its
+netns-debug meaning; add a new verb (`container run-in <id> <path> [args…]`, and
+accept `container exec --rootfs` as an alias) that spawns the rootfs binary in
+the container's namespaces + cgroup and joins on its exit code (reusing the
+proven `set_wait_task`→`block_current` join used by `container::wait`). The
+`docker exec` delegate maps to the real rootfs path. `docker build`'s
+`RUN`/`HEALTHCHECK` consume the real exec.
+
+**Alternatives.** (A) Replace the facade with real exec — rejected: deletes the
+netns-debug facility. (C) Keep facade only — rejected: leaves a real Docker gap
+and blocks `RUN`/`HEALTHCHECK`.
+
+**Where it lives.** `kernel/src/kshell.rs` (`container exec` arm + new `run-in`
+arm + `docker` delegate map), `kernel/src/container.rs` (new
+`exec(id, argv) -> KernelResult<i32>`), `kernel/src/oci.rs` (`build_image`
+`RUN`/`HEALTHCHECK`). Supersedes known-issues D-CONTAINER-EXEC-WAIT.
+
+---
+
+## 59. GPU acceleration scope (Q18) — build the kernel-side virtio-gpu render-ioctl dispatch now with honest "no-3D" reporting; defer the Mesa port (option B)
+
+**Date:** 2026-07-14
+**Decided by:** Operator (Claude recommended C; operator chose B).
+
+**Context.** Q15 green-lit the GPU-accel initiative; the 2D foundation is done.
+Real 3D is gated on a virgl-capable test environment (our headless TCG CI exposes
+plain virtio-gpu with **no** `VIRTIO_GPU_F_VIRGL`) and the large external Mesa
+port.
+
+**Decision.** Build the kernel-side virtio-gpu render-ioctl dispatch now with
+**honest "unsupported" reporting**: `GETPARAM` reports `3D_FEATURES=0`,
+`GET_CAPS` returns no capsets, every 3D-requiring ioctl returns the correct
+errno; verified by a ring-3 self-test that opens `renderD128` and issues the
+ioctls. The Mesa port stays deferred until a virgl test environment exists.
+
+**Alternatives.** (A) Invest in virgl env + Mesa now — deferred. (C) Stop at the
+foundation — operator chose to land the ioctl ABI now.
+
+**Where it lives.** `kernel/src/syscall/linux.rs` `drm_card_ioctl` (new
+`DRM_COMMAND_BASE`-range arm routing to `drm::virtgpu_uapi`), plus a ring-3
+`renderD128` ioctl self-test.
+
+---
+
+## 60. Container network model (Q19) — generalise to multi-network membership (Docker parity, option B)
+
+**Date:** 2026-07-14
+**Decided by:** Operator (Claude recommended B).
+
+**Context.** Docker containers can join **multiple** user-defined networks, each
+with its own interface + address + embedded-DNS scope. Our model assumed **one**
+veth pair per container. `container network connect/disconnect` needs a model
+decision.
+
+**Decision.** Generalise the data model to **N interfaces per container.**
+`Container` holds a list of `(netns-iface, veth_pair, network_name, ip)`
+memberships; `network connect` allocates a new veth into the running container's
+netns, configures it, attaches it to that network's bridge, and registers DNS
+names; `network disconnect` tears one membership down. `inspect`/`ps` become
+per-network. Its own dedicated increment (a real refactor).
+
+**Alternative.** (A) Single-network minimal — rejected: diverges from Docker.
+
+**Where it lives.** `kernel/src/container.rs` (`Container.veth_pair` → membership
+list; runtime `attach_network`/`detach_network`), `kernel/src/cnetwork.rs`
+(runtime connect), `kernel/src/kshell.rs` (`container network
+connect|disconnect` arms + `docker` delegate).
+
+---
+
+## 61. Hard-lockup (BSP-dead) detector (Q20) — build the `i6300esb` watchdog + inject-nmi detector (option A), opt-in behind the boot-test flag
+
+**Date:** 2026-07-14
+**Decided by:** Operator (Claude recommended A).
+
+**Context.** The BSP-dead variant of `B-PTHREAD-YIELDBUDGET` (BSP wedged with
+IF=0, total serial silence) is uncatchable by any IF-gated software watchdog;
+only an NMI can interrupt it. Under our TCG single-CPU boot test the one workable
+NMI source is QEMU's `i6300esb` PCI watchdog with `-action watchdog=inject-nmi`.
+The harness half (opt-in `boot-test.sh --hard-lockup-watchdog` flag) landed
+2026-07-01.
+
+**Decision.** Build the detector (option A), keeping it **opt-in** behind the
+existing flag so the shared boot harness is untouched by default. Kernel half: an
+`i6300esb` driver (BAR map + periodic kick), a dedicated NMI IST stack, and
+`handle_nmi` → `sched::dump_task_table`, armed over the boot ring-3 window
+(mirroring `sched::liveness_arm/disarm`). A diagnostic, not a fix.
+
+**Alternatives.** (B) Attack root cause without a catcher — §57 already
+root-caused/fixed the observed overflow variant; the detector remains valuable
+for residual BSP-dead repro. (C) Defer — operator chose to build it.
+
+**Where it lives.** `scripts/boot-test.sh` (flag landed), new
+`kernel/src/drivers/i6300esb.rs`, `kernel/src/idt.rs` (`handle_nmi`, dedicated
+NMI IST), `kernel/src/gdt.rs` (NMI IST stack), boot-window arming.
+
+---
+
+## 62. `nft`/`iptables` compat tooling (Q21) — keep as an explicit parser/pretty-printer only; fix the docs; steer users to `fw` (option C)
+
+**Date:** 2026-07-14
+**Decided by:** Operator (Claude recommended C).
+
+**Context.** `userspace/nft` (also `iptables`/`ip6tables` via `argv[0]`) is
+stateless: each invocation builds a fresh `Ruleset`, applies one command, prints,
+and discards it — it never persists or touches the kernel, despite a module doc
+claiming persistence. The native `fw` tool now fully configures the kernel
+firewall (§53). The kernel firewall model is far narrower than nftables (no NAT,
+no sets/maps, one src IP/prefix + one dst port, input/output only), so a faithful
+`nft` is impossible and a lossy one risks silently under-applying a user's policy.
+
+**Decision.** Keep `nft`/`iptables` as an **explicit parser/pretty-printer
+only.** Correct the module doc to state it does not persist or apply; print a
+clear "not applied — use `fw` to configure the kernel firewall" notice on
+mutating commands; treat `fw` as the one true firewall front-end. Full/minimal
+wiring (A/B) is deferred until a concrete need appears.
+
+**Alternatives.** (A) Full-ish wiring, (B) minimal wiring — both deferred:
+large, lossy, misleading against the narrow kernel model.
+
+**Where it lives.** `userspace/nft/src/main.rs` (`run_nft`/`run_iptables` module
+doc + mutating-command notice). Related: known-issues TD18 residual.

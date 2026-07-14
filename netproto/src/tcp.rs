@@ -9,6 +9,7 @@
 
 use crate::checksum;
 use crate::ipv4::PROTO_TCP;
+use crate::ipv6::{self, Ipv6Addr};
 use crate::Ipv4Addr;
 
 /// Minimum TCP header length (no options), in bytes.
@@ -71,6 +72,13 @@ fn pseudo_header_sum(src: &Ipv4Addr, dst: &Ipv4Addr, tcp_len: u16) -> u32 {
     checksum::accumulate(0, &ph)
 }
 
+/// Accumulate the IPv6 TCP pseudo-header (src IP, dst IP, upper-layer length,
+/// next-header = TCP) into a running checksum sum, per RFC 8200 §8.1.
+#[must_use]
+fn pseudo_header_sum_v6(src: &Ipv6Addr, dst: &Ipv6Addr, tcp_len: u32) -> u32 {
+    ipv6::pseudo_header_sum(src, dst, tcp_len, PROTO_TCP)
+}
+
 impl<'a> Segment<'a> {
     /// Parse a TCP segment carried in an IPv4 packet. `src`/`dst` are the IPv4
     /// addresses (needed for the pseudo-header checksum). `buf` must be exactly
@@ -89,6 +97,46 @@ impl<'a> Segment<'a> {
         }
         // Verify the checksum over the pseudo-header + the whole TCP segment.
         let sum = pseudo_header_sum(src, dst, buf.len() as u16);
+        if checksum::internet_continue(sum, buf) != 0 {
+            return None;
+        }
+        let src_port = u16::from_be_bytes([buf[0], buf[1]]);
+        let dst_port = u16::from_be_bytes([buf[2], buf[3]]);
+        let seq = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let ack = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        let flags = buf[13];
+        let window = u16::from_be_bytes([buf[14], buf[15]]);
+        let urgent = u16::from_be_bytes([buf[18], buf[19]]);
+        let options = &buf[MIN_HEADER_LEN..header_len];
+        let payload = &buf[header_len..];
+        Some(Segment {
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            window,
+            urgent,
+            options,
+            payload,
+        })
+    }
+
+    /// Parse a TCP segment carried in an IPv6 packet. Identical to [`parse`]
+    /// except the pseudo-header checksum uses the 16-byte IPv6 addresses and the
+    /// RFC 8200 pseudo-header layout. `buf` must be exactly the TCP bytes (the
+    /// IPv6 upper-layer payload).
+    #[must_use]
+    pub fn parse_v6(buf: &'a [u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> Option<Self> {
+        if buf.len() < MIN_HEADER_LEN {
+            return None;
+        }
+        let data_offset = (buf[12] >> 4) as usize;
+        let header_len = data_offset.checked_mul(4)?;
+        if header_len < MIN_HEADER_LEN || buf.len() < header_len {
+            return None;
+        }
+        let sum = pseudo_header_sum_v6(src, dst, buf.len() as u32);
         if checksum::internet_continue(sum, buf) != 0 {
             return None;
         }
@@ -160,6 +208,39 @@ impl Builder {
         out[MIN_HEADER_LEN..total].copy_from_slice(payload);
 
         let sum = pseudo_header_sum(src, dst, total as u16);
+        let csum = checksum::internet_continue(sum, &out[..total]);
+        out[16..18].copy_from_slice(&csum.to_be_bytes());
+        Some(total)
+    }
+
+    /// Serialize the segment over IPv6: identical to [`write`](Self::write)
+    /// except the checksum uses the IPv6 pseudo-header (16-byte addresses,
+    /// RFC 8200 layout). Returns the number of bytes written, or `None` if
+    /// `out` is too small.
+    #[must_use]
+    pub fn write_v6(
+        &self,
+        out: &mut [u8],
+        src: &Ipv6Addr,
+        dst: &Ipv6Addr,
+        payload: &[u8],
+    ) -> Option<usize> {
+        let total = MIN_HEADER_LEN.checked_add(payload.len())?;
+        if total > u16::MAX as usize || out.len() < total {
+            return None;
+        }
+        out[0..2].copy_from_slice(&self.src_port.to_be_bytes());
+        out[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
+        out[4..8].copy_from_slice(&self.seq.to_be_bytes());
+        out[8..12].copy_from_slice(&self.ack.to_be_bytes());
+        out[12] = (5u8) << 4; // data offset 5 (20 bytes), reserved bits zero
+        out[13] = self.flags;
+        out[14..16].copy_from_slice(&self.window.to_be_bytes());
+        out[16..18].copy_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+        out[18..20].copy_from_slice(&0u16.to_be_bytes()); // urgent pointer
+        out[MIN_HEADER_LEN..total].copy_from_slice(payload);
+
+        let sum = pseudo_header_sum_v6(src, dst, total as u32);
         let csum = checksum::internet_continue(sum, &out[..total]);
         out[16..18].copy_from_slice(&csum.to_be_bytes());
         Some(total)
@@ -247,6 +328,55 @@ mod tests {
         let mut buf = [0u8; MIN_HEADER_LEN + 3];
         b.write(&mut buf, &A, &B, &[9, 9, 9]).unwrap();
         buf[MIN_HEADER_LEN] ^= 0xFF; // mutate payload
+        assert!(Segment::parse(&buf, &A, &B).is_none());
+    }
+
+    const A6: Ipv6Addr = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+    ];
+    const B6: Ipv6Addr = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
+    ];
+
+    #[test]
+    fn v6_write_then_parse_roundtrips() {
+        let b = Builder {
+            src_port: 40000,
+            dst_port: 80,
+            seq: 0x1234_5678,
+            ack: 0x9ABC_DEF0,
+            flags: FLAG_SYN | FLAG_ACK,
+            window: 65535,
+        };
+        let mut buf = [0u8; MIN_HEADER_LEN + 4];
+        let n = b.write_v6(&mut buf, &A6, &B6, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(n, MIN_HEADER_LEN + 4);
+        let s = Segment::parse_v6(&buf, &A6, &B6).unwrap();
+        assert_eq!(s.src_port, 40000);
+        assert_eq!(s.dst_port, 80);
+        assert_eq!(s.seq, 0x1234_5678);
+        assert!(s.has_flag(FLAG_SYN | FLAG_ACK));
+        assert_eq!(s.payload, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn v6_checksum_binds_to_addresses() {
+        let b = Builder {
+            src_port: 1,
+            dst_port: 2,
+            seq: 1,
+            ack: 0,
+            flags: FLAG_SYN,
+            window: 1024,
+        };
+        let mut buf = [0u8; MIN_HEADER_LEN];
+        b.write_v6(&mut buf, &A6, &B6, &[]).unwrap();
+        // Wrong source address → checksum verification fails.
+        let mut wrong = A6;
+        wrong[0] ^= 0xFF;
+        assert!(Segment::parse_v6(&buf, &wrong, &B6).is_none());
+        assert!(Segment::parse_v6(&buf, &A6, &B6).is_some());
+        // A v4-pseudo-header parse of a v6-checksummed segment must not verify.
         assert!(Segment::parse(&buf, &A, &B).is_none());
     }
 

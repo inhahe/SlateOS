@@ -407,3 +407,41 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
   `pack_endpoint`, `OP_SEND`/`OP_RECV` streaming through the data window,
   `OP_CLOSE`) driving a live TCP transaction — the ring-native equivalent of the
   one-shot `OP_TCP_FETCH` control op, self-tested in the §64 bounded model.
+- 2026-07-14: Phase 4 increment 11 landed — **real socket opcodes driving a live
+  TCP fetch entirely over the ring (the Phase-4 capstone).** The daemon's
+  monolithic one-shot `tcp_fetch` was refactored into a reusable stateful
+  `TcpConn` struct (`connect`/`send`/`recv`/`close`), so a *single* TCP
+  implementation now backs **both** the `OP_TCP_FETCH` control op (now a thin
+  `TcpConn` wrapper — boot parity preserved) **and** the new ring path — no
+  duplicated TCP client. New netipc control op `OP_RING_TCP`
+  (`[handle_le:8][size_le:4]`, sharing the `parse_handle_size`/`encode_handle_size`
+  helpers with `OP_SHM_PING`/`OP_RING_ECHO`) + `Request::RingTcp` +
+  `encode_ring_tcp` (2 new host tests → 31 total, green). Daemon
+  `ring_tcp`/`ring_tcp_process` (services/netstack): `SYS_SHM_MAP` RW,
+  `Ring::attach`, then **drain the SQ driving one `Option<TcpConn>`** — `OP_CONNECT`
+  (`unpack_endpoint(aux)` → `TcpConn::connect`), `OP_SEND` (read data window →
+  `conn.send`), `OP_RECV` (`conn.recv` into scratch → `write_data` back into the
+  window), `OP_CLOSE` (`conn.close`) — one CQE per SQE, then `SYS_SHM_UNMAP`.
+  Kernel `netstack_ring_tcp_roundtrip` (spawn.rs): `Ring::init` a
+  `region_size(8,8,1024)` region, `write_data` an HTTP/1.0 HEAD request at off 0,
+  submit the 4-SQE `connect→send→recv→close` batch (endpoint packed into the
+  connect SQE's `aux`, recv window at off 512), ask the daemon via one
+  `OP_RING_TCP` message, reap all four CQEs in FIFO order (verifying echoed
+  `user_data`), then `read_data` the recv window and check it's an `HTTP/` reply.
+  **Bug found + fixed in the same increment:** making a *second* TCP connection
+  per daemon lifetime (tcp_fetch then ring_tcp) reused an *identical 4-tuple*
+  (fixed local port `0xC000` + fixed ISN + same server) — the server treated the
+  second SYN as a stale TIME_WAIT duplicate and dropped it, so ring-TCP initially
+  got no response while OP_TCP_FETCH succeeded. Proper fix: `TcpConn::connect` now
+  rotates the ephemeral local port (`0xC000 | (seed_ipid & 0x3FFF)`) and ISN per
+  connection, as real TCP stacks do. Boot-validated: **both** OP_TCP_FETCH and
+  OP_RING_TCP now return `HTTP/1.1 200 OK`; "netstack ring-TCP-over-IPC (ring 3):
+  OK — live TCP fetch over the ring (kernel submitted connect/send/recv/close
+  batch + daemon drove one TcpConn + HTTP response returned through the ring data
+  window)", clean 76s boot with all seven netstack ops green (DNS, TCP-fetch, UDP,
+  SHM-ping, ring-echo, **ring-TCP**, reverse-DNS). This proves a real TCP fetch
+  flowing entirely over the zero-copy ring — the exact shape the Phase-5 streaming
+  socket API is built on. Next Phase 4/5 work makes the connection *persistent*
+  (multiple send/recv SQEs against a live `TcpConn` across separate ring
+  submissions, not a one-shot batch) and begins Phase 5 cutover (persistent
+  daemon, delete `kernel/src/net/`, keep the NIC shim).

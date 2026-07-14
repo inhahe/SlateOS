@@ -488,3 +488,37 @@ persistent multi-connection socket server the forwarders need — proceeds now.
   not now. Next (unblocked): persistence *across separate ring submissions* (the
   table survives multiple `OP_RING_TCP` batches / the daemon's poll loop), then —
   gated on Q22 — the socket-syscall forwarders + kernel-stack deletion.
+
+- 2026-07-14: Phase 5 increment 2 landed — **persistent ring session across
+  separate submissions (the socket-daemon lifetime shape).** Increment 1's
+  `RingConns` table was still born-and-buried inside one `OP_RING_TCP` control
+  call: `ring_tcp` mapped the ring, drained one batch, and unmapped — so a
+  connection could not outlive a single submission. The daemon now owns a
+  `RingSession { handle, va, size, conns, ipid }` that lives in `run_dns_service`
+  across control calls. An `OP_RING_TCP` for a handle the session already holds
+  *re-attaches* the still-mapped ring (SQ/CQ head/tail live in the shared region,
+  so a fresh `Ring` view resumes exactly where the last call left off) and drains
+  the new SQEs against the **same** `RingConns` — so `OP_CONNECT` in one call and
+  `OP_SEND`/`OP_RECV`/`OP_CLOSE` in later calls drive the same live `TcpConn`. A
+  new `OP_STOP` opcode (netipc `ring.rs` 0x05) ends a session: the daemon drains
+  remaining SQEs, `close_all`s any still-live conns, and unmaps; the serve loop
+  also tears the session down at its idle deadline so nothing is left mapped/half-
+  open. A different handle transparently opens a fresh session (tearing the old one
+  down first). New kernel self-test `netstack_ring_tcp_persist_roundtrip`
+  (spawn.rs) drives ONE connection (conn_id 7) across **three separate**
+  `OP_RING_TCP` control calls — each a fresh `net.stack` service connection, over
+  one kernel-side ring kept mapped throughout: round 1 `CONNECT#7`, round 2
+  `SEND#7`+`RECV#7`, round 3 `CLOSE#7`+`OP_STOP`. The load-bearing assertion is
+  that round 2's send succeeds: had the daemon torn its session down after round 1
+  (increment-1 behaviour), `conn_id 7` would be gone and the send would complete
+  `-1` — so a non-negative send *is* the proof the session survived across
+  submissions. Boot-validated: "netstack ring-TCP-persist-over-IPC (ring 3): OK —
+  one connection driven across three separate OP_RING_TCP calls"; the persisted
+  conn returned `HTTP/1.1 200 OK`, clean 91s boot with every netstack op green,
+  kernel + daemon build and clippy clean, netipc 31 host tests pass. This is the
+  daemon's persistent-lifetime shape (map once, serve many submissions, explicit
+  teardown) that the future always-on socket daemon becomes — minimising Q22b
+  rework. Next (unblocked): fold this into a bounded top-level poll loop that also
+  hosts the shared per-4-tuple RX pump (D-NETSTACK-RX-DEMUX), so concurrent
+  connections can receive; then — gated on Q22 — the socket-syscall forwarders +
+  kernel-stack deletion.

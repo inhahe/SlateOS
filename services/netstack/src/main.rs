@@ -1073,6 +1073,9 @@ fn run_dns_service(me: &IfInfo) -> i64 {
     let mut txid: u16 = 0x1000;
     let mut served: u32 = 0;
     let mut idle_ticks: u32 = 0;
+    // Persistent ring-TCP session: survives across separate OP_RING_TCP control
+    // calls so a connection opened in one call is addressable in later ones.
+    let mut ring_session = RingSession::new();
 
     while idle_ticks < SERVICE_IDLE_ITERS {
         let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS);
@@ -1095,12 +1098,16 @@ fn run_dns_service(me: &IfInfo) -> i64 {
         if rlen > 0 {
             let req = &req[..rlen as usize];
             let mut reply = [0u8; MSG_CAP];
-            let reply_len = handle_request(req, &next_hop_mac, me, &mut txid, &mut reply);
+            let reply_len =
+                handle_request(req, &next_hop_mac, me, &mut txid, &mut ring_session, &mut reply);
             let _ = syscall3(SYS_CHANNEL_SEND, ch, reply.as_ptr() as u64, reply_len as u64);
             served += 1;
         }
         syscall1(SYS_CHANNEL_CLOSE, ch);
     }
+
+    // Tear down any ring session the client left open (unmaps + closes conns).
+    ring_session.teardown(me);
 
     let _ = syscall1(SYS_SERVICE_UNREGISTER, listener as u64);
     if served > 0 {
@@ -1119,6 +1126,7 @@ fn handle_request(
     next_hop_mac: &Option<[u8; 6]>,
     me: &IfInfo,
     txid: &mut u16,
+    ring_session: &mut RingSession,
     out: &mut [u8],
 ) -> usize {
     let fail = |out: &mut [u8]| netipc::encode_fail(out).unwrap_or(0);
@@ -1219,7 +1227,7 @@ fn handle_request(
             let ok = match next_hop_mac {
                 Some(mac) => {
                     *txid = txid.wrapping_add(1);
-                    ring_tcp(handle, size, me, mac, *txid)
+                    ring_tcp(ring_session, handle, size, me, mac, *txid)
                 }
                 None => false,
             };
@@ -1364,28 +1372,53 @@ fn ring_send_transform(ring: &netring::Ring, sqe: &netipc::ring::Sqe) -> i32 {
 /// the socket-opcode batch driving one live TCP connection, then unmap. Returns
 /// `true` iff at least one SQE was processed and every completion was posted.
 /// `seed_ipid` seeds the connection's IPv4 identification counter.
-fn ring_tcp(handle: u64, size: u32, me: &IfInfo, next_hop_mac: &[u8; 6], seed_ipid: u16) -> bool {
-    let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
-    if va < 0 {
-        return false;
+fn ring_tcp(
+    session: &mut RingSession,
+    handle: u64,
+    size: u32,
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    seed_ipid: u16,
+) -> bool {
+    // Ensure the session is mapped for this ring handle. A different handle (or a
+    // fresh start) opens a new session: tear down any prior mapping, map the new
+    // region, and reset the connection table + ident seed.
+    if session.handle != handle {
+        session.teardown(me);
+        let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
+        if va < 0 {
+            return false;
+        }
+        session.handle = handle;
+        session.va = va;
+        session.size = size;
+        session.conns = RingConns::new();
+        session.ipid = seed_ipid;
     }
-    let base = va as u64 as *mut u8;
 
-    // SAFETY: SYS_SHM_MAP returned a valid, writable mapping of at least `size`
-    // bytes; `attach` re-validates the ring geometry against that length and
-    // never reads/writes outside the mapping. We are the sole consumer of the SQ
-    // and sole producer of the CQ (the kernel is the other party), satisfying the
-    // Ring SPSC contract.
-    let ok = unsafe {
-        match netring::Ring::attach(base, size as usize) {
-            Some(ring) => ring_tcp_process(&ring, me, next_hop_mac, seed_ipid),
-            None => false,
+    let base = session.va as u64 as *mut u8;
+
+    // SAFETY: the mapping is valid and writable for `session.size` bytes for as
+    // long as the session holds `handle` (we only unmap in `teardown`); `attach`
+    // re-validates the ring geometry against that length and never reads/writes
+    // outside the mapping. Re-attaching each call is stateless — the SQ/CQ head/
+    // tail indices live in the shared region, so a fresh `Ring` view resumes
+    // exactly where the previous call left off. We are the sole SQ consumer and
+    // sole CQ producer (the kernel is the other party), satisfying the SPSC
+    // contract.
+    let (ok, stop) = unsafe {
+        match netring::Ring::attach(base, session.size as usize) {
+            Some(ring) => {
+                ring_tcp_process(&ring, &mut session.conns, me, next_hop_mac, &mut session.ipid)
+            }
+            None => (false, false),
         }
     };
 
-    // Drop our mapping regardless (refcount-aware; the kernel keeps its own
-    // reference until it closes the handle).
-    syscall2(SYS_SHM_UNMAP, va as u64, size as u64);
+    // On an explicit OP_STOP, close any still-live connections and unmap now.
+    if stop {
+        session.teardown(me);
+    }
     ok
 }
 
@@ -1459,6 +1492,61 @@ impl RingConns {
         }
         None
     }
+
+    /// Gracefully close every live connection and empty the table. Used when a
+    /// session ends (explicit `OP_STOP` or daemon shutdown) so no connection is
+    /// left half-open at the peer if the client did not `OP_CLOSE` it itself.
+    fn close_all(&mut self, me: &IfInfo) {
+        for slot in &mut self.slots {
+            if let Some((_, mut c)) = slot.take() {
+                c.close(me);
+            }
+        }
+    }
+}
+
+/// A persistent ring-TCP session: the mapped ring region plus the connection
+/// table that survives across *separate* `OP_RING_TCP` control calls.
+///
+/// The one-shot [`ring_tcp`] path mapped the ring, drained a single batch, and
+/// unmapped immediately — so a connection could not outlive one submission. This
+/// session keeps the mapping and the [`RingConns`] table alive between control
+/// calls, so a client can `OP_CONNECT` in one round and `OP_SEND`/`OP_RECV`/
+/// `OP_CLOSE` in later rounds against the *same* live [`TcpConn`] — the shape the
+/// persistent socket-forwarding daemon needs. The session is torn down (all
+/// connections closed, ring unmapped) on an explicit `OP_STOP` SQE or when the
+/// daemon's serve loop exits.
+struct RingSession {
+    /// SHM handle of the currently-mapped ring (0 = no session open).
+    handle: u64,
+    /// Mapped virtual address of the ring region (valid iff `handle != 0`).
+    va: i64,
+    /// Byte length of the mapping.
+    size: u32,
+    /// Per-connection table, keyed by SQE `conn_id`.
+    conns: RingConns,
+    /// IPv4 identification seed, advanced per new connection.
+    ipid: u16,
+}
+
+impl RingSession {
+    /// An idle session (nothing mapped).
+    fn new() -> Self {
+        Self { handle: 0, va: 0, size: 0, conns: RingConns::new(), ipid: 0 }
+    }
+
+    /// Tear the session down: gracefully close any live connections and unmap the
+    /// ring. Idempotent — a no-op when no session is open.
+    fn teardown(&mut self, me: &IfInfo) {
+        if self.handle == 0 {
+            return;
+        }
+        self.conns.close_all(me);
+        syscall2(SYS_SHM_UNMAP, self.va as u64, self.size as u64);
+        self.handle = 0;
+        self.va = 0;
+        self.size = 0;
+    }
 }
 
 /// Drain the submission queue, driving one or more [`TcpConn`]s through the
@@ -1483,27 +1571,38 @@ impl RingConns {
 /// - [`netipc::ring::OP_CLOSE`]: look up and evict `sqe.conn_id`, graceful
 ///   teardown; completion `result = 0`, or `-1` if no such connection.
 /// - [`netipc::ring::OP_NOP`]: complete with `result = 0`.
+/// - [`netipc::ring::OP_STOP`]: complete with `result = 0` and request session
+///   teardown (return flag) once the current batch is drained.
 /// - any unknown opcode: `result = -1`.
 ///
-/// Returns `true` iff at least one SQE was processed and the CQ never overflowed.
+/// `conns` and `ipid` are the *persistent* session state (see [`RingSession`]), so
+/// connections opened in an earlier call are still addressable here. Returns
+/// `(processed, stop)`: `processed` is true iff at least one SQE was handled and
+/// the CQ never overflowed; `stop` is true iff an `OP_STOP` was seen (the caller
+/// then tears the session down).
 fn ring_tcp_process(
     ring: &netring::Ring,
+    conns: &mut RingConns,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
-    seed_ipid: u16,
-) -> bool {
-    let mut conns = RingConns::new();
-    let mut ipid = seed_ipid;
+    ipid: &mut u16,
+) -> (bool, bool) {
     let mut processed = 0u32;
+    let mut stop = false;
     while let Some(sqe) = ring.sq_pop() {
         let result = match sqe.op {
             netipc::ring::OP_NOP => 0,
+            netipc::ring::OP_STOP => {
+                // Drain any remaining SQEs first, then the caller tears down.
+                stop = true;
+                0
+            }
             netipc::ring::OP_CONNECT => {
                 let (ip, port) = netipc::ring::Sqe::unpack_endpoint(sqe.aux);
                 // Advance the ident seed well past the handshake's own increments
                 // so each connection gets a distinct ephemeral port + ISN.
-                ipid = ipid.wrapping_add(0x10);
-                match TcpConn::connect(me, ip, port, *next_hop_mac, ipid) {
+                *ipid = ipid.wrapping_add(0x10);
+                match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid) {
                     Some(mut c) => match conns.reserve(sqe.conn_id) {
                         Some(slot) => {
                             *slot = Some((sqe.conn_id, c));
@@ -1539,11 +1638,11 @@ fn ring_tcp_process(
         };
         let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };
         if !ring.cq_push(&cqe) {
-            return false; // CQ full — would drop a completion; treat as failure
+            return (false, stop); // CQ full — would drop a completion; treat as failure
         }
         processed = processed.saturating_add(1);
     }
-    processed > 0
+    (processed > 0, stop)
 }
 
 /// Execute an `OP_SEND` SQE: read the data window into a scratch buffer and send

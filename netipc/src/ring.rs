@@ -105,6 +105,13 @@ pub const OP_SEND: u8 = 0x02;
 pub const OP_RECV: u8 = 0x03;
 /// Close connection `conn_id`. Completion `result` is 0, or a negative errno.
 pub const OP_CLOSE: u8 = 0x04;
+/// End the persistent ring session: after draining the remaining SQEs the daemon
+/// closes any still-live connections, drops its per-session connection table, and
+/// unmaps the ring. Used by the client to tear a session down explicitly (the
+/// daemon otherwise keeps the mapping + connection state alive across separate
+/// submissions so `OP_CONNECT` in one round and `OP_SEND`/`OP_RECV` in a later
+/// round drive the *same* connection). Completes with `result = 0`.
+pub const OP_STOP: u8 = 0x05;
 
 // ---------------------------------------------------------------------------
 // Entry structs

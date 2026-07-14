@@ -136,6 +136,49 @@ Redirect `SYS_TCP_*` / `SYS_UDP_*` / `SYS_DNS_RESOLVE` etc. to IPC calls into
 `netstack` (shared-memory data path for bulk transfer). POSIX socket layer
 delegates to the daemon.
 
+**Kickoff groundwork (surveyed 2026-07-14).** The socket-syscall ABI the daemon
+must serve already exists and stays stable across the cutover (Phase 5 keeps
+these numbers as thin forwarders):
+- **TCP** `SYS_TCP_*` 800–808 (connect/send/recv/close/bind/accept/
+  close_listener/abort/peer_addr), plus status/tuning 840–855
+  (list, listener_list, poll_status, listener_ready, shutdown, info,
+  set_nodelay, set_keepalive[_params]).
+- **UDP** `SYS_UDP_*` 810–817 (bind/send/recv/close/mcast_join/mcast_leave/
+  connect/local_port), plus rx_ready 847 / rx_front_bytes 848.
+- **DNS** `SYS_DNS_RESOLVE` 820 (→ `netproto::dns`).
+- (`SYS_SOCKETPAIR_*` 300–310 are AF_UNIX-style local pairs, unrelated to the
+  IP stack — leave them alone.)
+
+**Proposed architecture (forwarder, ABI-stable — matches §63 Path B):**
+each `SYS_TCP_*`/`SYS_UDP_*`/`SYS_DNS_RESOLVE` handler stops driving the
+in-kernel stack and instead marshals a request onto a **channel** (the OS's
+mandated primary IPC) to the `netstack` daemon, then blocks on the reply.
+- Control ops (connect/bind/close/accept/status) → small fixed request/reply
+  messages over the channel.
+- Bulk data (send/recv) → **shared-memory ring** (io_uring-style: the design
+  spec already calls for zero-copy IPC that moves pages, not copies), with the
+  channel carrying only submission/completion notifications. Avoid a per-byte
+  kernel→daemon copy.
+- Daemon side: a request dispatcher on the channel drives per-connection TCP
+  state machines built on `netproto` (TCP/UDP/IP framing) over the existing
+  `SYS_NET_RAW_*` TX/RX path it already owns.
+
+**Open design point to weigh before building (candidate for `open-questions.md`
+if the operator wants input):** forwarding every socket op through
+kernel→daemon IPC adds a round-trip vs. today's in-kernel fast path. The
+microkernel-purity win (operator already chose Path B in §63) is the premise,
+but the *data-path* design (shared-mem ring granularity, how `recv` blocking
+maps onto channel wait, batching) is where the latency is won or lost — that's
+the first real Phase 4 task and the one most worth getting right per the
+perf targets (IPC round-trip < 2µs).
+
+**First concrete Phase 4 step:** define the netstack request/reply message
+schema + the shared-mem ring layout in a small shared module (likely alongside
+`netproto`, or a sibling `netipc` crate so both kernel forwarders and the
+daemon share the wire format), then implement `SYS_DNS_RESOLVE` end-to-end as
+the simplest one-shot op (no per-connection state) to prove the channel path
+before tackling TCP/UDP streaming.
+
 ### Phase 5 — cut over + delete kernel stack  [ ] not started
 Flip default from in-kernel to daemon; remove `kernel/src/net/` protocol modules;
 keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
@@ -145,3 +188,7 @@ keep only the thin NIC shim + raw-frame syscalls. Update roadmap item to `[x]`.
 - 2026-07-14: Phase 1 (raw-frame boundary) + Phase 2 (netstack daemon skeleton)
   landed. Phase 3 increment 1: `netproto` shared crate created; netstack cut
   over onto it (hand-rolled framing deleted). Boot-validated end-to-end.
+- 2026-07-14: Phase 3 increments 2–6 landed — `netproto` grew UDP, TCP, IPv6,
+  DNS, DHCPv4 (10 modules, 51 host tests). Core L2–L4 coverage complete.
+  Surveyed the socket-syscall ABI and drafted the Phase 4 forwarder
+  architecture (channel control + shared-mem data ring; DNS_RESOLVE first).

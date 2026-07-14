@@ -23,9 +23,77 @@ Format for each entry:
 
 ---
 
-No open questions. Earlier deferred operator decisions (Q1–Q22) have been
+## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)
+
+**Status:** OPEN (logged 2026-07-14). Not blocking: the daemon+ring listen/accept
+layer is done and boot-validated (see `net-userspace-migration.md`, "Listen/accept
+server sockets over the daemon"); this question only gates the final AF_INET
+**socket-fd** wiring (`sys_bind`/`sys_listen`/`sys_accept4` +
+`net::socket::SockState::Listening`). While it is open, Claude is working the other
+remaining pre-5.7 gap — **IPv6 connect** in the daemon — which has no such fork.
+
+**Background.** In the daemon, a session == one SHM ring (one `RingConns` table +
+its listeners). `OP_ACCEPT` installs the newly-established connection into the
+**listener's own session**, under a new conn_id on the *same* ring. So a listening
+socket and every connection it accepts physically share one ring. Linux, by
+contrast, gives every accepted fd a fully independent socket whose lifetime is
+decoupled from the listener's.
+
+**Question.** How should the socket-fd layer model accepted connections so their
+lifetime/independence matches Linux, given the daemon co-locates them with the
+listener?
+
+**Options.**
+
+- **A — Shared, refcounted session (no daemon-ABI change).** The listening
+  `SocketInner` owns the session; each accepted socket is a new fd that holds an
+  `Arc` on the same session and carries its own conn_id. Per-connection `close`
+  sends `OP_CLOSE` for that conn_id; the session's `OP_STOP` fires only when the
+  last reference (listener or any accepted socket) drops — so closing the listener
+  no longer kills already-accepted connections (Linux-correct lifetime).
+  - *Pros:* no daemon protocol change; reuses everything already built; smallest
+    diff; matches the migration doc's "interim synchronous model, to be replaced by
+    the async socket server" framing.
+  - *Cons:* all connections under one listener funnel through **one ring guarded by
+    one lock** — a *blocking* op on one accepted conn stalls every other conn on the
+    same listener until its deadline. (Mitigated in practice: servers that use
+    `accept`+`poll`+non-blocking I/O only serialize per round-trip, not per slow
+    client. It is real for naively-blocking multi-client servers.)
+
+- **B — Accept-into-a-fresh-ring (daemon-ABI change).** Extend accept so the kernel
+  hands the daemon a *new* ring handle and the daemon migrates the established
+  `TcpConn` out of the listener's session into a new single-connection session on
+  that ring. Each accepted socket then owns its own ring exactly like a client
+  socket.
+  - *Pros:* true per-connection independence and concurrency (one slow client can't
+    stall others); accepted sockets are structurally identical to client sockets.
+  - *Cons:* new/extended accept ABI (SQE carries a ring handle; daemon must
+    `OP_RING_TCP`-attach it and move connection state between session tables); more
+    moving parts and a costlier-to-reverse protocol commitment.
+
+**Claude's recommendation:** **Option A** for the interim. The whole per-op
+synchronous socket path is explicitly a stepping stone to the async, always-on
+socket server (see `known-issues.md` D-NETSOCK-SYNC and the migration doc), which
+will replace the ring-per-op model wholesale — so paying for B's ABI complexity now,
+only to rework it at the async cutover, is poor value. A fixes the Linux *lifetime*
+semantics (the correctness-critical part) with zero protocol change; the
+concurrency limitation is real but documented and temporary, and is a non-issue for
+the poll-driven server pattern. If the operator wants genuine per-connection
+concurrency before the async server lands, choose B.
+
+**Where it bites:** `kernel/src/net/socket.rs` (`SockState`, `SocketInner`,
+`SOCKET_TABLE`; a shared `Arc<Mutex<Session>>` for A vs. a per-socket ring for B),
+`kernel/src/net/netstack_client.rs` (a `Session` abstraction hosting multiple
+conn_ids vs. the current single-conn `NetstackConn`), `kernel/src/syscall/linux.rs`
+(`sys_bind`/`sys_listen`/`sys_accept4` routing), and — for B only —
+`services/netstack/src/main.rs` (accept-into-new-ring) + `netipc/src/ring.rs`
+(accept SQE ring-handle field).
+
+---
+
+Earlier deferred operator decisions (Q1–Q22) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q23 …`.
+full rationale. New decisions should be appended above this line as `## Q24 …`.
 
 ---
 

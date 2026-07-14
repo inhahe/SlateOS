@@ -14,17 +14,22 @@
 //! **not** persist to a file, does **not** read `/proc/net/nftables`, and does
 //! **not** submit to the kernel firewall. So mutating commands (`add`/`delete`/
 //! `insert`/`create`/`flush`) validate and echo syntax but have no lasting
-//! effect. The native `fw` tool is the working front-end for the kernel
-//! firewall (it issues the `SYS_NET_FW_*` syscalls, 860–864).
+//! effect — and each now prints an explicit "NOT applied — use `fw`" notice so
+//! the user isn't misled. The native `fw` tool is the working front-end for the
+//! kernel firewall (it issues the `SYS_NET_FW_*` syscalls, 860–864).
 //!
-//! Wiring `nft`/`iptables` to persist and apply is tracked as **open-questions
-//! Q21**: the kernel `Rule` model (one src IP/prefix + one dst port, input/
-//! output only, no NAT/sets/maps) is far narrower than nftables, so any wiring
-//! is heavily lossy and needs an operator steer on how far to invest. The
-//! earlier `SYS_NET_IOCTL=810` plumbing was dead code that, had it been called,
-//! would have aliased `SYS_UDP_BIND` and leaked UDP sockets — it has been
-//! removed. The `NFT_*` sub-command numbers below are retained as documentation
-//! of the control ABI the kernel will eventually expose.
+//! **This is by design (open-questions Q21, resolved 2026-07-14, option C — see
+//! design-decisions §62).** The kernel `Rule` model (one src IP/prefix + one dst
+//! port, input/output only, no NAT/sets/maps) is far narrower than nftables, so
+//! any wiring would be heavily lossy and risks *silently under-applying* a user's
+//! intended policy. The operator chose to keep `nft`/`iptables` as an explicit
+//! parser/pretty-printer only and steer users to `fw`; full/minimal kernel
+//! wiring is deferred until a concrete need to run Linux firewall scripts
+//! unmodified appears. The earlier `SYS_NET_IOCTL=810` plumbing was dead code
+//! that, had it been called, would have aliased `SYS_UDP_BIND` and leaked UDP
+//! sockets — it has been removed. The `NFT_*` sub-command numbers below are
+//! retained as documentation of the control ABI the kernel would eventually
+//! expose if that wiring is ever built.
 
 #![cfg_attr(not(test), no_main)]
 #![deny(clippy::all)]
@@ -2274,8 +2279,21 @@ fn run_nft(args: &[&str], out: &mut dyn Write) -> i32 {
 
     let mut rs = Ruleset::new();
 
+    // A mutating verb changes only the throwaway in-memory ruleset; nothing is
+    // persisted or applied to the kernel firewall. Warn so the user isn't misled
+    // into thinking `nft add rule …` took effect. See design-decisions §62 (Q21).
+    let mutating = matches!(
+        args.first().copied(),
+        Some("add" | "delete" | "flush" | "insert" | "create" | "replace")
+    );
+
     match nft_command(&mut rs, args, out) {
-        Ok(()) => 0,
+        Ok(()) => {
+            if mutating {
+                print_not_applied_notice(out);
+            }
+            0
+        }
         Err(e) => {
             let _ = writeln!(out, "{}", e);
             1
@@ -2283,12 +2301,40 @@ fn run_nft(args: &[&str], out: &mut dyn Write) -> i32 {
     }
 }
 
+/// Notice printed after a syntactically-valid *mutating* command to make clear
+/// that `nft`/`iptables` do not persist or apply rules to the kernel firewall.
+/// The native `fw` tool is the working firewall front-end (§53, §62).
+fn print_not_applied_notice(out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "note: rule parsed but NOT applied — nft/iptables do not configure the \
+         Slate OS kernel firewall. Use `fw` to apply firewall rules."
+    );
+}
+
 fn run_iptables(args: &[&str], ipv6: bool, out: &mut dyn Write) -> i32 {
     match parse_iptables_args(args, ipv6) {
         Ok(cmd) => {
             let mut rs = Ruleset::new();
+            // Mutating actions touch only the throwaway ruleset — not persisted,
+            // not applied to the kernel. Warn the user. See §62 (Q21).
+            let mutating = matches!(
+                cmd.action,
+                IptAction::Append
+                    | IptAction::Delete
+                    | IptAction::Insert
+                    | IptAction::Flush
+                    | IptAction::Policy
+                    | IptAction::NewChain
+                    | IptAction::DeleteChain
+            );
             match exec_iptables(&mut rs, &cmd, out) {
-                Ok(()) => 0,
+                Ok(()) => {
+                    if mutating {
+                        print_not_applied_notice(out);
+                    }
+                    0
+                }
                 Err(e) => {
                     let _ = writeln!(out, "{}", e);
                     1
@@ -3681,5 +3727,64 @@ mod tests {
         assert!(table.chains.iter().any(|c| c.name == "INPUT"));
         assert!(table.chains.iter().any(|c| c.name == "OUTPUT"));
         assert!(table.chains.iter().any(|c| c.name == "POSTROUTING"));
+    }
+
+    // --- Q21 (§62): mutating commands print a "NOT applied" notice ---
+
+    fn buf_to_string(b: &[u8]) -> String {
+        String::from_utf8(b.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn test_nft_mutating_prints_not_applied_notice() {
+        let mut out = out_buf();
+        let rc = run_nft(&["add", "table", "ip", "filter"], &mut out);
+        assert_eq!(rc, 0);
+        let s = buf_to_string(&out);
+        assert!(
+            s.contains("NOT applied") && s.contains("`fw`"),
+            "mutating nft command must warn it isn't applied; got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn test_nft_list_no_notice() {
+        // Read-only `list` must NOT print the not-applied notice.
+        let mut out = out_buf();
+        let rc = run_nft(&["list", "ruleset"], &mut out);
+        assert_eq!(rc, 0);
+        let s = buf_to_string(&out);
+        assert!(
+            !s.contains("NOT applied"),
+            "read-only list must not warn about application; got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn test_iptables_mutating_prints_not_applied_notice() {
+        let mut out = out_buf();
+        let rc = run_iptables(
+            &["-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"],
+            false,
+            &mut out,
+        );
+        assert_eq!(rc, 0);
+        let s = buf_to_string(&out);
+        assert!(
+            s.contains("NOT applied") && s.contains("`fw`"),
+            "mutating iptables command must warn it isn't applied; got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn test_iptables_list_no_notice() {
+        let mut out = out_buf();
+        let rc = run_iptables(&["-L"], false, &mut out);
+        assert_eq!(rc, 0);
+        let s = buf_to_string(&out);
+        assert!(
+            !s.contains("NOT applied"),
+            "read-only -L must not warn about application; got: {s:?}"
+        );
     }
 }

@@ -3987,6 +3987,23 @@ pub fn exec_path(
     guest_cmd: &[u8],
     argv: &[&[u8]],
 ) -> KernelResult<ExecSpawn> {
+    exec_path_env(id, guest_cmd, argv, &[])
+}
+
+/// Like [`exec_path`], but launches the process with an explicit environment
+/// (`envp`, a list of `KEY=VALUE` byte strings). Used by the OCI build-time
+/// `RUN` executor (Q17/§58), which must run the command with the image's
+/// accumulated `ENV` so `PATH`/etc. resolve as in Docker. An empty `envp`
+/// leaves the spawn default (identical to [`exec_path`]).
+///
+/// # Errors
+/// Identical to [`exec_path`].
+pub fn exec_path_env(
+    id: ContainerId,
+    guest_cmd: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> KernelResult<ExecSpawn> {
     // 1. Container must exist and be running.
     let (running, root_path) = with_table_ref(|table| {
         let idx = id as usize;
@@ -4016,6 +4033,11 @@ pub fn exec_path(
     //    auto-detected from the ELF markers, matching `run`.
     let mut opts = crate::proc::spawn::SpawnOptions::new(guest_str);
     opts.argv = argv;
+    // Only override the default (empty) env when the caller supplied one, so
+    // `exec_path` callers keep the spawn default.
+    if !envp.is_empty() {
+        opts.envp = envp;
+    }
     opts.exe_path = Some(guest_cmd);
     let result = crate::proc::spawn::spawn_process(&elf, &opts)?;
 

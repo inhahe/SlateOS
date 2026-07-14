@@ -1998,12 +1998,17 @@ const MAX_BUILD_STAGES: usize = 128;
 /// Failure modes of [`build_image`].
 ///
 /// Kept distinct from a bare [`KernelError`] so the shell can print a precise,
-/// Docker-style diagnostic — in particular, a `RUN` instruction is *deferred*
-/// (it needs the operator-gated in-container exec, see open-questions.md Q17),
-/// not merely "invalid".
+/// Docker-style diagnostic — in particular, a `RUN` instruction executes the
+/// real in-container exec (design-decisions.md §58), so its two failure modes
+/// (could-not-launch vs. non-zero exit) are surfaced distinctly.
 pub enum BuildError {
-    /// A `RUN` instruction was found; executing it needs rootfs exec (Q17).
-    RunUnsupported { line: usize },
+    /// A `RUN` command could not be launched at 1-based source `line` — e.g. the
+    /// executable (or the shell for a shell-form `RUN`) is absent from the
+    /// in-progress rootfs (a `FROM scratch` image has no `/bin/sh`), or the
+    /// spawn failed. `msg` gives the specific cause.
+    RunLaunch { line: usize, msg: String },
+    /// A `RUN` command executed but exited non-zero (Docker aborts the build).
+    RunFailed { line: usize, code: i32 },
     /// Malformed or unsupported instruction at 1-based source `line`.
     Parse { line: usize, msg: String },
     /// The first build instruction (after any leading `ARG`s) was not `FROM`.
@@ -2019,10 +2024,12 @@ impl BuildError {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            BuildError::RunUnsupported { line } => format!(
-                "line {line}: RUN requires in-container exec (deferred — see Q17); \
-                 every other instruction is supported"
-            ),
+            BuildError::RunLaunch { line, msg } => {
+                format!("line {line}: RUN could not launch: {msg}")
+            }
+            BuildError::RunFailed { line, code } => {
+                format!("line {line}: RUN exited with code {code}")
+            }
             BuildError::Parse { line, msg } => format!("line {line}: {msg}"),
             BuildError::MissingFrom => {
                 String::from("Dockerfile must start with a FROM instruction")
@@ -2951,6 +2958,197 @@ fn resolve_from_rootfs(
     Ok(rootfs_dir)
 }
 
+/// If `path` is an OCI whiteout marker (`<dir>/.wh.<name>` or `.wh.<name>`),
+/// return the archive-relative path it deletes (`<dir>/<name>` or `<name>`).
+fn whiteout_target_path(path: &str) -> Option<String> {
+    let (parent, base) = match path.rsplit_once('/') {
+        Some((p, b)) => (p, b),
+        None => ("", path),
+    };
+    // An opaque-directory marker (`.wh..wh..opq`) has no single target; skip it
+    // (our overlay never emits one, but be defensive).
+    let name = base.strip_prefix(".wh.")?;
+    if name.starts_with(".wh.") {
+        return None;
+    }
+    if parent.is_empty() {
+        Some(String::from(name))
+    } else {
+        Some(format!("{parent}/{name}"))
+    }
+}
+
+/// Apply one accumulated [`BuildLayer`] onto a scratch rootfs directory `dir`,
+/// reconstructing the in-progress image filesystem for a `RUN`'s overlay lower.
+/// Directories and files are written verbatim; whiteout markers (`.wh.<name>`)
+/// delete the corresponding lower path so a later `RUN` sees the deletion.
+fn apply_build_layer_to_dir(layer: &BuildLayer, dir: &str) -> Result<(), BuildError> {
+    use crate::fs::Vfs;
+    let root = dir.trim_end_matches('/');
+    for d in &layer.dirs {
+        let p = format!("{root}/{}", d.path);
+        Vfs::mkdir_all(&p).map_err(BuildError::Kernel)?;
+        // Best-effort mode (POSIX perm bits are the low 12 of the mode word).
+        let _ = Vfs::set_permissions(&p, (d.mode & 0o7777) as u16);
+    }
+    for f in &layer.files {
+        if let Some(target) = whiteout_target_path(&f.path) {
+            let _ = Vfs::remove_recursive(&format!("{root}/{target}"));
+            continue;
+        }
+        // COPY/RUN layers list only leaf files; synthesise parent dirs.
+        for pre in parent_prefixes(&f.path) {
+            let _ = Vfs::mkdir_all(&format!("{root}/{pre}"));
+        }
+        let p = format!("{root}/{}", f.path);
+        Vfs::write_file(&p, &f.data).map_err(BuildError::Kernel)?;
+        let _ = Vfs::set_permissions(&p, (f.mode & 0o7777) as u16);
+    }
+    Ok(())
+}
+
+/// Reconstruct the in-progress image filesystem (base image layers, then the
+/// COPY/RUN layers accumulated so far this stage) into `out_dir`, to serve as
+/// the read-only lower for a `RUN`'s copy-on-write overlay.
+fn materialize_current_rootfs(
+    out_dir: &str,
+    base_dir: Option<&str>,
+    base_layer_descs: &[Descriptor],
+    layers: &[BuildLayer],
+) -> Result<(), BuildError> {
+    crate::fs::Vfs::mkdir_all(out_dir).map_err(BuildError::Kernel)?;
+    if let Some(bdir) = base_dir {
+        for d in base_layer_descs {
+            extract_layer(bdir, d, out_dir).map_err(BuildError::Kernel)?;
+        }
+    }
+    for layer in layers {
+        apply_build_layer_to_dir(layer, out_dir)?;
+    }
+    Ok(())
+}
+
+/// Execute a Dockerfile `RUN` (design-decisions.md §58 / Q17: the real
+/// in-container exec) and capture its filesystem changes as a [`BuildLayer`].
+///
+/// The in-progress rootfs is materialised as an overlay lower; `argv[0]` runs in
+/// an ephemeral container over a copy-on-write upper with the image's `env`; on a
+/// zero exit the upper (added/changed files) plus whiteouts (deletions) become
+/// the returned layer. All scratch dirs, the overlay, its VFS mount, and the
+/// container are torn down on every exit path.
+///
+/// A non-zero exit aborts the build ([`BuildError::RunFailed`], matching Docker);
+/// an un-launchable command (e.g. a `FROM scratch` image with no `/bin/sh` for a
+/// shell-form `RUN`) yields [`BuildError::RunLaunch`].
+#[allow(clippy::too_many_arguments)]
+fn exec_build_run(
+    run_no: usize,
+    line: usize,
+    dest: &str,
+    argv: &[String],
+    env: &[String],
+    base_dir: Option<&str>,
+    base_layer_descs: &[Descriptor],
+    layers: &[BuildLayer],
+) -> Result<BuildLayer, BuildError> {
+    use crate::fs::Vfs;
+    let lower = format!("{dest}.run{run_no}.lower");
+    let upper = format!("{dest}.run{run_no}.upper");
+    let merge = format!("{dest}.run{run_no}.merge");
+
+    let mut ct: Option<crate::container::ContainerId> = None;
+    let mut ov: Option<crate::fs::overlay::OverlayId> = None;
+    let mut mounted = false;
+
+    let res = exec_build_run_inner(
+        line, &lower, &upper, &merge, argv, env, base_dir, base_layer_descs, layers,
+        &mut ct, &mut ov, &mut mounted,
+    );
+
+    // Teardown (best-effort), reverse creation order. The container recorded no
+    // rootfs mount, so `force_delete` won't touch our overlay mount; we unmount
+    // and destroy it explicitly.
+    if let Some(id) = ct {
+        let _ = crate::container::force_delete(id);
+    }
+    if mounted {
+        let _ = Vfs::unmount(&merge);
+    }
+    if let Some(id) = ov {
+        let _ = crate::fs::overlay::destroy(id);
+    }
+    let _ = Vfs::remove_recursive(&lower);
+    let _ = Vfs::remove_recursive(&upper);
+    let _ = Vfs::remove_recursive(&merge);
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_build_run_inner(
+    line: usize,
+    lower: &str,
+    upper: &str,
+    merge: &str,
+    argv: &[String],
+    env: &[String],
+    base_dir: Option<&str>,
+    base_layer_descs: &[Descriptor],
+    layers: &[BuildLayer],
+    ct_out: &mut Option<crate::container::ContainerId>,
+    ov_out: &mut Option<crate::fs::overlay::OverlayId>,
+    mounted_out: &mut bool,
+) -> Result<BuildLayer, BuildError> {
+    use crate::fs::Vfs;
+
+    let Some(program) = argv.first() else {
+        return Err(BuildError::RunLaunch { line, msg: String::from("empty command") });
+    };
+
+    // 1. Reconstruct the in-progress rootfs as the overlay lower.
+    materialize_current_rootfs(lower, base_dir, base_layer_descs, layers)?;
+    Vfs::mkdir_all(upper).map_err(BuildError::Kernel)?;
+
+    // 2. Create + mount the copy-on-write overlay (writes land in `upper`).
+    let ov_id = crate::fs::overlay::create("oci-build-run", lower, upper)
+        .map_err(BuildError::Kernel)?;
+    *ov_out = Some(ov_id);
+    Vfs::mkdir_all(merge).map_err(BuildError::Kernel)?;
+    let ovfs = crate::fs::overlay::OverlayFs::new(ov_id).map_err(BuildError::Kernel)?;
+    Vfs::mount(merge, alloc::boxed::Box::new(ovfs)).map_err(BuildError::Kernel)?;
+    *mounted_out = true;
+
+    // 3. Ephemeral container jailed at the merged view.
+    let cfg = crate::container::ContainerConfig::new("oci-build-run");
+    let ct_id = crate::container::create(&cfg).map_err(BuildError::Kernel)?;
+    *ct_out = Some(ct_id);
+    crate::container::set_root_path(ct_id, merge).map_err(BuildError::Kernel)?;
+    crate::container::start(ct_id).map_err(BuildError::Kernel)?;
+
+    // 4. Launch argv[0] with the image ENV; wait for it to exit.
+    //    NOTE: the process starts at the rootfs root, not the image WORKDIR —
+    //    `exec_path_env` has no cwd argument yet (see todo.txt). RUN commands
+    //    using absolute paths are unaffected; this is a known limitation.
+    let argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(Vec::as_slice).collect();
+    let env_bytes: Vec<Vec<u8>> = env.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let env_refs: Vec<&[u8]> = env_bytes.iter().map(Vec::as_slice).collect();
+
+    let spawn = crate::container::exec_path_env(ct_id, program.as_bytes(), &argv_refs, &env_refs)
+        .map_err(|e| BuildError::RunLaunch { line, msg: format!("{e:?}") })?;
+
+    let code = crate::container::wait_process(spawn.pid)
+        .map_err(|e| BuildError::RunLaunch { line, msg: format!("wait failed: {e:?}") })?;
+    let _ = crate::container::remove_process_task(ct_id, spawn.pid, spawn.task_id);
+    if code != 0 {
+        return Err(BuildError::RunFailed { line, code });
+    }
+
+    // 5. Capture the upper (added/changed files) + whiteouts (deletions).
+    let whiteouts = crate::fs::overlay::list_whiteouts(ov_id).map_err(BuildError::Kernel)?;
+    let upper_path = crate::fs::overlay::upper_path(ov_id).map_err(BuildError::Kernel)?;
+    overlay_to_build_layer(&upper_path, &whiteouts).map_err(BuildError::Kernel)
+}
+
 /// Build a single stage, cleaning up any transient `COPY --from` rootfs
 /// extractions before returning (success or failure).
 fn build_one_stage(
@@ -3002,6 +3200,8 @@ fn build_one_stage_inner(
     let mut from_seen = false;
     // Memoised (image_dir -> extracted rootfs dir) for `COPY --from`.
     let mut rootfs_cache: Vec<(String, String)> = Vec::new();
+    // Monotone index for `RUN` scratch dirs (`{dest}.run{N}.{lower,upper,merge}`).
+    let mut run_no: usize = 0;
 
     for (line, logical) in stage.instrs {
         let line = *line;
@@ -3080,7 +3280,32 @@ fn build_one_stage_inner(
                 }
                 from_seen = true;
             }
-            "RUN" => return Err(BuildError::RunUnsupported { line }),
+            "RUN" => {
+                // Docker `RUN` runs a command inside the in-progress image and
+                // commits its filesystem changes as a new layer (§58/Q17).
+                let expanded = expand_vars(rest_raw, &vars);
+                let argv = parse_cmd_form(&expanded, &spec.shell);
+                if argv.is_empty() {
+                    return Err(BuildError::Parse {
+                        line,
+                        msg: String::from("RUN requires a command"),
+                    });
+                }
+                let layer = exec_build_run(
+                    run_no,
+                    line,
+                    dest,
+                    &argv,
+                    &spec.env,
+                    base_dir.as_deref(),
+                    &base_layer_descs,
+                    &spec.layers,
+                )?;
+                run_no = run_no.saturating_add(1);
+                // A `RUN` always produces a layer (even an empty one), matching
+                // Docker — this keeps the `history[]` empty_layer flags in step.
+                spec.layers.push(layer);
+            }
             "CMD" => {
                 spec.cmd = parse_cmd_form(rest_raw, &spec.shell);
             }
@@ -3907,11 +4132,18 @@ CMD ["--serve"]
         let readme = Vfs::read_file(&format!("{ext}/srv/readme.txt"))?;
         assert_eq!(readme, b"read me");
 
-        // RUN must be rejected as deferred (Q17), not silently ignored.
+        // RUN now executes the real in-container exec (§58/Q17). A shell-form
+        // RUN on a `FROM scratch` image has no `/bin/sh` to launch, so it must
+        // fail with a precise RunLaunch (not silently succeed). The full
+        // materialize→overlay→create→launch→cleanup pipeline runs here; the
+        // happy path (a successful RUN capturing a layer) is exercised
+        // end-to-end via the interactive `docker build` path, which is kept out
+        // of this dense boot self-test because it parks the boot thread on
+        // wait_process (see the B-PTHREAD-YIELDBUDGET boot-hang note).
         let with_run = b"FROM scratch\nRUN echo hi\n";
         match build_image(with_run, ctx, "/tmp/oci_build_run") {
-            Err(BuildError::RunUnsupported { line }) => assert_eq!(line, 2),
-            other => panic!("expected RunUnsupported, got {:?}", other.is_ok()),
+            Err(BuildError::RunLaunch { line, .. }) => assert_eq!(line, 2),
+            other => panic!("expected RunLaunch, got is_ok={:?}", other.is_ok()),
         }
 
         // FROM <local image> inherits base layers + config, appends a layer.

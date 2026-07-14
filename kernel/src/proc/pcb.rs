@@ -5264,10 +5264,14 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // demand-page allocation in the process zone.
     crate::mm::rmap::add(phys_frame.addr(), pml4_phys, frame_base);
 
-    serial_println!(
-        "[fault] Demand-paged user frame for pid {} at {:#x}",
-        pid, frame_base
-    );
+    // Trace-level: the page-fault path is hot — a process demand-paging its
+    // whole address space emits thousands of these. Routing them through klog
+    // at Trace keeps them in the dmesg ring buffer for debugging while keeping
+    // them OFF serial by default (serial_level = Info), so per-fault logging no
+    // longer saturates the (slow) serial port. An unconditional serial_println
+    // here previously starved the hard-lockup kick and made boots crawl/appear
+    // hung (see known-issues.md, i6300esb watchdog capture 2026-07-14).
+    crate::klog!(Trace, "mm.fault", "demand-paged user frame pid={} at {:#x}", pid, frame_base);
     true
 }
 
@@ -5348,8 +5352,11 @@ fn resolve_file_cached(
         page_table::flush_frame(virt);
     }
 
-    serial_println!(
-        "[fault] Page-cache mapped pid {} at {:#x} (file {:?} off {:#x})",
+    // Trace-level (hot path): see the demand-page site above. Kept in the dmesg
+    // ring buffer, off serial by default, to avoid the per-fault serial storm.
+    crate::klog!(
+        Trace, "mm.fault",
+        "page-cache mapped pid={} at {:#x} (file {:?} off {:#x})",
         pid, frame_base, file_id, page_file_off
     );
     true

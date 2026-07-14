@@ -67056,6 +67056,68 @@ fn cmd_netns(args: &str) {
     }
 }
 
+/// Real in-container process launch (the kernel side of Docker `docker exec`):
+/// read the ELF from the container's rootfs and spawn it bound into the
+/// container's cgroup + PID/user/network namespaces + rootfs jail, then (unless
+/// detached) join on its exit code. Shared by `container run-in`, the
+/// `container exec --rootfs` alias, and the `docker exec` delegate (Q17/§58,
+/// option B).
+///
+/// `rest` is the token slice *after* the verb: `[-d] <id> <path> [args...]`.
+/// `-d` detaches (print the pid and return); otherwise block on the spawned
+/// pid, print its exit status, and unregister it from container bookkeeping.
+fn container_exec_rootfs(rest: &[&str]) {
+    use crate::container;
+
+    let mut idx = 0usize;
+    let detached = rest.get(idx).copied() == Some("-d");
+    if detached {
+        idx = idx.saturating_add(1);
+    }
+    let Some(id_str) = rest.get(idx) else {
+        crate::console_println!("Usage: container run-in [-d] <id> <command> [args...]");
+        return;
+    };
+    let Ok(id) = id_str.parse::<u32>() else {
+        crate::console_println!("Invalid container ID");
+        return;
+    };
+
+    // Everything after the id is argv (argv[0] = the guest executable path
+    // resolved under the container's rootfs).
+    let cmd_tokens = rest.get(idx.saturating_add(1)..).unwrap_or(&[]);
+    let argv: alloc::vec::Vec<&[u8]> = cmd_tokens.iter().map(|s| s.as_bytes()).collect();
+    let Some(&guest_cmd) = argv.first() else {
+        crate::console_println!("Usage: container run-in [-d] <id> <command> [args...]");
+        return;
+    };
+
+    match container::exec_path(id, guest_cmd, &argv) {
+        Ok(spawned) => {
+            if detached {
+                crate::console_println!(
+                    "[run-in] container {} pid {} (detached)", id, spawned.pid
+                );
+            } else {
+                match container::wait_process(spawned.pid) {
+                    Ok(code) => crate::console_println!(
+                        "[run-in] container {} pid {} exited with status {}",
+                        id, spawned.pid, code
+                    ),
+                    Err(e) => crate::console_println!(
+                        "[run-in] wait failed for pid {}: {:?}", spawned.pid, e
+                    ),
+                }
+                // Unregister the finished process from container bookkeeping
+                // (drops the pid entry + decrements namespace refcounts; the
+                // cgroup task count is released when the dead task is reaped).
+                let _ = container::remove_process_task(id, spawned.pid, spawned.task_id);
+            }
+        }
+        Err(e) => crate::console_println!("[run-in] failed: {:?}", e),
+    }
+}
+
 fn cmd_container(args: &str) {
     use crate::container;
 
@@ -68220,70 +68282,82 @@ fn cmd_container(args: &str) {
             }
         }
         "exec" => {
-            // container exec [-d] <id> <command> [args...]
+            // container exec <id> <kshell-command...>   (Q17/§58, option B)
             //
-            // Launches <command> as a *real process* inside the running
-            // container: the ELF is read from the container's rootfs and the
-            // process is bound into the container's cgroup + PID/user/network
-            // namespaces + rootfs jail (the kernel side of `docker exec`, via
-            // container::exec_path).  Foreground (default): block until it
-            // exits and print the status.  `-d`: detached — print the pid and
-            // return immediately.
+            // The *netns-debug facade*: temporarily enter the container's
+            // network namespace, run a **kshell builtin** there (so DNS/TCP/UDP
+            // operations resolve inside the container's netns), then restore the
+            // caller's namespace. This is deliberately NOT Docker `docker exec`
+            // semantics — it runs a shell builtin, not a process from the
+            // container rootfs. For a *real* in-container process launch use
+            // `container run-in` (or the `container exec --rootfs` alias below,
+            // which is what `docker exec` maps to).
             //
-            // (This replaces the old net-namespace-switch facade that merely
-            // re-ran a *kshell builtin* in the container's net namespace; it now
-            // runs a genuine guest process — see D-CONTAINER-EXEC-WAIT.)
-            let mut idx = 1usize;
-            let detached = parts.get(idx).copied() == Some("-d");
-            if detached {
-                idx = idx.saturating_add(1);
+            // `container exec --rootfs [-d] <id> <path> [args...]` is an alias
+            // for `run-in`: launch a genuine process from the container rootfs.
+            if parts.get(1).copied() == Some("--rootfs") {
+                container_exec_rootfs(parts.get(2..).unwrap_or(&[]));
+                return;
             }
-            let Some(id_str) = parts.get(idx) else {
-                crate::console_println!("Usage: container exec [-d] <id> <command> [args...]");
+
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container exec <id> <kshell-command...>");
+                crate::console_println!("       container exec --rootfs [-d] <id> <path> [args...]  (real rootfs exec)");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 crate::console_println!("Invalid container ID");
                 return;
             };
+            // The command tail is everything in the raw arg string after the id
+            // token (preserves the builtin's own argument spacing for `execute`).
+            let cmd_offset = args.find(id_str).unwrap_or(0);
+            let after_id = args.get(cmd_offset..).unwrap_or("").trim_start();
+            let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
+            if after_id.is_empty() {
+                crate::console_println!("Usage: container exec <id> <kshell-command...>");
+                return;
+            }
 
-            // Everything after the id is argv (argv[0] = the guest executable
-            // path resolved under the container's rootfs).
-            let cmd_tokens = parts.get(idx.saturating_add(1)..).unwrap_or(&[]);
-            let argv: alloc::vec::Vec<&[u8]> =
-                cmd_tokens.iter().map(|s| s.as_bytes()).collect();
-            let Some(&guest_cmd) = argv.first() else {
-                crate::console_println!("Usage: container exec [-d] <id> <command> [args...]");
+            // Look up the container's network namespace and verify it is running.
+            let Some((_, _, net_ns)) = container::namespace_ids(id) else {
+                crate::console_println!("Container {} not found", id);
                 return;
             };
-
-            match container::exec_path(id, guest_cmd, &argv) {
-                Ok(spawned) => {
-                    if detached {
-                        crate::console_println!(
-                            "[exec] container {} pid {} (detached)", id, spawned.pid
-                        );
-                    } else {
-                        match container::wait_process(spawned.pid) {
-                            Ok(code) => crate::console_println!(
-                                "[exec] container {} pid {} exited with status {}",
-                                id, spawned.pid, code
-                            ),
-                            Err(e) => crate::console_println!(
-                                "[exec] wait failed for pid {}: {:?}", spawned.pid, e
-                            ),
-                        }
-                        // Unregister the finished process from container
-                        // bookkeeping (drops the pid entry + decrements
-                        // namespace refcounts; the cgroup task count is released
-                        // automatically when the dead task is reaped).
-                        let _ = container::remove_process_task(
-                            id, spawned.pid, spawned.task_id,
-                        );
-                    }
-                }
-                Err(e) => crate::console_println!("[exec] failed: {:?}", e),
+            let Some(ci) = container::info(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            if !matches!(ci.state, container::ContainerState::Running) {
+                crate::console_println!(
+                    "Container {} is not running (state: {:?})", id, ci.state
+                );
+                return;
             }
+
+            // Save the caller's namespace, switch to the container's netns, run
+            // the builtin, then restore — so DNS/TCP/UDP use the container's
+            // network stack for the duration of this one command.
+            let task_id = crate::sched::current_task_id();
+            let orig_ns = crate::sched::current_task_net_ns();
+            if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
+                crate::console_println!("Failed to enter namespace: {:?}", e);
+                return;
+            }
+            crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
+            execute(after_id);
+            let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
+            crate::console_println!("[exec] Exited container {} namespace", id);
+        }
+        "run-in" => {
+            // container run-in [-d] <id> <path> [args...]   (Q17/§58, option B)
+            //
+            // Real in-container process launch (Docker `docker exec` semantics):
+            // read <path> from the container's rootfs and spawn it as a genuine
+            // process bound into the container's cgroup + PID/user/network
+            // namespaces + rootfs jail. Foreground (default) blocks until it
+            // exits and prints the status; `-d` detaches and prints the pid.
+            container_exec_rootfs(parts.get(1..).unwrap_or(&[]));
         }
         "prune" => {
             // container prune  (Docker `container prune`): remove all stopped
@@ -68660,7 +68734,9 @@ fn cmd_container(args: &str) {
             crate::console_println!("  container unpause ID [ID...]             — thaw (resume all threads)");
             crate::console_println!("  container prune                          — remove all stopped containers");
             crate::console_println!("  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks");
-            crate::console_println!("  container exec [-d] ID <command> [args]  — run a real process in the container (foreground: waits + prints exit status; -d: detached)");
+            crate::console_println!("  container exec ID <kshell-command>       — netns-debug facade: run a kshell builtin in the container's network namespace");
+            crate::console_println!("  container run-in [-d] ID <path> [args]   — run a real process from the container rootfs (docker exec; foreground waits + prints exit status; -d detaches)");
+            crate::console_println!("  container exec --rootfs [-d] ID <path> [args]  — alias for run-in");
             crate::console_println!("  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)");
             crate::console_println!("  container export ID <host-tar-path>      — pack rootfs into a tar archive");
             crate::console_println!("  container import <tar> <name> <rootfs-dir> — create container from a tar archive");
@@ -69061,9 +69137,13 @@ fn cmd_docker(args: &str) {
         // Renamed subcommands (Docker name differs from the native one).
         "rm" => delegate("delete"),
         "inspect" => delegate("info"),
+        // `docker exec` is a *real* in-container process launch from the
+        // rootfs, so it maps to the native `container run-in` verb — NOT
+        // `container exec`, which is the netns-debug facade (Q17/§58, option B).
+        "exec" => delegate("run-in"),
         // 1:1 passthroughs — the Docker and native subcommand names match.
         "start" | "stop" | "kill" | "restart" | "pause" | "unpause"
-        | "exec" | "events" | "logs" | "stats" | "top" | "port" | "wait"
+        | "events" | "logs" | "stats" | "top" | "port" | "wait"
         | "diff" | "rename" | "update" | "prune" | "cp" | "export"
         | "import" | "volume" | "network" | "system" => delegate(sub),
         // `docker commit <container> <name:tag>` authors a *new image* from the

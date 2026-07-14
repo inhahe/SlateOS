@@ -2567,6 +2567,98 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the userspace `netstack` daemon (net→userspace
+/// migration, Phase 2 — see `net-userspace-migration.md`).
+///
+/// Spawns the real `services/netstack` binary as a ring-3 process holding a
+/// single `NetRaw` capability. The daemon claims the physical NIC through the
+/// capability-gated `SYS_NET_RAW_*` syscalls (Phase 1), broadcasts an ARP
+/// request for the default gateway, and polls raw frames until the gateway's
+/// ARP reply arrives — proving the raw-frame TX **and** RX path works
+/// end-to-end from userspace against QEMU's slirp. It exits 0 on success, a
+/// small nonzero code on failure/timeout.
+///
+/// While the daemon holds the claim, `net::poll()`'s physical-NIC drain is
+/// gated off (the daemon owns the frames); the driver's `recv()` refills its
+/// own RX descriptors, so RX keeps flowing without the kernel poll loop. On
+/// daemon exit the claim self-heals and the in-kernel stack resumes as the
+/// active path.
+///
+/// Skips gracefully (`Ok`) when the interface isn't up or DHCP hasn't assigned
+/// an address — there is no network to prove the path against in that case.
+pub fn self_test_userspace_netstack() -> KernelResult<()> {
+    // The prebuilt daemon ELF, embedded at compile time (same pattern as the
+    // `hello` service used by the container tests).  Built by
+    // `services/netstack` for x86_64-unknown-none.
+    static NETSTACK_ELF: &[u8] = include_bytes!(
+        "../../../services/netstack/target/x86_64-unknown-none/release/netstack"
+    );
+
+    // Skip when there's no usable network: the daemon's proof is an ARP
+    // round-trip with the gateway, which requires a bound address.
+    let ifinfo = crate::net::interface::info();
+    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.gateway.0 == [0, 0, 0, 0] {
+        serial_println!(
+            "[spawn]   netstack daemon (ring 3): SKIP (no network — up={}, ip={}, gw={})",
+            ifinfo.up, ifinfo.ip, ifinfo.gateway
+        );
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running userspace netstack daemon (ring 3) integration test...");
+
+    let argv: &[&[u8]] = &[b"netstack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The one capability the daemon needs: raw L2 frame access (WRITE rights).
+    let caps = [(ResourceType::NetRaw, 0u64, Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "netstack-selftest",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(NETSTACK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: netstack spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Park the boot thread until the daemon exits.  The daemon sleeps/polls
+    // for up to ~2s of its own wall-time; `wait_process` blocks (rather than
+    // spin-yielding) so that budget elapses in real time and reaps the zombie.
+    let code = match crate::container::wait_process(result.pid) {
+        Ok(c) => c,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: wait_process(netstack) returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    if code != 0 {
+        serial_println!(
+            "[spawn]   FAIL: netstack daemon (ring 3) exited {} \
+             (nonzero = could not claim NIC / TX failed / no gateway ARP reply)",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   netstack daemon (ring 3: raw NIC claim + ARP round-trip \
+         over SYS_NET_RAW_*): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `brk(2)` heap.
 ///
 /// Spawns a real Linux-ABI process that queries its program break, grows the

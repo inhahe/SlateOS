@@ -53428,3 +53428,23 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## `cwd: Option<&[u8]>` param); exec_build_run then passes spec.working_dir.
 ## Also apply it to `container run-in` / `docker exec` for parity. Low risk,
 ## small refactor — deferred only to keep the §58 RUN landing focused.
+
+## Services embedded via include_bytes! must be pre-built before the kernel
+## (build-workflow gap; pre-existing, now covers 3 services)
+##   The kernel embeds several bare-metal `services/*` ELFs at compile time via
+##   include_bytes!:
+##     - services/hello   -> kernel/src/container.rs (container exec tests)
+##     - services/netstack -> kernel/src/proc/spawn.rs (net→userspace Phase 2
+##       self_test_userspace_netstack)
+##   Each service's `target/` is gitignored (**/target/), so these ELFs are NOT
+##   committed. `scripts/boot-test.sh` only runs `cargo build` for the default
+##   workspace members (kernel/posix/stubs) — it does NOT build the services.
+##   Consequence: on a fresh checkout the kernel FAILS to build until each
+##   embedded service is built manually, e.g.:
+##       (cd services/netstack && cargo build --release)
+##       (cd services/hello    && cargo build --release)
+##   PROPER FIX: add a build step (kernel/build.rs or a top-level script invoked
+##   by boot-test.sh) that builds every service whose ELF the kernel embeds,
+##   before the kernel compiles. Keep artifacts out of git; make the build
+##   reproducible instead. Deferred (matches the existing hello/ticker pattern),
+##   but the gap is real and grows with each embedded service.

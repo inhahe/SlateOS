@@ -1412,6 +1412,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}", e);
     }
 
+    // Net→userspace migration Phase 2: spawn the real `services/netstack`
+    // daemon (ring 3), which claims the NIC via the capability-gated
+    // SYS_NET_RAW_* syscalls and proves the raw-frame TX/RX path end-to-end
+    // with an ARP round-trip. Skips gracefully when there's no network.
+    if let Err(e) = proc::spawn::self_test_userspace_netstack() {
+        serial_println!("WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of the Linux brk(2) heap: a real Linux-ABI
     // process queries its program break, grows the heap by 32 KiB, writes a
     // sentinel into the second frame, reads it back, and exits with that byte

@@ -42,12 +42,26 @@ Deferred to later increments (not blocking Phase 2):
   the raw path. This commit's validation is: build clean + boot test confirms
   the `poll()` gate did not regress in-kernel networking (no raw owner present).
 
-### Phase 2 — `netstack` daemon skeleton  [ ] not started
-- New `netstack/` userspace crate (Rust, `no_std`? — runs as a normal user
-  process, so `std`-on-SlateOS/POSIX where available; reuse kernel net modules'
-  logic by moving to a shared `no_std` protocol crate where practical).
-- Open raw iface, run a poll/event loop, answer ARP + ICMP echo (ping
-  responder). Proves the loop end-to-end against QEMU.
+### Phase 2 — `netstack` daemon skeleton  [x] landed 2026-07-14
+- New `services/netstack/` bare-metal daemon (`no_std`/`no_main`, hand-rolled
+  syscall wrappers — same shape as the other `services/*`; a `std`-on-SlateOS
+  port and a shared `no_std` protocol crate come with Phase 3's larger port).
+- Opens the raw iface via `SYS_NET_RAW_OPEN`, queries `SYS_NET_IF_INFO` for
+  IP/MAC/gateway, runs a raw-frame poll loop, and speaks two protocols wholly
+  in userspace: **ARP** (broadcasts a request for the gateway to prove TX+RX,
+  and answers inbound requests for our IP) and **ICMP echo** (unicasts a ping
+  reply back to the requester's L2 address).
+- Validated end-to-end in QEMU by a kernel ring-3 self-test
+  (`spawn::self_test_userspace_netstack`, wired in `main.rs`): spawns the real
+  daemon ELF holding a single `NetRaw` capability, and asserts a clean exit
+  after the gateway ARP round-trip. Boot log:
+  `[netstack] claimed raw NIC → sent ARP request → ARP reply: gateway resolved
+  → released raw NIC → SUCCESS`. Skips gracefully when there's no network.
+- Confirmed no regression: after the daemon releases the claim, `net::poll()`
+  resumes and the rest of the boot self-tests run normally (BOOT_OK reached).
+- Deferred to Phase 3: moving the real protocol *parsers/state machines* into
+  the daemon (this skeleton hand-builds only ARP/ICMP frames); a shared
+  `no_std` protocol crate; batched raw TX/RX.
 
 ### Phase 3 — port protocol layers  [ ] not started
 Move parsers/state machines into the daemon (or a shared crate): Ethernet, ARP,

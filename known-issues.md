@@ -129,6 +129,17 @@ Phase 5 progresses:
   `ENOTCONN` on an unconnected socket). Validated by `self_test_connect6` step 6
   (`v6 getsockname: local fe80::…:PORT ok`). Remaining v6 socket-fd gap: the
   server-socket-fd path (bind/listen/accept4) is the separate gap below.
+- **`shutdown(2)` DONE (v4 and v6).** A new `OP_SHUTDOWN` ring op carries the
+  Linux `how` (`SHUT_RD`/`WR`/`RDWR`) in `aux`; the daemon's `TcpConn` grew
+  `write_shut`/`read_shut` flags — `SHUT_WR` emits our FIN exactly once (a later
+  `close` sees `write_shut` and skips re-sending) and rejects subsequent `OP_SEND`
+  with `ERR_BROKEN_PIPE`, `SHUT_RD` makes subsequent `OP_RECV` report EOF; poll
+  bits stay honest (writable when write-shut since send won't block, readable when
+  read-shut). Kernel side: `NetstackConn::shutdown` + `net::socket::shutdown`
+  (gated on Connected) + `sys_shutdown` Path-B branch (validates `how` after the
+  fd lookup, so a bogus fd still wins with EBADF; `KernelError::BrokenPipe`→EPIPE).
+  Validated by `self_test_listen_accept` step 6
+  (`shutdown(SHUT_WR)→EPIPE + shutdown(SHUT_RD)→EOF ok`).
 - **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
   recv ≤512 B per call (callers must loop). Not a correctness bug, but small.
 

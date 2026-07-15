@@ -132,6 +132,9 @@ pub enum KernelError {
     /// A `connect` is already in progress on this socket (a repeated non-blocking
     /// `connect` before the first handshake resolved).  Maps to `EALREADY`.
     ConnectAlready = -703,
+    /// A `send`/`write` was issued on a stream socket whose write side has been
+    /// closed with `shutdown(SHUT_WR)`/`SHUT_RDWR`.  Maps to `EPIPE`.
+    BrokenPipe = -704,
 }
 
 impl KernelError {
@@ -185,6 +188,7 @@ impl KernelError {
             Self::NotConnected => "socket not connected",
             Self::InProgress => "operation now in progress",
             Self::ConnectAlready => "connection already in progress",
+            Self::BrokenPipe => "broken pipe (write side shut down)",
         }
     }
 

@@ -1299,6 +1299,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::NotConnected => errno::ENOTCONN,
         KernelError::InProgress => errno::EINPROGRESS,
         KernelError::ConnectAlready => errno::EALREADY,
+        KernelError::BrokenPipe => errno::EPIPE,
     }
 }
 
@@ -37126,6 +37127,25 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
+    }
+    // Path B: shutdown on a daemon-backed stream socket half/full-closes the
+    // connection without releasing the fd (SHUT_RD → recv EOF, SHUT_WR → send
+    // EPIPE).  The `how` range check happens here — after the fd lookup — so a
+    // bogus fd still wins with EBADF, matching Linux's inet_shutdown ordering.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let how = args.arg1;
+        if how > netipc::ring::SHUT_RDWR {
+            return linux_err(errno::EINVAL);
+        }
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        return match crate::net::socket::shutdown(h, how) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(crate::error::KernelError::NotConnected) => linux_err(errno::ENOTCONN),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
     }
     linux_err(errno::EBADF)
 }

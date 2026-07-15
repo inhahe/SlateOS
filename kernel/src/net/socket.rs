@@ -503,6 +503,26 @@ pub fn local(handle: SocketHandle) -> KernelResult<crate::net::netstack_client::
     guard.conn.local_addr()
 }
 
+/// Half- or full-close a connected stream socket per `shutdown(2)`.
+///
+/// `how` is the Linux value (`SHUT_RD`=0, `SHUT_WR`=1, `SHUT_RDWR`=2). The socket
+/// object stays alive and its fd remains valid; only the requested direction(s)
+/// close (see [`NetstackConn::shutdown`]). Callers must validate `how` before
+/// calling — an out-of-range value is treated as `SHUT_RDWR` by the daemon.
+///
+/// # Errors
+///
+/// - `NotConnected` — the socket is not in the connected state.
+/// - protocol faults propagated from [`NetstackConn::shutdown`].
+pub fn shutdown(handle: SocketHandle, how: u64) -> KernelResult<()> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.state != SockState::Connected {
+        return Err(KernelError::NotConnected);
+    }
+    guard.conn.shutdown(how)
+}
+
 /// Number of live sockets (test/introspection helper).
 #[must_use]
 pub fn live_count() -> usize {

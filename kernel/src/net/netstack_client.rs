@@ -353,6 +353,14 @@ impl NetstackConn {
                 }
                 return Err(KernelError::WouldBlock);
             }
+            if res == netipc::ring::ERR_BROKEN_PIPE {
+                // Write side was shut down (`shutdown(SHUT_WR)`). Report any bytes
+                // already accepted (Linux returns the short count); otherwise EPIPE.
+                if total > 0 {
+                    return Ok(total);
+                }
+                return Err(KernelError::BrokenPipe);
+            }
             if res < 0 {
                 // Peer gone mid-stream: report bytes already queued, or the raw
                 // negative result if nothing has been sent yet.
@@ -638,6 +646,36 @@ impl NetstackConn {
                 Ok(LocalEndpoint::V6(ip6, port))
             }
             _ => Err(KernelError::NotConnected),
+        }
+    }
+
+    /// Half- or full-close the connection per `shutdown(2)`.
+    ///
+    /// `how` is the Linux value: [`netipc::ring::SHUT_RD`] (0),
+    /// [`netipc::ring::SHUT_WR`] (1), or [`netipc::ring::SHUT_RDWR`] (2). Unlike
+    /// [`close`](Self::close) this keeps the connection (and its ring session)
+    /// alive — the still-open direction continues to work. After `SHUT_WR` a
+    /// subsequent [`send`](Self::send) fails with [`KernelError::BrokenPipe`]; after
+    /// `SHUT_RD` a subsequent [`recv`](Self::recv) reports EOF (0 bytes).
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::NotConnected`] — the daemon has no such connection.
+    /// - transport/resource faults from the underlying ring round-trip.
+    pub fn shutdown(&mut self, how: u64) -> KernelResult<()> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_SHUTDOWN,
+            conn_id: self.conn_id,
+            data_off: 0,
+            data_len: 0,
+            user_data: ud,
+            aux: how,
+        };
+        match self.submit_and_reap(&ring, &sqe)? {
+            0 => Ok(()),
+            _ => Err(KernelError::NotConnected), // -1 → unknown connection
         }
     }
 
@@ -1296,9 +1334,38 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         return Err(KernelError::InternalError);
     }
 
+    // 6. shutdown(2) parity on the established client stream (CONN_ID):
+    //    SHUT_WR closes the write side (a later send must fail with EPIPE), then
+    //    SHUT_RD closes the read side (a later recv must report EOF = 0 bytes).
+    conn.shutdown(netipc::ring::SHUT_WR)?;
+    match conn.send(b"post-shutdown", false) {
+        Err(KernelError::BrokenPipe) => {}
+        other => {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   send after shutdown(SHUT_WR) did not return EPIPE ({other:?}) — shutdown parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    conn.shutdown(netipc::ring::SHUT_RD)?;
+    match conn.recv(&mut [0u8; 16], false) {
+        Ok(0) => {}
+        other => {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   recv after shutdown(SHUT_RD) did not report EOF ({other:?}) — shutdown parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!(
+        "[netstack-client]   shutdown(SHUT_WR)→EPIPE + shutdown(SHUT_RD)→EOF ok"
+    );
+
     conn.close()?;
     crate::serial_println!(
-        "[netstack-client]   listen/accept + bidirectional data over loopback ok — server-socket parity ok"
+        "[netstack-client]   listen/accept + bidirectional data + shutdown over loopback ok — server-socket parity ok"
     );
     Ok(Some(()))
 }

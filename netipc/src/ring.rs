@@ -175,10 +175,28 @@ pub const OP_CONNECT6: u8 = 0x09;
 /// a dedicated query rather than kernel-side bookkeeping. Migration Phase 5,
 /// closing the `getsockname` part of the `D-NETSOCK-SYNC` parity gap.
 pub const OP_LOCALADDR: u8 = 0x0A;
+/// Half- or full-close the connection named by `conn_id`, per `shutdown(2)`.
+/// The direction is carried in `aux` as the Linux `how` value: [`SHUT_RD`] (0)
+/// closes the read side (subsequent `recv` returns EOF), [`SHUT_WR`] (1) closes
+/// the write side (the daemon emits our FIN and rejects subsequent `send` with
+/// [`ERR_BROKEN_PIPE`]), and [`SHUT_RDWR`] (2) does both. Unlike [`OP_CLOSE`]
+/// this does **not** tear the connection down — the fd stays valid and the
+/// still-open direction keeps working (a half-closed write side can still
+/// receive, a half-closed read side can still send). Completion `result` is `0`
+/// on success or `-1` for an unknown connection. Migration Phase 5, closing the
+/// `shutdown` part of the `D-NETSOCK-SYNC` parity gap.
+pub const OP_SHUTDOWN: u8 = 0x0B;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
 // ---------------------------------------------------------------------------
+
+/// [`OP_SHUTDOWN`] `aux` value: close the **read** side (`shutdown(fd, SHUT_RD)`).
+pub const SHUT_RD: u64 = 0;
+/// [`OP_SHUTDOWN`] `aux` value: close the **write** side (`shutdown(fd, SHUT_WR)`).
+pub const SHUT_WR: u64 = 1;
+/// [`OP_SHUTDOWN`] `aux` value: close **both** directions (`SHUT_RDWR`).
+pub const SHUT_RDWR: u64 = 2;
 
 /// [`OP_RECV`] `aux` flag: perform a **non-blocking** receive.
 ///
@@ -241,6 +259,13 @@ pub const ERR_WOULD_BLOCK: i32 = -11;
 /// `KernelError::InProgress` → the `connect(2)` `EINPROGRESS` errno. Distinct
 /// from `0` (established) and `-1` (could not start / no slot).
 pub const ERR_IN_PROGRESS: i32 = -115;
+
+/// Completion `result` sentinel: an [`OP_SEND`] was issued on a connection whose
+/// write side has already been shut down (`shutdown(fd, SHUT_WR)` / `SHUT_RDWR`).
+/// Numerically mirrors Linux `-EPIPE`; the kernel maps it to
+/// `KernelError::BrokenPipe` → the `send(2)`/`write(2)` `EPIPE` errno. Distinct
+/// from `0`, `-1`, [`ERR_WOULD_BLOCK`], and [`ERR_IN_PROGRESS`].
+pub const ERR_BROKEN_PIPE: i32 = -32;
 
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
@@ -631,6 +656,37 @@ mod tests {
         assert_eq!(back.aux & CONNECT_NONBLOCK, CONNECT_NONBLOCK);
         // The 16-bit port field and the bit-48 flag never overlap.
         assert_eq!(CONNECT_NONBLOCK & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn shutdown_opcode_is_unique_and_carries_how_in_aux() {
+        // OP_SHUTDOWN must not collide with any prior opcode.
+        let existing = [
+            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
+            OP_CONNECT6, OP_LOCALADDR,
+        ];
+        for other in existing {
+            assert_ne!(OP_SHUTDOWN, other, "OP_SHUTDOWN aliases another opcode");
+        }
+        // The `how` value rides `aux` verbatim (SHUT_RD/WR/RDWR = 0/1/2).
+        for how in [SHUT_RD, SHUT_WR, SHUT_RDWR] {
+            let sqe = Sqe {
+                op: OP_SHUTDOWN,
+                conn_id: 7,
+                data_off: 0,
+                data_len: 0,
+                user_data: 0x4e53_434c_0000_000e,
+                aux: how,
+            };
+            let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+            assert_eq!(sqe, back);
+            assert_eq!(back.aux, how);
+        }
+        // The EPIPE sentinel is distinct from every other completion code.
+        assert_ne!(ERR_BROKEN_PIPE, 0);
+        assert_ne!(ERR_BROKEN_PIPE, -1);
+        assert_ne!(ERR_BROKEN_PIPE, ERR_WOULD_BLOCK);
+        assert_ne!(ERR_BROKEN_PIPE, ERR_IN_PROGRESS);
     }
 
     #[test]

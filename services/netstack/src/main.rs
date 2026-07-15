@@ -1163,6 +1163,15 @@ struct TcpConn {
     /// ACK (`ack == isn+1`, `isn` = our SYN-ACK's seq) and emits nothing, whereas
     /// an active open completes on a SYN-ACK and emits the final ACK.
     passive: bool,
+    /// `true` once `shutdown(SHUT_WR)`/`SHUT_RDWR` has closed the write side: our
+    /// FIN has been emitted and subsequent [`OP_SEND`] submissions are rejected
+    /// with [`ERR_BROKEN_PIPE`](netipc::ring::ERR_BROKEN_PIPE). The read side stays
+    /// open, so `recv` keeps delivering buffered/inbound bytes until the peer FIN.
+    write_shut: bool,
+    /// `true` once `shutdown(SHUT_RD)`/`SHUT_RDWR` has closed the read side:
+    /// subsequent [`OP_RECV`] completes with EOF (`0`) without waiting. The write
+    /// side stays open, so `send` still works until [`OP_CLOSE`].
+    read_shut: bool,
 }
 
 impl TcpConn {
@@ -1292,6 +1301,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: false,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1339,6 +1350,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: false,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1400,6 +1413,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: true,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1480,6 +1495,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: false,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1517,6 +1534,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: false,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1567,6 +1586,8 @@ impl TcpConn {
             rx_buf: [0u8; TCP_RCV_BUF],
             rx_len: 0,
             passive: true,
+            write_shut: false,
+            read_shut: false,
         })
     }
 
@@ -1792,11 +1813,37 @@ impl TcpConn {
         self.take_rx(out)
     }
 
+    /// Half- or full-close per `shutdown(2)`. `SHUT_WR`/`SHUT_RDWR` emit our FIN
+    /// exactly once (idempotent across a later [`close`](Self::close), which will
+    /// see `write_shut` and skip re-sending it) and reject subsequent sends; the
+    /// read side stays open so buffered/inbound bytes keep flowing. `SHUT_RD`/
+    /// `SHUT_RDWR` mark the read side closed so subsequent recvs report EOF. The
+    /// connection is *not* torn down — the fd remains valid until `close`.
+    fn shutdown(&mut self, me: &IfInfo, how: u64) {
+        let close_read = how == netipc::ring::SHUT_RD || how == netipc::ring::SHUT_RDWR;
+        let close_write = how == netipc::ring::SHUT_WR || how == netipc::ring::SHUT_RDWR;
+        if close_read {
+            self.read_shut = true;
+        }
+        if close_write && !self.write_shut {
+            self.write_shut = true;
+            // Emit the FIN|ACK at the current send sequence (mirrors `close`'s
+            // convention of not advancing `snd_nxt` — the FIN's one seq is tracked
+            // locally as `snd_nxt + 1` there). Idempotent: `close` won't re-send.
+            self.ipid = self.ipid.wrapping_add(1);
+            self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
+        }
+    }
+
     /// Gracefully close: send our FIN|ACK and briefly drain the peer's final ACK
-    /// (and a late FIN, which we ACK for a clean teardown).
+    /// (and a late FIN, which we ACK for a clean teardown). If the write side was
+    /// already shut down (`shutdown(SHUT_WR)`), the FIN is already on the wire, so
+    /// we skip re-emitting it and only drain the teardown.
     fn close(&mut self, me: &IfInfo) {
-        self.ipid = self.ipid.wrapping_add(1);
-        self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
+        if !self.write_shut {
+            self.ipid = self.ipid.wrapping_add(1);
+            self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
+        }
         let fin_seq = self.snd_nxt.wrapping_add(1); // Our FIN consumed one seq.
 
         let mut frame = [0u8; MAX_FRAME];
@@ -2933,6 +2980,19 @@ fn ring_tcp_process(
                     }
                 }
             }
+            netipc::ring::OP_SHUTDOWN => {
+                // shutdown(2): half- or full-close the connection without tearing it
+                // down. `aux` carries the Linux `how` (SHUT_RD/WR/RDWR). SHUT_WR emits
+                // our FIN and marks the write side closed (subsequent sends → EPIPE);
+                // SHUT_RD marks the read side closed (subsequent recvs → EOF).
+                match conns.get_mut(sqe.conn_id) {
+                    None => -1, // no such connection
+                    Some(c) => {
+                        c.shutdown(me, sqe.aux);
+                        0
+                    }
+                }
+            }
             _ => -1, // unsupported opcode: report failure, still complete
         };
         let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };
@@ -2969,6 +3029,9 @@ fn ring_tcp_send(
 ) -> i32 {
     match conns.get_mut(target_id) {
         None => return -1, // no such connection
+        // A send after `shutdown(SHUT_WR)` is EPIPE, exactly like Linux: the write
+        // side is closed and our FIN is already on the wire.
+        Some(c) if c.write_shut => return netipc::ring::ERR_BROKEN_PIPE,
         // A send before the handshake completed is a protocol error on our minimal
         // client (no send buffering across connect): reject it so the kernel
         // surfaces ENOTCONN rather than us emitting a bad-seq segment.
@@ -3125,6 +3188,11 @@ fn ring_tcp_recv(
         Some(c) if !c.established => return -1,
         Some(_) => {}
     }
+    // A recv after `shutdown(SHUT_RD)` reports EOF immediately, like Linux — the
+    // read side is closed, so we neither deliver buffered bytes nor wait.
+    if conns.get_mut(target_id).is_some_and(|c| c.read_shut) {
+        return 0;
+    }
     if sqe.aux & netipc::ring::RECV_NONBLOCK != 0 {
         // Non-blocking receive (kernel honouring O_NONBLOCK): drain whatever has
         // already arrived exactly once, then decide immediately — never poll for
@@ -3246,10 +3314,15 @@ fn ring_tcp_poll(
             // unacknowledged, so reporting POLLOUT then would be a lie (the send
             // would return EAGAIN). This makes poll honest for a full-window socket.
             let mut bits = 0;
-            if !c.send_window_full() {
+            // Writable if the send window has room, or if the write side is shut:
+            // in the latter case a send never blocks (it returns EPIPE immediately),
+            // so poll must report "ready" rather than "would block".
+            if c.write_shut || !c.send_window_full() {
                 bits |= netipc::ring::POLL_WRITABLE;
             }
-            if c.rx_len > 0 || c.peer_fin {
+            // Readable if there are buffered bytes or the stream has ended — and a
+            // `shutdown(SHUT_RD)` read side counts as ended (recv returns EOF now).
+            if c.rx_len > 0 || c.peer_fin || c.read_shut {
                 bits |= netipc::ring::POLL_READABLE;
             }
             bits

@@ -394,14 +394,19 @@ impl NetstackConn {
     /// how a caller honours `O_NONBLOCK` on a daemon-backed stream socket. When
     /// `nonblock` is clear, the daemon blocks (polls) up to its receive deadline.
     ///
+    /// When `peek` is set, the [`netipc::ring::RECV_PEEK`] flag is passed to the
+    /// daemon: buffered bytes are copied out **without** being consumed, so a
+    /// subsequent `recv` returns the same data. This is how a caller honours
+    /// `MSG_PEEK` on a daemon-backed stream socket.
+    ///
     /// # Errors
     ///
     /// - [`KernelError::WouldBlock`] — `nonblock` was set and no data was ready.
     /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
     ///   read back the ring data window.
-    pub fn recv(&mut self, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
+    pub fn recv(&mut self, buf: &mut [u8], nonblock: bool, peek: bool) -> KernelResult<i32> {
         let cid = self.conn_id;
-        self.recv_on(cid, buf, nonblock)
+        self.recv_on(cid, buf, nonblock, peek)
     }
 
     /// Receive on an explicit connection id (see [`recv`](Self::recv)).
@@ -414,12 +419,21 @@ impl NetstackConn {
     /// # Errors
     ///
     /// Same as [`recv`](Self::recv).
-    fn recv_on(&mut self, conn_id: u32, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
+    fn recv_on(
+        &mut self,
+        conn_id: u32,
+        buf: &mut [u8],
+        nonblock: bool,
+        peek: bool,
+    ) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
         let ud = self.next_ud();
-        let aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
+        let mut aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
+        if peek {
+            aux |= netipc::ring::RECV_PEEK;
+        }
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_RECV,
             conn_id,
@@ -859,7 +873,7 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
     }
 
     let mut body = [0u8; RCV_CAP as usize];
-    let recv_res = conn.recv(&mut body, false)?;
+    let recv_res = conn.recv(&mut body, false, false)?;
     conn.close()?;
 
     if recv_res < 5 {
@@ -920,7 +934,7 @@ pub fn self_test_nonblock_recv(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
     }
 
     let mut body = [0u8; RCV_CAP as usize];
-    let outcome = conn.recv(&mut body, true);
+    let outcome = conn.recv(&mut body, true, false);
     conn.close()?;
 
     match outcome {
@@ -1360,7 +1374,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         }
     }
     conn.shutdown(netipc::ring::SHUT_RD)?;
-    match conn.recv(&mut [0u8; 16], false) {
+    match conn.recv(&mut [0u8; 16], false, false) {
         Ok(0) => {}
         other => {
             conn.close()?;
@@ -1629,7 +1643,7 @@ fn recv_exact(conn: &mut NetstackConn, conn_id: u32, expect: &[u8]) -> KernelRes
             Some(s) => s,
             None => break,
         };
-        let n = conn.recv_on(conn_id, slot, false)?;
+        let n = conn.recv_on(conn_id, slot, false, false)?;
         if n < 0 {
             return Ok(false);
         }

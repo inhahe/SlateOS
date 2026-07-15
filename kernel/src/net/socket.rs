@@ -350,19 +350,27 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
 /// data ready returns [`KernelError::WouldBlock`] (→ `EAGAIN`) instead of blocking
 /// on the daemon; otherwise it blocks up to the daemon's receive deadline.
 ///
+/// When `peek` is set (the caller's `MSG_PEEK`), buffered bytes are copied out
+/// without being consumed, so a subsequent `recv` returns the same data.
+///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `NotConnected` — the socket is not connected.
 /// - `WouldBlock` — `nonblock` was set and no data was ready.
 /// - protocol faults propagated from [`NetstackConn::recv`].
-pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool) -> KernelResult<i32> {
+pub fn recv(
+    handle: SocketHandle,
+    buf: &mut [u8],
+    nonblock: bool,
+    peek: bool,
+) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.recv(buf, nonblock)
+    guard.conn.recv(buf, nonblock, peek)
 }
 
 /// Non-destructively probe a stream socket's readiness for the poll/epoll engine.

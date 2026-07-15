@@ -1756,6 +1756,16 @@ impl TcpConn {
         n
     }
 
+    /// Copy up to `out.len()` buffered in-order bytes into `out` **without**
+    /// consuming them (`MSG_PEEK`): `rx_buf`/`rx_len` are left untouched, so the
+    /// next [`take_rx`](Self::take_rx) still returns the same bytes. Returns the
+    /// number of bytes copied.
+    fn peek_rx(&self, out: &mut [u8]) -> usize {
+        let n = self.rx_len.min(out.len());
+        out[..n].copy_from_slice(&self.rx_buf[..n]);
+        n
+    }
+
     /// Early in an idle window (nothing received yet), retransmit the buffered
     /// send segment up to three times in case our request was lost. Returns `true`
     /// if it retransmitted (the caller then resets its idle counter). Shared by
@@ -3246,8 +3256,17 @@ fn ring_tcp_recv(
         Some(w) => w,
         None => return -1, // recv window larger than our buffer
     };
+    // MSG_PEEK: copy buffered bytes out without consuming them, so a later
+    // OP_RECV returns the same data again.
+    let peek = sqe.aux & netipc::ring::RECV_PEEK != 0;
     let n = match conns.get_mut(target_id) {
-        Some(c) => c.take_rx(out),
+        Some(c) => {
+            if peek {
+                c.peek_rx(out)
+            } else {
+                c.take_rx(out)
+            }
+        }
         None => return -1,
     };
     if n > 0 && !ring.write_data(off, &out[..n]) {

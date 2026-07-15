@@ -174,14 +174,20 @@ Phase 5 progresses:
   regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
   `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
   never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
-  `MSG_*` flags (`MSG_PEEK`, `MSG_OOB`, `MSG_TRUNC`) are still ignored, and true
+  `MSG_*` flags (`MSG_OOB`, `MSG_TRUNC`) are still ignored, and true
   datagram (UDP) source addresses await the daemon-backed `SOCK_DGRAM` path
   (today's daemon sockets are connected streams, so the peer *is* the source).
   **`MSG_WAITALL` (arg3) is now honoured** on `recv`/`recvfrom`: on a blocking
   socket it loops (`socket_recv_waitall`, ≤4 KiB chunks) until the full request
   is read, terminating early only on EOF or error; under `O_NONBLOCK`/
   `MSG_DONTWAIT` it degrades to the single-shot receive, matching Linux.
-  (`MSG_PEEK` remains unimplemented — it needs a non-consuming daemon read.)
+  **`MSG_PEEK` (arg3) is now honoured** on `recv`/`recvfrom`/`recvmsg`: it
+  threads a `peek` flag through `dispatch_socket_read` → `net::socket::recv` →
+  `NetstackConn::recv` into the ring's new `RECV_PEEK` aux flag, and the daemon
+  copies buffered bytes out via a non-consuming `peek_rx` (vs the consuming
+  `take_rx`), so a subsequent receive returns the same data. `MSG_PEEK` is
+  single-shot even when combined with `MSG_WAITALL` (a non-consuming loop would
+  re-read forever).
 - **`sendmsg`/`recvmsg` now served (parity fix).** The Linux-ABI `sendmsg(2)`/
   `recvmsg(2)` on a connected daemon-backed stream socket no longer terminate in
   EBADF: `socket_sendmsg` gathers the `msg_iov` scatter/gather list into one
@@ -189,7 +195,8 @@ Phase 5 progresses:
   does a single bounded receive and scatters it across the iovecs, fills
   `msg_name` with the peer (`sockaddr_in`/`sockaddr_in6`, via `peer_sockaddr`),
   and clears `msg_controllen`/`msg_flags`. `MSG_DONTWAIT` (the `flags` arg) is
-  honoured on both; `msg_control` (ancillary/cmsg) is ignored and `msg_iovlen >
+  honoured on both and `MSG_PEEK` on `recvmsg`; `msg_control` (ancillary/cmsg)
+  is ignored and `msg_iovlen >
   1024` → `EMSGSIZE`. (The *native*-ABI `SYS_SOCKETPAIR_*` sendmsg/recvmsg path
   is separate and unaffected.) Remaining gap: like the plain send/recv path, only
   one page / one outstanding segment moves per call (no gather beyond 4 KiB, no

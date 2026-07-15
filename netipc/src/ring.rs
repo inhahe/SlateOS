@@ -228,6 +228,18 @@ pub const RECV_NONBLOCK: u64 = 1 << 0;
 /// separate bits avoids any accidental aliasing if flags are ever combined.
 pub const SEND_NONBLOCK: u64 = 1 << 1;
 
+/// [`OP_RECV`] `aux` flag: **peek** — copy buffered bytes to the caller
+/// *without* consuming them from the connection's receive buffer, so a
+/// subsequent `OP_RECV` returns the same bytes again.
+///
+/// This is how the kernel honours `MSG_PEEK` on a daemon-backed stream socket.
+/// It combines with [`RECV_NONBLOCK`]: a peeking non-blocking receive still
+/// waits at most one pump and reports [`ERR_WOULD_BLOCK`] when nothing is
+/// buffered; a peeking blocking receive still waits for the first data to
+/// arrive, then copies it out non-destructively. Distinct bit (bit 2) so it can
+/// be OR-ed with [`RECV_NONBLOCK`] on the same `OP_RECV` SQE.
+pub const RECV_PEEK: u64 = 1 << 2;
+
 /// [`OP_CONNECT`] `aux` flag: perform a **non-blocking** connect.
 ///
 /// The endpoint is packed into the low 48 bits of `aux` (`[ip:4][port_be:2]`, see

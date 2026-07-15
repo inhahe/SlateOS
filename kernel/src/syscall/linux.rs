@@ -1033,11 +1033,16 @@ mod tcpopt {
 /// `MSG_*` per-call flags for `send(2)`/`sendto(2)`/`recv(2)`/`recvfrom(2)`
 /// (the `flags` argument, arg3).  Values mirror Linux `include/linux/socket.h`.
 ///
-/// Only `MSG_DONTWAIT` changes behaviour; the rest are silently ignored, which
-/// is already correct for our daemon-backed streams — notably `MSG_NOSIGNAL`
-/// (0x4000) is a no-op because we never raise `SIGPIPE` (a broken pipe surfaces
-/// as the `EPIPE` return value instead).
+/// `MSG_DONTWAIT`, `MSG_WAITALL`, and `MSG_PEEK` change behaviour; the rest are
+/// silently ignored, which is already correct for our daemon-backed streams —
+/// notably `MSG_NOSIGNAL` (0x4000) is a no-op because we never raise `SIGPIPE`
+/// (a broken pipe surfaces as the `EPIPE` return value instead).
 mod msgflags {
+    /// Peek at received data without consuming it: buffered bytes are copied to
+    /// the caller but remain queued, so a subsequent receive returns the same
+    /// data.  Honoured on daemon-backed stream receives via the ring's
+    /// `RECV_PEEK` flag.
+    pub const MSG_PEEK: u32 = 0x2;
     /// Per-call non-blocking override.  Behaves like the fd's `O_NONBLOCK` was
     /// set for this one call, regardless of the fd's actual status flags: a
     /// receive with no data ready, or a send whose window is full, returns
@@ -3802,7 +3807,16 @@ fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64, force_nonblock: boo
 ///
 /// Honours the fd's `O_NONBLOCK` status flag: when set, a receive with no data
 /// ready returns `-EAGAIN` instead of blocking on the daemon.
-fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64, force_nonblock: bool) -> SyscallResult {
+///
+/// When `peek` is set (the caller's `MSG_PEEK`), buffered bytes are copied out
+/// without being consumed, so a subsequent read returns the same data.
+fn dispatch_socket_read(
+    entry: FdEntry,
+    buf: u64,
+    cap: u64,
+    force_nonblock: bool,
+    peek: bool,
+) -> SyscallResult {
     if cap == 0 {
         return SyscallResult::ok(0);
     }
@@ -3814,7 +3828,7 @@ fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64, force_nonblock: bool
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     // Non-blocking if the fd is O_NONBLOCK *or* the caller passed MSG_DONTWAIT.
     let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
-    let n = match crate::net::socket::recv(h, &mut kbuf, nonblock) {
+    let n = match crate::net::socket::recv(h, &mut kbuf, nonblock, peek) {
         Ok(v) => v,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
@@ -3858,7 +3872,7 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             }
             return linux_err(linux_errno_for(e));
         }
-        let n = match crate::net::socket::recv(h, &mut kbuf[..chunk], false) {
+        let n = match crate::net::socket::recv(h, &mut kbuf[..chunk], false, false) {
             Ok(v) => v,
             Err(e) => {
                 if done > 0 {
@@ -4161,7 +4175,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // silence.  Reading a playback substream is EINVAL, matching Linux.
         HandleKind::AlsaPcm => dispatch_alsa_pcm_read(entry, buf, cap),
         // AF_INET stream socket — `read(2)` is `recv(2)` with no flags.
-        HandleKind::Socket => dispatch_socket_read(entry, buf, cap, false),
+        HandleKind::Socket => dispatch_socket_read(entry, buf, cap, false, false),
     }
 }
 
@@ -36947,8 +36961,9 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     // (args.arg3) forces a per-call non-blocking receive.  When the caller supplies
     // a non-NULL source-address out-param (args.arg4 / args.arg5) it is filled with
     // the connected peer's endpoint on a successful receive, matching Linux (a
-    // connected stream socket reports its fixed peer).  Other MSG_* flags (e.g.
-    // MSG_PEEK, MSG_WAITALL) are not yet honoured.
+    // connected stream socket reports its fixed peer).  MSG_WAITALL and MSG_PEEK
+    // are honoured; MSG_PEEK copies buffered bytes without consuming them so a
+    // subsequent receive returns the same data.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
@@ -36963,10 +36978,14 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
         // single-shot receive of whatever is available (Linux semantics).
         let effective_nonblock = force_nonblock || (status_flags & oflags::O_NONBLOCK) != 0;
         let waitall = (msg_flags & msgflags::MSG_WAITALL) != 0;
-        let res = if waitall && !effective_nonblock {
+        let peek = (msg_flags & msgflags::MSG_PEEK) != 0;
+        // MSG_PEEK is single-shot: since it does not consume, looping for
+        // MSG_WAITALL would re-read the same bytes forever, so peek takes the
+        // single-shot path even when MSG_WAITALL is also set.
+        let res = if waitall && !effective_nonblock && !peek {
             socket_recv_waitall(entry, buf, args.arg2)
         } else {
-            dispatch_socket_read(entry, buf, args.arg2, force_nonblock)
+            dispatch_socket_read(entry, buf, args.arg2, force_nonblock, peek)
         };
         // Only populate src_addr on a successful receive (non-negative byte
         // count); an error (e.g. EAGAIN) leaves the caller's buffer untouched.
@@ -37198,13 +37217,14 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     let nonblock = (flags & msgflags::MSG_DONTWAIT) != 0
         || (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let peek = (flags & msgflags::MSG_PEEK) != 0;
     // Single receive into staging (skip the daemon round-trip entirely for a
     // zero-length receive buffer).
     let mut kbuf = alloc::vec![0u8; cap_total];
     let n = if cap_total == 0 {
         0
     } else {
-        match crate::net::socket::recv(h, &mut kbuf, nonblock) {
+        match crate::net::socket::recv(h, &mut kbuf, nonblock, peek) {
             Ok(v) => v,
             Err(e) => return linux_err(linux_errno_for(e)),
         }

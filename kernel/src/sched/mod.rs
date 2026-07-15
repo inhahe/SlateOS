@@ -4299,6 +4299,22 @@ static DEFERRED_WAKES: [AtomicU64; DEFERRED_WAKE_SLOTS] = {
 /// invocation reads one atomic bool instead of 32 atomic u64s.
 static DEFERRED_WAKES_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Number of consecutive idle-fallback HLT-wake iterations (≈ timer ticks,
+/// so ~10 ms each) with nothing runnable before we self-diagnose a wedge.
+///
+/// The `schedule_inner` idle fallback only spins while the current task is
+/// Blocked (`requeue == false`) and no other task is ready.  Legitimately,
+/// this lasts a handful of ticks between self-tests.  Persisting for ~5 s
+/// means a wakeup was lost: the CPU will HLT forever with a Blocked task
+/// that nothing re-dispatches.  This silent hang is invisible to the
+/// boot-scoped liveness watchdog (armed only at `BOOT_OK`), so we dump the
+/// scheduler + timer state directly from the loop instead.  First caught in
+/// the waitqueue `wait_timeout_ns (expired)` self-test (lost-wakeup family).
+const IDLE_FALLBACK_WEDGE_TICKS: u64 = 500;
+
+/// One-shot guard so the idle-fallback wedge dump fires at most once per boot.
+static IDLE_FALLBACK_WEDGE_DUMPED: AtomicBool = AtomicBool::new(false);
+
 /// Queue a deferred wake for a task.
 ///
 /// Called from ISR context when [`try_wake`] fails (scheduler lock
@@ -4405,6 +4421,80 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
 
     // All slots drained — clear the pending flag.
     DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
+}
+
+/// Dump scheduler + timer state when the `schedule_inner` idle fallback has
+/// spun for [`IDLE_FALLBACK_WEDGE_TICKS`] iterations with nothing runnable.
+///
+/// The caller holds the `SCHED` guard (`state`) so this reads the task table
+/// directly rather than re-locking.  It answers the questions a bare HLT
+/// register capture cannot: is the blocked task actually Blocked (vs. an
+/// orphaned Ready that was never enqueued)?  Did its `pending_wake` flag get
+/// stranded?  Is its wake-up hrtimer still pending, or did it already fire
+/// (and the wake was lost)?  Are there stuck deferred-wake slots?
+///
+/// Called only on the wedge path, so the serial cost is irrelevant.
+#[cold]
+fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) {
+    let now_ns = crate::hrtimer::now_ns();
+    let pending_timers = crate::hrtimer::pending_count();
+    let next_expiry = crate::hrtimer::next_expiry_ns();
+    let has_work = PER_CPU_SCHED.local_has_real_work(cpu);
+    let deferred_pending = DEFERRED_WAKES_PENDING.load(Ordering::Acquire);
+
+    serial_println!(
+        "[sched] *** IDLE-FALLBACK WEDGE on cpu{}: spun {} ticks with nothing \
+         runnable while task {} is parked — a wakeup was lost. now_ns={} \
+         local_has_real_work={} hrtimer_pending={} next_expiry_ns={:?} \
+         deferred_pending={}",
+        cpu,
+        IDLE_FALLBACK_WEDGE_TICKS,
+        blocked_id,
+        now_ns,
+        has_work,
+        pending_timers,
+        next_expiry,
+        deferred_pending,
+    );
+
+    // The parked task itself: the key question is Blocked (waiting for a wake
+    // that never came) vs. Ready (woken but orphaned out of every run queue).
+    if let Some(task) = state.tasks.get(&blocked_id) {
+        serial_println!(
+            "[sched]   parked task {}: state={:?} pending_wake={} last_cpu={} \
+             prio={} ready_since_tick={}",
+            blocked_id,
+            task.state,
+            task.pending_wake,
+            task.last_cpu,
+            task.priority,
+            task.ready_since_tick,
+        );
+    } else {
+        serial_println!("[sched]   parked task {} is GONE from the table", blocked_id);
+    }
+
+    // Any occupied deferred-wake slots (task IDs queued for a retry wake).
+    for (i, slot) in DEFERRED_WAKES.iter().enumerate() {
+        let tid = slot.load(Ordering::Acquire);
+        if tid != DEFERRED_WAKE_EMPTY {
+            serial_println!("[sched]   deferred-wake slot[{}] = task {}", i, tid);
+        }
+    }
+
+    // Full table (few tasks during boot self-tests): reveals whether any
+    // task is Ready-but-unqueued, which is the orphan signature.
+    serial_println!("[sched]   {} task(s) in table:", state.tasks.len());
+    for (&id, task) in state.tasks.iter() {
+        serial_println!(
+            "[sched]     tid={} state={:?} pending_wake={} last_cpu={} prio={}",
+            id,
+            task.state,
+            task.pending_wake,
+            task.last_cpu,
+            task.priority,
+        );
+    }
 }
 
 /// Sleep the current task for a precise duration in nanoseconds.
@@ -4789,6 +4879,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 // full context switch.  The blocked/dead task's context
                 // save area is still in the task table — we save our
                 // current registers there and load the new task's.
+                //
+                // `idle_spins` counts HLT-wake iterations that found nothing
+                // runnable, so a lost wakeup (task parked forever) is dumped
+                // once instead of hanging silently — see dump_idle_fallback_wedge.
+                let mut idle_spins: u64 = 0;
                 loop {
                     cpu::hlt();
 
@@ -4812,7 +4907,16 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                                 WORK_STEALS.fetch_add(1, Ordering::Relaxed);
                                 id
                             }
-                            None => { drop(s); continue; }
+                            None => {
+                                idle_spins = idle_spins.saturating_add(1);
+                                if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
+                                    && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
+                                {
+                                    dump_idle_fallback_wedge(&s, cpu, current_id);
+                                }
+                                drop(s);
+                                continue;
+                            }
                         },
                     };
                     // Update last_cpu for stolen tasks (same affinity
@@ -5025,8 +5129,19 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             return;
         };
 
-        if picked_id == current_id && requeue {
-            // Same task picked — no switch needed.
+        if picked_id == current_id {
+            // Same task picked — no switch needed; resume as Running.
+            //
+            // On the requeue path this is the common "still the best task"
+            // case.  On the block/exit path (`requeue == false`) the current
+            // task was NOT re-enqueued here, so picking it means a concurrent
+            // wake (e.g. an hrtimer callback's `try_wake`, or a drained
+            // deferred wake) re-enqueued it between `block_current` releasing
+            // the SCHED lock and this re-acquisition.  Either way, switching a
+            // task to *itself* must never fall through to the real switch path
+            // below: that aliases `&mut *old_p` and `&*new_p` to the same
+            // `Context`/`FpuState` (undefined behaviour) and does a pointless
+            // save-then-restore.  Handle it uniformly regardless of `requeue`.
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 task.state = TaskState::Running;
             }

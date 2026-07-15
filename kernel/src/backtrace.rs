@@ -155,7 +155,9 @@ pub struct BacktraceResult {
 /// Valid regions:
 /// - HHDM range (0xFFFF_8000... — bootloader stacks, early-boot stacks)
 /// - kstack region (0xFFFF_C100... — guard-page stacks)
-/// - Kernel text/data (0xFFFF_FFFF_8000... — static stacks)
+/// - The kernel boot stack (a static array inside the image range, matched by
+///   its exact bounds — NOT the whole image range, so general .text/.data is
+///   rejected)
 fn is_valid_frame_ptr(addr: u64) -> bool {
     // Must be non-null and 8-byte aligned (stack frames are word-aligned).
     if addr == 0 || !addr.is_multiple_of(8) {
@@ -182,8 +184,16 @@ fn is_valid_frame_ptr(addr: u64) -> bool {
         return true;
     }
 
-    // 3. Kernel text/data (high addresses)
-    if addr >= 0xFFFF_FFFF_8000_0000 {
+    // 3. The dedicated kernel boot stack.  It is a static array in the kernel
+    //    image, so its addresses fall in the 0xFFFF_FFFF_8000_0000+ range, but
+    //    it is the *only* part of that range that is a legitimate stack.  We
+    //    must NOT accept the whole image range: general .text/.data addresses
+    //    are not frame pointers, and blindly walking them interprets static
+    //    data as a stack-frame chain and prints a misleading garbage backtrace
+    //    (observed in the iter19 liveness dump, where a sampled RBP of
+    //    0xffffffff824ca080 — kernel .data — produced four bogus frames).
+    let (boot_lo, boot_hi) = crate::boot_stack_bounds();
+    if addr >= boot_lo && addr < boot_hi {
         return true;
     }
 

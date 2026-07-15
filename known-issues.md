@@ -456,6 +456,28 @@ boot); the harness logged the same "did not exit within 262144 yields
 BOOT_OK was reached and the container self-test (40 tests) passed on the
 same boot.
 
+**New variant 2026-07-15 — empty-capture, NOT a hang
+(`build/hang-catches/soak-20260715-022705-iter18`).** Distinct manifestation of
+the same real-glibc pthread self-test (`proc/spawn.rs`, `EXPECT_OUT =
+"SLATE_GLIBC_PTHREAD_OK counter=40000 joinsum=10\n"`): the child **reached
+Zombie and exited with the correct code** (so it passed the reap and exit-code
+checks), but the captured stdout file read back **0 bytes** —
+`[spawn]   FAIL: real glibc pthread — captured 0 bytes [], expected [83,76,…]`,
+`WARNING: Path-Z real glibc pthread self-test failed: InternalError`. Since the
+child fully exited (glibc's `atexit` stdio flush should have run and the
+`write(1,…)` to the redirected capture file completed), an empty read-back points
+at a **capture-file write/read visibility race** (a just-written file's contents
+not yet visible to the harness's immediate `Vfs::read_file`), *not* the
+yield-budget hang above — the two are different failure modes of the same test.
+Intermittent: 1 of ~18 armed boots in that soak; every other pthread run in the
+soak passed. Unlike the hang variant (classified `TimedOut` → WARNING), this
+empty-capture path returns `InternalError` and boot-test.sh flags the boot
+FAILED. **Proper fix (deferred, needs its own investigation):** determine whether
+the redirected-fd-1 file write is fully durable/visible at the moment the child
+becomes Zombie — if not, either fsync/flush on the capture fd at process teardown
+or have the harness retry the read-back a bounded number of times. Logged for the
+next focused session on the VFS write-visibility path.
+
 **Severity escalation 2026-06-30 — a *full* boot hang was observed, not
 just the non-fatal warning.** On a subsequent run the boot never reached
 BOOT_OK within the 480 s timeout; the serial log's last activity was in the
@@ -1292,6 +1314,43 @@ in the timer ISR, so to walk the *interrupted* (gen_dmastat) stack rather than
 the ISR's own, the interrupt frame's saved RBP must be threaded into the dump.
 Once done, the next catch of this wedge yields a conclusive call stack instead of
 a lone RIP.
+
+**UPDATE 2026-07-15 — rbp-chain backtrace implemented and it FIRED (iter19),
+plus a backtrace-validator bug it exposed
+(`build/hang-catches/soak-20260715-022705-iter19.*`).** The liveness `SYSTEM
+HANG` dump now threads the interrupted RBP (sampled per-CPU in the timer ISR via
+`rip_sample::record_last_rbp`, read from the ISR-stub save area at
+`frame_ptr.sub(6)`) into `backtrace::print_from`. On iter19 it produced a
+4-frame backtrace — but the frames were **garbage**, and diagnosing *why* found
+a real bug in the walker:
+
+- The sampled `cpu0 last_rbp = 0xffffffff824ca080` is in kernel **`.data`**, not
+  a stack (per-task stacks are at `0xffffc100…`, the NMI capture confirms
+  `RSP=RBP=0xffffc1000003bae0`). A frame pointer can never legitimately point
+  into `.text`/`.data`.
+- `backtrace::is_valid_frame_ptr` nonetheless **accepted any address ≥
+  `0xFFFF_FFFF_8000_0000`** ("static stacks"), so the walker dereferenced static
+  data as a frame chain and emitted four bogus frames (`#2/#3` resolved to
+  `kshell::cmd_startmenu`, which is not on any live call path). **Fixed**: the
+  validator now accepts, within the kernel image range, *only* the exact bounds
+  of `KERNEL_BOOT_STACK` (new `crate::boot_stack_bounds()`), rejecting general
+  `.text`/`.data`. A non-stack RBP now yields zero frames (honest "no backtrace")
+  instead of a misleading one.
+- **Why was `last_rbp` a `.data` pointer?** The timer sample (`last_rip =
+  alloc::collections::btree::node::slice_shr+0x5d`, a `BTreeMap` node op) and the
+  NMI capture (`RIP = 0xffffffff80a4f036 = kshell::cmd_queryable+0xd96`, DWARF →
+  the `shell_println!`/`format!` macro; `RFL=0x202`, IF=1) are from **different
+  instants** — cpu0 is executing *different* code at different times, i.e. this
+  is a **livelock, not a hard freeze**, consistent with the `gen_dmastat` family
+  above (batch task `tid=0 "prctl-batch269"` shown **Running**, liveness insists
+  "all CPUs idle-ticking"). At the timer tick that recorded the sample, RBP
+  happened to hold a data pointer (mid-prologue/epilogue or a leaf helper not
+  using RBP as a frame pointer), so the walk-start was junk. The reliable signal
+  remains the NMI RIP (`cmd_queryable`, in `shell_println!`/`format!`) — a busy
+  alloc/format path — plus the livelock character. `last_rip`/`last_rbp` samples
+  remain **inconclusive** for this wedge family (a lone sample has been a red
+  herring three times now: kernel_text, budstat, gen_dmastat, and now a
+  `.data` RBP). The next catch will at least no longer print a fabricated stack.
 
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
@@ -3505,6 +3564,40 @@ interleave — channel/eventfd failures in the same window were instead
 daemon-starvation, fixed separately by deferring the persistent daemon past
 POST). **Fix:** the waker now retries `futex_wake` until it reports it actually
 woke a waiter (bounded spin), which is deterministic regardless of interleave.
+
+### B-EVENTFD-TOTEST-SHORTTIMEOUT. Eventfd "signaled-before-expiry" self-test used a 500 ms reader timeout + fixed-yield polling → spurious `TimedOut` (`got 18446744073709551615`) under boot-time scheduler contention — FIXED 2026-07-15
+
+**Where:** `kernel/src/ipc/eventfd.rs`, `eventfd_timeout_reader_task` /
+`test_timeout_signaled`.
+
+**Observed:** caught during the post-serial-fix wedge-soak
+(`build/hang-catches/soak-20260715-022705-iter12`): boot reached BOOT_OK but the
+eventfd timeout self-test failed —
+`[eventfd]   FAIL: timeout_signaled: got 18446744073709551615`
+(`18446744073709551615` = `u64::MAX`, the reader's error sentinel), then
+`[FATAL] Eventfd timeout self-test failed: InternalError`. Intermittent: 1 of
+~13 armed boots in that soak; all other eventfd sub-tests passed.
+
+**Root cause:** this is a *test-timing* fragility, **not** a lost-wakeup — the
+scheduler's `pending_wake` protection (`sched::wake` sets `pending_wake` on a
+not-yet-blocked task; `block_current` consumes it) correctly closes the
+register-then-park race in `read_timeout`. Instead, the reader parked with only a
+**500 ms** timeout while the main test task signaled it after a fixed
+`yield + sleep_ms(5)`. During the busy boot self-test phase, transient scheduler
+contention can delay the *signaling* task past the reader's 500 ms deadline, so
+the reader legitimately times out (`read_timeout` → `Err(TimedOut)` → stores
+`u64::MAX`) even though the eventfd signal path is correct. The main task's
+fixed post-write `yield×2 + sleep_ms(5)` result check compounded the fragility
+(it assumed the reader is always scheduled to completion within that window).
+Same class as B-FUTEX-TOWAKER-LOSTWAKE and the channel `recv_timeout` flake.
+
+**Fix:** (a) give the reader a generous **5 s** timeout — many orders above the
+~5 ms the driver takes to signal — so the timeout can never fire under normal or
+momentarily-starved scheduling (only a genuinely broken signal path fails it);
+(b) replace the fixed post-write yields/sleeps with a **bounded poll loop**
+(200 × `yield + sleep_ms(5)`, ~1 s cap) that waits for the reader to store its
+result, so a real signal-path bug still fails deterministically in ~1 s rather
+than depending on exact interleave.
 
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 

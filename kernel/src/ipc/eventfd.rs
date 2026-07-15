@@ -970,10 +970,20 @@ fn test_timeout_fast_path() -> KernelResult<()> {
 static EVENTFD_TIMEOUT_RESULT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// Task that reads with a long timeout (should be signaled quickly).
+/// Task that reads with a generous timeout (should be signaled long before).
+///
+/// The timeout is deliberately large (5 s) relative to the ~5 ms the driver
+/// takes to signal: this test verifies the *signaled-before-expiry* path, so
+/// the timeout must never fire under normal — or even momentarily starved —
+/// boot-time scheduling. A short (500 ms) timeout here made the test flaky:
+/// under transient scheduler contention during the busy boot self-test phase
+/// the driver task could be delayed past the reader's deadline, so the reader
+/// legitimately timed out (returning the `u64::MAX` error sentinel) even though
+/// the signal path itself was correct. See known-issues.md (2026-07-15 eventfd
+/// timeout self-test flake).
 extern "C" fn eventfd_timeout_reader_task(handle_raw: u64) {
     let handle = EventFdHandle::from_raw(handle_raw);
-    match read_timeout(handle, 500_000_000) {
+    match read_timeout(handle, 5_000_000_000) {
         Ok(val) => {
             EVENTFD_TIMEOUT_RESULT.store(val, core::sync::atomic::Ordering::SeqCst);
         }
@@ -989,22 +999,30 @@ fn test_timeout_signaled() -> KernelResult<()> {
 
     let handle = create(0);
 
-    // Spawn reader that will block with 500ms timeout.
+    // Spawn reader that will block with a generous 5 s timeout.
     sched::spawn(b"efd-to-test", 16, eventfd_timeout_reader_task, handle.raw(), 0)?;
 
     // Let reader run and block.
     sched::yield_now();
 
-    // Signal after a tiny delay (well before the 500ms timeout).
+    // Signal after a tiny delay (many orders below the 5 s timeout).
     sched::sleep_ms(5);
     write(handle, 42)?;
 
-    // Let reader wake and process.
-    sched::yield_now();
-    sched::yield_now();
-    sched::sleep_ms(5);
+    // Poll for the reader to wake and store its result, rather than assuming a
+    // fixed number of yields/sleeps is enough — the reader may not be scheduled
+    // promptly under boot-time contention. Bounded so a genuine signal-path bug
+    // still fails the test in ~1 s instead of hanging.
+    let mut result = 0u64;
+    for _ in 0..200 {
+        sched::yield_now();
+        sched::sleep_ms(5);
+        result = EVENTFD_TIMEOUT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+        if result != 0 {
+            break;
+        }
+    }
 
-    let result = EVENTFD_TIMEOUT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
     if result != 42 {
         serial_println!("[eventfd]   FAIL: timeout_signaled: got {}", result);
         close(handle);

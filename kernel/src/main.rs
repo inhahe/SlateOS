@@ -242,6 +242,26 @@ struct KernelBootStack([u8; KERNEL_BOOT_STACK_SIZE]);
 
 static mut KERNEL_BOOT_STACK: KernelBootStack = KernelBootStack([0; KERNEL_BOOT_STACK_SIZE]);
 
+/// Return the `[base, top)` virtual-address bounds of [`KERNEL_BOOT_STACK`].
+///
+/// Used by the backtrace validator to distinguish a genuine frame pointer that
+/// lives on the boot stack (which is a static in the kernel image, so its
+/// addresses fall in the `0xFFFF_FFFF_8000_0000+` image range) from a bogus
+/// "frame pointer" that is actually a pointer into general kernel `.text`/
+/// `.data`.  Without this, any higher-half image address passes the frame-ptr
+/// check and the walker happily interprets static data as a stack frame chain,
+/// producing a misleading garbage backtrace (observed in the iter19 liveness
+/// dump: a sampled RBP of `0xffffffff824ca080` — kernel `.data`, not a stack —
+/// yielded four bogus frames).
+#[must_use]
+pub(crate) fn boot_stack_bounds() -> (u64, u64) {
+    // SAFETY: We only take the address and size of the static; we never
+    // dereference it here.  Address-of on a `static mut` is sound.
+    let base = core::ptr::addr_of!(KERNEL_BOOT_STACK) as u64;
+    let top = base.saturating_add(KERNEL_BOOT_STACK_SIZE as u64);
+    (base, top)
+}
+
 /// Fill the boot-stack redzone with the canary pattern.
 ///
 /// Called once, very early in [`kernel_main`], while `RSP` is near the top

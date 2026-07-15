@@ -113,8 +113,9 @@ client, *and* the AF_INET socket-fd wiring are all landed. A userspace
 `bind`/`sendto`/`recvfrom`/`getsockname` and `poll`/`epoll` route to
 `net::socket::create_dgram`/`dgram_bind`/`dgram_send_to`/`dgram_recv_from` over
 `OP_UDP_BIND`/`OP_UDP_SEND`/`OP_UDP_RECV`, boot-validated by `self_test_udp_dns`.
-Remaining UDP gaps are IPv6 datagrams and a UDP `connect()` default-peer (both
-documented follow-ups, below), not blockers. The last big gap is **(3) send
+**AF_INET6 UDP datagrams now work too** (`OP_UDP_SEND6` + v6-aware `OP_UDP_RECV`,
+`self_test_udp6_loopback`). The one remaining UDP gap is a UDP `connect()`
+default-peer (a documented follow-up, below), not a blocker. The last big gap is **(3) send
 pipelining** — the daemon's single-outstanding-segment sender is a *deliberate*
 minimal-TCP design, so multi-segment/windowed send is a design change with
 tradeoffs, not a bug fix.
@@ -216,27 +217,32 @@ Phase 5 progresses:
   `run_persistent_netstack`, boot-validated switch-on (`[udpget] start`→`query
   sent`→`OK: DNS reply`, `ring3 UDP capstone: OK … (exit 0)`). **Remaining
   follow-ups (not blockers):**
-  - **IPv6 datagrams** — the daemon UDP layer has no v6 path, so a `bind`/`sendto`
-    with `AF_INET6` returns `EAFNOSUPPORT` (the fd is still created, matching
-    Linux, but every v6 op fails). This is the direct next increment; it mirrors
-    the TCP-over-IPv6 work (commit landing `connect6`) across the UDP stack:
-    **(1) netproto** — add `udp::write6`/`parse6` computing the RFC 8200 v6
-    pseudo-header checksum (the existing `udp::write`/`parse` are IPv4-only via
-    `pseudo_header_sum(&Ipv4Addr,…)`; model the v6 pseudo-header on `tcp.rs`'s v6
-    checksum path). **(2) daemon** (`services/netstack/src/main.rs`) — a
-    `send_udp6` (frame via the existing `send_ipv6`, `ipv6::PROTO_UDP`) and a v6
-    arm in `recv_udp_any` (`ETHERTYPE_IPV6` → parse `ipv6::Packet` → UDP), plus a
-    v6 address in `UdpSock`/the RX-queue source header (widen the in-band
-    24-byte header, or add a family tag); route `OP_UDP_SEND`/`OP_UDP_RECV` on a
-    new `OP_UDP_SEND6`/aux flag or a family byte in the SQE data window.
-    **(3) client** (`netstack_client.rs`) — `udp_send_to6(&[u8;16],port,buf)` and
-    `udp_recv_from6(&mut buf,nonblock) -> (i32,[u8;16],u16)`. **(4) socket**
-    (`net::socket`) — `dgram_send_to6`/`dgram_recv_from6` (or thread a family
-    into the existing ones). **(5) linux.rs** — parse the 28-byte `sockaddr_in6`
-    in `socket_dgram_bind_from_user`/`dispatch_dgram_sendto`/`dispatch_dgram_recvfrom`
-    (dispatch on `sa_family` 2→v4, 10→v6), and write a `sockaddr_in6` source back
-    from `recvfrom`. Boot-validate with a `self_test_udp6_dns` (v6 loopback) and,
-    ideally, an AF_INET6 arm in `udpget`.
+  - **IPv6 datagrams — DONE (all five layers landed).** `AF_INET6` UDP
+    `SOCK_DGRAM` is now a real daemon-backed v6 datagram socket. **(1) netproto** —
+    `udp::write_v6`/`Datagram::parse_v6` compute the RFC 8200 v6 pseudo-header
+    checksum (mandatory for v6: `parse_v6` rejects a zero checksum). **(2) daemon**
+    (`services/netstack/src/main.rs`) — `udp_sock_send6` frames via `send_ipv6` +
+    `ipv4::PROTO_UDP`; `recv_udp_any` grew an `ETHERTYPE_IPV6` arm (parse
+    `ipv6::Packet` → `udp::Datagram::parse_v6`); `UdpDatagram`/`UdpSock::push`/`pop`
+    now carry a `family` tag + fixed 16-byte source address (one queue serves both
+    families), and `OP_UDP_RECV` packs the stored family into the in-band header.
+    New opcode `OP_UDP_SEND6` (netipc `ring.rs`, `0x0F`) carries the 16-byte v6
+    destination at the front of the data window (`[dst_ip16:16][payload…]`), port
+    in `aux`. **(3) client** (`netstack_client.rs`) — `udp_send_to6(&[u8;16],port,
+    buf)` and the family-aware `udp_recv_any(&mut buf,nonblock) -> (i32,u16 family,
+    [u8;16],u16)` (the old `udp_recv_from` is now a v4-truncating wrapper).
+    **(4) socket** (`net::socket`) — `dgram_send_to6`; `dgram_recv_from` returns the
+    family + 16-byte address. **(5) linux.rs** — `socket_dgram_bind_from_user`,
+    `dispatch_dgram_sendto`, and `dispatch_dgram_recvfrom` dispatch on `sa_family`
+    (2→`sockaddr_in`/v4, 10→`sockaddr_in6`/v6); `recvfrom` writes the sockaddr
+    matching the *datagram's* family (via `socket_write_peer_addr6` for a v6
+    source), since a datagram's family is a packet property, not the socket's.
+    Boot-validated by `netstack_client::self_test_udp6_loopback` (bind a fixed
+    port, send to the daemon's own link-local `me.ip6`, and confirm the looped-back
+    datagram reports `AF_INET6` + the link-local source + the sent payload). **Not
+    yet done:** an `AF_INET6` arm in the ring-3 `udpget` capstone (kernel-context
+    self-test only), and UDP `getsockname` reporting a v6 family (needs socket
+    domain tracking — the socket object doesn't record its domain).
   - a UDP `connect()` to fix a default peer (so `send`/`recv` without an address
     work, and `recv` filters to that peer) — mostly kernel-side state in
     `SocketInner` plus a recv source-filter; and UDP `getsockname` reporting the

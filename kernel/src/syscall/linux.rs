@@ -36251,12 +36251,15 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
-/// Parse a user `struct sockaddr_in` and `bind(2)` a datagram socket to its port.
+/// Parse a user `struct sockaddr_in` / `sockaddr_in6` and `bind(2)` a datagram
+/// socket to its port.
 ///
-/// The daemon owns the interface IP, so only the `sin_port` matters (a bind to a
+/// The daemon owns the interface IP, so only the port matters (a bind to a
 /// specific local IP is accepted but the address is the daemon's interface); a
-/// `sin_port` of 0 asks for an ephemeral port. Only `AF_INET` is supported (IPv6
-/// UDP is a documented follow-up); any other family is `EAFNOSUPPORT`.
+/// port of 0 asks for an ephemeral port. Both `AF_INET` (`sockaddr_in`, 16 bytes)
+/// and `AF_INET6` (`sockaddr_in6`, 28 bytes) are supported — the port sits at
+/// `[2..4]` (network order) in both layouts, so the bind is family-agnostic once
+/// the length is validated; any other family is `EAFNOSUPPORT`.
 fn socket_dgram_bind_from_user(
     h: crate::net::socket::SocketHandle,
     addr_ptr: u64,
@@ -36269,22 +36272,27 @@ fn socket_dgram_bind_from_user(
         return linux_err(linux_errno_for(e));
     }
     let family = u16::from_ne_bytes(fam);
-    if family != 2 {
-        return linux_err(errno::EAFNOSUPPORT);
-    }
-    // `struct sockaddr_in` is 16 bytes.
+    // Both families bind identically (the daemon owns the interface address; only
+    // the local port matters), but the port lives at a different offset and the
+    // minimum sockaddr length differs. `struct sockaddr_in` is 16 bytes with the
+    // port at [2..4]; `struct sockaddr_in6` is 28 bytes with the port also at
+    // [2..4] (sin6_port). So the port offset is shared; only the length gate differs.
     #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
-    if (addr_len as usize) < 16 {
+    let min_len = match family {
+        2 => 16,
+        10 => 28,
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    };
+    if (addr_len as usize) < min_len {
         return linux_err(errno::EINVAL);
     }
-    let mut sa = [0u8; 16];
-    // SAFETY: the gate validated `addr_len` (>= 16) bytes readable; SMAP re-check.
-    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+    let mut sa = [0u8; 4];
+    // SAFETY: the gate validated `addr_len` (>= min_len >= 4) bytes readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 4) } {
         return linux_err(linux_errno_for(e));
     }
-    // sa_family(2), sin_port (BE u16), sin_addr (4 octets, ignored — daemon owns it).
-    let [_, _, p0, p1, ..] = sa;
-    let port = u16::from_be_bytes([p0, p1]);
+    // sa_family(2), sin_port / sin6_port (BE u16 at [2..4]).
+    let port = u16::from_be_bytes([sa[2], sa[3]]);
     match crate::net::socket::dgram_bind(h, port) {
         Ok(_) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
@@ -36918,10 +36926,11 @@ fn dispatch_dgram_recvfrom(
     // way). Cap the staging buffer at the user's request length.
     let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX).min(4096);
     let mut kbuf = alloc::vec![0u8; cap_usize];
-    let (n, src_ip, src_port) = match crate::net::socket::dgram_recv_from(h, &mut kbuf, nonblock) {
-        Ok(v) => v,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
+    let (n, family, src_ip16, src_port) =
+        match crate::net::socket::dgram_recv_from(h, &mut kbuf, nonblock) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
     let n_usize = usize::try_from(n).unwrap_or(0).min(cap_usize);
     if n_usize > 0 {
         // SAFETY: the recvfrom gate validated [buf, +len) writable (cap_usize <= len);
@@ -36930,12 +36939,22 @@ fn dispatch_dgram_recvfrom(
             return linux_err(linux_errno_for(e));
         }
     }
-    // Fill the source address out-param (pre-validated by the recvfrom gate).
+    // Fill the source address out-param (pre-validated by the recvfrom gate). The
+    // datagram carries its own family (a v6-bound socket can still receive a v4
+    // datagram, and vice versa), so we write the sockaddr matching the packet, not
+    // the socket domain — an IPv6 source becomes a sockaddr_in6, an IPv4 source a
+    // sockaddr_in.
     if addr_ptr != 0 {
         // Discarded: a short/racing user buffer is handled by truncation inside
-        // socket_write_peer_addr; the receive already succeeded, so a write fault on
-        // the out-param must not undo the delivered datagram.
-        let _ = socket_write_peer_addr(addr_ptr, addrlen_ptr, &src_ip, src_port);
+        // socket_write_peer_addr*; the receive already succeeded, so a write fault
+        // on the out-param must not undo the delivered datagram.
+        if family == netipc::ring::UDP_AF_INET6 {
+            let _ = socket_write_peer_addr6(addr_ptr, addrlen_ptr, &src_ip16, src_port);
+        } else {
+            let mut src_ip = [0u8; 4];
+            src_ip.copy_from_slice(&src_ip16[..4]);
+            let _ = socket_write_peer_addr(addr_ptr, addrlen_ptr, &src_ip, src_port);
+        }
     }
     // Without MSG_TRUNC, Linux `recvfrom` returns the number of bytes copied into the
     // caller's buffer, not the true datagram length (which `n` carries when the
@@ -37044,10 +37063,13 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
 
 /// Send one datagram from a `SOCK_DGRAM` socket to the `sendto` destination.
 ///
-/// Parses the user `struct sockaddr_in` at `addr_ptr` (required — a NULL
-/// destination on an unconnected UDP socket is `EDESTADDRREQ`), stages the payload
-/// (capped at the datagram maximum), and drives [`crate::net::socket::dgram_send_to`].
-/// Only `AF_INET` is supported; any other family is `EAFNOSUPPORT`.
+/// Parses the user sockaddr at `addr_ptr` (required — a NULL destination on an
+/// unconnected UDP socket is `EDESTADDRREQ`), dispatching on `sa_family`:
+/// `AF_INET` (2, `struct sockaddr_in`, 16 bytes) →
+/// [`dgram_send_to`](crate::net::socket::dgram_send_to); `AF_INET6` (10,
+/// `struct sockaddr_in6`, 28 bytes) →
+/// [`dgram_send_to6`](crate::net::socket::dgram_send_to6). The payload is staged
+/// (capped at the datagram maximum). Any other family is `EAFNOSUPPORT`.
 fn dispatch_dgram_sendto(
     h: crate::net::socket::SocketHandle,
     buf: u64,
@@ -37059,29 +37081,67 @@ fn dispatch_dgram_sendto(
     if addr_ptr == 0 {
         return linux_err(errno::EDESTADDRREQ);
     }
-    // `struct sockaddr_in` is 16 bytes; the gate already validated the region.
-    #[allow(clippy::cast_possible_truncation)]
-    if (addr_len as usize) < 16 {
-        return linux_err(errno::EINVAL);
-    }
-    let mut sa = [0u8; 16];
-    // SAFETY: the sendto gate validated [addr_ptr, +addr_len>=16) readable; SMAP re-check.
-    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+    // Read sa_family first (2 bytes) to decide the address layout.
+    let mut fam = [0u8; 2];
+    // SAFETY: the sendto gate validated the addr region (>= 2 bytes) readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, fam.as_mut_ptr(), 2) } {
         return linux_err(linux_errno_for(e));
     }
-    let [f0, f1, p0, p1, a0, a1, a2, a3, ..] = sa;
-    let family = u16::from_ne_bytes([f0, f1]);
-    if family != 2 {
-        return linux_err(errno::EAFNOSUPPORT);
+    let family = u16::from_ne_bytes(fam);
+    #[allow(clippy::cast_possible_truncation)]
+    let addr_len_usize = addr_len as usize;
+    // Resolve the destination endpoint per family. `Dest` keeps the payload-staging
+    // path below family-agnostic (staged once, dispatched once).
+    enum Dest {
+        V4([u8; 4], u16),
+        V6([u8; 16], u16),
     }
-    let port = u16::from_be_bytes([p0, p1]);
-    let ip = [a0, a1, a2, a3];
+    let dest = match family {
+        2 => {
+            // `struct sockaddr_in` is 16 bytes.
+            if addr_len_usize < 16 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 16];
+            // SAFETY: gate validated [addr_ptr, +addr_len>=16) readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let [_, _, p0, p1, a0, a1, a2, a3, ..] = sa;
+            Dest::V4([a0, a1, a2, a3], u16::from_be_bytes([p0, p1]))
+        }
+        10 => {
+            // `struct sockaddr_in6` is 28 bytes: family(2), port(2 BE),
+            // flowinfo(4), addr(16), scope_id(4). We use port + addr.
+            if addr_len_usize < 28 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 28];
+            // SAFETY: gate validated [addr_ptr, +addr_len>=28) readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 28) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let port = u16::from_be_bytes([sa[2], sa[3]]);
+            let mut ip6 = [0u8; 16];
+            ip6.copy_from_slice(&sa[8..24]);
+            Dest::V6(ip6, port)
+        }
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    };
     // Stage the payload. A datagram is all-or-nothing; cap it at the ring's send
     // window (the client returns EMSGSIZE if it exceeds that).
     let cap = usize::try_from(len).unwrap_or(usize::MAX).min(4096);
+    let send = |payload: &[u8]| match dest {
+        Dest::V4(ip, port) => crate::net::socket::dgram_send_to(h, &ip, port, payload),
+        Dest::V6(ip6, port) => crate::net::socket::dgram_send_to6(h, &ip6, port, payload),
+    };
     if cap == 0 {
         // A zero-length datagram is valid (an empty UDP packet).
-        return match crate::net::socket::dgram_send_to(h, &ip, port, &[]) {
+        return match send(&[]) {
             Ok(n) => SyscallResult::ok(i64::from(n)),
             Err(e) => linux_err(linux_errno_for(e)),
         };
@@ -37094,7 +37154,7 @@ fn dispatch_dgram_sendto(
     if let Err(e) = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), cap) } {
         return linux_err(linux_errno_for(e));
     }
-    match crate::net::socket::dgram_send_to(h, &ip, port, &kbuf) {
+    match send(&kbuf) {
         Ok(n) => SyscallResult::ok(i64::from(n)),
         Err(e) => linux_err(linux_errno_for(e)),
     }

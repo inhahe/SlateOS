@@ -546,6 +546,60 @@ impl NetstackConn {
         Ok(res)
     }
 
+    /// Send one UDP datagram over **IPv6** from the bound socket to `[ip6]:port`
+    /// (daemon [`OP_UDP_SEND6`](netipc::ring::OP_UDP_SEND6)).
+    ///
+    /// The 16-byte IPv6 destination does not fit in the SQE `aux`, so it rides at
+    /// the front of the ring send window (`[dst_ip16:16][payload...]`); the port
+    /// travels in the low 16 bits of `aux`. The IPv6 sibling of
+    /// [`udp_send_to`](Self::udp_send_to); the same completion semantics apply.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::MsgSize`] — the payload exceeds the daemon's datagram limit
+    ///   ([`ERR_MSG_SIZE`](netipc::ring::ERR_MSG_SIZE)), or `16 + payload` overruns
+    ///   the ring send window.
+    /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_send_to6(&mut self, ip6: &[u8; 16], port: u16, buf: &[u8]) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        // The 16-byte destination address plus the payload must fit the ring send
+        // window; reject an oversized datagram as EMSGSIZE rather than truncating
+        // (a datagram is all-or-nothing).
+        let want = buf.len();
+        if want.saturating_add(16) > SND_CAP as usize {
+            return Err(KernelError::MsgSize);
+        }
+        // Prepend the destination address, then the payload.
+        if !ring.write_data(SND_OFF as usize, ip6) {
+            return Err(KernelError::InternalError);
+        }
+        if want > 0 {
+            let payload = buf.get(..want).ok_or(KernelError::InternalError)?;
+            if !ring.write_data(SND_OFF as usize + 16, payload) {
+                return Err(KernelError::InternalError);
+            }
+        }
+        let data_len = u32::try_from(want + 16).map_err(|_| KernelError::InternalError)?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_SEND6,
+            conn_id: self.conn_id,
+            data_off: SND_OFF,
+            data_len,
+            user_data: ud,
+            aux: u64::from(port),
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == netipc::ring::ERR_MSG_SIZE {
+            return Err(KernelError::MsgSize);
+        }
+        if res < 0 {
+            return Err(KernelError::NotConnected);
+        }
+        Ok(res)
+    }
+
     /// Receive one UDP datagram into `buf`, reporting the source address
     /// (daemon [`OP_UDP_RECV`](netipc::ring::OP_UDP_RECV)).
     ///
@@ -571,6 +625,28 @@ impl NetstackConn {
         buf: &mut [u8],
         nonblock: bool,
     ) -> KernelResult<(i32, [u8; 4], u16)> {
+        let (res, _family, ip16, port) = self.udp_recv_any(buf, nonblock)?;
+        let mut src_ip = [0u8; 4];
+        src_ip.copy_from_slice(ip16.get(..4).ok_or(KernelError::InternalError)?);
+        Ok((res, src_ip, port))
+    }
+
+    /// Receive one UDP datagram into `buf`, reporting the source address **with its
+    /// family** — the family-aware core behind [`udp_recv_from`](Self::udp_recv_from)
+    /// (which drops the family and truncates the address to 4 bytes for IPv4).
+    ///
+    /// Returns `(payload_len, family, src_ip16, src_port)` where `family` is
+    /// [`UDP_AF_INET`](netipc::ring::UDP_AF_INET) or
+    /// [`UDP_AF_INET6`](netipc::ring::UDP_AF_INET6) and `src_ip16` is the fixed
+    /// 16-byte address (IPv4 in `src_ip16[0..4]`, the rest zero). The socket layer
+    /// uses the reported family to write back the matching `sockaddr_in` /
+    /// `sockaddr_in6`, since a datagram's family is a property of the packet, not
+    /// the socket. See [`udp_recv_from`](Self::udp_recv_from) for the error cases.
+    pub fn udp_recv_any(
+        &mut self,
+        buf: &mut [u8],
+        nonblock: bool,
+    ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
         let ring = self.attach_ring()?;
         let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
         // The daemon writes a 24-byte address header + payload into the recv
@@ -602,10 +678,8 @@ impl NetstackConn {
         if !ring.read_data(RCV_OFF as usize, &mut hdr) {
             return Err(KernelError::InternalError);
         }
-        let (_family, ip16, src_port) =
+        let (family, ip16, src_port) =
             netipc::ring::Sqe::unpack_udp_addr(&hdr).ok_or(KernelError::InternalError)?;
-        let mut src_ip = [0u8; 4];
-        src_ip.copy_from_slice(ip16.get(..4).ok_or(KernelError::InternalError)?);
         let n = usize::try_from(res).unwrap_or(0).min(room).min(buf.len());
         if n > 0 {
             let window = buf.get_mut(..n).ok_or(KernelError::InternalError)?;
@@ -613,7 +687,7 @@ impl NetstackConn {
                 return Err(KernelError::InternalError);
             }
         }
-        Ok((res, src_ip, src_port))
+        Ok((res, family, ip16, src_port))
     }
 
     /// Probe the connection's readiness **without consuming any buffered data**
@@ -1161,6 +1235,129 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
     conn.close()?;
     // No reply came back (network variance); the bind/send/recv path still ran.
     Ok(None)
+}
+
+/// Boot self-test: prove the **AF_INET6 UDP datagram** path (`OP_UDP_SEND6` +
+/// v6-aware `OP_UDP_RECV`) end to end over the daemon's in-process software
+/// loopback — the datagram sibling of [`self_test_connect6`].
+///
+/// Like the v6 TCP test, slirp offers no IPv6 peer under QEMU, so this uses the
+/// daemon's loopback divert: a frame addressed to `me.ip6` (the daemon's
+/// EUI-64 link-local, derived from the NIC MAC) is routed into the daemon's RX
+/// FIFO instead of the wire. The test binds a UDP socket on a fixed port, sends a
+/// datagram to `[me.ip6]:port`, then polls for it to come back. Because
+/// [`udp_sock_send6`] uses the socket's own local port as the UDP source, the
+/// looped-back datagram is delivered to the very socket that sent it. A received
+/// datagram whose source header reports `AF_INET6`, the local link-local address,
+/// and the sent payload proves: kernel client → `OP_UDP_SEND6` → daemon v6 TX →
+/// loopback → daemon v6 RX classify (`recv_udp_any` IPv6 arm) → `OP_UDP_RECV` with
+/// the `UDP_AF_INET6` in-band header → kernel client.
+///
+/// The EUI-64 link-local derivation is inlined (the kernel crate cannot depend on
+/// `netproto`), matching [`self_test_connect6`] and `icmpv6::link_local_from_mac`.
+///
+/// Returns `Ok(Some(()))` on a proven v6 datagram round-trip, `Ok(None)` if there
+/// is no NIC yet (no MAC → the daemon has no `me.ip6` to loop back to), and `Err`
+/// on a real control-protocol fault or a parity break (bind/send failure, or the
+/// looped-back datagram never arriving).
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; a bind/send failure or a
+/// missing loopback datagram is reported as an error (the v6 UDP path is broken,
+/// not mere network variance — the loopback is deterministic and in-process).
+pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
+    /// Loopback datagram port (arbitrary, distinct from the other self-tests').
+    const PORT: u16 = 9201;
+    const PAYLOAD: &[u8] = b"slate-udp6:datagram-loopback";
+
+    let mac = crate::net::interface::mac().0;
+    if mac == [0u8; 6] {
+        // No NIC → the daemon has no me.ip6 to loop back to.
+        return Ok(None);
+    }
+
+    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
+    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
+    let ll: [u8; 16] = [
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        mac[5],
+    ];
+
+    let mut conn = NetstackConn::open()?;
+
+    // Bind the datagram socket to the fixed loopback port so the looped-back
+    // datagram (dst_port == PORT) routes back to this same socket.
+    let bound = conn.udp_bind(PORT)?;
+    if bound != PORT {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 UDP bind(port={}) returned {} — IPv6 datagram parity broken",
+            PORT,
+            bound
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Send the datagram to our own link-local (loops back in-process).
+    let sent = conn.udp_send_to6(&ll, PORT, PAYLOAD)?;
+    if sent < PAYLOAD.len() as i32 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 UDP short-sent ({} of {} bytes) — IPv6 datagram parity broken",
+            sent,
+            PAYLOAD.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Poll for the looped-back datagram. Each non-blocking recv drives the daemon's
+    // UDP pump once, so a bounded loop suffices for the deterministic loopback.
+    let mut resp = [0u8; 128];
+    for _ in 0..32u32 {
+        match conn.udp_recv_any(&mut resp, true) {
+            Ok((n, family, src_ip16, src_port)) => {
+                let len = usize::try_from(n).unwrap_or(0).min(resp.len());
+                let dg = resp.get(..len).unwrap_or(&[]);
+                if family == netipc::ring::UDP_AF_INET6
+                    && src_ip16 == ll
+                    && src_port == PORT
+                    && dg == PAYLOAD
+                {
+                    conn.close()?;
+                    crate::serial_println!(
+                        "[netstack-client]   v6 UDP datagram looped back: {} bytes from \
+                         fe80::…:{} (AF_INET6, payload matched) — AF_INET6 SOCK_DGRAM proven",
+                        len,
+                        src_port
+                    );
+                    return Ok(Some(()));
+                }
+                if family != netipc::ring::UDP_AF_INET6 && len > 0 {
+                    conn.close()?;
+                    crate::serial_println!(
+                        "[netstack-client]   v6 UDP recv reported family {} (want AF_INET6) — v6 demux broken",
+                        family
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                // A stray/partial datagram — keep polling.
+            }
+            Err(KernelError::WouldBlock) => {
+                // Nothing queued yet — retry (the daemon pumped the NIC this round).
+            }
+            Err(e) => {
+                conn.close()?;
+                return Err(e);
+            }
+        }
+    }
+
+    conn.close()?;
+    crate::serial_println!(
+        "[netstack-client]   v6 UDP loopback datagram never arrived — IPv6 datagram parity broken"
+    );
+    Err(KernelError::InternalError)
 }
 
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected

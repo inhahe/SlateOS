@@ -653,9 +653,40 @@ pub fn dgram_send_to(
     guard.conn.udp_send_to(ip, port, buf)
 }
 
+/// Send `buf` as a single datagram to `[ip6]:port` over IPv6 from a datagram
+/// socket. The IPv6 sibling of [`dgram_send_to`]; auto-binds an ephemeral local
+/// port on first use. Returns the number of bytes accepted (`buf.len()` on
+/// success — a datagram is all-or-nothing).
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - `MsgSize` — the datagram exceeds the maximum a single `sendto` can carry
+///   (Linux `EMSGSIZE`).
+/// - protocol faults propagated from [`NetstackConn::udp_send_to6`].
+pub fn dgram_send_to6(
+    handle: SocketHandle,
+    ip6: &[u8; 16],
+    port: u16,
+    buf: &[u8],
+) -> KernelResult<i32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    ensure_bound(&mut guard)?;
+    guard.conn.udp_send_to6(ip6, port, buf)
+}
+
 /// Receive one datagram into `buf` from a datagram socket. Returns the payload
-/// length copied plus the source `(ip, port)`. Auto-binds an ephemeral local port on
-/// first use (so a `recvfrom` before any `sendto` still listens on a port).
+/// length copied plus the source `(family, ip16, port)` — `family` is
+/// [`UDP_AF_INET`](netipc::ring::UDP_AF_INET) or
+/// [`UDP_AF_INET6`](netipc::ring::UDP_AF_INET6), and `ip16` is the fixed 16-byte
+/// address (IPv4 in `ip16[0..4]`). The syscall layer uses the reported family to
+/// write back the matching `sockaddr_in` / `sockaddr_in6`. Auto-binds an ephemeral
+/// local port on first use (so a `recvfrom` before any `sendto` still listens).
 ///
 /// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a receive with no
 /// datagram queued returns [`KernelError::WouldBlock`] (→ `EAGAIN`).
@@ -665,19 +696,19 @@ pub fn dgram_send_to(
 /// - `InvalidHandle` — closed handle.
 /// - `InvalidArgument` — not a datagram socket.
 /// - `WouldBlock` — `nonblock` was set and no datagram was ready.
-/// - protocol faults propagated from [`NetstackConn::udp_recv_from`].
+/// - protocol faults propagated from [`NetstackConn::udp_recv_any`].
 pub fn dgram_recv_from(
     handle: SocketHandle,
     buf: &mut [u8],
     nonblock: bool,
-) -> KernelResult<(i32, [u8; 4], u16)> {
+) -> KernelResult<(i32, u16, [u8; 16], u16)> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     if guard.kind != SockKind::Dgram {
         return Err(KernelError::InvalidArgument);
     }
     ensure_bound(&mut guard)?;
-    guard.conn.udp_recv_from(buf, nonblock)
+    guard.conn.udp_recv_any(buf, nonblock)
 }
 
 /// The bound local port of a datagram socket (`getsockname`), or `0` if not yet

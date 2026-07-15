@@ -1097,27 +1097,30 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
     }
 }
 
-/// A received IPv4 UDP datagram's routing identity, produced by
-/// [`recv_udp_any`]: the sender `(src_ip, src_port)` and our local `dst_port`.
-/// The payload has been copied into the caller's `pl` buffer (`payload_len`
-/// bytes; a longer datagram is truncated to the buffer, matching `recvfrom`).
+/// A received UDP datagram's routing identity, produced by [`recv_udp_any`]: the
+/// sender's address (`family` + fixed 16-byte `src_ip`, IPv4 in `src_ip[0..4]`)
+/// and port, plus our local `dst_port`. The payload has been copied into the
+/// caller's `pl` buffer (`payload_len` bytes; a longer datagram is truncated to
+/// the buffer, matching `recvfrom`).
 struct UdpRx {
-    src_ip: [u8; 4],
+    family: u16,
+    src_ip: [u8; 16],
     src_port: u16,
     dst_port: u16,
     payload_len: usize,
 }
 
-/// Read one frame off the NIC and, if it is an IPv4 UDP datagram addressed to
-/// us, return its routing identity (the [`recv_tcp_any`] sibling for UDP). A
-/// non-UDP frame — or no frame at all (`WOULD_BLOCK`) — yields `None`.
+/// Read one frame off the NIC and, if it is a UDP datagram (IPv4 *or* IPv6)
+/// addressed to us, return its routing identity (the [`recv_tcp_any`] sibling for
+/// UDP). A non-UDP frame — or no frame at all (`WOULD_BLOCK`) — yields `None`.
 ///
 /// Like [`recv_tcp_any`] this consumes exactly one NIC frame, so a caller
 /// draining for UDP datagrams also consumes any interleaved TCP frames and, in
 /// the current single-active-phase model, drops them — the same shared-RX-demux
 /// limitation the TCP pump already carries (`known-issues.md`
-/// D-NETSTACK-RX-DEMUX). IPv6 UDP is not yet classified (the daemon's UDP socket
-/// layer is IPv4-only for this increment).
+/// D-NETSTACK-RX-DEMUX). Both IPv4 (`ETHERTYPE_IPV4` → [`ipv4::Packet`]) and IPv6
+/// (`ETHERTYPE_IPV6` → [`ipv6::Packet`]) UDP datagrams are classified; the family
+/// is reported so `OP_UDP_RECV` can report the correct `sockaddr` family.
 fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
     let n = raw_rx(frame);
     if n < 0 {
@@ -1126,22 +1129,43 @@ fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
     let len = n as usize;
     let bytes = frame.get(..len)?;
     let eth = ethernet::Frame::parse(bytes)?;
-    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
-        return None;
+    match eth.ethertype {
+        ethernet::ETHERTYPE_IPV4 => {
+            let ip = ipv4::Packet::parse(eth.payload)?;
+            if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip {
+                return None;
+            }
+            let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
+            let cplen = dg.payload.len().min(pl.len());
+            pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
+            let mut src_ip = [0u8; 16];
+            src_ip[..4].copy_from_slice(&ip.src);
+            Some(UdpRx {
+                family: netipc::ring::UDP_AF_INET,
+                src_ip,
+                src_port: dg.src_port,
+                dst_port: dg.dst_port,
+                payload_len: cplen,
+            })
+        }
+        ethernet::ETHERTYPE_IPV6 => {
+            let ip = ipv6::Packet::parse(eth.payload)?;
+            if ip.next_header != ipv4::PROTO_UDP || ip.dst != me.ip6 {
+                return None;
+            }
+            let dg = udp::Datagram::parse_v6(ip.payload, &ip.src, &ip.dst)?;
+            let cplen = dg.payload.len().min(pl.len());
+            pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
+            Some(UdpRx {
+                family: netipc::ring::UDP_AF_INET6,
+                src_ip: ip.src,
+                src_port: dg.src_port,
+                dst_port: dg.dst_port,
+                payload_len: cplen,
+            })
+        }
+        _ => None,
     }
-    let ip = ipv4::Packet::parse(eth.payload)?;
-    if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip {
-        return None;
-    }
-    let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
-    let cplen = dg.payload.len().min(pl.len());
-    pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
-    Some(UdpRx {
-        src_ip: ip.src,
-        src_port: dg.src_port,
-        dst_port: dg.dst_port,
-        payload_len: cplen,
-    })
 }
 
 /// A single live TCP client connection. Holds the sequence-number and IP-ident
@@ -2568,12 +2592,16 @@ const UDP_DGRAM_MAX: usize = MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADE
 /// binds to port 0 (the IANA dynamic/ephemeral range base).
 const UDP_EPHEMERAL_BASE: u16 = 49152;
 
-/// One buffered inbound UDP datagram: the sender's IPv4 address/port plus the
-/// copied payload. Stored `Copy` so the fixed queue array can be built without a
-/// heap (the daemon is `no_std`, no `alloc`).
+/// One buffered inbound UDP datagram: the sender's address/port plus the copied
+/// payload. The source address is stored as a fixed 16-byte field tagged with a
+/// `family` ([`netipc::ring::UDP_AF_INET`] or [`UDP_AF_INET6`](netipc::ring::UDP_AF_INET6)),
+/// so one queue slot carries either an IPv4 (address in `src_ip[0..4]`, rest zero)
+/// or an IPv6 datagram without a parallel v6 queue. Stored `Copy` so the fixed
+/// queue array can be built without a heap (the daemon is `no_std`, no `alloc`).
 #[derive(Clone, Copy)]
 struct UdpDatagram {
-    src_ip: [u8; 4],
+    family: u16,
+    src_ip: [u8; 16],
     src_port: u16,
     len: usize,
     data: [u8; UDP_DGRAM_MAX],
@@ -2582,7 +2610,13 @@ struct UdpDatagram {
 impl UdpDatagram {
     /// An empty datagram slot (used to initialise the fixed queue array).
     const fn empty() -> Self {
-        Self { src_ip: [0; 4], src_port: 0, len: 0, data: [0; UDP_DGRAM_MAX] }
+        Self {
+            family: netipc::ring::UDP_AF_INET,
+            src_ip: [0; 16],
+            src_port: 0,
+            len: 0,
+            data: [0; UDP_DGRAM_MAX],
+        }
     }
 }
 
@@ -2607,8 +2641,10 @@ impl UdpSock {
 
     /// Buffer a received datagram. If the queue is full, the *oldest* datagram is
     /// evicted first (UDP is lossy — dropping the stalest data is the least-bad
-    /// choice and keeps a slow reader from wedging on ancient packets).
-    fn push(&mut self, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
+    /// choice and keeps a slow reader from wedging on ancient packets). `family`
+    /// tags the source address as IPv4 or IPv6; `src_ip` is the fixed 16-byte
+    /// address (IPv4 in `src_ip[0..4]`, rest zero).
+    fn push(&mut self, family: u16, src_ip: [u8; 16], src_port: u16, payload: &[u8]) {
         let n = payload.len().min(UDP_DGRAM_MAX);
         if self.count == UDP_QLEN {
             // Drop the head to make room, then append at the (freed) tail.
@@ -2617,6 +2653,7 @@ impl UdpSock {
         }
         let tail = (self.head + self.count) % UDP_QLEN;
         let slot = &mut self.q[tail];
+        slot.family = family;
         slot.src_ip = src_ip;
         slot.src_port = src_port;
         slot.len = n;
@@ -2625,9 +2662,9 @@ impl UdpSock {
     }
 
     /// Remove and copy out the oldest buffered datagram into `out` (payload only;
-    /// truncated to `out.len()`). Returns `(src_ip, src_port, payload_len)`, or
-    /// `None` if the queue is empty.
-    fn pop(&mut self, out: &mut [u8]) -> Option<([u8; 4], u16, usize)> {
+    /// truncated to `out.len()`). Returns `(family, src_ip16, src_port, payload_len)`,
+    /// or `None` if the queue is empty.
+    fn pop(&mut self, out: &mut [u8]) -> Option<(u16, [u8; 16], u16, usize)> {
         if self.count == 0 {
             return None;
         }
@@ -2636,7 +2673,7 @@ impl UdpSock {
         self.count -= 1;
         let n = dg.len.min(out.len());
         out[..n].copy_from_slice(&dg.data[..n]);
-        Some((dg.src_ip, dg.src_port, n))
+        Some((dg.family, dg.src_ip, dg.src_port, n))
     }
 
     /// True iff at least one datagram is queued (drives `OP_POLL` readability
@@ -2750,7 +2787,7 @@ fn udp_pump(udp: &mut UdpSocks, me: &IfInfo) -> bool {
         any = true;
         if let Some(sock) = udp.by_port(rx.dst_port) {
             let n = rx.payload_len.min(pl.len());
-            sock.push(rx.src_ip, rx.src_port, &pl[..n]);
+            sock.push(rx.family, rx.src_ip, rx.src_port, &pl[..n]);
         }
         // Datagram to an unbound port → drop (no ICMP port-unreachable yet).
     }
@@ -2783,6 +2820,35 @@ fn udp_sock_send(
         return -1;
     }
     // On success the caller learns how many payload bytes were accepted.
+    i32::try_from(payload.len()).unwrap_or(i32::MAX)
+}
+
+/// Build and transmit one UDP datagram over IPv6 from `sock`'s local port to
+/// `[dst_ip6]:dst_port`. The IPv6 sibling of [`udp_sock_send`] (there is no IPv4
+/// identification counter on the wire). Returns the payload byte count sent
+/// (`≥ 0`), or a negative [`netipc::ring`] errno:
+/// [`ERR_MSG_SIZE`](netipc::ring::ERR_MSG_SIZE) if the payload exceeds
+/// [`UDP_DGRAM_MAX`], `-1` on a build/transmit failure. Shared by `OP_UDP_SEND6`.
+fn udp_sock_send6(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    sock: &UdpSock,
+    dst_ip6: &[u8; 16],
+    dst_port: u16,
+    payload: &[u8],
+) -> i32 {
+    if payload.len() > UDP_DGRAM_MAX {
+        return netipc::ring::ERR_MSG_SIZE;
+    }
+    let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv6::HEADER_LEN)];
+    let dlen =
+        match udp::write_v6(&mut dgram, &me.ip6, dst_ip6, sock.local_port, dst_port, payload) {
+            Some(n) => n,
+            None => return -1,
+        };
+    if !send_ipv6(me, next_hop_mac, dst_ip6, ipv4::PROTO_UDP, &dgram[..dlen]) {
+        return -1;
+    }
     i32::try_from(payload.len()).unwrap_or(i32::MAX)
 }
 
@@ -3351,6 +3417,38 @@ fn ring_tcp_process(
                     }
                 }
             }
+            netipc::ring::OP_UDP_SEND6 => {
+                // Send one datagram over IPv6. The 16-byte destination address does
+                // not fit in `aux`, so it rides at the front of the data window:
+                // [dst_ip16:16][payload...]. Destination port is aux's low 16 bits.
+                let dst_port = (sqe.aux & 0xFFFF) as u16;
+                let want = sqe.data_len as usize;
+                if want < 16 {
+                    -1 // window too small to even hold the destination address
+                } else {
+                    let mut hdr = [0u8; 16];
+                    let plen = (want - 16).min(UDP_DGRAM_MAX);
+                    let mut buf = [0u8; UDP_DGRAM_MAX];
+                    let off = sqe.data_off as usize;
+                    if !ring.read_data(off, &mut hdr)
+                        || (plen > 0 && !ring.read_data(off + 16, &mut buf[..plen]))
+                    {
+                        -1
+                    } else {
+                        match udp.get_mut(sqe.conn_id) {
+                            Some(sock) => udp_sock_send6(
+                                me,
+                                next_hop_mac,
+                                sock,
+                                &hdr,
+                                dst_port,
+                                &buf[..plen],
+                            ),
+                            None => -1, // not bound
+                        }
+                    }
+                }
+            }
             netipc::ring::OP_UDP_RECV => {
                 // Drain the NIC (routing to all bound socks), then dequeue the
                 // oldest datagram for this socket. The daemon prepends a 24-byte
@@ -3368,13 +3466,9 @@ fn ring_tcp_process(
                     match udp.get_mut(sqe.conn_id) {
                         None => -1, // not bound
                         Some(sock) => match sock.pop(&mut payload[..room]) {
-                            Some((src_ip, src_port, n)) => {
-                                let mut ip16 = [0u8; 16];
-                                ip16[..4].copy_from_slice(&src_ip);
+                            Some((family, ip16, src_port, n)) => {
                                 let hdr = netipc::ring::Sqe::pack_udp_addr(
-                                    netipc::ring::UDP_AF_INET,
-                                    &ip16,
-                                    src_port,
+                                    family, &ip16, src_port,
                                 );
                                 let off = sqe.data_off as usize;
                                 if ring.write_data(off, &hdr)

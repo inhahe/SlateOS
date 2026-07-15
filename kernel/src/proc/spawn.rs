@@ -3378,6 +3378,25 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // IPv6 UDP datagram parity (D-NETSOCK-SYNC): OP_UDP_SEND6 + v6-aware
+    // OP_UDP_RECV over the daemon. The datagram sibling of connect6 — a UDP
+    // datagram sent to the daemon's own link-local (me.ip6) loops back in-process
+    // (slirp has no IPv6 peer), and its source header must report AF_INET6 with the
+    // link-local address and the sent payload. Proves the AF_INET6 SOCK_DGRAM path.
+    match crate::net::netstack_client::self_test_udp6_loopback() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack udp6: IPv6 datagram looped back with an AF_INET6 \
+             source header and matching payload — AF_INET6 SOCK_DGRAM parity proven over the daemon"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack udp6: no NIC MAC — check skipped"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack udp6 error ({:?})",
+            e
+        ),
+    }
+
     // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;
     // see todo.txt Judgment Calls 2026-07-14). Everything above drives the
     // daemon-backed socket path from *kernel* context via the `NetstackConn`
@@ -3399,7 +3418,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept/connect6/ring3-capstone/ring3-udp parity checks done; \
+         nonblock-send/listen-accept/connect6/udp6/ring3-capstone/ring3-udp parity checks done; \
          daemon now owns the NIC for the system's lifetime"
     );
     Ok(())

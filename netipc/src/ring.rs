@@ -217,6 +217,18 @@ pub const OP_UDP_SEND: u8 = 0x0D;
 /// Like Linux `recvfrom`, an oversized datagram is truncated to the payload
 /// window (the excess is discarded). Migration Phase 5, UDP `SOCK_DGRAM` support.
 pub const OP_UDP_RECV: u8 = 0x0E;
+/// Send one **UDP datagram over IPv6** from the socket named by `conn_id`.
+///
+/// The 16-byte IPv6 destination address does not fit in `aux` (which only holds a
+/// 4-byte IPv4 address via [`Sqe::pack_endpoint`]), so it rides *in-band* as the
+/// first 16 bytes of the SQE data window, immediately followed by the datagram
+/// payload (`data_len = 16 + payload_len`, `data_off` points at the destination
+/// address). The destination port is carried in the low 16 bits of `aux`
+/// (big-endian, matching the port half of [`Sqe::pack_endpoint`]). Completion
+/// `result` semantics match [`OP_UDP_SEND`]: payload bytes sent (`≥ 0`) or a
+/// negative errno ([`ERR_MSG_SIZE`] for an oversized datagram). Migration Phase 5,
+/// AF_INET6 UDP `SOCK_DGRAM` support.
+pub const OP_UDP_SEND6: u8 = 0x0F;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels

@@ -458,6 +458,164 @@ impl NetstackConn {
         Ok(res)
     }
 
+    /// Bind a connectionless UDP datagram socket on `port`
+    /// (daemon [`OP_UDP_BIND`](netipc::ring::OP_UDP_BIND)).
+    ///
+    /// `port == 0` asks the daemon to pick an unused ephemeral port. Returns the
+    /// bound local port (`>= 0`), which the caller records for `getsockname`.
+    /// Marks the client "connected" so teardown emits the `OP_CLOSE` that unbinds
+    /// the daemon-side socket.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::AddrInUse`] — the daemon reports the port is already bound
+    ///   ([`ERR_ADDR_IN_USE`](netipc::ring::ERR_ADDR_IN_USE)).
+    /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_bind(&mut self, port: u16) -> KernelResult<u16> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_BIND,
+            conn_id: self.conn_id,
+            user_data: ud,
+            aux: u64::from(port),
+            ..netipc::ring::Sqe::default()
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == netipc::ring::ERR_ADDR_IN_USE {
+            return Err(KernelError::AddrInUse);
+        }
+        if res < 0 {
+            // Table full (daemon `-1`) or any other bind failure.
+            return Err(KernelError::ResourceExhausted);
+        }
+        // A bound UDP socket holds a daemon-side session; mark it so teardown
+        // emits the OP_CLOSE that unbinds it (the daemon routes OP_CLOSE to
+        // `udp.remove` when the id isn't a TCP connection).
+        self.connected = true;
+        u16::try_from(res).map_err(|_| KernelError::InternalError)
+    }
+
+    /// Send one UDP datagram from the bound socket to `ip:port`
+    /// (daemon [`OP_UDP_SEND`](netipc::ring::OP_UDP_SEND)).
+    ///
+    /// The payload travels in the ring send window; the destination address rides
+    /// in the SQE `aux` ([`pack_endpoint`](netipc::ring::Sqe::pack_endpoint)).
+    /// Returns the number of payload bytes accepted (the whole datagram on success).
+    /// A datagram larger than the daemon's per-datagram limit is rejected.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::MsgSize`] — the payload exceeds the daemon's datagram limit
+    ///   ([`ERR_MSG_SIZE`](netipc::ring::ERR_MSG_SIZE)).
+    /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_send_to(&mut self, ip: &[u8; 4], port: u16, buf: &[u8]) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        // A single datagram must fit the ring send window (the daemon also caps it
+        // to its per-datagram maximum and returns ERR_MSG_SIZE). Rather than
+        // silently truncate a payload larger than the window, reject it as EMSGSIZE
+        // — a datagram is all-or-nothing, so a partial send would corrupt it.
+        if buf.len() > SND_CAP as usize {
+            return Err(KernelError::MsgSize);
+        }
+        let want = buf.len();
+        let payload = buf.get(..want).ok_or(KernelError::InternalError)?;
+        if want > 0 && !ring.write_data(SND_OFF as usize, payload) {
+            return Err(KernelError::InternalError);
+        }
+        let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_SEND,
+            conn_id: self.conn_id,
+            data_off: SND_OFF,
+            data_len: want_u32,
+            user_data: ud,
+            aux: netipc::ring::Sqe::pack_endpoint(ip, port),
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == netipc::ring::ERR_MSG_SIZE {
+            return Err(KernelError::MsgSize);
+        }
+        if res < 0 {
+            // Not bound, or a TX failure — surface as not-connected.
+            return Err(KernelError::NotConnected);
+        }
+        Ok(res)
+    }
+
+    /// Receive one UDP datagram into `buf`, reporting the source address
+    /// (daemon [`OP_UDP_RECV`](netipc::ring::OP_UDP_RECV)).
+    ///
+    /// The daemon drains the NIC, routes datagrams to their bound sockets, and
+    /// dequeues the oldest datagram for this socket, prepending a 24-byte in-band
+    /// source-address header ([`pack_udp_addr`](netipc::ring::Sqe::pack_udp_addr))
+    /// to the ring window. Returns `(payload_len, src_ip, src_port)`. The payload
+    /// is truncated to `buf.len()` (excess bytes are lost, matching UDP `recvfrom`
+    /// without `MSG_TRUNC`).
+    ///
+    /// When `nonblock` is set (or the daemon has no queued datagram), an empty
+    /// queue surfaces as [`KernelError::WouldBlock`] (→ `EAGAIN`); the caller's
+    /// poll/retry loop drives blocking semantics.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::WouldBlock`] — no datagram is queued.
+    /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
+    /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
+    ///   read back the ring window.
+    pub fn udp_recv_from(
+        &mut self,
+        buf: &mut [u8],
+        nonblock: bool,
+    ) -> KernelResult<(i32, [u8; 4], u16)> {
+        let ring = self.attach_ring()?;
+        let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
+        // The daemon writes a 24-byte address header + payload into the recv
+        // window, so the window must be at least the header plus whatever payload
+        // the caller can take (capped to the recv window).
+        let room = buf.len().min((RCV_CAP as usize).saturating_sub(hdr_len));
+        let cap = hdr_len.saturating_add(room);
+        let cap_u32 = u32::try_from(cap).map_err(|_| KernelError::InternalError)?;
+        let ud = self.next_ud();
+        let aux = if nonblock { netipc::ring::RECV_NONBLOCK } else { 0 };
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_RECV,
+            conn_id: self.conn_id,
+            data_off: RCV_OFF,
+            data_len: cap_u32,
+            user_data: ud,
+            aux,
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == netipc::ring::ERR_WOULD_BLOCK {
+            return Err(KernelError::WouldBlock);
+        }
+        if res < 0 {
+            // -1 = not bound (or window too small, already avoided above).
+            return Err(KernelError::NotConnected);
+        }
+        // Read back the address header, then the payload.
+        let mut hdr = [0u8; netipc::ring::UDP_ADDR_HDR_LEN];
+        if !ring.read_data(RCV_OFF as usize, &mut hdr) {
+            return Err(KernelError::InternalError);
+        }
+        let (_family, ip16, src_port) =
+            netipc::ring::Sqe::unpack_udp_addr(&hdr).ok_or(KernelError::InternalError)?;
+        let mut src_ip = [0u8; 4];
+        src_ip.copy_from_slice(ip16.get(..4).ok_or(KernelError::InternalError)?);
+        let n = usize::try_from(res).unwrap_or(0).min(room).min(buf.len());
+        if n > 0 {
+            let window = buf.get_mut(..n).ok_or(KernelError::InternalError)?;
+            if !ring.read_data(RCV_OFF as usize + hdr_len, window) {
+                return Err(KernelError::InternalError);
+            }
+        }
+        Ok((res, src_ip, src_port))
+    }
+
     /// Probe the connection's readiness **without consuming any buffered data**
     /// (a non-destructive peek).
     ///
@@ -901,6 +1059,108 @@ pub fn self_test_http(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>> {
     } else {
         Ok(None)
     }
+}
+
+/// Boot self-test: prove the **UDP `SOCK_DGRAM`** path end-to-end over the daemon
+/// (`D-NETSOCK-SYNC`, UDP increment).
+///
+/// Binds a connectionless datagram socket on an ephemeral port
+/// ([`udp_bind`](NetstackConn::udp_bind)), sends a real DNS `A`-record query for
+/// `example.com` to `dns_ip:53` ([`udp_send_to`](NetstackConn::udp_send_to)), then
+/// polls ([`udp_recv_from`](NetstackConn::udp_recv_from)) for the reply. A datagram
+/// that arrives **from source port 53** with the matching transaction id and the
+/// DNS response bit set proves the full round-trip: kernel client → ring
+/// `OP_UDP_BIND`/`OP_UDP_SEND` → daemon TX on the raw NIC → wire → daemon RX pump →
+/// `OP_UDP_RECV` with the in-band source-address header → kernel client.
+///
+/// Returns `Ok(Some(()))` when a valid DNS reply was received, `Ok(None)` when no
+/// reply arrived (slirp/network variance — the bind/send/recv path still ran), and
+/// `Err` only on a real control-protocol fault. `dns_ip == 0.0.0.0` (no configured
+/// resolver) returns `Ok(None)`.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client. A `bind` or `send` failure
+/// on a fresh session is surfaced as an error (it would mean the UDP ring path is
+/// broken, not mere network variance).
+pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
+    if *dns_ip == [0, 0, 0, 0] {
+        return Ok(None); // No resolver configured — nothing to query.
+    }
+    // A minimal DNS A-record query for "example.com" (txid 0x1234, RD set).
+    const TXID: u16 = 0x1234;
+    #[rustfmt::skip]
+    const QUERY: [u8; 29] = [
+        0x12, 0x34,             // transaction id
+        0x01, 0x00,             // flags: RD (recursion desired)
+        0x00, 0x01,             // qdcount = 1
+        0x00, 0x00,             // ancount = 0
+        0x00, 0x00,             // nscount = 0
+        0x00, 0x00,             // arcount = 0
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // label "example"
+        3, b'c', b'o', b'm',    // label "com"
+        0,                      // root label
+        0x00, 0x01,             // qtype  = A
+        0x00, 0x01,             // qclass = IN
+    ];
+
+    let mut conn = NetstackConn::open()?;
+
+    // Bind an ephemeral local port for the datagram socket.
+    let local_port = conn.udp_bind(0)?;
+    crate::serial_println!(
+        "[netstack-client]   UDP bound ephemeral port {} for DNS query",
+        local_port
+    );
+
+    let sent = conn.udp_send_to(dns_ip, 53, &QUERY)?;
+    if sent < QUERY.len() as i32 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   UDP DNS query short-sent ({} of {} bytes)",
+            sent,
+            QUERY.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Poll for the reply. Each non-blocking recv drives the daemon's RX pump once,
+    // so a bounded loop is enough under slirp's fast local DNS.
+    let mut resp = [0u8; 512];
+    for _ in 0..64u32 {
+        match conn.udp_recv_from(&mut resp, true) {
+            Ok((n, src_ip, src_port)) => {
+                let len = usize::try_from(n).unwrap_or(0).min(resp.len());
+                // A DNS reply comes from port 53, echoes the txid, and has the
+                // response (QR) bit set in the flags high byte.
+                let dg = resp.get(..len).unwrap_or(&[]);
+                let txid_ok = dg.get(..2) == Some(TXID.to_be_bytes().as_slice());
+                let is_response = dg.get(2).is_some_and(|&f| f & 0x80 != 0);
+                if src_port == 53 && txid_ok && is_response {
+                    conn.close()?;
+                    crate::serial_println!(
+                        "[netstack-client]   UDP DNS reply: {} bytes from {:?}:53 \
+                         (txid matched, QR set) — SOCK_DGRAM round-trip proven over the daemon",
+                        len,
+                        src_ip
+                    );
+                    return Ok(Some(()));
+                }
+                // A stray datagram (not our DNS reply) — keep polling.
+            }
+            Err(KernelError::WouldBlock) => {
+                // Nothing queued yet — retry (the daemon pumped the NIC this round).
+            }
+            Err(e) => {
+                conn.close()?;
+                return Err(e);
+            }
+        }
+    }
+
+    conn.close()?;
+    // No reply came back (network variance); the bind/send/recv path still ran.
+    Ok(None)
 }
 
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected

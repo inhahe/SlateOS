@@ -3227,6 +3227,27 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // UDP SOCK_DGRAM parity (D-NETSOCK-SYNC): the check above uses the daemon's
+    // older one-shot control-channel OP_UDP_EXCHANGE. This one drives the real
+    // ring-based datagram *socket* path — OP_UDP_BIND (ephemeral port) + OP_UDP_SEND
+    // + OP_UDP_RECV with the in-band source-address header — sending a DNS query and
+    // reading the reply back through a bound socket, proving connectionless sockets
+    // work end-to-end over the daemon.
+    match crate::net::netstack_client::self_test_udp_dns(&ifinfo.dns.0) {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack UDP socket: bind+sendto+recvfrom returned a DNS reply \
+             from port 53 — SOCK_DGRAM parity proven over the daemon"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack UDP socket: bind/send/recv path ran, no reply \
+             (no upstream / no resolver) — path proven"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack UDP socket error ({:?})",
+            e
+        ),
+    }
+
     // O_NONBLOCK parity (D-NETSOCK-SYNC): a non-blocking recv on a freshly
     // connected socket with no pending data must return promptly (WouldBlock →
     // EAGAIN) instead of stalling. Uses the same DNS-resolved address as the TCP

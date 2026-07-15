@@ -107,10 +107,14 @@ honour non-blocking recv/send/connect, honest poll/epoll readiness,
 `MSG_PEEK` per-call flags. The remaining daemon-socket gaps are the large,
 non-incremental ones: **(1) server sockets** (`bind`/`listen`/`accept4`) —
 *gated on operator decision Q23* (`open-questions.md`); **(2) UDP `SOCK_DGRAM`**
-— unstarted (the daemon only does one-shot `OP_UDP_EXCHANGE` for DNS today, not
-persistent bound datagram sockets); and **(3) send pipelining** — the daemon's
-single-outstanding-segment sender is a *deliberate* minimal-TCP design, so
-multi-segment/windowed send is a design change with tradeoffs, not a bug fix.
+— the daemon datagram-socket layer, ring ABI, and kernel client are now landed
+(bound datagram sockets over `OP_UDP_BIND`/`OP_UDP_SEND`/`OP_UDP_RECV`,
+boot-validated by `self_test_udp_dns`); what remains is the AF_INET **socket-fd
+wiring** (`sys_socket(SOCK_DGRAM)`/`sendto`/`recvfrom` routing) — analogous to
+the server-socket "daemon+ring done, fd wiring pending" state; and **(3) send
+pipelining** — the daemon's single-outstanding-segment sender is a *deliberate*
+minimal-TCP design, so multi-segment/windowed send is a design change with
+tradeoffs, not a bug fix.
 
 Known limitations, all deliberate for the 5.5 increment and to be closed as
 Phase 5 progresses:
@@ -176,6 +180,26 @@ Phase 5 progresses:
   `sys_accept4` do not route to the daemon and `net::socket` has no
   `SockState::Listening`, so a userspace `listen(2)`/`accept(2)` on a daemon-backed
   socket still isn't served. That syscall wiring is the remaining follow-on.
+- **UDP `SOCK_DGRAM`: daemon+ring+client done, socket-fd wiring pending.** The
+  daemon now hosts a fixed table of bound connectionless datagram sockets
+  (`UdpSock`/`UdpSocks` in `services/netstack/src/main.rs`) served by ring ops
+  `OP_UDP_BIND` (ephemeral-port picking + `EADDRINUSE`), `OP_UDP_SEND`
+  (`EMSGSIZE` on oversize), and `OP_UDP_RECV` (which prepends a 24-byte in-band
+  source-address header — `Sqe::pack_udp_addr`, design-decision #68 — since the
+  16-byte CQE has no room for a per-datagram address); `OP_POLL` reports a bound
+  socket as always-writable and readable-when-queued; `OP_CLOSE` unbinds. The
+  kernel client exposes `NetstackConn::udp_bind`/`udp_send_to`/`udp_recv_from`,
+  boot-validated end-to-end by `netstack_client::self_test_udp_dns` (bind an
+  ephemeral port, send a real DNS `A`-query to the resolver, read the reply back
+  from port 53). What is *not* yet wired is the AF_INET socket-fd layer:
+  `sys_socket(SOCK_DGRAM)`, `sendto`/`recvfrom` fd routing, and a
+  `SockState`/`NetstackConn` datagram variant in `net::socket`, so a userspace
+  `socket(AF_INET, SOCK_DGRAM)` still isn't served over the daemon. That syscall
+  wiring is the remaining follow-on. **Limitations:** IPv4-only (the daemon UDP
+  layer has no v6 datagram path yet); the receive queue is 2 deep per socket and
+  drops the oldest datagram on overflow (UDP is lossy); and it inherits the
+  daemon's single-active-phase RX-demux limitation (`D-NETSTACK-RX-DEMUX`) — the
+  `udp_pump` drops interleaved TCP frames while draining, same as the TCP pump.
 - **`recvfrom` source-address out-params now populated (parity fix).**
   `recvfrom`'s `src_addr`/`addrlen` (arg4/arg5) are filled with the connected
   peer's endpoint on a successful receive, matching Linux for a connected stream

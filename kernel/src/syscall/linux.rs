@@ -979,6 +979,7 @@ pub mod errno {
     pub const ESOCKTNOSUPPORT: i32 = 94;
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
+    pub const EADDRINUSE: i32 = 98;
     pub const EALREADY: i32 = 114;
     pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
@@ -1356,6 +1357,8 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::InProgress => errno::EINPROGRESS,
         KernelError::ConnectAlready => errno::EALREADY,
         KernelError::BrokenPipe => errno::EPIPE,
+        KernelError::AddrInUse => errno::EADDRINUSE,
+        KernelError::MsgSize => errno::EMSGSIZE,
     }
 }
 

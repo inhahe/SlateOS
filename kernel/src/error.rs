@@ -135,6 +135,12 @@ pub enum KernelError {
     /// A `send`/`write` was issued on a stream socket whose write side has been
     /// closed with `shutdown(SHUT_WR)`/`SHUT_RDWR`.  Maps to `EPIPE`.
     BrokenPipe = -704,
+    /// A `bind` requested a local address/port that is already in use.  Maps to
+    /// `EADDRINUSE`.
+    AddrInUse = -705,
+    /// A datagram was larger than the maximum a single `send`/`sendto` can carry
+    /// (exceeds the socket's per-datagram limit).  Maps to `EMSGSIZE`.
+    MsgSize = -706,
 }
 
 impl KernelError {
@@ -189,6 +195,8 @@ impl KernelError {
             Self::InProgress => "operation now in progress",
             Self::ConnectAlready => "connection already in progress",
             Self::BrokenPipe => "broken pipe (write side shut down)",
+            Self::AddrInUse => "address already in use",
+            Self::MsgSize => "message too long for datagram",
         }
     }
 

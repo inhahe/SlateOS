@@ -479,7 +479,10 @@ static HEAP_LOCK_SITE: AtomicUsize = AtomicUsize::new(0);
 /// Derefs transparently to `HeapInner`, so call sites are unchanged apart from
 /// swapping `.lock()` for `.lock_tracked()`.
 struct TrackedGuard<'a> {
-    guard: MutexGuard<'a, HeapInner>,
+    // ManuallyDrop so the physical spinlock release can be ordered *before*
+    // preempt_enable() in our Drop (see the Drop impl for why the order
+    // matters). Never dropped except in `Drop::drop`.
+    guard: core::mem::ManuallyDrop<MutexGuard<'a, HeapInner>>,
 }
 
 impl Deref for TrackedGuard<'_> {
@@ -500,12 +503,21 @@ impl DerefMut for TrackedGuard<'_> {
 impl Drop for TrackedGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        // Clear the owner *before* the wrapped MutexGuard field drops (fields
-        // drop after the Drop body), so the "unlocked" marker is published just
-        // ahead of the physical lock release. A brief window where the lock is
+        // Clear the owner *before* the physical lock release, so the "unlocked"
+        // marker is published just ahead of it. A brief window where the lock is
         // held but marked unlocked is harmless for a diagnostic.
         HEAP_LOCK_OWNER.store(u64::MAX, Ordering::Relaxed);
         HEAP_LOCK_SITE.store(0, Ordering::Relaxed);
+        // Release the spinlock BEFORE re-enabling involuntary preemption. If we
+        // re-enabled first, there would be a window where the lock is physically
+        // held but the holder is preemptible again — reopening the exact
+        // holder-preemption deadlock this pairing prevents (a timer could
+        // context-switch away with the heap lock still held, then another task
+        // spins on it forever). See `lock_tracked`.
+        // SAFETY: `guard` is a live ManuallyDrop dropped exactly once here; this
+        // Drop runs once and the field is never touched afterwards.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.guard); }
+        crate::sched::preempt_enable();
     }
 }
 
@@ -517,6 +529,21 @@ impl KernelHeap {
     #[inline]
     #[track_caller]
     fn lock_tracked(&self) -> TrackedGuard<'_> {
+        // Disable involuntary preemption for the whole hold. The heap uses a raw
+        // `spin::Mutex` (not `crate::sync::Mutex`, deliberately — the global
+        // allocator must stay out of lockdep to avoid re-entrant allocation and
+        // because it is a leaf lock taken under nearly every other lock). But a
+        // spinlock must NEVER be held across a context switch: if the timer
+        // preempts the holder, another task can spin on this lock forever while
+        // the Ready holder never gets scheduled to release it — a
+        // holder-preemption deadlock. Observed 2026-07-15 as a `spin_loop_hint`
+        // wedge with the heap lock "HELD by tid=133 (Ready)" while a prio-16 task
+        // spun in a VFS/memfs dealloc path and even the prio-31 boot task was
+        // starved. preempt_disable() (paired with preempt_enable() in
+        // TrackedGuard::drop) defers the timer's context switch until the lock is
+        // released — mirroring crate::sync::Mutex. Disabled BEFORE spinning to
+        // acquire, so a contended waiter can't be preempted mid-spin either.
+        crate::sched::preempt_disable();
         let guard = self.inner.lock();
         // Reading current_task_id() is lock-free (a per-CPU atomic load), so it
         // is safe to call from inside the allocator without re-entrancy.
@@ -526,7 +553,7 @@ impl KernelHeap {
             core::panic::Location::caller() as *const _ as usize,
             Ordering::Relaxed,
         );
-        TrackedGuard { guard }
+        TrackedGuard { guard: core::mem::ManuallyDrop::new(guard) }
     }
 }
 

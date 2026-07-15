@@ -1473,6 +1473,61 @@ inversion*, a deadlock — the wrong tool for this **livelock**; deprioritized.)
 Instrumentation + validator committed this session; this catch is the first that
 gives an actionable code-level mechanism rather than a lone red-herring RIP.
 
+**UPDATE 2026-07-15 (FOURTH catch — DEFINITIVE ROOT CAUSE, distinct from the
+free-list hypothesis; FIXED) (`build/hang-catches/soak-20260715-051830-iter22.*`,
+wedged `RIP=0xffffffff80726d96`).** A 25-iteration soak *with the free-list
+validator in place* caught a wedge on iter22 — and the validator did **not** fire
+(`grep 'FREE-LIST CORRUPTION'` → nothing), so the free-list-cycle hypothesis is
+**not** what wedged here. But the recent-RIP + heap-lock-owner instrumentation
+produced a *conclusive, different* picture — a textbook single-CPU
+**holder-preemption spinlock deadlock** on the global heap lock:
+- **Wedged RIP = `spin_loop_hint+0x6`** (`core::sync::atomic`) — the Running CPU
+  is busy-waiting in a spinlock acquire loop.
+- **`heap-lock: HELD by tid=133 acquired at heap.rs:1212:30`** (the `dealloc`
+  global path) — but the task table shows **tid=133 `"emit"` state=Ready**, i.e.
+  the lock holder is **not running**. It was involuntarily preempted mid-critical-
+  section.
+- **tid=132 `"spawn-test-glibc-pipe"` state=Running** is the spinner. Its
+  rbp-chain (all INSIDE named symbols): `Vfs::read_at_uncached_resolved →
+  MemFs::read_at → MemFs::resolve → drop(String) → RawVec::deallocate →
+  __rust_dealloc → KernelHeap::dealloc → slab_dealloc` — freeing a path-resolution
+  temporary, which takes the heap lock and spins on it forever.
+- **tid=0 `"prctl-batch269"` prio=31 Ready, ready_since=2168 (waited 41 ticks)** —
+  a *higher-priority* task is Ready but starved by the prio-16 Running spinner.
+  That is the smoking gun: **the timer is not preempting the spinner** (a prio-31
+  Ready task could never be starved by a prio-16 Running one if preemption were
+  live). So cpu0 is effectively pinned in the spin with no context switch — the
+  Ready holder (tid=133) can never be scheduled to release the lock. Deadlock.
+
+**Root cause (proven).** `mm/heap.rs` locks its `inner` with a **raw
+`spin::Mutex`** (`use spin::{Mutex, MutexGuard}`, line 43) rather than the
+preempt-aware `crate::sync::Mutex`. The raw lock does **not** call
+`sched::preempt_disable()` on acquire, so a heap critical section can be
+involuntarily preempted by the timer tick. This is exactly the general
+**B-PREEMPT-SPINLOCK** class (see that entry, 2026-07-01: "a spinlock must never
+be held across a context switch") — which was fixed for *tracked*
+`crate::sync::Mutex` via the per-CPU `PREEMPT_DISABLE_COUNT`, but the heap lock
+was deliberately left a raw `spin::Mutex` (to keep the global allocator out of
+lockdep — it is a leaf lock taken under nearly every other lock, and dragging it
+into lockdep risks re-entrant allocation) and thus **never received the
+preempt-disable protection**. The `dealloc`→`slab_dealloc` critical section got
+preempted; a second task then spun on the same lock; single CPU → permanent wedge.
+
+**Fix (committed this session).** Give the heap lock the preemption protection
+directly, *without* pulling it into lockdep: `KernelHeap::lock_tracked()` now calls
+`sched::preempt_disable()` before `self.inner.lock()` (disabled *before* the spin,
+mirroring `crate::sync::Mutex`), and `TrackedGuard::drop` calls
+`sched::preempt_enable()` — after releasing the physical spinlock. To order the
+physical release strictly *before* the preempt re-enable (otherwise a window
+exists where the lock is held but preemptible again — reopening the bug), the
+guard wraps its `MutexGuard` in `ManuallyDrop` and explicitly drops it, then
+re-enables. This defers the timer's context switch until the heap lock is
+released, so the lock is never held across a switch. No lockdep, no re-entrant
+allocation, no extra overhead on the hot path beyond two relaxed atomics. This is
+a *distinct* bug from the free-list-cycle hypothesis above (which the validator
+did not confirm here); the free-list validator stays in as cheap defence-in-depth.
+Re-soak after this fix to confirm the `spin_loop_hint` wedge no longer reproduces.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

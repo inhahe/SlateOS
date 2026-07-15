@@ -14970,6 +14970,45 @@ int main(void){\n\
     run_hosted_cc_case("vararg", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 46 — floating-point / SSE codegen + the x86_64 SysV FP ABI in a
+/// freshly-tcc-built dynamic glibc binary.
+///
+/// No prior rung used floating point: the integer/string/pointer programs of
+/// Parts 34-45 never touched an XMM register, so tcc's `double` codegen and the
+/// SysV *floating-point* calling convention (arguments and the return value in
+/// `%xmm0`/`%xmm1`, `mulsd`/`addsd` for arithmetic, `cvttsd2si` for the
+/// truncating `double`→`int` cast) were entirely untested from compiled code.
+/// FP ABI lowering is a distinct codegen path from the integer ABI (separate
+/// register class, separate spill rules) and a common compiler-bug locus, so a
+/// compiled-on-target floating-point program closes a real gap.
+///
+/// The program passes two `double`s to `scale(x, f) = x*f + 0.5`, so
+/// `scale(8.0, 5.0)` = 40.5; the `(int)` truncation yields 40, printed as its
+/// two decimal digits — captured file exactly `40\n` (3 bytes, exit 0). The
+/// input is `volatile` so the compiler cannot constant-fold the arithmetic
+/// away and must emit real SSE instructions + the FP-ABI call sequence. Raw
+/// `write(2)` keeps ordering exact. Pure userspace/codegen (no kernel path); the
+/// value is proving tcc's FP codegen + SysV FP ABI produce a correct ring-3
+/// binary (and, incidentally, that XMM state is sane across the glibc call path).
+pub fn self_test_linux_real_glibc_cc_float() -> KernelResult<()> {
+    // Bare `extern` prototype only (no <math.h>/libm — the arithmetic is plain
+    // `double` mul/add/truncate, which tcc emits inline as SSE, so no `-lm`
+    // link is needed and the run_hosted_cc_case single-source harness suffices).
+    // `volatile` on the input defeats constant folding so real SSE + the FP-ABI
+    // call sequence are exercised rather than a compile-time-computed constant.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static double scale(double x, double f){ return x * f + 0.5; }\n\
+int main(void){\n\
+  volatile double a = 8.0;\n\
+  double r = scale(a, 5.0);\n\
+  int n = (int)r;\n\
+  char b[3] = { (char)('0' + n / 10), (char)('0' + n % 10), '\\n' };\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("float", HOSTED_SRC, b"40\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

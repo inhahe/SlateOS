@@ -2132,6 +2132,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 46: floating-point / SSE codegen + the x86_64 SysV FP ABI in a
+    // tcc-built dynamic glibc binary. No prior rung touched an XMM register, so
+    // tcc's double codegen (mulsd/addsd), the FP calling convention (args/return
+    // in %xmm0/%xmm1), and the truncating double->int cast (cvttsd2si) were
+    // untested from compiled code. A volatile input defeats constant folding so
+    // real SSE + the FP-ABI call sequence run. Purely userspace/codegen.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_float() {
+        serial_println!(
+            "WARNING: Path-Z floating-point C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

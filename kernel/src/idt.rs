@@ -2218,6 +2218,14 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     // Print stack backtrace for crash diagnostics.
     crate::backtrace::print_current();
 
+    // Raw stack scan from the fault-time RSP. The RBP frame-walk above only
+    // shows the handler's own frames when the frame chain is broken — which is
+    // exactly what a control-flow hijack (corrupted return address / function
+    // pointer landing in a data region, e.g. B-PTHREAD-TEARDOWN-PF) looks like.
+    // The raw scan recovers the hijacked caller's origin by printing every
+    // stack slot that still holds a kernel-text-looking address.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
     serial_println!("FATAL: Unrecoverable kernel page fault. Halting.");
     cpu::halt_loop();
 }

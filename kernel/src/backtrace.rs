@@ -207,6 +207,56 @@ fn is_kernel_text_addr(addr: u64) -> bool {
     addr >= 0xFFFF_FFFF_8000_0000 || (addr >= 0xFFFF_8000_0000_0000 && addr < 0xFFFF_C200_0000_0000)
 }
 
+/// Raw stack scan: from `rsp`, walk up to `words` qwords and print every
+/// slot whose value looks like a kernel return address (`is_kernel_text_addr`).
+///
+/// This is a diagnostic *complement* to [`print_from`], not a replacement.
+/// The RBP frame-pointer walk gives a clean, ordered backtrace **when the
+/// frame chain is intact** — but a control-flow hijack (a corrupted return
+/// address / function pointer that sends execution into a data region) breaks
+/// the chain, so the walk stops at the handler frames and never reveals the
+/// culprit. A raw scan side-steps the chain entirely: every plausible return
+/// address still physically present on the stack is printed, so the hijacked
+/// caller's origin can be recovered by feeding the values to
+/// `scripts/resolve-rip.sh`. False positives (data that merely looks like a
+/// text address) are expected and acceptable for a post-mortem dump.
+///
+/// `rsp` must point into a valid kernel stack region; slots outside a known
+/// stack region abort the scan (a wild RSP would otherwise fault the handler).
+pub fn dump_stack_scan(rsp: u64, words: usize) {
+    if !is_valid_frame_ptr(rsp & !0x7) {
+        serial_println!("  <stack scan skipped: RSP {rsp:#018x} not in a known stack region>");
+        return;
+    }
+    serial_println!("  Stack scan from RSP {rsp:#018x} (return-address candidates):");
+    let base = rsp & !0x7;
+    let mut printed = 0usize;
+    for i in 0..words {
+        // SAFETY: `base` was validated to lie in a known kernel stack region
+        // and we advance by 8 bytes per iteration within `words` (bounded);
+        // the loop aborts as soon as a slot leaves a valid stack region, so
+        // every dereference stays inside mapped stack memory.
+        let slot = base.wrapping_add((i as u64).wrapping_mul(8));
+        if !is_valid_frame_ptr(slot) {
+            break;
+        }
+        // SAFETY: `slot` is 8-byte aligned and validated to be in a mapped
+        // kernel stack region above; reading a u64 from it is sound.
+        let val = unsafe { core::ptr::read(slot as *const u64) };
+        if is_kernel_text_addr(val) {
+            serial_println!("    [{slot:#018x}] = {val:#018x}");
+            printed = printed.saturating_add(1);
+            if printed >= MAX_FRAMES.saturating_mul(2) {
+                serial_println!("    <... more candidates truncated>");
+                break;
+            }
+        }
+    }
+    if printed == 0 {
+        serial_println!("    <no return-address-like values found>");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

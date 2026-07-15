@@ -55,21 +55,52 @@ exposed a pre-existing latent race.
 faults intermittently (observed ~1/5). Non-deterministic — depends on the
 exact preemption interleaving of the four clone-children during join/exit.
 
-**Investigation status:** symbolisation was inconclusive here — no working
-`llvm-symbolizer`/`addr2line` in the toolchain (only `llvm-nm`/`llvm-objdump`),
-and the booted image is stripped, so the fault RIP (0xffffffff82713dc2) and
-the 2-frame backtrace (0x…810e06c6, 0x…810d4f7b) could not be reliably mapped
-to functions. **PROPER FIX (next time it repeats / when tooling is available):**
-install `llvm-symbolizer` (or build with `llvm-objdump -d` disassembly around
-the faulting RIP against the *unstripped* debug ELF at
-`target/x86_64-slateos/debug/kernel`) to pin the faulting field access, then
-audit the thread-exit path (`proc::thread::kill_process_threads` /
-`on_thread_exit_hook` / the clone-child TLS/`clear_child_tid` teardown and the
-per-thread control block free) for a base pointer read after the owning
-structure can be freed by a sibling. Candidate: a `struct` read at offset
-0x97 off a thread/PCB pointer that a concurrent exit set to null or freed.
-Fix with an ID-lookup (not a stored pointer) or by holding the teardown lock
-across the read, per the "no dangling references" rule.
+**Investigation status (updated 2026-07-15):** the toolchain *does* have a
+working symbolizer — `scripts/resolve-rip.sh`, which maps a RIP against the
+actual booted ELF (`target/x86_64-unknown-none/debug/kernel`, staged by
+`scripts/boot-test.sh` line 73 — **not** the stale `target/x86_64-slateos/…`
+image, which is a June-20 leftover and gives garbage). Earlier "no symbolizer"
+/ garbage-symbol notes were wrong on two counts: (1) an awk-based mapper
+truncated the 64-bit address to a 53-bit float, and (2) it was run against the
+stale slateos ELF. `resolve-rip.sh` avoids both (lexicographic 16-hex-digit
+compare; correct ELF). Running it on the captured trace gave:
+
+```
+0xffffffff82713dc2 -> sched::CURRENT_TASK_IDS  +0x2   (a DATA symbol, not code)
+0xffffffff810e06c6 -> handle_page_fault
+0xffffffff810d4f7b -> isr_page_fault
+```
+
+The two backtrace frames (`0x…810e06c6`, `0x…810d4f7b`) are the fault handler
+itself (`handle_page_fault`/`isr_page_fault`) — expected, since the frame
+walker starts inside the handler. But the **RIP is authoritative**: it is the
+`frame.rip` value the CPU pushed onto the `#PF` interrupt stack frame
+(`idt.rs:2189`/`2192`), i.e. the instruction that was executing when the fault
+hit. That RIP resolves *into the `.data` section* (`CURRENT_TASK_IDS +0x2`).
+
+**Sharper diagnosis:** RIP living inside a data symbol means this is a
+**control-flow hijack** — a corrupted return address or function pointer sent
+execution into `.data`, whose bytes then decoded as an instruction that did a
+near-null read (base register 0 + disp 0x97 = cr2 0x97). (The kernel image is
+mapped executable across its image, so fetching from `.data` does not itself
+fault with an instruction-fetch error — consistent with the observed
+`error=0x0` = not-present, **read**, kernel.) A corrupted code pointer during
+thread teardown is the textbook signature of a **use-after-free**: a freed
+per-thread structure's function-pointer / return slot was reused (or its
+memory recycled) while task 123 still held a stale reference.
+
+**PROPER FIX (needs a fresh reproduction to pin the exact pointer):** audit the
+thread-exit path (`proc::thread::kill_process_threads` / `on_thread_exit_hook`
+/ the clone-child TLS/`clear_child_tid` teardown and the per-thread control
+block free) for a stored pointer (function pointer, return address into a
+freed stack, or `&mut` into a container element) that a concurrently-exiting
+sibling can free out from under task 123. Fix with an ID-lookup (not a stored
+pointer) or by holding the teardown lock across the corrupted access, per the
+"no dangling references" rule. On the next repro, also dump the top few
+stack-slot values around `frame.rsp` and symbolize each with `resolve-rip.sh`
+to recover the real caller frame (the hijacked return address's origin).
+Line of investigation paused here pending a repro: fault is non-reproducible
+(~1/5) and one capture cannot pin the exact corrupted pointer.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 

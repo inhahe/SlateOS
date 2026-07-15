@@ -67063,19 +67063,51 @@ fn cmd_netns(args: &str) {
 /// `container exec --rootfs` alias, and the `docker exec` delegate (Q17/§58,
 /// option B).
 ///
-/// `rest` is the token slice *after* the verb: `[-d] <id> <path> [args...]`.
-/// `-d` detaches (print the pid and return); otherwise block on the spawned
-/// pid, print its exit status, and unregister it from container bookkeeping.
+/// `rest` is the token slice *after* the verb: `[-d] [-w DIR] <id> <path>
+/// [args...]`. `-d` detaches (print the pid and return); otherwise block on the
+/// spawned pid, print its exit status, and unregister it from container
+/// bookkeeping. `-w`/`--workdir DIR` sets the exec'd process's initial working
+/// directory (an absolute guest path); when omitted the exec inherits the
+/// container's stored WorkingDir (Docker `exec` semantics).
 fn container_exec_rootfs(rest: &[&str]) {
     use crate::container;
 
+    // Parse leading options: `-d` (detached) and `-w/--workdir DIR` (initial
+    // working directory for the exec'd command). Both may precede the id, in
+    // any order. `-w` must be an absolute guest path (Docker requires this);
+    // when omitted the exec inherits the container's stored WorkingDir.
     let mut idx = 0usize;
-    let detached = rest.get(idx).copied() == Some("-d");
-    if detached {
-        idx = idx.saturating_add(1);
+    let mut detached = false;
+    let mut workdir: Option<&str> = None;
+    loop {
+        match rest.get(idx).copied() {
+            Some("-d") => {
+                detached = true;
+                idx = idx.saturating_add(1);
+            }
+            Some("-w" | "--workdir") => {
+                match rest.get(idx.saturating_add(1)).copied() {
+                    Some(dir) if dir.starts_with('/') => {
+                        workdir = Some(dir);
+                        idx = idx.saturating_add(2);
+                    }
+                    Some(dir) => {
+                        crate::console_println!(
+                            "[run-in] Ignoring workdir '{}': must be an absolute path", dir
+                        );
+                        idx = idx.saturating_add(2);
+                    }
+                    None => {
+                        crate::console_println!("[run-in] -w requires a directory argument");
+                        return;
+                    }
+                }
+            }
+            _ => break,
+        }
     }
     let Some(id_str) = rest.get(idx) else {
-        crate::console_println!("Usage: container run-in [-d] <id> <command> [args...]");
+        crate::console_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
         return;
     };
     let Ok(id) = id_str.parse::<u32>() else {
@@ -67088,11 +67120,12 @@ fn container_exec_rootfs(rest: &[&str]) {
     let cmd_tokens = rest.get(idx.saturating_add(1)..).unwrap_or(&[]);
     let argv: alloc::vec::Vec<&[u8]> = cmd_tokens.iter().map(|s| s.as_bytes()).collect();
     let Some(&guest_cmd) = argv.first() else {
-        crate::console_println!("Usage: container run-in [-d] <id> <command> [args...]");
+        crate::console_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
         return;
     };
 
-    match container::exec_path(id, guest_cmd, &argv) {
+    let cwd: Option<&[u8]> = workdir.map(str::as_bytes);
+    match container::exec_path_env(id, guest_cmd, &argv, &[], cwd) {
         Ok(spawned) => {
             if detached {
                 crate::console_println!(
@@ -68325,7 +68358,7 @@ fn cmd_container(args: &str) {
 
             let Some(id_str) = parts.get(1) else {
                 crate::console_println!("Usage: container exec <id> <kshell-command...>");
-                crate::console_println!("       container exec --rootfs [-d] <id> <path> [args...]  (real rootfs exec)");
+                crate::console_println!("       container exec --rootfs [-d] [-w DIR] <id> <path> [args...]  (real rootfs exec)");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {

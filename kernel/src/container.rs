@@ -768,6 +768,16 @@ struct Container {
     /// launched. The supervisor tick launches a probe once `now >= next_due`
     /// and re-arms it to `now + interval` after each probe completes.
     health_next_due_ns: u64,
+    /// The container's effective working directory (Docker `WorkingDir`), as an
+    /// absolute guest path resolved under the rootfs. Captured at [`run`] time
+    /// from the init process's spawn `cwd` (which the runner sets to the CLI
+    /// `-w`/`--workdir`, else the image's `WorkingDir` config, else empty). Used
+    /// as the default cwd for a subsequent [`exec_path`] (`docker exec` /
+    /// `container run-in`) that does not pass an explicit directory, so exec'd
+    /// commands start in the same directory as the container's main process —
+    /// matching Docker, where `docker exec` inherits the image/`--workdir`
+    /// WorkingDir. Empty means "no override" (exec'd commands default to `/`).
+    working_dir: String,
 }
 
 impl Container {
@@ -814,6 +824,7 @@ impl Container {
             health_probe_deadline_ns: 0,
             health_probe_timed_out: false,
             health_next_due_ns: 0,
+            working_dir: String::new(),
         }
     }
 }
@@ -2119,6 +2130,19 @@ fn run_with_abi(
             }
             table.containers[idx].init_pid = Some(result.pid);
             table.containers[idx].state = ContainerState::Running;
+            // Persist the init process's working directory so a later
+            // `exec_path` (docker exec / container run-in) with no explicit cwd
+            // starts in the same directory (Docker inherits the image/--workdir
+            // WorkingDir for exec). The runner sets `options.cwd` to the CLI
+            // `-w`, else the image's WorkingDir, else `None`. A path is bytes;
+            // this one always originates from a UTF-8 image-config/CLI string,
+            // so store it as such (empty when the init had no cwd override).
+            table.containers[idx].working_dir.clear();
+            if let Some(dir) = options.cwd {
+                if let Ok(s) = core::str::from_utf8(dir) {
+                    table.containers[idx].working_dir.push_str(s);
+                }
+            }
             // A launched container is, by definition, not user-stopped; clear
             // the flag so its restart policy is armed for the new init. (The
             // auto-restart counter is *not* reset here — that would let an
@@ -4296,14 +4320,37 @@ pub fn exec_path(
     exec_path_env(id, guest_cmd, argv, &[], None)
 }
 
+/// Resolve the working directory an exec'd container process should start in,
+/// following Docker `exec` semantics: an explicit `explicit` (e.g. an exec
+/// `-w`/`--workdir`) always wins; otherwise the container's stored WorkingDir
+/// (`container_wd`, captured at [`run`] time) is used, so the exec'd command
+/// starts where the container's main process does. An empty `container_wd`
+/// yields `None` (the spawn default of `/`).
+///
+/// Split out from [`exec_path_env`] so the (otherwise spawn-coupled) defaulting
+/// rule is unit-testable in isolation.
+fn resolve_exec_cwd<'a>(explicit: Option<&'a [u8]>, container_wd: &'a [u8]) -> Option<&'a [u8]> {
+    match explicit {
+        Some(dir) => Some(dir),
+        None if !container_wd.is_empty() => Some(container_wd),
+        None => None,
+    }
+}
+
 /// Like [`exec_path`], but launches the process with an explicit environment
 /// (`envp`, a list of `KEY=VALUE` byte strings) and an optional initial working
 /// directory (`cwd`). Used by the OCI build-time `RUN` executor (Q17/§58),
 /// which must run the command with the image's accumulated `ENV` so `PATH`/etc.
 /// resolve as in Docker, and at the image's `WORKDIR` so a `RUN` using a
 /// relative path (e.g. `RUN ./configure`) resolves against the working
-/// directory rather than `/`. An empty `envp` / `None` `cwd` each leave the
-/// spawn default (identical to [`exec_path`]).
+/// directory rather than `/`. An empty `envp` leaves the spawn default env.
+///
+/// `cwd` follows Docker `exec` semantics: an explicit `Some(dir)` (e.g. an
+/// exec `-w`) always wins; `None` falls back to the container's stored
+/// `WorkingDir` (captured at [`run`] time), so an exec'd command starts in the
+/// same directory as the container's main process. Only when the container has
+/// no stored WorkingDir does `None` leave the spawn default of `/` (identical
+/// to [`exec_path`], which passes `None`).
 ///
 /// `cwd`, when `Some`, must be an absolute path; [`pcb::set_cwd`] rejects a
 /// relative/too-long/NUL-bearing value (logged, and the child simply stays at
@@ -4320,8 +4367,10 @@ pub fn exec_path_env(
     envp: &[&[u8]],
     cwd: Option<&[u8]>,
 ) -> KernelResult<ExecSpawn> {
-    // 1. Container must exist and be running.
-    let (running, root_path) = with_table_ref(|table| {
+    // 1. Container must exist and be running. Also snapshot the container's
+    //    stored working directory (from `run` time) so we can default the
+    //    exec'd process's cwd to it when the caller passes none.
+    let (running, root_path, container_wd) = with_table_ref(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -4329,11 +4378,18 @@ pub fn exec_path_env(
         Ok((
             table.containers[idx].state == ContainerState::Running,
             table.containers[idx].root_path.clone(),
+            table.containers[idx].working_dir.clone(),
         ))
     })?;
     if !running {
         return Err(KernelError::InvalidArgument);
     }
+
+    // Default the working directory: an explicit `cwd` (e.g. `docker exec -w`)
+    // always wins; otherwise fall back to the container's stored WorkingDir so
+    // an exec'd command starts where the container's main process does (Docker
+    // semantics). An empty stored value leaves the spawn default of `/`.
+    let effective_cwd: Option<&[u8]> = resolve_exec_cwd(cwd, container_wd.as_bytes());
 
     // 2. Resolve the guest command under the rootfs and read the ELF bytes.
     //    The command path is supplied by the container CLI as a str; require
@@ -4358,7 +4414,7 @@ pub fn exec_path_env(
     // cwd so a relative-path command resolves against it, not `/`. `set_cwd`
     // (invoked inside `spawn_process`) validates and logs a bad value without
     // failing the spawn.
-    if let Some(dir) = cwd {
+    if let Some(dir) = effective_cwd {
         opts.cwd = Some(dir);
     }
     opts.exe_path = Some(guest_cmd);
@@ -6964,5 +7020,30 @@ pub fn self_test() {
     }
     serial_println!("[container]   tmpfs container mounts (--tmpfs): OK");
 
-    serial_println!("[container] Self-test PASSED (60 tests)");
+    // Test: exec cwd defaulting (Docker `exec` WorkingDir inheritance).
+    // An explicit `-w` always wins; otherwise the container's stored WorkingDir
+    // is used; an empty stored WorkingDir yields the spawn default (`None`).
+    assert_eq!(
+        resolve_exec_cwd(Some(b"/explicit"), b"/stored"),
+        Some(&b"/explicit"[..]),
+        "an explicit exec -w must override the stored WorkingDir",
+    );
+    assert_eq!(
+        resolve_exec_cwd(None, b"/stored"),
+        Some(&b"/stored"[..]),
+        "no explicit cwd must fall back to the container's stored WorkingDir",
+    );
+    assert_eq!(
+        resolve_exec_cwd(None, b""),
+        None,
+        "no explicit cwd and no stored WorkingDir must leave the spawn default",
+    );
+    assert_eq!(
+        resolve_exec_cwd(Some(b"/explicit"), b""),
+        Some(&b"/explicit"[..]),
+        "an explicit exec -w applies even when no WorkingDir is stored",
+    );
+    serial_println!("[container]   exec cwd defaulting (WorkingDir inheritance): OK");
+
+    serial_println!("[container] Self-test PASSED (61 tests)");
 }

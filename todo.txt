@@ -53460,15 +53460,26 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## spec.working_dir down and pass it (empty → None → default "/"). WORKDIR
 ## already materialises the dir as a layer, so it exists in the merged rootfs
 ## when the RUN executes. Built + clippy clean + boot-test green.
-##   REMAINING (separate, smaller follow-up): `docker exec` / `container run-in`
-## do NOT default to the container's configured WorkingDir the way Docker does,
-## because the container table (kernel/src/container.rs `struct Container`) does
-## not STORE a working_dir — `run` reads image.config.working_dir at spawn time
-## and sets the init process cwd, but nothing persists it for later exec. PROPER
-## FIX for that: add a `working_dir` field to the container record, set it at
-## `run`/`start`, and have container_exec_rootfs (kshell.rs) read it (plus parse
-## an explicit `-w`/`--workdir` exec flag that overrides it) and pass it as the
-## new exec_path_env cwd arg. Not needed for the build-RUN correctness fix above.
+##   REMAINING follow-up — RESOLVED 2026-07-15: `docker exec` / `container
+## run-in` now DO default to the container's configured WorkingDir (Docker
+## parity). Implementation:
+##   - `struct Container` (kernel/src/container.rs) gained a `working_dir:
+##     String` field (init empty in new_empty()).
+##   - `run_with_abi` persists the init process's spawn `options.cwd` into that
+##     field at the Created→Running flip, so whatever WorkingDir the runner
+##     chose (CLI `-w` > image WorkingDir > none) is stored for later exec.
+##   - `exec_path_env` defaults its cwd to the stored WorkingDir when the caller
+##     passes `None`; an explicit `Some(dir)` still wins. Logic extracted to
+##     `resolve_exec_cwd()` and unit-tested in the container self-test (now 61
+##     tests: explicit-wins / fallback-to-stored / empty-stored-is-default /
+##     explicit-with-no-stored).
+##   - `container_exec_rootfs` (kshell.rs) — the handler behind `container
+##     run-in`, `container exec --rootfs`, and the `docker exec` delegate — now
+##     parses `-w`/`--workdir DIR` (absolute-path required) before the id, and
+##     routes through exec_path_env so both the explicit flag and the stored
+##     WorkingDir default take effect. Built + boot-test green (61 tests pass).
+##   (The userspace `podman exec` remains a print-only stub — not wired to the
+##   kernel container API — so it needs no change here.)
 
 ## Services embedded via include_bytes! must be pre-built before the kernel
 ## (build-workflow gap; pre-existing, now covers 3 services)

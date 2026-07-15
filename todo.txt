@@ -53448,18 +53448,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## work end to end. Until the header tree is stageable from this environment, this
 ## rung cannot be implemented or validated here.
 
-## [LIMITATION 2026-07-14] OCI build-time RUN starts at rootfs root, not WORKDIR
-## exec_build_run (kernel/src/oci.rs) launches a Dockerfile `RUN` command via
-## container::exec_path_env, which has no working-directory argument — so the
-## process starts at "/" inside the merged rootfs rather than the image's
-## `WORKDIR`. RUN commands that use absolute paths (the common case) are
-## unaffected; a RUN relying on a relative cwd (e.g. `RUN ./configure`) would
-## resolve against "/" instead of WORKDIR.
-##   PROPER FIX: add an optional cwd to proc::spawn::SpawnOptions (set the new
-## process's initial cwd) and thread it through container::exec_path_env (a
-## `cwd: Option<&[u8]>` param); exec_build_run then passes spec.working_dir.
-## Also apply it to `container run-in` / `docker exec` for parity. Low risk,
-## small refactor — deferred only to keep the §58 RUN landing focused.
+## [RESOLVED 2026-07-15] OCI build-time RUN now starts at WORKDIR (was: rootfs root)
+## exec_build_run (kernel/src/oci.rs) launched a Dockerfile `RUN` command via
+## container::exec_path_env, which had no working-directory argument — so the
+## process started at "/" inside the merged rootfs rather than the image's
+## `WORKDIR`. A RUN relying on a relative cwd (e.g. `RUN ./configure`) resolved
+## against "/" instead of WORKDIR.
+##   FIX (2026-07-15): container::exec_path_env gained a `cwd: Option<&[u8]>`
+## param (sets SpawnOptions.cwd, which already existed + was unit-tested via
+## test_spawn_with_cwd); exec_build_run / exec_build_run_inner thread
+## spec.working_dir down and pass it (empty → None → default "/"). WORKDIR
+## already materialises the dir as a layer, so it exists in the merged rootfs
+## when the RUN executes. Built + clippy clean + boot-test green.
+##   REMAINING (separate, smaller follow-up): `docker exec` / `container run-in`
+## do NOT default to the container's configured WorkingDir the way Docker does,
+## because the container table (kernel/src/container.rs `struct Container`) does
+## not STORE a working_dir — `run` reads image.config.working_dir at spawn time
+## and sets the init process cwd, but nothing persists it for later exec. PROPER
+## FIX for that: add a `working_dir` field to the container record, set it at
+## `run`/`start`, and have container_exec_rootfs (kshell.rs) read it (plus parse
+## an explicit `-w`/`--workdir` exec flag that overrides it) and pass it as the
+## new exec_path_env cwd arg. Not needed for the build-RUN correctness fix above.
 
 ## Services embedded via include_bytes! must be pre-built before the kernel
 ## (build-workflow gap; pre-existing, now covers 3 services)

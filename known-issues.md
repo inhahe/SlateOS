@@ -14,6 +14,63 @@ work that should be done now."
 
 ## Active Bugs
 
+### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15
+
+**Symptom (1 occurrence in ~5 boots, 2026-07-15):** During the
+`self_test_linux_real_glibc_pthread` self-test (process labelled
+`spawn-test-glibc-pthread`: 4 threads via `clone`+futex+TLS, 40 000
+mutex/futex ops, then `pthread_join`), a boot died with:
+
+```
+[sched] Task 124 exiting
+[sched] Task 125 exiting
+[sched] Task 126 exiting
+EXCEPTION: Page Fault (#PF) at 0xffffffff82713dc2, address=0x97, error=0x0
+  Cause: not-present, read, kernel
+  Task: 123 ("cloned-thread"), priority 16, cpu 0
+FATAL: Unrecoverable kernel page fault. Halting.
+```
+
+i.e. a **kernel-mode read of a near-null pointer (base+0x97 = 0x97)** in
+one clone-child task (123) exactly while its sibling clone-children
+(124/125/126) are running their `[sched] Task N exiting` teardown. This is
+the classic signature of a **use-after-free / null-deref race in thread
+teardown**: task 123 dereferences a per-thread or per-process structure at
+field offset 0x97 whose base has just been torn down (freed / cleared) by a
+concurrently-exiting sibling, on the single-CPU boot where the exiting
+sibling preempts mid-window.
+
+**Why NOT the resolved B-PTHREAD-YIELDBUDGET:** that entry is a *silent
+hang* (yield-budget exhaustion), structurally fixed. This is a *hard #PF*
+with a distinct fault address — a different failure mode in the same test,
+so tracked separately.
+
+**Not caused by the change it surfaced under:** it appeared on one boot
+while validating the container-WORKDIR cwd plumbing (which does not touch
+any thread path and is not exercised at boot); the very next boot (identical
+binary) reached `BOOT_OK`. The code change only perturbed layout/timing and
+exposed a pre-existing latent race.
+
+**Reproduce:** run `bash scripts/boot-test.sh` repeatedly; the pthread test
+faults intermittently (observed ~1/5). Non-deterministic — depends on the
+exact preemption interleaving of the four clone-children during join/exit.
+
+**Investigation status:** symbolisation was inconclusive here — no working
+`llvm-symbolizer`/`addr2line` in the toolchain (only `llvm-nm`/`llvm-objdump`),
+and the booted image is stripped, so the fault RIP (0xffffffff82713dc2) and
+the 2-frame backtrace (0x…810e06c6, 0x…810d4f7b) could not be reliably mapped
+to functions. **PROPER FIX (next time it repeats / when tooling is available):**
+install `llvm-symbolizer` (or build with `llvm-objdump -d` disassembly around
+the faulting RIP against the *unstripped* debug ELF at
+`target/x86_64-slateos/debug/kernel`) to pin the faulting field access, then
+audit the thread-exit path (`proc::thread::kill_process_threads` /
+`on_thread_exit_hook` / the clone-child TLS/`clear_child_tid` teardown and the
+per-thread control block free) for a base pointer read after the owning
+structure can be freed by a sibling. Candidate: a `struct` read at offset
+0x97 off a thread/PCB pointer that a concurrent exit set to null or freed.
+Fix with an ID-lookup (not a stored pointer) or by holding the teardown lock
+across the read, per the "no dangling references" rule.
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
 **RESOLVED 2026-07-14 (option (b) — IPC provider-PID + `shm::authorize` grant).**

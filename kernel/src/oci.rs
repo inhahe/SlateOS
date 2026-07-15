@@ -3207,6 +3207,7 @@ fn exec_build_run(
     dest: &str,
     argv: &[String],
     env: &[String],
+    working_dir: &str,
     base_dir: Option<&str>,
     base_layer_descs: &[Descriptor],
     layers: &[BuildLayer],
@@ -3221,8 +3222,8 @@ fn exec_build_run(
     let mut mounted = false;
 
     let res = exec_build_run_inner(
-        line, &lower, &upper, &merge, argv, env, base_dir, base_layer_descs, layers,
-        &mut ct, &mut ov, &mut mounted,
+        line, &lower, &upper, &merge, argv, env, working_dir, base_dir, base_layer_descs,
+        layers, &mut ct, &mut ov, &mut mounted,
     );
 
     // Teardown (best-effort), reverse creation order. The container recorded no
@@ -3251,6 +3252,7 @@ fn exec_build_run_inner(
     merge: &str,
     argv: &[String],
     env: &[String],
+    working_dir: &str,
     base_dir: Option<&str>,
     base_layer_descs: &[Descriptor],
     layers: &[BuildLayer],
@@ -3284,17 +3286,22 @@ fn exec_build_run_inner(
     crate::container::set_root_path(ct_id, merge).map_err(BuildError::Kernel)?;
     crate::container::start(ct_id).map_err(BuildError::Kernel)?;
 
-    // 4. Launch argv[0] with the image ENV; wait for it to exit.
-    //    NOTE: the process starts at the rootfs root, not the image WORKDIR —
-    //    `exec_path_env` has no cwd argument yet (see todo.txt). RUN commands
-    //    using absolute paths are unaffected; this is a known limitation.
+    // 4. Launch argv[0] with the image ENV, at the image WORKDIR; wait for exit.
+    //    Passing the working directory makes a RUN with a relative path (e.g.
+    //    `RUN ./configure`) resolve against WORKDIR as in Docker. A `RUN` before
+    //    any WORKDIR (empty working_dir) keeps the spawn default of `/`. The
+    //    directory is guaranteed to exist because WORKDIR materialises it as a
+    //    layer, which `materialize_current_rootfs` reconstructs into the lower.
     let argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(Vec::as_slice).collect();
     let env_bytes: Vec<Vec<u8>> = env.iter().map(|s| s.as_bytes().to_vec()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(Vec::as_slice).collect();
+    let cwd: Option<&[u8]> =
+        if working_dir.is_empty() { None } else { Some(working_dir.as_bytes()) };
 
-    let spawn = crate::container::exec_path_env(ct_id, program.as_bytes(), &argv_refs, &env_refs)
-        .map_err(|e| BuildError::RunLaunch { line, msg: format!("{e:?}") })?;
+    let spawn =
+        crate::container::exec_path_env(ct_id, program.as_bytes(), &argv_refs, &env_refs, cwd)
+            .map_err(|e| BuildError::RunLaunch { line, msg: format!("{e:?}") })?;
 
     let code = crate::container::wait_process(spawn.pid)
         .map_err(|e| BuildError::RunLaunch { line, msg: format!("wait failed: {e:?}") })?;
@@ -3460,6 +3467,7 @@ fn build_one_stage_inner(
                     dest,
                     &argv,
                     &spec.env,
+                    &spec.working_dir,
                     base_dir.as_deref(),
                     &base_layer_descs,
                     &spec.layers,

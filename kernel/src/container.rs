@@ -4293,14 +4293,23 @@ pub fn exec_path(
     guest_cmd: &[u8],
     argv: &[&[u8]],
 ) -> KernelResult<ExecSpawn> {
-    exec_path_env(id, guest_cmd, argv, &[])
+    exec_path_env(id, guest_cmd, argv, &[], None)
 }
 
 /// Like [`exec_path`], but launches the process with an explicit environment
-/// (`envp`, a list of `KEY=VALUE` byte strings). Used by the OCI build-time
-/// `RUN` executor (Q17/§58), which must run the command with the image's
-/// accumulated `ENV` so `PATH`/etc. resolve as in Docker. An empty `envp`
-/// leaves the spawn default (identical to [`exec_path`]).
+/// (`envp`, a list of `KEY=VALUE` byte strings) and an optional initial working
+/// directory (`cwd`). Used by the OCI build-time `RUN` executor (Q17/§58),
+/// which must run the command with the image's accumulated `ENV` so `PATH`/etc.
+/// resolve as in Docker, and at the image's `WORKDIR` so a `RUN` using a
+/// relative path (e.g. `RUN ./configure`) resolves against the working
+/// directory rather than `/`. An empty `envp` / `None` `cwd` each leave the
+/// spawn default (identical to [`exec_path`]).
+///
+/// `cwd`, when `Some`, must be an absolute path; [`pcb::set_cwd`] rejects a
+/// relative/too-long/NUL-bearing value (logged, and the child simply stays at
+/// the default `/` — never a hard failure). Docker's `WORKDIR` normalises to an
+/// absolute path and materialises the directory as a layer, so by the time a
+/// `RUN` executes the directory exists in the merged rootfs.
 ///
 /// # Errors
 /// Identical to [`exec_path`].
@@ -4309,6 +4318,7 @@ pub fn exec_path_env(
     guest_cmd: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
+    cwd: Option<&[u8]>,
 ) -> KernelResult<ExecSpawn> {
     // 1. Container must exist and be running.
     let (running, root_path) = with_table_ref(|table| {
@@ -4343,6 +4353,13 @@ pub fn exec_path_env(
     // `exec_path` callers keep the spawn default.
     if !envp.is_empty() {
         opts.envp = envp;
+    }
+    // Honor the image WORKDIR (or an explicit exec `-w`): set the child's initial
+    // cwd so a relative-path command resolves against it, not `/`. `set_cwd`
+    // (invoked inside `spawn_process`) validates and logs a bad value without
+    // failing the spawn.
+    if let Some(dir) = cwd {
+        opts.cwd = Some(dir);
     }
     opts.exe_path = Some(guest_cmd);
     let result = crate::proc::spawn::spawn_process(&elf, &opts)?;

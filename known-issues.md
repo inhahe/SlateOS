@@ -102,6 +102,35 @@ to recover the real caller frame (the hijacked return address's origin).
 Line of investigation paused here pending a repro: fault is non-reproducible
 (~1/5) and one capture cannot pin the exact corrupted pointer.
 
+**Static audit (2026-07-15) — two findings that narrow the search:**
+
+1. **`reap_dead_tasks` is ruled out as the mechanism.** It snapshots the
+   current task id of *every* online CPU into `active_ids` and filters the
+   dead set with `!active_ids.contains(id)` (`sched/mod.rs:3473`), so it never
+   frees the kernel stack of a task any CPU is running on. And task 123 (the
+   faulting task) is not `Dead` — it *resumes* and then faults — so its own
+   stack is never a `reap_dead_tasks` candidate. The UAF is therefore not
+   "sibling reaps 123's still-in-use stack via the reaper."
+
+2. **The corrupted code pointer is a *specific* value: `&CURRENT_TASK_IDS[0]
+   + 2`, not random garbage.** `CURRENT_TASK_IDS` is
+   `[CachePadded<AtomicU64>; MAX_CPUS]`, so its storage spans MAX_CPUS × ≥64
+   bytes and the resolver's reported `+0x2` is genuinely *inside CPU 0's slot*
+   (the first `AtomicU64`). That address is exactly what `set_current_task(cpu,
+   id)` computes to `.store()` the running task id for CPU 0
+   (`sched/mod.rs:860`) — the sole writer of that address. So the hijacked
+   return-address / code-pointer slot held the *address of the per-CPU
+   current-task-id cell*, which strongly implicates the **low-level context
+   switch**: a spilled `&CURRENT_TASK_IDS[cpu]` (or a register holding it
+   across `set_current_task`) overlapping the saved-RIP slot on task 123's
+   kernel stack — a stack-frame-layout/offset bug in the switch path — rather
+   than a heap/PCB use-after-free in the higher-level exit bookkeeping
+   (`on_thread_exit`/`on_thread_exit_hook`, which only touch user memory + the
+   robust/ctid/rseq maps and never take `&CURRENT_TASK_IDS`). Next repro should
+   focus the `dump_stack_scan` output on which frame's return slot equals
+   `&CURRENT_TASK_IDS[0]+2` and cross-reference the context-switch save/restore
+   stack offsets.
+
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During

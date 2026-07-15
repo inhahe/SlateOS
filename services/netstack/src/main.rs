@@ -1097,6 +1097,53 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
     }
 }
 
+/// A received IPv4 UDP datagram's routing identity, produced by
+/// [`recv_udp_any`]: the sender `(src_ip, src_port)` and our local `dst_port`.
+/// The payload has been copied into the caller's `pl` buffer (`payload_len`
+/// bytes; a longer datagram is truncated to the buffer, matching `recvfrom`).
+struct UdpRx {
+    src_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload_len: usize,
+}
+
+/// Read one frame off the NIC and, if it is an IPv4 UDP datagram addressed to
+/// us, return its routing identity (the [`recv_tcp_any`] sibling for UDP). A
+/// non-UDP frame — or no frame at all (`WOULD_BLOCK`) — yields `None`.
+///
+/// Like [`recv_tcp_any`] this consumes exactly one NIC frame, so a caller
+/// draining for UDP datagrams also consumes any interleaved TCP frames and, in
+/// the current single-active-phase model, drops them — the same shared-RX-demux
+/// limitation the TCP pump already carries (`known-issues.md`
+/// D-NETSTACK-RX-DEMUX). IPv6 UDP is not yet classified (the daemon's UDP socket
+/// layer is IPv4-only for this increment).
+fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
+    let n = raw_rx(frame);
+    if n < 0 {
+        return None; // WOULD_BLOCK or error.
+    }
+    let len = n as usize;
+    let bytes = frame.get(..len)?;
+    let eth = ethernet::Frame::parse(bytes)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip {
+        return None;
+    }
+    let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
+    let cplen = dg.payload.len().min(pl.len());
+    pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
+    Some(UdpRx {
+        src_ip: ip.src,
+        src_port: dg.src_port,
+        dst_port: dg.dst_port,
+        payload_len: cplen,
+    })
+}
+
 /// A single live TCP client connection. Holds the sequence-number and IP-ident
 /// state that must persist across the connect / send / recv / close phases, so
 /// the same state machine backs both the one-shot [`tcp_fetch`] control op and
@@ -2369,6 +2416,7 @@ fn ring_tcp(
                     &ring,
                     &mut session.conns,
                     &mut session.listeners,
+                    &mut session.udp,
                     me,
                     next_hop_mac,
                     &mut session.ipid,
@@ -2501,6 +2549,241 @@ impl RingConns {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// UDP datagram sockets (SOCK_DGRAM over the ring)
+// ---------------------------------------------------------------------------
+
+/// Maximum concurrent bound UDP datagram sockets one ring session can hold.
+const MAX_UDP_SOCKS: usize = 8;
+/// Per-socket inbound datagram queue depth. UDP is lossy by contract, so a full
+/// queue drops the *oldest* datagram (favouring fresh data) rather than blocking.
+const UDP_QLEN: usize = 2;
+/// Maximum UDP payload we buffer per datagram (one Ethernet MTU minus the IPv4
+/// and UDP headers — a datagram that would exceed this on send is rejected with
+/// [`netipc::ring::ERR_MSG_SIZE`]).
+const UDP_DGRAM_MAX: usize = MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN + udp::HEADER_LEN);
+/// First ephemeral local port handed out by [`UdpSocks::bind`] when a caller
+/// binds to port 0 (the IANA dynamic/ephemeral range base).
+const UDP_EPHEMERAL_BASE: u16 = 49152;
+
+/// One buffered inbound UDP datagram: the sender's IPv4 address/port plus the
+/// copied payload. Stored `Copy` so the fixed queue array can be built without a
+/// heap (the daemon is `no_std`, no `alloc`).
+#[derive(Clone, Copy)]
+struct UdpDatagram {
+    src_ip: [u8; 4],
+    src_port: u16,
+    len: usize,
+    data: [u8; UDP_DGRAM_MAX],
+}
+
+impl UdpDatagram {
+    /// An empty datagram slot (used to initialise the fixed queue array).
+    const fn empty() -> Self {
+        Self { src_ip: [0; 4], src_port: 0, len: 0, data: [0; UDP_DGRAM_MAX] }
+    }
+}
+
+/// A bound connectionless UDP datagram socket. Holds its local port and a small
+/// FIFO of received datagrams (each tagged with its source), filled by
+/// [`udp_pump`] and drained by `OP_UDP_RECV`.
+struct UdpSock {
+    local_port: u16,
+    /// Fixed-capacity FIFO ring of buffered datagrams.
+    q: [UdpDatagram; UDP_QLEN],
+    /// Index of the oldest buffered datagram.
+    head: usize,
+    /// Number of buffered datagrams (`0..=UDP_QLEN`).
+    count: usize,
+}
+
+impl UdpSock {
+    /// A freshly-bound socket on `local_port` with an empty receive queue.
+    fn new(local_port: u16) -> Self {
+        Self { local_port, q: [UdpDatagram::empty(); UDP_QLEN], head: 0, count: 0 }
+    }
+
+    /// Buffer a received datagram. If the queue is full, the *oldest* datagram is
+    /// evicted first (UDP is lossy — dropping the stalest data is the least-bad
+    /// choice and keeps a slow reader from wedging on ancient packets).
+    fn push(&mut self, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
+        let n = payload.len().min(UDP_DGRAM_MAX);
+        if self.count == UDP_QLEN {
+            // Drop the head to make room, then append at the (freed) tail.
+            self.head = (self.head + 1) % UDP_QLEN;
+            self.count -= 1;
+        }
+        let tail = (self.head + self.count) % UDP_QLEN;
+        let slot = &mut self.q[tail];
+        slot.src_ip = src_ip;
+        slot.src_port = src_port;
+        slot.len = n;
+        slot.data[..n].copy_from_slice(&payload[..n]);
+        self.count += 1;
+    }
+
+    /// Remove and copy out the oldest buffered datagram into `out` (payload only;
+    /// truncated to `out.len()`). Returns `(src_ip, src_port, payload_len)`, or
+    /// `None` if the queue is empty.
+    fn pop(&mut self, out: &mut [u8]) -> Option<([u8; 4], u16, usize)> {
+        if self.count == 0 {
+            return None;
+        }
+        let dg = self.q[self.head];
+        self.head = (self.head + 1) % UDP_QLEN;
+        self.count -= 1;
+        let n = dg.len.min(out.len());
+        out[..n].copy_from_slice(&dg.data[..n]);
+        Some((dg.src_ip, dg.src_port, n))
+    }
+
+    /// True iff at least one datagram is queued (drives `OP_POLL` readability
+    /// once UDP poll is wired).
+    fn has_data(&self) -> bool {
+        self.count > 0
+    }
+}
+
+/// Table of bound UDP datagram sockets, keyed by the caller-chosen ring
+/// `conn_id` (the identity of the userspace `SOCK_DGRAM` fd) — the datagram
+/// sibling of [`RingConns`].
+struct UdpSocks {
+    slots: [Option<(u32, UdpSock)>; MAX_UDP_SOCKS],
+}
+
+impl UdpSocks {
+    /// An empty table (no bound sockets).
+    fn new() -> Self {
+        Self { slots: core::array::from_fn(|_| None) }
+    }
+
+    /// Bind a new datagram socket under `conn_id` to `port` (`0` = pick an unused
+    /// ephemeral port). Returns the bound local port, or a negative
+    /// [`netipc::ring`] errno sentinel: [`ERR_ADDR_IN_USE`](netipc::ring::ERR_ADDR_IN_USE)
+    /// if `port` is already bound (or `conn_id` is a duplicate), `-1` if the table
+    /// is full.
+    fn bind(&mut self, conn_id: u32, port: u16) -> i32 {
+        if self.slots.iter().flatten().any(|(id, _)| *id == conn_id) {
+            return netipc::ring::ERR_ADDR_IN_USE; // duplicate conn_id
+        }
+        let local = if port == 0 {
+            match self.pick_ephemeral() {
+                Some(p) => p,
+                None => return -1,
+            }
+        } else {
+            if self.port_in_use(port) {
+                return netipc::ring::ERR_ADDR_IN_USE;
+            }
+            port
+        };
+        match self.slots.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some((conn_id, UdpSock::new(local)));
+                i32::from(local)
+            }
+            None => -1, // table full
+        }
+    }
+
+    /// True iff some bound socket already owns `port`.
+    fn port_in_use(&self, port: u16) -> bool {
+        self.slots.iter().flatten().any(|(_, s)| s.local_port == port)
+    }
+
+    /// Pick the lowest unused ephemeral port at/above [`UDP_EPHEMERAL_BASE`], or
+    /// `None` if the entire ephemeral range is exhausted.
+    fn pick_ephemeral(&self) -> Option<u16> {
+        (UDP_EPHEMERAL_BASE..=u16::MAX).find(|&p| !self.port_in_use(p))
+    }
+
+    /// Borrow the socket bound under `conn_id`, if any.
+    fn get_mut(&mut self, conn_id: u32) -> Option<&mut UdpSock> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|(id, _)| *id == conn_id)
+            .map(|(_, s)| s)
+    }
+
+    /// Borrow the socket bound to local `port` (the routing lookup [`udp_pump`]
+    /// uses to deliver an inbound datagram to its owner).
+    fn by_port(&mut self, port: u16) -> Option<&mut UdpSock> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|(_, s)| s.local_port == port)
+            .map(|(_, s)| s)
+    }
+
+    /// Remove the socket bound under `conn_id` (its `close(2)`), freeing the slot.
+    /// Returns `true` if a socket was present. UDP is connectionless, so this just
+    /// drops the buffer — no teardown handshake.
+    fn remove(&mut self, conn_id: u32) -> bool {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|(id, _)| *id == conn_id) {
+                *slot = None;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Drain the NIC of inbound UDP datagrams, delivering each to the bound socket
+/// that owns its destination port (dropping datagrams to unbound ports). This is
+/// the UDP counterpart of [`ring_pump`]; `OP_UDP_RECV` calls it before dequeuing
+/// so a datagram that arrived for a *sibling* socket is buffered on that socket
+/// rather than lost. Returns `true` if any frame was consumed.
+///
+/// Cross-protocol caveat: like the TCP pump, this reads whole NIC frames, so any
+/// interleaved TCP frame is consumed and dropped here (D-NETSTACK-RX-DEMUX). Safe
+/// under the daemon's single-active-phase model; the future shared RX demux
+/// unifies both pumps.
+fn udp_pump(udp: &mut UdpSocks, me: &IfInfo) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    let mut pl = [0u8; UDP_DGRAM_MAX];
+    let mut any = false;
+    while let Some(rx) = recv_udp_any(me, &mut frame, &mut pl) {
+        any = true;
+        if let Some(sock) = udp.by_port(rx.dst_port) {
+            let n = rx.payload_len.min(pl.len());
+            sock.push(rx.src_ip, rx.src_port, &pl[..n]);
+        }
+        // Datagram to an unbound port → drop (no ICMP port-unreachable yet).
+    }
+    any
+}
+
+/// Build and transmit one UDP datagram from `sock`'s local port to
+/// `dst_ip:dst_port`. Returns the payload byte count sent (`≥ 0`), or a negative
+/// [`netipc::ring`] errno: [`ERR_MSG_SIZE`](netipc::ring::ERR_MSG_SIZE) if the
+/// payload exceeds [`UDP_DGRAM_MAX`], `-1` on a build/transmit failure. Shared by
+/// `OP_UDP_SEND` and the UDP self-test.
+fn udp_sock_send(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    sock: &UdpSock,
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    payload: &[u8],
+    id: u16,
+) -> i32 {
+    if payload.len() > UDP_DGRAM_MAX {
+        return netipc::ring::ERR_MSG_SIZE;
+    }
+    let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
+    let dlen = match udp::write(&mut dgram, &me.ip, dst_ip, sock.local_port, dst_port, payload) {
+        Some(n) => n,
+        None => return -1,
+    };
+    if !send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_UDP, &dgram[..dlen], id) {
+        return -1;
+    }
+    // On success the caller learns how many payload bytes were accepted.
+    i32::try_from(payload.len()).unwrap_or(i32::MAX)
 }
 
 /// Maximum concurrent listening sockets one ring session can hold.
@@ -2748,6 +3031,8 @@ struct RingSession {
     conns: RingConns,
     /// Listening sockets, keyed by the `OP_LISTEN` `conn_id`.
     listeners: Listeners,
+    /// Bound UDP datagram sockets, keyed by the `OP_UDP_BIND` `conn_id`.
+    udp: UdpSocks,
     /// IPv4 identification seed, advanced per new connection.
     ipid: u16,
 }
@@ -2761,6 +3046,7 @@ impl RingSession {
             size: 0,
             conns: RingConns::new(),
             listeners: Listeners::new(),
+            udp: UdpSocks::new(),
             ipid: 0,
         }
     }
@@ -2773,6 +3059,8 @@ impl RingSession {
         }
         self.conns.close_all(me);
         self.listeners.close_all(me);
+        // UDP sockets are connectionless — just drop their buffers.
+        self.udp = UdpSocks::new();
         syscall2(SYS_SHM_UNMAP, self.va as u64, self.size as u64);
         self.handle = 0;
         self.va = 0;
@@ -2808,6 +3096,12 @@ impl RingSession {
 /// - [`netipc::ring::OP_NOP`]: complete with `result = 0`.
 /// - [`netipc::ring::OP_STOP`]: complete with `result = 0` and request session
 ///   teardown (return flag) once the current batch is drained.
+/// - [`netipc::ring::OP_UDP_BIND`]/[`OP_UDP_SEND`](netipc::ring::OP_UDP_SEND)/
+///   [`OP_UDP_RECV`](netipc::ring::OP_UDP_RECV): connectionless UDP datagram
+///   sockets against the session's [`UdpSocks`] table (IPv4). Bind installs a
+///   socket under `conn_id`; send transmits from it to `aux`'s endpoint; recv
+///   drains the NIC ([`udp_pump`]) and dequeues one datagram, prepending the
+///   24-byte source-address header. `OP_CLOSE` unbinds a UDP socket too.
 /// - any unknown opcode: `result = -1`.
 ///
 /// `conns` and `ipid` are the *persistent* session state (see [`RingSession`]), so
@@ -2819,6 +3113,7 @@ fn ring_tcp_process(
     ring: &netring::Ring,
     conns: &mut RingConns,
     listeners: &mut Listeners,
+    udp: &mut UdpSocks,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     ipid: &mut u16,
@@ -2945,12 +3240,31 @@ fn ring_tcp_process(
             netipc::ring::OP_RECV => {
                 ring_tcp_recv(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
             }
-            netipc::ring::OP_POLL => ring_tcp_poll(conns, listeners, sqe.conn_id, me, next_hop_mac),
+            netipc::ring::OP_POLL => {
+                // First try TCP; `-1` means no such connection, so fall through to a
+                // bound UDP datagram socket. A UDP socket is always writable (a
+                // datagram send never blocks) and readable when a datagram is queued.
+                let tcp = ring_tcp_poll(conns, listeners, sqe.conn_id, me, next_hop_mac);
+                if tcp >= 0 {
+                    tcp
+                } else if udp.get_mut(sqe.conn_id).is_some() {
+                    udp_pump(udp, me);
+                    let mut bits = netipc::ring::POLL_WRITABLE;
+                    if udp.get_mut(sqe.conn_id).is_some_and(|s| s.has_data()) {
+                        bits |= netipc::ring::POLL_READABLE;
+                    }
+                    bits
+                } else {
+                    -1
+                }
+            }
             netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
                 Some(mut c) => {
                     c.close(me);
                     0
                 }
+                // Not a TCP connection — it may be a bound UDP datagram socket.
+                None if udp.remove(sqe.conn_id) => 0,
                 None => -1,
             },
             netipc::ring::OP_LISTEN => {
@@ -3000,6 +3314,83 @@ fn ring_tcp_process(
                     Some(c) => {
                         c.shutdown(me, sqe.aux);
                         0
+                    }
+                }
+            }
+            netipc::ring::OP_UDP_BIND => {
+                // Create/bind a datagram socket under conn_id. Low 16 bits of aux
+                // are the requested local port (0 = ephemeral); OP_CLOSE unbinds it.
+                let port = (sqe.aux & 0xFFFF) as u16;
+                udp.bind(sqe.conn_id, port)
+            }
+            netipc::ring::OP_UDP_SEND => {
+                // Send one datagram from the bound socket to aux=[dst_ip:4][port_be:2].
+                let (dst_ip, dst_port) = netipc::ring::Sqe::unpack_endpoint(sqe.aux);
+                *ipid = ipid.wrapping_add(1);
+                let id = *ipid;
+                // Read the payload out of the ring data window first (immutable
+                // borrow of the ring), then borrow the socket to send.
+                let mut buf = [0u8; UDP_DGRAM_MAX];
+                let want = (sqe.data_len as usize).min(UDP_DGRAM_MAX);
+                let plen = if want == 0 {
+                    0
+                } else if ring.read_data(sqe.data_off as usize, &mut buf[..want]) {
+                    want
+                } else {
+                    // fall through to error below
+                    usize::MAX
+                };
+                if plen == usize::MAX {
+                    -1
+                } else {
+                    match udp.get_mut(sqe.conn_id) {
+                        Some(sock) => {
+                            udp_sock_send(me, next_hop_mac, sock, &dst_ip, dst_port, &buf[..plen], id)
+                        }
+                        None => -1, // not bound
+                    }
+                }
+            }
+            netipc::ring::OP_UDP_RECV => {
+                // Drain the NIC (routing to all bound socks), then dequeue the
+                // oldest datagram for this socket. The daemon prepends a 24-byte
+                // source-address header (Sqe::pack_udp_addr) to the data window,
+                // payload following; result = payload length (header excluded).
+                let nonblock = sqe.aux & netipc::ring::RECV_NONBLOCK != 0;
+                udp_pump(udp, me);
+                let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
+                let cap = sqe.data_len as usize;
+                if cap < hdr_len {
+                    -1 // window too small even for the address header
+                } else {
+                    let mut payload = [0u8; UDP_DGRAM_MAX];
+                    let room = (cap - hdr_len).min(UDP_DGRAM_MAX);
+                    match udp.get_mut(sqe.conn_id) {
+                        None => -1, // not bound
+                        Some(sock) => match sock.pop(&mut payload[..room]) {
+                            Some((src_ip, src_port, n)) => {
+                                let mut ip16 = [0u8; 16];
+                                ip16[..4].copy_from_slice(&src_ip);
+                                let hdr = netipc::ring::Sqe::pack_udp_addr(
+                                    netipc::ring::UDP_AF_INET,
+                                    &ip16,
+                                    src_port,
+                                );
+                                let off = sqe.data_off as usize;
+                                if ring.write_data(off, &hdr)
+                                    && (n == 0 || ring.write_data(off + hdr_len, &payload[..n]))
+                                {
+                                    i32::try_from(n).unwrap_or(i32::MAX)
+                                } else {
+                                    -1
+                                }
+                            }
+                            None if nonblock => netipc::ring::ERR_WOULD_BLOCK,
+                            // Blocking recv with nothing queued: report would-block
+                            // for now (the kernel client polls). A blocking wait loop
+                            // lands with the kernel-side UDP fd wiring.
+                            None => netipc::ring::ERR_WOULD_BLOCK,
+                        },
                     }
                 }
             }

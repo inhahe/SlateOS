@@ -261,6 +261,8 @@ mod loopback {
     struct State {
         /// Our IP; loopback is inert until this is set non-zero at startup.
         my_ip: [u8; 4],
+        /// Our IPv6 address (link-local); loopback ignores v6 until this is set.
+        my_ip6: [u8; 16],
         frames: [[u8; MAX_FRAME]; QCAP],
         lens: [u16; QCAP],
         head: usize,
@@ -269,6 +271,7 @@ mod loopback {
 
     static mut STATE: State = State {
         my_ip: [0, 0, 0, 0],
+        my_ip6: [0u8; 16],
         frames: [[0u8; MAX_FRAME]; QCAP],
         lens: [0u16; QCAP],
         head: 0,
@@ -285,26 +288,39 @@ mod loopback {
         }
     }
 
-    /// If `frame` is IPv4 addressed to our own IP, copy it into the loopback FIFO
-    /// and return `true` (the caller must not also send it on the NIC). Returns
-    /// `false` (frame goes to the wire) for any non-self-addressed frame, a full
-    /// FIFO, or before `set_my_ip`.
+    /// Record our IPv6 address so loopback recognises self-addressed IPv6 frames.
+    /// Called once at startup alongside [`set_my_ip`].
+    pub fn set_my_ip6(ip6: [u8; 16]) {
+        // SAFETY: single-threaded daemon; no live borrow of STATE spans this call,
+        // and this runs at startup before the serve loop begins.
+        unsafe {
+            STATE.my_ip6 = ip6;
+        }
+    }
+
+    /// If `frame` is IPv4/IPv6 addressed to our own IP, copy it into the loopback
+    /// FIFO and return `true` (the caller must not also send it on the NIC).
+    /// Returns `false` (frame goes to the wire) for any non-self-addressed frame,
+    /// a full FIFO, or before the corresponding `set_my_ip*`.
     pub fn maybe_divert(frame: &[u8]) -> bool {
         // SAFETY: single-threaded; no live borrow of STATE spans this call.
         let st = unsafe { &mut *core::ptr::addr_of_mut!(STATE) };
-        if st.my_ip == [0, 0, 0, 0] {
+        if frame.len() < 14 {
             return false;
         }
-        // Cheap inline check for IPv4 (ethertype 0x0800) dst == my_ip. The IPv4
-        // destination address sits at offset 30 (14-byte Ethernet header + 16 into
-        // the IPv4 header). Avoid a full parse on the TX hot path.
-        if frame.len() < 34 {
-            return false;
-        }
-        if frame[12] != 0x08 || frame[13] != 0x00 {
-            return false; // not IPv4
-        }
-        if frame[30..34] != st.my_ip {
+        let self_addressed = if frame[12] == 0x08 && frame[13] == 0x00 {
+            // IPv4 (ethertype 0x0800): dst address sits at offset 30 (14-byte
+            // Ethernet header + 16 into the IPv4 header). Avoid a full parse on
+            // the TX hot path.
+            st.my_ip != [0, 0, 0, 0] && frame.len() >= 34 && frame[30..34] == st.my_ip
+        } else if frame[12] == 0x86 && frame[13] == 0xDD {
+            // IPv6 (ethertype 0x86DD): dst address sits at offset 38 (14-byte
+            // Ethernet header + 24 into the fixed 40-byte IPv6 header).
+            st.my_ip6 != [0u8; 16] && frame.len() >= 54 && frame[38..54] == st.my_ip6
+        } else {
+            false
+        };
+        if !self_addressed {
             return false; // not addressed to us
         }
         if st.len >= QCAP || frame.len() > MAX_FRAME {
@@ -350,6 +366,13 @@ struct IfInfo {
     gateway: [u8; 4],
     dns: [u8; 4],
     mac: [u8; 6],
+    /// Our IPv6 link-local address (`fe80::/64` + EUI-64 from `mac`), derived at
+    /// startup. The daemon has no IPv6 configuration syscall yet, so the
+    /// link-local — which is deterministically formed from the MAC and needs no
+    /// router — is the source identity for daemon-originated IPv6 TCP (and the
+    /// address the IPv6 loopback self-test connects to). SLAAC/DHCPv6 global
+    /// addressing is a later increment.
+    ip6: [u8; 16],
 }
 
 impl IfInfo {
@@ -375,12 +398,14 @@ fn query_if_info() -> Option<IfInfo> {
     if rc < 0 {
         return None;
     }
+    let mac = [rec[16], rec[17], rec[18], rec[19], rec[20], rec[21]];
     Some(IfInfo {
         ip: [rec[0], rec[1], rec[2], rec[3]],
         mask: [rec[4], rec[5], rec[6], rec[7]],
         gateway: [rec[8], rec[9], rec[10], rec[11]],
         dns: [rec[12], rec[13], rec[14], rec[15]],
-        mac: [rec[16], rec[17], rec[18], rec[19], rec[20], rec[21]],
+        mac,
+        ip6: icmpv6::link_local_from_mac(&mac),
     })
 }
 
@@ -393,7 +418,7 @@ fn query_if_info() -> Option<IfInfo> {
 // of truth for frame layout and the RFC 1071 checksum. This daemon only wires
 // those parsers/builders to the raw-frame syscalls and the interface config.
 
-use netproto::{arp, dns, ethernet, icmp, ipv4, tcp, udp};
+use netproto::{arp, dns, ethernet, icmp, icmpv6, ipv4, ipv6, tcp, udp};
 
 /// Maximum standard Ethernet frame we handle (jumbo frames are out of scope).
 const MAX_FRAME: usize = 1522;
@@ -559,6 +584,82 @@ fn arp_reply_mac(frame: &[u8], target_ip: &[u8; 4]) -> Option<[u8; 6]> {
     } else {
         None
     }
+}
+
+/// Resolve `target_ip6`'s link-layer address via IPv6 Neighbor Discovery
+/// (RFC 4861): multicast a Neighbor Solicitation to the target's solicited-node
+/// group and wait for the matching Neighbor Advertisement. The IPv6 sibling of
+/// [`arp_resolve`]. Returns `None` if no advertisement arrives in the poll budget.
+///
+/// Note: this is only exercised for *real* on-link IPv6 peers. The daemon's own
+/// loopback path ([`loopback::maybe_divert`]) short-circuits self-addressed
+/// frames before they hit the wire, so an IPv6 connect to `me.ip6` never calls
+/// this (its next-hop MAC is irrelevant). There is no IPv6 router in the QEMU
+/// slirp test environment, so the NDP round-trip itself is not end-to-end tested
+/// here; the NS/NA wire formats are unit-tested in `netproto::icmpv6`.
+fn ndp_resolve(target_ip6: &[u8; 16], me: &IfInfo) -> Option<[u8; 6]> {
+    let sol = icmpv6::solicited_node_multicast(target_ip6);
+    // Ethernet destination for an IPv6 solicited-node multicast: 33:33 followed
+    // by the low 32 bits of the multicast address (RFC 2464 §7).
+    let eth_dst = [0x33, 0x33, sol[12], sol[13], sol[14], sol[15]];
+
+    let mut frame = [0u8; MAX_FRAME];
+    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
+    let mut ns = [0u8; 32];
+    let ns_len = icmpv6::write_neighbor_solicitation(&mut ns, &me.ip6, &sol, target_ip6, &me.mac)?;
+    let total = l4_off.checked_add(ns_len)?;
+    if total > frame.len() {
+        return None;
+    }
+    frame[l4_off..total].copy_from_slice(&ns[..ns_len]);
+    let ip_hdr = ipv6::Builder {
+        traffic_class: 0,
+        flow_label: 0,
+        next_header: icmpv6::NH_ICMPV6,
+        hop_limit: 255, // NDP requires a hop limit of 255 (RFC 4861 §7.1.1).
+        src: me.ip6,
+        dst: sol,
+    }
+    .build_header(ns_len as u16);
+    frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
+    ethernet::write_header(&mut frame, &eth_dst, &me.mac, ethernet::ETHERTYPE_IPV6);
+    if raw_tx(&frame[..total]) < 0 {
+        return None;
+    }
+
+    let mut buf = [0u8; MAX_FRAME];
+    for _ in 0..RESOLVE_POLL_ITERS {
+        loop {
+            let n = raw_rx(&mut buf);
+            if n < 0 {
+                break; // WouldBlock or error — sleep and retry.
+            }
+            let len = n as usize;
+            if len > buf.len() {
+                continue;
+            }
+            if let Some(mac) = ndp_advert_mac(&buf[..len], target_ip6) {
+                return Some(mac);
+            }
+        }
+        sleep_ns(POLL_SLEEP_NS);
+    }
+    None
+}
+
+/// If `frame` is a Neighbor Advertisement for `target_ip6` carrying a Target
+/// Link-Layer Address option, return the advertised MAC.
+fn ndp_advert_mac(frame: &[u8], target_ip6: &[u8; 16]) -> Option<[u8; 6]> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV6 {
+        return None;
+    }
+    let ip = ipv6::Packet::parse(eth.payload)?;
+    if ip.next_header != icmpv6::NH_ICMPV6 {
+        return None;
+    }
+    let na = icmpv6::parse_neighbor_advertisement(ip.payload, &ip.src, &ip.dst)?;
+    if na.target == *target_ip6 { na.link_addr } else { None }
 }
 
 /// Frame a DNS query payload `qbuf` as Ethernet | IPv4 | UDP toward `me.dns`
@@ -785,6 +886,61 @@ fn send_tcp(
     send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_TCP, &seg[..n], id)
 }
 
+/// Frame an arbitrary L4 payload as Ethernet | IPv6 toward `dst_ip6` and transmit
+/// it on the raw NIC. The IPv6 sibling of [`send_ipv4`]; the source address is the
+/// daemon's link-local identity (`me.ip6`). Returns `true` on a successful TX.
+fn send_ipv6(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    dst_ip6: &[u8; 16],
+    next_header: u8,
+    l4: &[u8],
+) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
+    let total = match l4_off.checked_add(l4.len()) {
+        Some(t) if t <= frame.len() => t,
+        _ => return false,
+    };
+    frame[l4_off..total].copy_from_slice(l4);
+    let ip_hdr = ipv6::Builder {
+        traffic_class: 0,
+        flow_label: 0,
+        next_header,
+        hop_limit: 64,
+        src: me.ip6,
+        dst: *dst_ip6,
+    }
+    .build_header(l4.len() as u16);
+    frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
+    ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV6);
+    raw_tx(&frame[..total]) >= 0
+}
+
+/// Build and transmit one TCP segment over IPv6 for our connection. The IPv6
+/// sibling of [`send_tcp`]; there is no IPv4 identification counter on the wire.
+#[allow(clippy::too_many_arguments)]
+fn send_tcp6(
+    me: &IfInfo,
+    next_hop_mac: &[u8; 6],
+    dst_ip6: &[u8; 16],
+    dst_port: u16,
+    src_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+) -> bool {
+    // TCP segment sits inside the IPv6 payload; bound it by the framing headroom.
+    let mut seg = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv6::HEADER_LEN)];
+    let builder = tcp::Builder { src_port, dst_port, seq, ack, flags, window: TCP_WINDOW };
+    let n = match builder.write_v6(&mut seg, &me.ip6, dst_ip6, payload) {
+        Some(n) => n,
+        None => return false,
+    };
+    send_ipv6(me, next_hop_mac, dst_ip6, ipv4::PROTO_TCP, &seg[..n])
+}
+
 /// Try to receive one TCP segment addressed to our connection (matching the
 /// local/remote ports and endpoint IPs). On a match, copies the payload into
 /// `pl` and returns the segment metadata; returns `None` when no matching frame
@@ -822,6 +978,42 @@ fn recv_tcp_seg(
     Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
 }
 
+/// The IPv6 sibling of [`recv_tcp_seg`]: receive one TCP segment carried in an
+/// IPv6 datagram from `dst_ip6`, matching our local/remote ports and endpoint
+/// IPs. On a match, copies the payload into `pl` and returns the metadata.
+fn recv_tcp_seg6(
+    me: &IfInfo,
+    dst_ip6: &[u8; 16],
+    local_port: u16,
+    remote_port: u16,
+    frame: &mut [u8],
+    pl: &mut [u8],
+) -> Option<TcpRx> {
+    let n = raw_rx(frame);
+    if n < 0 {
+        return None;
+    }
+    let len = n as usize;
+    if len > frame.len() {
+        return None;
+    }
+    let eth = ethernet::Frame::parse(&frame[..len])?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV6 {
+        return None;
+    }
+    let ip = ipv6::Packet::parse(eth.payload)?;
+    if ip.next_header != ipv4::PROTO_TCP || ip.dst != me.ip6 || ip.src != *dst_ip6 {
+        return None;
+    }
+    let seg = tcp::Segment::parse_v6(ip.payload, &ip.src, &ip.dst)?;
+    if seg.src_port != remote_port || seg.dst_port != local_port {
+        return None;
+    }
+    let cplen = seg.payload.len().min(pl.len());
+    pl[..cplen].copy_from_slice(&seg.payload[..cplen]);
+    Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
+}
+
 /// Outcome of one non-filtered NIC read for the multiplexed RX pump.
 enum RawRx {
     /// No frame available (`WOULD_BLOCK`) or a read error — draining is done.
@@ -833,6 +1025,9 @@ enum RawRx {
     /// for routing to the owning connection, plus the parsed segment metadata. The
     /// payload has been copied into the caller's `pl` buffer (`payload_len` bytes).
     Seg([u8; 4], u16, u16, TcpRx),
+    /// An IPv6 TCP segment addressed to us: peer identity `(src_ip6, src_port,
+    /// dst_port)` plus the parsed segment metadata. The IPv6 sibling of [`Seg`].
+    Seg6([u8; 16], u16, u16, TcpRx),
 }
 
 /// Read one frame off the NIC without filtering to a specific connection's
@@ -849,28 +1044,56 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
     if len > frame.len() {
         return RawRx::Ignore;
     }
-    let parsed = (|| {
-        let eth = ethernet::Frame::parse(frame.get(..len)?)?;
-        if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
-            return None;
+    let eth = match ethernet::Frame::parse(frame.get(..len).unwrap_or(&[])) {
+        Some(eth) => eth,
+        None => return RawRx::Ignore,
+    };
+    match eth.ethertype {
+        ethernet::ETHERTYPE_IPV4 => {
+            let parsed = (|| {
+                let ip = ipv4::Packet::parse(eth.payload)?;
+                if ip.protocol != ipv4::PROTO_TCP || ip.dst != me.ip {
+                    return None;
+                }
+                let seg = tcp::Segment::parse(ip.payload, &ip.src, &ip.dst)?;
+                let cplen = seg.payload.len().min(pl.len());
+                pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
+                Some((
+                    ip.src,
+                    seg.src_port,
+                    seg.dst_port,
+                    TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
+                ))
+            })();
+            match parsed {
+                Some((src_ip, src_port, dst_port, rx)) => RawRx::Seg(src_ip, src_port, dst_port, rx),
+                None => RawRx::Ignore,
+            }
         }
-        let ip = ipv4::Packet::parse(eth.payload)?;
-        if ip.protocol != ipv4::PROTO_TCP || ip.dst != me.ip {
-            return None;
+        ethernet::ETHERTYPE_IPV6 => {
+            let parsed = (|| {
+                let ip = ipv6::Packet::parse(eth.payload)?;
+                if ip.next_header != ipv4::PROTO_TCP || ip.dst != me.ip6 {
+                    return None;
+                }
+                let seg = tcp::Segment::parse_v6(ip.payload, &ip.src, &ip.dst)?;
+                let cplen = seg.payload.len().min(pl.len());
+                pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
+                Some((
+                    ip.src,
+                    seg.src_port,
+                    seg.dst_port,
+                    TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
+                ))
+            })();
+            match parsed {
+                Some((src_ip6, src_port, dst_port, rx)) => {
+                    RawRx::Seg6(src_ip6, src_port, dst_port, rx)
+                }
+                None => RawRx::Ignore,
+            }
         }
-        let seg = tcp::Segment::parse(ip.payload, &ip.src, &ip.dst)?;
-        let cplen = seg.payload.len().min(pl.len());
-        pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
-        Some((
-            ip.src,
-            seg.src_port,
-            seg.dst_port,
-            TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
-        ))
-    })();
-    match parsed {
-        Some((src_ip, src_port, dst_port, rx)) => RawRx::Seg(src_ip, src_port, dst_port, rx),
-        None => RawRx::Ignore,
+        _ => RawRx::Ignore,
     }
 }
 
@@ -886,6 +1109,12 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
 /// request/response transactions the Phase-4 self-tests exercise.
 struct TcpConn {
     dst_ip: [u8; 4],
+    /// Peer IPv6 address when this is an IPv6 connection; `None` for IPv4. All
+    /// segment emission and RX matching dispatch on this: `Some` frames via
+    /// [`send_tcp6`] and matches on `me.ip6`, `None` uses the IPv4 path. Keeping
+    /// one state machine (rather than a parallel `TcpConn6`) means the handshake,
+    /// send/ACK, and teardown logic are shared byte-for-byte across families.
+    dst6: Option<[u8; 16]>,
     dst_port: u16,
     local_port: u16,
     /// Next-hop L2 address (gateway or on-link peer) for outbound frames.
@@ -937,6 +1166,53 @@ struct TcpConn {
 }
 
 impl TcpConn {
+    /// Transmit one TCP segment for this connection, dispatching on the address
+    /// family recorded at open time. An IPv6 connection (`dst6 == Some`) frames
+    /// via [`send_tcp6`] using the daemon's link-local source; an IPv4 connection
+    /// frames via [`send_tcp`] using `self.ipid` for the on-wire IP identification.
+    /// Callers advance `self.ipid` before calling (kept identical to the former
+    /// inline `send_tcp` calls so the IPv4 wire behaviour is unchanged).
+    fn emit(&self, me: &IfInfo, seq: u32, ack: u32, flags: u8, payload: &[u8]) -> bool {
+        match self.dst6 {
+            Some(ref dst6) => send_tcp6(
+                me,
+                &self.mac,
+                dst6,
+                self.dst_port,
+                self.local_port,
+                seq,
+                ack,
+                flags,
+                payload,
+            ),
+            None => send_tcp(
+                me,
+                &self.mac,
+                &self.dst_ip,
+                self.dst_port,
+                self.local_port,
+                seq,
+                ack,
+                flags,
+                payload,
+                self.ipid,
+            ),
+        }
+    }
+
+    /// Receive one TCP segment addressed to this connection, dispatching on the
+    /// address family. The single-connection RX counterpart to [`emit`]; used by
+    /// [`recv`](Self::recv) and [`close`](Self::close), which each service exactly
+    /// one connection (the multiplexed ring path uses [`recv_tcp_any`] instead).
+    fn recv_one_seg(&self, me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<TcpRx> {
+        match self.dst6 {
+            Some(ref dst6) => {
+                recv_tcp_seg6(me, dst6, self.local_port, self.dst_port, frame, pl)
+            }
+            None => recv_tcp_seg(me, &self.dst_ip, self.local_port, self.dst_port, frame, pl),
+        }
+    }
+
     /// Open a connection to `dst_ip:dst_port` via `mac`, seeding the IPv4 ident
     /// counter from `seed_ipid`. Performs the SYN / SYN-ACK / ACK handshake.
     /// Returns `None` if the peer refused (RST) or never answered.
@@ -998,6 +1274,7 @@ impl TcpConn {
 
         Some(TcpConn {
             dst_ip,
+            dst6: None,
             dst_port,
             local_port,
             mac,
@@ -1043,6 +1320,7 @@ impl TcpConn {
         }
         Some(TcpConn {
             dst_ip,
+            dst6: None,
             dst_port,
             local_port,
             mac,
@@ -1104,6 +1382,7 @@ impl TcpConn {
         }
         Some(TcpConn {
             dst_ip: peer_ip,
+            dst6: None,
             dst_port: peer_port,
             local_port,
             mac,
@@ -1113,6 +1392,173 @@ impl TcpConn {
             ipid,
             isn,
             established: false, // SYN_RCVD until the peer ACKs our SYN-ACK.
+            connect_failed: false,
+            syn_sends: 1,
+            peer_fin: false,
+            snd_buf: [0u8; TCP_SND_BUF],
+            snd_buf_len: 0,
+            rx_buf: [0u8; TCP_RCV_BUF],
+            rx_len: 0,
+            passive: true,
+        })
+    }
+
+    // --- IPv6 constructors -------------------------------------------------
+    //
+    // Each is the byte-for-byte analogue of its IPv4 sibling above, differing
+    // only in that it frames the handshake segments over IPv6 (`send_tcp6` /
+    // `recv_tcp_seg6`) and records `dst6: Some(..)`, `dst_ip: [0;4]`. Once
+    // constructed, the connection is driven by the *same* `ingest_seg` / `send`
+    // / `close` state machine as an IPv4 connection — `emit`/`recv_one_seg`
+    // dispatch on `dst6`, so there is no duplicated data-transfer logic.
+
+    /// Open an IPv6 connection to `dst_ip6:dst_port` via `mac` (blocking full
+    /// handshake). The IPv6 sibling of [`connect`](Self::connect).
+    fn connect6(
+        me: &IfInfo,
+        dst_ip6: [u8; 16],
+        dst_port: u16,
+        mac: [u8; 6],
+        seed_ipid: u16,
+    ) -> Option<Self> {
+        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
+        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+
+        let mut frame = [0u8; MAX_FRAME];
+        let mut pl = [0u8; MAX_FRAME];
+
+        let mut server_isn = 0u32;
+        let mut established = false;
+        'syn: for _ in 0..TCP_SYN_ATTEMPTS {
+            if !send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[]) {
+                return None;
+            }
+            for _ in 0..RESOLVE_POLL_ITERS {
+                while let Some(rx) =
+                    recv_tcp_seg6(me, &dst_ip6, local_port, dst_port, &mut frame, &mut pl)
+                {
+                    if rx.flags & tcp::FLAG_RST != 0 {
+                        return None; // Connection refused.
+                    }
+                    if rx.flags & tcp::FLAG_SYN != 0
+                        && rx.flags & tcp::FLAG_ACK != 0
+                        && rx.ack == isn.wrapping_add(1)
+                    {
+                        server_isn = rx.seq;
+                        established = true;
+                        break 'syn;
+                    }
+                }
+                sleep_ns(POLL_SLEEP_NS);
+            }
+        }
+        if !established {
+            return None;
+        }
+
+        let snd_nxt = isn.wrapping_add(1);
+        let rcv_nxt = server_isn.wrapping_add(1);
+        send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, snd_nxt, rcv_nxt, tcp::FLAG_ACK, &[]);
+
+        Some(TcpConn {
+            dst_ip: [0; 4],
+            dst6: Some(dst_ip6),
+            dst_port,
+            local_port,
+            mac,
+            snd_nxt,
+            rcv_nxt,
+            server_isn,
+            ipid: seed_ipid,
+            isn,
+            established: true,
+            connect_failed: false,
+            syn_sends: 0,
+            peer_fin: false,
+            snd_buf: [0u8; TCP_SND_BUF],
+            snd_buf_len: 0,
+            rx_buf: [0u8; TCP_RCV_BUF],
+            rx_len: 0,
+            passive: false,
+        })
+    }
+
+    /// Start a **non-blocking** IPv6 connect (transmit the SYN, return in
+    /// SYN_SENT). The IPv6 sibling of [`connect_start`](Self::connect_start).
+    fn connect_start6(
+        me: &IfInfo,
+        dst_ip6: [u8; 16],
+        dst_port: u16,
+        mac: [u8; 6],
+        seed_ipid: u16,
+    ) -> Option<Self> {
+        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
+        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        if !send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[]) {
+            return None;
+        }
+        Some(TcpConn {
+            dst_ip: [0; 4],
+            dst6: Some(dst_ip6),
+            dst_port,
+            local_port,
+            mac,
+            snd_nxt: isn.wrapping_add(1),
+            rcv_nxt: 0,
+            server_isn: 0,
+            ipid: seed_ipid,
+            isn,
+            established: false,
+            connect_failed: false,
+            syn_sends: 1,
+            peer_fin: false,
+            snd_buf: [0u8; TCP_SND_BUF],
+            snd_buf_len: 0,
+            rx_buf: [0u8; TCP_RCV_BUF],
+            rx_len: 0,
+            passive: false,
+        })
+    }
+
+    /// Passively open an IPv6 connection from an inbound SYN to a [`Listener`].
+    /// The IPv6 sibling of [`accept_syn`](Self::accept_syn).
+    #[allow(clippy::too_many_arguments)]
+    fn accept_syn6(
+        me: &IfInfo,
+        peer_ip6: [u8; 16],
+        peer_port: u16,
+        local_port: u16,
+        peer_isn: u32,
+        mac: [u8; 6],
+        seed_ipid: u16,
+    ) -> Option<Self> {
+        let isn: u32 = 0x0002_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let rcv_nxt = peer_isn.wrapping_add(1); // Their SYN consumes one seq.
+        if !send_tcp6(
+            me,
+            &mac,
+            &peer_ip6,
+            peer_port,
+            local_port,
+            isn,
+            rcv_nxt,
+            tcp::FLAG_SYN | tcp::FLAG_ACK,
+            &[],
+        ) {
+            return None;
+        }
+        Some(TcpConn {
+            dst_ip: [0; 4],
+            dst6: Some(peer_ip6),
+            dst_port: peer_port,
+            local_port,
+            mac,
+            snd_nxt: isn.wrapping_add(1),
+            rcv_nxt,
+            server_isn: peer_isn,
+            ipid: seed_ipid,
+            isn,
+            established: false,
             connect_failed: false,
             syn_sends: 1,
             peer_fin: false,
@@ -1142,18 +1588,7 @@ impl TcpConn {
         }
         self.ipid = self.ipid.wrapping_add(1);
         self.syn_sends = self.syn_sends.saturating_add(1);
-        send_tcp(
-            me,
-            &self.mac,
-            &self.dst_ip,
-            self.dst_port,
-            self.local_port,
-            self.isn,
-            0,
-            tcp::FLAG_SYN,
-            &[],
-            self.ipid,
-        );
+        self.emit(me, self.isn, 0, tcp::FLAG_SYN, &[]);
     }
 
     /// True when the send window has no room: a previously-sent segment is still
@@ -1182,18 +1617,7 @@ impl TcpConn {
             return None; // Window occupied by an unacked segment; caller must wait/EAGAIN.
         }
         self.ipid = self.ipid.wrapping_add(1);
-        if !send_tcp(
-            me,
-            &self.mac,
-            &self.dst_ip,
-            self.dst_port,
-            self.local_port,
-            self.snd_nxt,
-            self.rcv_nxt,
-            tcp::FLAG_PSH | tcp::FLAG_ACK,
-            payload,
-            self.ipid,
-        ) {
+        if !self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_PSH | tcp::FLAG_ACK, payload) {
             return None;
         }
         // Retain for retransmit; `snd_nxt - snd_buf_len` recovers this seq.
@@ -1228,18 +1652,7 @@ impl TcpConn {
                 // the completing segment is not lost.
                 if rx.flags & tcp::FLAG_SYN != 0 && rx.flags & tcp::FLAG_ACK == 0 {
                     self.ipid = self.ipid.wrapping_add(1);
-                    send_tcp(
-                        me,
-                        &self.mac,
-                        &self.dst_ip,
-                        self.dst_port,
-                        self.local_port,
-                        self.isn,
-                        self.rcv_nxt,
-                        tcp::FLAG_SYN | tcp::FLAG_ACK,
-                        &[],
-                        self.ipid,
-                    );
+                    self.emit(me, self.isn, self.rcv_nxt, tcp::FLAG_SYN | tcp::FLAG_ACK, &[]);
                     return;
                 }
                 if rx.flags & tcp::FLAG_ACK != 0 && rx.ack == self.isn.wrapping_add(1) {
@@ -1260,18 +1673,7 @@ impl TcpConn {
                     self.snd_nxt = self.isn.wrapping_add(1); // Our SYN consumed one seq.
                     self.rcv_nxt = rx.seq.wrapping_add(1); // Their SYN consumed one.
                     self.ipid = self.ipid.wrapping_add(1);
-                    send_tcp(
-                        me,
-                        &self.mac,
-                        &self.dst_ip,
-                        self.dst_port,
-                        self.local_port,
-                        self.snd_nxt,
-                        self.rcv_nxt,
-                        tcp::FLAG_ACK,
-                        &[],
-                        self.ipid,
-                    );
+                    self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[]);
                     self.established = true;
                 }
                 return; // While SYN_SENT we never buffer data.
@@ -1312,12 +1714,12 @@ impl TcpConn {
             }
             if rx.payload_len > 0 || self.peer_fin {
                 self.ipid = self.ipid.wrapping_add(1);
-                send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
+                self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[]);
             }
         } else if rx.payload_len > 0 {
             // Out-of-order data: dup-ACK to prompt the peer to retransmit.
             self.ipid = self.ipid.wrapping_add(1);
-            send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
+            self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[]);
         }
     }
 
@@ -1346,18 +1748,7 @@ impl TcpConn {
             *retransmits += 1;
             self.ipid = self.ipid.wrapping_add(1);
             let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
-            send_tcp(
-                me,
-                &self.mac,
-                &self.dst_ip,
-                self.dst_port,
-                self.local_port,
-                seq,
-                self.rcv_nxt,
-                tcp::FLAG_PSH | tcp::FLAG_ACK,
-                &self.snd_buf[..self.snd_buf_len],
-                self.ipid,
-            );
+            self.emit(me, seq, self.rcv_nxt, tcp::FLAG_PSH | tcp::FLAG_ACK, &self.snd_buf[..self.snd_buf_len]);
             true
         } else {
             false
@@ -1381,7 +1772,7 @@ impl TcpConn {
         let mut retransmits = 0u32;
         while idle < TCP_DATA_ITERS && !self.peer_fin {
             let mut got = false;
-            while let Some(rx) = recv_tcp_seg(me, &self.dst_ip, self.local_port, self.dst_port, &mut frame, &mut pl) {
+            while let Some(rx) = self.recv_one_seg(me, &mut frame, &mut pl) {
                 got = true;
                 self.ingest_seg(me, &rx, &pl[..rx.payload_len]);
                 if self.peer_fin {
@@ -1405,20 +1796,20 @@ impl TcpConn {
     /// (and a late FIN, which we ACK for a clean teardown).
     fn close(&mut self, me: &IfInfo) {
         self.ipid = self.ipid.wrapping_add(1);
-        send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[], self.ipid);
+        self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
         let fin_seq = self.snd_nxt.wrapping_add(1); // Our FIN consumed one seq.
 
         let mut frame = [0u8; MAX_FRAME];
         let mut pl = [0u8; MAX_FRAME];
         for _ in 0..40 {
             let mut any = false;
-            while let Some(rx) = recv_tcp_seg(me, &self.dst_ip, self.local_port, self.dst_port, &mut frame, &mut pl) {
+            while let Some(rx) = self.recv_one_seg(me, &mut frame, &mut pl) {
                 any = true;
                 // A late FIN from the peer still needs an ACK for a clean teardown.
                 if rx.flags & tcp::FLAG_FIN != 0 && rx.seq == self.rcv_nxt {
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(rx.payload_len as u32).wrapping_add(1);
                     self.ipid = self.ipid.wrapping_add(1);
-                    send_tcp(me, &self.mac, &self.dst_ip, self.dst_port, self.local_port, fin_seq, self.rcv_nxt, tcp::FLAG_ACK, &[], self.ipid);
+                    self.emit(me, fin_seq, self.rcv_nxt, tcp::FLAG_ACK, &[]);
                 }
             }
             if !any {
@@ -2003,6 +2394,23 @@ impl RingConns {
             .find(|c| c.dst_ip == *src_ip && c.dst_port == src_port && c.local_port == dst_port)
     }
 
+    /// The IPv6 sibling of [`find_by_tuple`](Self::find_by_tuple): match a live
+    /// connection by its IPv6 peer address (`dst6`) and ports.
+    fn find_by_tuple6(
+        &mut self,
+        src_ip6: &[u8; 16],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Option<&mut TcpConn> {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .map(|(_, c)| c)
+            .find(|c| {
+                c.dst6 == Some(*src_ip6) && c.dst_port == src_port && c.local_port == dst_port
+            })
+    }
+
     /// Reserve the free slot that should hold `id`, if `id` is not already in use
     /// and the table has room. Returns a mutable handle to the empty slot for the
     /// caller to fill (`*slot = Some((id, conn))`), or `None` on a duplicate id or
@@ -2080,6 +2488,19 @@ impl Listener {
             .iter_mut()
             .filter_map(|s| s.as_mut())
             .find(|c| c.dst_ip == *src_ip && c.dst_port == src_port && c.local_port == dst_port)
+    }
+
+    /// The IPv6 sibling of [`find_backlog_by_tuple`](Self::find_backlog_by_tuple):
+    /// match a pending passive connection by its IPv6 peer address and ports.
+    fn find_backlog_by_tuple6(
+        &mut self,
+        src_ip6: &[u8; 16],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Option<&mut TcpConn> {
+        self.backlog.iter_mut().filter_map(|s| s.as_mut()).find(|c| {
+            c.dst6 == Some(*src_ip6) && c.dst_port == src_port && c.local_port == dst_port
+        })
     }
 
     /// Register a freshly passive-opened connection in a free backlog slot. Returns
@@ -2160,6 +2581,7 @@ impl Listeners {
     /// SYN to a listening port with no existing owner) start a passive open. Returns
     /// `true` if the segment was consumed by a listener. `mac` is the reply next-hop
     /// and `ipid_seed` seeds a new passive connection's identification counter.
+    #[allow(clippy::too_many_arguments)]
     fn route_seg(
         &mut self,
         me: &IfInfo,
@@ -2180,17 +2602,59 @@ impl Listeners {
             }
         }
         // 2) A fresh SYN (SYN set, ACK clear) to a listening port → passive open.
-        if rx.flags & tcp::FLAG_SYN != 0 && rx.flags & tcp::FLAG_ACK == 0 {
-            if let Some(l) = self.find_by_port(dst_port) {
-                l.ipid = l.ipid.wrapping_add(0x10);
-                let seed = l.ipid;
-                if let Some(conn) =
-                    TcpConn::accept_syn(me, *src_ip, src_port, dst_port, rx.seq, *mac, seed)
-                {
-                    l.push_backlog(conn);
-                }
-                return true; // consumed (whether or not the backlog had room)
+        if rx.flags & tcp::FLAG_SYN != 0
+            && rx.flags & tcp::FLAG_ACK == 0
+            && let Some(l) = self.find_by_port(dst_port)
+        {
+            l.ipid = l.ipid.wrapping_add(0x10);
+            let seed = l.ipid;
+            if let Some(conn) =
+                TcpConn::accept_syn(me, *src_ip, src_port, dst_port, rx.seq, *mac, seed)
+            {
+                l.push_backlog(conn);
             }
+            return true; // consumed (whether or not the backlog had room)
+        }
+        false
+    }
+
+    /// The IPv6 sibling of [`route_seg`](Self::route_seg): route an inbound IPv6
+    /// segment to a matching passive backlog connection, or start a passive open
+    /// for a fresh SYN to a listening port. A [`Listener`]'s `port` is
+    /// family-agnostic, so the same listener accepts both IPv4 and IPv6 SYNs.
+    #[allow(clippy::too_many_arguments)]
+    fn route_seg6(
+        &mut self,
+        me: &IfInfo,
+        src_ip6: &[u8; 16],
+        src_port: u16,
+        dst_port: u16,
+        rx: &TcpRx,
+        payload: &[u8],
+        mac: &[u8; 6],
+    ) -> bool {
+        // 1) An existing pending/established backlog connection for this 6-tuple.
+        for slot in &mut self.slots {
+            if let Some((_, l)) = slot.as_mut()
+                && let Some(c) = l.find_backlog_by_tuple6(src_ip6, src_port, dst_port)
+            {
+                c.ingest_seg(me, rx, payload);
+                return true;
+            }
+        }
+        // 2) A fresh SYN to a listening port → passive IPv6 open.
+        if rx.flags & tcp::FLAG_SYN != 0
+            && rx.flags & tcp::FLAG_ACK == 0
+            && let Some(l) = self.find_by_port(dst_port)
+        {
+            l.ipid = l.ipid.wrapping_add(0x10);
+            let seed = l.ipid;
+            if let Some(conn) =
+                TcpConn::accept_syn6(me, *src_ip6, src_port, dst_port, rx.seq, *mac, seed)
+            {
+                l.push_backlog(conn);
+            }
+            return true;
         }
         false
     }
@@ -2357,6 +2821,64 @@ fn ring_tcp_process(
                             }
                         },
                         None => -1,
+                    }
+                }
+            }
+            netipc::ring::OP_CONNECT6 => {
+                // IPv6 connect: the 16-byte peer address travels in the SQE's data
+                // window; the port is the low 16 bits of `aux`. Read the address,
+                // resolve the next-hop MAC (skipping NDP for a self/loopback target,
+                // whose frames are diverted by IP before hitting the wire), then run
+                // the same connect state machine as IPv4 via the v6 constructors.
+                let mut addr = [0u8; 16];
+                let ok = sqe.data_len as usize >= 16 && ring.read_data(sqe.data_off as usize, &mut addr);
+                if !ok {
+                    -1
+                } else {
+                    let port = (sqe.aux & 0xFFFF) as u16;
+                    *ipid = ipid.wrapping_add(0x10);
+                    // Loopback (dst == our own IPv6) is demuxed by IP; any MAC works.
+                    // Otherwise resolve the peer's link-layer address via NDP.
+                    let mac = if addr == me.ip6 {
+                        Some(me.mac)
+                    } else {
+                        ndp_resolve(&addr, me)
+                    };
+                    match mac {
+                        None => -1, // next-hop unresolved → report failure
+                        Some(mac) => {
+                            if sqe.aux & netipc::ring::CONNECT_NONBLOCK != 0 {
+                                match TcpConn::connect_start6(me, addr, port, mac, *ipid) {
+                                    Some(c) => match conns.reserve(sqe.conn_id) {
+                                        Some(slot) => {
+                                            *slot = Some((sqe.conn_id, c));
+                                            ring_pump(conns, listeners, me, next_hop_mac);
+                                            match conns.get_mut(sqe.conn_id) {
+                                                Some(c) if c.established => 0,
+                                                Some(_) => netipc::ring::ERR_IN_PROGRESS,
+                                                None => -1,
+                                            }
+                                        }
+                                        None => -1,
+                                    },
+                                    None => -1,
+                                }
+                            } else {
+                                match TcpConn::connect6(me, addr, port, mac, *ipid) {
+                                    Some(mut c) => match conns.reserve(sqe.conn_id) {
+                                        Some(slot) => {
+                                            *slot = Some((sqe.conn_id, c));
+                                            0
+                                        }
+                                        None => {
+                                            c.close(me);
+                                            -1
+                                        }
+                                    },
+                                    None => -1,
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2527,6 +3049,18 @@ fn ring_pump(
                     // Unmatched by both → drop (nothing to do).
                 }
             }
+            RawRx::Seg6(src_ip6, src_port, dst_port, rx) => {
+                any = true;
+                let plen = rx.payload_len.min(pl.len());
+                let payload = pl.get(..plen).unwrap_or(&[]);
+                if let Some(c) = conns.find_by_tuple6(&src_ip6, src_port, dst_port) {
+                    c.ingest_seg(me, &rx, payload);
+                } else {
+                    let _consumed = listeners.route_seg6(
+                        me, &src_ip6, src_port, dst_port, &rx, payload, next_hop_mac,
+                    );
+                }
+            }
         }
     }
     any
@@ -2579,9 +3113,16 @@ fn ring_tcp_recv(
         let mut idle = 0u32;
         let mut retransmits = 0u32;
         loop {
-            // Stop once the target's stream has ended or we've waited long enough.
+            // Stop as soon as the target has in-order bytes to deliver (a blocking
+            // recv returns available data promptly, like `read(2)` — it must not
+            // spin the whole receive deadline once data has arrived), or its stream
+            // has ended, or we've waited long enough. Without the `rx_len > 0` break
+            // a recv burned the full `TCP_DATA_ITERS` deadline even with data already
+            // buffered — harmless for a fast path that stayed under the kernel's
+            // control-channel timeout, but on the slower IPv6 loopback path it pushed
+            // the round past `RECV_TIMEOUT_NS`, surfacing as a spurious `TimedOut`.
             match conns.get_mut(target_id) {
-                Some(c) if c.peer_fin => break,
+                Some(c) if c.rx_len > 0 || c.peer_fin => break,
                 Some(_) => {}
                 None => break, // connection vanished (shouldn't happen mid-recv)
             }
@@ -2719,13 +3260,30 @@ fn ring_tcp_accept(
         Some(c) => c,
         None => return netipc::ring::ERR_WOULD_BLOCK, // accept queue empty
     };
-    // Write the peer address [ip:4][port_be:2] into the data window before installing
-    // the connection, so a window write error tears the (already-dequeued) connection
-    // down cleanly rather than leaking it.
-    let mut addr = [0u8; 6];
-    addr[..4].copy_from_slice(&conn.dst_ip);
-    addr[4..6].copy_from_slice(&conn.dst_port.to_be_bytes());
-    if !ring.write_data(sqe.data_off as usize, &addr) {
+    // Write the peer address into the data window before installing the connection,
+    // so a window write error tears the (already-dequeued) connection down cleanly
+    // rather than leaking it. An IPv6 peer needs 18 bytes (`[ip6:16][port_be:2]`);
+    // when the caller supplied a large-enough window we write that form, else the
+    // 6-byte IPv4 form (`[ip:4][port_be:2]`) — an IPv6 peer then reads back as
+    // 0.0.0.0, which a v4-only caller ignores anyway.
+    let wrote = if let Some(dst6) = conn.dst6 {
+        if sqe.data_len as usize >= 18 {
+            let mut addr = [0u8; 18];
+            addr[..16].copy_from_slice(&dst6);
+            addr[16..18].copy_from_slice(&conn.dst_port.to_be_bytes());
+            ring.write_data(sqe.data_off as usize, &addr)
+        } else {
+            let mut addr = [0u8; 6];
+            addr[4..6].copy_from_slice(&conn.dst_port.to_be_bytes());
+            ring.write_data(sqe.data_off as usize, &addr)
+        }
+    } else {
+        let mut addr = [0u8; 6];
+        addr[..4].copy_from_slice(&conn.dst_ip);
+        addr[4..6].copy_from_slice(&conn.dst_port.to_be_bytes());
+        ring.write_data(sqe.data_off as usize, &addr)
+    };
+    if !wrote {
         conn.close(me);
         return -1;
     }
@@ -2801,6 +3359,9 @@ pub extern "C" fn _start() -> ! {
     // (server-socket self-connections) circulate internally instead of being
     // dropped by slirp. Inert for every other frame.
     loopback::set_my_ip(me.ip);
+    // Same for the daemon's link-local IPv6 identity, so IPv6 self-connections
+    // (the OP_CONNECT6 loopback self-test) circulate internally too.
+    loopback::set_my_ip6(me.ip6);
 
     if !raw_open() {
         print("[netstack] FAIL: could not claim raw NIC (SYS_NET_RAW_OPEN)\n");

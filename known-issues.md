@@ -107,9 +107,19 @@ Phase 5 progresses:
 - **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
   source-address out-params (arg4/arg5) are left untouched (fine for a connected
   stream socket, but not for datagram semantics).
-- **IPv6 unsupported.** `AF_INET6` passes `sys_socket` (Linux does too) but
-  `connect` on an `AF_INET6` sockaddr returns `EAFNOSUPPORT`; only IPv4 connect
-  works. `getsockname` returns `EBADF` (local address not tracked).
+- **IPv6 connect: daemon+ring+client done, socket-fd wiring pending.** The daemon
+  now speaks full TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6:
+  Option<[u8;16]>` dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`;
+  v6 framing, `find_by_tuple6`/`route_seg6` demux, `connect6`/`connect_start6`/
+  `accept_syn6` constructors, IPv6-aware in-process loopback), the ring ABI has
+  `OP_CONNECT6`, and `NetstackConn::connect6`/`accept6` drive it end-to-end —
+  boot-validated by `netstack_client::self_test_connect6` (v6 handshake +
+  bidirectional data over the `fe80::/64`+EUI-64 loopback, `IPv6 parity ok`). What
+  is *not* yet wired is the AF_INET6 socket-fd layer: `sys_connect` on an
+  `AF_INET6` sockaddr still returns `EAFNOSUPPORT` (it does not yet parse
+  `sockaddr_in6` → `NetstackConn::connect6`). That syscall wiring is the remaining
+  follow-on (parallel to the server-socket-fd wiring gap above). `getsockname`
+  returns `EBADF` (local address not tracked).
 - **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
   recv ≤512 B per call (callers must loop). Not a correctness bug, but small.
 

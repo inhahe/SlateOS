@@ -233,6 +233,44 @@ impl NetstackConn {
         Ok(res)
     }
 
+    /// IPv6 sibling of [`connect`](Self::connect): open a connection to
+    /// `ip6:port` (daemon [`OP_CONNECT6`](netipc::ring::OP_CONNECT6)).
+    ///
+    /// The 16-byte peer address does not fit in the SQE's 64-bit `aux`, so it
+    /// travels in the ring data window (`SND_OFF`, 16 bytes) and the port occupies
+    /// the low 16 bits of `aux`; the daemon resolves the next hop via NDP (or, for
+    /// a loopback self-connect, diverts by IP without NDP). Result semantics match
+    /// [`connect`](Self::connect): `>= 0` established, `ERR_IN_PROGRESS` a started
+    /// non-blocking handshake, other `< 0` a failure to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn connect6(&mut self, ip6: &[u8; 16], port: u16, nonblock: bool) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        if !ring.write_data(SND_OFF as usize, ip6) {
+            return Err(KernelError::InternalError);
+        }
+        let ud = self.next_ud();
+        let mut aux = u64::from(port);
+        if nonblock {
+            aux |= netipc::ring::CONNECT_NONBLOCK;
+        }
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_CONNECT6,
+            conn_id: self.conn_id,
+            data_off: SND_OFF,
+            data_len: 16,
+            user_data: ud,
+            aux,
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res >= 0 || res == netipc::ring::ERR_IN_PROGRESS {
+            self.connected = true;
+        }
+        Ok(res)
+    }
+
     /// Send `buf` to the connected peer, chunking into ≤`SND_CAP` pieces (one
     /// daemon round-trip each).
     ///
@@ -489,6 +527,41 @@ impl NetstackConn {
             conn_id: listener_id,
             data_off: RCV_OFF,
             data_len: 6,
+            user_data: ud,
+            aux: u64::from(new_conn_id),
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        if res == 0 && !ring.read_data(RCV_OFF as usize, peer) {
+            return Err(KernelError::InternalError);
+        }
+        Ok(res)
+    }
+
+    /// IPv6 sibling of [`accept`](Self::accept): dequeue one established connection
+    /// and read back an 18-byte peer address `[ip6:16][port_be:2]`.
+    ///
+    /// The daemon writes the IPv6 form when the accepted connection is IPv6 and the
+    /// window is at least 18 bytes; a listener is family-agnostic, so this is the
+    /// variant to call when the accepted connection is expected to be IPv6. Result
+    /// semantics match [`accept`](Self::accept).
+    ///
+    /// # Errors
+    ///
+    /// Returns a control-protocol fault (see [`connect`](Self::connect)), or a
+    /// failure to read back the peer-address window.
+    pub fn accept6(
+        &mut self,
+        listener_id: u32,
+        new_conn_id: u32,
+        peer: &mut [u8; 18],
+    ) -> KernelResult<i32> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_ACCEPT,
+            conn_id: listener_id,
+            data_off: RCV_OFF,
+            data_len: 18,
             user_data: ud,
             aux: u64::from(new_conn_id),
         };
@@ -1157,6 +1230,213 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     conn.close()?;
     crate::serial_println!(
         "[netstack-client]   listen/accept + bidirectional data over loopback ok — server-socket parity ok"
+    );
+    Ok(Some(()))
+}
+
+/// Boot self-test: prove the **IPv6 connect** path (`OP_CONNECT6`) over the daemon,
+/// closing the final `D-NETSOCK-SYNC` parity gap before the `net.userspace` default
+/// can be flipped (increment 5.7). The kernel-resident stack could open AF_INET6
+/// connections; the daemon was IPv4-only until this increment, so this test asserts
+/// that a full TCP-over-IPv6 handshake and bidirectional data exchange now work
+/// through the userspace daemon.
+///
+/// Like [`self_test_listen_accept`], it exercises the daemon's **in-process software
+/// loopback** because slirp offers no IPv6 peer (and no IPv6 router, so real NDP
+/// cannot be driven end-to-end under QEMU). The connect target is the daemon's own
+/// **link-local address** `fe80::/64 + EUI-64(mac)` — the same value the daemon
+/// derives from its NIC MAC for `me.ip6`. A frame addressed to `me.ip6` is diverted
+/// into the daemon's internal RX FIFO (bypassing NDP entirely, since the loopback
+/// demuxes by destination IP), so the v6 handshake completes in-process exactly as
+/// the v4 loopback does. A single non-blocking `OP_CONNECT6` pump drives the 3-way
+/// handshake for both ends; `OP_ACCEPT` (18-byte peer window: `[ip6:16][port:2]`)
+/// dequeues the passive side; then a bidirectional exchange proves the accepted
+/// IPv6 connection is a real, addressable socket.
+///
+/// The kernel crate cannot depend on `netproto`, so the EUI-64 link-local
+/// derivation is inlined here (RFC 4291 App. A: flip the U/L bit of the first MAC
+/// octet, insert `FF:FE` in the middle) to reproduce `icmpv6::link_local_from_mac`.
+///
+/// Returns `Ok(Some(()))` if the v6 connect→accept→data round-trip completed,
+/// `Ok(None)` if the interface has no MAC yet (no NIC — the loopback v6 divert keys
+/// on a non-zero `me.ip6` derived from the MAC), and `Err` on a real
+/// control-protocol fault or a parity break.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults from the client; reports a failed
+/// connect6/accept over loopback, or a data mismatch, as an error.
+pub fn self_test_connect6() -> KernelResult<Option<()>> {
+    /// Session-local listener id.
+    const LISTENER_ID: u32 = 110;
+    /// Id under which the accepted server-side connection is installed.
+    const ACCEPTED_ID: u32 = 111;
+    /// Loopback listen port (arbitrary, distinct from the v4 self-test's).
+    const PORT: u16 = 9101;
+    const CLIENT_MSG: &[u8] = b"slate-connect6:ping";
+    const SERVER_MSG: &[u8] = b"slate-connect6:pong";
+
+    let mac = crate::net::interface::mac().0;
+    if mac == [0u8; 6] {
+        // No NIC → the daemon has no me.ip6 to loop back to.
+        return Ok(None);
+    }
+
+    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
+    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
+    let ll: [u8; 16] = [
+        0xFE,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
+        mac[5],
+    ];
+
+    let mut conn = NetstackConn::open()?;
+
+    // 1. Register the passive listener BEFORE connecting (family-agnostic port).
+    let listen_res = conn.listen(LISTENER_ID, PORT)?;
+    if listen_res != 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 listen(port={}) failed (result {}) — IPv6 parity broken",
+            PORT,
+            listen_res
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Non-blocking IPv6 connect to our own link-local: one OP_CONNECT6 pump
+    //    drives the full handshake for both ends over the software loopback.
+    let connect_res = conn.connect6(&ll, PORT, true)?;
+    if connect_res != 0 && connect_res != netipc::ring::ERR_IN_PROGRESS {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 loopback connect failed (result {}) — IPv6 parity broken",
+            connect_res
+        );
+        return Err(KernelError::InternalError);
+    }
+    if connect_res == netipc::ring::ERR_IN_PROGRESS {
+        let mut writable = false;
+        for _ in 0..16u32 {
+            let (_r, w, err) = conn.poll_ready()?;
+            if err {
+                conn.close()?;
+                crate::serial_println!(
+                    "[netstack-client]   v6 loopback connect reported POLL_ERR — IPv6 parity broken"
+                );
+                return Err(KernelError::InternalError);
+            }
+            if w {
+                writable = true;
+                break;
+            }
+        }
+        if !writable {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   v6 loopback connect never resolved to writable — IPv6 parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 3. Accept the passive connection (18-byte v6 peer window).
+    let mut peer = [0u8; 18];
+    let mut accepted = false;
+    for _ in 0..16u32 {
+        let ares = conn.accept6(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
+        if ares == 0 {
+            accepted = true;
+            break;
+        }
+        if ares != netipc::ring::ERR_WOULD_BLOCK {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   v6 accept failed (result {}) — IPv6 parity broken",
+                ares
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if !accepted {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 accept never dequeued the loopback connection — IPv6 parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The accepted peer's source IPv6 must be our own link-local.
+    let peer_ip6 = peer.get(..16).unwrap_or(&[]);
+    if peer_ip6 != ll {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   accepted v6 peer address != local link-local — v6 demux broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+    let peer_port = u16::from_be_bytes([
+        peer.get(16).copied().unwrap_or(0),
+        peer.get(17).copied().unwrap_or(0),
+    ]);
+    crate::serial_println!(
+        "[netstack-client]   accepted IPv6 loopback connection from fe80::…:{} on port {}",
+        peer_port,
+        PORT
+    );
+
+    // 4. Client → server.
+    let sent = conn.send(CLIENT_MSG, false)?;
+    if sent <= 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 loopback client send returned {} — IPv6 parity broken",
+            sent
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !recv_exact(&mut conn, ACCEPTED_ID, CLIENT_MSG)? {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 server did not receive the client's message intact — IPv6 parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 5. Server → client.
+    let sent2 = conn.send_on(ACCEPTED_ID, SERVER_MSG, false)?;
+    if sent2 <= 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 loopback server send returned {} — IPv6 parity broken",
+            sent2
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !recv_exact(&mut conn, CONN_ID, SERVER_MSG)? {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   v6 client did not receive the server's message intact — IPv6 parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    conn.close()?;
+    crate::serial_println!(
+        "[netstack-client]   IPv6 connect/accept + bidirectional data over loopback ok — IPv6 parity ok"
     );
     Ok(Some(()))
 }

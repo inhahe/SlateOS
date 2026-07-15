@@ -3337,10 +3337,30 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
+    // Slirp offers no IPv6 peer or router, so this too drives the in-process
+    // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,
+    // derived from the NIC MAC) completes a full TCP-over-IPv6 handshake for both
+    // ends, and accept + a bidirectional exchange prove the accepted v6 connection
+    // is a real socket. This closes the last pre-5.7 IPv6 parity gap.
+    match crate::net::netstack_client::self_test_connect6() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack connect6: IPv6 handshake completed over loopback and \
+             echoed data both ways — IPv6-connect parity proven over the daemon"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack connect6: no NIC MAC — check skipped"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack connect6 error ({:?})",
+            e
+        ),
+    }
+
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept parity checks done; daemon now owns the NIC for the \
-         system's lifetime"
+         nonblock-send/listen-accept/connect6 parity checks done; daemon now owns the NIC for \
+         the system's lifetime"
     );
     Ok(())
 }

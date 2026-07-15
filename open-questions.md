@@ -25,12 +25,21 @@ Format for each entry:
 
 ## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)
 
-**Status:** OPEN (logged 2026-07-14). Not blocking: the daemon+ring listen/accept
-layer is done and boot-validated (see `net-userspace-migration.md`, "Listen/accept
-server sockets over the daemon"); this question only gates the final AF_INET
-**socket-fd** wiring (`sys_bind`/`sys_listen`/`sys_accept4` +
-`net::socket::SockState::Listening`). While it is open, Claude is working the other
-remaining pre-5.7 gap — **IPv6 connect** in the daemon — which has no such fork.
+**Status:** OPEN (logged 2026-07-14; **now the sole remaining socket-fd gate for
+the 5.7 default-flip** as of 2026-07-14). The daemon+ring listen/accept layer is
+done and boot-validated (see `net-userspace-migration.md`, "Listen/accept server
+sockets over the daemon"); this question gates the final AF_INET/AF_INET6
+**server** socket-fd wiring (`sys_bind`/`sys_listen`/`sys_accept4` +
+`net::socket::SockState::Listening`). Every other pre-5.7 gap is now closed:
+non-blocking recv/connect/send, honest poll/epoll readiness, and — as of commits
+cf1cba879/e99fb694f — **IPv6 connect end-to-end through the socket-fd layer**
+(`sys_connect`/`getpeername` on `AF_INET6` → `NetstackConn::connect6`). So this
+fork now blocks the netstack-migration thread's completion: with server sockets
+unwired, flipping `net.userspace` by default would regress server programs
+(`bind`/`listen`/`accept` would hit the stubbed path). Claude has paused the
+netstack thread here rather than pick Option A autonomously, because the operator
+explicitly logged this fork *and* the 5.7 flip itself is a user-visible,
+costly-to-reverse policy that warrants operator sign-off.
 
 **Background.** In the daemon, a session == one SHM ring (one `RingConns` table +
 its listeners). `OP_ACCEPT` installs the newly-established connection into the

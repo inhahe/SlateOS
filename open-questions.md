@@ -76,6 +76,26 @@ instances properly (holder-side preempt protection), and each is documented in
 so far: `kernel/src/mm/heap.rs`, `kernel/src/container.rs`. Detector:
 `scripts/wedge-soak.sh`.
 
+**Update (2026-07-15b) — a *suspected* third instance narrows toward the
+escalation trigger.** `B-FORKEXEC-BOOT-HANG` (known-issues.md) is a silent,
+output-less boot hang that a static re-audit this session pinned to the
+**task-exit teardown path** (last serial line `[sched] Task N exiting`, then
+`task_exit`→`notify_exit_hooks`→process teardown), *after* ruling out the
+waitpid/scheduler-wakeup hypotheses (the harness polls, never blocks; the
+`wake`/`block_current` `pending_wake` protocol is sound; the parent already
+reached Zombie). A mid-teardown silent freeze is the exact signature of a
+holder-preemption spin-deadlock — the same class as the two fixed ones — which
+would make it a **suspected third instance**. It is not yet *confirmed* (needs a
+repro with `--hard-lockup-watchdog` RIP capture to prove the wedge sits in a
+`spin::Mutex::lock` spin vs. an idle-reschedule bug). Per the recommendation
+above ("switch to C if a third or fourth instance shows up"), a confirmed third
+instance would tip the balance toward **C** (add a `PreemptSpinMutex` and
+convert the contended non-leaf locks on the process-exit/reap path:
+`PROCESS_TABLE`, the reaper, and the exit-hook locks). Recommend the operator
+decide between staying on **A** vs. pre-authorizing the targeted **C** sweep of
+the exit/teardown path specifically (a bounded, non-kernel-wide subset) now that
+two separate intermittent boot bugs both point at teardown-path contention.
+
 ---
 
 ## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)

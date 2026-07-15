@@ -138,7 +138,12 @@ ran this boot — the hang is ~300 lines of test earlier). The change only
 perturbed timing.
 
 **Reproduce:** run `bash scripts/boot-test.sh` repeatedly. Non-deterministic;
-observed once. **PROPER FIX (needs a repro):** on the next occurrence, break in
+observed once. **Diagnostic aid (2026-07-15):** `boot-test.sh` now echoes the
+last 25 serial lines to stdout on any timeout (independently of the serial
+file, which a re-run overwrites), so the next occurrence records its freeze
+point in the test output automatically; the harness also hints to re-run with
+`--hard-lockup-watchdog` to capture the wedged guest RIP via the i6300esb NMI +
+HMP monitor. **PROPER FIX (needs a repro):** on the next occurrence, break in
 with the debugger (or add a watchdog that dumps all task states after N idle
 ticks) to see whether the parent task is blocked in `waitpid` with the child
 already reaped (missed wakeup) or whether the run queue is genuinely empty with

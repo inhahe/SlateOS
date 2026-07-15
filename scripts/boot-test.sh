@@ -489,5 +489,21 @@ if [ "$BENCH" -eq 1 ] && [ -f "$SERIAL_FILE" ] && grep -q "BOOT_OK" "$SERIAL_FIL
 fi
 
 echo "$WAIT_MARKER not found within ${TIMEOUT}s."
+# Surface WHERE the boot froze.  On a silent wedge the harness otherwise prints
+# only this line, and the operator/next session must manually `tail` the serial
+# file — which a subsequent re-run then overwrites, losing the freeze context
+# (this exact loss bit the fork+exec-hang investigation, known-issues.md
+# B-FORKEXEC-BOOT-HANG).  Echoing the tail to stdout preserves it in the test
+# output independently of the serial file.  Pure post-kill log processing: the
+# guest is already dead, so this cannot perturb any (timing-sensitive) boot.
+if [ -f "$SERIAL_FILE" ]; then
+    echo "=== Last 25 serial lines before the wedge (freeze point) ==="
+    tail -n 25 "$SERIAL_FILE" || true
+    echo "=== (end serial tail) ==="
+    if [ "$HARD_LOCKUP_WATCHDOG" -eq 0 ]; then
+        echo "Hint: re-run with --hard-lockup-watchdog to capture the wedged"
+        echo "      guest RIP via the i6300esb NMI + HMP monitor (see Q20)."
+    fi
+fi
 echo "=== Boot test FAILED ==="
 exit 1

@@ -120,8 +120,14 @@ Phase 5 progresses:
   `net::socket::connect6` → `NetstackConn::connect6` (`socket_connect_from_user`
   dispatches on `sa_family`: 2 → v4, 10 → v6, else `EAFNOSUPPORT`). `getpeername`
   on a v6-connected socket returns a `sockaddr_in6` (`socket_write_peer_addr6`,
-  fed by `net::socket::peer6`/`SocketInner.peer_ip6`). Remaining v6 socket-fd gap:
-  `getsockname` still returns `EBADF` (local address not tracked), and the
+  fed by `net::socket::peer6`/`SocketInner.peer_ip6`). **`getsockname` now works
+  for daemon sockets (both v4 and v6)** via the new `OP_LOCALADDR` ring op: the
+  daemon writes its own interface address + the connection's ephemeral
+  `local_port` to the data window (`[ip:4][port_be:2]` v4 / `[ip6:16][port_be:2]`
+  v6), surfaced through `NetstackConn::local_addr` → `net::socket::local` →
+  `sys_getsockname` (Path-B branch; returns `sockaddr_in`/`sockaddr_in6`,
+  `ENOTCONN` on an unconnected socket). Validated by `self_test_connect6` step 6
+  (`v6 getsockname: local fe80::…:PORT ok`). Remaining v6 socket-fd gap: the
   server-socket-fd path (bind/listen/accept4) is the separate gap below.
 - **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
   recv ≤512 B per call (callers must loop). Not a correctness bug, but small.

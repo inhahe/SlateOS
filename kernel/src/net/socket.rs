@@ -482,6 +482,27 @@ pub fn peer6(handle: SocketHandle) -> KernelResult<(Option<[u8; 16]>, u16)> {
     Ok((guard.peer_ip6, guard.peer_port))
 }
 
+/// The socket's **local** endpoint for `getsockname`, queried live from the daemon
+/// (which owns the interface IP and the ephemeral source port it assigned).
+///
+/// Only meaningful once the socket is connected — an unconnected socket has no
+/// daemon-assigned local port yet. Returns a [`LocalEndpoint`] whose variant
+/// conveys the address family.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `NotConnected` — the socket is not connected (no local port assigned).
+/// - protocol faults propagated from [`NetstackConn::local_addr`].
+pub fn local(handle: SocketHandle) -> KernelResult<crate::net::netstack_client::LocalEndpoint> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.state != SockState::Connected {
+        return Err(KernelError::NotConnected);
+    }
+    guard.conn.local_addr()
+}
+
 /// Number of live sockets (test/introspection helper).
 #[must_use]
 pub fn live_count() -> usize {

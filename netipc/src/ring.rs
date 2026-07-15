@@ -162,6 +162,19 @@ pub const OP_ACCEPT: u8 = 0x08;
 /// window too small). Migration Phase 5, closing the IPv6-connect part of the
 /// `D-NETSOCK-SYNC` parity gap.
 pub const OP_CONNECT6: u8 = 0x09;
+/// Query the **local** address of the connection named by `conn_id` (for
+/// `getsockname`). The daemon writes the local endpoint into the data window at
+/// `data_off` — `[ip:4][port_be:2]` (6 bytes) for an IPv4 connection, or
+/// `[ip6:16][port_be:2]` (18 bytes) for an IPv6 connection — using the daemon's
+/// own interface address as the source IP and the connection's ephemeral local
+/// port. Completion `result` is the number of bytes written (`6` or `18`), so the
+/// kernel learns the address family from the length; `-1` = unknown connection or
+/// data window too small (must be ≥ 6 for v4, ≥ 18 for v6). The local endpoint is
+/// daemon-owned state (the NIC's configured IP and the source port the daemon
+/// chose when it built the SYN), so it can only be answered by the daemon — hence
+/// a dedicated query rather than kernel-side bookkeeping. Migration Phase 5,
+/// closing the `getsockname` part of the `D-NETSOCK-SYNC` parity gap.
+pub const OP_LOCALADDR: u8 = 0x0A;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels

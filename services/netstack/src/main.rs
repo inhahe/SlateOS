@@ -2905,6 +2905,34 @@ fn ring_tcp_process(
             netipc::ring::OP_ACCEPT => {
                 ring_tcp_accept(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
             }
+            netipc::ring::OP_LOCALADDR => {
+                // getsockname: report this connection's local endpoint. The source IP
+                // is the daemon's interface address (`me.ip`/`me.ip6`); the local port
+                // is the ephemeral port the connection chose. Family is conveyed by the
+                // written length (6 = v4, 18 = v6).
+                match conns.get_mut(sqe.conn_id) {
+                    None => -1, // no such connection
+                    Some(c) => {
+                        if c.dst6.is_some() {
+                            if sqe.data_len as usize >= 18 {
+                                let mut addr = [0u8; 18];
+                                addr[..16].copy_from_slice(&me.ip6);
+                                addr[16..18].copy_from_slice(&c.local_port.to_be_bytes());
+                                if ring.write_data(sqe.data_off as usize, &addr) { 18 } else { -1 }
+                            } else {
+                                -1
+                            }
+                        } else if sqe.data_len as usize >= 6 {
+                            let mut addr = [0u8; 6];
+                            addr[..4].copy_from_slice(&me.ip);
+                            addr[4..6].copy_from_slice(&c.local_port.to_be_bytes());
+                            if ring.write_data(sqe.data_off as usize, &addr) { 6 } else { -1 }
+                        } else {
+                            -1
+                        }
+                    }
+                }
+            }
             _ => -1, // unsupported opcode: report failure, still complete
         };
         let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };

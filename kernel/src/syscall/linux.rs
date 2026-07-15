@@ -36389,6 +36389,26 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    // Path B: getsockname on a connected daemon-backed stream socket returns the
+    // local endpoint (interface IP + ephemeral source port) the daemon assigned.
+    // An unconnected socket has no assigned local port → ENOTCONN (matching a
+    // socket that never bound/connected).
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        return match crate::net::socket::local(h) {
+            Ok(crate::net::netstack_client::LocalEndpoint::V4(ip, port)) => {
+                socket_write_peer_addr(args.arg1, args.arg2, &ip, port)
+            }
+            Ok(crate::net::netstack_client::LocalEndpoint::V6(ip6, port)) => {
+                socket_write_peer_addr6(args.arg1, args.arg2, &ip6, port)
+            }
+            Err(crate::error::KernelError::NotConnected) => linux_err(errno::ENOTCONN),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
     linux_err(errno::EBADF)
 }
 

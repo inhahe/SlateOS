@@ -91,6 +91,18 @@ pub fn userspace_enabled() -> bool {
     crate::fs::kernparam::is_set("net.userspace")
 }
 
+/// A connection's local endpoint, as reported by the daemon for `getsockname`.
+///
+/// The address family is carried by the variant (the daemon distinguishes them by
+/// the length it writes to the ring: 6 bytes for v4, 18 for v6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalEndpoint {
+    /// IPv4 local address `(ip, port)`.
+    V4([u8; 4], u16),
+    /// IPv6 local address `(ip6, port)`.
+    V6([u8; 16], u16),
+}
+
 /// A single client connection to the userspace `net.stack` daemon.
 ///
 /// Owns one shared-memory ring and one daemon-side TCP connection. Drive it with
@@ -570,6 +582,63 @@ impl NetstackConn {
             return Err(KernelError::InternalError);
         }
         Ok(res)
+    }
+
+    /// Query this connection's **local** endpoint for `getsockname`
+    /// (daemon [`OP_LOCALADDR`](netipc::ring::OP_LOCALADDR)).
+    ///
+    /// The daemon owns the local address — the NIC's configured IP and the
+    /// ephemeral source port it chose when it built the SYN — so it is asked
+    /// directly rather than tracked kernel-side. The daemon writes the endpoint
+    /// into the recv window and returns its length: `6` = IPv4 (`[ip:4][port:2]`),
+    /// `18` = IPv6 (`[ip6:16][port:2]`); the family is recovered from that length.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::NotConnected`] — the daemon reports no such connection
+    ///   (`-1`), i.e. the socket was never connected or has been torn down.
+    /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
+    ///   read back the address window / an unexpected length.
+    pub fn local_addr(&mut self) -> KernelResult<LocalEndpoint> {
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        // Ask for the 18-byte (v6) form; the daemon writes 6 for a v4 connection.
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_LOCALADDR,
+            conn_id: self.conn_id,
+            data_off: RCV_OFF,
+            data_len: 18,
+            user_data: ud,
+            aux: 0,
+        };
+        let res = self.submit_and_reap(&ring, &sqe)?;
+        match res {
+            6 => {
+                let mut buf = [0u8; 6];
+                if !ring.read_data(RCV_OFF as usize, &mut buf) {
+                    return Err(KernelError::InternalError);
+                }
+                let [a0, a1, a2, a3, p0, p1] = buf;
+                Ok(LocalEndpoint::V4([a0, a1, a2, a3], u16::from_be_bytes([p0, p1])))
+            }
+            18 => {
+                let mut buf = [0u8; 18];
+                if !ring.read_data(RCV_OFF as usize, &mut buf) {
+                    return Err(KernelError::InternalError);
+                }
+                let ip6: [u8; 16] = buf
+                    .get(..16)
+                    .and_then(|s| <[u8; 16]>::try_from(s).ok())
+                    .ok_or(KernelError::InternalError)?;
+                let port = buf
+                    .get(16..18)
+                    .and_then(|s| <[u8; 2]>::try_from(s).ok())
+                    .map(u16::from_be_bytes)
+                    .ok_or(KernelError::InternalError)?;
+                Ok(LocalEndpoint::V6(ip6, port))
+            }
+            _ => Err(KernelError::NotConnected),
+        }
     }
 
     /// Close the connection and end the daemon session.
@@ -1434,9 +1503,34 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
         return Err(KernelError::InternalError);
     }
 
+    // 6. getsockname: the client connection's local endpoint must be our own
+    //    link-local (this is a self-connect) with a non-zero ephemeral port.
+    match conn.local_addr()? {
+        LocalEndpoint::V6(ip6, lport) => {
+            if ip6 != ll || lport == 0 {
+                conn.close()?;
+                crate::serial_println!(
+                    "[netstack-client]   v6 getsockname wrong (ip6 mismatch or port 0) — parity broken"
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!(
+                "[netstack-client]   v6 getsockname: local fe80::…:{} ok",
+                lport
+            );
+        }
+        LocalEndpoint::V4(..) => {
+            conn.close()?;
+            crate::serial_println!(
+                "[netstack-client]   v6 getsockname returned an IPv4 endpoint — parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     conn.close()?;
     crate::serial_println!(
-        "[netstack-client]   IPv6 connect/accept + bidirectional data over loopback ok — IPv6 parity ok"
+        "[netstack-client]   IPv6 connect/accept + bidirectional data + getsockname over loopback ok — IPv6 parity ok"
     );
     Ok(Some(()))
 }

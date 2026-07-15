@@ -3389,10 +3389,18 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // previously only covered by code review, never a live ring-3 call.
     run_ring3_http_capstone();
 
+    // Ring-3 datagram capstone (UDP SOCK_DGRAM cutover): the datagram sibling of
+    // the HTTP capstone. `udpget` (a bare Linux-ABI ELF) does socket(SOCK_DGRAM)/
+    // bind()/sendto()/recvfrom()/close() over the persistent daemon, proving the
+    // *ring-3* datagram socket-fd dispatch wiring (sockaddr parse, fd install,
+    // errno mapping in `dispatch_linux` → `net::socket::dgram_*`) works end to end
+    // — previously only the kernel-context `self_test_udp_dns` covered it.
+    run_ring3_udp_capstone(&ifinfo.dns.0);
+
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept/connect6/ring3-capstone parity checks done; daemon now \
-         owns the NIC for the system's lifetime"
+         nonblock-send/listen-accept/connect6/ring3-capstone/ring3-udp parity checks done; \
+         daemon now owns the NIC for the system's lifetime"
     );
     Ok(())
 }
@@ -3504,6 +3512,102 @@ fn run_ring3_http_capstone() {
         ),
         None => serial_println!(
             "[spawn]   WARNING: ring3 HTTP capstone produced no exit code"
+        ),
+    }
+}
+
+/// Spawn the `udpget` ring-3 Linux-ABI ELF to send a DNS query and read the reply
+/// over the persistent `net.stack` daemon, and report its exit code.
+///
+/// This is the datagram half of the Phase-5 socket cutover proof: unlike the
+/// kernel-context `NetstackConn::self_test_udp_dns`, it drives the *real* Linux
+/// datagram socket syscalls (`socket(SOCK_DGRAM)`/`bind`/`sendto`/`recvfrom`/
+/// `close`) from an unprivileged process, so it validates the `dispatch_linux`
+/// datagram socket arms (`create_dgram`/`dgram_bind`/`dgram_send_to`/
+/// `dgram_recv_from`) end to end.
+///
+/// `dns_ip` is the interface's resolver address (`ifinfo.dns.0`); the query goes
+/// to `dns_ip:53`. A zero resolver (no DHCP-provided DNS) skips the check. Never
+/// fails the boot: network variance (no upstream under slirp) is logged as a
+/// non-fatal note, exactly like the other persistent-daemon parity checks.
+fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
+    if *dns_ip == [0, 0, 0, 0] {
+        serial_println!(
+            "[spawn]   ring3 UDP capstone: no resolver address (no DHCP DNS?) — check skipped"
+        );
+        return;
+    }
+
+    static UDPGET_ELF: &[u8] = include_bytes!(
+        "../../../services/udpget/target/x86_64-unknown-none/release/udpget"
+    );
+
+    // Format the resolver IP as a dotted-decimal argv string; port 53 (DNS).
+    let mut ip_buf = [0u8; 16];
+    let ip_len = fmt_ipv4_dotted(dns_ip, &mut ip_buf);
+    let ip_arg = &ip_buf[..ip_len];
+    let argv: &[&[u8]] = &[b"udpget", ip_arg, b"53"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+
+    let options = SpawnOptions {
+        name: "udpget",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    // Explicit Linux ABI: udpget is a bare static ELF (like httpget), so we state
+    // its ABI rather than relying on auto-detection.
+    let result = match spawn_process_with_abi(UDPGET_ELF, &options, pcb::AbiMode::Linux) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   WARNING: ring3 UDP capstone spawn returned {:?}", e);
+            return;
+        }
+    };
+
+    // Let the ring-3 process and the daemon run until udpget zombies (one blocking
+    // sendto + recvfrom), bounded by a deadline so a stuck fetch can't wedge boot.
+    let deadline = crate::hrtimer::now_ns().saturating_add(15_000_000_000); // 15s
+    loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            serial_println!(
+                "[spawn]   ring3 UDP capstone: process did not exit within 15s — tearing down"
+            );
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    match exit_code {
+        Some(0) => serial_println!(
+            "[spawn]   ring3 UDP capstone: OK — ring-3 socket(SOCK_DGRAM)/bind()/sendto()/\
+             recvfrom() over the daemon returned a DNS reply (exit 0)"
+        ),
+        Some(13) | Some(14) => serial_println!(
+            "[spawn]   ring3 UDP capstone: bind+sendto OK, no/invalid reply (no upstream?) — \
+             ring-3 datagram socket-syscall path proven (exit {})",
+            exit_code.unwrap_or_default()
+        ),
+        Some(code) => serial_println!(
+            "[spawn]   WARNING: ring3 UDP capstone exited {} (see udpget exit-code table)",
+            code
+        ),
+        None => serial_println!(
+            "[spawn]   WARNING: ring3 UDP capstone produced no exit code"
         ),
     }
 }

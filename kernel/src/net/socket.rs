@@ -97,6 +97,18 @@ pub enum SockState {
     Failed,
 }
 
+/// The socket's transport type. A stream socket (`SOCK_STREAM`) is driven by the
+/// connect→send/recv→close TCP lifecycle above; a datagram socket (`SOCK_DGRAM`)
+/// is connectionless — it `bind`s a local port and exchanges datagrams with
+/// explicit peer addresses via [`dgram_send_to`]/[`dgram_recv_from`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockKind {
+    /// `SOCK_STREAM` — a daemon-backed TCP connection.
+    Stream,
+    /// `SOCK_DGRAM` — a daemon-backed connectionless UDP socket.
+    Dgram,
+}
+
 /// Outcome of a [`connect`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectOutcome {
@@ -113,6 +125,15 @@ pub enum ConnectOutcome {
 struct SocketInner {
     /// The daemon-backed connection driving this socket.
     conn: NetstackConn,
+    /// Stream vs datagram transport.
+    kind: SockKind,
+    /// Datagram sockets only: whether the daemon-side UDP socket has been bound
+    /// yet (an explicit `bind(2)` or the implicit ephemeral auto-bind on the
+    /// first `sendto`/`recvfrom`, matching Linux). Meaningless for a stream socket.
+    bound: bool,
+    /// Datagram sockets only: the bound local port (for `getsockname`). `0` until
+    /// bound.
+    local_port: u16,
     /// Connection lifecycle state.
     state: SockState,
     /// Remembered peer address (for `getpeername`), set on a successful connect.
@@ -153,9 +174,32 @@ static SOCKET_TABLE: Mutex<BTreeMap<SocketId, SocketSlot>> = Mutex::new(BTreeMap
 /// Propagates the [`NetstackConn::open`] error if the SHM ring cannot be
 /// allocated/initialised.
 pub fn create() -> KernelResult<SocketHandle> {
+    create_kind(SockKind::Stream)
+}
+
+/// Create a new (unbound) connectionless datagram (`SOCK_DGRAM`) socket.
+///
+/// Allocates the SHM ring backing the daemon connection but does **not** contact
+/// the daemon yet — the daemon-side UDP socket is created on the first `bind(2)`
+/// (explicit) or on the first `sendto`/`recvfrom` (implicit ephemeral auto-bind,
+/// matching Linux).
+///
+/// # Errors
+///
+/// Propagates the [`NetstackConn::open`] error if the SHM ring cannot be
+/// allocated/initialised.
+pub fn create_dgram() -> KernelResult<SocketHandle> {
+    create_kind(SockKind::Dgram)
+}
+
+/// Shared constructor for [`create`] (stream) and [`create_dgram`] (datagram).
+fn create_kind(kind: SockKind) -> KernelResult<SocketHandle> {
     let conn = NetstackConn::open()?;
     let inner = SocketInner {
         conn,
+        kind,
+        bound: false,
+        local_port: 0,
         state: SockState::Created,
         peer_ip: [0; 4],
         peer_ip6: None,
@@ -400,6 +444,17 @@ pub fn recv(
 pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
+    // A datagram socket has no connection lifecycle: readiness is whatever the
+    // daemon-side UDP socket reports (readable iff a datagram is queued, always
+    // writable). An *unbound* datagram socket has no daemon UDP socket yet, so it
+    // can only be written (an implicit ephemeral bind happens on the first
+    // `sendto`); report writable-only, nothing to read, no error.
+    if guard.kind == SockKind::Dgram {
+        if guard.bound {
+            return guard.conn.poll_ready();
+        }
+        return Ok((false, true, false));
+    }
     match guard.state {
         SockState::Connected => guard.conn.poll_ready(),
         SockState::Connecting => {
@@ -529,6 +584,130 @@ pub fn shutdown(handle: SocketHandle, how: u64) -> KernelResult<()> {
         return Err(KernelError::NotConnected);
     }
     guard.conn.shutdown(how)
+}
+
+/// Explicitly `bind(2)` a datagram socket to `port` (host byte order; `0` asks the
+/// daemon for an ephemeral port). Returns the actually-bound local port.
+///
+/// Mirrors Linux `bind(2)` on a `SOCK_DGRAM` fd: it creates the daemon-side UDP
+/// socket and reserves the local port. A socket may be bound only once — a second
+/// `bind` (explicit, or after the implicit ephemeral auto-bind on first `sendto`)
+/// is `EINVAL`.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket, or already bound (Linux `EINVAL`).
+/// - `AddrInUse` — the requested port is already in use (Linux `EADDRINUSE`).
+/// - protocol faults propagated from [`NetstackConn::udp_bind`].
+pub fn dgram_bind(handle: SocketHandle, port: u16) -> KernelResult<u16> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    if guard.bound {
+        return Err(KernelError::InvalidArgument); // EINVAL — already bound
+    }
+    let local = guard.conn.udp_bind(port)?;
+    guard.bound = true;
+    guard.local_port = local;
+    Ok(local)
+}
+
+/// Ensure a datagram socket has a daemon-side UDP socket, performing the implicit
+/// ephemeral auto-bind (Linux binds an unbound `SOCK_DGRAM` to an ephemeral port on
+/// the first `sendto`/`recvfrom`). No-op if already bound. Caller holds the guard.
+fn ensure_bound(guard: &mut SocketInner) -> KernelResult<()> {
+    if !guard.bound {
+        let local = guard.conn.udp_bind(0)?;
+        guard.bound = true;
+        guard.local_port = local;
+    }
+    Ok(())
+}
+
+/// Send `buf` as a single datagram to `ip:port` from a datagram socket. Returns the
+/// number of bytes accepted (a datagram is all-or-nothing, so this equals
+/// `buf.len()` on success). Auto-binds an ephemeral local port on first use.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - `MsgSize` — the datagram exceeds the maximum a single `sendto` can carry
+///   (Linux `EMSGSIZE`).
+/// - protocol faults propagated from [`NetstackConn::udp_send_to`].
+pub fn dgram_send_to(
+    handle: SocketHandle,
+    ip: &[u8; 4],
+    port: u16,
+    buf: &[u8],
+) -> KernelResult<i32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    ensure_bound(&mut guard)?;
+    guard.conn.udp_send_to(ip, port, buf)
+}
+
+/// Receive one datagram into `buf` from a datagram socket. Returns the payload
+/// length copied plus the source `(ip, port)`. Auto-binds an ephemeral local port on
+/// first use (so a `recvfrom` before any `sendto` still listens on a port).
+///
+/// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a receive with no
+/// datagram queued returns [`KernelError::WouldBlock`] (→ `EAGAIN`).
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - `WouldBlock` — `nonblock` was set and no datagram was ready.
+/// - protocol faults propagated from [`NetstackConn::udp_recv_from`].
+pub fn dgram_recv_from(
+    handle: SocketHandle,
+    buf: &mut [u8],
+    nonblock: bool,
+) -> KernelResult<(i32, [u8; 4], u16)> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    ensure_bound(&mut guard)?;
+    guard.conn.udp_recv_from(buf, nonblock)
+}
+
+/// The bound local port of a datagram socket (`getsockname`), or `0` if not yet
+/// bound. The daemon owns the interface IP, so callers pair this with the
+/// interface address for a full `sockaddr_in`.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+pub fn dgram_local_port(handle: SocketHandle) -> KernelResult<u16> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(guard.local_port)
+}
+
+/// Whether a socket handle refers to a datagram (`SOCK_DGRAM`) socket. Lets the
+/// syscall layer route `bind`/`sendto`/`recvfrom`/`getsockname` to the datagram
+/// path without duplicating the table lookup logic.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn is_dgram(handle: SocketHandle) -> KernelResult<bool> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    Ok(guard.kind == SockKind::Dgram)
 }
 
 /// Number of live sockets (test/introspection helper).

@@ -107,11 +107,14 @@ honour non-blocking recv/send/connect, honest poll/epoll readiness,
 `MSG_PEEK` per-call flags. The remaining daemon-socket gaps are the large,
 non-incremental ones: **(1) server sockets** (`bind`/`listen`/`accept4`) —
 *gated on operator decision Q23* (`open-questions.md`); **(2) UDP `SOCK_DGRAM`**
-— the daemon datagram-socket layer, ring ABI, and kernel client are now landed
-(bound datagram sockets over `OP_UDP_BIND`/`OP_UDP_SEND`/`OP_UDP_RECV`,
-boot-validated by `self_test_udp_dns`); what remains is the AF_INET **socket-fd
-wiring** (`sys_socket(SOCK_DGRAM)`/`sendto`/`recvfrom` routing) — analogous to
-the server-socket "daemon+ring done, fd wiring pending" state; and **(3) send
+— now **complete end-to-end**: the daemon datagram-socket layer, ring ABI, kernel
+client, *and* the AF_INET socket-fd wiring are all landed. A userspace
+`socket(AF_INET, SOCK_DGRAM)` is a real daemon-backed UDP socket:
+`bind`/`sendto`/`recvfrom`/`getsockname` and `poll`/`epoll` route to
+`net::socket::create_dgram`/`dgram_bind`/`dgram_send_to`/`dgram_recv_from` over
+`OP_UDP_BIND`/`OP_UDP_SEND`/`OP_UDP_RECV`, boot-validated by `self_test_udp_dns`.
+Remaining UDP gaps are IPv6 datagrams and a UDP `connect()` default-peer (both
+documented follow-ups, below), not blockers. The last big gap is **(3) send
 pipelining** — the daemon's single-outstanding-segment sender is a *deliberate*
 minimal-TCP design, so multi-segment/windowed send is a design change with
 tradeoffs, not a bug fix.
@@ -180,8 +183,8 @@ Phase 5 progresses:
   `sys_accept4` do not route to the daemon and `net::socket` has no
   `SockState::Listening`, so a userspace `listen(2)`/`accept(2)` on a daemon-backed
   socket still isn't served. That syscall wiring is the remaining follow-on.
-- **UDP `SOCK_DGRAM`: daemon+ring+client done, socket-fd wiring pending.** The
-  daemon now hosts a fixed table of bound connectionless datagram sockets
+- **UDP `SOCK_DGRAM`: complete end-to-end (daemon+ring+client+socket-fd wiring).**
+  The daemon hosts a fixed table of bound connectionless datagram sockets
   (`UdpSock`/`UdpSocks` in `services/netstack/src/main.rs`) served by ring ops
   `OP_UDP_BIND` (ephemeral-port picking + `EADDRINUSE`), `OP_UDP_SEND`
   (`EMSGSIZE` on oversize), and `OP_UDP_RECV` (which prepends a 24-byte in-band
@@ -191,15 +194,27 @@ Phase 5 progresses:
   kernel client exposes `NetstackConn::udp_bind`/`udp_send_to`/`udp_recv_from`,
   boot-validated end-to-end by `netstack_client::self_test_udp_dns` (bind an
   ephemeral port, send a real DNS `A`-query to the resolver, read the reply back
-  from port 53). What is *not* yet wired is the AF_INET socket-fd layer:
-  `sys_socket(SOCK_DGRAM)`, `sendto`/`recvfrom` fd routing, and a
-  `SockState`/`NetstackConn` datagram variant in `net::socket`, so a userspace
-  `socket(AF_INET, SOCK_DGRAM)` still isn't served over the daemon. That syscall
-  wiring is the remaining follow-on. **Limitations:** IPv4-only (the daemon UDP
-  layer has no v6 datagram path yet); the receive queue is 2 deep per socket and
-  drops the oldest datagram on overflow (UDP is lossy); and it inherits the
-  daemon's single-active-phase RX-demux limitation (`D-NETSTACK-RX-DEMUX`) — the
-  `udp_pump` drops interleaved TCP frames while draining, same as the TCP pump.
+  from port 53). The **AF_INET socket-fd layer is now wired**: `net::socket` grew a
+  `SockKind::{Stream,Dgram}` transport tag and `create_dgram`/`dgram_bind`/
+  `dgram_send_to`/`dgram_recv_from`/`dgram_local_port`/`is_dgram`; the Linux
+  syscall layer routes `socket(AF_INET, SOCK_DGRAM)` → `create_dgram`,
+  `bind` → `dgram_bind` (`socket_dgram_bind_from_user`), `sendto` →
+  `dispatch_dgram_sendto` (destination `sockaddr_in`; `EDESTADDRREQ` on a NULL
+  dest — no UDP `connect()` default-peer yet), `recvfrom` →
+  `dispatch_dgram_recvfrom` (fills the real per-datagram source address, truncates
+  a short buffer like Linux without `MSG_TRUNC`), `getsockname` → `dgram_local_port`
+  (reports `0.0.0.0:port` — the daemon owns the interface IP and has no UDP
+  `OP_LOCALADDR` yet), and `poll`/`epoll` → `poll_ready` (a bound dgram socket is
+  writable + readable-when-queued; unbound is writable-only). Implicit ephemeral
+  auto-bind on the first `sendto`/`recvfrom` matches Linux. **Remaining follow-ups
+  (not blockers):** IPv6 datagrams (the daemon UDP layer has no v6 path — a
+  `bind`/`sendto` with `AF_INET6` returns `EAFNOSUPPORT`); a UDP `connect()` to fix
+  a default peer (so `send`/`recv` without an address work); and UDP `getsockname`
+  reporting the real interface IP (needs a UDP `OP_LOCALADDR`). **Limitations:** the
+  receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
+  is lossy); and it inherits the daemon's single-active-phase RX-demux limitation
+  (`D-NETSTACK-RX-DEMUX`) — the `udp_pump` drops interleaved TCP frames while
+  draining, same as the TCP pump.
 - **`recvfrom` source-address out-params now populated (parity fix).**
   `recvfrom`'s `src_addr`/`addrlen` (arg4/arg5) are filled with the connected
   peer's endpoint on a successful receive, matching Linux for a connected stream
@@ -212,9 +227,10 @@ Phase 5 progresses:
   regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
   `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
   never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
-  `MSG_*` flags (`MSG_OOB`, `MSG_TRUNC`) are still ignored, and true
-  datagram (UDP) source addresses await the daemon-backed `SOCK_DGRAM` path
-  (today's daemon sockets are connected streams, so the peer *is* the source).
+  `MSG_*` flags (`MSG_OOB`, `MSG_TRUNC`) are still ignored. (For a **datagram**
+  socket, `recvfrom` now reports the *real* per-datagram source address — see the
+  `SOCK_DGRAM` bullet above — via `dispatch_dgram_recvfrom`; the connected-stream
+  path below reports the fixed peer.)
   **`MSG_WAITALL` (arg3) is now honoured** on `recv`/`recvfrom`: on a blocking
   socket it loops (`socket_recv_waitall`, ≤4 KiB chunks) until the full request
   is read, terminating early only on EOF or error; under `O_NONBLOCK`/

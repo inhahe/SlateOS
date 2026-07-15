@@ -973,6 +973,7 @@ pub mod errno {
     pub const ELOOP: i32 = 40;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    pub const EDESTADDRREQ: i32 = 89;
     pub const EMSGSIZE: i32 = 90;
     pub const ENOPROTOOPT: i32 = 92;
     pub const EPROTONOSUPPORT: i32 = 93;
@@ -35884,14 +35885,27 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     }
     // Path B userspace-netstack cutover (design-decisions.md §63/§66):
     // when the `net.userspace` boot switch is set, an AF_INET/AF_INET6
-    // SOCK_STREAM socket becomes a real daemon-backed stream socket
+    // SOCK_STREAM socket becomes a real daemon-backed stream socket, and a
+    // SOCK_DGRAM socket becomes a real daemon-backed UDP socket
     // ([`crate::net::socket`]).  Every other family/type — and the entire
     // socket surface when the switch is off — stays ENOSYS (staged cutover:
     // the in-kernel resident stack is authoritative until the default flips).
     // All the gate checks above have already validated (domain, type,
-    // protocol); by here a matching (2|10, SOCK_STREAM) has protocol 0 or TCP.
+    // protocol); by here a matching (2|10, SOCK_STREAM) has protocol 0 or TCP,
+    // and a matching (2|10, SOCK_DGRAM) has protocol 0 or UDP/UDPLITE.  We only
+    // route the protocols the daemon actually speaks: TCP for stream, plain UDP
+    // for datagram.  IPPROTO_UDPLITE=136 is a distinct wire protocol the daemon
+    // does not implement — routing it to a plain-UDP socket would silently give
+    // the wrong semantics, so it falls through to ENOSYS (unimplemented) rather
+    // than being quietly aliased to UDP.
+    let daemon_proto_ok = match sock_type {
+        1 => matches!(protocol, 0 | 6),  // SOCK_STREAM: default or IPPROTO_TCP
+        2 => matches!(protocol, 0 | 17), // SOCK_DGRAM: default or IPPROTO_UDP
+        _ => false,
+    };
     if matches!(domain, 2 | 10)
-        && sock_type == 1
+        && matches!(sock_type, 1 | 2)
+        && daemon_proto_ok
         && crate::net::netstack_client::userspace_enabled()
     {
         // A real caller is required — kernel context has no fd table.
@@ -35904,7 +35918,13 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
         // object itself does not track it.
         let nonblock = sock_flags & 0o4000 != 0;
         let cloexec = sock_flags & 0o2_000_000 != 0;
-        let handle = match crate::net::socket::create() {
+        // SOCK_STREAM=1 -> TCP stream socket; SOCK_DGRAM=2 -> UDP datagram socket.
+        let created = if sock_type == 2 {
+            crate::net::socket::create_dgram()
+        } else {
+            crate::net::socket::create()
+        };
+        let handle = match created {
             Ok(h) => h,
             Err(e) => return linux_err(linux_errno_for(e)),
         };
@@ -36215,7 +36235,60 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
     }
+    // Path B userspace-netstack cutover: `bind(2)` on a daemon-backed datagram
+    // (`SOCK_DGRAM`) socket reserves a local UDP port. Stream sockets stay EBADF
+    // (server-socket bind/listen/accept is a separate, operator-gated increment —
+    // known-issues D-NETSOCK-SYNC / open-question Q23).
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        if crate::net::socket::is_dgram(h).unwrap_or(false) {
+            return socket_dgram_bind_from_user(h, args.arg1, addr_len);
+        }
+    }
     linux_err(errno::EBADF)
+}
+
+/// Parse a user `struct sockaddr_in` and `bind(2)` a datagram socket to its port.
+///
+/// The daemon owns the interface IP, so only the `sin_port` matters (a bind to a
+/// specific local IP is accepted but the address is the daemon's interface); a
+/// `sin_port` of 0 asks for an ephemeral port. Only `AF_INET` is supported (IPv6
+/// UDP is a documented follow-up); any other family is `EAFNOSUPPORT`.
+fn socket_dgram_bind_from_user(
+    h: crate::net::socket::SocketHandle,
+    addr_ptr: u64,
+    addr_len: i32,
+) -> SyscallResult {
+    let mut fam = [0u8; 2];
+    // SAFETY: the gate validated >= 2 bytes readable at addr_ptr; copy_from_user
+    // re-checks under SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, fam.as_mut_ptr(), 2) } {
+        return linux_err(linux_errno_for(e));
+    }
+    let family = u16::from_ne_bytes(fam);
+    if family != 2 {
+        return linux_err(errno::EAFNOSUPPORT);
+    }
+    // `struct sockaddr_in` is 16 bytes.
+    #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+    if (addr_len as usize) < 16 {
+        return linux_err(errno::EINVAL);
+    }
+    let mut sa = [0u8; 16];
+    // SAFETY: the gate validated `addr_len` (>= 16) bytes readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+        return linux_err(linux_errno_for(e));
+    }
+    // sa_family(2), sin_port (BE u16), sin_addr (4 octets, ignored — daemon owns it).
+    let [_, _, p0, p1, ..] = sa;
+    let port = u16::from_be_bytes([p0, p1]);
+    match crate::net::socket::dgram_bind(h, port) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `listen(sockfd, backlog)`.
@@ -36597,6 +36670,18 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        // A datagram socket reports its bound local port with INADDR_ANY (0.0.0.0):
+        // the daemon owns the interface IP and does not yet expose a per-UDP-socket
+        // local address (TCP-only OP_LOCALADDR — documented follow-up), and a UDP
+        // socket bound to any interface is correctly `0.0.0.0:port` under Linux. An
+        // unbound datagram socket reports port 0.
+        if crate::net::socket::is_dgram(h).unwrap_or(false) {
+            let port = match crate::net::socket::dgram_local_port(h) {
+                Ok(p) => p,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
+            return socket_write_peer_addr(args.arg1, args.arg2, &[0, 0, 0, 0], port);
+        }
         return match crate::net::socket::local(h) {
             Ok(crate::net::netstack_client::LocalEndpoint::V4(ip, port)) => {
                 socket_write_peer_addr(args.arg1, args.arg2, &ip, port)
@@ -36813,6 +36898,52 @@ fn socket_write_src_addr(
     }
 }
 
+/// Receive one datagram from a `SOCK_DGRAM` socket into the user buffer and fill
+/// the `recvfrom` source-address out-param with the datagram's origin.
+///
+/// Drives [`crate::net::socket::dgram_recv_from`] into a staging buffer, copies the
+/// payload out, and — when the caller supplied a non-NULL `src_addr` — writes the
+/// datagram's actual source `(ip, port)` as a `sockaddr_in`. A non-blocking receive
+/// with no datagram queued returns `EAGAIN`.
+fn dispatch_dgram_recvfrom(
+    h: crate::net::socket::SocketHandle,
+    buf: u64,
+    cap: u64,
+    nonblock: bool,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> SyscallResult {
+    // A short buffer truncates the datagram (Linux discards the overflow unless
+    // MSG_TRUNC is set; we always discard — the datagram is consumed whole either
+    // way). Cap the staging buffer at the user's request length.
+    let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX).min(4096);
+    let mut kbuf = alloc::vec![0u8; cap_usize];
+    let (n, src_ip, src_port) = match crate::net::socket::dgram_recv_from(h, &mut kbuf, nonblock) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let n_usize = usize::try_from(n).unwrap_or(0).min(cap_usize);
+    if n_usize > 0 {
+        // SAFETY: the recvfrom gate validated [buf, +len) writable (cap_usize <= len);
+        // copy_to_user re-checks under SMAP.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n_usize) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Fill the source address out-param (pre-validated by the recvfrom gate).
+    if addr_ptr != 0 {
+        // Discarded: a short/racing user buffer is handled by truncation inside
+        // socket_write_peer_addr; the receive already succeeded, so a write fault on
+        // the out-param must not undo the delivered datagram.
+        let _ = socket_write_peer_addr(addr_ptr, addrlen_ptr, &src_ip, src_port);
+    }
+    // Without MSG_TRUNC, Linux `recvfrom` returns the number of bytes copied into the
+    // caller's buffer, not the true datagram length (which `n` carries when the
+    // datagram was larger than the buffer). Return the truncated, copied count.
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(n_usize as i64)
+}
+
 /// `sendto(sockfd, buf*, len, flags, dest_addr*, addrlen)`.
 ///
 /// ## Batch 436 — fd lookup gates between buf and addr
@@ -36895,12 +37026,78 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
     {
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        // A datagram socket routes to `sendto` with an explicit destination. Linux
+        // requires a destination address on an unconnected `SOCK_DGRAM` socket
+        // (`EDESTADDRREQ` when `dest_addr` is NULL — UDP `connect()` to fix a default
+        // peer is a documented follow-up).
+        if crate::net::socket::is_dgram(h).unwrap_or(false) {
+            return dispatch_dgram_sendto(h, buf, args.arg2, args.arg4, args.arg5);
+        }
         #[allow(clippy::cast_possible_truncation)]
         let msg_flags = args.arg3 as u32;
         let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
         return dispatch_socket_write(entry, buf, args.arg2, force_nonblock);
     }
     linux_err(errno::EBADF)
+}
+
+/// Send one datagram from a `SOCK_DGRAM` socket to the `sendto` destination.
+///
+/// Parses the user `struct sockaddr_in` at `addr_ptr` (required — a NULL
+/// destination on an unconnected UDP socket is `EDESTADDRREQ`), stages the payload
+/// (capped at the datagram maximum), and drives [`crate::net::socket::dgram_send_to`].
+/// Only `AF_INET` is supported; any other family is `EAFNOSUPPORT`.
+fn dispatch_dgram_sendto(
+    h: crate::net::socket::SocketHandle,
+    buf: u64,
+    len: u64,
+    addr_ptr: u64,
+    addr_len: u64,
+) -> SyscallResult {
+    // Unconnected UDP send requires a destination address.
+    if addr_ptr == 0 {
+        return linux_err(errno::EDESTADDRREQ);
+    }
+    // `struct sockaddr_in` is 16 bytes; the gate already validated the region.
+    #[allow(clippy::cast_possible_truncation)]
+    if (addr_len as usize) < 16 {
+        return linux_err(errno::EINVAL);
+    }
+    let mut sa = [0u8; 16];
+    // SAFETY: the sendto gate validated [addr_ptr, +addr_len>=16) readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+        return linux_err(linux_errno_for(e));
+    }
+    let [f0, f1, p0, p1, a0, a1, a2, a3, ..] = sa;
+    let family = u16::from_ne_bytes([f0, f1]);
+    if family != 2 {
+        return linux_err(errno::EAFNOSUPPORT);
+    }
+    let port = u16::from_be_bytes([p0, p1]);
+    let ip = [a0, a1, a2, a3];
+    // Stage the payload. A datagram is all-or-nothing; cap it at the ring's send
+    // window (the client returns EMSGSIZE if it exceeds that).
+    let cap = usize::try_from(len).unwrap_or(usize::MAX).min(4096);
+    if cap == 0 {
+        // A zero-length datagram is valid (an empty UDP packet).
+        return match crate::net::socket::dgram_send_to(h, &ip, port, &[]) {
+            Ok(n) => SyscallResult::ok(i64::from(n)),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(buf, cap) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kbuf = alloc::vec![0u8; cap];
+    // SAFETY: validate_user_read confirmed [buf, +cap) readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), cap) } {
+        return linux_err(linux_errno_for(e));
+    }
+    match crate::net::socket::dgram_send_to(h, &ip, port, &kbuf) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `recvfrom(sockfd, buf*, len, flags, src_addr*, addrlen*)`.
@@ -36976,6 +37173,22 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
         #[allow(clippy::cast_possible_truncation)]
         let msg_flags = args.arg3 as u32;
         let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
+        // A datagram socket routes to `recvfrom`: receive one datagram and fill the
+        // caller's source-address out-param with the datagram's actual origin (unlike
+        // a stream socket, whose source is the fixed connected peer).
+        let dh = crate::net::socket::SocketHandle::from_raw(raw_handle);
+        if crate::net::socket::is_dgram(dh).unwrap_or(false) {
+            let effective_nonblock =
+                force_nonblock || (status_flags & oflags::O_NONBLOCK) != 0;
+            return dispatch_dgram_recvfrom(
+                dh,
+                buf,
+                args.arg2,
+                effective_nonblock,
+                args.arg4,
+                args.arg5,
+            );
+        }
         // MSG_WAITALL blocks until the full request is read — but only on a
         // blocking socket; under O_NONBLOCK / MSG_DONTWAIT it degrades to a
         // single-shot receive of whatever is available (Linux semantics).
@@ -88339,13 +88552,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // F: AF_INET SOCK_DGRAM IPPROTO_UDP -> ENOSYS (accept).
+            // F: AF_INET SOCK_DGRAM IPPROTO_UDP -> ENOSYS (accept) when the
+            // net.userspace switch is off, or a daemon-backed datagram fd when
+            // it is on (same switch-aware gate as the stream case E). The
+            // datagram socket-fd path (create_dgram → dgram_bind/send_to/
+            // recv_from) is only wired behind the switch; kernel-context /
+            // switch-off keeps the historical ENOSYS acceptance.
             let a = SyscallArgs {
                 arg0: 2, arg1: 2, arg2: 17, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -89048,6 +89266,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   A. socket(AF_INET=2, DGRAM=2, ICMP=1)       -> ENOSYS
         //   B. socket(AF_INET6=10, DGRAM=2, ICMPV6=58)  -> ENOSYS
         //   C. Regression: socket(AF_INET, DGRAM, UDP=17) -> ENOSYS
+        //      (switch off) / daemon-backed datagram fd (switch on)
         //   D. Regression: socket(AF_INET, DGRAM, UDPLITE=136) -> ENOSYS
         //   E. Cross-family: socket(AF_INET, DGRAM, ICMPV6=58) -> EPROTONOSUPPORT
         //      (ICMPV6 is not in inetsw[SOCK_DGRAM] for AF_INET)
@@ -89083,16 +89302,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // C: Regression — AF_INET / DGRAM / UDP=17.
+            // C: Regression — AF_INET / DGRAM / UDP=17.  ENOSYS when the
+            // net.userspace switch is off; a daemon-backed datagram fd when it
+            // is on (switch-aware gate, same as the SOCK_STREAM/TCP case).
             let a = SyscallArgs {
                 arg0: 2, arg1: 2, arg2: 17,
                 arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value
-                != -i64::from(errno::ENOSYS)
-            {
+            if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) regression not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) regression gate mismatch"
                 );
                 return Err(KernelError::InternalError);
             }

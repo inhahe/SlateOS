@@ -3434,10 +3434,17 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // — previously only the kernel-context `self_test_udp_dns` covered it.
     run_ring3_udp_capstone(&ifinfo.dns.0);
 
+    // Ring-3 IPv6 datagram capstone: the v6 sibling of `run_ring3_udp_capstone`.
+    // slirp has no IPv6 DNS upstream, so this arm does a self-loopback — udpget
+    // sends to the daemon's own link-local `me.ip6` and asserts the datagram
+    // echoes back — proving the ring-3 `sockaddr_in6` sendto/recvfrom dispatch
+    // path (previously only the kernel-context `self_test_udp6_loopback`).
+    run_ring3_udp6_capstone();
+
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept/connect6/udp6/udp-connect/ring3-capstone/ring3-udp parity checks done; \
-         daemon now owns the NIC for the system's lifetime"
+         nonblock-send/listen-accept/connect6/udp6/udp-connect/ring3-capstone/ring3-udp/ring3-udp6 \
+         parity checks done; daemon now owns the NIC for the system's lifetime"
     );
     Ok(())
 }
@@ -3646,6 +3653,123 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
         None => serial_println!(
             "[spawn]   WARNING: ring3 UDP capstone produced no exit code"
         ),
+    }
+}
+
+/// Spawn the `udpget` ring-3 Linux-ABI ELF in its **IPv6** loopback arm and report
+/// its exit code.
+///
+/// The v6 sibling of [`run_ring3_udp_capstone`]. Because QEMU/slirp provides no
+/// IPv6 upstream, this cannot hit a real resolver; instead it drives a
+/// self-loopback that exercises the ring-3 `sockaddr_in6` datagram dispatch path
+/// (`create_dgram`/`dgram_bind`/`dgram_send_to6`/`dgram_recv_from` with the v6
+/// source header) end to end from an unprivileged process: udpget binds
+/// `[::]:port`, sends a marker payload to the daemon's own EUI-64 link-local
+/// `me.ip6` (which the daemon diverts back into its RX FIFO, bypassing NDP), and
+/// asserts the exact bytes echo back with an `AF_INET6` source.
+///
+/// The kernel derives `me.ip6` from the NIC MAC (the same inline EUI-64
+/// link-local the daemon seeds and the `self_test_udp6_loopback` check uses) and
+/// passes it as a 32-hex-char argv string plus a `"6"` mode selector. A missing
+/// NIC MAC skips the check. Never fails the boot — a spawn fault is a WARNING, a
+/// network/exit variance a non-fatal note, matching the other parity checks.
+fn run_ring3_udp6_capstone() {
+    let mac = crate::net::interface::mac().0;
+    if mac == [0u8; 6] {
+        serial_println!(
+            "[spawn]   ring3 UDP6 capstone: no NIC MAC (no me.ip6) — check skipped"
+        );
+        return;
+    }
+    // EUI-64 link-local (RFC 4291 App. A), matching the daemon's
+    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
+    let ll: [u8; 16] = [
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        mac[5],
+    ];
+    let mut hex = [0u8; 32];
+    fmt_ipv6_hex32(&ll, &mut hex);
+
+    static UDPGET_ELF: &[u8] = include_bytes!(
+        "../../../services/udpget/target/x86_64-unknown-none/release/udpget"
+    );
+
+    // argv = ["udpget", "<32-hex me.ip6>", "<port>", "6"]. A fixed loopback port
+    // (distinct from the kernel self-test's 9201 to avoid any cross-talk).
+    let argv: &[&[u8]] = &[b"udpget", &hex, b"9404", b"6"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+
+    let options = SpawnOptions {
+        name: "udpget6",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process_with_abi(UDPGET_ELF, &options, pcb::AbiMode::Linux) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   WARNING: ring3 UDP6 capstone spawn returned {:?}", e);
+            return;
+        }
+    };
+
+    // Bounded wait for the ring-3 process to zombie (one loopback send + recv).
+    let deadline = crate::hrtimer::now_ns().saturating_add(15_000_000_000); // 15s
+    loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            serial_println!(
+                "[spawn]   ring3 UDP6 capstone: process did not exit within 15s — tearing down"
+            );
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    match exit_code {
+        Some(0) => serial_println!(
+            "[spawn]   ring3 UDP6 capstone: OK — ring-3 socket(AF_INET6,SOCK_DGRAM)/bind()/\
+             sendto()/recvfrom() looped a datagram back from me.ip6 (exit 0)"
+        ),
+        Some(13) | Some(14) => serial_println!(
+            "[spawn]   WARNING: ring3 UDP6 capstone bind+sendto OK but the loopback datagram \
+             did not echo back (exit {}) — v6 datagram dispatch may be broken",
+            exit_code.unwrap_or_default()
+        ),
+        Some(code) => serial_println!(
+            "[spawn]   WARNING: ring3 UDP6 capstone exited {} (see udpget exit-code table)",
+            code
+        ),
+        None => serial_println!(
+            "[spawn]   WARNING: ring3 UDP6 capstone produced no exit code"
+        ),
+    }
+}
+
+/// Format a 16-byte IPv6 address as 32 lowercase hex chars (no colons) into `buf`.
+/// The ring-3 `udpget` v6 arm parses this plain-hex form (no RFC 4291
+/// `::`-compression parser needed on the userspace side).
+// Every index is `i*2`/`i*2+1` for `i` in `0..16` (0..=31, in bounds) and every
+// hex lookup is masked to a nibble (0..=15, in bounds); no op can overflow.
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn fmt_ipv6_hex32(ip: &[u8; 16], buf: &mut [u8; 32]) {
+    const HEXD: &[u8; 16] = b"0123456789abcdef";
+    for (i, &b) in ip.iter().enumerate() {
+        buf[i * 2] = HEXD[(b >> 4) as usize];
+        buf[i * 2 + 1] = HEXD[(b & 0x0f) as usize];
     }
 }
 

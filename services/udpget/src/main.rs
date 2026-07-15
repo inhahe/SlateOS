@@ -22,22 +22,29 @@
 //! call — this closes that gap for the datagram path.
 //!
 //! The program is spawned by `proc::spawn::run_persistent_netstack` with an
-//! explicit `AbiMode::Linux` override and `argv = ["udpget", "<a.b.c.d>",
-//! "<port>"]` (the kernel passes the interface's resolver IP and port 53). It
-//! reports its result purely through its **exit code** so the kernel self-test
-//! can decode it deterministically without parsing console output:
+//! explicit `AbiMode::Linux` override. The **IPv4** arm takes `argv = ["udpget",
+//! "<a.b.c.d>", "<port>"]` (the kernel passes the interface's resolver IP and
+//! port 53) and validates a real DNS reply. The **IPv6** arm takes a 4th argv
+//! `"6"` — `argv = ["udpget", "<32-hex me.ip6>", "<port>", "6"]` — and, since
+//! slirp has no IPv6 upstream, does a self-loopback: it sends a marker payload to
+//! the daemon's own link-local `me.ip6` (which the daemon diverts back into its
+//! RX FIFO, bypassing NDP) and asserts the exact bytes echo back with an
+//! `AF_INET6` source. Both arms report their result purely through the **exit
+//! code** so the kernel self-test can decode it deterministically without parsing
+//! console output:
 //!
-//! | code | meaning                                              |
-//! |------|------------------------------------------------------|
-//! | 0    | success — DNS reply, TXID matched and QR bit set     |
-//! | 10   | `socket()` failed                                    |
-//! | 11   | `bind()` failed                                      |
-//! | 12   | `sendto()` failed                                    |
-//! | 13   | `recvfrom()` returned <= 0 (no reply)                |
-//! | 14   | reply too short / TXID mismatch / not a response     |
-//! | 20   | wrong argc                                            |
-//! | 21   | could not parse the IP argument                      |
-//! | 22   | could not parse the port argument                    |
+//! | code | meaning                                                     |
+//! |------|-------------------------------------------------------------|
+//! | 0    | success — v4: DNS reply (TXID + QR); v6: loopback echo       |
+//! | 10   | `socket()` failed                                           |
+//! | 11   | `bind()` failed                                             |
+//! | 12   | `sendto()` failed                                           |
+//! | 13   | `recvfrom()` returned <= 0 (no reply)                       |
+//! | 14   | v4: bad DNS reply; v6: payload/source mismatch              |
+//! | 20   | wrong argc                                                  |
+//! | 21   | could not parse the IPv4 argument                          |
+//! | 22   | could not parse the port argument                          |
+//! | 23   | could not parse the IPv6 (32-hex) argument                 |
 
 #![no_std]
 #![no_main]
@@ -52,7 +59,15 @@ const SYS_RECVFROM: usize = 45;
 const SYS_EXIT: usize = 60;
 
 const AF_INET: usize = 2;
+const AF_INET6: usize = 10;
 const SOCK_DGRAM: usize = 2;
+
+// Distinct marker payload for the IPv6 loopback mode. Under QEMU/slirp there is
+// no IPv6 DNS upstream, so the v6 arm is a self-loopback: we send this to the
+// daemon's own EUI-64 link-local (`me.ip6`), which the daemon diverts back into
+// its RX FIFO, and assert the exact bytes come back. (The v4 arm, by contrast,
+// hits a real DNS resolver and validates a DNS *reply*.)
+const V6_PAYLOAD: &[u8] = b"slate-udpget6:ring3-loopback!";
 
 // DNS `A?` query for example.com — TXID 0x1234, RD set. 12-byte header +
 // 13-byte QNAME (7"example"3"com"0) + QTYPE(A=1) + QCLASS(IN=1) = 29 bytes.
@@ -236,6 +251,145 @@ fn sockaddr_in(ip: &[u8; 4], port: u16) -> [u8; 16] {
     sa
 }
 
+/// Decode one ASCII hex nibble.
+fn hexval(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse a 32-hex-char string into 16 network-order bytes (an IPv6 address). The
+/// kernel passes `me.ip6` this way — plain hex is trivial to parse without a full
+/// RFC 4291 `::`-compression parser, and it round-trips exactly.
+fn parse_hex16(s: &[u8]) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        let hi = hexval(s[i * 2])?;
+        let lo = hexval(s[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+        i += 1;
+    }
+    Some(out)
+}
+
+/// Build a `struct sockaddr_in6` (28 bytes): sin6_family(2 host-endian),
+/// sin6_port(2 BE), sin6_flowinfo(4)=0, sin6_addr(16), sin6_scope_id(4)=0.
+fn sockaddr_in6(ip: &[u8; 16], port: u16) -> [u8; 28] {
+    let mut sa = [0u8; 28];
+    sa[0] = (AF_INET6 & 0xff) as u8;
+    sa[1] = ((AF_INET6 >> 8) & 0xff) as u8;
+    sa[2] = (port >> 8) as u8;
+    sa[3] = (port & 0xff) as u8;
+    // flowinfo [4..8] stays zero.
+    let mut i = 0usize;
+    while i < 16 {
+        sa[8 + i] = ip[i];
+        i += 1;
+    }
+    // scope_id [24..28] stays zero.
+    sa
+}
+
+/// AF_INET6 loopback arm: `socket(AF_INET6, SOCK_DGRAM)` → `bind([::]:port)` →
+/// `sendto([me.ip6]:port, V6_PAYLOAD)` → `recvfrom` and assert the datagram
+/// echoes back from `me.ip6`.
+///
+/// `ip_hex` is the 32-hex-char encoding of the daemon's link-local `me.ip6`
+/// (passed in argv by the kernel). Because the socket is bound to `port` and the
+/// datagram is addressed to `[me.ip6]:port`, the daemon's in-process IPv6
+/// loopback divert (a frame to its own link-local, bypassing NDP) delivers the
+/// datagram back to this very socket — proving the ring-3 `sockaddr_in6`
+/// send/recv dispatch path end to end without needing a real IPv6 upstream.
+///
+/// # Safety
+/// Uses raw Linux syscalls; the sockaddr/buffer pointers are to local stack
+/// arrays valid for the call duration.
+unsafe fn run_v6(ip_hex: &[u8], port: u16) -> ! {
+    let dst = match parse_hex16(ip_hex) {
+        Some(v) => v,
+        None => {
+            print(b"[udpget] FAIL: v6 addr parse\n");
+            exit(23);
+        }
+    };
+
+    // socket(AF_INET6, SOCK_DGRAM, 0)
+    let fd = unsafe { sys3(SYS_SOCKET, AF_INET6, SOCK_DGRAM, 0) };
+    if fd < 0 {
+        print(b"[udpget] FAIL: socket6\n");
+        exit(10);
+    }
+    let fd = fd as usize;
+
+    // bind(fd, sockaddr_in6{[::], port}, 28) — a fixed port so the loopback
+    // datagram (dst_port == port) routes back to this same socket.
+    let local = sockaddr_in6(&[0u8; 16], port);
+    let rc = unsafe { sys3(SYS_BIND, fd, local.as_ptr() as usize, local.len()) };
+    if rc < 0 {
+        print(b"[udpget] FAIL: bind6\n");
+        let _ = unsafe { sys1(SYS_CLOSE, fd) };
+        exit(11);
+    }
+
+    // sendto(fd, V6_PAYLOAD, .., 0, sockaddr_in6{me.ip6, port}, 28)
+    let dst_sa = sockaddr_in6(&dst, port);
+    let sent = unsafe {
+        sys6(
+            SYS_SENDTO,
+            fd,
+            V6_PAYLOAD.as_ptr() as usize,
+            V6_PAYLOAD.len(),
+            0,
+            dst_sa.as_ptr() as usize,
+            dst_sa.len(),
+        )
+    };
+    if sent < 0 {
+        print(b"[udpget] FAIL: sendto6\n");
+        let _ = unsafe { sys1(SYS_CLOSE, fd) };
+        exit(12);
+    }
+    print(b"[udpget] v6 query sent\n");
+
+    // recvfrom(fd, buf, .., 0, &src, &srclen) — one blocking datagram receive.
+    let mut buf = [0u8; 512];
+    let mut src = [0u8; 28];
+    let mut srclen: u32 = src.len() as u32;
+    let n = unsafe {
+        sys6(
+            SYS_RECVFROM,
+            fd,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            0,
+            src.as_mut_ptr() as usize,
+            (&mut srclen as *mut u32) as usize,
+        )
+    };
+    let _ = unsafe { sys1(SYS_CLOSE, fd) };
+    if n <= 0 {
+        print(b"[udpget] FAIL: recvfrom6\n");
+        exit(13);
+    }
+    let got = &buf[..n as usize];
+    // The loopback echoes our exact payload back; the source should be a
+    // sockaddr_in6 whose address (offset 8..24) is me.ip6.
+    let src_ok = src[0] == (AF_INET6 & 0xff) as u8 && src[8..24] == dst;
+    if got == V6_PAYLOAD && src_ok {
+        print(b"[udpget] OK: v6 loopback echo\n");
+        exit(0);
+    }
+    print(b"[udpget] FAIL: bad v6 reply\n");
+    exit(14);
+}
+
 /// The real work, given the initial process stack pointer (points at `argc`).
 ///
 /// # Safety
@@ -257,18 +411,34 @@ unsafe fn run(sp: *const usize) -> ! {
     let ip_bytes = unsafe { core::slice::from_raw_parts(argv1, strlen(argv1)) };
     let port_bytes = unsafe { core::slice::from_raw_parts(argv2, strlen(argv2)) };
 
-    let ip = match parse_ipv4(ip_bytes) {
-        Some(v) => v,
-        None => {
-            print(b"[udpget] FAIL: ip parse\n");
-            exit(21);
+    // A 4th argv of "6" selects the AF_INET6 loopback arm (argv1 is then a
+    // 32-hex-char v6 address — the daemon's own link-local `me.ip6`).
+    let v6 = argc >= 4 && {
+        let argv3 = unsafe { *sp.add(4) } as *const u8;
+        !argv3.is_null() && {
+            let s = unsafe { core::slice::from_raw_parts(argv3, strlen(argv3)) };
+            s == b"6"
         }
     };
+
     let port = match parse_port(port_bytes) {
         Some(v) => v,
         None => {
             print(b"[udpget] FAIL: port parse\n");
             exit(22);
+        }
+    };
+
+    if v6 {
+        // Never returns.
+        unsafe { run_v6(ip_bytes, port) };
+    }
+
+    let ip = match parse_ipv4(ip_bytes) {
+        Some(v) => v,
+        None => {
+            print(b"[udpget] FAIL: ip parse\n");
+            exit(21);
         }
     };
 

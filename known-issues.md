@@ -245,9 +245,16 @@ Phase 5 progresses:
     source), since a datagram's family is a packet property, not the socket's.
     Boot-validated by `netstack_client::self_test_udp6_loopback` (bind a fixed
     port, send to the daemon's own link-local `me.ip6`, and confirm the looped-back
-    datagram reports `AF_INET6` + the link-local source + the sent payload). **Not
-    yet done:** an `AF_INET6` arm in the ring-3 `udpget` capstone (kernel-context
-    self-test only).
+    datagram reports `AF_INET6` + the link-local source + the sent payload), and
+    **now also from a real ring-3 process** by the `udpget` v6 arm (a bare
+    Linux-ABI ELF: `socket(AF_INET6,SOCK_DGRAM)`/`bind([::]:port)`/`sendto([me.ip6]:
+    port)`/`recvfrom`, exit-code decoded). The kernel derives `me.ip6` from the NIC
+    MAC and passes it as a 32-hex argv + a `"6"` mode flag; `run_ring3_udp6_capstone`
+    spawns it and boot-validated switch-on with **exit 0** (`[udpget] OK: v6 loopback
+    echo`, `ring3 UDP6 capstone: OK … (exit 0)`) — so the ring-3 `sockaddr_in6`
+    sendto/recvfrom dispatch path (user-copy, family parse, fd install, errno map)
+    is now exercised live, not just by the kernel-context self-test. With this, all
+    documented UDP daemon-socket follow-ups are closed.
   - **UDP `connect()` default-peer — DONE (v4 and v6).** `connect(2)` on a
     `SOCK_DGRAM` fd records a default peer without a handshake (auto-binding a
     source port). `net::socket` grew a `DgramPeer::{V4,V6}` + `SocketInner.
@@ -264,11 +271,10 @@ Phase 5 progresses:
     otherwise). Boot-validated by `netstack_client::self_test_udp_connect` (a
     connected send loops back and passes the peer filter; `getpeername` matches;
     a datagram injected from a *non-peer* port is dropped by the connected
-    receive). **Still not done:** an `AF_INET6` arm in the ring-3 `udpget`
-    capstone (kernel-context self-tests only); and UDP `getsockname` reporting the
-    real interface IP (needs a UDP `OP_LOCALADDR`) — the last is only a divergence
-    for a socket bound to a specific local IP; our sockets bind `INADDR_ANY`, for
-    which Linux's `getsockname` correctly reports `0.0.0.0`/`[::]`.
+    receive). **Still not done:** UDP `getsockname` reporting the real interface IP
+    (needs a UDP `OP_LOCALADDR`) — only a divergence for a socket bound to a
+    specific local IP; our sockets bind `INADDR_ANY`, for which Linux's
+    `getsockname` correctly reports `0.0.0.0`/`[::]`.
   - **UDP `getsockname` v6-family reporting — DONE.** `net::socket` now records the
     creation `domain` on every socket (`SocketInner.domain`, set by
     `create`/`create_dgram`/`create_kind`, exposed via `socket::domain(handle)`), so

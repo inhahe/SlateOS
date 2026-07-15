@@ -14928,6 +14928,48 @@ int main(void){\n\
     run_hosted_cc_case("setjmp", HOSTED_SRC, b"A\nS\n7\n")
 }
 
+/// Path Z Part 45 — user-defined variadic function (SysV varargs ABI codegen)
+/// in a freshly-tcc-built dynamic glibc binary.
+///
+/// The prior rungs' only varargs consumer was `printf`, whose `va_arg` walk is
+/// implemented *inside glibc* — so no rung exercised tcc's own codegen for the
+/// x86_64 SysV variadic ABI: laying out the register save area (integer args in
+/// the GP save area, `%al` = vector-register count on the call side), spilling
+/// named + anonymous args, and the `va_start`/`va_arg`/`va_end` sequence in a
+/// *user-authored* variadic function.  That is a classic compiler-bug locus
+/// (register vs. overflow-area boundary, `gp_offset`/`fp_offset` bookkeeping),
+/// so a compiled-on-target variadic function is a genuine coverage gap.
+///
+/// The program defines `isum(int count, ...)` which sums `count` `int` varargs
+/// via the builtins (`__builtin_va_list`/`__builtin_va_start`/`__builtin_va_arg`
+/// /`__builtin_va_end` — tcc intrinsics, so no `<stdarg.h>` header tree is
+/// needed, staying inside the TD22 constraint).  `isum(4, 10, 20, 5, 7)` = 42,
+/// which the program prints as its two decimal digits; the captured file is
+/// exactly `42\n` (3 bytes, exit 0).  Raw `write(2)` keeps ordering exact.  No
+/// kernel path is exercised (varargs is pure userspace/codegen) — the value is
+/// proving tcc's variadic ABI lowering produces a correct binary here.
+pub fn self_test_linux_real_glibc_cc_vararg() -> KernelResult<()> {
+    // Uses tcc's va builtins directly (the `<stdarg.h>` macros just alias them),
+    // so no glibc/compiler header tree is required.  Named param `count` fixes
+    // where the anonymous args begin; the loop reads `count` `int`s via va_arg.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int isum(int count, ...){\n\
+  __builtin_va_list ap;\n\
+  __builtin_va_start(ap, count);\n\
+  int total = 0;\n\
+  for (int i = 0; i < count; i++){ total += __builtin_va_arg(ap, int); }\n\
+  __builtin_va_end(ap);\n\
+  return total;\n\
+}\n\
+int main(void){\n\
+  int s = isum(4, 10, 20, 5, 7);\n\
+  char b[3] = { (char)('0' + s / 10), (char)('0' + s % 10), '\\n' };\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("vararg", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

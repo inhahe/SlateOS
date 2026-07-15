@@ -2120,6 +2120,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 45: user-defined variadic function (SysV varargs ABI codegen)
+    // in a tcc-built dynamic glibc binary. Exercises tcc's own lowering of the
+    // x86_64 variadic ABI (register save area, %al vector count, va_start/
+    // va_arg/va_end) for a user-authored isum(int, ...) — a path glibc's printf
+    // never covers (its va_arg walk lives inside libc). Purely userspace/codegen.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vararg() {
+        serial_println!(
+            "WARNING: Path-Z variadic-function C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

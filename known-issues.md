@@ -1449,15 +1449,29 @@ self-test and `gen_dmastat`, this one in tmpwatch), and why bounded logic loops
 can't explain a 240 s hang. It is the same **B-PTHREAD-YIELDBUDGET / container-exec
 spawn-dispatch** intermittent family, now with a concrete mechanism to chase.
 
-**Next concrete step to CONFIRM:** add a **bounded free-list cycle check** to the
-poison-debug slab path — on `slab_dealloc`/`refill`, walk the class free list with
-a hop cap (e.g. a few × slots-per-frame) and, if exceeded, `emergency_println!`
-the class + loop and halt. This directly tests the cycle theory and, if it fires,
-names the corrupting size class. (The `lockdep_mm` migration from todo.txt targets
-*lock inversion*, a deadlock — the wrong tool for this **livelock**; deprioritize
-it for this symptom.) Instrumentation this session is committed; this catch is the
-first that gives an actionable code-level mechanism rather than a lone red-herring
-RIP.
+**CONFIRMING INSTRUMENT — IMPLEMENTED 2026-07-15 (free-list link validation).**
+Rather than an O(n) full free-list walk, added an **O(1)-per-pop** intrusive-link
+validator (`heap::free_link_valid`, guarded by `POISON_ENABLED`) wired into both
+slab pop sites (`HeapInner::slab_alloc` and `pcpu_slab_alloc`). Rationale: a freed
+slot's `next` pointer lives in bytes 0..8, but the poison magic/fill only covers
+bytes 8..`class_size` — so an 8-byte use-after-free write to a freed slot's first
+word corrupts `next` **without** tripping `check_poison`. That is precisely how an
+*undetected* free-list cycle/alias forms. On each pop the validator checks the
+about-to-be-installed head link is null, or (a) higher-half HHDM, (b) `class_size`-
+aligned, (c) not a self-cycle; on failure it logs
+`[heap] FREE-LIST CORRUPTION! class=… slot=… bad next=…` and **severs** the list
+(hands out the current slot, leaks the corrupted tail) instead of following a wild/
+aliasing link. This converts the silent, location-moving wedge into a precise,
+located fault at the moment of damage — and, critically, *stops* the corruption
+from reaching the `BTreeMap` that would otherwise livelock. Boot-tested clean (no
+false positives — valid slots always pass by construction). It does not catch a
+perfect cycle between two *valid* same-class slots; if the wedge recurs without a
+`FREE-LIST CORRUPTION` line, the corruption source is elsewhere (buddy allocator
+`mm/frame.rs` / rmap `mm/rmap.rs`) and the next tool is a bounded full-list Floyd
+cycle check on `refill`. (The `lockdep_mm` migration from todo.txt targets *lock
+inversion*, a deadlock — the wrong tool for this **livelock**; deprioritized.)
+Instrumentation + validator committed this session; this catch is the first that
+gives an actionable code-level mechanism rather than a lone red-herring RIP.
 
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The

@@ -221,6 +221,50 @@ unsafe fn check_redzone(ptr: *mut u8, alloc_size: usize, class_size: usize) {
     }
 }
 
+/// Validate a slab free-list `next` link (poison-debug builds only).
+///
+/// A freed slot stores its intrusive `next` pointer in bytes 0..8, but the
+/// poison magic/fill only covers bytes 8..class_size — so an 8-byte
+/// use-after-free write to a freed slot's first word corrupts `next` *without*
+/// tripping [`check_poison`].  That silently splices a bad link into the free
+/// list; the allocator then either follows a wild pointer or, if the write
+/// happens to point at another live/free slot, hands out **aliased** memory,
+/// which downstream corrupts a `BTreeMap`/`Vec` node and wedges the kernel in a
+/// non-terminating traversal (see known-issues: the tmpwatch-self_test livelock
+/// caught 2026-07-15).  Catching the bad link here converts that silent,
+/// location-moving corruption into a loud, precise fault at the point of damage.
+///
+/// A valid link is either null or a pointer that is (a) in the higher-half
+/// HHDM window, (b) aligned to `class_size` (every real slot is, since frames
+/// are 16 KiB-aligned and `class_size` is a power of two ≤ 16 KiB), and (c) not
+/// a self-cycle.  Returns `true` if the link is structurally valid.
+///
+/// This is O(1) (a few comparisons) and gated on `POISON_ENABLED`, so it costs
+/// nothing in release builds.  It does not catch a perfect cycle between two
+/// *valid* same-class slots, but the overwhelmingly common corruption — a stray
+/// data value written over `next` — is caught immediately.
+#[inline]
+fn free_link_valid(link: *mut FreeSlot, slot: *mut FreeSlot, class_size: usize) -> bool {
+    if link.is_null() {
+        return true;
+    }
+    let addr = link as usize;
+    // Higher-half kernel/HHDM addresses only; a stray heap-data value written
+    // over `next` is almost always a low or unaligned value.
+    if addr < 0xffff_8000_0000_0000 {
+        return false;
+    }
+    if !addr.is_multiple_of(class_size) {
+        return false;
+    }
+    // Immediate self-cycle: the list head points back at the node we just
+    // popped (the simplest cycle, and the one a naive double-free re-add makes).
+    if link == slot {
+        return false;
+    }
+    true
+}
+
 /// Check poison integrity on a slot being allocated.
 ///
 /// First verifies the POISON_MAGIC signature at bytes 8..12.  If not
@@ -608,7 +652,28 @@ impl HeapInner {
         let slot = self.free_lists[class_idx];
         // SAFETY: slot is non-null (we just refilled or it was already non-null).
         // It points to a valid FreeSlot in HHDM-mapped frame memory.
-        self.free_lists[class_idx] = unsafe { (*slot).next };
+        let next = unsafe { (*slot).next };
+        // Free-list integrity: validate the link we're about to install as the
+        // new head *before* trusting it.  A use-after-free that overwrote this
+        // slot's `next` word escapes check_poison (which only covers bytes
+        // 8..); catching it here stops the allocator from following a wild/
+        // aliasing link and turns a silent, location-moving wedge into a precise
+        // fault.  Debug-only (guarded by POISON_ENABLED).
+        if POISON_ENABLED.load(Ordering::Relaxed)
+            && !free_link_valid(next, slot, SIZE_CLASSES[class_idx])
+        {
+            serial_println!(
+                "[heap] FREE-LIST CORRUPTION! class={} slot={:#x} bad next={:#x} \
+                 (use-after-free overwrote the intrusive link)",
+                SIZE_CLASSES[class_idx], slot as usize, next as usize,
+            );
+            // Sever the list rather than propagate the bad link: hand out this
+            // slot but drop the corrupted tail (leak) so we neither loop nor
+            // alias.  One leaked run of slots beats cascading corruption.
+            self.free_lists[class_idx] = ptr::null_mut();
+        } else {
+            self.free_lists[class_idx] = next;
+        }
         let ptr = slot.cast::<u8>();
 
         // Slab poisoning: check free-poison integrity, then alloc-poison.
@@ -827,6 +892,10 @@ pub fn enable_pcpu_slab_caches() {
 /// The global heap must be initialized.
 #[inline(always)]
 #[allow(clippy::cast_ptr_alignment)]
+// `class_idx` is a caller-guaranteed invariant (0..NUM_CLASSES, see # Safety),
+// so every `cache.heads[class_idx]` / `cache.counts[class_idx]` / `SIZE_CLASSES`
+// index is in bounds — same rationale as `slab_alloc`'s existing allow.
+#[allow(clippy::indexing_slicing)]
 unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
     let cpu = crate::smp::fast_cpu_index();
 
@@ -845,11 +914,30 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
     cache.active = true;
 
     if cache.counts[class_idx] > 0 {
+        let class_size = SIZE_CLASSES[class_idx];
         // Fast path: pop from local cache.
         let slot_ptr = cache.heads[class_idx] as *mut FreeSlot;
         // SAFETY: slot_ptr is non-null (count > 0 means head is valid).
         // It points to HHDM-mapped frame memory owned by this allocator.
-        cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
+        let next = unsafe { (*slot_ptr).next };
+        // Free-list integrity (see slab_alloc): validate the intrusive link a
+        // use-after-free may have overwritten before installing it as the new
+        // head.  The per-CPU count bounds the list length (so no infinite pop),
+        // but a corrupted link still aliases live memory — catch it here.
+        if POISON_ENABLED.load(Ordering::Relaxed)
+            && !free_link_valid(next, slot_ptr, class_size)
+        {
+            serial_println!(
+                "[heap] FREE-LIST CORRUPTION (pcpu)! class={} slot={:#x} bad next={:#x} \
+                 (use-after-free overwrote the intrusive link)",
+                class_size, slot_ptr as usize, next as usize,
+            );
+            // Sever: drop the rest of the per-CPU run (leak) rather than alias.
+            cache.heads[class_idx] = 0;
+            cache.counts[class_idx] = 1; // decremented to 0 below
+        } else {
+            cache.heads[class_idx] = next as usize;
+        }
         cache.counts[class_idx] -= 1;
         // OPT: Per-CPU counter — plain increment, no `lock` prefix.
         cache.slab_allocs += 1;
@@ -858,7 +946,6 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // Slab poisoning: verify free-poison integrity (UAF detection),
         // then fill with alloc-poison (uninitialized-read detection).
         if POISON_ENABLED.load(Ordering::Relaxed) {
-            let class_size = SIZE_CLASSES[class_idx];
             // SAFETY: ptr (cast from slot_ptr) is a valid slab slot of
             // class_size bytes — it was on the per-CPU free list, which
             // only contains HHDM-mapped allocator-owned memory.

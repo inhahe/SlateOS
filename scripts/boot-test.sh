@@ -73,9 +73,42 @@ to_win_path() {
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
+# QEMU writes its OS-level PID here so we can reap it reliably.  Under MSYS,
+# `kill "$!"` uses the Cygwin PID and does NOT reliably TerminateProcess a
+# native (non-Cygwin) qemu-system-x86_64.exe: the emulator survives as an
+# orphan that keeps its `-serial file:` handle open, so the NEXT boot's
+# `rm serial-test.txt` fails with "Device or resource busy" and its qemu
+# dies instantly.  This silently broke every repeated run (e.g. wedge-soak).
+# The pidfile holds qemu's real Windows PID; kill_qemu() taskkills it.
+PIDFILE="$PROJECT_ROOT/build/qemu.pid"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
+PIDFILE_WIN="$(to_win_path "$PIDFILE")"
+
+# Reliably terminate the QEMU launched by this script.
+#
+# $1 = the MSYS/Cygwin PID from `$!` (used for the `wait` and a first,
+# best-effort Cygwin-side kill).  We then read the OS PID that qemu wrote to
+# its -pidfile and `taskkill //F //PID` it, which is the only thing that
+# reliably kills a native Windows qemu from MSYS.  Falls back to killing by
+# image name only if the pidfile is missing (should not happen).  Idempotent.
+kill_qemu() {
+    local cyg_pid="${1:-}"
+    # Best-effort Cygwin-side signal first (harmless if it does nothing).
+    [ -n "$cyg_pid" ] && kill "$cyg_pid" 2>/dev/null || true
+    # Authoritative kill via the OS PID qemu recorded in its pidfile.
+    if [ -f "$PIDFILE" ]; then
+        local win_pid
+        win_pid="$(tr -cd '0-9' < "$PIDFILE" 2>/dev/null || true)"
+        if [ -n "$win_pid" ]; then
+            taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
+        fi
+    fi
+    # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
+    [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+}
 # Default boot timeout.  The boot path runs the full self-test suite before
 # printing BOOT_OK, including the Path-Z ring-3 toolchain tests (each spawns a
 # real glibc/tcc/make/dash process under ld.so), which now dominate boot time:
@@ -403,6 +436,7 @@ echo "=== Booting QEMU (timeout: ${TIMEOUT}s) ==="
 rm -f "$SERIAL_FILE"
 
 OVMF_WIN="$(to_win_path "$OVMF")"
+rm -f "$PIDFILE"
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
@@ -413,11 +447,17 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     "${MONITOR_ARGS[@]}" \
     -device virtio-gpu-pci \
     -serial "file:$SERIAL_FILE_WIN" \
+    -pidfile "$PIDFILE_WIN" \
     -display none \
     -no-reboot \
     -m 512M \
     -machine q35 &
 QEMU_PID=$!
+# Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)
+# or exits early — a surviving qemu keeps the serial file locked and breaks
+# the next run.  (A hard SIGKILL/TaskStop of the harness cannot run this, so
+# callers that force-stop the script must still clean up qemu themselves.)
+trap 'kill_qemu "$QEMU_PID"' EXIT INT TERM
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0
@@ -427,8 +467,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
 
     if [ -f "$SERIAL_FILE" ] && grep -q "$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "$WAIT_MARKER detected after ${ELAPSED}s!"
-        kill "$QEMU_PID" 2>/dev/null || true
-        wait "$QEMU_PID" 2>/dev/null || true
+        kill_qemu "$QEMU_PID"
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
@@ -452,8 +491,7 @@ if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
 fi
 
 # Clean up
-kill "$QEMU_PID" 2>/dev/null || true
-wait "$QEMU_PID" 2>/dev/null || true
+kill_qemu "$QEMU_PID"
 
 # Check final output
 if [ -f "$SERIAL_FILE" ]; then

@@ -196,12 +196,41 @@ last 25 serial lines to stdout on any timeout (independently of the serial
 file, which a re-run overwrites), so the next occurrence records its freeze
 point in the test output automatically; the harness also hints to re-run with
 `--hard-lockup-watchdog` to capture the wedged guest RIP via the i6300esb NMI +
-HMP monitor. **PROPER FIX (needs a repro):** on the next occurrence, break in
-with the debugger (or add a watchdog that dumps all task states after N idle
-ticks) to see whether the parent task is blocked in `waitpid` with the child
-already reaped (missed wakeup) or whether the run queue is genuinely empty with
-a task still `Zombie`-but-not-reaped. Audit the `wait4`/`waitpid` wakeup path
-and the "last thread exits → parent notified" hand-off for a lost-wakeup race.
+HMP monitor.
+
+**Static audit (2026-07-15b) — the waitpid-lost-wakeup hypothesis is RULED OUT;
+suspect is a task-exit-path wedge (likely Q24 holder-preemption spin-deadlock).**
+Two facts from reading the code + the serial log flip the diagnosis:
+1. **The kernel harness that waits for the spawned glibc program does not block
+   — it *polls*.** `self_test_linux_real_glibc_forkexec` (`spawn.rs:9523`) waits
+   with `for _ in 0..MAX_YIELDS { if state==Zombie break; sched::yield_now() }`,
+   never `block_current`. A poll loop cannot suffer a lost wakeup, so "harness
+   parked in wait4 with a missed wakeup" is impossible here.
+2. **The parent process itself reached `Zombie`** (`Process 164 … now zombie`
+   in the log) — i.e. the glibc program's own `waitpid()` already returned and
+   the program exited normally. So the in-guest wait4 also completed. The freeze
+   is *after* both, at `[sched] Task 130 exiting` — inside the scheduler's
+   task-exit teardown for the last thread, with **no further output**.
+   And the core kernel `wake`/`block_current` protocol is independently sound
+   (the `pending_wake` flag in `sched/mod.rs:1523` closes the register→park
+   window), so this is not a scheduler wakeup bug either.
+This points at the **exit/teardown path wedging on the CPU** rather than any
+missed wakeup: most plausibly a **raw `spin::Mutex` holder-preemption deadlock**
+— the *same Q24 class* as the already-fixed container-exec (`fa87bbb5e`) and
+heap (`83307bdfc`) deadlocks — hit somewhere between "[sched] Task N exiting"
+and the reap (e.g. `PROCESS_TABLE`/`SCHED`/reaper locks taken without
+preempt-disable while a timer preemption lands on the holder on a 1-CPU boot).
+It could also be an idle-transition bug (last runnable task exits and the idle
+path never reschedules the still-Ready harness), but the lock-deadlock is the
+better fit for a *silent, output-less* freeze mid-teardown.
+
+**PROPER FIX (needs a repro):** on the next occurrence, capture the wedged guest
+RIP (`--hard-lockup-watchdog`) and check whether it sits inside a
+`spin::Mutex::lock` spin in the exit/reap path (→ Q24 preempt-disable fix, mirror
+the container/heap pattern) vs. the idle loop with a Ready task still queued (→
+idle-reschedule bug). Given the Q24 lineage, the highest-value proactive step is
+the kernel-wide raw-spin holder-preemption audit already queued as **Q24** in
+`open-questions.md`; this hang is another data point for doing that audit.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 

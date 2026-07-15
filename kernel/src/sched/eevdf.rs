@@ -403,11 +403,8 @@ impl EevdfScheduler {
     /// vruntime is fixed, so each task crosses the boundary — and is promoted
     /// — at most once per residency.
     fn rebalance(&mut self) {
-        loop {
-            // Front of the vruntime-ordered ineligible set = smallest vruntime.
-            let Some((&(vrt, id), &())) = self.ineligible_by_vrt.iter().next() else {
-                break;
-            };
+        // Front of the vruntime-ordered ineligible set = smallest vruntime.
+        while let Some((&(vrt, id), &())) = self.ineligible_by_vrt.iter().next() {
             if vrt > self.min_vruntime {
                 // Still ineligible; everything behind it has a larger vruntime.
                 break;

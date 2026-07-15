@@ -37,9 +37,10 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
+use core::ops::{Deref, DerefMut};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use spin::{Mutex, MutexGuard};
 
 // ---------------------------------------------------------------------------
 // Slab poisoning (use-after-free / double-free detection)
@@ -406,6 +407,119 @@ static HEAP: KernelHeap = KernelHeap {
 };
 
 // ---------------------------------------------------------------------------
+// Heap-lock owner instrumentation (deadlock diagnosis)
+// ---------------------------------------------------------------------------
+//
+// The global heap lock (`HEAP.inner`) is a `spin::Mutex`, so a task that
+// wedges while holding it hangs every other CPU the instant it next tries to
+// allocate — the frozen-RIP capture from the NMI watchdog only ever names the
+// *victim* spinning in `spin_loop_hint`, never the *holder*. These two atomics
+// record, for the duration of each critical section, WHO holds the lock (the
+// owning task-id) and WHERE it was acquired (a `&'static Location` pointer,
+// stored as usize). They are updated with plain relaxed stores immediately
+// after the lock is taken and cleared when the guard drops, so the liveness /
+// NMI hang path can name the holder + acquire site directly.
+//
+// `u64::MAX` in OWNER means "unlocked". SITE is only meaningful while OWNER is
+// not `u64::MAX`.
+
+/// Task-id currently holding `HEAP.inner`, or `u64::MAX` when unlocked.
+static HEAP_LOCK_OWNER: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// `&'static Location` (as usize) of the acquire site of the current holder.
+static HEAP_LOCK_SITE: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII guard wrapping the real `spin::MutexGuard` that records the heap-lock
+/// owner + acquire site on acquisition and clears them on drop.
+///
+/// Derefs transparently to `HeapInner`, so call sites are unchanged apart from
+/// swapping `.lock()` for `.lock_tracked()`.
+struct TrackedGuard<'a> {
+    guard: MutexGuard<'a, HeapInner>,
+}
+
+impl Deref for TrackedGuard<'_> {
+    type Target = HeapInner;
+    #[inline]
+    fn deref(&self) -> &HeapInner {
+        &self.guard
+    }
+}
+
+impl DerefMut for TrackedGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut HeapInner {
+        &mut self.guard
+    }
+}
+
+impl Drop for TrackedGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // Clear the owner *before* the wrapped MutexGuard field drops (fields
+        // drop after the Drop body), so the "unlocked" marker is published just
+        // ahead of the physical lock release. A brief window where the lock is
+        // held but marked unlocked is harmless for a diagnostic.
+        HEAP_LOCK_OWNER.store(u64::MAX, Ordering::Relaxed);
+        HEAP_LOCK_SITE.store(0, Ordering::Relaxed);
+    }
+}
+
+impl KernelHeap {
+    /// Acquire `inner`, recording the owning task-id and acquire site for the
+    /// hang-diagnosis path. `#[track_caller]` captures the *call site* at
+    /// compile time (zero runtime cost), so the recorded `Location` names the
+    /// line that took the lock, not this helper.
+    #[inline]
+    #[track_caller]
+    fn lock_tracked(&self) -> TrackedGuard<'_> {
+        let guard = self.inner.lock();
+        // Reading current_task_id() is lock-free (a per-CPU atomic load), so it
+        // is safe to call from inside the allocator without re-entrancy.
+        let tid = crate::sched::current_task_id();
+        HEAP_LOCK_OWNER.store(tid, Ordering::Relaxed);
+        HEAP_LOCK_SITE.store(
+            core::panic::Location::caller() as *const _ as usize,
+            Ordering::Relaxed,
+        );
+        TrackedGuard { guard }
+    }
+}
+
+/// Dump the current holder of the global heap lock to the serial log.
+///
+/// Called from the liveness / NMI hang path. Lock-free (plain atomic loads),
+/// so it is safe to call from a partially-wedged system or IRQ context. When
+/// the lock is held, names the owning task-id and the `file:line` where it was
+/// acquired — turning a "victim spinning in spin_loop_hint" capture into a
+/// direct pointer at the deadlocking critical section.
+pub fn dump_lock_owner() {
+    let owner = HEAP_LOCK_OWNER.load(Ordering::Relaxed);
+    if owner == u64::MAX {
+        serial_println!("[liveness]   heap-lock: unlocked (no current holder)");
+        return;
+    }
+    let site_ptr = HEAP_LOCK_SITE.load(Ordering::Relaxed);
+    if site_ptr == 0 {
+        serial_println!("[liveness]   heap-lock: HELD by tid={} (acquire site unknown)", owner);
+        return;
+    }
+    // SAFETY: HEAP_LOCK_SITE, when non-zero, holds a `&'static Location`
+    // pointer written by lock_tracked() from `Location::caller()`, which has
+    // static lifetime. It is only cleared to 0 (checked above) on guard drop,
+    // so a non-zero value is always a live &'static Location.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
+    serial_println!(
+        "[liveness]   heap-lock: HELD by tid={} acquired at {}:{}:{}  <-- likely deadlock holder",
+        owner,
+        loc.file(),
+        loc.line(),
+        loc.column(),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // HeapInner implementation
 // ---------------------------------------------------------------------------
 
@@ -756,7 +870,7 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
     }
 
     // Slow path: batch refill from global allocator.
-    let mut inner = HEAP.inner.lock();
+    let mut inner = HEAP.lock_tracked();
     let mut transferred = 0u16;
 
     for _ in 0..PCPU_SLAB_BATCH {
@@ -863,7 +977,7 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     }
 
     // Local cache full — drain half to global.
-    let mut inner = HEAP.inner.lock();
+    let mut inner = HEAP.lock_tracked();
     for _ in 0..PCPU_SLAB_BATCH {
         if cache.counts[class_idx] == 0 {
             break;
@@ -930,7 +1044,7 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
 
         // Global locked path.
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_tracked();
         if !inner.initialized {
             return ptr::null_mut();
         }
@@ -1008,7 +1122,7 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
 
         // Global locked path.
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_tracked();
         if !inner.initialized {
             return;
         }
@@ -1379,7 +1493,7 @@ pub struct HeapAuditResult {
 /// latency-sensitive contexts.
 #[allow(clippy::cast_ptr_alignment)]
 pub fn audit_free_lists() -> HeapAuditResult {
-    let inner = HEAP.inner.lock();
+    let inner = HEAP.lock_tracked();
     let poison_on = POISON_ENABLED.load(Ordering::Relaxed);
 
     let mut total_free: usize = 0;
@@ -1488,7 +1602,7 @@ pub fn audit_free_lists() -> HeapAuditResult {
 /// Must be called after the frame allocator is initialized and before
 /// any heap allocations are made.
 pub fn init(hhdm_offset: u64) {
-    let mut inner = HEAP.inner.lock();
+    let mut inner = HEAP.lock_tracked();
     inner.hhdm_offset = hhdm_offset;
     inner.initialized = true;
     serial_println!("[mm] Kernel heap allocator initialized");

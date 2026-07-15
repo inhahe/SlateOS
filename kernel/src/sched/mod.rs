@@ -2226,6 +2226,12 @@ fn dump_all_tasks_serial() {
         );
     }
 
+    // Global heap-lock holder: a task wedged while holding `HEAP.inner` hangs
+    // every other CPU the instant it next allocates, but the frozen-RIP capture
+    // only ever names the victim spinning in spin_loop_hint. This lock-free dump
+    // names the actual holder + acquire site (see mm::heap::dump_lock_owner).
+    crate::mm::heap::dump_lock_owner();
+
     let now = crate::apic::tick_count();
     let Some(state) = SCHED.try_lock() else {
         serial_println!(

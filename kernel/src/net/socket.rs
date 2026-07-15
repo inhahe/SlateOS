@@ -109,6 +109,34 @@ pub enum SockKind {
     Dgram,
 }
 
+/// A connected datagram socket's default peer, set by `connect(2)` on a
+/// `SOCK_DGRAM` fd. Once set, [`dgram_send_connected`] targets it (so `send`/
+/// `write` need no explicit destination) and [`dgram_recv_from`] filters incoming
+/// datagrams to those from it — Linux drops datagrams from any other source on a
+/// connected UDP socket. The address itself carries the family (a v4 peer is a
+/// [`V4`](DgramPeer::V4), a v6 peer a [`V6`](DgramPeer::V6)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgramPeer {
+    /// IPv4 default peer `(addr, port)`.
+    V4([u8; 4], u16),
+    /// IPv6 default peer `(addr, port)`.
+    V6([u8; 16], u16),
+}
+
+/// Whether a received datagram's source `(family, ip16, port)` matches a connected
+/// UDP socket's default `peer` — the filter Linux applies to a connected
+/// `SOCK_DGRAM` socket (only datagrams from the connected peer are delivered).
+fn dgram_peer_matches(peer: &DgramPeer, family: u16, ip16: &[u8; 16], port: u16) -> bool {
+    match peer {
+        DgramPeer::V4(ip, p) => {
+            family == netipc::ring::UDP_AF_INET && port == *p && ip16.iter().take(4).eq(ip.iter())
+        }
+        DgramPeer::V6(ip6, p) => {
+            family == netipc::ring::UDP_AF_INET6 && port == *p && ip16.iter().eq(ip6.iter())
+        }
+    }
+}
+
 /// Outcome of a [`connect`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectOutcome {
@@ -134,6 +162,11 @@ struct SocketInner {
     /// Datagram sockets only: the bound local port (for `getsockname`). `0` until
     /// bound.
     local_port: u16,
+    /// Datagram sockets only: the connected default peer set by `connect(2)`, or
+    /// `None` for an unconnected datagram socket. When set, `send`/`write` (no
+    /// explicit destination) target it and `recv`/`read` filter to it. Meaningless
+    /// for a stream socket.
+    dgram_peer: Option<DgramPeer>,
     /// Connection lifecycle state.
     state: SockState,
     /// Remembered peer address (for `getpeername`), set on a successful connect.
@@ -200,6 +233,7 @@ fn create_kind(kind: SockKind) -> KernelResult<SocketHandle> {
         kind,
         bound: false,
         local_port: 0,
+        dgram_peer: None,
         state: SockState::Created,
         peer_ip: [0; 4],
         peer_ip6: None,
@@ -708,7 +742,110 @@ pub fn dgram_recv_from(
         return Err(KernelError::InvalidArgument);
     }
     ensure_bound(&mut guard)?;
-    guard.conn.udp_recv_any(buf, nonblock)
+    let peer = guard.dgram_peer;
+    // An *unconnected* datagram socket delivers from any source. A *connected*
+    // one (a `connect(2)` set a default peer) only delivers datagrams from that
+    // peer — Linux drops the rest at input, so we discard non-matching datagrams
+    // here and keep receiving. On a non-blocking socket the discard loop drains to
+    // `WouldBlock` (→ `EAGAIN`) once the queue holds no matching datagram; on a
+    // blocking socket it waits for the next one, matching a connected UDP `recv`.
+    loop {
+        let got = guard.conn.udp_recv_any(buf, nonblock)?;
+        match peer {
+            None => return Ok(got),
+            Some(p) => {
+                let (_, family, ip16, port) = got;
+                if dgram_peer_matches(&p, family, &ip16, port) {
+                    return Ok(got);
+                }
+                // Source does not match the connected peer — drop and receive again.
+            }
+        }
+    }
+}
+
+/// `connect(2)` a datagram (`SOCK_DGRAM`) socket to a default peer.
+///
+/// Sets (or replaces — a UDP socket may be re-`connect`ed) the socket's default
+/// destination. After this, [`dgram_send_connected`] (`send`/`write` with no
+/// explicit address) targets `peer`, and [`dgram_recv_from`] filters incoming
+/// datagrams to those from `peer`. Auto-binds an ephemeral local port if the
+/// socket is unbound (Linux assigns a source port on a UDP `connect`).
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - protocol faults propagated from the implicit ephemeral auto-bind.
+pub fn dgram_connect(handle: SocketHandle, peer: DgramPeer) -> KernelResult<()> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    ensure_bound(&mut guard)?;
+    guard.dgram_peer = Some(peer);
+    Ok(())
+}
+
+/// Dissolve a datagram socket's connected peer per `connect(AF_UNSPEC)` — Linux
+/// disconnects the UDP socket, so a later `send`/`write` again needs an explicit
+/// destination and `recv` again accepts datagrams from any source.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+pub fn dgram_disconnect(handle: SocketHandle) -> KernelResult<()> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    guard.dgram_peer = None;
+    Ok(())
+}
+
+/// The datagram socket's connected default peer (`getpeername`), or `None` if it
+/// has not been `connect`ed.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+pub fn dgram_peer(handle: SocketHandle) -> KernelResult<Option<DgramPeer>> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(guard.dgram_peer)
+}
+
+/// Send `buf` as a single datagram to the socket's connected default peer
+/// (`send(2)`/`write(2)` with no explicit destination). Returns the number of
+/// bytes accepted (`buf.len()` on success — a datagram is all-or-nothing).
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - `NotConnected` — no default peer set (the syscall layer maps this to
+///   `EDESTADDRREQ`).
+/// - `MsgSize` — the datagram exceeds the maximum a single send can carry.
+/// - protocol faults propagated from [`NetstackConn::udp_send_to`]/`udp_send_to6`.
+pub fn dgram_send_connected(handle: SocketHandle, buf: &[u8]) -> KernelResult<i32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    let peer = guard.dgram_peer.ok_or(KernelError::NotConnected)?;
+    ensure_bound(&mut guard)?;
+    match peer {
+        DgramPeer::V4(ip, port) => guard.conn.udp_send_to(&ip, port, buf),
+        DgramPeer::V6(ip6, port) => guard.conn.udp_send_to6(&ip6, port, buf),
+    }
 }
 
 /// The bound local port of a datagram socket (`getsockname`), or `0` if not yet

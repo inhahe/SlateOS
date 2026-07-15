@@ -3779,6 +3779,14 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 /// a full send window returns `-EAGAIN` (before any bytes are accepted) instead of
 /// waiting on the daemon.
 fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64, force_nonblock: bool) -> SyscallResult {
+    // A datagram socket has no stream: `write(2)` sends one datagram to the
+    // connected default peer (`EDESTADDRREQ` if unconnected). Route it before the
+    // `len == 0` short-circuit so an unconnected zero-length write still faults and
+    // a connected one sends a valid empty datagram.
+    let dh = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    if crate::net::socket::is_dgram(dh).unwrap_or(false) {
+        return dispatch_dgram_send_connected(dh, buf, len);
+    }
     if len == 0 {
         return SyscallResult::ok(0);
     }
@@ -3823,6 +3831,15 @@ fn dispatch_socket_read(
 ) -> SyscallResult {
     if cap == 0 {
         return SyscallResult::ok(0);
+    }
+    // A datagram socket has no stream: `read(2)` receives one datagram (dropping
+    // the source, as `read` takes no address out-param). Routing through the shared
+    // datagram receive keeps the connected-peer filter (a connected UDP socket only
+    // delivers from its peer). A `read` supplies no `src_addr`, hence NULL out-params.
+    let dh = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    if crate::net::socket::is_dgram(dh).unwrap_or(false) {
+        let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
+        return dispatch_dgram_recvfrom(dh, buf, cap, nonblock, 0, 0);
     }
     let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX).min(4096);
     if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
@@ -36512,6 +36529,12 @@ fn socket_connect_from_user(entry: FdEntry, addr_ptr: u64, addr_len: i32) -> Sys
     }
     let family = u16::from_ne_bytes(fam);
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    // A datagram (`SOCK_DGRAM`) socket has no TCP handshake: `connect(2)` just
+    // records a default peer (and auto-binds a source port). Route it separately —
+    // it never blocks or returns EINPROGRESS.
+    if crate::net::socket::is_dgram(h).unwrap_or(false) {
+        return dgram_connect_from_user(h, addr_ptr, addr_len, family);
+    }
     // Honour the fd's O_NONBLOCK: a non-blocking connect returns EINPROGRESS
     // immediately and the handshake completes in the background (the caller then
     // poll(POLLOUT)s and reads getsockopt(SO_ERROR)).
@@ -36591,6 +36614,69 @@ fn socket_connect_from_user(entry: FdEntry, addr_ptr: u64, addr_len: i32) -> Sys
             connect_outcome_to_result(crate::net::socket::connect6(h, &ip6, port, nonblock))
         }
         _ => linux_err(errno::EAFNOSUPPORT),
+    }
+}
+
+/// Parse a user sockaddr and drive `connect(2)` on a datagram (`SOCK_DGRAM`)
+/// socket: record the default peer (no handshake).
+///
+/// Dispatches on `sa_family`: `AF_UNSPEC` (0) dissolves any existing connection
+/// (Linux disconnects a UDP socket); `AF_INET` (2, 16-byte `sockaddr_in`) and
+/// `AF_INET6` (10, 28-byte `sockaddr_in6`) set the peer via
+/// [`crate::net::socket::dgram_connect`]. Any other family is `EAFNOSUPPORT`.
+/// Returns `0` on success — a UDP `connect` never blocks or returns `EINPROGRESS`.
+fn dgram_connect_from_user(
+    h: crate::net::socket::SocketHandle,
+    addr_ptr: u64,
+    addr_len: i32,
+    family: u16,
+) -> SyscallResult {
+    use crate::net::socket::DgramPeer;
+    #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+    let addr_len_usize = addr_len as usize;
+    let peer = match family {
+        0 => {
+            // AF_UNSPEC — dissolve the connected peer.
+            return match crate::net::socket::dgram_disconnect(h) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        2 => {
+            if addr_len_usize < 16 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 16];
+            // SAFETY: the connect gate validated `addr_len` (>= 16) bytes readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let [_, _, p0, p1, a0, a1, a2, a3, ..] = sa;
+            DgramPeer::V4([a0, a1, a2, a3], u16::from_be_bytes([p0, p1]))
+        }
+        10 => {
+            if addr_len_usize < 28 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 28];
+            // SAFETY: the connect gate validated `addr_len` (>= 28) bytes readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 28) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            let port = u16::from_be_bytes([sa[2], sa[3]]);
+            let mut ip6 = [0u8; 16];
+            ip6.copy_from_slice(&sa[8..24]);
+            DgramPeer::V6(ip6, port)
+        }
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    };
+    match crate::net::socket::dgram_connect(h, peer) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
     }
 }
 
@@ -36732,6 +36818,20 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        // A datagram socket reports its connected default peer (set by connect(2));
+        // ENOTCONN if it was never connected. The peer variant carries the family.
+        if crate::net::socket::is_dgram(h).unwrap_or(false) {
+            return match crate::net::socket::dgram_peer(h) {
+                Ok(Some(crate::net::socket::DgramPeer::V6(ip6, port))) => {
+                    socket_write_peer_addr6(args.arg1, args.arg2, &ip6, port)
+                }
+                Ok(Some(crate::net::socket::DgramPeer::V4(ip, port))) => {
+                    socket_write_peer_addr(args.arg1, args.arg2, &ip, port)
+                }
+                Ok(None) => linux_err(errno::ENOTCONN),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
         // An AF_INET6 socket (connected via connect6) reports a sockaddr_in6; an
         // AF_INET socket reports a sockaddr_in.
         return match crate::net::socket::peer6(h) {
@@ -37046,11 +37146,14 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-        // A datagram socket routes to `sendto` with an explicit destination. Linux
-        // requires a destination address on an unconnected `SOCK_DGRAM` socket
-        // (`EDESTADDRREQ` when `dest_addr` is NULL — UDP `connect()` to fix a default
-        // peer is a documented follow-up).
+        // A datagram socket: `sendto` with an explicit destination sends there
+        // (Linux uses the supplied address even on a connected UDP socket); `sendto`
+        // with a NULL destination — i.e. `send(2)` — targets the socket's connected
+        // default peer, or is `EDESTADDRREQ` on an unconnected socket.
         if crate::net::socket::is_dgram(h).unwrap_or(false) {
+            if args.arg4 == 0 {
+                return dispatch_dgram_send_connected(h, buf, args.arg2);
+            }
             return dispatch_dgram_sendto(h, buf, args.arg2, args.arg4, args.arg5);
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -37156,6 +37259,49 @@ fn dispatch_dgram_sendto(
     }
     match send(&kbuf) {
         Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Send one datagram from a *connected* `SOCK_DGRAM` socket to its default peer —
+/// `send(2)`/`write(2)` (or `sendto` with a NULL destination) on a socket a prior
+/// `connect(2)` fixed a peer on.
+///
+/// Returns `EDESTADDRREQ` when the socket has no connected peer (a `send` with no
+/// destination on an unconnected UDP socket). A zero-length datagram is valid.
+fn dispatch_dgram_send_connected(
+    h: crate::net::socket::SocketHandle,
+    buf: u64,
+    len: u64,
+) -> SyscallResult {
+    // A send with no explicit destination requires a connected peer.
+    match crate::net::socket::dgram_peer(h) {
+        Ok(Some(_)) => {}
+        Ok(None) => return linux_err(errno::EDESTADDRREQ),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+    // Stage the payload, capped at the ring's send window (a datagram is
+    // all-or-nothing; the client returns EMSGSIZE beyond that).
+    let cap = usize::try_from(len).unwrap_or(usize::MAX).min(4096);
+    if cap == 0 {
+        // A zero-length datagram is valid (an empty UDP packet to the peer).
+        return match crate::net::socket::dgram_send_connected(h, &[]) {
+            Ok(n) => SyscallResult::ok(i64::from(n)),
+            Err(crate::error::KernelError::NotConnected) => linux_err(errno::EDESTADDRREQ),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(buf, cap) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kbuf = alloc::vec![0u8; cap];
+    // SAFETY: validate_user_read confirmed [buf, +cap) readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), cap) } {
+        return linux_err(linux_errno_for(e));
+    }
+    match crate::net::socket::dgram_send_connected(h, &kbuf) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(crate::error::KernelError::NotConnected) => linux_err(errno::EDESTADDRREQ),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }

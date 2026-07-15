@@ -114,8 +114,14 @@ client, *and* the AF_INET socket-fd wiring are all landed. A userspace
 `net::socket::create_dgram`/`dgram_bind`/`dgram_send_to`/`dgram_recv_from` over
 `OP_UDP_BIND`/`OP_UDP_SEND`/`OP_UDP_RECV`, boot-validated by `self_test_udp_dns`.
 **AF_INET6 UDP datagrams now work too** (`OP_UDP_SEND6` + v6-aware `OP_UDP_RECV`,
-`self_test_udp6_loopback`). The one remaining UDP gap is a UDP `connect()`
-default-peer (a documented follow-up, below), not a blocker. The last big gap is **(3) send
+`self_test_udp6_loopback`). **UDP `connect()` default-peer now works too** (v4 and
+v6): `connect(2)` on a `SOCK_DGRAM` fd records a default peer (no handshake,
+auto-binds a source port) via `net::socket::dgram_connect`, so `send`/`write` (no
+explicit destination) target it (`dgram_send_connected`; `EDESTADDRREQ` when
+unconnected) and `recv`/`read` filter incoming datagrams to that peer (Linux drops
+non-peer datagrams on a connected UDP socket); `getpeername` reports it, and
+`connect(AF_UNSPEC)` dissolves it. Boot-validated by `self_test_udp_connect` (both
+filter-pass and filter-drop). The last big gap is **(3) send
 pipelining** — the daemon's single-outstanding-segment sender is a *deliberate*
 minimal-TCP design, so multi-segment/windowed send is a design change with
 tradeoffs, not a bug fix.
@@ -243,12 +249,29 @@ Phase 5 progresses:
     yet done:** an `AF_INET6` arm in the ring-3 `udpget` capstone (kernel-context
     self-test only), and UDP `getsockname` reporting a v6 family (needs socket
     domain tracking — the socket object doesn't record its domain).
-  - a UDP `connect()` to fix a default peer (so `send`/`recv` without an address
-    work, and `recv` filters to that peer) — mostly kernel-side state in
-    `SocketInner` plus a recv source-filter; and UDP `getsockname` reporting the
-    real interface IP (needs a UDP `OP_LOCALADDR`) — note this is only a
-    divergence for a socket bound to a specific local IP; our sockets bind
-    `INADDR_ANY`, for which Linux's `getsockname` correctly reports `0.0.0.0`.
+  - **UDP `connect()` default-peer — DONE (v4 and v6).** `connect(2)` on a
+    `SOCK_DGRAM` fd records a default peer without a handshake (auto-binding a
+    source port). `net::socket` grew a `DgramPeer::{V4,V6}` + `SocketInner.
+    dgram_peer` field and `dgram_connect`/`dgram_disconnect`/`dgram_peer`/
+    `dgram_send_connected`; `dgram_recv_from` filters to the connected peer
+    (discarding non-peer datagrams, which Linux drops at input on a connected UDP
+    socket). The Linux syscall layer routes `connect(SOCK_DGRAM)` →
+    `dgram_connect_from_user` (`AF_UNSPEC` dissolves; 2→v4, 10→v6, else
+    `EAFNOSUPPORT`), `send`/`write`/`sendto(NULL dest)` →
+    `dispatch_dgram_send_connected` (targets the peer; `EDESTADDRREQ` when
+    unconnected), `sendto` *with* an address still sends there (Linux uses the
+    supplied address even on a connected UDP socket), `read` routes through the
+    filtered receive, and `getpeername` reports the connected peer (`ENOTCONN`
+    otherwise). Boot-validated by `netstack_client::self_test_udp_connect` (a
+    connected send loops back and passes the peer filter; `getpeername` matches;
+    a datagram injected from a *non-peer* port is dropped by the connected
+    receive). **Still not done:** an `AF_INET6` arm in the ring-3 `udpget`
+    capstone (kernel-context self-tests only); UDP `getsockname` reporting a v6
+    family (needs socket-domain tracking — the socket object doesn't record its
+    domain); and UDP `getsockname` reporting the real interface IP (needs a UDP
+    `OP_LOCALADDR`) — the last is only a divergence for a socket bound to a
+    specific local IP; our sockets bind `INADDR_ANY`, for which Linux's
+    `getsockname` correctly reports `0.0.0.0`.
   **Limitations:** the
   receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
   is lossy); and it inherits the daemon's single-active-phase RX-demux limitation

@@ -3397,6 +3397,24 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // UDP connect() default-peer parity (D-NETSOCK-SYNC): drive the net::socket
+    // SOCK_DGRAM object layer through the daemon loopback — a connect()ed socket's
+    // send targets the default peer and its recv filters to that peer (Linux drops
+    // non-peer datagrams). Proves both filter directions + getpeername.
+    match crate::net::netstack_client::self_test_udp_connect() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack udp-connect: connected send looped back and the \
+             non-peer datagram was dropped — UDP connect() default-peer parity proven"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: persistent netstack udp-connect error ({:?})",
+            e
+        ),
+    }
+
     // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;
     // see todo.txt Judgment Calls 2026-07-14). Everything above drives the
     // daemon-backed socket path from *kernel* context via the `NetstackConn`
@@ -3418,7 +3436,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept/connect6/udp6/ring3-capstone/ring3-udp parity checks done; \
+         nonblock-send/listen-accept/connect6/udp6/udp-connect/ring3-capstone/ring3-udp parity checks done; \
          daemon now owns the NIC for the system's lifetime"
     );
     Ok(())

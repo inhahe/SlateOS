@@ -1360,6 +1360,172 @@ pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
     Err(KernelError::InternalError)
 }
 
+/// Boot self-test: prove UDP `connect(2)` **default-peer** semantics on a
+/// daemon-backed `SOCK_DGRAM` socket, end-to-end through the
+/// [`crate::net::socket`] object layer the Linux syscalls use.
+///
+/// Two phases over the in-process IPv6 loopback (a frame to our own EUI-64
+/// link-local is diverted into the daemon RX FIFO, bypassing NDP):
+///
+/// 1. **Connected send + filter-pass.** Bind a datagram socket to a fixed port,
+///    `dgram_connect` it to `[me.ip6]:port` (itself), then a *connected* send
+///    ([`dgram_send_connected`](crate::net::socket::dgram_send_connected) — no
+///    explicit destination) must loop back and be delivered, because the source
+///    (`[me.ip6]:port`) equals the connected peer. `getpeername`
+///    ([`dgram_peer`](crate::net::socket::dgram_peer)) must report that peer.
+/// 2. **Filter-drop.** Re-`connect` the same socket to a *different* peer port,
+///    then inject a datagram from our own port via an explicit
+///    [`dgram_send_to6`](crate::net::socket::dgram_send_to6) to ourselves. The
+///    daemon delivers it to our bound port, but a *connected* receive must **drop**
+///    it (its source port ≠ the connected peer port) — Linux filters a connected
+///    UDP socket to its peer. A receive that returns any datagram means the filter
+///    leaked.
+///
+/// Returns `Ok(Some(()))` on both phases proven, `Ok(None)` if there is no NIC yet
+/// (no MAC → the daemon has no `me.ip6`), and `Err` on a control-protocol fault or
+/// a parity break.
+///
+/// # Errors
+///
+/// Propagates control-protocol faults; a bind/connect/send failure, a missing
+/// loopback datagram (phase 1), or a leaked filter (phase 2) is an error.
+pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
+    use crate::net::socket::{self, DgramPeer};
+    /// Bound/connected port for phase 1 (self-connect).
+    const PORT: u16 = 9310;
+    /// A different peer port for phase 2 (so an injected datagram from `PORT` is
+    /// filtered out).
+    const OTHER: u16 = 9312;
+    const PAYLOAD: &[u8] = b"slate-udp:connect-default-peer";
+
+    let mac = crate::net::interface::mac().0;
+    if mac == [0u8; 6] {
+        // No NIC → the daemon has no me.ip6 to loop back to.
+        return Ok(None);
+    }
+    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
+    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
+    let ll: [u8; 16] = [
+        0xFE, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4],
+        mac[5],
+    ];
+
+    let h = socket::create_dgram()?;
+    let bound = match socket::dgram_bind(h, PORT) {
+        Ok(b) => b,
+        Err(e) => {
+            socket::close(h);
+            return Err(e);
+        }
+    };
+    if bound != PORT {
+        socket::close(h);
+        crate::serial_println!(
+            "[netstack-client]   UDP connect: bind(port={PORT}) returned {bound} — parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Phase 1 — connect to ourselves, connected send must loop back and pass the
+    // peer filter.
+    if let Err(e) = socket::dgram_connect(h, DgramPeer::V6(ll, PORT)) {
+        socket::close(h);
+        return Err(e);
+    }
+    match socket::dgram_peer(h) {
+        Ok(Some(DgramPeer::V6(p, pp))) if p == ll && pp == PORT => {}
+        other => {
+            socket::close(h);
+            crate::serial_println!(
+                "[netstack-client]   UDP connect: getpeername mismatch ({other:?}) — parity broken"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let sent = match socket::dgram_send_connected(h, PAYLOAD) {
+        Ok(n) => n,
+        Err(e) => {
+            socket::close(h);
+            return Err(e);
+        }
+    };
+    if usize::try_from(sent).unwrap_or(0) < PAYLOAD.len() {
+        socket::close(h);
+        crate::serial_println!(
+            "[netstack-client]   UDP connect: short connected send ({sent} bytes) — parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+    let mut resp = [0u8; 128];
+    let mut got = false;
+    for _ in 0..32u32 {
+        match socket::dgram_recv_from(h, &mut resp, true) {
+            Ok((n, family, ip16, port)) => {
+                let len = usize::try_from(n).unwrap_or(0).min(resp.len());
+                let dg = resp.get(..len).unwrap_or(&[]);
+                if family == netipc::ring::UDP_AF_INET6 && ip16 == ll && port == PORT && dg == PAYLOAD
+                {
+                    got = true;
+                    break;
+                }
+            }
+            Err(KernelError::WouldBlock) => {}
+            Err(e) => {
+                socket::close(h);
+                return Err(e);
+            }
+        }
+    }
+    if !got {
+        socket::close(h);
+        crate::serial_println!(
+            "[netstack-client]   UDP connect: connected send never looped back — parity broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Phase 2 — re-connect to a different peer, then inject a datagram from our own
+    // port (source == PORT, peer == OTHER). The connected recv must drop it.
+    if let Err(e) = socket::dgram_connect(h, DgramPeer::V6(ll, OTHER)) {
+        socket::close(h);
+        return Err(e);
+    }
+    if let Err(e) = socket::dgram_send_to6(h, &ll, PORT, b"stray-should-be-filtered") {
+        socket::close(h);
+        return Err(e);
+    }
+    let mut leaked = false;
+    for _ in 0..16u32 {
+        match socket::dgram_recv_from(h, &mut resp, true) {
+            // Any delivered datagram means the peer filter leaked (the injected one
+            // came from PORT, not the connected peer OTHER).
+            Ok(_) => {
+                leaked = true;
+                break;
+            }
+            Err(KernelError::WouldBlock) => {}
+            Err(e) => {
+                socket::close(h);
+                return Err(e);
+            }
+        }
+    }
+    socket::close(h);
+    if leaked {
+        crate::serial_println!(
+            "[netstack-client]   UDP connect: connected recv delivered a non-peer datagram — filter broken"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!(
+        "[netstack-client]   UDP connect() default-peer proven: connected send looped back \
+         (filter-pass), getpeername ok, non-peer datagram dropped (filter-drop) — \
+         SOCK_DGRAM connect parity"
+    );
+    Ok(Some(()))
+}
+
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected
 /// daemon socket returns "would block" rather than stalling for the full receive
 /// deadline — the `O_NONBLOCK` parity property (`D-NETSOCK-SYNC`).

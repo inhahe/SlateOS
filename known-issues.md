@@ -4125,6 +4125,33 @@ intentionally the bounded-self-test stand-in until then. See
 
 ### BENCH-COMPOSITOR-SLOW. Compositor over its 4K frame budget (~10.6ms/frame vs 2ms) — PERF BUG 2026-07-01, IMPROVED 4.6x 2026-07-02
 
+**UPDATE 2026-07-14 (5) — parallel opaque window blit landed (first increment of
+the deferred window-render parallelization).** The opaque fast path of
+`Compositor::blit_buffer` (full-opacity window carrying an `is_opaque()` Xrgb
+shared buffer — the common game/video/maximized-window case, which ran every
+frame as O(rows) serial `copy_row` memcpys) is now parallelized across
+destination row-bands, mirroring the existing `clear_except` band split. New
+`Framebuffer::blit_opaque(buf, win_x, win_y, cols, rows)` partitions the back
+buffer into disjoint `chunks_mut` row-bands filled on `std::thread::scope`
+workers (no `unsafe`, no aliasing; `&SharedBuffer` is `Sync` so workers share it
+read-only via `buf.row(r)`), gated by the same `fill_worker_count` heuristic (1M
+px threshold, cap 8, single-thread fallback). The static
+`blit_opaque_band(band, by0, band_rows, fb_width, buf, win_x, win_y, cols, rows)`
+helper replicates `copy_row`'s clipping (left `src_off` when `win_x<0`,
+right-edge `min`, vertical band ownership) byte-for-byte, so the result is
+bit-identical to the old serial path. Two new unit tests:
+`test_blit_opaque_matches_serial_reference_large` (2048×1024 fb > threshold,
+1200×900 buffer at 5 offsets incl. negative and offscreen; asserts parallel ==
+serial reference) and `test_blit_opaque_clips_edges_small` (single-thread path,
+all clip corners). 66 compositor tests total, clippy clean. NOTE: only the
+*opaque* blit is parallelized; the per-pixel alpha-blend path stays
+single-threaded, and this still spawns a fresh `thread::scope` per blit — the
+remaining gap needs a persistent thread pool (to amortize spawn cost) and to
+parallelize the `RenderEngine` per-window content draws (not just the final
+buffer blit). baselines.toml unchanged (the 4K benchmark's dominant cost is the
+background clear + per-window RenderEngine draws, not buffer blits; this helps
+buffer-backed-window workloads specifically).
+
 **UPDATE 2026-07-02 (4) — parallel background clear landed, 11.9ms → 10.6ms/frame
 min (cumulative 48.6ms → 10.6ms = 4.6x).** Both `Framebuffer::clear` and
 `Framebuffer::clear_except` now split the framebuffer into horizontal row-bands

@@ -813,6 +813,119 @@ impl Framebuffer {
         }
     }
 
+    /// Blit the opaque fast path of a client buffer onto the back buffer,
+    /// parallelizing across destination row-bands on multicore hosts.
+    ///
+    /// Copies `rows` source scanlines of `cols` opaque pixels each from `buf`,
+    /// placing the top-left source pixel at framebuffer coordinate
+    /// (`win_x`, `win_y`). Left-clipping (negative `win_x`), right-edge clipping,
+    /// and vertical clipping are byte-identical to running
+    /// [`copy_row`](Self::copy_row) per source row (the previous serial path).
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): a maximized buffer-backed window is the
+    /// dominant per-frame blit cost, and the opaque path is pure per-row
+    /// `copy_from_slice`s that are independent across destination rows. Above
+    /// [`fill_worker_count`](Self::fill_worker_count)'s threshold the framebuffer
+    /// is partitioned into disjoint row-bands (`chunks_mut` — non-overlapping
+    /// `&mut [u32]`, safe with no `unsafe`) and each band is filled on a scoped
+    /// worker. `buf` is shared read-only (`&SharedBuffer` is `Sync`); each worker
+    /// only writes rows that fall inside its own band. Below the threshold, or on
+    /// single-core targets, it runs single-threaded — no pessimization.
+    fn blit_opaque(&mut self, buf: &SharedBuffer, win_x: i32, win_y: i32, cols: u32, rows: u32) {
+        let width = self.width;
+        let height = self.height;
+        // Work proportional to the visible pixel count; reuse the fill heuristic.
+        let workers = Self::fill_worker_count(rows as usize * cols as usize);
+        if workers <= 1 {
+            Self::blit_opaque_band(&mut self.back, 0, height, width, buf, win_x, win_y, cols, rows);
+            return;
+        }
+        let rows_per_band = height.div_ceil(workers as u32);
+        let band_stride = rows_per_band as usize * width as usize;
+        std::thread::scope(|s| {
+            for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
+                let by0 = band_idx as u32 * rows_per_band;
+                let band_rows = (chunk.len() / width as usize) as u32;
+                s.spawn(move || {
+                    Self::blit_opaque_band(
+                        chunk, by0, band_rows, width, buf, win_x, win_y, cols, rows,
+                    );
+                });
+            }
+        });
+    }
+
+    /// Copy the opaque source rows that land inside one framebuffer row-band.
+    ///
+    /// `band` holds `band_rows` contiguous scanlines of `fb_width` pixels each,
+    /// the first at absolute framebuffer row `by0`. For each source row
+    /// `r in 0..rows`, the destination row is `win_y + r`; rows outside
+    /// `[by0, by0 + band_rows)` belong to another band and are skipped, so calling
+    /// this over a full row-band partition of the framebuffer reproduces the
+    /// serial per-row [`copy_row`](Self::copy_row) blit exactly. Horizontal
+    /// clipping (left `src_off` when `win_x < 0`, right-edge `min`) mirrors
+    /// `copy_row` byte-for-byte.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_opaque_band(
+        band: &mut [u32],
+        by0: u32,
+        band_rows: u32,
+        fb_width: u32,
+        buf: &SharedBuffer,
+        win_x: i32,
+        win_y: i32,
+        cols: u32,
+        rows: u32,
+    ) {
+        let width_usize = fb_width as usize;
+        let band_end = by0.saturating_add(band_rows);
+        for r in 0..rows {
+            let sy = win_y.saturating_add(r as i32);
+            if sy < 0 {
+                continue;
+            }
+            let sy = sy as u32;
+            // Rows past the framebuffer bottom (band_end == fb_height for the last
+            // band) and rows owned by other bands are both handled by this range.
+            if sy < by0 || sy >= band_end {
+                continue;
+            }
+            let Some(full_src) = buf.row(r) else {
+                continue;
+            };
+            // Matches blit_buffer: clamp the source run to `cols`, but never grow
+            // it past the actual row length.
+            let src = full_src.get(..cols as usize).unwrap_or(full_src);
+            if src.is_empty() {
+                continue;
+            }
+            // Replicate copy_row's clipping exactly for byte-identical output.
+            let (src_off, dst_x) = if win_x < 0 {
+                let skip = win_x.unsigned_abs() as usize;
+                if skip >= src.len() {
+                    continue;
+                }
+                (skip, 0usize)
+            } else {
+                (0usize, win_x as usize)
+            };
+            if dst_x >= width_usize {
+                continue;
+            }
+            let count = (src.len() - src_off).min(width_usize - dst_x);
+            if count == 0 {
+                continue;
+            }
+            let row_off = (sy - by0) as usize * width_usize + dst_x;
+            if let (Some(dst), Some(s)) = (
+                band.get_mut(row_off..row_off + count),
+                src.get(src_off..src_off + count),
+            ) {
+                dst.copy_from_slice(s);
+            }
+        }
+    }
+
     /// Fill a horizontal span of back-buffer row `y`, columns `[x_start, x_end)`,
     /// with a fully-opaque `color` using a single slice `fill()`.
     ///
@@ -3320,16 +3433,14 @@ impl Compositor {
         let cols = buf.width().min(win_width);
         let rows = buf.height().min(win_height);
         let fast = opacity >= 1.0 && buf.is_opaque();
+        if fast {
+            // Per-row-independent opaque copies — parallelized across row bands.
+            fb.blit_opaque(buf, win_x, win_y, cols, rows);
+            return;
+        }
         for row in 0..rows {
             let sy = win_y.saturating_add(row as i32);
             if sy < 0 {
-                continue;
-            }
-            if fast {
-                if let Some(src) = buf.row(row) {
-                    let run = src.get(..cols as usize).unwrap_or(src);
-                    fb.copy_row(win_x, sy as u32, run);
-                }
                 continue;
             }
             for col in 0..cols {
@@ -5023,6 +5134,90 @@ mod tests {
         // both far from row 0 so at least one band boundary was crossed.
         assert_eq!(par.get_pixel(200, 600), Some(0xFF_00_00_00));
         assert_eq!(par.get_pixel(900, 600), Some(0xFF_AB_CD_EF));
+    }
+
+    // ---- blit_opaque parallel row-band blit ---------------------------------
+
+    /// Build an opaque (Xrgb) `SharedBuffer` whose pixel `(x, y)` carries a
+    /// deterministic non-black value, so a copy can be verified per-pixel.
+    #[cfg(test)]
+    fn make_opaque_test_buffer(w: u32, h: u32) -> SharedBuffer {
+        let mut bytes = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let off = ((y * w + x) * 4) as usize;
+                // Xrgb: bytes are little-endian [B, G, R, X]; distinct per pixel.
+                bytes[off] = (x & 0xFF) as u8;
+                bytes[off + 1] = (y & 0xFF) as u8;
+                bytes[off + 2] = ((x ^ y) & 0xFF) as u8;
+                bytes[off + 3] = 0;
+            }
+        }
+        SharedBuffer::import(9, w, h, w * 4, BufferFormat::Xrgb8888, &bytes).expect("import")
+    }
+
+    /// Serial reference: exactly the old blit_buffer opaque fast path.
+    #[cfg(test)]
+    fn blit_opaque_reference(fb: &mut Framebuffer, buf: &SharedBuffer, win_x: i32, win_y: i32) {
+        let cols = buf.width();
+        let rows = buf.height();
+        for row in 0..rows {
+            let sy = win_y.saturating_add(row as i32);
+            if sy < 0 {
+                continue;
+            }
+            if let Some(src) = buf.row(row) {
+                let run = src.get(..cols as usize).unwrap_or(src);
+                fb.copy_row(win_x, sy as u32, run);
+            }
+        }
+    }
+
+    #[test]
+    fn test_blit_opaque_matches_serial_reference_large() {
+        // Above the parallel threshold so the multi-band path runs on multicore.
+        // The buffer is larger than 1<<20 px to force blit_opaque to parallelize.
+        const W: u32 = 2048;
+        const H: u32 = 1024; // 2M px > threshold
+        let buf = make_opaque_test_buffer(1200, 900);
+
+        for &(wx, wy) in &[(0i32, 0i32), (100, 200), (-50, -30), (1900, 800), (2000, 0)] {
+            let mut par = Framebuffer::new(W, H).unwrap();
+            par.clear(0xFF_00_00_00);
+            par.blit_opaque(&buf, wx, wy, buf.width(), buf.height());
+
+            let mut reference = Framebuffer::new(W, H).unwrap();
+            reference.clear(0xFF_00_00_00);
+            blit_opaque_reference(&mut reference, &buf, wx, wy);
+
+            assert!(
+                par.back == reference.back,
+                "blit_opaque({wx},{wy}) must match serial reference"
+            );
+        }
+    }
+
+    #[test]
+    fn test_blit_opaque_clips_edges_small() {
+        // Small buffers exercise the single-threaded path plus all clip corners.
+        let buf = make_opaque_test_buffer(16, 12);
+        for &(wx, wy) in &[
+            (0i32, 0i32),
+            (-5, -3), // top-left straddle
+            (28, 20), // fully offscreen bottom-right
+            (-20, 5), // fully offscreen left
+            (25, -2), // right-straddle + top-straddle
+        ] {
+            let mut got = Framebuffer::new(32, 24).unwrap();
+            got.clear(0xFF_11_22_33);
+            got.blit_opaque(&buf, wx, wy, buf.width(), buf.height());
+
+            let mut want = Framebuffer::new(32, 24).unwrap();
+            want.clear(0xFF_11_22_33);
+            blit_opaque_reference(&mut want, &buf, wx, wy);
+
+            assert!(got.back == want.back, "blit_opaque clip mismatch at ({wx},{wy})");
+        }
     }
 
     // ---- opaque_cover_rects (which windows cull the desktop clear) ---------

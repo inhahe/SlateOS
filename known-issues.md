@@ -64,6 +64,14 @@ context and are fine keeping the blocking read.
 wedge appeared within a handful of iterations under the oom/container
 self-test load that exercises `sysctl::set`.
 
+**Validation (post-fix).** 6/6 wedge-soak iterations booted to BOOT_OK
+(101–158s each) with zero wedges caught (2026-07-15). NOTE: validating
+this required first fixing a separate harness bug — boot-test.sh was
+leaking orphaned native QEMU processes on Windows (MSYS `kill` does not
+reap them), which locked `serial-test.txt` and made every repeated soak
+iteration fast-fail. Fixed in the same session via `-pidfile` +
+`taskkill` (commit 845c4447b); the sysctl fix itself is 0da3324e5.
+
 ---
 
 ### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15

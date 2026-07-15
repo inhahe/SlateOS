@@ -1117,6 +1117,32 @@ work (the persistent daemon only spawns when `net.userspace` is set), so these
 hangs cannot be a 5.6 regression. Increment 5.6 committed on this basis. **STILL
 OPEN — same container-exec / ring-3 spawn-dispatch race.**
 
+**OCCURRENCE 2026-07-15 (EEVDF-PICK-ON O(log n) rewrite validation).** Two
+consecutive `boot-test.sh` runs both timed out at `BOOT_OK not found within
+480s` at **different, non-deterministic points**; an **immediate third run
+passed cleanly in 95s** (`BOOT_OK`, all self-tests OK) — the definitive
+non-determinism tell, not a regression. Run 1 froze in the **virtio-blk write
+path** (repeated `[virtio-blk] Write sector NN timed out (IRQ mode)` on the
+`vdb` ext4 rootfs) with QEMU's one-off stderr `Incorrect order for
+descriptors`. Run 2 froze **earlier and at a ring-0 point** — mid-serial-output
+inside `budstat::self_test` (printed `  [3/` of the buddyinfo self-test line and
+then went dark mid-character). **Data point re. the two-wedge model:** run 2's
+freeze is *pre-userspace* (a ring-0 boot self-test, long before any container
+exec / ring-3 spawn) and froze *mid-serial-write*, which is the hard-CPU-wedge
+signature (the UART poll loop spins because the CPU is otherwise stuck), NOT the
+`[liveness] SYSTEM HANG … all CPUs idle-ticking` lost-wakeup signature of the
+ring-3 spawn-dispatch race. `budstat::self_test` itself was **audited and is
+provably deadlock-free** (straight-line assertions, no loops, `spin::Mutex`
+fully released between calls, STATE never touched from interrupt context) — so
+budstat is a red herring: it is merely where the CPU happened to be when the
+wedge fired. This reinforces that at least one still-open wedge is a general
+hard-CPU-wedge that can strike at *any* point (ring 0 or ring 3), distinct from
+the ring-3-only container-exec lost-wakeup race. The EEVDF change under test is
+an opt-in non-default scheduler backend whose self-tests **passed cleanly in all
+three runs** (`eevdf: all tests passed`, serial line ~6842) and cannot affect
+the ring-0 boot path (the default `PriorityRoundRobin` runs the boot); it was
+committed on this basis. **STILL OPEN.**
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

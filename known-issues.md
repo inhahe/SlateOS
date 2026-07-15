@@ -1390,6 +1390,75 @@ cpu0's RIPs cluster (→ names the livelock loop) or scatter (→ the wedge is a
 holder / another CPU, not a spin here). Boot-tested clean; the profiler
 self-test still passes.
 
+**UPDATE 2026-07-15 (THIRD catch — BREAKTHROUGH; recent-RIP instrumentation paid
+off) (`build/hang-catches/soak-20260715-043312-iter06.*`, wedged
+`RIP=0xffffffff80812316`).** The new recent-RIP history turned an inconclusive
+single RIP into the clearest picture yet — and this catch is *coherent*, unlike
+every prior one. All addresses below resolved against the exact booted binary
+(`target/x86_64-unknown-none/debug/kernel`, built 04:32, soak started 04:33) via
+`llvm-nm --print-size` + Python bisect (INSIDE-symbol verified, not gap guesses).
+
+- **Serial phase:** hang struck during `[tmpwatch] Running self-test...`, right
+  after `cleanup removes files: OK (removed 3)` (Test 5) — i.e. **Test 6's first
+  `Vfs::write_file("<dir>/delete_me.tmp", b"delete")`** (a 6-byte write) never
+  returned. A 6-byte write cannot legitimately take the full 240 s → genuine
+  infinite loop, not poison-allocator slowness.
+- **rbp-chain backtrace (20 frames, all INSIDE named symbols — the validator fix
+  is now confirmed good across two catches):** a clean, sensible call chain
+  `kmain → kernel_main → tmpwatch::self_test → Vfs::write_file →
+  Vfs::write_file_resolved → MemFs::write_file → MemFs::resolve_write_path →
+  MemFs::path_components → Iterator::collect → Vec::from_iter → RawVec allocate →
+  Global::allocate → __rust_alloc → KernelHeap::alloc → HeapInner::slab_alloc →
+  heap::check_poison`. So at the sampled instant cpu0 was allocating the
+  `path_components` `Vec` through the poison allocator.
+- **Recent-RIP history (16 samples ≈ 160 ms, this is the decisive new datum):**
+  NOT clustered in one tight loop but cycling through a *small working set* of
+  heap + BTreeMap + iterator code: `heap::check_poison`, `heap::poison_alloc`,
+  `heap::poison_free` (the O(size) byte-walk poison ops) and their inner
+  `Range`/`usize::Step` loops (`spec_next`, `forward_unchecked`, `Iterator::next`);
+  `BTreeMap::clone`, `BTreeMap::…insert_fit`, `slice::IterMut::next`;
+  `AtomicBool::compare_exchange_weak` (a spinlock CAS); `ptr::write_volatile`
+  (poison fill). Because these span *both* a BTreeMap *search/clone* phase and a
+  BTreeMap *insert* phase, cpu0 is not wedged on one instruction — it is
+  **repeatedly executing allocate→(BTreeMap op)→free**, i.e. a livelock, for the
+  full 15 s+ that froze `useful_work` (315) and `ctx_switches` (1119).
+- **`heap-lock: HELD by tid=0 acquired at heap.rs:1047:30`** (the `alloc` global
+  path) — expected, caught mid-allocation; NOT a static self-deadlock (the recent
+  RIPs prove forward motion, so it is not spinning 15 s on its own lock). The
+  240 s NMI `RIP = spin_loop_hint+0x6` is a single sample of a transient CAS spin
+  inside that busy loop, not the whole story.
+- **tid=0 `"prctl-batch269"` prio=31 Running** — the boot task itself, running the
+  self-test inline at max priority with no preemption point, so the loop starves
+  every other task → SYSTEM HANG.
+
+**Root-cause hypothesis (strong, not yet proven): slab/heap corruption →
+cyclic `BTreeMap` → non-terminating traversal.** `resolve_write_path`'s own loop
+is bounded (`MAX_SYMLINK_DEPTH = 40`) and the non-existent-file write takes the
+immediate `None → return` branch, so the loop is **not** a logic bug in memfs.
+The recent RIPs put the livelock inside `BTreeMap` node ops fed by poison-allocator
+churn. MemFs stores directory children in a `BTreeMap<name, node>`; if a slab
+free-list develops a **cycle** (the poison allocator's own `slab_dealloc` comment,
+heap.rs:632, explicitly calls this out as a corruption hazard it guards against
+*only* for detected double-frees — a use-after-free that overwrites a freed slot's
+`->next` from an unrelated allocation would NOT be caught), two live allocations
+alias the same memory, a `BTreeMap` node's child pointer becomes cyclic, and
+`children.get()` / insert traverses forever. This unifies every symptom: the
+BTreeMap ops in the RIP set, the poison-allocator involvement, the **moving catch
+location** (corruption is timing-dependent — prior catches landed in container
+self-test and `gen_dmastat`, this one in tmpwatch), and why bounded logic loops
+can't explain a 240 s hang. It is the same **B-PTHREAD-YIELDBUDGET / container-exec
+spawn-dispatch** intermittent family, now with a concrete mechanism to chase.
+
+**Next concrete step to CONFIRM:** add a **bounded free-list cycle check** to the
+poison-debug slab path — on `slab_dealloc`/`refill`, walk the class free list with
+a hop cap (e.g. a few × slots-per-frame) and, if exceeded, `emergency_println!`
+the class + loop and halt. This directly tests the cycle theory and, if it fires,
+names the corrupting size class. (The `lockdep_mm` migration from todo.txt targets
+*lock inversion*, a deadlock — the wrong tool for this **livelock**; deprioritize
+it for this symptom.) Instrumentation this session is committed; this catch is the
+first that gives an actionable code-level mechanism rather than a lone red-herring
+RIP.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

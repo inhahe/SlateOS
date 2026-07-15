@@ -1143,6 +1143,58 @@ three runs** (`eevdf: all tests passed`, serial line ~6842) and cannot affect
 the ring-0 boot path (the default `PriorityRoundRobin` runs the boot); it was
 committed on this basis. **STILL OPEN.**
 
+**BREAKTHROUGH 2026-07-15 (armed wedge-soak caught the hang with a resolved RIP —
+it is a deadlock on the GLOBAL KERNEL HEAP LOCK).** After the three runs above, an
+armed hang-repro soak (`scripts/wedge-soak.sh`: `boot-test.sh
+--hard-lockup-watchdog --no-build` in a loop, which enables the i6300esb NMI
+watchdog + the HMP monitor so a wedge's frozen CPU state is captured directly from
+QEMU) **reproduced and captured the wedge on iteration 2**. The captured guest
+state (`build/hang-catches/soak-20260715-004449-iter02.{serial,regs}.txt`) is
+decisive:
+- **Wedged RIP = `0xffffffff80b25ce6` = `core::sync::atomic::spin_loop_hint`+6** —
+  the CPU is spinning in a `spin::Mutex` acquire loop, not making progress.
+- **RDI = `0xffffffff827a1378` = `kernel::mm::heap::HEAP`** (resolved via
+  `llvm-nm`). RDI is the first-arg / lock pointer: **the lock being spun on is the
+  global kernel heap allocator's `HEAP.inner` `spin::Mutex`.**
+- **RFL = `0x202` → IF=1 (interrupts ENABLED).** So this is NOT the IF=0
+  hard-CPU-wedge family — it is a *lost-release spinlock deadlock* with interrupts
+  live (which is why `[liveness] SYSTEM HANG … all CPUs idle-ticking` DID fire and
+  dump the task table this time).
+- **RBX = `0xffffffff810c2e20` = `kernel::proc::spawn::userspace_entry_trampoline`**
+  — the spinning task is on the process-spawn → ring-3 entry path (task
+  `port-init`, `state=Running`, in the liveness dump), consistent with the
+  long-suspected container-exec / spawn-dispatch locus.
+- **`info cpus` shows a UNIPROCESSOR guest (only CPU#0).** So this is NOT a
+  cross-CPU AB-BA lock-ordering deadlock (that needs ≥2 spinning CPUs). On UP, a
+  permanent spin on a lock means the holder is **not running and never will be** —
+  i.e. **a task acquired `HEAP.inner.lock()` and then exited / was torn down
+  WITHOUT releasing it** (leaked `MutexGuard`), or was preempted while holding it
+  in a context that then never reschedules it. The liveness dump shows several
+  `state=Dead` tasks (`/tmp/restart-init.elf`, `logs-init`) alongside the live
+  spinner — a dead holder fits.
+
+**Ruled out this session:** (1) reentrancy through the frame allocator — the heap
+slow path (`KernelHeap::alloc`/`dealloc` → `HeapInner::slab_alloc` → `refill`)
+holds `HEAP.inner.lock()` across `frame::alloc_frame()` and
+`memtype::charge()`, but **neither allocates from the heap**: `memtype::charge`
+is pure atomics, and `frame::alloc_frame` + its sub-paths (`pcpu_refill`,
+`alloc_order`, `charge_cgroup_alloc`) contain no `Vec`/`Box`/`BTreeMap`/`format!`
+— only fixed per-CPU array pushes and atomics (audited `kernel/src/mm/frame.rs`).
+So holding the heap lock across the frame call is not itself a reentrancy
+deadlock. (2) Cross-CPU AB-BA — ruled out by the UP config.
+
+**Remaining hypothesis to confirm:** a code path acquires the global heap lock
+(directly, or transitively via any `alloc`/`dealloc`/`Vec`/`Box` on the
+spawn/exec/teardown path) and then the owning task is destroyed or context-switched
+away permanently before the guard drops, leaving the lock held forever. The
+decisive next step is **heap-lock owner instrumentation**: record the owning
+task-id + acquire-site RIP whenever `HEAP.inner` is locked, and dump it from the
+liveness/NMI path, so the next caught wedge names the holder and the exact
+acquire site. `scripts/wedge-soak.sh` reproduces reliably (~1 catch per 1–3 armed
+boots) to validate any fix. **STILL OPEN — now localized to the global heap
+spinlock; next: instrument the owner and identify the leaked-guard / dead-holder
+site.**
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

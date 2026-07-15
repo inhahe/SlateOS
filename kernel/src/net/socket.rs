@@ -117,6 +117,9 @@ struct SocketInner {
     state: SockState,
     /// Remembered peer address (for `getpeername`), set on a successful connect.
     peer_ip: [u8; 4],
+    /// Remembered IPv6 peer address (for `getpeername` on an `AF_INET6` socket),
+    /// set on a successful [`connect6`]. `None` for an IPv4 socket.
+    peer_ip6: Option<[u8; 16]>,
     /// Remembered peer port.
     peer_port: u16,
     /// Whether the latched `SO_ERROR` has already been consumed by a
@@ -155,6 +158,7 @@ pub fn create() -> KernelResult<SocketHandle> {
         conn,
         state: SockState::Created,
         peer_ip: [0; 4],
+        peer_ip6: None,
         peer_port: 0,
         so_error_read: false,
     };
@@ -267,6 +271,52 @@ pub fn connect(
     }
     guard.state = SockState::Connected;
     guard.peer_ip = *ip;
+    guard.peer_port = port;
+    Ok(ConnectOutcome::Established)
+}
+
+/// Connect an `AF_INET6` socket to `ip6:port` via the daemon.
+///
+/// IPv6 sibling of [`connect`]: identical lifecycle/outcome semantics, but drives
+/// [`NetstackConn::connect6`] (which carries the 16-byte peer address in the ring
+/// data window) and remembers the peer in `peer_ip6` for `getpeername`.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `AlreadyExists` — the socket is already connected (Linux `EISCONN`).
+/// - `ConnectAlready` — a non-blocking connect is already in progress (Linux
+///   `EALREADY`).
+/// - `ConnectionRefused` — the daemon could not establish the connection.
+/// - protocol faults propagated from [`NetstackConn::connect6`].
+pub fn connect6(
+    handle: SocketHandle,
+    ip6: &[u8; 16],
+    port: u16,
+    nonblock: bool,
+) -> KernelResult<ConnectOutcome> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    match guard.state {
+        SockState::Connected => return Err(KernelError::AlreadyExists), // EISCONN
+        SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
+        _ => {}
+    }
+    let res = guard.conn.connect6(ip6, port, nonblock)?;
+    if res == netipc::ring::ERR_IN_PROGRESS {
+        // Non-blocking handshake pending: remember the peer now so getpeername works
+        // once it resolves, and enter Connecting.
+        guard.state = SockState::Connecting;
+        guard.peer_ip6 = Some(*ip6);
+        guard.peer_port = port;
+        return Ok(ConnectOutcome::InProgress);
+    }
+    if res < 0 {
+        guard.state = SockState::Failed;
+        return Err(KernelError::ConnectionRefused);
+    }
+    guard.state = SockState::Connected;
+    guard.peer_ip6 = Some(*ip6);
     guard.peer_port = port;
     Ok(ConnectOutcome::Established)
 }
@@ -412,6 +462,24 @@ pub fn peer(handle: SocketHandle) -> KernelResult<([u8; 4], u16)> {
         return Err(KernelError::NotConnected);
     }
     Ok((guard.peer_ip, guard.peer_port))
+}
+
+/// The remembered IPv6 peer address `(ip6, port)` for a socket connected via
+/// [`connect6`]. Returns `None` (as `NotConnected` would be wrong here) only when
+/// the socket was connected over IPv4 — callers that need `getpeername` on an
+/// `AF_INET6` socket use this; an IPv4 socket uses [`peer`].
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `NotConnected` — never successfully connected.
+pub fn peer6(handle: SocketHandle) -> KernelResult<(Option<[u8; 16]>, u16)> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    if guard.state != SockState::Connected {
+        return Err(KernelError::NotConnected);
+    }
+    Ok((guard.peer_ip6, guard.peer_port))
 }
 
 /// Number of live sockets (test/introspection helper).

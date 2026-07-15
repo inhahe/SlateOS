@@ -36213,40 +36213,112 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
-/// Parse a user `struct sockaddr_in` and drive the daemon-backed connect.
+/// Parse a user `struct sockaddr_in`/`sockaddr_in6` and drive the daemon-backed
+/// connect.
 ///
-/// AF_INET only for the first cut of the userspace-netstack cutover — the
-/// daemon ring protocol carries a 4-byte IPv4 endpoint.  AF_INET6 connects
-/// return `EAFNOSUPPORT` (documented limitation).
+/// Dispatches on `sa_family`: `AF_INET` (2) routes a 4-byte IPv4 endpoint to
+/// [`crate::net::socket::connect`]; `AF_INET6` (10) routes a 16-byte IPv6 endpoint
+/// to [`crate::net::socket::connect6`] (which the daemon carries in the ring data
+/// window). Any other family returns `EAFNOSUPPORT`.
 fn socket_connect_from_user(entry: FdEntry, addr_ptr: u64, addr_len: i32) -> SyscallResult {
-    // `struct sockaddr_in` is 16 bytes.  The validation gate already confirmed
-    // [addr_ptr, +addr_len) is readable and addr_len >= 2; require the full
-    // sockaddr_in for a well-formed AF_INET connect.
-    #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
-    if (addr_len as usize) < 16 {
-        return linux_err(errno::EINVAL);
-    }
-    let mut sa = [0u8; 16];
-    // SAFETY: the gate validated `addr_len` (>= 16) bytes readable at addr_ptr;
-    // copy_from_user re-checks under SMAP.
-    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) } {
+    // The validation gate already confirmed [addr_ptr, +addr_len) is readable and
+    // addr_len >= 2 (enough for sa_family). Peek the family first so we can require
+    // the correct sockaddr size per address family.
+    let mut fam = [0u8; 2];
+    // SAFETY: the gate validated >= 2 bytes readable at addr_ptr; copy_from_user
+    // re-checks under SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, fam.as_mut_ptr(), 2) } {
         return linux_err(linux_errno_for(e));
     }
-    // Destructure to avoid indexing: sa_family (host-endian u16), sin_port
-    // (network/BE u16), sin_addr (4 octets in network order), then padding.
-    let [f0, f1, p0, p1, a0, a1, a2, a3, ..] = sa;
-    let family = u16::from_ne_bytes([f0, f1]);
-    if family != 2 {
-        return linux_err(errno::EAFNOSUPPORT);
-    }
-    let port = u16::from_be_bytes([p0, p1]);
-    let ip = [a0, a1, a2, a3];
+    let family = u16::from_ne_bytes(fam);
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     // Honour the fd's O_NONBLOCK: a non-blocking connect returns EINPROGRESS
     // immediately and the handshake completes in the background (the caller then
     // poll(POLLOUT)s and reads getsockopt(SO_ERROR)).
     let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
-    match crate::net::socket::connect(h, &ip, port, nonblock) {
+    match family {
+        2 => {
+            // `struct sockaddr_in` is 16 bytes.
+            #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+            if (addr_len as usize) < 16 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 16];
+            // SAFETY: the gate validated `addr_len` (>= 16) bytes readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 16) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            // sa_family (host-endian u16), sin_port (network/BE u16), sin_addr
+            // (4 octets network order), then padding.
+            let [_, _, p0, p1, a0, a1, a2, a3, ..] = sa;
+            let port = u16::from_be_bytes([p0, p1]);
+            let ip = [a0, a1, a2, a3];
+            connect_outcome_to_result(crate::net::socket::connect(h, &ip, port, nonblock))
+        }
+        10 => {
+            // `struct sockaddr_in6` is 28 bytes: sin6_family(2) + sin6_port(2 BE) +
+            // sin6_flowinfo(4) + sin6_addr(16) + sin6_scope_id(4).
+            #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+            if (addr_len as usize) < 28 {
+                return linux_err(errno::EINVAL);
+            }
+            let mut sa = [0u8; 28];
+            // SAFETY: the gate validated `addr_len` (>= 28) bytes readable; SMAP re-check.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 28) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            // Destructure to avoid indexing: sin6_family(2), sin6_port(2 BE),
+            // sin6_flowinfo(4), sin6_addr(16, network = wire order), sin6_scope_id(4).
+            // flowinfo/scope_id are not used for a loopback/link-local daemon connect.
+            let [
+                _,
+                _,
+                p0,
+                p1,
+                _,
+                _,
+                _,
+                _,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                b8,
+                b9,
+                b10,
+                b11,
+                b12,
+                b13,
+                b14,
+                b15,
+                _,
+                _,
+                _,
+                _,
+            ] = sa;
+            let port = u16::from_be_bytes([p0, p1]);
+            let ip6 = [
+                b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15,
+            ];
+            connect_outcome_to_result(crate::net::socket::connect6(h, &ip6, port, nonblock))
+        }
+        _ => linux_err(errno::EAFNOSUPPORT),
+    }
+}
+
+/// Map a [`crate::net::socket`] connect outcome to the Linux `connect(2)` return.
+fn connect_outcome_to_result(
+    r: crate::error::KernelResult<crate::net::socket::ConnectOutcome>,
+) -> SyscallResult {
+    match r {
         Ok(crate::net::socket::ConnectOutcome::Established) => SyscallResult::ok(0),
         // Non-blocking handshake pending → Linux EINPROGRESS.
         Ok(crate::net::socket::ConnectOutcome::InProgress) => linux_err(errno::EINPROGRESS),
@@ -36348,8 +36420,17 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-        return match crate::net::socket::peer(h) {
-            Ok((ip, port)) => socket_write_peer_addr(args.arg1, args.arg2, &ip, port),
+        // An AF_INET6 socket (connected via connect6) reports a sockaddr_in6; an
+        // AF_INET socket reports a sockaddr_in.
+        return match crate::net::socket::peer6(h) {
+            Ok((Some(ip6), port)) => {
+                socket_write_peer_addr6(args.arg1, args.arg2, &ip6, port)
+            }
+            Ok((None, _)) => match crate::net::socket::peer(h) {
+                Ok((ip, port)) => socket_write_peer_addr(args.arg1, args.arg2, &ip, port),
+                Err(crate::error::KernelError::NotConnected) => linux_err(errno::ENOTCONN),
+                Err(e) => linux_err(linux_errno_for(e)),
+            },
             Err(crate::error::KernelError::NotConnected) => linux_err(errno::ENOTCONN),
             Err(e) => linux_err(linux_errno_for(e)),
         };
@@ -36406,6 +36487,66 @@ fn socket_write_peer_addr(
     }
     // Linux writes back the *full* address size (16) even when the buffer
     // was too small — the caller detects truncation by len > bufsize.
+    let full = (sa.len() as u32).to_ne_bytes();
+    // SAFETY: validate_sockaddr_out confirmed addrlen_ptr is writable for 4 bytes.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_to_user(full.as_ptr(), addrlen_ptr, 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// Serialise an IPv6 endpoint into the user's `struct sockaddr_in6` for a
+/// `getpeername`-style out-param, honouring the caller's supplied `*addrlen`
+/// (a short buffer is truncated, as Linux does) and writing back the full
+/// 28-byte address length.
+fn socket_write_peer_addr6(
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+    ip6: &[u8; 16],
+    port: u16,
+) -> SyscallResult {
+    // Build the 28-byte sockaddr_in6: sin6_family (AF_INET6=10, host-endian),
+    // sin6_port (big-endian), sin6_flowinfo (4, zero), sin6_addr (16, network
+    // order = wire order), sin6_scope_id (4, zero).
+    let mut sa = [0u8; 28];
+    let [f0, f1] = 10u16.to_ne_bytes();
+    sa[0] = f0;
+    sa[1] = f1;
+    let [p0, p1] = port.to_be_bytes();
+    sa[2] = p0;
+    sa[3] = p1;
+    // sin6_addr occupies bytes [8, 24).
+    for (dst, src) in sa.iter_mut().skip(8).take(16).zip(ip6.iter()) {
+        *dst = *src;
+    }
+    // Read the caller-provided buffer length so we truncate rather than
+    // overflow a short buffer (move_addr_to_user semantics).
+    let mut lenbuf = [0u8; 4];
+    // SAFETY: validate_sockaddr_out already confirmed addrlen_ptr is a
+    // readable 4-byte user region.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(addrlen_ptr, lenbuf.as_mut_ptr(), 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let caller_len = u32::from_ne_bytes(lenbuf) as usize;
+    let copy_len = core::cmp::min(caller_len, sa.len());
+    if copy_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(addr_ptr, copy_len) {
+            return linux_err(linux_errno_for(e));
+        }
+        // SAFETY: validate_user_write above confirmed `copy_len` bytes at
+        // addr_ptr are writable for the caller.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(sa.as_ptr(), addr_ptr, copy_len)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Linux writes back the *full* address size (28) even when the buffer was
+    // too small — the caller detects truncation by len > bufsize.
     let full = (sa.len() as u32).to_ne_bytes();
     // SAFETY: validate_sockaddr_out confirmed addrlen_ptr is writable for 4 bytes.
     if let Err(e) = unsafe {

@@ -107,19 +107,22 @@ Phase 5 progresses:
 - **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
   source-address out-params (arg4/arg5) are left untouched (fine for a connected
   stream socket, but not for datagram semantics).
-- **IPv6 connect: daemon+ring+client done, socket-fd wiring pending.** The daemon
-  now speaks full TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6:
-  Option<[u8;16]>` dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`;
-  v6 framing, `find_by_tuple6`/`route_seg6` demux, `connect6`/`connect_start6`/
-  `accept_syn6` constructors, IPv6-aware in-process loopback), the ring ABI has
-  `OP_CONNECT6`, and `NetstackConn::connect6`/`accept6` drive it end-to-end —
-  boot-validated by `netstack_client::self_test_connect6` (v6 handshake +
-  bidirectional data over the `fe80::/64`+EUI-64 loopback, `IPv6 parity ok`). What
-  is *not* yet wired is the AF_INET6 socket-fd layer: `sys_connect` on an
-  `AF_INET6` sockaddr still returns `EAFNOSUPPORT` (it does not yet parse
-  `sockaddr_in6` → `NetstackConn::connect6`). That syscall wiring is the remaining
-  follow-on (parallel to the server-socket-fd wiring gap above). `getsockname`
-  returns `EBADF` (local address not tracked).
+- **IPv6 connect: daemon+ring+client+socket-fd DONE.** The daemon speaks full
+  TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6: Option<[u8;16]>`
+  dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`; v6 framing,
+  `find_by_tuple6`/`route_seg6` demux, `connect6`/`connect_start6`/`accept_syn6`
+  constructors, IPv6-aware in-process loopback), the ring ABI has `OP_CONNECT6`,
+  and `NetstackConn::connect6`/`accept6` drive it end-to-end — boot-validated by
+  `netstack_client::self_test_connect6` (v6 handshake + bidirectional data over the
+  `fe80::/64`+EUI-64 loopback, `IPv6 parity ok`). The **AF_INET6 socket-fd layer is
+  now wired**: `sys_connect` on an `AF_INET6` sockaddr parses the 28-byte
+  `sockaddr_in6` (`sin6_port` BE, `sin6_addr` 16 octets) and routes to
+  `net::socket::connect6` → `NetstackConn::connect6` (`socket_connect_from_user`
+  dispatches on `sa_family`: 2 → v4, 10 → v6, else `EAFNOSUPPORT`). `getpeername`
+  on a v6-connected socket returns a `sockaddr_in6` (`socket_write_peer_addr6`,
+  fed by `net::socket::peer6`/`SocketInner.peer_ip6`). Remaining v6 socket-fd gap:
+  `getsockname` still returns `EBADF` (local address not tracked), and the
+  server-socket-fd path (bind/listen/accept4) is the separate gap below.
 - **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
   recv ≤512 B per call (callers must loop). Not a correctness bug, but small.
 
@@ -132,11 +135,12 @@ non-destructive `OP_POLL` peek; **non-blocking `connect` (EINPROGRESS →
 (EAGAIN on a full send window, honest `POLLOUT`) now works**; and **listen/accept
 server sockets now work at the daemon+ring layer** (ring `OP_LISTEN`/`OP_ACCEPT`,
 passive-open TCP, in-daemon software loopback; validated by
-`self_test_listen_accept`) (see the updated bullets above). Remaining before the
-5.7 default-flip: (a) route the AF_INET socket-fd layer's `bind`/`listen`/`accept`
-to the daemon (`SockState::Listening` + `sys_bind`/`sys_listen`/`sys_accept4`), and
-(b) IPv6 connect (needs IPv6 + neighbour discovery in the daemon, currently
-IPv4-only).
+`self_test_listen_accept`) (see the updated bullets above); **IPv6 connect is now
+wired end-to-end through the socket-fd layer** (`sys_connect`/`getpeername` on
+`AF_INET6` → `NetstackConn::connect6`). Remaining before the 5.7 default-flip:
+route the AF_INET/AF_INET6 socket-fd server path's `bind`/`listen`/`accept` to the
+daemon (`SockState::Listening` + `sys_bind`/`sys_listen`/`sys_accept4`) — the last
+socket-fd gap (blocked on operator Q23).
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 

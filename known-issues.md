@@ -1563,6 +1563,63 @@ wedge is a *different* bug, with two parts:
    dumps cleanly instead of double-faulting, unblocking diagnosis of the primary.
    Built clean, BOOT_OK, committed.
 
+**UPDATE 2026-07-15 (SIXTH catch — crash-dump fix VALIDATED; SECOND holder-
+preemption instance, on the container `TABLE` lock; FIXED)
+(`build/hang-catches/soak-20260715-070017-iter03.*`, wedged
+`RIP=0xffffffff81056446`).** With the crash-dump over-read fixed, a 30-iter soak
+caught a wedge on iter03 and this time **the crash dump survived cleanly** (no
+guard-page `#PF`) — confirming the idt.rs fix. The dump gives a conclusive
+picture, and it is a **third-party of the same holder-preemption class** as the
+heap deadlock, but on a *different* raw `spin::Mutex`:
+- **`RFL=0x202` → IF=1** (interrupts *enabled*) — so this is NOT the iter12 IF=0
+  device-IRQ hang; that remains a separate open item above.
+- **Wedged RIP = `spin_loop_hint+0x6`** with one sample in `AtomicBool::load` — a
+  busy-wait in a spinlock acquire loop.
+- **rbp backtrace:** `syscall_entry → syscall_handler_inner → sys_exit →
+  on_thread_exit → remove_thread → notify_init_exit+0xbf` — i.e. an exiting
+  thread's `sys_exit` path, spinning on `container::TABLE.lock()` (container.rs:1438).
+- **Task table (survived!):** `tid=189 "/tmp/restart-init.elf" state=Running
+  prio=16` is the spinner; **`tid=0 "prctl-batch269" state=Ready prio=31,
+  waited=1735 ticks`** is a *higher*-priority task that is Ready but never
+  scheduled — the smoking gun that the spinner's context is non-preemptible and
+  the Ready TABLE holder can't run to release the lock. `heap-lock: unlocked`
+  (so the heap fix held; this is a *different* lock).
+
+**Root cause (proven).** `container::TABLE` (and `EVENT_LOG`) used a **raw
+`spin::Mutex`** (`use spin::Mutex`, container.rs:47), which — like the heap lock
+before its fix — does **not** disable preemption on acquire. A container operation
+(tid=0) held TABLE and was involuntarily preempted mid-critical-section; a process
+exiting via `remove_thread → notify_init_exit` then spun on `TABLE.lock()` forever
+while the Ready holder (tid=0) could never be scheduled on the single CPU. Note
+`remove_thread` correctly **drops `PROCESS_TABLE` before** calling
+`notify_init_exit` (pcb.rs:2039), so this is *not* a lock-ordering/nesting bug —
+it is purely the missing preempt-disable on the raw spinlock.
+
+**Fix (committed).** Converted `container::TABLE` and `EVENT_LOG` from raw
+`spin::Mutex` to the preempt-aware `crate::sync::Mutex` (named for lockdep:
+`container-tbl` / `container-evt`). The tracked mutex calls `preempt_disable()` on
+acquire, so a holder can never be preempted mid-critical-section → the hold is
+bounded and short → the exit-path spinner finds TABLE free almost immediately. As
+a bonus this adds lockdep coverage (which would have *caught* this) and owner
+tracking. Safe because container locks are only taken in task context (never ISR:
+`restart_backoff_fire` runs in the hrtimer ISR but only submits to the workqueue),
+and `EVENT_LOG` is a leaf (never acquires TABLE), so no ordering inversion.
+
+**SYSTEMIC NOTE — raw `spin::Mutex` holder-preemption is a latent class, not a
+one-off.** This is now the **second** confirmed instance (heap, then container
+TABLE). The kernel has ~476 files importing `spin::` — any raw `spin::Mutex`
+whose critical section can be involuntarily preempted *and* is contended across
+tasks is a latent holder-preemption deadlock on a single CPU. Most are safe (true
+leaf locks, trivially short sections, or never contended under preemption), so a
+blanket conversion of all 476 is neither cheap nor obviously correct (it would
+drag every lock into lockdep, exploding its scope and surfacing much triage). The
+current strategy is **reactive but principled**: the armed hang soak
+(`scripts/wedge-soak.sh`) reliably reproduces these under stress; each catch names
+the exact lock via the backtrace; convert *that* lock to `crate::sync::Mutex`
+(or, for true leaf/allocation locks like the heap, keep raw + manual
+preempt_disable/enable). Whether to do a broader proactive audit/conversion is a
+larger architectural tradeoff — see `open-questions.md`.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

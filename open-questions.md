@@ -23,6 +23,61 @@ Format for each entry:
 
 ---
 
+## Q24 — Raw `spin::Mutex` holder-preemption: reactive fixes vs. a proactive kernel-wide audit
+
+**Status:** OPEN (logged 2026-07-15). Not blocking any current thread — Claude is
+proceeding reactively and this only asks whether to also invest in a proactive
+sweep.
+
+**Question.** The kernel has two confirmed single-CPU **holder-preemption
+deadlocks** on raw `spin::Mutex` locks — the global heap lock (fixed 2026-07-15)
+and `container::TABLE` (fixed 2026-07-15). A raw `spin::Mutex` does not disable
+preemption on acquire, so a holder can be involuntarily preempted mid-critical-
+section; a second task then spins on the lock forever while the Ready holder
+never gets scheduled on a single CPU. The preempt-aware `crate::sync::Mutex`
+prevents this (it calls `preempt_disable()` on acquire) — but ~476 kernel files
+import raw `spin::` locks. Should we (A) keep fixing these reactively as the hang
+soak catches them, or (B) do a proactive audit/conversion?
+
+**Options.**
+- **A — Reactive (status quo).** Fix each lock as `scripts/wedge-soak.sh` catches
+  it (the backtrace names the exact lock). *Pros:* zero churn on the ~476 files;
+  no lockdep-scope explosion; each fix is targeted and validated by the very
+  repro that found it; most raw locks are genuinely safe (true leaf locks,
+  trivially short sections, or never contended under preemption). *Cons:* latent
+  deadlocks remain until a soak happens to hit them under the right timing;
+  relies on soak coverage; each new one costs a catch+diagnose+fix cycle.
+- **B — Proactive full audit/conversion.** Mechanically convert `use spin::Mutex`
+  → `crate::sync::Mutex` kernel-wide (or triage each). *Pros:* eliminates the
+  whole class at once; adds lockdep + owner tracking everywhere (would *catch*
+  future ordering bugs too). *Cons:* huge, risky one-shot change; drags every
+  lock into lockdep — memory per lock, first-acquire registration allocation, and
+  a flood of newly-surfaced lock-ordering reports to triage; perf cost of lockdep
+  on hot leaf locks; some locks are deliberately raw (heap) and must stay raw +
+  manual-preempt, so it can't be a blind sed.
+- **C — Middle path.** Add a preempt-aware-but-*not*-lockdep spinlock to
+  `crate::sync` (e.g. `PreemptSpinMutex`: just `preempt_disable/enable` around the
+  raw spin, no registry), and convert only the *contended, non-leaf* locks to it
+  (or to `crate::sync::Mutex` where lockdep is wanted). *Pros:* closes the
+  deadlock class on the locks that matter without the lockdep explosion; cheap.
+  *Cons:* still requires judgment per lock about which are "contended/non-leaf";
+  adds a third lock type to the codebase's vocabulary.
+
+**Claude's recommendation.** **A for now, with C as the escalation** if a third
+or fourth instance shows up. Two instances is not yet evidence that the reactive
+approach is failing, and the soak is a reliable detector. If the same class keeps
+recurring, switch to C (a targeted preempt-aware spinlock for contended non-leaf
+locks) rather than the full-blown B. Meanwhile Claude keeps fixing caught
+instances properly (holder-side preempt protection), and each is documented in
+`known-issues.md`.
+
+**Where it bites.** `kernel/src/sync.rs` (`Mutex`, and a possible new
+`PreemptSpinMutex`); every `use spin::Mutex` site (~476 files); the two fixed
+so far: `kernel/src/mm/heap.rs`, `kernel/src/container.rs`. Detector:
+`scripts/wedge-soak.sh`.
+
+---
+
 ## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)
 
 **Status:** OPEN (logged 2026-07-14; **now the sole remaining socket-fd gate for

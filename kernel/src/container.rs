@@ -44,7 +44,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use spin::Mutex;
+// The preempt-aware `crate::sync::Mutex` (NOT raw `spin::Mutex`): the container
+// TABLE is contended across many tasks and its critical sections walk/mutate the
+// container list, so it must never be held across an involuntary preemption. A
+// raw spin lock does not disable preemption, so a holder could be preempted
+// mid-critical-section and another task (e.g. a process exiting via
+// `notify_init_exit`) would spin on the lock forever while the Ready holder never
+// gets scheduled on a single CPU — a holder-preemption deadlock (observed
+// 2026-07-15, soak iter03: sys_exit→notify_init_exit spinning on TABLE.lock()
+// while the prio-31 holder sat Ready). The tracked Mutex calls preempt_disable on
+// acquire, closing that window, and adds lockdep + owner tracking as a bonus.
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -912,7 +922,7 @@ impl ContainerTable {
     }
 }
 
-static TABLE: Mutex<Option<ContainerTable>> = Mutex::new(None);
+static TABLE: Mutex<Option<ContainerTable>> = Mutex::named(None, b"container-tbl");
 
 /// Check whether the container subsystem has been initialized.
 pub fn is_initialized() -> bool {
@@ -1033,7 +1043,7 @@ impl EventLog {
     }
 }
 
-static EVENT_LOG: Mutex<EventLog> = Mutex::new(EventLog::new());
+static EVENT_LOG: Mutex<EventLog> = Mutex::named(EventLog::new(), b"container-evt");
 
 /// Record a container lifecycle event.
 ///

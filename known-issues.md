@@ -33,6 +33,37 @@ grant/transfer op) before any *untrusted* process is allowed to use
 apps. Until then, only kernel-mediated, trusted-daemon SHM sharing is
 safe. Where it bites: any future userspace-to-userspace SHM use.
 
+**Investigation 2026-07-14 (why this is not a quick turn):** the natural
+enforcement — "a userspace `SYS_SHM_MAP`/`SIZE`/`CLOSE` caller must own or
+have been granted the handle" — needs a way to *authorize the netstack
+daemon* for the kernel-created ring regions it legitimately maps, or the
+fix hard-breaks the working daemon. The daemon does **not** receive the
+region as a tracked capability: the handle travels as *plain u64 payload*
+inside the `net.stack` control-channel `Request` (see the daemon's
+`shm_ping`/`ring_echo`/`ring_tcp` handlers in `services/netstack/src/main.rs`
+and the kernel senders `netipc::encode_ring_tcp` in
+`kernel/src/net/netstack_client.rs::submit_round_on` +
+`kernel/src/proc/spawn.rs` self-test bootstraps). To authorize the daemon
+at those handoff points the kernel must know the daemon's PID — but the
+plumbing to derive it doesn't exist: `ipc/channel.rs` has **no** peer-PID
+query (only `peer_side`), and `ipc/service.rs`'s `Listener`/registry does
+**not** record the provider PID. So the real fix requires one of:
+ (a) route the SHM handle through the existing **capability transfer**
+     mechanism (channel `Message` cap slots → `ipc/mod.rs` already
+     dispatches `ResourceType::SharedMemory` on cleanup) so receipt
+     registers ownership in the daemon PCB via `pcb::register_ipc_handle`,
+     then gate the three syscalls on `caller_pid()`-ownership (kernel
+     context `caller_pid()==None` stays allowed as the TCB); **or**
+ (b) add process-identity at the IPC boundary (channel peer-PID or service
+     provider-PID) + an explicit `shm::authorize(handle, pid)` grant called
+     at each kernel→daemon handoff, then gate the syscalls the same way.
+Option (a) is architecturally cleaner (reuses caps, no new identity
+plumbing) and is the recommended path. Either way it touches the working
+daemon data path and needs full switch-on boot validation, so it is a
+deliberate multi-step change rather than a drive-by — deferred until it
+can be done carefully (still non-blocking: no untrusted process maps SHM
+today).
+
 ### D-NETSOCK-SYNC. Daemon-backed AF_INET stream sockets (migration 5.5) are synchronous, single-stream, and IPv4-only — TECH DEBT (logged 2026-07-14)
 
 **Where:** `kernel/src/net/socket.rs` + the switch-gated socket arms in

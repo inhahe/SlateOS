@@ -1595,6 +1595,25 @@ fn is_kernel_text(val: u64) -> bool {
 ///
 /// Skipped entirely if the interrupt came from ring 3 (`cs & 3 != 0`), where
 /// the stack is untrusted user memory.
+/// If `addr` lies within the current CPU's IRQ stack, return that stack's top
+/// (the exclusive upper bound for safe reads: the page *at* the top is a guard,
+/// so reading at/above it faults). Returns 0 when `addr` is not on the IRQ stack
+/// or the stack isn't installed — callers then apply their default window.
+///
+/// This exists because the crash-dump stack walkers scan/chase *upward* from the
+/// wedged `rsp`; when the wedge is on the fixed 16 KiB IRQ stack with `rsp` near
+/// the top, an unbounded upward read runs straight off the top into the guard
+/// page — a fault that turns a caught, diagnosable wedge into a fatal double
+/// fault and destroys the rest of the crash dump (the task table, lock owners).
+/// Observed 2026-07-15 (`soak-20260715-061420-iter12`): a nested-IRQ wedge at
+/// `rsp=0x…27be8` faulted the scan at the guard `0x…28000`.
+fn irq_stack_top_for(addr: u64) -> u64 {
+    let cpu = crate::smp::current_cpu_index();
+    let top = IRQ_STACK_TOP.get(cpu).map_or(0, |t| t.load(Ordering::Acquire));
+    let bottom = IRQ_STACK_BOTTOM.get(cpu).map_or(0, |b| b.load(Ordering::Acquire));
+    if top != 0 && addr > bottom && addr <= top { top } else { 0 }
+}
+
 fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
     let rip = frame.rip;
     let rsp = frame.rsp;
@@ -1649,6 +1668,14 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
             // Not monotonically increasing → chain is broken/corrupt; stop.
             break;
         }
+        // If this frame pointer is on the IRQ stack, ensure both words we're about
+        // to read (`rbp`, `rbp+8`) stay below the guard page. Checked per-iteration
+        // because the chain legitimately crosses off the IRQ stack onto the boot
+        // stack, for which `irq_stack_top_for` correctly returns 0 (no cap).
+        let rbp_top = irq_stack_top_for(rbp);
+        if rbp_top != 0 && rbp.saturating_add(16) > rbp_top {
+            break;
+        }
         // `rbp` and `rbp+8` are two words at a valid higher-half, aligned frame
         // pointer; both lie in already-mapped stack. SAFETY as above.
         let ret = unsafe { core::ptr::read_volatile((rbp as *const u64).add(1)) };
@@ -1667,13 +1694,24 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
     const MAX_WORDS: usize = 256;
     const MAX_HITS: u32 = 40;
     let mut hits: u32 = 0;
+    // If the wedge is on the fixed-size IRQ stack, cap the upward scan at the
+    // stack top so we never read into the guard page above it (which would fault
+    // and destroy the rest of the crash dump). 0 == not on the IRQ stack, so the
+    // full MAX_WORDS window applies (a normal deep kernel stack has room above).
+    let irq_top = irq_stack_top_for(rsp);
     for i in 0..MAX_WORDS {
         // `i` is bounded by MAX_WORDS so the multiply/add cannot overflow.
         #[allow(clippy::arithmetic_side_effects)]
         let addr = rsp + (i as u64) * 8;
+        // Stop before stepping onto (or past) the IRQ-stack top's guard page.
+        if irq_top != 0 && addr.saturating_add(8) > irq_top {
+            emergency_println!("[hardlockup]   … (reached IRQ-stack top {:#x}, stopping scan)", irq_top);
+            break;
+        }
         // SAFETY: `addr` is within a 2 KiB window at higher addresses than the
-        // interrupted `rsp` (older, already-mapped stack frames). 8-byte aligned
-        // by construction; volatile so the read is not reordered/elided.
+        // interrupted `rsp` (older, already-mapped stack frames), and — when on
+        // the IRQ stack — bounded below the guard page by the check above. 8-byte
+        // aligned by construction; volatile so the read is not reordered/elided.
         let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
         if is_kernel_text(val) {
             #[allow(clippy::arithmetic_side_effects)]

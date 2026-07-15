@@ -1528,6 +1528,41 @@ a *distinct* bug from the free-list-cycle hypothesis above (which the validator
 did not confirm here); the free-list validator stays in as cheap defence-in-depth.
 Re-soak after this fix to confirm the `spin_loop_hint` wedge no longer reproduces.
 
+**UPDATE 2026-07-15 (heap fix VALIDATED by re-soak; a NEW, distinct blocker
+surfaced) (`build/hang-catches/soak-20260715-061420-iter12.*`).** Re-ran the soak
+after the holder-preemption fix above. **The `spin_loop_hint` / holder-preemption
+signature is gone** — and boot now progresses *hundreds* of self-tests further
+(from the tmpwatch phase all the way to the eventfd-timeout self-test phase)
+before wedging. So the heap deadlock fix is confirmed working. The new iter12
+wedge is a *different* bug, with two parts:
+
+1. **PRIMARY (still open) — nested device-IRQ dispatch hang.** cpu0 is stuck with
+   `IF=0`, heartbeat frozen ~9.8 s, inside a *nested* device-IRQ handler
+   (`isr_irq11`) reached from the **outermost timer's IF=1 window** (the timer
+   re-enables interrupts on the IRQ stack for softirq/preempt; a level-triggered
+   device IRQ then fired and nested). `RSP=0x…27be8` is only ~0x418 below the IRQ
+   stack top `0x…28000` — i.e. only ~1 KiB into the 16 KiB IRQ stack, so this is
+   **not** a deep-nesting stack overflow (unlike the 2026-07-03 catch below).
+   Suspected: a level-triggered IRQ on vector 11 re-firing / storming because it
+   is not being ACKed or masked, or an ISR-reentrancy lock spin. Needs a soak that
+   catches it *with a surviving task-table dump* to identify the device on IRQ11
+   and why cpu0 can't leave IF=0.
+
+2. **SECONDARY (FIXED this session) — crash-dump stack-scan over-read.** The wedge
+   was caught, but the hard-lockup crash dump then took a **fatal `#PF` at
+   `0xffffc10000028000`** (the IRQ-stack guard page), which *destroyed* the
+   task-table dump needed to root-cause the primary. Cause: `dump_kernel_backtrace`
+   (idt.rs) scans/chases words **upward** from the wedged `rsp` (a 256-word / 2 KiB
+   stack scan, plus the rbp-chain walk) with **no bound against the IRQ-stack
+   top** — with `rsp` only 0x418 below the top, the scan ran straight into the
+   guard page. Fix: added `irq_stack_top_for(addr)` (returns the current CPU's
+   IRQ-stack top iff `addr` is on that stack, else 0) and applied it to **both**
+   walkers — the stack scan caps at `irq_top` before each read; the rbp-walk checks
+   per-iteration (the chain legitimately crosses off the IRQ stack onto the boot
+   stack, where the helper returns 0 → no cap). Now a wedge near the IRQ-stack top
+   dumps cleanly instead of double-faulting, unblocking diagnosis of the primary.
+   Built clean, BOOT_OK, committed.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

@@ -6795,7 +6795,35 @@ child mapping, so every address space that maps a frame holds exactly
 one ref and teardown stays balanced. Also recorded in todo.txt under
 Judgment Calls.
 
-### TD10. ALSA PCM shim does not implement the STATUS ioctl — DEBT 2026-06-13 (narrowed 2026-06-13)
+### TD10. ALSA PCM shim does not implement the STATUS ioctl — RESOLVED 2026-07-15
+
+**RESOLUTION (2026-07-15):** `STATUS` and `STATUS_EXT` are now implemented.
+The ABI-target ambiguity that had deferred this (below) is resolved by the
+obviously-correct choice for a new 64-bit OS: **target the time64 variant**
+(64-bit `time_t` → 16-byte `struct timespec`), which is what a modern 64-bit
+ALSA-lib is compiled against. `kernel/src/audio_alsa.rs` gains a byte-exact
+`SndPcmStatus` (`size_of == 152`, asserted in `self_test`), from which the
+request numbers derive: `SNDRV_PCM_IOCTL_STATUS == 0x8098_4120`
+(`_IOR('A',0x20,152)`) and `SNDRV_PCM_IOCTL_STATUS_EXT == 0xC098_4124`
+(`_IOWR('A',0x24,152)`), both asserted. `alsa_pcm_ioctl_status`
+(`kernel/src/syscall/linux.rs`) fills `state`/`appl_ptr`/`hw_ptr`/`delay`
+(= queued frames, what `snd_pcm_delay(3)` reports) / `avail` (playback: free
+buffer space `buffer_frames − delay`; capture: full buffer) from the same
+`sync_position` snapshot as SYNC_PTR, plus monotonic reference timestamps
+(`clock_monotonic`) and the `trigger_tstamp` stamped at `START`. The ring
+buffer size is captured at `HW_PARAMS` (`audio_alsa::buffer_size_frames` reads
+the client-committed `BUFFER_SIZE` interval → `alsa_pcm::set_buffer_size`).
+`avail_max` reports the current `avail` (a truthful lower bound — we don't
+track a running peak); `overrange` is 0 (capture is synthesised silence).
+Boot-validated: `[alsa] ALSA PCM ABI self-test PASSED` (struct size + ioctl
+encodings) and `[alsa_pcm] PCM instance lifecycle self-test PASSED` (delay=2 /
+avail=1022 / buffer_frames=1024 / trigger-stamped-on-start). Design note in
+`design-decisions.md` (time64 ALSA ABI target). Original entry preserved
+below for context.
+
+---
+
+### TD10 (original). ALSA PCM shim does not implement the STATUS ioctl — DEBT 2026-06-13 (narrowed 2026-06-13)
 
 **Update (commit 4b):** SYNC_PTR and READI_FRAMES are now implemented.
 `alsa_pcm_ioctl` (`kernel/src/syscall/linux.rs`) stores `boundary` /

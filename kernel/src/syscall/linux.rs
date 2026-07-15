@@ -8860,6 +8860,11 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
                     _ => linux_err(errno::EINVAL),
                 };
             }
+            // Record the client's chosen ring size (frames) so STATUS can
+            // report `avail` = free buffer space.  We do not constrain it
+            // (refine_to_native leaves buffer/period intervals free), so
+            // whatever the client committed is what we track.
+            crate::ipc::alsa_pcm::set_buffer_size(h, alsa::buffer_size_frames(&hwp));
             match write_user_struct(argp, &hwp) {
                 Ok(()) => SyscallResult::ok(0),
                 Err(e) => linux_err(e),
@@ -8900,6 +8905,11 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(entry, argp),
         alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(entry, argp),
         alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(entry, argp),
+        // STATUS (_IOR) and STATUS_EXT (_IOWR) both return the same
+        // `snd_pcm_status` snapshot; STATUS_EXT additionally lets the client
+        // preselect an audio-timestamp type (which we echo back unchanged).
+        alsa::SNDRV_PCM_IOCTL_STATUS => alsa_pcm_ioctl_status(entry, argp, false),
+        alsa::SNDRV_PCM_IOCTL_STATUS_EXT => alsa_pcm_ioctl_status(entry, argp, true),
         // HWSYNC / RESUME / XRUN / LINK / UNLINK / TTSTAMP: position-sync and
         // link operations that are no-ops on our software pipeline.  Accept
         // them so clients that issue them during teardown do not error.
@@ -8914,13 +8924,7 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
                 linux_err(errno::EBADF)
             }
         }
-        // STATUS / STATUS_EXT remain unwired: their `snd_pcm_status` payload
-        // embeds bare `struct timespec`s, so its size (and thus the ioctl
-        // request number) depends on the time64-vs-legacy-timespec ABI.  A
-        // client that wants the hardware pointer uses SYNC_PTR (handled above,
-        // and timestamp-ABI-independent thanks to its 64-byte union pages);
-        // STATUS is a convenience overlay we add once the timespec layout is
-        // pinned down.  Report ENOTTY so the client falls back to SYNC_PTR.
+        // Any other PCM ioctl is unsupported → ENOTTY.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -9102,6 +9106,74 @@ fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
     sp.control.avail_min = pos.avail_min;
 
     match write_user_struct(argp, &sp) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_PCM_IOCTL_STATUS` / `STATUS_EXT` — return a full `snd_pcm_status`
+/// snapshot of the substream.
+///
+/// Fills state / application+hardware pointers / `delay` / `avail` from the
+/// same position snapshot that backs `SYNC_PTR`, plus monotonic reference
+/// timestamps.  This is what `snd_pcm_status(3)` and `snd_pcm_delay(3)` read —
+/// the latter drives A/V sync and latency compensation in players
+/// (PulseAudio/PipeWire/MPD/games).  For `STATUS_EXT` (`ext == true`, `_IOWR`)
+/// the caller preselects an audio-timestamp type in `audio_tstamp_data`, which
+/// we read and echo back unchanged; `STATUS` (`_IOR`) supplies no input.
+fn alsa_pcm_ioctl_status(entry: &FdEntry, argp: u64, ext: bool) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+
+    let pos = match crate::ipc::alsa_pcm::sync_position(h) {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // STATUS_EXT is _IOWR: read the caller's struct to preserve the audio
+    // timestamp-type selector it set.  STATUS (_IOR) has no input.
+    let audio_tstamp_data = if ext {
+        match read_user_struct::<alsa::SndPcmStatus>(argp) {
+            Ok(v) => v.audio_tstamp_data,
+            Err(e) => return linux_err(e),
+        }
+    } else {
+        0
+    };
+
+    // `struct timespec { tv_sec, tv_nsec }` as `[u64; 2]` (matches this file's
+    // timespec modelling elsewhere).  Divisor is a nonzero literal.
+    let ts = |ns: u64| -> [u64; 2] { [ns / 1_000_000_000, ns % 1_000_000_000] };
+    let now = crate::timekeeping::clock_monotonic();
+
+    // `state`/`suspended_state` are `SNDRV_PCM_STATE_*` (≤ 8) and `delay` is a
+    // small queued-frame count, so these casts cannot lose information.
+    #[allow(clippy::cast_possible_wrap)]
+    let (state_i, delay_i) = (pos.state as i32, pos.delay as i64);
+
+    let st = alsa::SndPcmStatus {
+        state: state_i,
+        pad1: 0,
+        trigger_tstamp: ts(pos.trigger_time_ns),
+        tstamp: ts(now),
+        appl_ptr: pos.appl_ptr,
+        hw_ptr: pos.hw_ptr,
+        delay: delay_i,
+        avail: pos.avail,
+        // We do not track a running peak; the current `avail` is a truthful
+        // lower bound for `avail_max` (never fabricated above the real value).
+        avail_max: pos.avail,
+        // Capture is synthesised silence — it never overruns.
+        overrange: 0,
+        suspended_state: state_i,
+        audio_tstamp_data,
+        audio_tstamp: ts(now),
+        driver_tstamp: ts(now),
+        audio_tstamp_accuracy: 0,
+        reserved: [0u8; 20],
+    };
+
+    match write_user_struct(argp, &st) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
     }

@@ -448,6 +448,102 @@ pub const SNDRV_PCM_SYNC_PTR_APPL: u32 = 1 << 1;
 /// caller's.
 pub const SNDRV_PCM_SYNC_PTR_AVAIL_MIN: u32 = 1 << 2;
 
+/// `struct snd_pcm_status` — the `STATUS` / `STATUS_EXT` payload (152 bytes on
+/// a 64-bit-`time_t` target).
+///
+/// Unlike [`SndPcmSyncPtr`] (whose pages sit in 64-byte unions), this struct
+/// embeds bare `struct timespec`s directly, so its `sizeof` — and therefore the
+/// `_IOR`/`_IOWR` request number — depends on the `time_t` width.  SlateOS is a
+/// **time64** OS (64-bit `time_t`, so `struct timespec` is 16 bytes), which is
+/// the only sane choice for a new 64-bit target (32-bit `time_t` is the
+/// Y2038-unsafe legacy path).  A modern 64-bit ALSA-lib is compiled against
+/// exactly this layout, so it is byte-for-byte compatible with the request
+/// numbers below.  The upstream userspace definition (`asound.h`):
+///
+/// ```c
+/// struct snd_pcm_status {
+///   snd_pcm_state_t   state;              // int
+///   __time_pad        pad1;               // pad[sizeof(time_t)-sizeof(int)] = 4
+///   struct timespec   trigger_tstamp;     // 16
+///   struct timespec   tstamp;             // 16  (reference)
+///   snd_pcm_uframes_t appl_ptr;           // 8
+///   snd_pcm_uframes_t hw_ptr;             // 8
+///   snd_pcm_sframes_t delay;              // 8   (current delay in frames)
+///   snd_pcm_uframes_t avail;              // 8
+///   snd_pcm_uframes_t avail_max;          // 8
+///   snd_pcm_uframes_t overrange;          // 8
+///   snd_pcm_state_t   suspended_state;    // int
+///   __u32             audio_tstamp_data;  // 4
+///   struct timespec   audio_tstamp;       // 16
+///   struct timespec   driver_tstamp;      // 16
+///   __u32             audio_tstamp_accuracy; // 4
+///   unsigned char     reserved[52-2*sizeof(struct timespec)]; // 20
+/// };
+/// ```
+///
+/// `struct timespec` is modelled as `[u64; 2]` (`tv_sec`, `tv_nsec`), matching
+/// the rest of this file (see [`SndPcmMmapStatus::tstamp`]).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmStatus {
+    /// `SNDRV_PCM_STATE_*` stream state.
+    pub state: i32,
+    /// `__time_pad`: `sizeof(time_t) - sizeof(int)` = 4 bytes, aligning the
+    /// following `timespec` to 8.
+    pub pad1: i32,
+    /// Time the stream was last started/stopped/paused (`struct timespec`).
+    pub trigger_tstamp: [u64; 2],
+    /// Reference timestamp for `hw_ptr` (`struct timespec`).
+    pub tstamp: [u64; 2],
+    /// Application pointer (frames submitted, reduced modulo boundary).
+    pub appl_ptr: SndPcmUframes,
+    /// Hardware pointer (frames consumed, reduced modulo boundary).
+    pub hw_ptr: SndPcmUframes,
+    /// Current delay in frames (`appl_ptr - hw_ptr`, i.e. frames still queued).
+    pub delay: SndPcmSframes,
+    /// Frames available (playback: free buffer space; capture: readable frames).
+    pub avail: SndPcmUframes,
+    /// Max frames available since the last status (peak `avail`).
+    pub avail_max: SndPcmUframes,
+    /// Count of capture overrange detections since the last status (always 0 —
+    /// our capture path is synthesised silence, never overruns).
+    pub overrange: SndPcmUframes,
+    /// `SNDRV_PCM_STATE_*` suspended state.
+    pub suspended_state: i32,
+    /// Audio-timestamp report/config selector (`STATUS_EXT`); echoed back.
+    pub audio_tstamp_data: u32,
+    /// Sample-counter / wall-clock audio timestamp (`struct timespec`).
+    pub audio_tstamp: [u64; 2],
+    /// Driver timestamp (`struct timespec`).
+    pub driver_tstamp: [u64; 2],
+    /// Audio-timestamp accuracy in ns (0 — not reported).
+    pub audio_tstamp_accuracy: u32,
+    /// Reserved tail (`52 - 2*sizeof(struct timespec)` = 20 bytes), zeroed.
+    pub reserved: [u8; 20],
+}
+
+/// Interval slot for `SNDRV_PCM_HW_PARAM_BUFFER_SIZE` (ring size in frames).
+///
+/// The intervals array is indexed by `SNDRV_PCM_HW_PARAM_<x> -
+/// SNDRV_PCM_HW_PARAM_SAMPLE_BITS`; `BUFFER_SIZE` (17) − `SAMPLE_BITS` (8) = 9.
+const IV_BUFFER_SIZE: usize = 9;
+
+/// Extract the client's chosen ring buffer size (in frames) from a committed
+/// `HW_PARAMS` payload.
+///
+/// [`refine_to_native`] deliberately leaves the buffer/period intervals
+/// untouched (the client picks them freely), so at `HW_PARAMS` commit time the
+/// `BUFFER_SIZE` interval has been narrowed by the client to a single value.
+/// We report `min` (== `max` for a fixed interval); `0` means "not negotiated"
+/// and the caller should treat the buffer size as unknown.
+#[must_use]
+pub fn buffer_size_frames(params: &SndPcmHwParams) -> u64 {
+    match params.intervals.get(IV_BUFFER_SIZE) {
+        Some(iv) => u64::from(iv.min),
+        None => 0,
+    }
+}
+
 /// Size of an ALSA payload struct as a `u32` for ioctl-number encoding.
 ///
 /// Every struct here is well under the 14-bit `_IOC` size field (max
@@ -493,6 +589,16 @@ pub const SNDRV_PCM_IOCTL_INFO: u32 =
 /// `SYNC_PTR` — exchange the application/hardware pointers (`_IOWR`).
 pub const SNDRV_PCM_IOCTL_SYNC_PTR: u32 =
     ioc(IOC_READ | IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x23, struct_size::<SndPcmSyncPtr>());
+/// `STATUS` — read the full stream status snapshot (`_IOR`).
+///
+/// Time64 layout → `sizeof(snd_pcm_status)` = 152, so this encodes to
+/// `0x8098_4120` (asserted in [`self_test`]).
+pub const SNDRV_PCM_IOCTL_STATUS: u32 =
+    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x20, struct_size::<SndPcmStatus>());
+/// `STATUS_EXT` — like `STATUS` but read-write (the client selects an
+/// audio-timestamp type in `audio_tstamp_data`); `_IOWR`, `0xC098_4124`.
+pub const SNDRV_PCM_IOCTL_STATUS_EXT: u32 =
+    ioc(IOC_READ | IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x24, struct_size::<SndPcmStatus>());
 
 // ---------------------------------------------------------------------------
 // Format / configuration translation onto the mixer pipeline
@@ -725,6 +831,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "snd_pcm_sync_ptr size {}",
         size_of::<SndPcmSyncPtr>()
     );
+    // time64 layout: 4+4 + 16+16 + 8*3 + 8*3 + 4+4 + 16+16 + 4 + 20 = 152.
+    check!(
+        size_of::<SndPcmStatus>() == 152,
+        "snd_pcm_status size {}",
+        size_of::<SndPcmStatus>()
+    );
 
     // --- struct-carrying ioctls vs known Linux hex (size-derived) -------
     check!(
@@ -761,6 +873,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         SNDRV_PCM_IOCTL_SYNC_PTR == 0xC088_4123,
         "SYNC_PTR enc {:#x}",
         SNDRV_PCM_IOCTL_SYNC_PTR
+    );
+    check!(
+        SNDRV_PCM_IOCTL_STATUS == 0x8098_4120,
+        "STATUS enc {:#x}",
+        SNDRV_PCM_IOCTL_STATUS
+    );
+    check!(
+        SNDRV_PCM_IOCTL_STATUS_EXT == 0xC098_4124,
+        "STATUS_EXT enc {:#x}",
+        SNDRV_PCM_IOCTL_STATUS_EXT
     );
 
     // --- the _IOC helper's field decomposition --------------------------

@@ -156,6 +156,13 @@ struct PcmStream {
     /// Minimum available frames for a poll wakeup, from `SW_PARAMS`.  Stored so
     /// `SYNC_PTR` can echo it back to the client; we wake on any space today.
     avail_min: u64,
+    /// Ring buffer size in frames, from `HW_PARAMS` (`BUFFER_SIZE` interval).
+    /// `0` until negotiated; drives the `avail` field of the `STATUS` snapshot.
+    buffer_frames: u64,
+    /// Monotonic time (ns since boot) the substream last transitioned to
+    /// `RUNNING` via `START`; reported as `trigger_tstamp` in `STATUS`.  `0`
+    /// until the stream has been started at least once.
+    trigger_time_ns: u64,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
 }
@@ -172,6 +179,8 @@ impl PcmStream {
             frames_written: 0,
             boundary: 0,
             avail_min: 0,
+            buffer_frames: 0,
+            trigger_time_ns: 0,
             refcount: 1,
         }
     }
@@ -192,6 +201,22 @@ pub struct PcmPosition {
     pub appl_ptr: u64,
     /// Minimum available frames for a wakeup (echoed from `SW_PARAMS`).
     pub avail_min: u64,
+    /// Current delay in frames: `appl_ptr - hw_ptr` (absolute, pre-boundary
+    /// reduction) — i.e. frames still queued in the mixer, what
+    /// `snd_pcm_delay(3)` reports.
+    pub delay: u64,
+    /// Frames available for the next transfer.  Playback: free buffer space
+    /// (`buffer_frames - delay`).  Capture: `buffer_frames` (our capture path
+    /// is always-ready synthesised silence).  `0` if the buffer size is not
+    /// yet negotiated.
+    pub avail: u64,
+    /// Ring buffer size in frames (`0` if `HW_PARAMS` has not set it).
+    pub buffer_frames: u64,
+    /// `true` for a capture substream, `false` for playback.
+    pub capture: bool,
+    /// Monotonic ns of the last `START`, for `trigger_tstamp` (`0` if never
+    /// started).
+    pub trigger_time_ns: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +503,8 @@ pub fn start(handle: AlsaPcmHandle) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     pcm.state = STATE_RUNNING;
+    // Record the trigger time for the STATUS snapshot's `trigger_tstamp`.
+    pcm.trigger_time_ns = crate::timekeeping::clock_monotonic();
     Ok(())
 }
 
@@ -604,6 +631,18 @@ pub fn set_avail_min(handle: AlsaPcmHandle, avail_min: u64) {
     }
 }
 
+/// Record the ring buffer size (frames) negotiated at `HW_PARAMS`.
+///
+/// Used to compute the `avail` field of the `STATUS` snapshot.  A stale handle
+/// is ignored (existence is validated separately by the ioctl path).  A zero
+/// `frames` (client did not pin the `BUFFER_SIZE` interval) is stored as-is and
+/// simply yields `avail == 0` in the snapshot.
+pub fn set_buffer_size(handle: AlsaPcmHandle, frames: u64) {
+    if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id()) {
+        pcm.buffer_frames = frames;
+    }
+}
+
 /// Snapshot the substream position for `SYNC_PTR` / `STATUS` reporting.
 ///
 /// Computes the hardware pointer (frames the mixer has consumed) as the
@@ -616,7 +655,7 @@ pub fn set_avail_min(handle: AlsaPcmHandle, avail_min: u64) {
 /// mixer call is made while `ALSA_PCM_TABLE` is held.
 #[must_use]
 pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
-    let (state, frames_written, boundary, avail_min, mixer_stream) = {
+    let (state, frames_written, boundary, avail_min, mixer_stream, buffer_frames, capture, trigger_time_ns) = {
         let table = ALSA_PCM_TABLE.lock();
         let pcm = table.get(&handle.id())?;
         (
@@ -625,6 +664,9 @@ pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
             pcm.boundary,
             pcm.avail_min,
             pcm.mixer_stream,
+            pcm.buffer_frames,
+            pcm.capture,
+            pcm.trigger_time_ns,
         )
     };
 
@@ -638,6 +680,17 @@ pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
     };
     let hw_abs = frames_written.saturating_sub(buffered_frames);
 
+    // `delay` is the absolute queued-frame count (pre-boundary), matching
+    // `snd_pcm_delay(3)`.  `avail` is derived from the negotiated buffer size:
+    // playback reports free space, capture reports the whole buffer (silence is
+    // always readable).  A not-yet-negotiated buffer (0) yields avail 0.
+    let delay = buffered_frames;
+    let avail = if capture {
+        buffer_frames
+    } else {
+        buffer_frames.saturating_sub(delay)
+    };
+
     // Reduce modulo the boundary; a zero boundary (not yet set) means "report
     // the raw counter".  `checked_rem` returns `None` on a zero divisor.
     let reduce = |v: u64| v.checked_rem(boundary).unwrap_or(v);
@@ -646,6 +699,11 @@ pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
         hw_ptr: reduce(hw_abs),
         appl_ptr: reduce(frames_written),
         avail_min,
+        delay,
+        avail,
+        buffer_frames,
+        capture,
+        trigger_time_ns,
     })
 }
 
@@ -824,9 +882,28 @@ pub fn self_test() -> KernelResult<()> {
                 hw_ptr: 0,
                 appl_ptr: 2,
                 avail_min: 64,
+                // 2 frames still ring-buffered → delay = 2.  Buffer size not yet
+                // negotiated (HW_PARAMS via the kernel path did not set it), so
+                // avail = 0.  Auto-start (write) does not stamp trigger_time.
+                delay: 2,
+                avail: 0,
+                buffer_frames: 0,
+                capture: false,
+                trigger_time_ns: 0,
             }),
-        "sync position snapshot (appl=2, hw=0)"
+        "sync position snapshot (appl=2, hw=0, delay=2)"
     );
+    // STATUS-field coverage: negotiate a buffer size and START explicitly, then
+    // confirm delay/avail/buffer_frames and a stamped trigger time.
+    set_buffer_size(p, 1024);
+    let snap = sync_position(p).ok_or(KernelError::InternalError)?;
+    check!(snap.buffer_frames == 1024, "buffer size stored for STATUS");
+    // Still 2 frames queued (mixer pull idle): avail = 1024 - 2 = 1022.
+    check!(snap.delay == 2, "STATUS delay = queued frames");
+    check!(snap.avail == 1022, "STATUS avail = buffer_frames - delay");
+    check!(!snap.capture, "playback snapshot capture flag false");
+    // Auto-start left trigger unset; an explicit prepare+start stamps it.
+    check!(snap.trigger_time_ns == 0, "trigger unstamped before explicit start");
     // A pushed application pointer is adopted (the !APPL SYNC_PTR case).
     set_appl_ptr(p, 7);
     check!(frames_written(p) == Some(7), "set_appl_ptr adopted");
@@ -847,6 +924,11 @@ pub fn self_test() -> KernelResult<()> {
     prepare(p)?;
     start(p)?;
     check!(state(p) == Some(STATE_RUNNING), "explicit start -> RUNNING");
+    // Explicit START now stamps the trigger time for STATUS's trigger_tstamp.
+    check!(
+        sync_position(p).is_some_and(|pp| pp.trigger_time_ns != 0),
+        "explicit start stamps trigger_time"
+    );
     // DROP -> SETUP and resets the appl ptr.
     drop_stream(p)?;
     check!(state(p) == Some(STATE_SETUP), "drop -> SETUP");

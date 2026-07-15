@@ -973,6 +973,7 @@ pub mod errno {
     pub const ELOOP: i32 = 40;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    pub const EMSGSIZE: i32 = 90;
     pub const ENOPROTOOPT: i32 = 92;
     pub const EPROTONOSUPPORT: i32 = 93;
     pub const ESOCKTNOSUPPORT: i32 = 94;
@@ -36939,6 +36940,257 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
 /// and the `validate_user_read(args.arg1, 56)` access check BEFORE
 /// the fd lookup, so userspace observed `sendmsg(99, NULL, 0)` as
 /// EFAULT where Linux returns EBADF.  Translator-only swap.
+/// x86_64 `struct msghdr` (56 bytes) as passed to `sendmsg(2)`/`recvmsg(2)`.
+/// Field order and padding match `include/linux/socket.h`'s `struct
+/// user_msghdr`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct UserMsgHdr {
+    msg_name: u64,
+    msg_namelen: u32,
+    _pad0: u32,
+    msg_iov: u64,
+    msg_iovlen: u64,
+    msg_control: u64,
+    msg_controllen: u64,
+    msg_flags: i32,
+    _pad1: u32,
+}
+
+/// Serialise the socket's connected peer into a `sockaddr` byte buffer for a
+/// `recvmsg` `msg_name`.  Returns the 28-byte scratch buffer and the address
+/// length actually used (16 = `sockaddr_in`, 28 = `sockaddr_in6`), or `None`
+/// if the socket has no connected peer.  Mirrors `socket_write_peer_addr[6]`.
+fn peer_sockaddr(h: crate::net::socket::SocketHandle) -> Option<([u8; 28], usize)> {
+    let mut sa = [0u8; 28];
+    match crate::net::socket::peer6(h) {
+        Ok((Some(ip6), port)) => {
+            let [f0, f1] = 10u16.to_ne_bytes();
+            sa[0] = f0;
+            sa[1] = f1;
+            let [p0, p1] = port.to_be_bytes();
+            sa[2] = p0;
+            sa[3] = p1;
+            for (dst, src) in sa.iter_mut().skip(8).take(16).zip(ip6.iter()) {
+                *dst = *src;
+            }
+            Some((sa, 28))
+        }
+        Ok((None, _)) => {
+            let (ip, port) = crate::net::socket::peer(h).ok()?;
+            let [f0, f1] = 2u16.to_ne_bytes();
+            sa[0] = f0;
+            sa[1] = f1;
+            let [p0, p1] = port.to_be_bytes();
+            sa[2] = p0;
+            sa[3] = p1;
+            sa[4] = ip[0];
+            sa[5] = ip[1];
+            sa[6] = ip[2];
+            sa[7] = ip[3];
+            Some((sa, 16))
+        }
+        Err(_) => None,
+    }
+}
+
+/// `sendmsg(2)` on a connected daemon-backed stream socket: gathers the
+/// `msg_iov` scatter/gather list into one bounded staging buffer (a page, like
+/// the single-write path — a stream short-write is well-defined, so the caller
+/// loops) and forwards it to the daemon.  `msg_name` (destination) and
+/// `msg_control` (ancillary data) are ignored on a connected stream, matching
+/// Linux.  `MSG_DONTWAIT` (`flags`) forces a per-call non-blocking send.
+fn socket_sendmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
+    #[repr(C)]
+    struct Iovec {
+        base: u64,
+        len: u64,
+    }
+    let mut mh = UserMsgHdr::default();
+    // SAFETY: sys_sendmsg validated [msg_ptr, +56) readable; copy_from_user
+    // re-checks the range under SMAP.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(msg_ptr, (&raw mut mh).cast::<u8>(), 56)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    // Linux rejects msg_iovlen > UIO_MAXIOV (1024) with EMSGSIZE.
+    if mh.msg_iovlen > 1024 {
+        return linux_err(errno::EMSGSIZE);
+    }
+    // Gather up to one page of payload across the iovecs.
+    let mut staged: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for i in 0..mh.msg_iovlen {
+        if staged.len() >= 4096 {
+            break;
+        }
+        let iov_ptr = mh.msg_iov.wrapping_add(i.wrapping_mul(16));
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: copy_from_user validates the 16-byte iovec descriptor range.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(iov_ptr, (&raw mut iov).cast::<u8>(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let want = usize::try_from(iov.len).unwrap_or(usize::MAX);
+        let room = 4096usize.saturating_sub(staged.len());
+        let take = want.min(room);
+        if take == 0 {
+            continue;
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(iov.base, take) {
+            return linux_err(linux_errno_for(e));
+        }
+        let base = staged.len();
+        staged.resize(base.saturating_add(take), 0);
+        // SAFETY: validate_user_read confirmed [iov.base, +take) readable;
+        // the destination slice was just sized to hold `take` bytes.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(iov.base, staged[base..].as_mut_ptr(), take)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if staged.is_empty() {
+        return SyscallResult::ok(0);
+    }
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let nonblock = (flags & msgflags::MSG_DONTWAIT) != 0
+        || (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    match crate::net::socket::send(h, &staged, nonblock) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `recvmsg(2)` on a connected daemon-backed stream socket: performs a single
+/// receive (bounded to one page) and scatters it across the `msg_iov` list.
+/// Fills `msg_name` with the peer address when requested, clears
+/// `msg_controllen` (no ancillary data) and `msg_flags`.  `MSG_DONTWAIT`
+/// (`flags`) forces a per-call non-blocking receive.
+fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
+    #[repr(C)]
+    struct Iovec {
+        base: u64,
+        len: u64,
+    }
+    struct Seg {
+        base: u64,
+        len: usize,
+    }
+    let mut mh = UserMsgHdr::default();
+    // SAFETY: sys_recvmsg validated [msg_ptr, +56) readable; copy_from_user
+    // re-checks under SMAP.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(msg_ptr, (&raw mut mh).cast::<u8>(), 56)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    if mh.msg_iovlen > 1024 {
+        return linux_err(errno::EMSGSIZE);
+    }
+    // First pass: validate each destination iovec writable and compute the
+    // bounded receive capacity (one page total).
+    let mut segs: alloc::vec::Vec<Seg> = alloc::vec::Vec::new();
+    let mut cap_total = 0usize;
+    for i in 0..mh.msg_iovlen {
+        if cap_total >= 4096 {
+            break;
+        }
+        let iov_ptr = mh.msg_iov.wrapping_add(i.wrapping_mul(16));
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: copy_from_user validates the 16-byte iovec descriptor range.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(iov_ptr, (&raw mut iov).cast::<u8>(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let want = usize::try_from(iov.len).unwrap_or(usize::MAX);
+        let room = 4096usize.saturating_sub(cap_total);
+        let take = want.min(room);
+        if take == 0 {
+            continue;
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(iov.base, take) {
+            return linux_err(linux_errno_for(e));
+        }
+        segs.push(Seg { base: iov.base, len: take });
+        cap_total = cap_total.saturating_add(take);
+    }
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let nonblock = (flags & msgflags::MSG_DONTWAIT) != 0
+        || (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    // Single receive into staging (skip the daemon round-trip entirely for a
+    // zero-length receive buffer).
+    let mut kbuf = alloc::vec![0u8; cap_total];
+    let n = if cap_total == 0 {
+        0
+    } else {
+        match crate::net::socket::recv(h, &mut kbuf, nonblock) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+    };
+    let n_usize = usize::try_from(n).unwrap_or(0).min(cap_total);
+    // Scatter received bytes into the iovecs in order.
+    let mut off = 0usize;
+    for seg in &segs {
+        if off >= n_usize {
+            break;
+        }
+        let chunk = seg.len.min(n_usize.saturating_sub(off));
+        // SAFETY: validate_user_write confirmed [seg.base, +seg.len) writable;
+        // `chunk <= seg.len` and `off + chunk <= n_usize <= kbuf.len()`.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(kbuf[off..].as_ptr(), seg.base, chunk)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        off = off.saturating_add(chunk);
+    }
+    // Fill msg_name with the peer address if the caller supplied a buffer.
+    let mut name_len_out = 0u32;
+    if mh.msg_name != 0 && mh.msg_namelen > 0 {
+        if let Some((sa, full)) = peer_sockaddr(h) {
+            let cap = (mh.msg_namelen as usize).min(full);
+            if cap > 0 {
+                if let Err(e) = crate::mm::user::validate_user_write(mh.msg_name, cap) {
+                    return linux_err(linux_errno_for(e));
+                }
+                // SAFETY: validate_user_write confirmed [msg_name, +cap) writable;
+                // `cap <= sa.len()`.
+                if let Err(e) = unsafe {
+                    crate::mm::user::copy_to_user(sa.as_ptr(), mh.msg_name, cap)
+                } {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            // Linux writes back the full address length (caller detects
+            // truncation via namelen > supplied buffer).
+            name_len_out = u32::try_from(full).unwrap_or(0);
+        }
+    }
+    // Write back the recvmsg output fields.  msg_iov/msg_control pointers are
+    // written back unchanged (we preserved them from the read).
+    mh.msg_namelen = name_len_out;
+    mh.msg_controllen = 0;
+    mh.msg_flags = 0;
+    // SAFETY: sys_recvmsg validated [msg_ptr, +56) writable; copy_to_user
+    // re-checks under SMAP.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_to_user((&raw const mh).cast::<u8>(), msg_ptr, 56)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(i64::from(n))
+}
+
 fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -36954,6 +37206,16 @@ fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
+    }
+    // Path B: a connected daemon-backed stream socket.  MSG_DONTWAIT (arg2) is
+    // honoured; other MSG_* flags and msg_control are ignored.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = args.arg2 as u32;
+        return socket_sendmsg(entry, args.arg1, flags);
     }
     linux_err(errno::EBADF)
 }
@@ -36994,6 +37256,16 @@ fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
+    }
+    // Path B: a connected daemon-backed stream socket.  MSG_DONTWAIT (arg2) is
+    // honoured; msg_name is filled with the peer, msg_control is ignored.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let flags = args.arg2 as u32;
+        return socket_recvmsg(entry, args.arg1, flags);
     }
     linux_err(errno::EBADF)
 }

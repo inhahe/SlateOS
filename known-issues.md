@@ -178,6 +178,18 @@ Phase 5 progresses:
   ignored, and true datagram (UDP) source addresses await the daemon-backed
   `SOCK_DGRAM` path (today's daemon sockets are connected streams, so the peer
   *is* the source).
+- **`sendmsg`/`recvmsg` now served (parity fix).** The Linux-ABI `sendmsg(2)`/
+  `recvmsg(2)` on a connected daemon-backed stream socket no longer terminate in
+  EBADF: `socket_sendmsg` gathers the `msg_iov` scatter/gather list into one
+  bounded (≤4 KiB, one segment) staging buffer and forwards it; `socket_recvmsg`
+  does a single bounded receive and scatters it across the iovecs, fills
+  `msg_name` with the peer (`sockaddr_in`/`sockaddr_in6`, via `peer_sockaddr`),
+  and clears `msg_controllen`/`msg_flags`. `MSG_DONTWAIT` (the `flags` arg) is
+  honoured on both; `msg_control` (ancillary/cmsg) is ignored and `msg_iovlen >
+  1024` → `EMSGSIZE`. (The *native*-ABI `SYS_SOCKETPAIR_*` sendmsg/recvmsg path
+  is separate and unaffected.) Remaining gap: like the plain send/recv path, only
+  one page / one outstanding segment moves per call (no gather beyond 4 KiB, no
+  send pipelining).
 - **IPv6 connect: daemon+ring+client+socket-fd DONE.** The daemon speaks full
   TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6: Option<[u8;16]>`
   dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`; v6 framing,

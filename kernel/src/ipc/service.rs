@@ -131,6 +131,15 @@ struct ServiceEntry {
     /// same namespace.  This prevents a sandboxed process from connecting
     /// to services outside its isolation boundary.
     namespace_id: u64,
+
+    /// PID of the process that registered (provides) this service.
+    ///
+    /// `0` when the service was registered from a kernel task (kernel is the
+    /// TCB).  Used to attribute a service to its backing process — e.g. the
+    /// SHM-region authorization path grants the `net.stack` daemon the right
+    /// to `SYS_SHM_MAP` the kernel-created ring regions handed to it (see
+    /// `ipc/shm.rs::authorize` and `syscall/handlers.rs::sys_shm_map`).
+    provider_pid: u64,
 }
 
 /// Global service registry.
@@ -232,14 +241,16 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         return Err(KernelError::AlreadyExists);
     }
 
-    // Determine the registering process's namespace.
+    // Determine the registering process's namespace and PID.
     // Services registered from the root namespace (0) are globally visible.
-    let ns_id = {
+    let provider_pid = {
         let task_id = sched::current_task_id();
-        match crate::proc::thread::owner_process(task_id) {
-            Some(pid) if pid != 0 => super::namespace::query(pid),
-            _ => 0, // Kernel tasks register in root namespace.
-        }
+        crate::proc::thread::owner_process(task_id).unwrap_or(0)
+    };
+    let ns_id = if provider_pid != 0 {
+        super::namespace::query(provider_pid)
+    } else {
+        0 // Kernel tasks register in root namespace.
     };
 
     // Check for pre-queued connections from socket activation.
@@ -251,6 +262,7 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         accept_waiter: None,
         closed: false,
         namespace_id: ns_id,
+        provider_pid,
     };
 
     reg.listeners.insert(id, entry);
@@ -523,6 +535,25 @@ pub fn accept_timeout(
 
         sched::block_current();
     }
+}
+
+/// Look up the PID of the process that provides a registered service.
+///
+/// Returns `Some(pid)` for a live (non-closed) service registered by a
+/// userspace process, `Some(0)` for a kernel-registered service, or `None`
+/// if no such service is registered.  Used to authorize a trusted daemon for
+/// resources the kernel hands it (e.g. SHM ring regions — see
+/// `ipc/shm.rs::authorize`).  This lookup ignores namespace visibility on
+/// purpose: it is a kernel-internal trust query, not a client-facing connect.
+#[must_use]
+pub fn provider_pid(name: &[u8]) -> Option<u64> {
+    let reg = SERVICE_REGISTRY.lock();
+    let id = reg.names.get(name).copied()?;
+    let entry = reg.listeners.get(&id)?;
+    if entry.closed {
+        return None;
+    }
+    Some(entry.provider_pid)
 }
 
 /// Unregister a service and close its listener.

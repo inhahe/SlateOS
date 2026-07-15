@@ -744,6 +744,17 @@ impl NetstackConn {
     }
 
     fn submit_round_on(&self, client: channel::ChannelHandle) -> KernelResult<()> {
+        // Authorize the daemon backing `net.stack` to `SYS_SHM_MAP` our ring
+        // region before we hand it the handle. Idempotent, so re-doing it every
+        // round is cheap. Skipped when the service is kernel-provided (PID 0):
+        // the kernel is the TCB and never needs a grant. `authorize` can only
+        // fail with `InvalidHandle`, which is impossible here — we hold the
+        // handle for the region's whole lifetime — so the result is ignorable.
+        if let Some(pid) = service::provider_pid(b"net.stack")
+            && pid != 0
+        {
+            let _ = shm::authorize(self.handle, pid);
+        }
         let mut req = [0u8; 16];
         let n = netipc::encode_ring_tcp(&mut req, self.handle.raw(), self.size)
             .ok_or(KernelError::InternalError)?;

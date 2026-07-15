@@ -2586,14 +2586,42 @@ pub fn sys_shm_create(args: &SyscallArgs) -> SyscallResult {
 
     match shm::create(size) {
         Ok(handle) => {
-            if let Some(pid) = caller_pid() {
+            if let Some(pid) = caller_pid()
+                && pid != 0
+            {
                 pcb::register_ipc_handle(pid, ResourceType::SharedMemory, handle.raw());
+                // The creating process is authorized to operate on its own
+                // region (map/size/close). Only `InvalidHandle` can fail here,
+                // impossible for a region we just created — safe to ignore.
+                let _ = shm::authorize(handle, pid);
             }
             #[allow(clippy::cast_possible_wrap)]
             let h = handle.raw() as i64;
             SyscallResult::ok(h)
         }
         Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Verify that a userspace caller is authorized to operate on a SHM region.
+///
+/// Returns `Ok(())` for kernel-context callers (no PID / PID 0 — the kernel is
+/// the TCB) and for userspace processes that were granted access (the region's
+/// creator, or a process authorized at a kernel→daemon handoff). Returns
+/// `PermissionDenied` for any other userspace caller — this closes
+/// D-SHM-MAP-NOCAP, where any process holding a raw handle value (which is just
+/// the small monotonic region ID) could map another process's region.
+fn shm_check_authorized(handle: ShmHandle) -> crate::error::KernelResult<()> {
+    match caller_pid() {
+        Some(pid) if pid != 0 => {
+            if shm::is_authorized(handle, pid) {
+                Ok(())
+            } else {
+                Err(KernelError::PermissionDenied)
+            }
+        }
+        // Kernel task (no owning process, or PID 0): implicit authority.
+        _ => Ok(()),
     }
 }
 
@@ -2604,6 +2632,10 @@ pub fn sys_shm_create(args: &SyscallArgs) -> SyscallResult {
 /// Returns: size in bytes.
 pub fn sys_shm_size(args: &SyscallArgs) -> SyscallResult {
     let handle = ShmHandle::from_raw(args.arg0);
+
+    if let Err(e) = shm_check_authorized(handle) {
+        return SyscallResult::err(e);
+    }
 
     match shm::size(handle) {
         Ok(sz) => {
@@ -2620,6 +2652,9 @@ pub fn sys_shm_size(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: shared memory handle.
 pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ShmHandle::from_raw(args.arg0);
+    if let Err(e) = shm_check_authorized(handle) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::SharedMemory, handle.raw());
     }
@@ -2651,6 +2686,13 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
 
     let handle = ShmHandle::from_raw(args.arg0);
     let flags = args.arg1;
+
+    // Enforce region authorization: a userspace caller must be the region's
+    // creator or have been granted access at a kernel→daemon handoff. Kernel
+    // context is the TCB and always allowed. Closes D-SHM-MAP-NOCAP.
+    if let Err(e) = shm_check_authorized(handle) {
+        return SyscallResult::err(e);
+    }
 
     // A mapping with no access requested is meaningless (and would map the
     // region PROT_NONE — reject rather than silently create dead PTEs).

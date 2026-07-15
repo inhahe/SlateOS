@@ -107,6 +107,19 @@ struct ShmRegion {
     /// Reference count — how many handles (or mappings) exist.
     /// When this reaches 0, the region is destroyed and frames freed.
     ref_count: usize,
+    /// PIDs authorized to perform userspace operations (`SYS_SHM_MAP`,
+    /// `SYS_SHM_SIZE`, `SYS_SHM_CLOSE`) on this region.
+    ///
+    /// A region is created by the kernel (kernel context has no caller PID
+    /// and is the TCB — it may always operate on any region). To let a
+    /// *specific* userspace process touch a region — e.g. handing the
+    /// `net.stack` daemon the kernel-created TCP ring so it can
+    /// `SYS_SHM_MAP` it — that process's PID must be added here via
+    /// [`authorize`]. Without this list, any process holding a raw handle
+    /// value (the handle *is* the small monotonic region ID, trivially
+    /// guessable) could map another process's region — see the
+    /// D-SHM-MAP-NOCAP issue.
+    authorized: Vec<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +193,7 @@ pub fn create(size: usize) -> KernelResult<ShmHandle> {
         frames,
         size: actual_size,
         ref_count: 1,
+        authorized: Vec::new(),
     };
 
     let mut table = SHM_TABLE.lock();
@@ -278,6 +292,38 @@ pub fn close(handle: ShmHandle) {
             }
         }
     }
+}
+
+/// Grant a process the right to perform userspace SHM operations
+/// (`SYS_SHM_MAP`/`SIZE`/`CLOSE`) on a region.
+///
+/// Used at each kernel→daemon SHM handoff: the kernel creates a region in
+/// its own (TCB) context, then authorizes the specific daemon PID that will
+/// map it. Idempotent — re-authorizing an already-listed PID is a no-op.
+///
+/// Returns `InvalidHandle` if the region does not exist.
+pub fn authorize(handle: ShmHandle, pid: u64) -> KernelResult<()> {
+    let mut table = SHM_TABLE.lock();
+    let region = table
+        .get_mut(&handle.region_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    if !region.authorized.contains(&pid) {
+        region.authorized.push(pid);
+    }
+    Ok(())
+}
+
+/// Check whether `pid` is authorized to operate on a region.
+///
+/// Returns `false` if the region does not exist or the PID is not in the
+/// region's authorized list. Kernel-context callers (no PID) do not use
+/// this — they are the TCB and may always operate on any region.
+#[must_use]
+pub fn is_authorized(handle: ShmHandle, pid: u64) -> bool {
+    let table = SHM_TABLE.lock();
+    table
+        .get(&handle.region_id())
+        .is_some_and(|region| region.authorized.contains(&pid))
 }
 
 // ---------------------------------------------------------------------------

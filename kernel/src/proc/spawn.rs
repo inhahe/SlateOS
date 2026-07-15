@@ -3562,6 +3562,21 @@ fn netstack_udp_dns_roundtrip(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
     result
 }
 
+/// Authorize the running `net.stack` daemon to `SYS_SHM_MAP` a kernel-created
+/// region before its handle is handed over the control channel.
+///
+/// No-op when the service is absent or kernel-provided (PID 0) — the kernel is
+/// the TCB and needs no grant. The only [`shm::authorize`] failure is
+/// `InvalidHandle`, impossible for a handle we just created and still hold, so
+/// the result is safe to ignore.
+fn authorize_netstack_daemon(handle: crate::ipc::shm::ShmHandle) {
+    if let Some(pid) = crate::ipc::service::provider_pid(b"net.stack")
+        && pid != 0
+    {
+        let _ = crate::ipc::shm::authorize(handle, pid);
+    }
+}
+
 /// Perform one `OP_SHM_PING` round-trip to the running `net.stack` daemon,
 /// validating cross-address-space `SYS_SHM_MAP` sharing.
 ///
@@ -3583,6 +3598,7 @@ fn netstack_shm_ping_roundtrip() -> KernelResult<()> {
 
     // Create a region (rounds up to one 16 KiB frame — ample for two magics).
     let handle = shm::create(64)?;
+    authorize_netstack_daemon(handle);
     let size = shm::size(handle)?;
 
     // Helper to close the SHM handle on every exit path (RAII-ish).
@@ -3699,6 +3715,7 @@ fn netstack_ring_echo_roundtrip() -> KernelResult<()> {
     let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
 
     let handle = shm::create(need)?;
+    authorize_netstack_daemon(handle);
     let size = shm::size(handle)?;
 
     // Close the SHM handle on every exit path.
@@ -3893,6 +3910,7 @@ fn netstack_ring_tcp_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
     let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
 
     let handle = shm::create(need)?;
+    authorize_netstack_daemon(handle);
     let size = shm::size(handle)?;
 
     // Close the SHM handle on every exit path.
@@ -4131,6 +4149,7 @@ fn netstack_ring_tcp_multi_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
     let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
 
     let handle = shm::create(need)?;
+    authorize_netstack_daemon(handle);
     let size = shm::size(handle)?;
 
     let finish = |h: shm::ShmHandle, r: KernelResult<Option<()>>| -> KernelResult<Option<()>> {
@@ -4411,6 +4430,7 @@ fn netstack_ring_tcp_demux_roundtrip(ip: &[u8; 4], port: u16) -> KernelResult<Op
     let need = netipc::ring::region_size(sq_entries, cq_entries, data_len);
 
     let handle = shm::create(need)?;
+    authorize_netstack_daemon(handle);
     let size = shm::size(handle)?;
 
     let finish = |h: shm::ShmHandle, r: KernelResult<Option<()>>| -> KernelResult<Option<()>> {

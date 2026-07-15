@@ -2849,7 +2849,10 @@ pub fn load_average_x100() -> u64 {
 fn check_starvation() {
     // Read threshold from sysctl (allows runtime tuning).
     // 0 = anti-starvation disabled.
-    let threshold = crate::sysctl::get(crate::sysctl::PARAM_SCHED_STARVATION_THRESHOLD)
+    // Runs in timer-IRQ context, so use try_get (non-blocking). A blocking
+    // sysctl::get here can deadlock if a task was preempted while holding the
+    // sysctl REGISTRY lock (see known-issues.md B-SYSCTL-IRQ-DEADLOCK).
+    let threshold = crate::sysctl::try_get(crate::sysctl::PARAM_SCHED_STARVATION_THRESHOLD)
         .unwrap_or(STARVATION_THRESHOLD_TICKS);
     if threshold == 0 {
         return; // Anti-starvation disabled.

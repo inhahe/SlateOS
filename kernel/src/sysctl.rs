@@ -570,6 +570,28 @@ pub fn get(id: u16) -> Option<u64> {
     REGISTRY.lock().get(id)
 }
 
+/// Non-blocking parameter read for **interrupt / exception context**.
+///
+/// `REGISTRY` is a raw `spin::Mutex` that does not mask interrupts, so any
+/// blocking `REGISTRY.lock()` reached from an ISR (timer tick, page-fault
+/// handler, …) will hard-deadlock if it interrupts a task that is *already*
+/// holding the lock in normal context: the ISR spins on the lock forever
+/// while the interrupted holder can never resume to release it (single CPU).
+/// This was observed as a real boot wedge — the timer IRQ's
+/// `sched::check_starvation` blocked on `REGISTRY` behind a task in
+/// `sysctl::set()` that held it across a slow `serial_println!`
+/// (`known-issues.md` B-SYSCTL-IRQ-DEADLOCK).
+///
+/// Interrupt-context callers must use this instead of [`get`]: it uses
+/// `try_lock` and returns `None` on contention (or unknown id), letting the
+/// caller fall back to a compile-time default. Best-effort by design — a
+/// momentarily-contended tunable read simply uses its default for that one
+/// tick, which is always safe for the tunables read from ISRs.
+#[must_use]
+pub fn try_get(id: u16) -> Option<u64> {
+    REGISTRY.try_lock().and_then(|reg| reg.get(id))
+}
+
 /// Set a parameter's value.
 ///
 /// Returns the old value on success, `None` if the ID is unknown or
@@ -581,7 +603,15 @@ pub fn get(id: u16) -> Option<u64> {
 pub fn set(id: u16, value: u64) -> Option<u64> {
     let result = REGISTRY.lock().set(id, value);
     if let Some(old) = result {
-        if let Some(info) = REGISTRY.lock().find(id) {
+        // Snapshot the metadata (owned `ParamInfo`, `name: &'static str`) and
+        // release the lock BEFORE logging.  Never hold `REGISTRY` across a
+        // `serial_println!`: `REGISTRY` is also read from interrupt context
+        // (via `try_get`), and holding it across the slow serial write widens
+        // the deadlock window that B-SYSCTL-IRQ-DEADLOCK exploited — the
+        // `let … = REGISTRY.lock().find(id);` temporary guard drops at the
+        // statement's `;`, so the log below runs lock-free.
+        let info = REGISTRY.lock().find(id);
+        if let Some(info) = info {
             serial_println!(
                 "[sysctl] {} = {} (was {})",
                 info.name, value, old

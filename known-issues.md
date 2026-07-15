@@ -14,6 +14,58 @@ work that should be done now."
 
 ## Active Bugs
 
+### B-SYSCTL-IRQ-DEADLOCK. `sysctl::REGISTRY` (raw `spin::Mutex`) acquired blockingly from interrupt context → single-CPU hard deadlock — ROOT-CAUSED & FIXED 2026-07-15
+
+**Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh` (iter 4).
+The i6300esb NMI hard-lockup watchdog captured a frozen guest with
+`RIP=0xffffffff81acd516` (`spin_loop_hint`) and `RFL=0x00000002` (IF
+cleared → interrupts disabled while spinning, i.e. a spinlock deadlock,
+not a lost-wakeup/idle bug). The NMI backtrace showed
+`serial::_print ← sysctl::set ← mm::oom::self_test`, with
+`RDI = &sysctl::REGISTRY`; a stack scan additionally showed
+`timer_tick → check_starvation → sysctl::get` frames.
+
+**Root cause.** `static REGISTRY: spin::Mutex<Registry>` (kernel/src/sysctl.rs)
+is a *raw* `spin::Mutex` — it does **not** mask hardware interrupts on
+acquire. It was reachable from two contexts:
+  - **Task context:** `sysctl::set()` held `REGISTRY` across a slow
+    `serial_println!` (the `[sysctl] name = v (was old)` log).
+  - **Interrupt context:** the timer IRQ's `sched::check_starvation()`
+    (sched/mod.rs) called the *blocking* `sysctl::get()` to read
+    `sched.starvation_threshold`; the #PF stack-grow handler (idt.rs)
+    likewise called blocking `sysctl::get()` for `mm.max_stack_frames`.
+On a single CPU, when the timer IRQ fired while a task held `REGISTRY`
+(inside `set()`'s log window), the ISR spun on `REGISTRY.lock()` forever
+— the interrupted holder can never resume to release it. Classic Q24
+"raw spin::Mutex holder-preemption / interrupt-reentrancy" deadlock
+(same class as the already-fixed heap-lock 83307bdfc and container::TABLE
+fa87bbb5e).
+
+**Fix (proper).**
+  1. Added `sysctl::try_get(id) -> Option<u64>` — a non-blocking read
+     using `REGISTRY.try_lock()`, returning `None` on contention so the
+     caller falls back to its compile-time default (always safe for these
+     tunables). Interrupt/exception-context readers MUST use this, never
+     the blocking `get()`. (Mirrors how `check_starvation` already uses
+     `SCHED.try_lock()`.)
+  2. Converted the two IRQ/exception-context callers to `try_get`:
+     `sched::check_starvation` (sched/mod.rs) and the #PF stack-grow
+     handler (idt.rs).
+  3. Stopped `sysctl::set()` from holding `REGISTRY` across the log: it
+     now snapshots an owned `ParamInfo` via
+     `let info = REGISTRY.lock().find(id);` (guard drops at the `;`) and
+     logs lock-free, closing the window entirely.
+
+The remaining `sysctl::get()` callers (frame-alloc slow path, kswapd,
+oom self-test, swap, syscall handlers, procfs) all run in task/syscall
+context and are fine keeping the blocking read.
+
+**Repro (pre-fix).** `scripts/wedge-soak.sh` (hard-lockup watchdog); the
+wedge appeared within a handful of iterations under the oom/container
+self-test load that exercises `sysctl::set`.
+
+---
+
 ### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15
 
 **Symptom (1 occurrence in ~5 boots, 2026-07-15):** During the

@@ -2275,7 +2275,10 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // of the two guards.
     #[allow(clippy::arithmetic_side_effects)]
     let dynamic_guard = {
-        let max_frames = crate::sysctl::get(
+        // Runs in #PF exception context; use try_get (non-blocking) to avoid
+        // deadlocking against a task preempted while holding the sysctl
+        // REGISTRY lock (see known-issues.md B-SYSCTL-IRQ-DEADLOCK).
+        let max_frames = crate::sysctl::try_get(
             crate::sysctl::PARAM_MM_MAX_STACK_FRAMES,
         ).unwrap_or(MAX_STACK_FRAMES as u64);
         let max_bytes = max_frames.saturating_mul(FRAME_SIZE as u64);

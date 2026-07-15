@@ -1205,6 +1205,7 @@ _Patent timeline: most of Microsoft's ribbon-specific patents (filed around 2005
 - [ ] Drag-and-drop (OLE-style multi-format)
 - [ ] File picker / save dialog (reuses file explorer component)
 - [ ] DPI/scaling awareness
+- [ ] **Forgiving drag margins.** Every draggable divider/edge (window resize borders, dockable-panel splitters, list/table column dividers, and any other "grab the boundary and drag" affordance) must be easy to hit — either the visible grab strip is drawn thick enough to target comfortably, or the drag hit-region extends a few pixels past the visible margin on both sides (a hysteresis/"snap-to-edge" hit-target that starts the drag mode slightly before the cursor reaches the exact pixel line). Users should never have to pixel-hunt to start a resize/reposition drag.
 - [ ] Enable/disable controls API (grey out, set/clear tooltip explaining why disabled)
 - [ ] Encourage (but don't enforce) tooltip on disabled controls explaining why disabled
 - [ ] SVG rendering support

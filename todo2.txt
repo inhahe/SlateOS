@@ -1,3 +1,5 @@
+[DONE -> roadmap-detailed.md §3.5 GUI Toolkit / Advanced Features "Forgiving drag margins"] add to roadmap-detailed that dragging margins (e.g., rezizing an app, sliding panels, resizing columns) should be easy either because they're thick or because the drag mode starts a little bit of distance from the margin
+
 
 [DONE -> roadmap-detailed.md §3.4 Hotkeys] add to roadmap-detailed that there should be a way to make any hotkey produce any given emoji or other unicode character (or string).  can paste the character or string or select the character from the unicode selection dialog that has the categories and the search.
 

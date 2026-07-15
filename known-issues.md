@@ -78,6 +78,68 @@ real UB.
 `build/hang-catches/*.serial.txt` for the `[sched] *** IDLE-FALLBACK WEDGE`
 block and pin the root cause.
 
+### B-SCHED-SPAWN-DEADLOCK. Intermittent boot hang — boot task spins on `SCHED.lock()` in `spawn_inner` during the `tcc` project-header spawn self-test; SCHED held by an unidentified non-running context — INSTRUMENTED, WATCH 2026-07-15
+
+**Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`
+(`build/hang-catches/soak-20260715-180829-iter15.*`), ~1 in 15 boots.
+Distinct from both B-WAITQ-IDLEPARK (a lost-wakeup, IF *set*, HLT) and
+B-SYSCTL-IRQ-DEADLOCK (sysctl lock). The i6300esb NMI hard-lockup watchdog
+captured CPU#0 (the only CPU) at `RIP=0xffffffff815c8976` =
+`core::sync::atomic::spin_loop_hint`, `RFL=0x00000002` (**IF cleared** →
+spinning with interrupts disabled = a spinlock deadlock, not a lost-wakeup).
+`RDI=0xffffffff8271efb0`, which `llvm-nm` resolves to **exactly**
+`kernel::sched::SCHED` — so the CPU is spinning on `SCHED.lock()`.
+
+**Where it hangs.** `llvm-objdump -dl` on the frozen RIP + backtrace
+resolves the stack (fresh `target/x86_64-unknown-none/debug/kernel`,
+Jul 15 18:06) to:
+`kernel_main → spawn::self_test_linux_real_glibc_cc_project_header →
+spawn_reap_tcc → proc::spawn::spawn_process → spawn_process_inner →
+proc::thread::spawn → sched::spawn_suspended → sched::spawn_inner →
+cpu::without_interrupts{closure} → spin_loop_hint`. The spin is the inlined
+`spin::Mutex::lock` of `SCHED.lock()` at `sched/mod.rs` ~1189 (address
+operand `0x8271efb0` in the disasm == `&SCHED`), inside the
+`without_interrupts` critical section. Serial ends mid-`[spawn] Running REAL
+project-header C build (tcc, #include "...", ring 3, Path Z) test…`
+(process 217), i.e. the *6th* `tcc` spawn (the prior 5 tcc self-tests all
+passed) — so it is timing/allocation-pattern dependent, not a static
+double-lock. The post-BOOT_OK liveness watchdog fired (heartbeat=4328,
+ctx_switches=1122) and confirmed `!! could not acquire SCHED lock — a task
+is likely wedged holding it`.
+
+**Root cause — NOT yet pinned.** On a single CPU, SCHED can only be *held
+while its holder is not running* if some context acquired SCHED and then a
+context switch occurred before it released — yet: (a) involuntary preemption
+is already deferred while SCHED is held (`do_deferred_preempt` checks
+`SCHED.is_locked()`, sched/mod.rs ~2666), and (b) a *voluntary* yield while
+holding SCHED would immediately self-deadlock in `schedule_inner`'s own
+`SCHED.lock()` (which would show `schedule_inner` in the backtrace, not
+`spawn_inner`). Static analysis this session could not identify which of the
+~50 `SCHED.lock()`/`try_lock()` sites leaks it, nor the exact race
+(candidate: a `SCHED.is_locked()`-guard race, or a fault/exception while
+holding SCHED). SCHED is a raw `spin::Mutex` and does **not** bump
+`preempt_count` (only `crate::sync::Mutex` does), so the `spawn_inner`
+voluntary-switch guard at sched/mod.rs ~4744 — which checks `preempt_count`
+— would *not* catch a SCHED-held voluntary switch.
+
+**Diagnostic fix (this session).** Wrapped SCHED in a `SchedMutex` newtype
+(sched/mod.rs) mirroring the existing `mm::heap` HEAP_LOCK_OWNER/SITE
+mechanism: `lock`/`try_lock` are `#[track_caller]` and record the holder's
+task-id + CPU + `&'static Location` acquire site into
+`SCHED_LOCK_{OWNER,CPU,SITE}` atomics; the `SchedGuard` clears them on drop.
+`try_lock` records **only on success** so a failing probe never clobbers the
+real holder's record. New lock-free `dump_sched_lock_owner()` prints
+`tid=… (cpu …) acquired at file:line:col` and is now called from the
+liveness "could not acquire SCHED lock" path (~2273). The `SchedGuard`
+derefs transparently to `SchedState`, so all existing call sites are
+unchanged. This turns the "victim spinning in spin_loop_hint" capture into a
+direct pointer at the leaking acquire site on the next reproduction.
+
+**Next step.** Re-run `wedge-soak.sh` until it re-catches; read the
+`[liveness]   SCHED-lock: HELD by tid=… acquired at …` line to identify the
+exact leaking critical section, then fix it (release SCHED before the
+switch, or convert the offending hold to `try_lock`/short scope).
+
 ### B-SYSCTL-IRQ-DEADLOCK. `sysctl::REGISTRY` (raw `spin::Mutex`) acquired blockingly from interrupt context → single-CPU hard deadlock — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh` (iter 4).

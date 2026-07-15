@@ -70,7 +70,7 @@ use crate::cpu;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::serial_print;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use self::context::switch_context;
@@ -252,7 +252,153 @@ pub(crate) struct SchedState {
     initialized: bool,
 }
 
-static SCHED: Mutex<SchedState> = Mutex::new(SchedState {
+// --- SCHED lock-holder tracking (deadlock diagnosis) ----------------------
+//
+// SCHED is a raw `spin::Mutex`, so when a task wedges while holding it the
+// NMI/hardlockup frozen-RIP capture only ever names the *victim* spinning in
+// `spin_loop_hint`, never the *holder* (observed 2026-07-15 as
+// B-SCHED-SPAWN-DEADLOCK: the boot task spinning on `SCHED.lock()` at
+// `spawn_inner`, SCHED held by an unidentified non-running context). These
+// atomics record, for the duration of each critical section, WHO holds the
+// lock (owning task-id + CPU) and WHERE it was acquired (a `&'static Location`
+// pointer stored as usize). They are written right after the lock is taken and
+// cleared when the guard drops, so `dump_sched_lock_owner()` — called from the
+// liveness / NMI hang path — can name the holder + acquire site directly.
+// This mirrors the identical `mm::heap` HEAP_LOCK_OWNER/SITE mechanism.
+//
+// `u64::MAX` in OWNER means "unlocked"; SITE/CPU are only meaningful otherwise.
+static SCHED_LOCK_OWNER: AtomicU64 = AtomicU64::new(u64::MAX);
+static SCHED_LOCK_SITE: AtomicUsize = AtomicUsize::new(0);
+static SCHED_LOCK_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Spinlock over [`SchedState`] that records holder provenance for deadlock
+/// diagnosis.  Delegates to `spin::Mutex`; the returned [`SchedGuard`] derefs
+/// to `SchedState` transparently and clears the holder record on drop, so all
+/// existing `SCHED.lock()` / `SCHED.try_lock()` / `SCHED.is_locked()` call
+/// sites are unchanged.
+struct SchedMutex(Mutex<SchedState>);
+
+impl SchedMutex {
+    const fn new(state: SchedState) -> Self {
+        Self(Mutex::new(state))
+    }
+
+    /// Acquire the lock (blocking spin), recording the holder + acquire site.
+    /// `#[track_caller]` captures the *call site* at compile time (zero runtime
+    /// cost), so the recorded `Location` names the line that took the lock, not
+    /// this helper.
+    #[inline]
+    #[track_caller]
+    fn lock(&self) -> SchedGuard<'_> {
+        let guard = self.0.lock();
+        Self::record(core::panic::Location::caller());
+        SchedGuard(guard)
+    }
+
+    /// Try to acquire without spinning.  Records the holder + acquire site only
+    /// on success (a failed `try_lock` must not clobber the real holder's
+    /// record — the whole point is to preserve it for the wedge dump).
+    #[inline]
+    #[track_caller]
+    fn try_lock(&self) -> Option<SchedGuard<'_>> {
+        self.0.try_lock().map(|guard| {
+            Self::record(core::panic::Location::caller());
+            SchedGuard(guard)
+        })
+    }
+
+    #[inline]
+    fn is_locked(&self) -> bool {
+        self.0.is_locked()
+    }
+
+    /// Stamp the holder atomics.  `current_task_id()` / `current_cpu_id()` are
+    /// lock-free per-CPU atomic loads, so this cannot re-enter SCHED.
+    #[inline]
+    fn record(loc: &'static core::panic::Location<'static>) {
+        SCHED_LOCK_OWNER.store(current_task_id(), Ordering::Relaxed);
+        SCHED_LOCK_CPU.store(current_cpu_id(), Ordering::Relaxed);
+        SCHED_LOCK_SITE.store(loc as *const _ as usize, Ordering::Relaxed);
+    }
+}
+
+/// RAII guard wrapping the real `spin::MutexGuard`, transparently deref-ing to
+/// `SchedState` and clearing the holder record on drop.
+struct SchedGuard<'a>(spin::MutexGuard<'a, SchedState>);
+
+impl core::ops::Deref for SchedGuard<'_> {
+    type Target = SchedState;
+    #[inline]
+    fn deref(&self) -> &SchedState {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for SchedGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut SchedState {
+        &mut self.0
+    }
+}
+
+impl Drop for SchedGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // Clear the owner *before* the physical lock release (the spinlock
+        // releases when `self.0` drops right after this Drop body).  A brief
+        // window marked unlocked while still physically held is harmless for a
+        // diagnostic-only record.
+        SCHED_LOCK_OWNER.store(u64::MAX, Ordering::Relaxed);
+        SCHED_LOCK_SITE.store(0, Ordering::Relaxed);
+        SCHED_LOCK_CPU.store(usize::MAX, Ordering::Relaxed);
+    }
+}
+
+/// Dump the current holder of the global SCHED lock to the serial log.
+///
+/// Called from the liveness / NMI hang path when `SCHED.try_lock()` fails.
+/// Lock-free (plain atomic loads), so it is safe from a partially-wedged
+/// system or IRQ/NMI context.  When the lock is held, names the owning
+/// task-id, the CPU that took it, and the `file:line:col` acquire site —
+/// turning a "victim spinning in spin_loop_hint" capture into a direct pointer
+/// at the deadlocking critical section.
+pub(crate) fn dump_sched_lock_owner() {
+    let owner = SCHED_LOCK_OWNER.load(Ordering::Relaxed);
+    if owner == u64::MAX {
+        crate::serial_println!(
+            "[liveness]   SCHED-lock: record shows unlocked (holder cleared its \
+             record but the lock is still physically held — a torn/racing release, \
+             or a holder that bypassed SchedMutex)"
+        );
+        return;
+    }
+    let cpu = SCHED_LOCK_CPU.load(Ordering::Relaxed);
+    let site_ptr = SCHED_LOCK_SITE.load(Ordering::Relaxed);
+    if site_ptr == 0 {
+        crate::serial_println!(
+            "[liveness]   SCHED-lock: HELD by tid={} (cpu {}, acquire site unknown)",
+            owner, cpu
+        );
+        return;
+    }
+    // SAFETY: a non-zero SCHED_LOCK_SITE holds a `&'static Location` pointer
+    // written by `SchedMutex::record` from `Location::caller()`, which has
+    // static lifetime.  It is only cleared to 0 (checked above) on guard drop,
+    // so a non-zero value is always a live &'static Location.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
+    crate::serial_println!(
+        "[liveness]   SCHED-lock: HELD by tid={} (cpu {}) acquired at {}:{}:{}  \
+         <-- likely deadlock holder",
+        owner,
+        cpu,
+        loc.file(),
+        loc.line(),
+        loc.column(),
+    );
+}
+
+static SCHED: SchedMutex = SchedMutex::new(SchedState {
     tasks: BTreeMap::new(),
     initialized: false,
 });
@@ -2275,6 +2421,9 @@ fn dump_all_tasks_serial() {
             "[liveness]   !! could not acquire SCHED lock — a task is likely \
              wedged holding it (this IS the deadlock)",
         );
+        // Name the holder + acquire site (see B-SCHED-SPAWN-DEADLOCK); mirrors
+        // mm::heap::dump_lock_owner for the heap lock above.
+        dump_sched_lock_owner();
         return;
     };
 

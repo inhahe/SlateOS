@@ -155,6 +155,11 @@ struct SocketInner {
     conn: NetstackConn,
     /// Stream vs datagram transport.
     kind: SockKind,
+    /// The address family the socket was created with (`AF_INET` = 2 /
+    /// `AF_INET6` = 10). Recorded so `getsockname` on an unconnected/bound socket
+    /// reports the correct family (`sockaddr_in` vs `sockaddr_in6`) even before any
+    /// address is otherwise known.
+    domain: u16,
     /// Datagram sockets only: whether the daemon-side UDP socket has been bound
     /// yet (an explicit `bind(2)` or the implicit ephemeral auto-bind on the
     /// first `sendto`/`recvfrom`, matching Linux). Meaningless for a stream socket.
@@ -193,7 +198,8 @@ struct SocketSlot {
 /// Global table of live stream sockets.
 static SOCKET_TABLE: Mutex<BTreeMap<SocketId, SocketSlot>> = Mutex::new(BTreeMap::new());
 
-/// Create a new (unconnected) stream socket.
+/// Create a new (unconnected) stream socket in address family `domain`
+/// (`AF_INET` = 2 / `AF_INET6` = 10).
 ///
 /// Allocates the SHM ring backing the daemon connection but does **not** contact
 /// the daemon yet — that happens on [`connect`]. The `O_NONBLOCK` flag is *not*
@@ -206,11 +212,12 @@ static SOCKET_TABLE: Mutex<BTreeMap<SocketId, SocketSlot>> = Mutex::new(BTreeMap
 ///
 /// Propagates the [`NetstackConn::open`] error if the SHM ring cannot be
 /// allocated/initialised.
-pub fn create() -> KernelResult<SocketHandle> {
-    create_kind(SockKind::Stream)
+pub fn create(domain: u16) -> KernelResult<SocketHandle> {
+    create_kind(SockKind::Stream, domain)
 }
 
-/// Create a new (unbound) connectionless datagram (`SOCK_DGRAM`) socket.
+/// Create a new (unbound) connectionless datagram (`SOCK_DGRAM`) socket in address
+/// family `domain` (`AF_INET` = 2 / `AF_INET6` = 10).
 ///
 /// Allocates the SHM ring backing the daemon connection but does **not** contact
 /// the daemon yet — the daemon-side UDP socket is created on the first `bind(2)`
@@ -221,16 +228,17 @@ pub fn create() -> KernelResult<SocketHandle> {
 ///
 /// Propagates the [`NetstackConn::open`] error if the SHM ring cannot be
 /// allocated/initialised.
-pub fn create_dgram() -> KernelResult<SocketHandle> {
-    create_kind(SockKind::Dgram)
+pub fn create_dgram(domain: u16) -> KernelResult<SocketHandle> {
+    create_kind(SockKind::Dgram, domain)
 }
 
 /// Shared constructor for [`create`] (stream) and [`create_dgram`] (datagram).
-fn create_kind(kind: SockKind) -> KernelResult<SocketHandle> {
+fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
     let conn = NetstackConn::open()?;
     let inner = SocketInner {
         conn,
         kind,
+        domain,
         bound: false,
         local_port: 0,
         dgram_peer: None,
@@ -878,6 +886,20 @@ pub fn is_dgram(handle: SocketHandle) -> KernelResult<bool> {
     Ok(guard.kind == SockKind::Dgram)
 }
 
+/// The address family the socket was created with (`AF_INET` = 2 /
+/// `AF_INET6` = 10). Lets the syscall layer report the correct `getsockname`
+/// family for a socket whose local address is otherwise only a port (an
+/// unconnected/bound datagram socket bound to the wildcard address).
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn domain(handle: SocketHandle) -> KernelResult<u16> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    Ok(guard.domain)
+}
+
 /// Number of live sockets (test/introspection helper).
 #[must_use]
 pub fn live_count() -> usize {
@@ -901,7 +923,7 @@ pub fn self_test() -> KernelResult<()> {
     let baseline = live_count();
 
     // Create → one live socket, unconnected, no peer.
-    let h = create()?;
+    let h = create(2)?;
     if live_count() != baseline + 1 {
         crate::serial_println!("[net::socket] FAIL: live_count did not increment on create");
         return Err(KernelError::InternalError);

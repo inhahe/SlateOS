@@ -247,8 +247,7 @@ Phase 5 progresses:
     port, send to the daemon's own link-local `me.ip6`, and confirm the looped-back
     datagram reports `AF_INET6` + the link-local source + the sent payload). **Not
     yet done:** an `AF_INET6` arm in the ring-3 `udpget` capstone (kernel-context
-    self-test only), and UDP `getsockname` reporting a v6 family (needs socket
-    domain tracking — the socket object doesn't record its domain).
+    self-test only).
   - **UDP `connect()` default-peer — DONE (v4 and v6).** `connect(2)` on a
     `SOCK_DGRAM` fd records a default peer without a handshake (auto-binding a
     source port). `net::socket` grew a `DgramPeer::{V4,V6}` + `SocketInner.
@@ -266,12 +265,19 @@ Phase 5 progresses:
     connected send loops back and passes the peer filter; `getpeername` matches;
     a datagram injected from a *non-peer* port is dropped by the connected
     receive). **Still not done:** an `AF_INET6` arm in the ring-3 `udpget`
-    capstone (kernel-context self-tests only); UDP `getsockname` reporting a v6
-    family (needs socket-domain tracking — the socket object doesn't record its
-    domain); and UDP `getsockname` reporting the real interface IP (needs a UDP
-    `OP_LOCALADDR`) — the last is only a divergence for a socket bound to a
-    specific local IP; our sockets bind `INADDR_ANY`, for which Linux's
-    `getsockname` correctly reports `0.0.0.0`.
+    capstone (kernel-context self-tests only); and UDP `getsockname` reporting the
+    real interface IP (needs a UDP `OP_LOCALADDR`) — the last is only a divergence
+    for a socket bound to a specific local IP; our sockets bind `INADDR_ANY`, for
+    which Linux's `getsockname` correctly reports `0.0.0.0`/`[::]`.
+  - **UDP `getsockname` v6-family reporting — DONE.** `net::socket` now records the
+    creation `domain` on every socket (`SocketInner.domain`, set by
+    `create`/`create_dgram`/`create_kind`, exposed via `socket::domain(handle)`), so
+    `sys_getsockname` on an `AF_INET6` datagram socket writes a `sockaddr_in6` with
+    the unspecified address (`[::]:port`) instead of always emitting a `sockaddr_in`
+    (`0.0.0.0:port`). A v4 datagram socket still reports `0.0.0.0:port`; a stream
+    socket is unaffected (it reports the daemon-assigned local endpoint, which
+    already carries the family). The domain narrows exactly from the syscall's
+    `AF_INET`(2)/`AF_INET6`(10) gate.
   **Limitations:** the
   receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
   is lossy); and it inherits the daemon's single-active-phase RX-demux limitation

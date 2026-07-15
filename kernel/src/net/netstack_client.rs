@@ -1410,7 +1410,7 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
         mac[5],
     ];
 
-    let h = socket::create_dgram()?;
+    let h = socket::create_dgram(10)?;
     let bound = match socket::dgram_bind(h, PORT) {
         Ok(b) => b,
         Err(e) => {

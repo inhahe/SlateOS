@@ -35936,10 +35936,14 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
         let nonblock = sock_flags & 0o4000 != 0;
         let cloexec = sock_flags & 0o2_000_000 != 0;
         // SOCK_STREAM=1 -> TCP stream socket; SOCK_DGRAM=2 -> UDP datagram socket.
+        // `domain` is gated to 2 (AF_INET) or 10 (AF_INET6) above, so the
+        // narrowing to u16 is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let domain_u16 = domain as u16;
         let created = if sock_type == 2 {
-            crate::net::socket::create_dgram()
+            crate::net::socket::create_dgram(domain_u16)
         } else {
-            crate::net::socket::create()
+            crate::net::socket::create(domain_u16)
         };
         let handle = match created {
             Ok(h) => h,
@@ -36764,16 +36768,22 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-        // A datagram socket reports its bound local port with INADDR_ANY (0.0.0.0):
+        // A datagram socket reports its bound local port with the wildcard address:
         // the daemon owns the interface IP and does not yet expose a per-UDP-socket
         // local address (TCP-only OP_LOCALADDR — documented follow-up), and a UDP
-        // socket bound to any interface is correctly `0.0.0.0:port` under Linux. An
-        // unbound datagram socket reports port 0.
+        // socket bound to any interface is correctly `0.0.0.0:port` (v4) or `[::]:port`
+        // (v6) under Linux. The family is taken from the socket's creation domain so
+        // an AF_INET6 socket reports a `sockaddr_in6` even when only a port is known.
+        // An unbound datagram socket reports port 0.
         if crate::net::socket::is_dgram(h).unwrap_or(false) {
             let port = match crate::net::socket::dgram_local_port(h) {
                 Ok(p) => p,
                 Err(e) => return linux_err(linux_errno_for(e)),
             };
+            // AF_INET6 == 10 → sockaddr_in6 with the unspecified address (::).
+            if crate::net::socket::domain(h).unwrap_or(2) == 10 {
+                return socket_write_peer_addr6(args.arg1, args.arg2, &[0u8; 16], port);
+            }
             return socket_write_peer_addr(args.arg1, args.arg2, &[0, 0, 0, 0], port);
         }
         return match crate::net::socket::local(h) {

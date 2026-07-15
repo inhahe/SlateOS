@@ -1536,17 +1536,29 @@ signature is gone** — and boot now progresses *hundreds* of self-tests further
 before wedging. So the heap deadlock fix is confirmed working. The new iter12
 wedge is a *different* bug, with two parts:
 
-1. **PRIMARY (still open) — nested device-IRQ dispatch hang.** cpu0 is stuck with
-   `IF=0`, heartbeat frozen ~9.8 s, inside a *nested* device-IRQ handler
-   (`isr_irq11`) reached from the **outermost timer's IF=1 window** (the timer
-   re-enables interrupts on the IRQ stack for softirq/preempt; a level-triggered
-   device IRQ then fired and nested). `RSP=0x…27be8` is only ~0x418 below the IRQ
-   stack top `0x…28000` — i.e. only ~1 KiB into the 16 KiB IRQ stack, so this is
-   **not** a deep-nesting stack overflow (unlike the 2026-07-03 catch below).
-   Suspected: a level-triggered IRQ on vector 11 re-firing / storming because it
-   is not being ACKed or masked, or an ISR-reentrancy lock spin. Needs a soak that
-   catches it *with a surviving task-table dump* to identify the device on IRQ11
-   and why cpu0 can't leave IF=0.
+1. **PRIMARY (NOT REPRODUCIBLE after the container fix — downgraded from blocker
+   to latent) — nested device-IRQ dispatch hang.** cpu0 was stuck with `IF=0`,
+   heartbeat frozen ~9.8 s, inside a *nested* device-IRQ handler (`isr_irq11`)
+   reached from the **outermost timer's IF=1 window** (the timer re-enables
+   interrupts on the IRQ stack for softirq/preempt; a level-triggered device IRQ
+   then fired and nested). `RSP=0x…27be8` is only ~0x418 below the IRQ stack top
+   `0x…28000` — i.e. only ~1 KiB into the 16 KiB IRQ stack, so this is **not** a
+   deep-nesting stack overflow (unlike the 2026-07-03 catch below). Suspected: a
+   level-triggered IRQ on vector 11 re-firing / storming (not ACKed/masked), or an
+   ISR-reentrancy lock spin.
+   **STATUS 2026-07-15:** after the container `TABLE` holder-preemption fix (which
+   was the iter03 catch), a **40-iteration soak came back 40/40 clean**
+   (`build/soak-postfix2.log`, `WEDGE_SOAK_DONE rc_caught=0`) — this IF=0
+   device-IRQ signature did **not** reproduce even once. Given the earlier soaks
+   caught wedges by iter03/12/22 and this one caught none in 40, the intermittent
+   boot wedge is resolved for practical purposes. This IF=0 catch was seen exactly
+   once and is not currently reproducible; it may have been a downstream symptom of
+   the same task-starvation the holder-preemption deadlocks caused (a spinning,
+   never-preempted CPU can leave a device IRQ un-serviced), or a genuinely
+   ultra-rare separate race. **Not claiming it fixed** (never root-caused), but it
+   is no longer an active blocker. Re-open if a future soak reproduces it — the
+   crash-dump guard-page fix means the next catch will have a full task-table dump
+   to work from.
 
 2. **SECONDARY (FIXED this session) — crash-dump stack-scan over-read.** The wedge
    was caught, but the hard-lockup crash dump then took a **fatal `#PF` at

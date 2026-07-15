@@ -96,6 +96,33 @@ decide between staying on **A** vs. pre-authorizing the targeted **C** sweep of
 the exit/teardown path specifically (a bounded, non-kernel-wide subset) now that
 two separate intermittent boot bugs both point at teardown-path contention.
 
+**Update (2026-07-15c) — a confirmed third instance, but a *different sub-variant*
+than the one suspected above; reactive approach still holding.** The wedge-soak
+caught a live wedge this session and it root-caused to **`sysctl::REGISTRY`**
+(commit 0da3324e5, `known-issues.md` B-SYSCTL-IRQ-DEADLOCK), NOT to the
+`B-FORKEXEC-BOOT-HANG` teardown path suspected in update 2026-07-15b. It is a
+confirmed third instance of the broad "raw `spin::Mutex` deadlock" class, but of
+the **interrupt-reentrancy** sub-variant (a lock acquired *blockingly from IRQ/
+exception context* — timer `check_starvation` + the `#PF` stack-grow reader —
+while a task held it across a slow `serial_println!`), rather than the
+**holder-preemption** sub-variant of the first two. Fixed reactively (approach A):
+a non-blocking `sysctl::try_get` for the IRQ-context readers + not holding
+`REGISTRY` across the log — no new lock type needed. Crucially, I then did the
+**bounded proactive audit** that would have been step one of a **C** sweep, but
+scoped to the *interrupt-reentrancy* surface only: the timer hard-IRQ path
+(`sched::timer_tick`/`check_starvation`, `cgroup::{cpu_charge,cpu_period_reset,
+io_period_reset}`, all of `hrtimer`) and the `#PF` handler — **all clean** (each
+already uses `try_lock` in IRQ context or `without_interrupts` on every task-side
+holder). So for the IRQ-reentrancy variant, the hot paths are audited-clean and
+reactive-A is demonstrably sufficient. The **holder-preemption** variant on the
+process-exit/teardown path (`B-FORKEXEC-BOOT-HANG`) remains *unconfirmed* — the
+soak caught sysctl first, not a teardown wedge — so the case for a **C** sweep of
+the teardown locks (`PROCESS_TABLE`/reaper/exit-hooks) is neither strengthened nor
+weakened by this catch. Net: no change to the recommendation (stay on **A**;
+escalate to **C** only if the *teardown* hypothesis gets a confirmed RIP capture).
+Operator input still only needed on whether to pre-authorize that bounded
+teardown-path **C** sweep proactively.
+
 ---
 
 ## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)

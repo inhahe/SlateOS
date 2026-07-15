@@ -36679,6 +36679,43 @@ fn socket_write_peer_addr6(
     SyscallResult::ok(0)
 }
 
+/// Populate a `recvfrom` source-address out-param (`src_addr`/`addrlen`) with
+/// the socket's connected peer endpoint.  Linux fills `src_addr` with the
+/// remote peer for a connected stream socket, so a caller passing a non-NULL
+/// `src_addr` sees the same address `getpeername` would report (a `sockaddr_in`
+/// for an AF_INET connection, a `sockaddr_in6` for AF_INET6).
+///
+/// Best-effort: the pointers were already pre-validated by the caller via
+/// `validate_sockaddr_out`, and a successful receive implies the socket is
+/// connected, so the peer lookup normally succeeds.  If the socket has since
+/// raced to a disconnected state the out-param is simply left untouched rather
+/// than failing the already-successful receive (the byte count still stands).
+fn socket_write_src_addr(
+    h: crate::net::socket::SocketHandle,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) {
+    // An AF_INET6 socket (connected via connect6) reports a sockaddr_in6; an
+    // AF_INET socket reports a sockaddr_in.  Mirrors sys_getpeername's dispatch.
+    match crate::net::socket::peer6(h) {
+        Ok((Some(ip6), port)) => {
+            // Discarded: the socket buffer was pre-validated writable and any
+            // short-buffer case is handled by truncation, so the only remaining
+            // failure would be a concurrent unmap — harmless to ignore here
+            // because the receive itself already succeeded.
+            let _ = socket_write_peer_addr6(addr_ptr, addrlen_ptr, &ip6, port);
+        }
+        Ok((None, _)) => {
+            if let Ok((ip, port)) = crate::net::socket::peer(h) {
+                // Discarded for the same reason as the v6 arm above.
+                let _ = socket_write_peer_addr(addr_ptr, addrlen_ptr, &ip, port);
+            }
+        }
+        // Not connected / lookup error: leave src_addr as the caller left it.
+        Err(_) => {}
+    }
+}
+
 /// `sendto(sockfd, buf*, len, flags, dest_addr*, addrlen)`.
 ///
 /// ## Batch 436 — fd lookup gates between buf and addr
@@ -36822,15 +36859,24 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     }
     // Path B: `recv(2)`/`recvfrom(2)` on a connected daemon-backed stream socket
     // returns bytes from the daemon.  The fd's `O_NONBLOCK` status flag is honoured
-    // (no data ready → EAGAIN, via dispatch_socket_read).  The optional
-    // source-address out-params (args.arg4 / args.arg5) are left untouched — a
-    // connected stream socket's peer is fixed and most callers pass NULL
-    // (documented limitation).  MSG_* flags (args.arg3) are not yet honoured.
+    // (no data ready → EAGAIN, via dispatch_socket_read).  When the caller supplies
+    // a non-NULL source-address out-param (args.arg4 / args.arg5) it is filled with
+    // the connected peer's endpoint on a successful receive, matching Linux (a
+    // connected stream socket reports its fixed peer).  MSG_* flags (args.arg3) are
+    // not yet honoured.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
     {
-        return dispatch_socket_read(entry, buf, args.arg2);
+        let raw_handle = entry.raw_handle;
+        let res = dispatch_socket_read(entry, buf, args.arg2);
+        // Only populate src_addr on a successful receive (non-negative byte
+        // count); an error (e.g. EAGAIN) leaves the caller's buffer untouched.
+        if res.value >= 0 && args.arg4 != 0 {
+            let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
+            socket_write_src_addr(h, args.arg4, args.arg5);
+        }
+        return res;
     }
     linux_err(errno::EBADF)
 }

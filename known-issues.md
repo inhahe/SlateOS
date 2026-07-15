@@ -162,9 +162,16 @@ Phase 5 progresses:
   `sys_accept4` do not route to the daemon and `net::socket` has no
   `SockState::Listening`, so a userspace `listen(2)`/`accept(2)` on a daemon-backed
   socket still isn't served. That syscall wiring is the remaining follow-on.
-- **`MSG_*` flags ignored** on `sendto`/`recvfrom` (arg3), and `recvfrom`'s
-  source-address out-params (arg4/arg5) are left untouched (fine for a connected
-  stream socket, but not for datagram semantics).
+- **`recvfrom` source-address out-params now populated (parity fix).**
+  `recvfrom`'s `src_addr`/`addrlen` (arg4/arg5) are filled with the connected
+  peer's endpoint on a successful receive, matching Linux for a connected stream
+  socket (`sys_recvfrom` → `socket_write_src_addr`, reusing the getpeername
+  serialisers: `sockaddr_in` for AF_INET, `sockaddr_in6` for AF_INET6; short
+  buffers truncate, `*addrlen` written back full). Only touched on a non-negative
+  byte count so an EAGAIN leaves the buffer alone. Remaining gap: **`MSG_*` flags
+  ignored** on `sendto`/`recvfrom` (arg3), and true datagram (UDP) source
+  addresses await the daemon-backed `SOCK_DGRAM` path (today's daemon sockets are
+  connected streams, so the peer *is* the source).
 - **IPv6 connect: daemon+ring+client+socket-fd DONE.** The daemon speaks full
   TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6: Option<[u8;16]>`
   dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`; v6 framing,

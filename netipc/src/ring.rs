@@ -187,6 +187,37 @@ pub const OP_LOCALADDR: u8 = 0x0A;
 /// `shutdown` part of the `D-NETSOCK-SYNC` parity gap.
 pub const OP_SHUTDOWN: u8 = 0x0B;
 
+/// Create/bind a connectionless **UDP datagram** socket under `conn_id`.
+///
+/// Unlike the stream ops, a UDP socket has no peer: it is bound to a *local*
+/// port and thereafter sends to, and receives from, arbitrary peers. The kernel
+/// chooses `conn_id` (the identity of the userspace `SOCK_DGRAM` fd); the local
+/// port is carried in the low 16 bits of `aux` (big-endian, `0` = let the daemon
+/// pick an ephemeral port). Completion `result` is the bound local port (`≥ 0`)
+/// on success — so the kernel learns the ephemeral port for `getsockname` — or a
+/// negative errno (`ERR_ADDR_IN_USE` if the port is already bound). Migration
+/// Phase 5, UDP `SOCK_DGRAM` support.
+pub const OP_UDP_BIND: u8 = 0x0C;
+/// Send one **UDP datagram** from the socket named by `conn_id` to the
+/// destination packed in `aux` (`[ip:4][port_be:2]`, see [`Sqe::pack_endpoint`]).
+/// The payload is the SQE data window (`data_off`/`data_len`). Completion
+/// `result` is the number of payload bytes sent (`≥ 0`), or a negative errno.
+/// A datagram larger than the daemon's datagram MTU completes with
+/// [`ERR_MSG_SIZE`]. Migration Phase 5, UDP `SOCK_DGRAM` support.
+pub const OP_UDP_SEND: u8 = 0x0D;
+/// Receive one **UDP datagram** on the socket named by `conn_id`.
+///
+/// Because the 16-byte [`Cqe`] cannot carry a source address, the daemon writes
+/// the sender's address *in-band* as a fixed [`UDP_ADDR_HDR_LEN`]-byte header at
+/// the **front** of the SQE data window (see [`Sqe::pack_udp_addr`]), immediately
+/// followed by the datagram payload. So the data window must be at least
+/// `UDP_ADDR_HDR_LEN + wanted_payload` bytes. Completion `result` is the number
+/// of **payload** bytes delivered (`≥ 0`; the address header is *not* counted),
+/// or [`ERR_WOULD_BLOCK`] when [`RECV_NONBLOCK`] is set and no datagram is queued.
+/// Like Linux `recvfrom`, an oversized datagram is truncated to the payload
+/// window (the excess is discarded). Migration Phase 5, UDP `SOCK_DGRAM` support.
+pub const OP_UDP_RECV: u8 = 0x0E;
+
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
 // ---------------------------------------------------------------------------
@@ -279,6 +310,18 @@ pub const ERR_IN_PROGRESS: i32 = -115;
 /// from `0`, `-1`, [`ERR_WOULD_BLOCK`], and [`ERR_IN_PROGRESS`].
 pub const ERR_BROKEN_PIPE: i32 = -32;
 
+/// Completion `result` sentinel: an [`OP_UDP_BIND`] requested a local port that
+/// is already bound by another datagram socket. Numerically mirrors Linux
+/// `-EADDRINUSE`; the kernel maps it to `KernelError::AddrInUse` → the `bind(2)`
+/// `EADDRINUSE` errno. Distinct from the other sentinels above.
+pub const ERR_ADDR_IN_USE: i32 = -98;
+
+/// Completion `result` sentinel: an [`OP_UDP_SEND`] payload exceeds the daemon's
+/// datagram MTU (it will not fit in a single UDP datagram). Numerically mirrors
+/// Linux `-EMSGSIZE`; the kernel maps it to `KernelError::MessageSize` → the
+/// `sendto(2)` `EMSGSIZE` errno. Distinct from the other sentinels above.
+pub const ERR_MSG_SIZE: i32 = -90;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -361,7 +404,54 @@ impl Sqe {
         let b = aux.to_le_bytes();
         ([b[0], b[1], b[2], b[3]], u16::from_be_bytes([b[4], b[5]]))
     }
+
+    /// Build the in-band source-address header the daemon prepends to an
+    /// [`OP_UDP_RECV`] payload.
+    ///
+    /// Layout (little-endian scalars, [`UDP_ADDR_HDR_LEN`] = 24 bytes total):
+    /// - `[0..2]`  `family` — [`UDP_AF_INET`] (2) or [`UDP_AF_INET6`] (10).
+    /// - `[2..4]`  `port`   — **big-endian** (network order), matching `sockaddr_in`.
+    /// - `[4..20]` `ip`     — 16 bytes; for IPv4 the address is in `ip[0..4]` and
+    ///   `ip[4..16]` are zero, so one fixed layout serves both families.
+    /// - `[20..24]` reserved (zero).
+    ///
+    /// `port` is passed in host order and stored big-endian. Forward-compatible:
+    /// IPv6 datagram sockets reuse the same header with `family == UDP_AF_INET6`
+    /// and the full 16-byte address.
+    #[must_use]
+    pub fn pack_udp_addr(family: u16, ip: &[u8; 16], port: u16) -> [u8; UDP_ADDR_HDR_LEN] {
+        let mut h = [0u8; UDP_ADDR_HDR_LEN];
+        h[0..2].copy_from_slice(&family.to_le_bytes());
+        h[2..4].copy_from_slice(&port.to_be_bytes());
+        h[4..20].copy_from_slice(ip);
+        h
+    }
+
+    /// Parse a source-address header written by [`pack_udp_addr`]. Returns
+    /// `(family, ip16, port_host_order)`, or `None` if `b` is shorter than
+    /// [`UDP_ADDR_HDR_LEN`].
+    #[must_use]
+    pub fn unpack_udp_addr(b: &[u8]) -> Option<(u16, [u8; 16], u16)> {
+        let s = b.get(..UDP_ADDR_HDR_LEN)?;
+        let family = u16::from_le_bytes([s[0], s[1]]);
+        let port = u16::from_be_bytes([s[2], s[3]]);
+        let mut ip = [0u8; 16];
+        ip.copy_from_slice(&s[4..20]);
+        Some((family, ip, port))
+    }
 }
+
+/// Length of the in-band source-address header the daemon prepends to an
+/// [`OP_UDP_RECV`] payload window (see [`Sqe::pack_udp_addr`]).
+pub const UDP_ADDR_HDR_LEN: usize = 24;
+
+/// `family` value for an IPv4 datagram source address ([`Sqe::pack_udp_addr`]).
+/// Mirrors Linux `AF_INET`.
+pub const UDP_AF_INET: u16 = 2;
+
+/// `family` value for an IPv6 datagram source address ([`Sqe::pack_udp_addr`]).
+/// Mirrors Linux `AF_INET6`.
+pub const UDP_AF_INET6: u16 = 10;
 
 /// A completion-queue entry (daemon → kernel). 16 bytes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -699,6 +789,64 @@ mod tests {
         assert_ne!(ERR_BROKEN_PIPE, -1);
         assert_ne!(ERR_BROKEN_PIPE, ERR_WOULD_BLOCK);
         assert_ne!(ERR_BROKEN_PIPE, ERR_IN_PROGRESS);
+    }
+
+    #[test]
+    fn udp_opcodes_are_unique() {
+        // The three UDP datagram opcodes must not collide with any stream opcode
+        // or with each other.
+        let existing = [
+            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
+            OP_CONNECT6, OP_LOCALADDR, OP_SHUTDOWN,
+        ];
+        for op in [OP_UDP_BIND, OP_UDP_SEND, OP_UDP_RECV] {
+            for other in existing {
+                assert_ne!(op, other, "UDP opcode aliases a stream opcode");
+            }
+        }
+        assert_ne!(OP_UDP_BIND, OP_UDP_SEND);
+        assert_ne!(OP_UDP_BIND, OP_UDP_RECV);
+        assert_ne!(OP_UDP_SEND, OP_UDP_RECV);
+        // The UDP sentinels are distinct from every other completion code.
+        for s in [ERR_ADDR_IN_USE, ERR_MSG_SIZE] {
+            assert_ne!(s, 0);
+            assert_ne!(s, -1);
+            assert_ne!(s, ERR_WOULD_BLOCK);
+            assert_ne!(s, ERR_IN_PROGRESS);
+            assert_ne!(s, ERR_BROKEN_PIPE);
+        }
+        assert_ne!(ERR_ADDR_IN_USE, ERR_MSG_SIZE);
+    }
+
+    #[test]
+    fn udp_addr_header_round_trips_v4() {
+        // An IPv4 source address survives the in-band header pack/unpack with the
+        // port in network order and the address left-packed into the 16-byte slot.
+        let mut ip16 = [0u8; 16];
+        ip16[..4].copy_from_slice(&[192, 168, 1, 42]);
+        let hdr = Sqe::pack_udp_addr(UDP_AF_INET, &ip16, 53);
+        assert_eq!(hdr.len(), UDP_ADDR_HDR_LEN);
+        // Port is stored big-endian (network order) like sockaddr_in.
+        assert_eq!(&hdr[2..4], &53u16.to_be_bytes());
+        let (family, ip, port) = Sqe::unpack_udp_addr(&hdr).unwrap();
+        assert_eq!(family, UDP_AF_INET);
+        assert_eq!(port, 53);
+        assert_eq!(&ip[..4], &[192, 168, 1, 42]);
+        assert_eq!(&ip[4..], &[0u8; 12]);
+    }
+
+    #[test]
+    fn udp_addr_header_round_trips_v6_and_rejects_short() {
+        let ip16 = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let hdr = Sqe::pack_udp_addr(UDP_AF_INET6, &ip16, 12345);
+        let (family, ip, port) = Sqe::unpack_udp_addr(&hdr).unwrap();
+        assert_eq!(family, UDP_AF_INET6);
+        assert_eq!(port, 12345);
+        assert_eq!(ip, ip16);
+        // A buffer shorter than the header is rejected rather than misparsed.
+        assert!(Sqe::unpack_udp_addr(&hdr[..UDP_ADDR_HDR_LEN - 1]).is_none());
     }
 
     #[test]

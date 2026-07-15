@@ -98,6 +98,20 @@ today).
 `getpeername`, `dispatch_socket_read`/`write`). All gated behind
 `net.userspace` (default off).
 
+**Status (2026-07-15):** the *TCP-client* Linux-parity line is now essentially
+complete. Connected daemon-backed `AF_INET`/`AF_INET6` `SOCK_STREAM` sockets
+honour non-blocking recv/send/connect, honest poll/epoll readiness,
+`getsockname`/`getpeername`, `shutdown`, `setsockopt`/`getsockopt`
+(`SO_ERROR`/`SO_TYPE`/buffer hints/`TCP_NODELAY`), `sendmsg`/`recvmsg`, the
+`recvfrom` source-address out-param, and the `MSG_DONTWAIT`/`MSG_WAITALL`/
+`MSG_PEEK` per-call flags. The remaining daemon-socket gaps are the large,
+non-incremental ones: **(1) server sockets** (`bind`/`listen`/`accept4`) —
+*gated on operator decision Q23* (`open-questions.md`); **(2) UDP `SOCK_DGRAM`**
+— unstarted (the daemon only does one-shot `OP_UDP_EXCHANGE` for DNS today, not
+persistent bound datagram sockets); and **(3) send pipelining** — the daemon's
+single-outstanding-segment sender is a *deliberate* minimal-TCP design, so
+multi-segment/windowed send is a design change with tradeoffs, not a bug fix.
+
 Known limitations, all deliberate for the 5.5 increment and to be closed as
 Phase 5 progresses:
 

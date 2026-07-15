@@ -2069,6 +2069,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 41: the first rung to exercise the C runtime's constructor/
+    // destructor machinery. tcc compiles a program with __attribute__((constructor))
+    // and __attribute__((destructor)) into .init_array/.fini_array; glibc's csu
+    // init runs the ctor before main, and _dl_fini runs the dtor at exit. The
+    // three markers use raw write(2) (unbuffered) so the captured file's byte
+    // order is the exact temporal order: CTOR then MAIN then DTOR.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_ctor_dtor() {
+        serial_println!(
+            "WARNING: Path-Z ctor/dtor C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

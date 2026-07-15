@@ -2702,6 +2702,21 @@ end-to-end boot-tested against that program. Until then this entry stays
 open to flag that the constructor path is *implemented but unproven under
 load*.
 
+**Related — glibc-side ctor/dtor path IS now validated (2026-07-15):** Note
+this entry is specifically about *Slate's own* `posix/src/crt.rs`
+(slateos-target no_std programs that link the `posix` crate as libc). A
+**separate** mechanism — the *glibc* Linux-ABI runtime's `.init_array`/
+`.fini_array` walk (glibc's `__libc_csu_init` before `main`, `_dl_fini` at
+exit) — is now proven end-to-end in ring 3 by Path Z **Part 41**
+(`self_test_linux_real_glibc_cc_ctor_dtor` in `kernel/src/proc/spawn.rs`):
+tcc compiles a program with `__attribute__((constructor))`/`((destructor))`,
+and the freshly-built dynamic ELF emits `CTOR\nMAIN\nDTOR\n` (raw `write(2)`,
+so byte order == temporal order), confirming ctor-before-main-before-dtor
+under a real glibc. This does *not* close the entry (it exercises glibc's
+runtime, not `crt.rs`), but it de-risks the concept and is the path real
+Linux-ABI binaries actually use; the still-open gap is purely the
+slateos-native `posix` crt whose live linker-script wiring remains vestigial.
+
 **Discovered/documented:** 2026-06-30; mechanism implemented + host-tested
 2026-07-01.
 

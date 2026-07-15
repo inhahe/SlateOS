@@ -14778,6 +14778,35 @@ int main(void){\n\
     }
 }
 
+/// Path Z Part 41 — glibc `.init_array` constructor + `.fini_array` destructor
+/// ordering through a freshly-tcc-built dynamic binary.
+///
+/// Parts 36-40 all entered `main` directly (via `__libc_start_main`); none
+/// exercised the C runtime's *constructor/destructor* machinery.  This rung is
+/// the first to do so: the source declares a function with
+/// `__attribute__((constructor))` and one with `__attribute__((destructor))`,
+/// which tcc emits into `.init_array` / `.fini_array`.  glibc's csu init
+/// (`__libc_csu_init`, invoked by `__libc_start_main` *before* `main`) walks
+/// `.init_array`; the dynamic linker's `_dl_fini` walks `.fini_array` at exit.
+/// So this proves the full ctor-before-main-before-dtor lifecycle actually runs
+/// for a real dynamically-linked glibc program in ring 3.
+///
+/// The three markers are emitted with the raw `write(2)` syscall (unbuffered)
+/// rather than buffered stdio, so the captured file's byte order reflects the
+/// *temporal* execution order directly and is immune to any ambiguity about
+/// when glibc's exit-time stdio flush runs relative to `.fini_array`.  fd 1 is
+/// redirected to a capture file by the harness, so `write(1, ...)` lands there.
+/// Expected capture (in order): constructor → `main` → destructor.
+pub fn self_test_linux_real_glibc_cc_ctor_dtor() -> KernelResult<()> {
+    // extern prototype for write(2) avoids needing the glibc/unistd header tree
+    // on the target; ssize_t/size_t are long/unsigned long on x86_64.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+__attribute__((constructor)) static void slate_ctor(void){ write(1, \"CTOR\\n\", 5); }\n\
+__attribute__((destructor))  static void slate_dtor(void){ write(1, \"DTOR\\n\", 5); }\n\
+int main(void){ write(1, \"MAIN\\n\", 5); return 0; }\n";
+    run_hosted_cc_case("ctor/dtor", HOSTED_SRC, b"CTOR\nMAIN\nDTOR\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

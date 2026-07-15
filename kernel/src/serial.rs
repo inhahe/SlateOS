@@ -155,19 +155,44 @@ pub unsafe fn init() {
     }
 }
 
+/// Backing function for the serial print macros.
+///
+/// Writes `args` to the global [`SERIAL`] port **with interrupts disabled on
+/// this CPU** for the whole critical section.
+///
+/// DEADLOCK FIX (2026-07-15): `SERIAL` is a non-reentrant `spin::Mutex`. If a
+/// task holds it mid-write and a timer/IRQ handler on the SAME CPU then tries
+/// to print (e.g. the liveness watchdog breadcrumb, a hang dump, or any ISR log
+/// line), the handler spins forever on the lock the interrupted task can no
+/// longer release — a hard single-CPU wedge with RIP parked in
+/// `spin_loop_hint`. This was the long-open non-deterministic "mid-serial-
+/// write" boot hang (see known-issues.md). Disabling interrupts for the
+/// duration of the critical section makes same-CPU re-entry impossible (the
+/// standard console-lock discipline, cf. Linux `spin_lock_irqsave`). Cross-CPU
+/// contention is still fine: the other CPU also runs IRQ-off and releases
+/// promptly, so a waiter only spins briefly.
+///
+/// This is a function (not inline in the macro) so that `?`/`await`/`return`
+/// used inside a `serial_println!(...)` format argument is evaluated in the
+/// *caller's* context, exactly as with the standard-library `print!` family.
+#[doc(hidden)]
+pub fn _print(args: core::fmt::Arguments<'_>) {
+    use core::fmt::Write;
+    crate::cpu::without_interrupts(|| {
+        // If the lock is poisoned (shouldn't happen with spinlocks) or the
+        // write fails, silently drop the output rather than panicking inside a
+        // print path.
+        let _ = SERIAL.lock().write_fmt(args);
+    });
+}
+
 /// Print to the serial console (COM1).
 ///
 /// Usage is identical to the standard `print!` macro.
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {{
-        #[allow(unused_imports)]
-        use core::fmt::Write;
-        // Lock the serial port and write.  If the lock is poisoned
-        // (shouldn't happen with spinlocks), we silently drop the output
-        // rather than panicking inside a print macro.
-        let mut serial = $crate::serial::SERIAL.lock();
-        let _ = write!(serial, $($arg)*);
+        $crate::serial::_print(::core::format_args!($($arg)*));
     }};
 }
 

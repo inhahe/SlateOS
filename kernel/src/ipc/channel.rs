@@ -1484,11 +1484,23 @@ fn test_recv_timeout() -> KernelResult<()> {
 
     sched::spawn(b"recv-to-test", 16, timeout_recv_task, ep1.0, 0)?;
 
-    // Let the receiver run and block.  Wait a bit more than 5ms to ensure
-    // the timer fires.
-    sched::sleep_ms(20);
-
-    let result = TIMEOUT_RESULT.load(Ordering::SeqCst);
+    // Let the receiver run, block on its 5 ms recv_timeout, and record the
+    // outcome. Poll for completion with a generous overall deadline instead of
+    // a single fixed sleep: a fixed margin is racy under boot-timing shifts
+    // (the receiver may be scheduled late, or its wake hrtimer may fire a few
+    // ticks behind), which intermittently tripped this test with result=0. The
+    // receiver sets TIMEOUT_RESULT to a non-zero code exactly once it returns,
+    // so poll until that happens (up to ~1s) and only then assert it timed out.
+    // Cf. B-FUTEX-TOWAKER-LOSTWAKE — timeout self-tests must not depend on a
+    // fixed number of ticks/yields.
+    let mut result = 0;
+    for _ in 0..200 {
+        sched::sleep_ms(5);
+        result = TIMEOUT_RESULT.load(Ordering::SeqCst);
+        if result != 0 {
+            break;
+        }
+    }
     if result != 1 {
         serial_println!("[ipc]   FAIL: recv_timeout didn't time out (result={})", result);
         close(ep0);
@@ -1509,15 +1521,23 @@ fn test_recv_timeout() -> KernelResult<()> {
     sched::yield_now();
     sched::yield_now();
 
-    // Send a message — should wake receiver before 500ms deadline.
+    // Send a message — should wake receiver before its 500ms deadline.
     let msg = Message::from_bytes(b"early")?;
     send(ep0, msg)?;
 
-    // Let receiver process the message.
-    sched::yield_now();
-    sched::yield_now();
-
-    let result = TIMEOUT_EARLY_RESULT.load(Ordering::SeqCst);
+    // Let the receiver process the message. Poll for completion rather than
+    // assuming a fixed number of yields is enough (same timing-robustness
+    // rationale as Part A). The receiver's deadline is 500 ms, so a ~1s poll
+    // window comfortably distinguishes "woke early with the message" (result=1)
+    // from a genuine failure.
+    let mut result = 0;
+    for _ in 0..200 {
+        sched::sleep_ms(5);
+        result = TIMEOUT_EARLY_RESULT.load(Ordering::SeqCst);
+        if result != 0 {
+            break;
+        }
+    }
     if result != 1 {
         serial_println!("[ipc]   FAIL: recv_timeout early-msg (result={})", result);
         close(ep0);

@@ -1195,6 +1195,65 @@ boots) to validate any fix. **STILL OPEN — now localized to the global heap
 spinlock; next: instrument the owner and identify the leaked-guard / dead-holder
 site.**
 
+**ROOT-CAUSED AND FIXED 2026-07-15 (it is a SERIAL-lock re-entrancy deadlock,
+NOT the heap lock — the earlier RDI=&HEAP read was a coincidental register
+leftover).** After adding the heap-lock owner instrumentation above, a fresh
+armed soak caught the wedge again on iteration 6
+(`build/hang-catches/soak-20260715-012819-iter06.*`), and this time the **NMI
+hard-lockup watchdog produced a full `rbp`-chain backtrace** — vastly more
+reliable than guessing the lock identity from a leftover register. The
+backtrace is decisive:
+
+```
+core::sync::atomic::spin_loop_hint        <- spinning on a spin::Mutex
+kernel::sched::liveness_boot_deadline_check   <- the frame taking the lock
+kernel::sched::timer_tick
+handle_timer_irq / dispatch_vector / run_on_irq_stack / irq_common_dispatch
+isr_timer                                  <- TIMER IRQ context
+kernel_main                                <- interrupted here (boot self-tests)
+kmain
+```
+
+The heap-lock owner dump printed **`heap-lock: unlocked (no current holder)`** —
+conclusively exonerating the heap. The only lock `liveness_boot_deadline_check`
+acquires is the **global `SERIAL` `spin::Mutex`**, via its 30 s "boot-window
+breadcrumb" `serial_println!`. Root cause: **`serial_print!` acquired
+`SERIAL.lock()` without disabling interrupts.** A task doing boot self-test
+output (`kernel_main`, serial-heavy) held the lock mid-write; a timer IRQ fired
+on the **same CPU** (interrupts enabled); the ISR's `liveness_boot_deadline_check`
+breadcrumb tried to re-acquire the already-held `SERIAL` lock and spun forever —
+the interrupted task can never resume to release it. This is a textbook
+ISR-vs-task non-reentrant-spinlock deadlock on the console lock.
+
+It explains **every** prior symptom in this cluster: the "mid-serial-write" hard
+freezes (the wedge *is* a serial write), the ring-0 hard-CPU-wedge signature
+(`spin_loop_hint`, IF spinning), and the non-determinism (needs a timer tick to
+land inside the narrow serial-lock window — and the breadcrumb path needs the
+tick to also cross a 30 s bucket, hence ~1-in-several-boots). The earlier iter02
+`RDI=0x…HEAP` was a register the interrupted code happened to leave behind, not
+the lock identity — `spin_loop_hint` takes no arguments.
+
+**Fix** (`kernel/src/serial.rs`): `serial_print!`/`serial_println!` now route
+through a `serial::_print(fmt::Arguments)` function that takes the `SERIAL` lock
+**inside `cpu::without_interrupts(...)`**, so same-CPU IRQ re-entry is
+impossible (the standard console-lock discipline, cf. Linux `spin_lock_irqsave`).
+Cross-CPU contention remains deadlock-free (the holder runs IRQ-off and releases
+promptly). The `_print` function form (vs. inlining in the macro) preserves
+`?`/`return` semantics for expressions used inside a `serial_println!(…)` format
+argument. NMI/panic output is unaffected — it already uses the lock-free
+`emergency_print!` path.
+
+The heap-lock owner instrumentation (`HEAP_LOCK_OWNER`/`HEAP_LOCK_SITE` +
+`lock_tracked()` + `mm::heap::dump_lock_owner()` wired into the liveness dump) is
+**kept** — it is cheap, and it is what proved the heap was innocent; it will name
+the holder immediately should a *heap*-lock deadlock ever occur.
+
+**Validation:** rebuilt; boots green; re-running the armed `wedge-soak.sh` to
+confirm the wedge no longer reproduces across many armed boots. If a distinct
+`[liveness] SYSTEM HANG … all CPUs idle-ticking` *lost-wakeup* (a blocked task,
+no spinning CPU) still appears in future soaks, that is a **separate** issue from
+this now-fixed spinlock deadlock and should get its own entry.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

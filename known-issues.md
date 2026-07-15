@@ -1352,6 +1352,44 @@ a real bug in the walker:
   herring three times now: kernel_text, budstat, gen_dmastat, and now a
   `.data` RBP). The next catch will at least no longer print a fabricated stack.
 
+**UPDATE 2026-07-15 (second catch) — validator fix works; stale-stack limit
+confirmed; per-CPU recent-RIP history added
+(`build/hang-catches/soak-20260715-032821-iter19.*`, `RIP=0xffffffff81e7d35a`).**
+A second soak caught the same wedge, and this time the backtrace-validator fix
+paid off: `cpu0 last_rbp = 0xffffc10000063ae0` is a **valid task stack**, so
+`backtrace::print_from` walked a clean **9-frame** chain instead of garbage — the
+fix is confirmed good. But diagnosing the frames surfaced the *deeper* limitation:
+- Frames `#0/#1/#2` land inside `procfs::self_test` (a 163 KiB symbol, verified
+  with `llvm-nm --print-size` + Python bisect since debug-build monomorphizations
+  have no exported symbols and defeat nearest-symbol lookup). Yet the serial log
+  shows `[procfs] Running self-test...` **completed at line 3201**, long before
+  the hang (line 6181). So those frames are **stale** — leftover return addresses
+  on a reused stack, not the live call path.
+- `last_rip` is inside `oomkiller::select_victim`'s iterator (a finite `Vec`
+  fold — provably cannot infinite-loop), and the NMI-captured RIP lands in a
+  symbol *gap* (discard). All three signals point to **transient** locations.
+- The **reliable** signal is the serial *phase*: the hang struck during
+  `[container] Running self-test...` right after `test-port-ct` (veth pair +
+  published ports → NAT forward) spawns `port-init` (task 192, ring-3). This is
+  the **container-exec / ring-3 spawn-dispatch race** family. IF toggling + RSP
+  moving between NMI captures = **livelock**, consistent with the entries above.
+
+**Fundamental limitation & the fix for it.** An asynchronous timer tick samples
+the CPU at an arbitrary instant, which for a livelock is almost never a frame
+boundary — so *both* the rbp-chain (stale return addresses) *and* the lone RIP
+(whichever loop-body instruction ran) are unreliable. For a task cycling a loop
+that never yields, the conclusive datum is the **set of recently-sampled RIPs**:
+if the last N ticks cluster in a tight address range, that range *is* the spin
+loop, revealed directly with no stack unwinding or symbol-gap guessing.
+**Implemented this session:** a per-CPU recent-RIP ring buffer
+(`rip_sample::RIP_HIST`, 16 samples/CPU, `record_rip_history` called every timer
+tick alongside `record_last_rip`; reader `recent_rips`). The liveness
+`SYSTEM HANG` dump (`sched::dump_all_tasks_serial`) now prints each CPU's last 16
+sampled RIPs (newest-first, with `AddrClass`). The next catch should show whether
+cpu0's RIPs cluster (→ names the livelock loop) or scatter (→ the wedge is a lock
+holder / another CPU, not a spin here). Boot-tested clean; the profiler
+self-test still passes.
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

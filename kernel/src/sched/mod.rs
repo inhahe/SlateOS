@@ -2240,6 +2240,27 @@ fn dump_all_tasks_serial() {
                 crate::backtrace::print_from(rbp);
             }
         }
+
+        // Recent-RIP history: the last N timer-sampled RIPs on this CPU. For a
+        // livelock (a task spinning a loop that never yields), the async tick
+        // rarely lands on a frame boundary — so the rbp-chain above is often
+        // stale (leftover return addresses on a reused stack) and the lone RIP
+        // lands on whichever loop-body instruction happened to run. The *set* of
+        // recent RIPs is the conclusive datum: if they cluster in a tight
+        // address range, that range IS the spin loop (no stack unwinding, no
+        // symbol-gap guessing). If they scatter widely, the CPU is making
+        // progress and this "hang" is elsewhere (a lock holder, another CPU).
+        let mut hist = [0u64; 16];
+        let hn = crate::rip_sample::recent_rips(cpu, &mut hist);
+        if hn > 0 {
+            serial_println!("[liveness]   cpu{} recent RIPs (newest first, {} samples):", cpu, hn);
+            for (i, &r) in hist.iter().take(hn).enumerate() {
+                serial_println!(
+                    "[liveness]     [{:2}] {:#018x} ({})",
+                    i, r, crate::rip_sample::AddrClass::classify(r).name(),
+                );
+            }
+        }
     }
 
     // Global heap-lock holder: a task wedged while holding `HEAP.inner` hangs

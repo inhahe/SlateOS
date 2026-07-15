@@ -244,6 +244,88 @@ pub fn last_rbp(cpu: usize) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Always-on per-CPU recent-RIP history (livelock diagnostics)
+// ---------------------------------------------------------------------------
+//
+// A single sampled RIP/RBP is repeatedly a red herring on this project: an
+// asynchronous timer tick catches the CPU at an arbitrary instant, which for a
+// livelock (a task spinning a loop that never yields) is usually *not* a frame
+// boundary — so the rbp-chain we walk is stale (leftover return addresses on a
+// reused stack), and even the raw RIP lands on whichever instruction of the
+// loop body happened to be executing.  Neither a lone RIP nor a lone stack walk
+// distinguishes "wedged here" from "briefly passing through here".
+//
+// The conclusive datum for a livelock is the *set* of recently-sampled RIPs: if
+// the CPU is truly stuck cycling a loop, the last N ticks all fall inside that
+// loop's small address range, and printing them reveals the loop directly —
+// no stack unwinding, no symbol-gap guessing.  This ring records the last
+// [`RIP_HIST_SIZE`] interrupted RIPs per CPU, one relaxed store per tick.
+
+/// Number of recent RIPs retained per CPU.  A livelock loop body is small, so
+/// 16 samples span ~160 ms at 100 Hz — long enough to show a tight loop's RIP
+/// spread while staying cheap (16 × 16 × 8 = 2 KiB of static storage).
+const RIP_HIST_SIZE: usize = 16;
+
+/// Per-CPU ring of the last [`RIP_HIST_SIZE`] interrupted RIPs.
+static RIP_HIST: [[AtomicU64; RIP_HIST_SIZE]; MAX_CPUS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    const ROW: [AtomicU64; RIP_HIST_SIZE] = [INIT; RIP_HIST_SIZE];
+    [ROW; MAX_CPUS]
+};
+
+/// Per-CPU write position into [`RIP_HIST`] (monotonic; masked on use).
+static RIP_HIST_POS: [AtomicU32; MAX_CPUS] = {
+    const INIT: AtomicU32 = AtomicU32::new(0);
+    [INIT; MAX_CPUS]
+};
+
+/// Append `rip` to `cpu`'s recent-RIP history ring.  Always on.
+///
+/// # Performance
+/// One relaxed load + one relaxed store + one relaxed increment.  Called
+/// unconditionally from the timer ISR alongside [`record_last_rip`].
+#[inline]
+pub fn record_rip_history(rip: u64, cpu: usize) {
+    let (Some(row), Some(pos)) = (RIP_HIST.get(cpu), RIP_HIST_POS.get(cpu)) else {
+        return;
+    };
+    let idx = (pos.fetch_add(1, Ordering::Relaxed) as usize) % RIP_HIST_SIZE;
+    if let Some(slot) = row.get(idx) {
+        slot.store(rip, Ordering::Relaxed);
+    }
+}
+
+/// Copy `cpu`'s recent RIPs into `buf`, newest first.  Returns the count
+/// written (0 if the CPU has never been sampled or `cpu` is out of range).
+///
+/// Skips zero entries (unfilled slots) so a freshly-booted CPU with fewer than
+/// [`RIP_HIST_SIZE`] samples reports only the real ones.
+pub fn recent_rips(cpu: usize, buf: &mut [u64]) -> usize {
+    let (Some(row), Some(pos)) = (RIP_HIST.get(cpu), RIP_HIST_POS.get(cpu)) else {
+        return 0;
+    };
+    let write_pos = pos.load(Ordering::Relaxed) as usize;
+    let mut n = 0;
+    for i in 0..RIP_HIST_SIZE {
+        if n >= buf.len() {
+            break;
+        }
+        // Walk backwards from the most-recently-written slot.  `wrapping_sub`
+        // is intentional (monotonic counter can wrap); `% RIP_HIST_SIZE` keeps
+        // `idx` in range so the `.get()` below always hits.
+        let idx = write_pos.wrapping_sub(1).wrapping_sub(i) % RIP_HIST_SIZE;
+        let rip = row.get(idx).map_or(0, |s| s.load(Ordering::Relaxed));
+        if rip != 0 {
+            if let Some(dst) = buf.get_mut(n) {
+                *dst = rip;
+                n = n.saturating_add(1);
+            }
+        }
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
 // Public API — recording (called from timer ISR)
 // ---------------------------------------------------------------------------
 

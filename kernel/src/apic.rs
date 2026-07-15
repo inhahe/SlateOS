@@ -1017,6 +1017,12 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // *where* each CPU was executing at the moment the system wedged.
     crate::rip_sample::record_last_rip(frame.rip, crate::smp::current_cpu_index());
 
+    // Always-on per-CPU recent-RIP *history* ring, paired with the single-RIP
+    // snapshot above.  A lone RIP/RBP is a known red herring for livelocks (the
+    // async tick rarely lands on a frame boundary, so the walked stack is
+    // stale); the set of the last N RIPs instead reveals a spin loop directly.
+    crate::rip_sample::record_rip_history(frame.rip, crate::smp::current_cpu_index());
+
     // Always-on per-CPU last-RBP (frame pointer) snapshot, paired with the RIP
     // above.  The liveness SYSTEM-HANG dump feeds this to `backtrace::print_from`
     // to walk the wedged CPU's call stack — turning an inconclusive single RIP

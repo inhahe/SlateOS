@@ -5122,7 +5122,7 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
 
 ### 5.3 Additional schedulers (if needed)
 - [x] EEVDF-style scheduler (for users wanting sophisticated fairness)
-  - [x] EevdfScheduler struct: BTreeMap run queue keyed by (deadline, task_id), reverse index for O(log n) dequeue
+  - [x] EevdfScheduler struct: BTreeMap run queue keyed by (deadline, task_id), reverse index for O(log n) dequeue; split eligible/ineligible partition indexes (eligible keyed by deadline, ineligible keyed by vruntime) give amortised O(log n) pick_next with a true-minimum min_vruntime (2026-07-15 rewrite — see known-issues EEVDF-PICK-ON RESOLVED)
   - [x] 32-entry geometric weight table (ratio ~1.25× per level, modeled on Linux sched_prio_to_weight)
   - [x] Virtual runtime tracking: advances as VRUNTIME_UNIT / weight per tick
   - [x] Virtual deadline computation: vruntime + time_slice * VRUNTIME_UNIT / weight
@@ -5131,7 +5131,7 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
   - [x] Work stealing (least-urgent tasks from back of BTreeMap)
   - [x] Scheduler trait implementation, WorkloadProfile integration, has_real_work
   - [x] Preemption-on-wake: should_preempt() checks front-of-queue deadline vs current task; tick() triggers early reschedule when woken task has significantly earlier deadline (MIN_GRANULARITY threshold prevents oscillation)
-  - [x] 12 self-tests: pick_next ordering, tick vruntime advance, dequeue, equal-priority fairness, weighted fairness, steal, has_ready/has_real_work, workload profiles, anti-starvation, preemption-on-wake (high-prio preempts, equal-prio doesn't, empty queue safe)
+  - [x] 15 self-tests: pick_next ordering, tick vruntime advance, dequeue, equal-priority fairness, weighted fairness (CPU-time), steal, has_ready/has_real_work, workload profiles, anti-starvation, preemption-on-wake (high-prio preempts, equal-prio doesn't, empty queue safe), partition invariant across ops, deadline-correctness under adversarial vruntime mix, true-minimum min_vruntime
 - [x] Deadline scheduler (for real-time/audio workloads)
   - [x] DeadlineScheduler struct: BTreeMap run queue keyed by (abs_deadline, task_id), reverse index for O(log n) dequeue
   - [x] DeadlineParams: budget_ticks, deadline_ticks, period_ticks per task

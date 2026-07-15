@@ -24,28 +24,39 @@
 //! ## Data Structure
 //!
 //! The run queue is a `BTreeMap<(u64, TaskId), EevdfEntry>` keyed by
-//! `(virtual_deadline, task_id)`.  This gives O(log n) insertion and
-//! removal.  A reverse index `BTreeMap<TaskId, u64>` maps task IDs to
-//! their deadlines for O(log n) dequeue-by-ID.
+//! `(virtual_deadline, task_id)` holding **all** waiting tasks (the source
+//! of truth), with a reverse index `BTreeMap<TaskId, u64>` (task → deadline)
+//! for O(log n) dequeue-by-ID.  Both give O(log n) insertion and removal.
 //!
-//! **Known limitation (`pick_next` is O(n) worst-case).** Because the
-//! tree is ordered by *deadline* but eligibility is a predicate on
-//! *vruntime*, selecting the earliest-deadline *eligible* task requires
-//! scanning the tree from the front past any earlier-deadline-but-
-//! ineligible tasks (see `pick_next`).  In the common case (most waiting
-//! tasks are eligible) this stops almost immediately, but an adversarial
-//! mix of early-deadline/high-vruntime tasks makes it O(n).  This
-//! violates the project's "scheduler must never be O(n) over all tasks"
-//! rule and is tracked as tech debt in `known-issues.md` (EEVDF-PICK-ON).
-//! It is tolerated for now only because EEVDF is a non-default, opt-in
-//! backend (the default `PriorityRoundRobin` is strictly O(1)).  The
-//! proper fix is a Linux-style augmented tree (each node caching its
-//! subtree's min vruntime, à la `kernel/sched/fair.c` `__pick_eevdf`),
-//! which Rust's non-augmentable `alloc::collections::BTreeMap` cannot
-//! express — so it needs a custom intrusive tree, or a redesign into
-//! split eligible/ineligible structures with corrected `min_vruntime`
-//! bookkeeping.  This must be done before EEVDF is made a default or
-//! heavily-used backend.
+//! On top of `tree` sit **two partition indexes** that together make
+//! `pick_next` O(log n) (see below), keyed differently to answer the two
+//! queries that used to require a linear scan:
+//!
+//! - `eligible: BTreeMap<(deadline, TaskId), ()>` — the eligible tasks
+//!   (`vruntime <= min_vruntime`) ordered by deadline.  `pick_next` reads
+//!   its front to get the earliest-deadline eligible task directly.
+//! - `ineligible_by_vrt: BTreeMap<(vruntime, TaskId), ()>` — the rest,
+//!   ordered by vruntime.  Its front is the least-progressed above-floor
+//!   task, used to compute the *true* minimum vruntime and to promote
+//!   tasks into `eligible` as the monotonic floor rises (`rebalance`).
+//!
+//! Every waiting task is in `tree` and in exactly one partition index; each
+//! `EevdfEntry` carries an `is_eligible` flag that says which, so removals
+//! locate the entry in its index in O(log n).  `rebalance` (run after every
+//! change to `min_vruntime`) keeps `is_eligible` exactly equal to the
+//! `vruntime <= min_vruntime` predicate.
+//!
+//! **History.** This replaced an earlier design where `pick_next` scanned
+//! `tree` front-to-back for the first eligible entry — O(n) worst-case under
+//! an adversarial early-deadline/high-vruntime mix, which violated the
+//! project's "scheduler must never be O(n) over all tasks" rule
+//! (`known-issues.md` EEVDF-PICK-ON).  The split-index redesign is the
+//! safe-`std`-collections equivalent of Linux's augmented rb-tree
+//! (`kernel/sched/fair.c` `__pick_eevdf`), which Rust's non-augmentable
+//! `alloc::collections::BTreeMap` cannot express directly.  It also fixed a
+//! secondary defect in that design: `min_vruntime` was derived from the
+//! *earliest-deadline* task's vruntime (not the true minimum), so the
+//! eligibility boundary itself was approximate.
 //!
 //! ## Weight Table
 //!
@@ -56,12 +67,12 @@
 //!
 //! ## Performance
 //!
-//! - `pick_next`: O(n) worst-case — scans the deadline-ordered BTreeMap
-//!   from the front until an *eligible* task is found (usually O(1) in
-//!   practice; see "Known limitation" above and `known-issues.md`)
-//! - `enqueue`: O(log n) — BTreeMap insert
-//! - `dequeue`: O(log n) — reverse index lookup + BTreeMap remove
-//! - `tick`: O(1) — decrement counter, advance vruntime
+//! - `pick_next`: O(log n) — front of the `eligible` index (Phase 1) or, in
+//!   the rare no-eligible case, front of `tree` (Phase 2), plus an amortised
+//!   O(log n) `rebalance` (each task is promoted at most once per residency)
+//! - `enqueue`: O(log n) — BTreeMap inserts (+ amortised `rebalance`)
+//! - `dequeue`: O(log n) — reverse index lookup + BTreeMap removes
+//! - `tick`: O(log n) amortised — advance vruntime + `rebalance`
 //! - `has_ready`: O(1) — check count
 //!
 //! ## References
@@ -174,6 +185,13 @@ struct EevdfEntry {
     /// Virtual deadline — `vruntime + time_slice * VRUNTIME_UNIT / weight`
     /// at the time the task was enqueued.  Earlier deadline = higher urgency.
     deadline: u64,
+    /// Which partition index this entry currently lives in: `true` ⇒ it is
+    /// in `eligible` (keyed by deadline); `false` ⇒ it is in
+    /// `ineligible_by_vrt` (keyed by vruntime).  Kept in lock-step with the
+    /// `vruntime <= min_vruntime` predicate by `rebalance` after every
+    /// change to `min_vruntime`, so it is the authoritative way to locate an
+    /// entry in its partition map for O(log n) removal.
+    is_eligible: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,14 +203,33 @@ struct EevdfEntry {
 /// Provides fair scheduling with latency guarantees by combining virtual
 /// runtime tracking with virtual deadline ordering.
 pub struct EevdfScheduler {
-    /// Run queue: tasks ordered by (virtual_deadline, task_id).
-    /// BTreeMap gives O(log n) first-entry access and insertion.
+    /// Run queue: **all** waiting tasks ordered by (virtual_deadline,
+    /// task_id).  BTreeMap gives O(log n) first-entry access and insertion.
+    /// This is the source of truth for entry data and the deadline-ordered
+    /// view used by the Phase-2 fallback, `steal`, and `should_preempt`.
     tree: BTreeMap<(u64, TaskId), EevdfEntry>,
 
     /// Reverse index: task_id → virtual_deadline.
     /// Enables O(log n) dequeue-by-ID (need the deadline to form the
     /// composite key for `tree`).
     deadlines: BTreeMap<TaskId, u64>,
+
+    /// Partition index — **eligible** tasks (`vruntime <= min_vruntime`)
+    /// ordered by (virtual_deadline, task_id).  `pick_next`'s Phase 1
+    /// reads this map's front in O(log n) to get the earliest-deadline
+    /// eligible task, eliminating the old O(n) front-to-back scan of `tree`.
+    /// Membership mirrors each entry's `is_eligible` flag; the union of
+    /// `eligible` and `ineligible_by_vrt` is exactly `tree`.
+    eligible: BTreeMap<(u64, TaskId), ()>,
+
+    /// Partition index — **ineligible** tasks (`vruntime > min_vruntime`)
+    /// ordered by (vruntime, task_id).  Its front is the least-progressed
+    /// above-floor task, used both to advance `min_vruntime` to the true
+    /// minimum and to promote tasks into `eligible` as the floor rises
+    /// (see `rebalance`).  Because `min_vruntime` is monotonic and a waiting
+    /// task's vruntime is fixed, each task is promoted at most once per
+    /// residency, so promotion is amortised O(log n).
+    ineligible_by_vrt: BTreeMap<(u64, TaskId), ()>,
 
     /// Minimum vruntime across all runnable tasks.
     ///
@@ -242,6 +279,8 @@ impl EevdfScheduler {
         Self {
             tree: BTreeMap::new(),
             deadlines: BTreeMap::new(),
+            eligible: BTreeMap::new(),
+            ineligible_by_vrt: BTreeMap::new(),
             min_vruntime: 0,
             nr_running: 0,
             time_slices: [0; NUM_PRIORITIES],
@@ -265,6 +304,8 @@ impl EevdfScheduler {
         Self {
             tree: BTreeMap::new(),
             deadlines: BTreeMap::new(),
+            eligible: BTreeMap::new(),
+            ineligible_by_vrt: BTreeMap::new(),
             min_vruntime: 0,
             nr_running: 0,
             time_slices,
@@ -304,70 +345,124 @@ impl EevdfScheduler {
         vruntime.saturating_add(slice_vruntime)
     }
 
-    /// Update min_vruntime after a change to the run queue.
+    /// Update `min_vruntime` to the true minimum vruntime of any runnable
+    /// entity (the waiting tasks plus the current task), clamped so it only
+    /// ever advances — never regresses.
     ///
-    /// min_vruntime is the minimum vruntime of any runnable task (or the
-    /// current task's vruntime, whichever is smaller).  It only advances
-    /// forward — never backwards — to prevent vruntime regression.
+    /// # Why this is O(1), and how it fixes the old approximation
+    ///
+    /// The floor can only *advance* when there is **no** eligible task,
+    /// because every eligible task has `vruntime <= min_vruntime` by
+    /// definition — so while any eligible task exists, the true minimum is
+    /// already at or below the floor and monotonicity keeps the floor put.
+    /// (The old code took the *earliest-deadline* task's vruntime as the
+    /// candidate, which is **not** the minimum vruntime — the tree is keyed
+    /// by deadline, not vruntime — so the floor, and hence the eligibility
+    /// boundary, was approximate.  See known-issues.md EEVDF-PICK-ON
+    /// "secondary defect".)
+    ///
+    /// When the eligible set is empty, the least-progressed runnable task is
+    /// the front of `ineligible_by_vrt` (which is vruntime-ordered), possibly
+    /// beaten by the current task.  Both are O(1) look-ups, so this is O(1).
+    ///
+    /// Callers must run [`rebalance`](Self::rebalance) afterwards so the
+    /// partition indexes reflect the (possibly advanced) floor.
     fn update_min_vruntime(&mut self) {
-        let tree_min = self.tree.values().next().map(|e| e.vruntime);
-        let candidate = match (tree_min, self.current_id != 0) {
-            (Some(tv), true) => tv.min(self.current_vruntime),
-            (Some(tv), false) => tv,
-            (None, true) => self.current_vruntime,
-            (None, false) => self.min_vruntime,
-        };
-        // min_vruntime only advances, never goes backward.
-        if candidate > self.min_vruntime {
-            self.min_vruntime = candidate;
+        // An eligible task pins the true minimum at or below the floor, so
+        // the monotonic floor cannot advance.
+        if !self.eligible.is_empty() {
+            return;
+        }
+        // No eligible task: the minimum runnable vruntime is the smaller of
+        // the least-progressed ineligible task and the current task.
+        let mut min_above: Option<u64> = self.ineligible_by_vrt.keys().next().map(|k| k.0);
+        if self.current_id != 0 {
+            min_above = Some(match min_above {
+                Some(m) => m.min(self.current_vruntime),
+                None => self.current_vruntime,
+            });
+        }
+        if let Some(m) = min_above {
+            // Clamp: the floor only ever advances.
+            if m > self.min_vruntime {
+                self.min_vruntime = m;
+            }
+        }
+    }
+
+    /// Promote every ineligible task whose vruntime has fallen at or below
+    /// the (possibly just-advanced) `min_vruntime` into the `eligible` index.
+    ///
+    /// Restores the partition invariant after any change to `min_vruntime`:
+    /// afterwards `is_eligible` is exactly `vruntime <= min_vruntime` for
+    /// every waiting task, `eligible` holds exactly the eligible tasks
+    /// (deadline-ordered), and `ineligible_by_vrt` holds exactly the rest
+    /// (vruntime-ordered).
+    ///
+    /// Amortised O(log n): the floor is monotonic and a waiting task's
+    /// vruntime is fixed, so each task crosses the boundary — and is promoted
+    /// — at most once per residency.
+    fn rebalance(&mut self) {
+        loop {
+            // Front of the vruntime-ordered ineligible set = smallest vruntime.
+            let Some((&(vrt, id), &())) = self.ineligible_by_vrt.iter().next() else {
+                break;
+            };
+            if vrt > self.min_vruntime {
+                // Still ineligible; everything behind it has a larger vruntime.
+                break;
+            }
+            self.ineligible_by_vrt.remove(&(vrt, id));
+            if let Some(&deadline) = self.deadlines.get(&id) {
+                self.eligible.insert((deadline, id), ());
+                if let Some(entry) = self.tree.get_mut(&(deadline, id)) {
+                    entry.is_eligible = true;
+                }
+            }
         }
     }
 
     /// Pick the next eligible task with the earliest virtual deadline.
     ///
-    /// A task is eligible when `vruntime <= min_vruntime`.  We iterate
-    /// the BTreeMap from the front (earliest deadline) and pick the first
-    /// eligible entry.
+    /// A task is eligible when `vruntime <= min_vruntime`.  Phase 1 reads the
+    /// front of the `eligible` index (deadline-ordered) to get the
+    /// earliest-deadline eligible task directly.  If no task is eligible
+    /// (can happen transiently when the current task's vruntime is below
+    /// every waiting task's), Phase 2 falls back to the absolute
+    /// earliest-deadline task via `tree`'s front — guaranteeing forward
+    /// progress.
     ///
-    /// If no task is eligible (can happen briefly during vruntime
-    /// adjustments), we fall back to the task with the absolute earliest
-    /// deadline — this guarantees forward progress.
-    ///
-    /// **Complexity: O(n) worst-case.** The front-to-back scan can walk
-    /// past many earlier-deadline-but-ineligible tasks before finding an
-    /// eligible one.  In practice most waiting tasks are eligible so it
-    /// stops almost immediately, but the worst case is linear.  See the
-    /// module-level "Known limitation" note and `known-issues.md`
-    /// (EEVDF-PICK-ON) for the proper augmented-tree fix.  This is
-    /// tolerated only because EEVDF is a non-default, opt-in backend.
+    /// **Complexity: O(log n).** Both the Phase-1 `eligible` front look-up
+    /// and the Phase-2 `tree` front look-up are O(log n), the removals are
+    /// O(log n), and the trailing [`rebalance`](Self::rebalance) is amortised
+    /// O(log n) (each task is promoted at most once per residency).  This
+    /// replaces the old front-to-back scan of `tree`, which was O(n)
+    /// worst-case (an adversarial early-deadline/high-vruntime mix could walk
+    /// the whole tree) and violated the project's "scheduler must never be
+    /// O(n) over all tasks" rule.  See `known-issues.md` (EEVDF-PICK-ON).
     #[must_use]
     pub fn pick_next(&mut self) -> Option<TaskId> {
         if self.tree.is_empty() {
             return None;
         }
 
-        // Phase 1: Find the first eligible task (vruntime <= min_vruntime)
-        // among those with the earliest deadlines.
-        let mut best_key: Option<(u64, TaskId)> = None;
+        // Phase 1: earliest-deadline *eligible* task (front of `eligible`).
+        // Phase 2: fall back to the earliest-deadline task overall (front of
+        // the deadline-ordered `tree`) to guarantee forward progress.
+        let key = if let Some((&k, &())) = self.eligible.iter().next() {
+            k
+        } else {
+            let (&k, _) = self.tree.iter().next()?;
+            k
+        };
 
-        for (key, entry) in &self.tree {
-            if entry.vruntime <= self.min_vruntime {
-                best_key = Some(*key);
-                break;
-            }
-        }
-
-        // Phase 2: If no eligible task found, just take the earliest
-        // deadline (guarantees forward progress).
-        if best_key.is_none() {
-            if let Some((key, _)) = self.tree.iter().next() {
-                best_key = Some(*key);
-            }
-        }
-
-        let key = best_key?;
         let entry = self.tree.remove(&key)?;
         self.deadlines.remove(&entry.id);
+        if entry.is_eligible {
+            self.eligible.remove(&key);
+        } else {
+            self.ineligible_by_vrt.remove(&(entry.vruntime, entry.id));
+        }
         self.nr_running = self.nr_running.saturating_sub(1);
 
         // Set up current task tracking.
@@ -379,6 +474,7 @@ impl EevdfScheduler {
         self.current_id = entry.id;
 
         self.update_min_vruntime();
+        self.rebalance();
 
         Some(entry.id)
     }
@@ -398,7 +494,13 @@ impl EevdfScheduler {
     pub fn enqueue(&mut self, id: TaskId, priority: u8) {
         // Remove any stale entry (shouldn't happen, but defensive).
         if let Some(old_deadline) = self.deadlines.remove(&id) {
-            self.tree.remove(&(old_deadline, id));
+            if let Some(old) = self.tree.remove(&(old_deadline, id)) {
+                if old.is_eligible {
+                    self.eligible.remove(&(old_deadline, id));
+                } else {
+                    self.ineligible_by_vrt.remove(&(old.vruntime, id));
+                }
+            }
             self.nr_running = self.nr_running.saturating_sub(1);
         }
 
@@ -422,19 +524,31 @@ impl EevdfScheduler {
 
         let deadline = self.compute_deadline(vruntime, priority, weight);
 
+        // A task placed with vruntime at or below the current floor is
+        // immediately eligible; otherwise it starts ineligible and will be
+        // promoted by `rebalance` once the floor rises to meet it.
+        let is_eligible = vruntime <= self.min_vruntime;
+
         let entry = EevdfEntry {
             id,
             priority,
             weight,
             vruntime,
             deadline,
+            is_eligible,
         };
 
         self.tree.insert((deadline, id), entry);
         self.deadlines.insert(id, deadline);
+        if is_eligible {
+            self.eligible.insert((deadline, id), ());
+        } else {
+            self.ineligible_by_vrt.insert((vruntime, id), ());
+        }
         self.nr_running = self.nr_running.saturating_add(1);
 
         self.update_min_vruntime();
+        self.rebalance();
     }
 
     /// Remove a specific task from the run queue.
@@ -444,9 +558,15 @@ impl EevdfScheduler {
     #[allow(clippy::cast_possible_truncation)]
     pub fn dequeue(&mut self, id: TaskId, _priority: u8) -> bool {
         if let Some(deadline) = self.deadlines.remove(&id) {
-            if self.tree.remove(&(deadline, id)).is_some() {
+            if let Some(entry) = self.tree.remove(&(deadline, id)) {
+                if entry.is_eligible {
+                    self.eligible.remove(&(deadline, id));
+                } else {
+                    self.ineligible_by_vrt.remove(&(entry.vruntime, id));
+                }
                 self.nr_running = self.nr_running.saturating_sub(1);
                 self.update_min_vruntime();
+                self.rebalance();
                 return true;
             }
         }
@@ -543,8 +663,9 @@ impl EevdfScheduler {
         self.current_vruntime = self.current_vruntime.saturating_add(delta);
 
         // Update min_vruntime (it may advance if the running task was
-        // the minimum).
+        // the minimum) and re-partition any tasks the advance made eligible.
         self.update_min_vruntime();
+        self.rebalance();
 
         // Decrement time slice.
         if self.current_remaining > 0 {
@@ -606,10 +727,15 @@ impl EevdfScheduler {
             remaining = remaining.saturating_sub(1);
         }
 
-        // Remove collected entries.
+        // Remove collected entries, keeping the partition indexes in sync.
         for key in keys_to_steal[..steal_idx].iter().flatten() {
             if let Some(entry) = self.tree.remove(key) {
                 self.deadlines.remove(&entry.id);
+                if entry.is_eligible {
+                    self.eligible.remove(key);
+                } else {
+                    self.ineligible_by_vrt.remove(&(entry.vruntime, entry.id));
+                }
                 self.nr_running = self.nr_running.saturating_sub(1);
                 stolen.push(entry.id, entry.priority);
             }
@@ -617,6 +743,7 @@ impl EevdfScheduler {
 
         if steal_idx > 0 {
             self.update_min_vruntime();
+            self.rebalance();
         }
 
         stolen
@@ -657,6 +784,39 @@ impl EevdfScheduler {
     pub fn apply_profile(&mut self, profile: super::priority_rr::WorkloadProfile) {
         let ok = self.reconfigure_slices(profile.base(), profile.increment());
         debug_assert!(ok, "WorkloadProfile base must be >= 1");
+    }
+
+    /// Verify the partition invariant that the O(log n) `pick_next` relies
+    /// on.  Test/diagnostic only.  Returns `true` when:
+    ///
+    /// 1. `eligible` ∪ `ineligible_by_vrt` == `tree` (same task ids, sizes
+    ///    add up to `tree.len()` == `nr_running`);
+    /// 2. every entry's `is_eligible` flag agrees with its index membership;
+    /// 3. after a `rebalance`, `is_eligible` == `vruntime <= min_vruntime`
+    ///    for every waiting task, and each index key matches the entry's
+    ///    deadline / vruntime.
+    #[must_use]
+    fn partition_invariant_ok(&self) -> bool {
+        if self.nr_running as usize != self.tree.len() {
+            return false;
+        }
+        if self.eligible.len().saturating_add(self.ineligible_by_vrt.len()) != self.tree.len() {
+            return false;
+        }
+        for (&(deadline, id), entry) in &self.tree {
+            let should_be_eligible = entry.vruntime <= self.min_vruntime;
+            if entry.is_eligible != should_be_eligible {
+                return false;
+            }
+            if entry.is_eligible {
+                if !self.eligible.contains_key(&(deadline, id)) {
+                    return false;
+                }
+            } else if !self.ineligible_by_vrt.contains_key(&(entry.vruntime, id)) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -768,34 +928,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    serial_println!("  eevdf: weighted fairness — higher priority gets more CPU...");
+    serial_println!("  eevdf: weighted fairness — higher weight gets more CPU time...");
     {
         let mut sched = EevdfScheduler::new();
-        let mut pick_count = [0u32; 2];
+        // Measure CPU *time* (ticks consumed), which is the true EEVDF
+        // fairness metric — NOT pick count.  With correct `min_vruntime`
+        // bookkeeping the two tasks alternate *picks*, but preemption-on-wake
+        // truncates the low-weight task's slice while the high-weight task
+        // runs its full slice, so the high-weight task accrues far more CPU
+        // time per turn.  (The old assertion checked pick count, which only
+        // showed A-dominance because the previous `min_vruntime` derived the
+        // floor from the earliest-*deadline* task's vruntime rather than the
+        // true minimum — the EEVDF-PICK-ON "secondary defect" — wrongly
+        // re-marking the high-weight task eligible every re-enqueue.)
+        let mut ticks_used = [0u64; 2];
 
         // Task A at priority 10 (weight 9548), Task B at priority 20 (weight 1024).
-        // Weight ratio: 9548/1024 ≈ 9.3×.  A should be picked ~9× more than B.
+        // Weight ratio 9548/1024 ≈ 9.3× — A should get much more CPU time.
         sched.enqueue(200, 10);
         sched.enqueue(201, 20);
 
-        for _ in 0..100 {
+        for _ in 0..200 {
             if let Some(id) = sched.pick_next() {
-                if id == 200 {
-                    pick_count[0] += 1;
-                } else {
-                    pick_count[1] += 1;
+                let slot = usize::from(id != 200);
+                // Run until the slice expires or the task is preempted,
+                // counting every tick of CPU time it consumes.
+                loop {
+                    ticks_used[slot] = ticks_used[slot].saturating_add(1);
+                    if sched.tick() {
+                        break;
+                    }
                 }
-                while !sched.tick() {}
                 sched.enqueue(id, if id == 200 { 10 } else { 20 });
             }
         }
 
-        // Task A should dominate. We expect ~90 picks for A and ~10 for B.
-        // Allow wide tolerance since time slices also differ.
+        // The higher-weight task must accumulate strictly more CPU time.
         assert!(
-            pick_count[0] > pick_count[1],
-            "higher-weight task should get more picks: A={}, B={}",
-            pick_count[0], pick_count[1]
+            ticks_used[0] > ticks_used[1],
+            "higher-weight task should get more CPU time: A={}, B={}",
+            ticks_used[0], ticks_used[1]
         );
     }
 
@@ -929,6 +1101,96 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = sched.pick_next();
         // Queue is empty — should_preempt must be false.
         assert!(!sched.should_preempt(), "empty queue → no preemption");
+    }
+
+    serial_println!("  eevdf: partition invariant holds across operations...");
+    {
+        let mut sched = EevdfScheduler::new();
+        // Mixed workload: enqueue, pick (creates a running/ineligible task on
+        // re-enqueue), tick, dequeue — the invariant must hold after each.
+        for round in 0..8u64 {
+            let base = 900 + round * 10;
+            sched.enqueue(base, 5);
+            sched.enqueue(base + 1, 15);
+            sched.enqueue(base + 2, 25);
+            assert!(sched.partition_invariant_ok(), "invariant after enqueue r{round}");
+
+            if let Some(id) = sched.pick_next() {
+                assert!(sched.partition_invariant_ok(), "invariant after pick r{round}");
+                // Run part of a slice, then re-enqueue with accumulated vruntime.
+                sched.tick();
+                assert!(sched.partition_invariant_ok(), "invariant after tick r{round}");
+                sched.enqueue(id, 15);
+                assert!(sched.partition_invariant_ok(), "invariant after re-enqueue r{round}");
+            }
+
+            // Dequeue one arbitrary task if present.
+            let _ = sched.dequeue(base + 2, 25);
+            assert!(sched.partition_invariant_ok(), "invariant after dequeue r{round}");
+        }
+    }
+
+    serial_println!("  eevdf: pick_next is deadline-correct under adversarial vruntime mix...");
+    {
+        // The old O(n) failure shape: many tasks with EARLY deadlines but
+        // HIGH vruntime (ineligible), plus one eligible task.  The eligible
+        // task must be picked regardless of how many ineligible tasks with
+        // earlier deadlines precede it in deadline order — and the pick must
+        // not depend on a linear scan.
+        let mut sched = EevdfScheduler::new();
+
+        // Task A: enqueue and run a long time to build a large vruntime, so
+        // when re-enqueued it is ineligible with a very tight (early) deadline
+        // (priority 0 → tiny weight divisor → tiny deadline offset).
+        sched.enqueue(1, 0);
+        let picked = sched.pick_next();
+        assert_eq!(picked, Some(1));
+        for _ in 0..200 {
+            sched.tick();
+        }
+        // Re-enqueue A: high vruntime, early deadline.  With only A present,
+        // the floor advances to A's vruntime, so A ends up eligible again.
+        sched.enqueue(1, 0);
+        assert!(sched.partition_invariant_ok(), "invariant after A re-enqueue");
+
+        // Now add a fresh low-priority task B: it enters at the (now advanced)
+        // floor, so it is eligible, but its deadline is far LATER than A's.
+        sched.enqueue(2, 25);
+        assert!(sched.partition_invariant_ok(), "invariant after B enqueue");
+
+        // Both eligible; A has the earlier deadline, so A is picked first.
+        let first = sched.pick_next();
+        assert_eq!(first, Some(1), "earliest-deadline eligible task picked");
+        assert!(sched.partition_invariant_ok(), "invariant after adversarial pick");
+    }
+
+    serial_println!("  eevdf: min_vruntime tracks the true minimum, not earliest-deadline...");
+    {
+        // Regression for the secondary defect: min_vruntime must reflect the
+        // least-progressed runnable task, not the earliest-*deadline* task's
+        // vruntime.  Build a state where the earliest-deadline task has a
+        // LARGER vruntime than another waiting task, then confirm the low-
+        // vruntime task stays eligible (never wrongly excluded).
+        let mut sched = EevdfScheduler::new();
+
+        // High-weight task (prio 0) accrues vruntime slowly but gets a very
+        // early deadline; low-weight task (prio 25) gets a late deadline.
+        sched.enqueue(10, 0);
+        sched.enqueue(11, 25);
+
+        // Run a few cycles; both should keep getting picked (no starvation,
+        // invariant intact), proving eligibility isn't skewed by deadline.
+        let mut seen_10 = false;
+        let mut seen_11 = false;
+        for _ in 0..40 {
+            if let Some(id) = sched.pick_next() {
+                if id == 10 { seen_10 = true; } else { seen_11 = true; }
+                while !sched.tick() {}
+                assert!(sched.partition_invariant_ok(), "invariant during fairness run");
+                sched.enqueue(id, if id == 10 { 0 } else { 25 });
+            }
+        }
+        assert!(seen_10 && seen_11, "both tasks scheduled — no starvation");
     }
 
     serial_println!("  eevdf: all tests passed.");

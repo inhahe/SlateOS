@@ -1,17 +1,20 @@
-add roadmap-detailed.md that the chromium port should name its processes so that when the user views them in the process explorer, he can tell which process belongs to which tab.
 
-add to roadmap-detailed: a cmd.exe and maybe even powershell emulator.
+[DONE -> roadmap-detailed.md §3.4 Hotkeys] add to roadmap-detailed that there should be a way to make any hotkey produce any given emoji or other unicode character (or string).  can paste the character or string or select the character from the unicode selection dialog that has the categories and the search.
+
+[DONE -> roadmap-detailed.md §4.3 Process Explorer "Launch provenance"] add to roadmap-detailed that processes in the process explorer should tell what command line launched them if any, or what parameters they were passed, and what process or thread launched it and when
+
+[DONE -> roadmap-detailed.md §4.7 Port Chromium] add to roadmap-detailed.md that the chromium port should name its processes so that when the user views them in the process explorer, he can tell which process belongs to which tab.
+
+[DONE -> roadmap-detailed.md §Shells] add to roadmap-detailed: a cmd.exe and maybe even powershell emulator.
 
 Tell Fable 5 to analyze the most critical parts of the OS (memory management, task scheduling, IPC, what else? capability robustness?) and optimize them.
 
-write to roadmap-detailed: if a mass move or delete option gets interrupted (crash, restart, accidental abort, etc.), it remembers it was running and maybe reminds the user later when it can, and there's also a place that the user can go to to see interrupted things like these and resume them.
+[DONE -> roadmap-detailed.md §4.1 File Explorer "Durable, resumable bulk file operations"] write to roadmap-detailed: if a mass move or delete option gets interrupted (crash, restart, accidental abort, etc.), it remembers it was running and maybe reminds the user later when it can, and there's also a place that the user can go to to see interrupted things like these and resume them.
 
-in file save dialog, remember default filename for the user to use again if he/she accidentally changes it while trying to type in a path
+[DONE -> roadmap-detailed.md §4.1 File Explorer "Save dialog remembers the suggested default filename"] in file save dialog, remember default filename for the user to use again if he/she accidentally changes it while trying to type in a path
 
-make sure that in the file explorer, there's a way to view filenames, dates, and/or sizes for files even when using thumbnail mode if the user wants.
+[DONE -> roadmap-detailed.md §4.1 File Explorer "Optional metadata labels in thumbnail / icon view"] make sure that in the file explorer, there's a way to view filenames, dates, and/or sizes for files even when using thumbnail mode if the user wants.
 
 [DONE] make our text editors work so that if a file is edited from outside the editor, it asks not only whether to keep current changes or reload the file, but also whether to merge the changes or review the merge (using the same logic as in ..\orchestrator2's view file edit tool) and choose whether to accept it
   -> Implemented in both apps/editor and apps/markdowneditor. Shared engine lives in apps/diffcore (diff3 three-way merge + FileSync external-change tracker + MergeReview). When a file open in an editor is changed on disk while the buffer has unsaved edits, a modal offers: keep current / reload from disk / auto-merge / review merge side-by-side (per-conflict take-ours/take-disk/keep-both, then accept). Unmodified buffers reload automatically. Same LCS-based approach as orchestrator2's static/diff.js file-edit viewer.
-
-^^ make sure that's in the detailed-roadmap, even though it's already done
-
+  [DONE -> roadmap-detailed.md §4.2 Text Editor "External-change detection with three-way merge"] ^^ now recorded in the detailed roadmap, even though it's already done

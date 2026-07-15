@@ -8041,6 +8041,19 @@ Remaining net improvements (diminishing returns):
   syscall *dispatch* wiring (user-pointer copies, fd install, errno mapping) is
   only exercised by code review + the thin-delegation argument, not a live
   ring-3 call.
+  RESOLVED (2026-07-15): the ring-3 capstone now exists — `services/httpget`, a
+  bare Linux-ABI ELF that does raw socket()/connect()/write()/read()/close()
+  syscalls, spawned by `proc::spawn::run_persistent_netstack` via
+  `spawn_process_with_abi(_, AbiMode::Linux)` with `argv=["httpget","<ip>","80"]`
+  (the kernel resolves example.com first). Boot-validated switch-on: serial shows
+  `Created process 228 ("httpget")` → `[httpget] connected` → `[httpget] OK: HTTP
+  response` → `ring3 HTTP capstone: OK … (exit 0)`. This exercises the
+  `dispatch_linux` socket arms — user-pointer copies, fd install, errno mapping —
+  from an actual unprivileged process, closing the "only covered by code review"
+  gap. The self-test is bounded (15 s deadline) so a stuck fetch can never wedge
+  the boot. Precondition (reliable switch-on boots) was met by the wedge fixes
+  this session (heap + container holder-preemption); a 15/15-clean switch-on soak
+  plus this live ring-3 spawn confirm the spawn-dispatch race is resolved.
 
 - (2026-06-20) Removed the redundant `userspace/mount-cli` tool. It was a
   multi-personality demo (mount/umount/findmnt) that printed *fabricated*
@@ -53481,16 +53494,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   THEN flip (5.7), THEN delete (5.8). Operator already approved the overall
 ##   staged cutover (§66 Q22b: prove parity, flip, delete) — this is just being
 ##   careful not to regress on the flip.
-##   KEY BLOCKER for that parity work: reliable switch-ON boot validation is
-##   undermined by the still-open moving-location container-exec / ring-3
-##   spawn-dispatch race (known-issues B-PTHREAD-YIELDBUDGET family). Every
-##   switch-on socket-parity increment needs a clean switch-on boot to validate,
-##   and those boots intermittently hang at moving Path-Z locations. So the
-##   single highest-leverage next task for the whole endgame (5.7 validation AND
-##   the deferred ring-3 glibc socket-syscall HTTP capstone) is root-causing that
-##   race. Prior negative results (known-issues): futex primitive is sound (not
-##   the bug); prime suspects are untracked `spin::Mutex` in the buddy frame
-##   allocator (mm/frame.rs) and rmap (mm/rmap.rs) — a cfg(feature="lockdep_mm")
-##   migration to the tracked crate::sync::Mutex would let lockdep catch a latent
-##   AB-BA inversion deterministically (hot-path cost is why it must be feature-
-##   gated). That is the recommended next concrete tool to build.
+##   KEY BLOCKER for that parity work (RESOLVED 2026-07-15): reliable switch-ON
+##   boot validation was undermined by the moving-location container-exec /
+##   ring-3 spawn-dispatch race (known-issues B-PTHREAD-YIELDBUDGET family). That
+##   race is now root-caused and FIXED — it was two holder-preemption spinlock
+##   deadlocks (a task holding a raw `spin::Mutex` involuntarily preempted mid-
+##   critical-section on the UP boot, the spinner then never yielding to the
+##   Ready holder): (1) the global kernel heap lock (fixed 83307bdfc, preempt-
+##   disable via ManuallyDrop) and (2) the container TABLE/EVENT_LOG locks (fixed
+##   fa87bbb5e, migrated to the preempt-aware crate::sync::Mutex). NOT the futex
+##   (confirmed sound) and NOT an AB-BA inversion (the guest is UP, so lockdep_mm
+##   would not have caught it — that earlier recommendation is moot). Validation:
+##   a 40/40-clean default-path soak, a 15/15-clean switch-ON soak, and the live
+##   ring-3 HTTP capstone (services/httpget) all green. So the endgame is no
+##   longer blocked on the race. Remaining endgame gates are operator decisions:
+##   Q23 (server-socket session model, blocks sys_bind/listen/accept4) and the
+##   5.7 default-flip itself (user-visible policy). See open-questions.md.

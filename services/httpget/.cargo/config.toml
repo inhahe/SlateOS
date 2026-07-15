@@ -1,0 +1,15 @@
+# Build configuration for the httpget userspace binary.
+# See userspace/init/.cargo/config.toml for details.
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+linker = "rust-lld"
+# Static relocation + large code model: 64-bit absolute addresses,
+# no GOT.  See init/.cargo/config.toml for rationale.
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+    "-C", "code-model=large",
+]

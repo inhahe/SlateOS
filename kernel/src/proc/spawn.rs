@@ -3357,12 +3357,163 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;
+    // see todo.txt Judgment Calls 2026-07-14). Everything above drives the
+    // daemon-backed socket path from *kernel* context via the `NetstackConn`
+    // client. This final check proves the same path works from an **actual ring-3
+    // process** using the raw Linux syscall ABI: `httpget` (a bare Linux-ABI ELF)
+    // does socket()/connect()/write()/read()/close() over the persistent daemon.
+    // That exercises the syscall *dispatch* wiring — user-pointer copies, fd
+    // install, errno mapping in `dispatch_linux` → `net::socket::*` — which was
+    // previously only covered by code review, never a live ring-3 call.
+    run_ring3_http_capstone();
+
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
-         nonblock-send/listen-accept/connect6 parity checks done; daemon now owns the NIC for \
-         the system's lifetime"
+         nonblock-send/listen-accept/connect6/ring3-capstone parity checks done; daemon now \
+         owns the NIC for the system's lifetime"
     );
     Ok(())
+}
+
+/// Spawn the `httpget` ring-3 Linux-ABI ELF to fetch HTTP over the persistent
+/// `net.stack` daemon, and report its exit code.
+///
+/// This is the ring-3 half of the Phase-5 socket cutover proof: unlike the
+/// kernel-context `NetstackConn` self-tests, it drives the *real* Linux socket
+/// syscalls (`socket`/`connect`/`write`/`read`/`close`) from an unprivileged
+/// process, so it validates the `dispatch_linux` socket arms end to end.
+///
+/// Never fails the boot: network variance (no upstream under slirp) is logged as
+/// a non-fatal note, exactly like the other persistent-daemon parity checks. A
+/// genuine spawn fault is logged as a WARNING but still returns.
+fn run_ring3_http_capstone() {
+    // Resolve the target first (the ring-3 program takes a numeric IP in argv so
+    // it needs no in-process resolver). Reuse example.com:80, as the other checks.
+    let ip = match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => ip,
+        Ok(None) => {
+            serial_println!(
+                "[spawn]   ring3 HTTP capstone: DNS unresolved (no upstream?) — check skipped"
+            );
+            return;
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   ring3 HTTP capstone: DNS resolve error ({:?}) — check skipped",
+                e
+            );
+            return;
+        }
+    };
+
+    static HTTPGET_ELF: &[u8] = include_bytes!(
+        "../../../services/httpget/target/x86_64-unknown-none/release/httpget"
+    );
+
+    // Format the resolved IP as a dotted-decimal argv string (no NUL — the Linux
+    // stack builder terminates argv entries itself, as for the daemon's argv).
+    let mut ip_buf = [0u8; 16];
+    let ip_len = fmt_ipv4_dotted(&ip, &mut ip_buf);
+    let ip_arg = &ip_buf[..ip_len];
+    let argv: &[&[u8]] = &[b"httpget", ip_arg, b"80"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+
+    let options = SpawnOptions {
+        name: "httpget",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    // Explicit Linux ABI: httpget is a bare static ELF (OSABI=SYSV, no interp, no
+    // GNU property note) so auto-detection would classify it Native and route its
+    // `syscall`s through the wrong table. We produced it, so we state its ABI.
+    let result = match spawn_process_with_abi(HTTPGET_ELF, &options, pcb::AbiMode::Linux) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   WARNING: ring3 HTTP capstone spawn returned {:?}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Let the ring-3 process and the daemon run until httpget zombies (it does one
+    // blocking connect + write + read over the network), bounded by a deadline so
+    // a stuck fetch can never wedge the boot.
+    let deadline = crate::hrtimer::now_ns().saturating_add(15_000_000_000); // 15s
+    loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            serial_println!(
+                "[spawn]   ring3 HTTP capstone: process did not exit within 15s — tearing down"
+            );
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    match exit_code {
+        Some(0) => serial_println!(
+            "[spawn]   ring3 HTTP capstone: OK — ring-3 socket()/connect()/write()/read() over \
+             the daemon returned an HTTP response (exit 0)"
+        ),
+        Some(13) | Some(14) => serial_println!(
+            "[spawn]   ring3 HTTP capstone: connect+send OK, no/non-HTTP response (no upstream?) \
+             — ring-3 socket-syscall path proven (exit {})",
+            exit_code.unwrap_or_default()
+        ),
+        Some(code) => serial_println!(
+            "[spawn]   WARNING: ring3 HTTP capstone exited {} (see httpget exit-code table)",
+            code
+        ),
+        None => serial_println!(
+            "[spawn]   WARNING: ring3 HTTP capstone produced no exit code"
+        ),
+    }
+}
+
+/// Format an IPv4 address as dotted-decimal into `buf`, returning the byte length
+/// written. `buf` must be at least 15 bytes (max `"255.255.255.255"`).
+// Every arithmetic op here is on values bounded to 0..=255 (a single octet) or a
+// digit 0..=9, so no add/sub/mul/div can overflow a `u8`; the buffer index is
+// bounds-checked by `push`.
+#[allow(clippy::arithmetic_side_effects)]
+fn fmt_ipv4_dotted(ip: &[u8; 4], buf: &mut [u8; 16]) -> usize {
+    let mut n = 0usize;
+    let push = |buf: &mut [u8; 16], n: &mut usize, b: u8| {
+        if *n < buf.len() {
+            buf[*n] = b;
+            *n += 1;
+        }
+    };
+    for (i, &octet) in ip.iter().enumerate() {
+        if i != 0 {
+            push(buf, &mut n, b'.');
+        }
+        if octet >= 100 {
+            push(buf, &mut n, b'0' + octet / 100);
+        }
+        if octet >= 10 {
+            push(buf, &mut n, b'0' + (octet / 10) % 10);
+        }
+        push(buf, &mut n, b'0' + octet % 10);
+    }
+    n
 }
 
 /// Perform one `OP_RESOLVE_PTR` round-trip to the running `net.stack` daemon for

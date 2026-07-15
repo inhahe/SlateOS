@@ -14844,6 +14844,46 @@ int main(void){\n\
     run_hosted_cc_case("tls", HOSTED_SRC, b"27\n")
 }
 
+/// Path Z Part 43 — POSIX signal handler round-trip in a freshly-tcc-built
+/// dynamic glibc binary (`sigaction`/`raise`/`sigreturn` from compiled code).
+///
+/// The kernel's Linux-ABI signal machinery (`rt_sigaction`, asynchronous frame
+/// setup, `rt_sigreturn`) is already well covered by pre-built ELF self-tests
+/// (`self_test_linux_sa_restart`, the signalfd tests, …).  What no prior rung
+/// exercised is that same path *driven by a program compiled on-target*: the
+/// existing tests run hand-authored / pre-built binaries, so the full "tcc emits
+/// a `.text` handler + glibc's `signal()` installs it via `rt_sigaction` (with
+/// glibc's own SA_RESTORER trampoline) → `raise()` issues `tgkill` → the kernel
+/// posts the signal and, on the syscall-return path, builds the Linux signal
+/// frame the handler `ret`s into to reach `rt_sigreturn`" round-trip had never
+/// been proven for a binary built from source here.  This rung closes that gap
+/// and is the signal-delivery sibling of Part 41 (ctor/dtor) and Part 42 (TLS).
+///
+/// The program installs a `SIGUSR1` (10 on x86_64 Linux) handler, writes `A`,
+/// raises `SIGUSR1` to itself, and writes `B`.  `raise` delivers synchronously
+/// (the pending signal is taken on return from the `tgkill` syscall, *before*
+/// `raise` returns to `main`), so the handler's `SIG` lands between `A` and `B`
+/// — the captured file is exactly `A\nSIG\nB\n`.  Markers use raw `write(2)`
+/// (unbuffered) so the captured byte order is the exact temporal order, immune
+/// to any stdio-buffering ambiguity.
+pub fn self_test_linux_real_glibc_cc_signal() -> KernelResult<()> {
+    // Bare extern prototypes avoid needing the glibc <signal.h>/<unistd.h> header
+    // tree on-target (blocked per TD22).  `signal` returns a function pointer:
+    // `void (*signal(int, void (*)(int)))(int)`.  SIGUSR1 == 10 on x86_64 Linux.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+extern void (*signal(int sig, void (*handler)(int)))(int);\n\
+extern int raise(int sig);\n\
+static void slate_h(int s){ (void)s; write(1, \"SIG\\n\", 4); }\n\
+int main(void){\n\
+  signal(10, slate_h);\n\
+  write(1, \"A\\n\", 2);\n\
+  raise(10);\n\
+  write(1, \"B\\n\", 2);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("signal", HOSTED_SRC, b"A\nSIG\nB\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

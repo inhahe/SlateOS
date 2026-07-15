@@ -2094,6 +2094,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 43: POSIX signal delivery in a tcc-built dynamic glibc binary.
+    // The program installs a SIGUSR1 (10) handler via signal(), raise(10)s to
+    // itself, and the kernel delivers the signal synchronously on the syscall
+    // return path (tgkill self-signal) so the handler runs between the "A" and
+    // "B" markers. Exercises glibc's sigaction wrapper, the kernel's asynchronous
+    // signal-frame setup, and rt_sigreturn — end-to-end from compiled source.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_signal() {
+        serial_println!(
+            "WARNING: Path-Z signal C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

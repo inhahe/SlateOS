@@ -2107,6 +2107,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 44: non-local control flow (setjmp/longjmp) in a tcc-built
+    // dynamic glibc binary. setjmp snapshots the callee-saved registers + rsp/
+    // rip into a jmp_buf; a longjmp from a deeper frame restores it so control
+    // resumes at the setjmp site (setjmp "returns" a second time with the
+    // longjmp value). Uses glibc's exported _setjmp/_longjmp symbols. Proves
+    // tcc's call sequence + glibc's register save/restore work in ring 3.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_setjmp() {
+        serial_println!(
+            "WARNING: Path-Z setjmp/longjmp C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

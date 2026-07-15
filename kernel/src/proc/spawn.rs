@@ -14884,6 +14884,50 @@ int main(void){\n\
     run_hosted_cc_case("signal", HOSTED_SRC, b"A\nSIG\nB\n")
 }
 
+/// Path Z Part 44 — non-local control flow (`setjmp`/`longjmp`) in a
+/// freshly-tcc-built dynamic glibc binary.
+///
+/// `setjmp`/`longjmp` are the C substrate for error recovery / exception-like
+/// unwinding: `setjmp` snapshots the callee-saved register set + `%rsp`/`%rip`
+/// into a `jmp_buf`, and a later `longjmp` from a *deeper* call frame restores
+/// that snapshot so control resumes at the `setjmp` site with `setjmp`
+/// appearing to return the `longjmp` value.  No prior hosted-cc rung exercised
+/// this: it proves tcc emits the correct call sequence for glibc's `_setjmp`/
+/// `_longjmp` (the POSIX no-signal-mask variants — real exported glibc symbols,
+/// unlike the `setjmp` *macro* which needs `<setjmp.h>`, blocked per TD22) and
+/// that glibc's register save/restore works in our ring-3 environment.
+///
+/// Flow: the program writes `A`, calls `_setjmp(env)` (returns 0 the first
+/// time → writes `S`), then calls `jumper()` which `_longjmp(env, 7)`s back —
+/// so `_setjmp` "returns" a second time with 7, taking the else branch which
+/// writes `7`.  `env` is a static buffer so it survives the stack unwind.  The
+/// captured file is exactly `A\nS\n7\n` (6 bytes, exit 0).  Raw `write(2)`
+/// keeps the byte order the exact temporal order.
+pub fn self_test_linux_real_glibc_cc_setjmp() -> KernelResult<()> {
+    // `_setjmp`/`_longjmp` are real POSIX symbols exported by glibc (the plain
+    // `setjmp` is a header macro → `__sigsetjmp`, which needs <setjmp.h>).  The
+    // jmp_buf is opaque; a static 32-long (256-byte) buffer over-provisions the
+    // ~200-byte x86_64 `struct __jmp_buf_tag` and survives the longjmp unwind.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+extern int _setjmp(void *env);\n\
+extern void _longjmp(void *env, int val);\n\
+static long slate_env[32];\n\
+static void jumper(void){ _longjmp(slate_env, 7); }\n\
+int main(void){\n\
+  write(1, \"A\\n\", 2);\n\
+  int r = _setjmp(slate_env);\n\
+  if (r == 0){\n\
+    write(1, \"S\\n\", 2);\n\
+    jumper();\n\
+  } else {\n\
+    char b[2] = { (char)('0' + r), '\\n' };\n\
+    write(1, b, 2);\n\
+  }\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("setjmp", HOSTED_SRC, b"A\nS\n7\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

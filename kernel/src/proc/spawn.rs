@@ -14807,6 +14807,43 @@ int main(void){ write(1, \"MAIN\\n\", 5); return 0; }\n";
     run_hosted_cc_case("ctor/dtor", HOSTED_SRC, b"CTOR\nMAIN\nDTOR\n")
 }
 
+/// Path Z Part 42 — ELF thread-local storage (`__thread`) in a freshly-tcc-built
+/// dynamic glibc binary.
+///
+/// No prior rung exercised the TLS ABI from a *compiled* program: the existing
+/// pthread self-test runs a pre-built `/bin/pthread`, not tcc output, so the
+/// full "tcc emits a `.tdata`/PT_TLS segment + local-exec TLS relocations →
+/// glibc's `__libc_setup_tls` copies the init image into the main thread's TLS
+/// block → `%fs`-relative access reads/writes it" path had never been proven for
+/// a binary built on-target.  This rung is the first to do so.  It also gives
+/// concrete end-to-end coverage of the per-task `%fs`-base save/restore that
+/// bugs F13/F14 fixed — those were validated against hand-written ELFs, never a
+/// real `__thread` consumer.
+///
+/// The program declares one initialised `__thread int` (42), prints its low
+/// decimal digit (proves the init image was copied → `%fs:off` reads 42), then
+/// reassigns it (7) and prints again (proves TLS is writable, not a read-only
+/// mapping of the template).  Markers use raw `write(2)` (unbuffered) so the
+/// captured bytes are exactly `27\n`.
+pub fn self_test_linux_real_glibc_cc_tls() -> KernelResult<()> {
+    // `__thread` on the main executable uses the local-exec TLS model: tcc emits
+    // a fixed negative %fs offset resolved at link time, and glibc initialises
+    // the block from the PT_TLS template it finds via AT_PHDR/AT_PHNUM.  No
+    // header tree needed — write(2) via an extern prototype.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+__thread int slate_tls = 42;\n\
+int main(void){\n\
+  char c = (char)('0' + (slate_tls % 10));\n\
+  write(1, &c, 1);\n\
+  slate_tls = 7;\n\
+  char d = (char)('0' + slate_tls);\n\
+  write(1, &d, 1);\n\
+  write(1, \"\\n\", 1);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("tls", HOSTED_SRC, b"27\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

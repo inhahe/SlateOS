@@ -2082,6 +2082,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 42: ELF thread-local storage (__thread) in a tcc-built dynamic
+    // glibc binary. tcc emits a .tdata/PT_TLS segment + local-exec TLS relocs;
+    // glibc's __libc_setup_tls copies the init image into the main thread's TLS
+    // block and %fs-relative access reads/writes it. First compiled-program TLS
+    // test; also end-to-end coverage of the per-task %fs-base save/restore (F13/F14).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_tls() {
+        serial_println!(
+            "WARNING: Path-Z TLS (__thread) C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

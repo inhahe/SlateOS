@@ -131,6 +131,30 @@ Line of investigation paused here pending a repro: fault is non-reproducible
    `&CURRENT_TASK_IDS[0]+2` and cross-reference the context-switch save/restore
    stack offsets.
 
+**Static audit refinement (2026-07-15b) — the context-switch assembly is
+provably clean, so finding 2's "switch-path layout bug" phrasing is wrong.**
+Reading `sched/context.rs` in full: `switch_context` only saves/restores the
+callee-saved GPRs, `rsp`, `rflags`, and FPU state via the `Context` struct at
+fixed offsets 0x00–0x38; it *never computes or references `&CURRENT_TASK_IDS`*
+at all (nor does `task_entry_trampoline`). The offsets match `task.rs`'s
+`Context`. Therefore the address value `&CURRENT_TASK_IDS[0]` cannot originate
+in the switch code — it must be **spilled/stored by a *different* function that
+takes `&CURRENT_TASK_IDS[cpu]`** (`set_current_task` at 860, `load_current_task`
+at 869, and the reaper/health snapshots at 3487/5242/5263/5309) and then land,
+via a wild write / stack overflow, on top of task 123's saved return-address
+slot. Mechanism is now: task 123 last suspended by calling `switch_context`
+(pushing a normal return address into `schedule()`); something overwrote that
+stack word with the value `&CURRENT_TASK_IDS[0]` (+2 is the resolver rounding to
+the nearest preceding symbol; the stored qword is the cell base); when 123 is
+resumed, `switch_context`'s final `ret` jumps to that data address and #GP/#PFs
+executing `.data` as code (cr2=0x97 is then whatever the garbage bytes there
+decode to dereference). **Next repro must catch which code path spills
+`&CURRENT_TASK_IDS[cpu]` to a stack slot that can alias another task's stack** —
+prime suspects are any `current_cpu_id()`/`load_current_task()` call made while
+running on a *borrowed* or already-freed stack, or an off-by-one stack write in
+the clone/exit path. The `dump_stack_scan` capture should show the exact stack
+address holding `&CURRENT_TASK_IDS[0]` relative to task 123's `rsp`.
+
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During

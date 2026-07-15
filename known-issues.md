@@ -206,11 +206,44 @@ Phase 5 progresses:
   (reports `0.0.0.0:port` — the daemon owns the interface IP and has no UDP
   `OP_LOCALADDR` yet), and `poll`/`epoll` → `poll_ready` (a bound dgram socket is
   writable + readable-when-queued; unbound is writable-only). Implicit ephemeral
-  auto-bind on the first `sendto`/`recvfrom` matches Linux. **Remaining follow-ups
-  (not blockers):** IPv6 datagrams (the daemon UDP layer has no v6 path — a
-  `bind`/`sendto` with `AF_INET6` returns `EAFNOSUPPORT`); a UDP `connect()` to fix
-  a default peer (so `send`/`recv` without an address work); and UDP `getsockname`
-  reporting the real interface IP (needs a UDP `OP_LOCALADDR`). **Limitations:** the
+  auto-bind on the first `sendto`/`recvfrom` matches Linux. The socket-gate
+  self-tests (`socket EPROTONOSUPPORT gating`) are switch-aware for the
+  `SOCK_DGRAM`/UDP case (ENOSYS off, daemon-backed fd on), and only protocol
+  `0`/`IPPROTO_UDP` route to the daemon — `IPPROTO_UDPLITE=136` stays ENOSYS
+  (unimplemented) rather than being silently aliased to plain UDP. Proven from
+  ring-3 by the `services/udpget` capstone (`socket(SOCK_DGRAM)`/`bind`/`sendto`/
+  `recvfrom` a DNS `A?` query, exit-code-decoded), spawned by
+  `run_persistent_netstack`, boot-validated switch-on (`[udpget] start`→`query
+  sent`→`OK: DNS reply`, `ring3 UDP capstone: OK … (exit 0)`). **Remaining
+  follow-ups (not blockers):**
+  - **IPv6 datagrams** — the daemon UDP layer has no v6 path, so a `bind`/`sendto`
+    with `AF_INET6` returns `EAFNOSUPPORT` (the fd is still created, matching
+    Linux, but every v6 op fails). This is the direct next increment; it mirrors
+    the TCP-over-IPv6 work (commit landing `connect6`) across the UDP stack:
+    **(1) netproto** — add `udp::write6`/`parse6` computing the RFC 8200 v6
+    pseudo-header checksum (the existing `udp::write`/`parse` are IPv4-only via
+    `pseudo_header_sum(&Ipv4Addr,…)`; model the v6 pseudo-header on `tcp.rs`'s v6
+    checksum path). **(2) daemon** (`services/netstack/src/main.rs`) — a
+    `send_udp6` (frame via the existing `send_ipv6`, `ipv6::PROTO_UDP`) and a v6
+    arm in `recv_udp_any` (`ETHERTYPE_IPV6` → parse `ipv6::Packet` → UDP), plus a
+    v6 address in `UdpSock`/the RX-queue source header (widen the in-band
+    24-byte header, or add a family tag); route `OP_UDP_SEND`/`OP_UDP_RECV` on a
+    new `OP_UDP_SEND6`/aux flag or a family byte in the SQE data window.
+    **(3) client** (`netstack_client.rs`) — `udp_send_to6(&[u8;16],port,buf)` and
+    `udp_recv_from6(&mut buf,nonblock) -> (i32,[u8;16],u16)`. **(4) socket**
+    (`net::socket`) — `dgram_send_to6`/`dgram_recv_from6` (or thread a family
+    into the existing ones). **(5) linux.rs** — parse the 28-byte `sockaddr_in6`
+    in `socket_dgram_bind_from_user`/`dispatch_dgram_sendto`/`dispatch_dgram_recvfrom`
+    (dispatch on `sa_family` 2→v4, 10→v6), and write a `sockaddr_in6` source back
+    from `recvfrom`. Boot-validate with a `self_test_udp6_dns` (v6 loopback) and,
+    ideally, an AF_INET6 arm in `udpget`.
+  - a UDP `connect()` to fix a default peer (so `send`/`recv` without an address
+    work, and `recv` filters to that peer) — mostly kernel-side state in
+    `SocketInner` plus a recv source-filter; and UDP `getsockname` reporting the
+    real interface IP (needs a UDP `OP_LOCALADDR`) — note this is only a
+    divergence for a socket bound to a specific local IP; our sockets bind
+    `INADDR_ANY`, for which Linux's `getsockname` correctly reports `0.0.0.0`.
+  **Limitations:** the
   receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
   is lossy); and it inherits the daemon's single-active-phase RX-demux limitation
   (`D-NETSTACK-RX-DEMUX`) — the `udp_pump` drops interleaved TCP frames while

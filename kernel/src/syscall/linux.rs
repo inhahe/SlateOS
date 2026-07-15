@@ -1029,6 +1029,21 @@ mod tcpopt {
     pub const TCP_NODELAY: i32 = 1;
 }
 
+/// `MSG_*` per-call flags for `send(2)`/`sendto(2)`/`recv(2)`/`recvfrom(2)`
+/// (the `flags` argument, arg3).  Values mirror Linux `include/linux/socket.h`.
+///
+/// Only `MSG_DONTWAIT` changes behaviour; the rest are silently ignored, which
+/// is already correct for our daemon-backed streams — notably `MSG_NOSIGNAL`
+/// (0x4000) is a no-op because we never raise `SIGPIPE` (a broken pipe surfaces
+/// as the `EPIPE` return value instead).
+mod msgflags {
+    /// Per-call non-blocking override.  Behaves like the fd's `O_NONBLOCK` was
+    /// set for this one call, regardless of the fd's actual status flags: a
+    /// receive with no data ready, or a send whose window is full, returns
+    /// `EAGAIN` instead of blocking on the daemon.
+    pub const MSG_DONTWAIT: u32 = 0x40;
+}
+
 // ---------------------------------------------------------------------------
 // SA_RESTART — kernel-internal syscall-restart sentinels and decision logic
 // ---------------------------------------------------------------------------
@@ -3732,7 +3747,7 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
         // AF_INET stream socket — `write(2)` is `send(2)` with no flags.
-        HandleKind::Socket => dispatch_socket_write(entry, buf, len),
+        HandleKind::Socket => dispatch_socket_write(entry, buf, len, false),
     }
 }
 
@@ -3747,7 +3762,7 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 /// Honours the fd's `O_NONBLOCK` status flag: when set, a send that would block on
 /// a full send window returns `-EAGAIN` (before any bytes are accepted) instead of
 /// waiting on the daemon.
-fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64, force_nonblock: bool) -> SyscallResult {
     if len == 0 {
         return SyscallResult::ok(0);
     }
@@ -3766,7 +3781,8 @@ fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    // Non-blocking if the fd is O_NONBLOCK *or* the caller passed MSG_DONTWAIT.
+    let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
     match crate::net::socket::send(h, &kbuf, nonblock) {
         Ok(n) => SyscallResult::ok(i64::from(n)),
         Err(e) => linux_err(linux_errno_for(e)),
@@ -3779,7 +3795,7 @@ fn dispatch_socket_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 ///
 /// Honours the fd's `O_NONBLOCK` status flag: when set, a receive with no data
 /// ready returns `-EAGAIN` instead of blocking on the daemon.
-fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64, force_nonblock: bool) -> SyscallResult {
     if cap == 0 {
         return SyscallResult::ok(0);
     }
@@ -3789,7 +3805,8 @@ fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     }
     let mut kbuf = alloc::vec![0u8; cap_usize];
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    // Non-blocking if the fd is O_NONBLOCK *or* the caller passed MSG_DONTWAIT.
+    let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
     let n = match crate::net::socket::recv(h, &mut kbuf, nonblock) {
         Ok(v) => v,
         Err(e) => return linux_err(linux_errno_for(e)),
@@ -4081,7 +4098,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // silence.  Reading a playback substream is EINVAL, matching Linux.
         HandleKind::AlsaPcm => dispatch_alsa_pcm_read(entry, buf, cap),
         // AF_INET stream socket — `read(2)` is `recv(2)` with no flags.
-        HandleKind::Socket => dispatch_socket_read(entry, buf, cap),
+        HandleKind::Socket => dispatch_socket_read(entry, buf, cap, false),
     }
 }
 
@@ -36791,13 +36808,17 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
     // Path B: `send(2)`/`sendto(2)` on a connected daemon-backed stream socket
     // forwards the payload to the daemon.  A destination address on a connected
     // stream socket is ignored (Linux ignores it too, or returns EISCONN — we
-    // take the permissive path and just send).  MSG_* flags (args.arg3) are not
-    // yet honoured (documented limitation).
+    // take the permissive path and just send).  MSG_DONTWAIT (args.arg3) forces a
+    // per-call non-blocking send; MSG_NOSIGNAL is a harmless no-op (we never raise
+    // SIGPIPE — a broken pipe surfaces as EPIPE).  Other MSG_* flags are ignored.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
     {
-        return dispatch_socket_write(entry, buf, args.arg2);
+        #[allow(clippy::cast_possible_truncation)]
+        let msg_flags = args.arg3 as u32;
+        let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
+        return dispatch_socket_write(entry, buf, args.arg2, force_nonblock);
     }
     linux_err(errno::EBADF)
 }
@@ -36859,17 +36880,21 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     }
     // Path B: `recv(2)`/`recvfrom(2)` on a connected daemon-backed stream socket
     // returns bytes from the daemon.  The fd's `O_NONBLOCK` status flag is honoured
-    // (no data ready → EAGAIN, via dispatch_socket_read).  When the caller supplies
+    // (no data ready → EAGAIN, via dispatch_socket_read), and MSG_DONTWAIT
+    // (args.arg3) forces a per-call non-blocking receive.  When the caller supplies
     // a non-NULL source-address out-param (args.arg4 / args.arg5) it is filled with
     // the connected peer's endpoint on a successful receive, matching Linux (a
-    // connected stream socket reports its fixed peer).  MSG_* flags (args.arg3) are
-    // not yet honoured.
+    // connected stream socket reports its fixed peer).  Other MSG_* flags (e.g.
+    // MSG_PEEK, MSG_WAITALL) are not yet honoured.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
     {
         let raw_handle = entry.raw_handle;
-        let res = dispatch_socket_read(entry, buf, args.arg2);
+        #[allow(clippy::cast_possible_truncation)]
+        let msg_flags = args.arg3 as u32;
+        let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
+        let res = dispatch_socket_read(entry, buf, args.arg2, force_nonblock);
         // Only populate src_addr on a successful receive (non-negative byte
         // count); an error (e.g. EAGAIN) leaves the caller's buffer untouched.
         if res.value >= 0 && args.arg4 != 0 {

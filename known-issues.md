@@ -168,10 +168,16 @@ Phase 5 progresses:
   socket (`sys_recvfrom` → `socket_write_src_addr`, reusing the getpeername
   serialisers: `sockaddr_in` for AF_INET, `sockaddr_in6` for AF_INET6; short
   buffers truncate, `*addrlen` written back full). Only touched on a non-negative
-  byte count so an EAGAIN leaves the buffer alone. Remaining gap: **`MSG_*` flags
-  ignored** on `sendto`/`recvfrom` (arg3), and true datagram (UDP) source
-  addresses await the daemon-backed `SOCK_DGRAM` path (today's daemon sockets are
-  connected streams, so the peer *is* the source).
+  byte count so an EAGAIN leaves the buffer alone. **`MSG_DONTWAIT` (arg3) is now
+  honoured** on `send`/`sendto`/`recv`/`recvfrom`: it forces a per-call
+  non-blocking transfer (→ `EAGAIN` on a full send window / empty receive)
+  regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
+  `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
+  never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
+  `MSG_*` flags (`MSG_PEEK`, `MSG_WAITALL`, `MSG_OOB`, `MSG_TRUNC`) are still
+  ignored, and true datagram (UDP) source addresses await the daemon-backed
+  `SOCK_DGRAM` path (today's daemon sockets are connected streams, so the peer
+  *is* the source).
 - **IPv6 connect: daemon+ring+client+socket-fd DONE.** The daemon speaks full
   TCP-over-IPv6 with no state-machine duplication (`TcpConn.dst6: Option<[u8;16]>`
   dispatching `emit`/`recv_one_seg` to `send_tcp6`/`recv_tcp_seg6`; v6 framing,

@@ -973,6 +973,7 @@ pub mod errno {
     pub const ELOOP: i32 = 40;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    pub const ENOPROTOOPT: i32 = 92;
     pub const EPROTONOSUPPORT: i32 = 93;
     pub const ESOCKTNOSUPPORT: i32 = 94;
     pub const EOPNOTSUPP: i32 = 95;
@@ -991,13 +992,41 @@ pub mod errno {
 mod sol {
     /// Socket-level options (`SOL_SOCKET`).
     pub const SOL_SOCKET: i32 = 1;
+    /// TCP-level options (`IPPROTO_TCP`), also the `getsockopt`/`setsockopt` level.
+    pub const IPPROTO_TCP: i32 = 6;
 }
 
-/// `SOL_SOCKET`-level option names (Linux `SO_*`).
+/// `SOL_SOCKET`-level option names (Linux `SO_*`, asm-generic values).
 mod so {
+    /// `SO_REUSEADDR` — allow reuse of a local address (a `bool`/`int`).
+    pub const SO_REUSEADDR: i32 = 2;
+    /// `SO_TYPE` — read-only: the socket's type (`SOCK_STREAM` for our sockets).
+    pub const SO_TYPE: i32 = 3;
     /// `SO_ERROR` — read and clear the pending socket error (an `int`). Used by a
     /// non-blocking `connect()`er after `poll(POLLOUT)` to learn the outcome.
     pub const SO_ERROR: i32 = 4;
+    /// `SO_BROADCAST` — permit sending to a broadcast address (a `bool`/`int`).
+    pub const SO_BROADCAST: i32 = 6;
+    /// `SO_SNDBUF` — send-buffer size hint (an `int`).
+    pub const SO_SNDBUF: i32 = 7;
+    /// `SO_RCVBUF` — receive-buffer size hint (an `int`).
+    pub const SO_RCVBUF: i32 = 8;
+    /// `SO_KEEPALIVE` — enable TCP keepalive probes (a `bool`/`int`).
+    pub const SO_KEEPALIVE: i32 = 9;
+    /// `SO_LINGER` — linger-on-close (a `struct linger`, 8 bytes).
+    pub const SO_LINGER: i32 = 13;
+    /// `SO_REUSEPORT` — allow multiple binds to the same port (a `bool`/`int`).
+    pub const SO_REUSEPORT: i32 = 15;
+
+    /// `SOCK_STREAM` — the value `SO_TYPE` reports for a stream socket.
+    pub const SOCK_STREAM: i32 = 1;
+}
+
+/// `IPPROTO_TCP`-level option names (Linux `TCP_*`).
+mod tcpopt {
+    /// `TCP_NODELAY` — disable Nagle (a `bool`/`int`). Our daemon never coalesces
+    /// (it sends each segment immediately), so it is effectively always on.
+    pub const TCP_NODELAY: i32 = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -37024,6 +37053,45 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Path B userspace-netstack cutover: for a real daemon-backed AF_INET socket,
+    // accept the socket options that a typical TCP client (curl/wget/glibc) sets
+    // during connection setup.  Our daemon has no per-socket tunables — it always
+    // sends each segment immediately (TCP_NODELAY-equivalent) and buffers are
+    // fixed — so these are recorded as no-op successes rather than errored.  An
+    // unrecognised option returns ENOPROTOOPT (Linux's "protocol doesn't know
+    // this option"), never EBADF, so probing programs can feature-detect cleanly.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let optname = args.arg2 as i32;
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let accepted = match level {
+            // SOL_SOCKET: common client toggles + buffer-size hints.  All are
+            // no-ops for our daemon (fixed buffers, no keepalive/linger yet),
+            // but returning success keeps glibc/curl setup paths happy.
+            l if l == sol::SOL_SOCKET => matches!(
+                optname,
+                so::SO_REUSEADDR
+                    | so::SO_REUSEPORT
+                    | so::SO_KEEPALIVE
+                    | so::SO_BROADCAST
+                    | so::SO_SNDBUF
+                    | so::SO_RCVBUF
+                    | so::SO_LINGER
+            ),
+            // IPPROTO_TCP: TCP_NODELAY (always effectively on for us).
+            l if l == sol::IPPROTO_TCP => matches!(optname, tcpopt::TCP_NODELAY),
+            _ => false,
+        };
+        if accepted {
+            return SyscallResult::ok(0);
+        }
+        // Recognised socket, unrecognised option → ENOPROTOOPT (not EBADF).
+        return linux_err(errno::ENOPROTOOPT);
+    }
     linux_err(errno::EBADF)
 }
 
@@ -37093,6 +37161,55 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: validated 4 writable bytes at optval above; copy_to_user re-checks.
         if let Err(e) = unsafe {
             crate::mm::user::copy_to_user(err_bytes.as_ptr(), args.arg3, 4)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let four = 4u32.to_ne_bytes();
+        // SAFETY: validated 4 writable bytes at optlen above; copy_to_user re-checks.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(four.as_ptr(), args.arg4, 4)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        return SyscallResult::ok(0);
+    }
+    // Path B: other read-only int options a daemon-backed AF_INET socket can
+    // answer from constants.  Our daemon has fixed behaviour (always nodelay,
+    // fixed buffers, keepalive not yet wired), so these are reported as static
+    // values.  An unrecognised option on a real socket returns ENOPROTOOPT.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        // Our fixed per-direction buffer size hint (bytes).  Chosen to be a
+        // plausible non-zero value so callers sizing reads/writes off it behave.
+        const BUF_HINT: i32 = 65536;
+        let value: i32 = match level {
+            l if l == sol::SOL_SOCKET => match optname {
+                so::SO_TYPE => so::SOCK_STREAM,
+                so::SO_RCVBUF | so::SO_SNDBUF => BUF_HINT,
+                so::SO_KEEPALIVE | so::SO_REUSEADDR | so::SO_REUSEPORT
+                | so::SO_BROADCAST => 0,
+                _ => return linux_err(errno::ENOPROTOOPT),
+            },
+            l if l == sol::IPPROTO_TCP => match optname {
+                // Daemon sends each segment immediately → Nagle effectively off.
+                tcpopt::TCP_NODELAY => 1,
+                _ => return linux_err(errno::ENOPROTOOPT),
+            },
+            _ => return linux_err(errno::ENOPROTOOPT),
+        };
+        // optval must be able to hold an int (4 bytes).
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+        let val_bytes = value.to_ne_bytes();
+        // SAFETY: validated 4 writable bytes at optval above; copy_to_user re-checks.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(val_bytes.as_ptr(), args.arg3, 4)
         } {
             return linux_err(linux_errno_for(e));
         }

@@ -140,6 +140,21 @@ Phase 5 progresses:
   fd lookup, so a bogus fd still wins with EBADF; `KernelError::BrokenPipe`→EPIPE).
   Validated by `self_test_listen_accept` step 6
   (`shutdown(SHUT_WR)→EPIPE + shutdown(SHUT_RD)→EOF ok`).
+- **`setsockopt`/`getsockopt` compat DONE (client options).** `sys_setsockopt`
+  no longer blanket-returns EBADF for daemon-backed sockets: it accepts the
+  options a typical TCP client (curl/wget/glibc) sets during setup —
+  `SOL_SOCKET`: `SO_REUSEADDR`/`SO_REUSEPORT`/`SO_KEEPALIVE`/`SO_BROADCAST`/
+  `SO_SNDBUF`/`SO_RCVBUF`/`SO_LINGER`, and `IPPROTO_TCP`: `TCP_NODELAY` — as
+  no-op successes (the daemon has no per-socket tunables: fixed buffers, always
+  sends each segment immediately). Unknown options return `ENOPROTOOPT` (not
+  EBADF), so probes feature-detect cleanly. `sys_getsockopt` gained a matching
+  read side beyond the existing `SO_ERROR`: `SO_TYPE`→`SOCK_STREAM`,
+  `SO_RCVBUF`/`SO_SNDBUF`→65536, `TCP_NODELAY`→1, `SO_KEEPALIVE`/`SO_REUSEADDR`/
+  `SO_REUSEPORT`/`SO_BROADCAST`→0, unknown→`ENOPROTOOPT`. Both Path-B branches
+  gate on `userspace_enabled()` + a real Socket fd; kernel-context callers and
+  non-socket fds keep the prior EBADF terminal. Not a strict 5.7 regression gate
+  (the resident path also stubs these), but a real compat gap on the path to
+  running unmodified Linux network programs (the HTTP-client capstone).
 - **Capacity caps** inherited from `NetstackConn`: send chunked to ≤1024 B,
   recv ≤512 B per call (callers must loop). Not a correctness bug, but small.
 

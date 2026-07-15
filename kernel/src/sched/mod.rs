@@ -2224,6 +2224,22 @@ fn dump_all_tasks_serial() {
              last_rip={:#x} ({})",
             cpu, hb, cs, has_work, rip, class,
         );
+
+        // Full call stack for the wedged CPU, not just its lone RIP. Walk the
+        // frame-pointer chain from the RBP the timer ISR sampled at the same
+        // tick as `last_rip` (see rip_sample::record_last_rbp). A single RIP has
+        // repeatedly been inconclusive on this project (kernel_text, budstat,
+        // gen_dmastat); the surrounding frames name the actual caller path — the
+        // same diagnostic the NMI hard-lockup dump produces, but on the softer
+        // timer-driven hang path. Only meaningful when the CPU was in kernel
+        // text (a user RBP is untrusted and `walk_from` would reject it anyway).
+        if rip >= 0xffff_ffff_8000_0000 {
+            let rbp = crate::rip_sample::last_rbp(cpu);
+            if rbp != 0 {
+                serial_println!("[liveness]   cpu{} stack (rbp-chain from {:#x}):", cpu, rbp);
+                crate::backtrace::print_from(rbp);
+            }
+        }
     }
 
     // Global heap-lock holder: a task wedged while holding `HEAP.inner` hangs

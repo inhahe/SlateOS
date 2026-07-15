@@ -1017,6 +1017,30 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // *where* each CPU was executing at the moment the system wedged.
     crate::rip_sample::record_last_rip(frame.rip, crate::smp::current_cpu_index());
 
+    // Always-on per-CPU last-RBP (frame pointer) snapshot, paired with the RIP
+    // above.  The liveness SYSTEM-HANG dump feeds this to `backtrace::print_from`
+    // to walk the wedged CPU's call stack — turning an inconclusive single RIP
+    // into a full backtrace (the same diagnostic the NMI hard-lockup path emits).
+    //
+    // The interrupted RBP is not in the CPU-pushed `InterruptStackFrame`; it is a
+    // general register the IRQ stub saved.  The `irq_stub!` macro pushes, below
+    // the CPU frame: dummy-error, rax, rcx, rdx, rbx, rbp, … and loads
+    // `rdi = rsp + 128` (the `frame` pointer).  Counting down from `frame`:
+    // [-8]=error, [-16]=rax, [-24]=rcx, [-32]=rdx, [-40]=rbx, [-48]=rbp — so the
+    // saved RBP is 6 words below `frame`.  `frame` still points at the
+    // interrupted task stack even though this handler runs on the IRQ stack
+    // (`run_on_irq_stack` relocates RSP, not the frame), so the save area is
+    // valid, mapped kernel stack.
+    let frame_ptr = frame as *const crate::idt::InterruptStackFrame as *const u64;
+    // SAFETY: `frame_ptr` = interrupted `rsp + 128` (set by the IRQ stub), so the
+    // six words below it are the pushed dummy-error + rax/rcx/rdx/rbx/rbp save
+    // slots — all within the mapped interrupted kernel stack.  8-byte aligned;
+    // volatile so the read is not elided/reordered.  For a ring-3 interrupt this
+    // reads a user RBP value, which is only ever *stored* here (never walked
+    // unless it validates as a kernel frame pointer in the dump), so it is safe.
+    let interrupted_rbp = unsafe { core::ptr::read_volatile(frame_ptr.sub(6)) };
+    crate::rip_sample::record_last_rbp(interrupted_rbp, crate::smp::current_cpu_index());
+
     // --- ISR latency measurement: record entry TSC ---
     //
     // When benchmarking is active, capture the TSC at ISR entry and after

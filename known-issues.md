@@ -1248,11 +1248,50 @@ The heap-lock owner instrumentation (`HEAP_LOCK_OWNER`/`HEAP_LOCK_SITE` +
 **kept** — it is cheap, and it is what proved the heap was innocent; it will name
 the holder immediately should a *heap*-lock deadlock ever occur.
 
-**Validation:** rebuilt; boots green; re-running the armed `wedge-soak.sh` to
-confirm the wedge no longer reproduces across many armed boots. If a distinct
-`[liveness] SYSTEM HANG … all CPUs idle-ticking` *lost-wakeup* (a blocked task,
-no spinning CPU) still appears in future soaks, that is a **separate** issue from
-this now-fixed spinlock deadlock and should get its own entry.
+**Validation — DONE (2026-07-15).** Rebuilt; boots green; re-ran the armed
+`wedge-soak.sh`. **Four consecutive clean armed boots** (soak-20260715-020155
+iters 01–04, 97/101/101/92 s to BOOT_OK) with **no `spin_loop_hint` wedge** — the
+`spin_loop_hint ← liveness_boot_deadline_check ← timer_tick` deadlock no longer
+reproduces. This spinlock-deadlock issue is considered **fixed**. As predicted,
+a *distinct* wedge with a different signature then appeared (iter05, see next
+entry) — that is a separate lost-wakeup/hang issue, not this deadlock.
+
+---
+
+**SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
+(first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
+On the very soak that validated the serial fix, iter05 caught a *different* wedge
+that the NMI watchdog reported:
+- **Wedged RIP = `0xffffffff80e6d896` = `kernel::fs::procfs::gen_dmastat+1270`
+  (0x4f6)** — genuinely inside `gen_dmastat`, not a leftover symbol.
+- **`RFL=0x202` (IF=1)** — interrupts *enabled*, so this is NOT the IRQ-off
+  spinlock deadlock; the CPU is not spinning with IF=0.
+- `RBX=0xffffffff80f8f7a0`, `CR2=0x60000ee200`.
+- Serial tail: `[spawn] Process 225 running ("/tmp/restart-init.elf")` then
+  `[liveness] SYSTEM HANG … all CPUs idle-ticking`, `heap-lock: unlocked`, and a
+  2-task dump: **tid=0 `"prctl-batch269"` state=Ready**, **tid=189
+  `"/tmp/restart-init.elf"` state=Running cpu=0**, `cpu0 last_rip=gen_dmastat`.
+
+This is the recurring `restart-init.elf`(Running) / `prctl-batch269`(Ready)
+spawn-dispatch signature from earlier in this cluster. Because `record_last_rip`
+is called *unconditionally* from the timer ISR, `last_rip=gen_dmastat` means cpu0
+was *actively executing* `gen_dmastat` at the last tick (not parked idle) — which
+is in tension with a pure lost-wakeup model and hints at a busy path (a loop or
+repeated re-entry) inside or above `gen_dmastat`. `gen_dmastat` itself
+(`fs/procfs.rs:10081`) is straight-line with no obvious infinite loop, and
+`dmastat::device_stats()`/`stats()` are bounded Vec clones — so a **single** RIP
+frame is inconclusive (`last_rip` has been a red herring before: kernel_text,
+budstat, now gen_dmastat).
+
+**Proper next step (in progress):** make the liveness `SYSTEM HANG` dump
+(`sched::dump_all_tasks_serial`) capture a full **rbp-chain backtrace of the
+stuck CPU**, the way the NMI path does (`idt.rs::dump_kernel_backtrace` recovers
+the interrupted RBP via `read_volatile(frame_ptr.sub(6))` from the ISR-stub save
+area, then walks the chain with `backtrace::walk_from`). The liveness check runs
+in the timer ISR, so to walk the *interrupted* (gen_dmastat) stack rather than
+the ISR's own, the interrupt frame's saved RBP must be threaded into the dump.
+Once done, the next catch of this wedge yields a conclusive call stack instead of
+a lone RIP.
 
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The

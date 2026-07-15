@@ -194,6 +194,21 @@ static LAST_RIP: [AtomicU64; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
+/// Per-CPU last interrupted RBP (frame pointer), updated every timer tick
+/// alongside [`LAST_RIP`].
+///
+/// This is what turns the liveness watchdog's SYSTEM-HANG dump from a single
+/// inconclusive RIP into a full call stack: the dump feeds this value to
+/// [`crate::backtrace::print_from`] to walk the wedged CPU's frame-pointer
+/// chain — exactly the diagnostic the NMI hard-lockup path produces, but on the
+/// (softer) timer-driven hang path that fires while interrupts are still
+/// enabled.  A single RIP has repeatedly been a red herring on this project
+/// (kernel_text, budstat, gen_dmastat); the surrounding frames disambiguate.
+static LAST_RBP: [AtomicU64; MAX_CPUS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_CPUS]
+};
+
 /// Record the RIP a timer interrupt preempted on `cpu`.  Always on.
 ///
 /// # Performance
@@ -209,6 +224,23 @@ pub fn record_last_rip(rip: u64, cpu: usize) {
 #[must_use]
 pub fn last_rip(cpu: usize) -> u64 {
     LAST_RIP.get(cpu).map_or(0, |slot| slot.load(Ordering::Relaxed))
+}
+
+/// Record the RBP (frame pointer) a timer interrupt preempted on `cpu`.
+///
+/// The caller recovers the interrupted RBP from the IRQ stub's register save
+/// area (see the timer ISR).  Always on; one relaxed atomic store per tick.
+#[inline]
+pub fn record_last_rbp(rbp: u64, cpu: usize) {
+    if let Some(slot) = LAST_RBP.get(cpu) {
+        slot.store(rbp, Ordering::Relaxed);
+    }
+}
+
+/// Read the last interrupted RBP recorded on `cpu` (0 if never sampled).
+#[must_use]
+pub fn last_rbp(cpu: usize) -> u64 {
+    LAST_RBP.get(cpu).map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 // ---------------------------------------------------------------------------

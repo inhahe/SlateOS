@@ -1632,6 +1632,18 @@ the exact lock via the backtrace; convert *that* lock to `crate::sync::Mutex`
 preempt_disable/enable). Whether to do a broader proactive audit/conversion is a
 larger architectural tradeoff — see `open-questions.md`.
 
+**END-TO-END VALIDATION 2026-07-15 — ring-3 socket capstone passes on the
+switch-on spawn-heavy path.** With both holder-preemption fixes in, the deferred
+netstack Phase-5.6 ring-3 HTTP capstone (`services/httpget`, a Linux-ABI ring-3
+ELF doing raw `socket()`/`connect()`/`write()`/`read()`/`close()` over the
+daemon-backed fd path, spawned by `run_persistent_netstack`) now boots and runs
+green switch-on: `Created process 228 ("httpget")` -> `[httpget] connected` ->
+`[httpget] OK: HTTP response` -> `ring3 HTTP capstone: OK ... (exit 0)`. This is
+the spawn-heavy container-exec/ring-3 dispatch path that previously wedged; a
+15/15-clean switch-on wedge soak plus this live spawn confirm the container-exec /
+ring-3 spawn-dispatch race is resolved for practical purposes. (The self-test is
+bounded by a 15 s Zombie-poll deadline so a stuck fetch can never wedge the boot.)
+
 **IRQ-stack overflow wedge (one of the two) — ROOT-CAUSED AND FIXED 2026-07-03.**
 The
 first-NMI one-shot backtrace (added to `idt.rs::handle_nmi` this session so a

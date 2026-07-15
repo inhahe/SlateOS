@@ -102,6 +102,49 @@ to recover the real caller frame (the hijacked return address's origin).
 Line of investigation paused here pending a repro: fault is non-reproducible
 (~1/5) and one capture cannot pin the exact corrupted pointer.
 
+### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
+
+**Symptom (1 occurrence, 2026-07-15):** During
+`self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
+main.rs:1791: a glibc program that `fork()`s, the child `execl()`s a second
+ELF, the parent `waitpid()`s), a boot went silent. The last serial lines were
+the normal end of that test's process teardown:
+
+```
+[exec] Process 165 exec complete: entry=0x…, rsp=0x…
+[mmap] Lazy mapped 0x6000212000..0x6000216000 (1 frames, demand-paged)
+[thread] Process 165 has no threads left — now zombie   (execed child)
+[thread] Process 164 has no threads left — now zombie   (fork parent)
+[sched] Task 130 exiting
+```
+
+…then **no further output** and the 480 s boot-test timeout fired. Note there
+is **no `#PF`/PANIC/FATAL** — this is a *hang* (the scheduler idled with no
+runnable task, or a reap/`waitpid` wait never woke), NOT the `#PF` control-flow
+hijack tracked in **B-PTHREAD-TEARDOWN-PF** above, and it is at a different
+test (fork+exec, not pthread). The immediately-following boot (identical binary)
+reached `BOOT_OK` in 89 s, so it is intermittent, not a hard regression.
+
+**Distinct from the two known pthread issues:** B-PTHREAD-TEARDOWN-PF is a hard
+`#PF`; B-PTHREAD-YIELDBUDGET (resolved) was a yield-budget hang inside the
+*pthread* test. This hang is in the *fork+exec* test, after both child and
+parent have gone zombie — pointing at the parent's `waitpid`/reap wakeup or the
+scheduler's idle transition when the last task exits, rather than at thread
+teardown.
+
+**Not caused by the change it surfaced under:** it appeared while validating
+Path Z Part 43 (a signal self-test registered at main.rs:2106, which never even
+ran this boot — the hang is ~300 lines of test earlier). The change only
+perturbed timing.
+
+**Reproduce:** run `bash scripts/boot-test.sh` repeatedly. Non-deterministic;
+observed once. **PROPER FIX (needs a repro):** on the next occurrence, break in
+with the debugger (or add a watchdog that dumps all task states after N idle
+ticks) to see whether the parent task is blocked in `waitpid` with the child
+already reaped (missed wakeup) or whether the run queue is genuinely empty with
+a task still `Zombie`-but-not-reaped. Audit the `wait4`/`waitpid` wakeup path
+and the "last thread exits → parent notified" hand-off for a lost-wakeup race.
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
 **RESOLVED 2026-07-14 (option (b) — IPC provider-PID + `shm::authorize` grant).**

@@ -174,10 +174,14 @@ Phase 5 progresses:
   regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
   `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
   never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
-  `MSG_*` flags (`MSG_PEEK`, `MSG_WAITALL`, `MSG_OOB`, `MSG_TRUNC`) are still
-  ignored, and true datagram (UDP) source addresses await the daemon-backed
-  `SOCK_DGRAM` path (today's daemon sockets are connected streams, so the peer
-  *is* the source).
+  `MSG_*` flags (`MSG_PEEK`, `MSG_OOB`, `MSG_TRUNC`) are still ignored, and true
+  datagram (UDP) source addresses await the daemon-backed `SOCK_DGRAM` path
+  (today's daemon sockets are connected streams, so the peer *is* the source).
+  **`MSG_WAITALL` (arg3) is now honoured** on `recv`/`recvfrom`: on a blocking
+  socket it loops (`socket_recv_waitall`, ≤4 KiB chunks) until the full request
+  is read, terminating early only on EOF or error; under `O_NONBLOCK`/
+  `MSG_DONTWAIT` it degrades to the single-shot receive, matching Linux.
+  (`MSG_PEEK` remains unimplemented — it needs a non-consuming daemon read.)
 - **`sendmsg`/`recvmsg` now served (parity fix).** The Linux-ABI `sendmsg(2)`/
   `recvmsg(2)` on a connected daemon-backed stream socket no longer terminate in
   EBADF: `socket_sendmsg` gathers the `msg_iov` scatter/gather list into one

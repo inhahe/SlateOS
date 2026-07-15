@@ -1043,6 +1043,12 @@ mod msgflags {
     /// receive with no data ready, or a send whose window is full, returns
     /// `EAGAIN` instead of blocking on the daemon.
     pub const MSG_DONTWAIT: u32 = 0x40;
+    /// Block a receive until the *full* requested length has been read (rather
+    /// than returning as soon as any data is available).  Terminates early only
+    /// on EOF (peer closed), an error, or when the socket is non-blocking
+    /// (`O_NONBLOCK`/`MSG_DONTWAIT`), in which case it degrades to a single-shot
+    /// receive of whatever is available.
+    pub const MSG_WAITALL: u32 = 0x100;
 }
 
 // ---------------------------------------------------------------------------
@@ -3822,6 +3828,62 @@ fn dispatch_socket_read(entry: FdEntry, buf: u64, cap: u64, force_nonblock: bool
         }
     }
     SyscallResult::ok(i64::from(n))
+}
+
+/// `MSG_WAITALL` receive on a blocking daemon-backed stream socket: keep
+/// receiving (in ≤4 KiB chunks) into `[buf, buf+len)` until the full `len`-byte
+/// request is satisfied.  Terminates early — returning the bytes delivered so
+/// far — only on EOF (peer closed), or on an error/fault after some bytes were
+/// already delivered (an error before any byte propagates the error).
+///
+/// Only reached on a blocking receive; `sys_recvfrom` uses the single-shot
+/// [`dispatch_socket_read`] when the socket is non-blocking, so this loop never
+/// spins on `EAGAIN`.  Like Linux, `MSG_WAITALL` may block indefinitely if the
+/// peer stalls without closing — that is the caller's contract.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    let total_req = usize::try_from(len).unwrap_or(usize::MAX);
+    if total_req == 0 {
+        return SyscallResult::ok(0);
+    }
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let mut kbuf = alloc::vec![0u8; 4096];
+    let mut done = 0usize;
+    while done < total_req {
+        let chunk = (total_req - done).min(4096);
+        let dst = buf.wrapping_add(done as u64);
+        if let Err(e) = crate::mm::user::validate_user_write(dst, chunk) {
+            if done > 0 {
+                return SyscallResult::ok(done as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        let n = match crate::net::socket::recv(h, &mut kbuf[..chunk], false) {
+            Ok(v) => v,
+            Err(e) => {
+                if done > 0 {
+                    return SyscallResult::ok(done as i64);
+                }
+                return linux_err(linux_errno_for(e));
+            }
+        };
+        let n_usize = usize::try_from(n).unwrap_or(0).min(chunk);
+        if n_usize == 0 {
+            break; // peer closed — return the short count.
+        }
+        // SAFETY: validate_user_write confirmed `chunk` bytes writable at `dst`;
+        // `n_usize <= chunk` and `kbuf` holds at least `n_usize` valid bytes.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), dst, n_usize) }
+        {
+            if done > 0 {
+                return SyscallResult::ok(done as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        done = done.saturating_add(n_usize);
+    }
+    SyscallResult::ok(done as i64)
 }
 
 /// Memfd write — copy `len` bytes from user buffer into the memfd at
@@ -36892,10 +36954,20 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
         && entry.kind == HandleKind::Socket
     {
         let raw_handle = entry.raw_handle;
+        let status_flags = entry.status_flags;
         #[allow(clippy::cast_possible_truncation)]
         let msg_flags = args.arg3 as u32;
         let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
-        let res = dispatch_socket_read(entry, buf, args.arg2, force_nonblock);
+        // MSG_WAITALL blocks until the full request is read — but only on a
+        // blocking socket; under O_NONBLOCK / MSG_DONTWAIT it degrades to a
+        // single-shot receive of whatever is available (Linux semantics).
+        let effective_nonblock = force_nonblock || (status_flags & oflags::O_NONBLOCK) != 0;
+        let waitall = (msg_flags & msgflags::MSG_WAITALL) != 0;
+        let res = if waitall && !effective_nonblock {
+            socket_recv_waitall(entry, buf, args.arg2)
+        } else {
+            dispatch_socket_read(entry, buf, args.arg2, force_nonblock)
+        };
         // Only populate src_addr on a successful receive (non-negative byte
         // count); an error (e.g. EAGAIN) leaves the caller's buffer untouched.
         if res.value >= 0 && args.arg4 != 0 {

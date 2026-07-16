@@ -324,6 +324,17 @@ site so a proper root-cause fix can follow. Until then this is WATCH — rare,
 and the cascade (the part that took down the whole machine hard) is now contained
 to a clean halt.
 
+**UPDATE 2026-07-16 — reproduction-hunt soak came back clean.** Ran an 80-iter
+`wedge-soak.sh` (`soak-20260716-014354`) specifically to re-catch this with the
+new diagnostics: **0 catches in 80 boots** (all passed, e.g. iter80 BOOT_OK
+121s). Combined with the original 1/40, the empirical rate is ~1-in-120 — too
+rare to force in a bounded soak. Ending the *dedicated* hunt (per the
+no-idle-loop rule: a clean verification loop is done). This stays WATCH: the
+diagnostics fix (commit 6fb1597aa) is permanently in place, so the **next**
+spontaneous occurrence — in any future soak or a normal boot — will self-report a
+single clean fault line plus a stack-scan naming the null pointer's caller, which
+is what's needed to pin and fix the root cause. No further action until then.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

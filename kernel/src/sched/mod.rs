@@ -271,6 +271,59 @@ static SCHED_LOCK_OWNER: AtomicU64 = AtomicU64::new(u64::MAX);
 static SCHED_LOCK_SITE: AtomicUsize = AtomicUsize::new(0);
 static SCHED_LOCK_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+// Per-CPU stack of SCHED acquire sites currently in flight.
+//
+// Unlike SCHED_LOCK_OWNER (written only *after* the physical spinlock is
+// acquired), a site is pushed here *before* `self.0.lock()` and popped when the
+// guard drops.  This captures two failure modes the OWNER record alone cannot,
+// both revealed by the iter21 wedge (SCHED physically held but OWNER cleared):
+//   1. A holder wedged in the tiny window between acquiring the physical
+//      spinlock and calling `record()` — OWNER is still `u64::MAX`, but the
+//      acquire site was already pushed.
+//   2. A fault/IRQ handler re-entering `SCHED.lock()` on the *same* CPU while
+//      an outer frame still holds (or is mid-acquire of) it — the stack shows
+//      the full nesting chain, naming BOTH the outer holder and the inner
+//      deadlocking acquirer, which is exactly the single-CPU self-deadlock the
+//      NMI frozen-RIP capture (always just `spin_loop_hint`) cannot show.
+const SCHED_ACQ_DEPTH_MAX: usize = 8;
+static SCHED_ACQ_SITES: [[AtomicUsize; SCHED_ACQ_DEPTH_MAX]; priority_rr::MAX_CPUS] = {
+    const Z: AtomicUsize = AtomicUsize::new(0);
+    const ROW: [AtomicUsize; SCHED_ACQ_DEPTH_MAX] = [Z; SCHED_ACQ_DEPTH_MAX];
+    [ROW; priority_rr::MAX_CPUS]
+};
+static SCHED_ACQ_DEPTH: [CachePadded<AtomicUsize>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Push a SCHED acquire site onto `cpu`'s in-flight stack (before the physical
+/// lock is taken).  Lock-free; over-deep nesting still bumps the depth counter
+/// (so pop stays balanced) but stops storing sites past the array bound.
+#[inline]
+fn sched_acq_push(cpu: usize, loc: &'static core::panic::Location<'static>) {
+    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else { return };
+    let d = depth.load(Ordering::Relaxed);
+    if let Some(slot) = SCHED_ACQ_SITES.get(cpu).and_then(|row| row.get(d)) {
+        slot.store(loc as *const _ as usize, Ordering::Relaxed);
+    }
+    depth.store(d.wrapping_add(1), Ordering::Relaxed);
+}
+
+/// Pop the top SCHED acquire site from `cpu`'s in-flight stack (on guard drop).
+#[inline]
+fn sched_acq_pop(cpu: usize) {
+    let Some(depth) = SCHED_ACQ_DEPTH.get(cpu) else { return };
+    let d = depth.load(Ordering::Relaxed);
+    if d == 0 {
+        return;
+    }
+    let nd = d.wrapping_sub(1);
+    depth.store(nd, Ordering::Relaxed);
+    if let Some(slot) = SCHED_ACQ_SITES.get(cpu).and_then(|row| row.get(nd)) {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Spinlock over [`SchedState`] that records holder provenance for deadlock
 /// diagnosis.  Delegates to `spin::Mutex`; the returned [`SchedGuard`] derefs
 /// to `SchedState` transparently and clears the holder record on drop, so all
@@ -290,9 +343,15 @@ impl SchedMutex {
     #[inline]
     #[track_caller]
     fn lock(&self) -> SchedGuard<'_> {
+        let loc = core::panic::Location::caller();
+        let cpu = current_cpu_id();
+        // Push the acquire site BEFORE spinning on the physical lock, so a
+        // holder wedged in the acquire→record window (or a nested re-entrant
+        // acquirer) is still visible in the per-CPU acquire stack.
+        sched_acq_push(cpu, loc);
         let guard = self.0.lock();
-        Self::record(core::panic::Location::caller());
-        SchedGuard(guard)
+        Self::record(cpu, loc);
+        SchedGuard { guard, cpu }
     }
 
     /// Try to acquire without spinning.  Records the holder + acquire site only
@@ -301,9 +360,12 @@ impl SchedMutex {
     #[inline]
     #[track_caller]
     fn try_lock(&self) -> Option<SchedGuard<'_>> {
+        let loc = core::panic::Location::caller();
         self.0.try_lock().map(|guard| {
-            Self::record(core::panic::Location::caller());
-            SchedGuard(guard)
+            let cpu = current_cpu_id();
+            sched_acq_push(cpu, loc);
+            Self::record(cpu, loc);
+            SchedGuard { guard, cpu }
         })
     }
 
@@ -312,42 +374,49 @@ impl SchedMutex {
         self.0.is_locked()
     }
 
-    /// Stamp the holder atomics.  `current_task_id()` / `current_cpu_id()` are
-    /// lock-free per-CPU atomic loads, so this cannot re-enter SCHED.
+    /// Stamp the holder atomics.  `current_task_id()` is a lock-free per-CPU
+    /// atomic load and `cpu` is already resolved by the caller, so this cannot
+    /// re-enter SCHED.
     #[inline]
-    fn record(loc: &'static core::panic::Location<'static>) {
+    fn record(cpu: usize, loc: &'static core::panic::Location<'static>) {
         SCHED_LOCK_OWNER.store(current_task_id(), Ordering::Relaxed);
-        SCHED_LOCK_CPU.store(current_cpu_id(), Ordering::Relaxed);
+        SCHED_LOCK_CPU.store(cpu, Ordering::Relaxed);
         SCHED_LOCK_SITE.store(loc as *const _ as usize, Ordering::Relaxed);
     }
 }
 
 /// RAII guard wrapping the real `spin::MutexGuard`, transparently deref-ing to
 /// `SchedState` and clearing the holder record on drop.
-struct SchedGuard<'a>(spin::MutexGuard<'a, SchedState>);
+struct SchedGuard<'a> {
+    guard: spin::MutexGuard<'a, SchedState>,
+    /// CPU that acquired the lock (captured at acquire time so the acquire-site
+    /// stack is popped from the correct per-CPU slot on drop).
+    cpu: usize,
+}
 
 impl core::ops::Deref for SchedGuard<'_> {
     type Target = SchedState;
     #[inline]
     fn deref(&self) -> &SchedState {
-        &self.0
+        &self.guard
     }
 }
 
 impl core::ops::DerefMut for SchedGuard<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut SchedState {
-        &mut self.0
+        &mut self.guard
     }
 }
 
 impl Drop for SchedGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        // Clear the owner *before* the physical lock release (the spinlock
-        // releases when `self.0` drops right after this Drop body).  A brief
-        // window marked unlocked while still physically held is harmless for a
-        // diagnostic-only record.
+        // Pop this frame's acquire site, then clear the owner *before* the
+        // physical lock release (the spinlock releases when `self.guard` drops
+        // right after this Drop body).  A brief window marked unlocked while
+        // still physically held is harmless for a diagnostic-only record.
+        sched_acq_pop(self.cpu);
         SCHED_LOCK_OWNER.store(u64::MAX, Ordering::Relaxed);
         SCHED_LOCK_SITE.store(0, Ordering::Relaxed);
         SCHED_LOCK_CPU.store(usize::MAX, Ordering::Relaxed);
@@ -367,35 +436,86 @@ pub(crate) fn dump_sched_lock_owner() {
     if owner == u64::MAX {
         crate::serial_println!(
             "[liveness]   SCHED-lock: record shows unlocked (holder cleared its \
-             record but the lock is still physically held — a torn/racing release, \
-             or a holder that bypassed SchedMutex)"
+             record OR is wedged in the acquire->record window). The per-CPU \
+             acquire-site stack below names the actual holder/acquirer."
         );
-        return;
+    } else {
+        let cpu = SCHED_LOCK_CPU.load(Ordering::Relaxed);
+        let site_ptr = SCHED_LOCK_SITE.load(Ordering::Relaxed);
+        if site_ptr == 0 {
+            crate::serial_println!(
+                "[liveness]   SCHED-lock: HELD by tid={} (cpu {}, acquire site unknown)",
+                owner, cpu
+            );
+        } else {
+            // SAFETY: a non-zero SCHED_LOCK_SITE holds a `&'static Location`
+            // pointer written by `SchedMutex::record` from `Location::caller()`,
+            // which has static lifetime.  It is only cleared to 0 (checked
+            // above) on guard drop, so a non-zero value is a live &'static
+            // Location.
+            let loc: &'static core::panic::Location<'static> =
+                unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
+            crate::serial_println!(
+                "[liveness]   SCHED-lock: HELD by tid={} (cpu {}) acquired at {}:{}:{}  \
+                 <-- likely deadlock holder",
+                owner,
+                cpu,
+                loc.file(),
+                loc.line(),
+                loc.column(),
+            );
+        }
     }
-    let cpu = SCHED_LOCK_CPU.load(Ordering::Relaxed);
-    let site_ptr = SCHED_LOCK_SITE.load(Ordering::Relaxed);
-    if site_ptr == 0 {
+
+    // Always dump the per-CPU acquire-site stacks.  These are the definitive
+    // record when OWNER is cleared: they name every frame that has taken (or is
+    // mid-acquire of) SCHED on each CPU, including the nesting chain of a
+    // single-CPU fault/IRQ self-deadlock.
+    dump_sched_acquire_stacks();
+}
+
+/// Dump every CPU's in-flight SCHED acquire-site stack (deepest frame last).
+///
+/// Lock-free plain atomic loads, safe from a wedged/NMI context.  A non-empty
+/// stack names the `file:line:col` of each `SCHED.lock()`/`try_lock()` call
+/// that is currently holding or spinning to acquire SCHED on that CPU.
+fn dump_sched_acquire_stacks() {
+    for cpu in 0..priority_rr::MAX_CPUS {
+        let Some(depth_cell) = SCHED_ACQ_DEPTH.get(cpu) else { continue };
+        let depth = depth_cell.load(Ordering::Relaxed);
+        if depth == 0 {
+            continue;
+        }
         crate::serial_println!(
-            "[liveness]   SCHED-lock: HELD by tid={} (cpu {}, acquire site unknown)",
-            owner, cpu
+            "[liveness]   SCHED acquire-stack cpu{}: depth={} (outer->inner):",
+            cpu, depth
         );
-        return;
+        let shown = depth.min(SCHED_ACQ_DEPTH_MAX);
+        for level in 0..shown {
+            let Some(slot) = SCHED_ACQ_SITES.get(cpu).and_then(|row| row.get(level)) else {
+                continue;
+            };
+            let site_ptr = slot.load(Ordering::Relaxed);
+            if site_ptr == 0 {
+                continue;
+            }
+            // SAFETY: a non-zero acquire-stack slot holds a `&'static Location`
+            // pointer written by `sched_acq_push` from `Location::caller()`
+            // (static lifetime); it is only cleared to 0 on pop.
+            let loc: &'static core::panic::Location<'static> =
+                unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
+            crate::serial_println!(
+                "[liveness]     [{}] {}:{}:{}",
+                level, loc.file(), loc.line(), loc.column(),
+            );
+        }
+        if depth > SCHED_ACQ_DEPTH_MAX {
+            crate::serial_println!(
+                "[liveness]     (+{} deeper frames not captured)",
+                depth.saturating_sub(SCHED_ACQ_DEPTH_MAX)
+            );
+        }
     }
-    // SAFETY: a non-zero SCHED_LOCK_SITE holds a `&'static Location` pointer
-    // written by `SchedMutex::record` from `Location::caller()`, which has
-    // static lifetime.  It is only cleared to 0 (checked above) on guard drop,
-    // so a non-zero value is always a live &'static Location.
-    let loc: &'static core::panic::Location<'static> =
-        unsafe { &*(site_ptr as *const core::panic::Location<'static>) };
-    crate::serial_println!(
-        "[liveness]   SCHED-lock: HELD by tid={} (cpu {}) acquired at {}:{}:{}  \
-         <-- likely deadlock holder",
-        owner,
-        cpu,
-        loc.file(),
-        loc.line(),
-        loc.column(),
-    );
 }
 
 static SCHED: SchedMutex = SchedMutex::new(SchedState {

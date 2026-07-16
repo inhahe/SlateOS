@@ -135,10 +135,41 @@ derefs transparently to `SchedState`, so all existing call sites are
 unchanged. This turns the "victim spinning in spin_loop_hint" capture into a
 direct pointer at the leaking acquire site on the next reproduction.
 
+**2nd catch (iter21, 2026-07-15 run 204740).** Re-caught at `RIP=spin_loop_hint`,
+`RDI=&SCHED` again — but `RFL=0x202` (**IF *set*** — interrupts enabled, distinct
+from iter15's IF-cleared `without_interrupts` spin) during the same tcc ring-3
+spawn self-test (`[spawn] Running REAL C compiler (tcc, ring 3, Path Z) test`).
+20 clean boots preceded it. The new SCHED holder-tracking dump fired and
+reported: `SCHED-lock: record shows unlocked … but the lock is still physically
+held`. **Key inference:** on a single CPU, `record()` runs immediately after the
+physical acquire, so `OWNER == u64::MAX` while the lock is physically held means
+the holder is wedged in the tiny window *between* `self.0.lock()` and `record()`
+— which only stalls for 15+ s if a **fault or interrupt lands in that window and
+re-enters `SCHED.lock()` on the same CPU** (a single-CPU self-deadlock: spinning
+to acquire a lock whose holder can't run). The page-fault handler
+(`idt.rs::handle_page_fault`) does `cpu::sti()` when the faulting context had
+IF=1 and then runs long fault resolution (demand paging, CoW, swap) — a plausible
+source of same-CPU re-entrancy. `account_fault` already uses `try_lock` (safe);
+the offending re-entrant `SCHED.lock()` site is not yet pinned.
+
+**2nd diagnostic pass (this session).** The original holder-tracking could not
+name the holder in the iter21 case (OWNER was never written — the holder was in
+the acquire→record window). Added a **per-CPU acquire-site stack**
+(`SCHED_ACQ_SITES`/`SCHED_ACQ_DEPTH`, sched/mod.rs): `SchedMutex::lock`/`try_lock`
+push `Location::caller()` **before** taking the physical lock and pop on guard
+drop. This captures (a) a holder wedged in the acquire→record window (its site is
+already pushed) and (b) the full **nesting chain** when a fault/IRQ handler
+re-enters SCHED on the same CPU — naming BOTH the outer holder and the inner
+deadlocking acquirer, which the NMI frozen-RIP capture (always just
+`spin_loop_hint`) and the OWNER record alone cannot. `dump_sched_lock_owner` now
+always prints every CPU's acquire-stack (`SCHED acquire-stack cpuN: depth=… →
+[lvl] file:line:col`).
+
 **Next step.** Re-run `wedge-soak.sh` until it re-catches; read the
-`[liveness]   SCHED-lock: HELD by tid=… acquired at …` line to identify the
-exact leaking critical section, then fix it (release SCHED before the
-switch, or convert the offending hold to `try_lock`/short scope).
+`[liveness]   SCHED acquire-stack cpuN:` frames — the deepest (inner) frame is
+the re-entrant `SCHED.lock()` that deadlocks, the outer frame is the holder.
+Then fix the re-entrancy (make the inner site non-blocking `try_lock`, or ensure
+SCHED is not held across a fault-prone / interruptible region).
 
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 

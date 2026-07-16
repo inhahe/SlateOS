@@ -2186,6 +2186,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 50: indirect call through a function-pointer dispatch table in
+    // a tcc-built dynamic glibc binary. Prior rungs called by name (direct call);
+    // this calls through a runtime-selected function pointer, exercising tcc's
+    // indirect-call codegen (call *reg) plus per-slot function-address
+    // relocations in a static const table that ld.so fixes up at load. A
+    // volatile selector forces the real indirect call. Only undefined sym: write.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_funcptr() {
+        serial_println!(
+            "WARNING: Path-Z function-pointer C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

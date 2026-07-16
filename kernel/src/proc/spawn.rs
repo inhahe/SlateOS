@@ -15164,6 +15164,48 @@ int main(void){\n\
     run_hosted_cc_case("bitfield", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 50 — indirect call through a function-pointer dispatch table in a
+/// freshly-tcc-built dynamic glibc binary.
+///
+/// Every prior rung called functions by *name* (a direct `call rel32`).  This
+/// rung calls through a **function pointer** selected at runtime, exercising two
+/// things no earlier part did: (1) tcc's indirect-call codegen — load the target
+/// from a table slot and emit `call *reg` rather than a fixed relative call; and
+/// (2) taking the *address* of a function and materialising it into a static
+/// table, which requires the compiler to emit an absolute (or GOT-relative)
+/// relocation per entry that the linker + `ld.so` must fix up at load time —
+/// the function-pointer analogue of a data relocation, distinct from the code
+/// the direct-call rungs produced.  Indirect dispatch tables underpin vtables,
+/// syscall/ioctl jump tables, and plugin interfaces, so proving the compiled
+/// binary calls the *right* target through a relocated pointer closes a real gap.
+///
+/// `ops[3]` is a `static const` array of `int(*)(int)` initialised with three
+/// file-scope functions (`add10`, `mul3`, `neg`); being `static const` it lands
+/// in read-only data with one relocation per slot and needs no runtime
+/// aggregate init (so no synthesised `memset` — avoids B-TCC-LIBTCC1-MAIN).  A
+/// `volatile` selector `sel = 1` picks `mul3`, so `ops[sel](14)` = `mul3(14)` =
+/// 42, printed as its two decimal digits — captured file exactly `42\n` (3
+/// bytes, exit 0).  `volatile` stops the compiler folding the selection to a
+/// direct call.  Only undefined symbol is `write`.  Pure userspace/codegen.
+pub fn self_test_linux_real_glibc_cc_funcptr() -> KernelResult<()> {
+    // `static const` table => rodata + per-slot relocation (no runtime init, no
+    // `memset`).  `volatile sel` forces a real indirect `call *reg` through the
+    // relocated pointer rather than a compile-time-resolved direct call.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int add10(int x){ return x + 10; }\n\
+static int mul3(int x){ return x * 3; }\n\
+static int neg(int x){ return -x; }\n\
+static int (*const ops[3])(int) = { add10, mul3, neg };\n\
+int main(void){\n\
+  volatile int sel = 1;\n\
+  int r = ops[sel](14);\n\
+  char b[3]; b[0] = (char)(48 + r / 10); b[1] = (char)(48 + r % 10); b[2] = 10;\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("funcptr-dispatch", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

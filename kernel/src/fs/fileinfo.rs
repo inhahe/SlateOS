@@ -261,7 +261,21 @@ pub fn extract(path: &str) -> KernelResult<FileInfo> {
     let extractors = EXTRACTORS.lock();
     for ext in extractors.iter() {
         if mime.starts_with(ext.mime_prefix.as_str()) {
-            (ext.func)(&header, &mut info);
+            // Defense-in-depth: validate the stored extractor pointer against
+            // real kernel `.text` before calling it.  A registered `ExtractorFn`
+            // always points into code; a value that doesn't means this table's
+            // heap backing was corrupted (the B-KNULLJUMP-SIGNAL class — a wild
+            // `call` through a clobbered code-pointer field).  Log + skip.
+            let func_addr = ext.func as *const () as u64;
+            if crate::idt::is_kernel_text(func_addr) {
+                (ext.func)(&header, &mut info);
+            } else {
+                serial_println!(
+                    "[fileinfo] CRITICAL: refusing to run corrupt extractor func={:#x} \
+                     (mime_prefix={:?}) — table corruption; skipping (see B-KNULLJUMP-SIGNAL)",
+                    func_addr, ext.mime_prefix
+                );
+            }
         }
     }
 

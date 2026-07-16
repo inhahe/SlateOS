@@ -370,6 +370,21 @@ With these, **all five** kernel deferred-code-pointer dispatch sites (hrtimer,
 ktimer, exit-hooks, workqueue, rcu) now validate against `.text` before calling
 — whichever one is the corruption victim, the next occurrence self-reports which
 subsystem and what `arg` was involved instead of jumping to `RIP=0`.
+
+**Follow-up 2026-07-16 — audit completed to the last two indirect-call sites.** A
+full kernel sweep for stored/transmuted `fn`-pointer dispatch (`transmute`-to-`fn`
+and `.<field>)(…)` indirect calls) confirmed only two more registration-table
+call sites existed beyond the five async ones: `fs::fileinfo` custom metadata
+extractors (`(ext.func)(…)`) and `mm::pressure` shrinker callbacks
+(`(shrinker.callback)(…)`). Both run in *synchronous* thread context (not from a
+timer ISR, so they don't match this bug's async-jump-during-spawn signature as
+closely), but each is a `Mutex<Vec<struct{fn ptr}>>` whose heap backing could be
+clobbered by the same suspected overrun, so both were hardened with the identical
+`.text` guard (`[fileinfo]`/`[pressure] CRITICAL: refusing … (see
+B-KNULLJUMP-SIGNAL)`). The two `transmute::<u64, fn>` sites (ktimer, exit-hooks)
+are the ones already guarded above. **The kernel now validates every
+stored-code-pointer dispatch (7 sites total) before calling.** Boot-validated
+(BOOT_OK 138s, no false positives).
 These are **not** the root-cause fix (the corruption *source* is still unknown),
 but they (a) are the correct defensive posture for dispatching a stored code
 pointer, and (b) convert the catastrophic wild-jump into a **named diagnostic

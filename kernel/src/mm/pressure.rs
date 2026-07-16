@@ -272,6 +272,20 @@ pub fn notify(level: PressureLevel) {
 
     for shrinker in table.iter() {
         if shrinker.active {
+            // Defense-in-depth: validate the stored shrinker pointer against
+            // real kernel `.text` before calling it.  A registered callback
+            // always points into code; a value that doesn't means this table's
+            // heap backing was corrupted (the B-KNULLJUMP-SIGNAL class — a wild
+            // `call` through a clobbered code-pointer field).  Log + skip.
+            let cb_addr = shrinker.callback as *const () as u64;
+            if !crate::idt::is_kernel_text(cb_addr) {
+                serial_println!(
+                    "[pressure] CRITICAL: refusing to run corrupt shrinker '{}' callback={:#x} \
+                     — table corruption; skipping (see B-KNULLJUMP-SIGNAL)",
+                    shrinker.name, cb_addr
+                );
+                continue;
+            }
             let freed = (shrinker.callback)(level);
             if freed > 0 {
                 serial_println!(

@@ -2173,6 +2173,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 49: bitfield layout + extract/insert codegen in a tcc-built
+    // dynamic glibc binary. No prior rung used bitfields: packing three members
+    // into one 32-bit unit exercises tcc's shift+mask extract and load/mask/
+    // shift/store RMW insert (leaving neighbours intact) — a distinct codegen
+    // path from Part 47's plain struct fields. A volatile seed defeats folding.
+    // Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_bitfield() {
+        serial_println!(
+            "WARNING: Path-Z bitfield C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -15121,6 +15121,49 @@ int main(void){\n\
     run_hosted_cc_case("long-double-x87", HOSTED_SRC, b"40\n")
 }
 
+/// Path Z Part 49 — bitfield layout + extract/insert codegen in a freshly-tcc-
+/// built dynamic glibc binary.
+///
+/// No prior rung used bitfields.  A C bitfield is not a plain load/store: the
+/// compiler packs several sub-byte members into one storage unit and must emit
+/// a *shift + mask* to read a member (extract) and a *load / mask-out-old /
+/// shift-in-new / mask-to-width / store* read-modify-write to assign one
+/// (insert), all while leaving the neighbouring bitfields in the same unit
+/// intact.  Getting the bit offsets, the width masks, and the RMW right is a
+/// classic compiler-bug locus (off-by-one masks, sign vs. zero extension,
+/// clobbering an adjacent field), so a compiled-on-target bitfield program is a
+/// genuine coverage gap distinct from the plain-`int` struct fields of Part 47.
+///
+/// `struct flags { unsigned a:3, b:5, c:4; }` packs three members into a single
+/// 32-bit unit (bits 0-2, 3-7, 8-11).  The program assigns `a=5, b=20, c=9`
+/// (the first from a `volatile` seed so the compiler cannot fold the inserts
+/// away) and sums them back (`5+20+9`), which — that each field reads back its
+/// own value proves the inserts did not clobber their neighbours — plus 8 gives
+/// 42, printed as its two decimal digits: captured file exactly `42\n` (3 bytes,
+/// exit 0).  Only undefined symbol is `write` (no aggregate init → does not trip
+/// B-TCC-LIBTCC1-MAIN).  Pure userspace/codegen (no kernel path).
+pub fn self_test_linux_real_glibc_cc_bitfield() -> KernelResult<()> {
+    // Three bitfields packed into one 32-bit unit exercise shift+mask extract and
+    // load/mask/shift/store insert without clobbering neighbours.  `volatile`
+    // seed on `a` defeats constant folding so the real RMW insert sequence runs.
+    // Individual field assignment (not a brace initialiser) => no synthesised
+    // `memset`, keeping the link surface at just `write` (see B-TCC-LIBTCC1-MAIN).
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+struct flags { unsigned a : 3; unsigned b : 5; unsigned c : 4; };\n\
+int main(void){\n\
+  volatile int seed = 5;\n\
+  struct flags f;\n\
+  f.a = (unsigned)seed;\n\
+  f.b = 20u;\n\
+  f.c = 9u;\n\
+  int total = (int)f.a + (int)f.b + (int)f.c + 8;\n\
+  char b[3]; b[0] = (char)(48 + total / 10); b[1] = (char)(48 + total % 10); b[2] = 10;\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("bitfield", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

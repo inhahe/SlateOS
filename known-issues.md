@@ -335,6 +335,38 @@ spontaneous occurrence — in any future soak or a normal boot — will self-rep
 single clean fault line plus a stack-scan naming the null pointer's caller, which
 is what's needed to pin and fix the root cause. No further action until then.
 
+**UPDATE 2026-07-16 — deferred-callback dispatch paths hardened (defense in
+depth).** Audited every kernel path that invokes a *stored code pointer* from
+interrupt/softirq/exit context — the mechanism class that would produce this
+bug's exact signature (an async `call` through a corrupted/zeroed field →
+`RIP=0` or a wild address in kernel context). Findings + fixes:
+- **`hrtimer::process_expired`** (`kernel/src/hrtimer.rs`) was the *only* path
+  that called a code pointer **directly from the APIC timer ISR** with **no
+  validation** (`cb(arg)`), so a corrupted per-CPU `TimerEntry.callback` field
+  would jump the ISR straight to a bad address. Now validates the callback
+  against real `.text` bounds before dispatch; a rejected pointer is logged
+  (`[hrtimer] CRITICAL: refusing to dispatch corrupt timer callback …`) and
+  skipped.
+- **`ktimer::process_expirations`** (`kernel/src/ktimer.rs`) only rejected an
+  *exactly-zero* `func`; strengthened to a full `.text` check so a non-zero-but-
+  wild value (torn store / heap overrun) is caught, the slot freed, and logged,
+  instead of being submitted to the workqueue and later jumped-to by the worker.
+- **`notify_exit_hooks`** (`kernel/src/sched/mod.rs`) only rejected exactly-zero
+  hook slots; strengthened to a full `.text` check. This runs **at task-exit
+  time — the exact moment this bug fires** (right after "Task N exiting"), so a
+  clobbered hook slot now logs-and-skips rather than jumping the dying task's
+  context to a wild address.
+- Exposed `idt::is_kernel_text` as `pub(crate)` (precise linker-symbol
+  `__text_start..__text_end` bounds) as the shared validator.
+These are **not** the root-cause fix (the corruption *source* is still unknown),
+but they (a) are the correct defensive posture for dispatching a stored code
+pointer, and (b) convert the catastrophic wild-jump into a **named diagnostic
+that identifies which subsystem carried the bad pointer** — a large step toward
+pinning the corruption site on the next occurrence, complementing the idt.rs
+re-entrancy guard (6fb1597aa). Boot-validated: BOOT_OK 104s, no false-positive
+`CRITICAL` logs (all legitimate callbacks validate as `.text`), hrtimer/ktimer
+self-tests still pass. Still WATCH for the underlying corruption.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

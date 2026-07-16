@@ -1090,18 +1090,34 @@ fn notify_exit_hooks(task_id: TaskId) {
 
     for slot in &EXIT_HOOKS {
         let addr = slot.load(Ordering::Acquire);
-        if addr != 0 {
-            // SAFETY: The address was set by register_exit_hook from a
-            // valid fn(TaskId) pointer.  We only clear slots via
-            // unregister_exit_hook (which sets to 0) or never.  The
-            // function pointer remains valid for the lifetime of the
-            // kernel (hooks are registered by subsystem init, never
-            // unloaded).
-            let hook: fn(TaskId) = unsafe {
-                core::mem::transmute::<u64, fn(TaskId)>(addr)
-            };
-            hook(task_id);
+        if addr == 0 {
+            continue; // Empty slot.
         }
+        // Defense-in-depth: validate the stored hook points into kernel
+        // `.text` before calling it.  This runs at task-exit time (the exact
+        // moment B-KNULLJUMP-SIGNAL fires — right after "Task N exiting"); a
+        // slot corrupted to a wild value would jump the dying task's context
+        // to a bad address.  A validly-registered `fn(TaskId)` always points
+        // into code, so a rejected value means the slot table was clobbered;
+        // log which slot, skip it, and keep unwinding.
+        if !crate::idt::is_kernel_text(addr) {
+            serial_println!(
+                "[sched] CRITICAL: exit hook addr={:#x} is not kernel .text — \
+                 slot corruption; skipping (see B-KNULLJUMP-SIGNAL)",
+                addr
+            );
+            continue;
+        }
+        // SAFETY: The address was set by register_exit_hook from a
+        // valid fn(TaskId) pointer and just validated to point into kernel
+        // `.text`.  We only clear slots via unregister_exit_hook (which sets
+        // to 0) or never.  The function pointer remains valid for the lifetime
+        // of the kernel (hooks are registered by subsystem init, never
+        // unloaded).
+        let hook: fn(TaskId) = unsafe {
+            core::mem::transmute::<u64, fn(TaskId)>(addr)
+        };
+        hook(task_id);
     }
 }
 

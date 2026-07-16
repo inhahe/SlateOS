@@ -1576,7 +1576,15 @@ unsafe extern "C" {
 /// is a plausible return address. Bounds come from the linker script, so this
 /// rejects rodata/data/bss/stack pointers that a loose "any higher-half address"
 /// scan would wrongly report.
-fn is_kernel_text(val: u64) -> bool {
+///
+/// Exposed `pub(crate)` so the deferred-callback dispatch paths (hrtimer /
+/// ktimer softirqs, scheduler exit hooks) can validate a *stored code pointer*
+/// against real `.text` bounds before `call`-ing it.  A corrupted/zeroed
+/// callback field would otherwise send an ISR straight to `RIP=0` (or a wild
+/// address) with no recovery — the failure signature of B-KNULLJUMP-SIGNAL.
+/// Validating here turns that catastrophe into a logged, skipped callback that
+/// names which subsystem carried the bad pointer.
+pub(crate) fn is_kernel_text(val: u64) -> bool {
     let lo = core::ptr::addr_of!(__text_start) as u64;
     let hi = core::ptr::addr_of!(__text_end) as u64;
     val >= lo && val < hi

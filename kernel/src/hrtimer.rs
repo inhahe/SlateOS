@@ -330,6 +330,25 @@ pub fn process_expired() -> u32 {
     // Callbacks might schedule new timers (which take the lock with CLI).
     for slot in to_fire.iter().take(fire_count) {
         if let Some((cb, arg, _interval)) = *slot {
+            // Defense-in-depth: validate the stored callback points into
+            // kernel `.text` before `call`-ing it.  This dispatch runs from
+            // the APIC timer ISR, so a corrupted/zeroed `callback` field would
+            // send the CPU straight to a wild address (or `RIP=0`) in kernel
+            // context with no recovery — precisely the B-KNULLJUMP-SIGNAL
+            // failure signature.  A `fn(u64)` value is non-null by type, so a
+            // rejected pointer here means the timer entry was corrupted (heap
+            // overrun / use-after-free of the per-CPU timer state); log it,
+            // skip the call, and let the machine keep running so the event is
+            // diagnosable instead of a triple-fault storm.
+            let cb_addr = cb as *const () as u64;
+            if !crate::idt::is_kernel_text(cb_addr) {
+                serial_println!(
+                    "[hrtimer] CRITICAL: refusing to dispatch corrupt timer callback \
+                     addr={:#x} arg={:#x} — entry corruption; skipping (see B-KNULLJUMP-SIGNAL)",
+                    cb_addr, arg
+                );
+                continue;
+            }
             cb(arg);
             fired = fired.saturating_add(1);
         }

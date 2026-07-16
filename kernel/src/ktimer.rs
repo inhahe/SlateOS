@@ -339,6 +339,27 @@ pub fn process_expirations() {
             continue;
         }
 
+        // Defense-in-depth: reject a non-zero-but-implausible callback (not a
+        // `.text` address).  A validly-scheduled `fn(u64)` always points into
+        // kernel code; a value that isn't means the slot was corrupted (heap
+        // overrun / torn store).  Submitting it to the workqueue would later
+        // jump the worker to a wild address — the B-KNULLJUMP-SIGNAL class.
+        // Log which subsystem's arg was involved, free the slot, and skip.
+        if !crate::idt::is_kernel_text(func_raw) {
+            serial_println!(
+                "[ktimer] CRITICAL: refusing to submit corrupt timer callback \
+                 addr={:#x} arg={:#x} — slot corruption; freeing (see B-KNULLJUMP-SIGNAL)",
+                func_raw,
+                entry.arg.load(Ordering::Relaxed)
+            );
+            entry.deadline.store(0, Ordering::Release);
+            entry.func.store(0, Ordering::Relaxed);
+            entry.arg.store(0, Ordering::Relaxed);
+            entry.interval.store(0, Ordering::Relaxed);
+            entry.handle.store(0, Ordering::Release);
+            continue;
+        }
+
         if interval > 0 {
             // Periodic: advance deadline.  Don't free the slot.
             let new_deadline = now.saturating_add(interval);

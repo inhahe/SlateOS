@@ -15329,6 +15329,50 @@ int main(void){\n\
     run_hosted_cc_case("func-local-static", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 54 — variable-length array (C99 VLA: a runtime-sized automatic
+/// array → dynamic stack-frame allocation) in a freshly-tcc-built dynamic glibc
+/// binary.
+///
+/// Every prior automatic array had a compile-time-constant size, so its storage
+/// was a fixed offset in the frame the compiler reserved with a single `sub rsp,
+/// imm`.  A VLA (`int a[n]` where `n` is a runtime value) is fundamentally
+/// different: the compiler must compute the size at runtime, subtract it from
+/// `rsp` to carve out the space (rounding for alignment), remember the original
+/// `rsp` (or the frame pointer) to unwind it on return, and index into the
+/// dynamically-placed block — the same dynamic-stack mechanism as `alloca`.
+/// Getting the runtime frame adjustment, alignment, and teardown right is a
+/// distinct, easily-mis-lowered codegen path (a bad `rsp` computation corrupts
+/// the stack), so a compiled-on-target VLA closes a genuine gap.  (Confirmed via
+/// the off-target build that this tcc lowers the VLA inline — no `alloca`/bounds
+/// helper is pulled, so the link surface stays clean.)
+///
+/// `sumfill(n)` declares `int a[n]`, fills it with `1..=n`, and returns the sum.
+/// `n` is a `volatile` 8 so the compiler cannot fold the size to a constant and
+/// must emit the real runtime allocation; `sum(1..=8)` = 36, and `+ 6` gives 42,
+/// printed as its two decimal digits — captured file exactly `42\n` (3 bytes,
+/// exit 0).  Only undefined symbol is `write`.  Pure userspace/codegen.
+pub fn self_test_linux_real_glibc_cc_vla() -> KernelResult<()> {
+    // `int a[n]` with runtime `n` => VLA => dynamic `sub rsp, size` frame carve +
+    // aligned teardown on return (the alloca mechanism).  `volatile n` defeats
+    // constant-folding the size so the real runtime stack allocation is emitted.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int sumfill(int n){\n\
+  int a[n];\n\
+  for (int i = 0; i < n; i++) a[i] = i + 1;\n\
+  int s = 0;\n\
+  for (int i = 0; i < n; i++) s += a[i];\n\
+  return s;\n\
+}\n\
+int main(void){\n\
+  volatile int n = 8;\n\
+  int r = sumfill(n) + 6;\n\
+  char c[3]; c[0] = (char)(48 + r / 10); c[1] = (char)(48 + r % 10); c[2] = 10;\n\
+  write(1, c, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("vla-dynstack", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

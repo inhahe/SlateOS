@@ -2238,6 +2238,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 54: variable-length array (C99 VLA -> runtime-sized stack
+    // frame) in a tcc-built dynamic glibc binary. Prior automatic arrays had
+    // compile-time-constant sizes (fixed sub rsp,imm); a VLA computes its size at
+    // runtime, carves it off rsp (the alloca mechanism), and unwinds on return --
+    // a distinct, easily-mis-lowered codegen path. A volatile size defeats
+    // constant folding; sum(1..=8)=36 +6 = 42. Only undefined sym: write.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_vla() {
+        serial_println!(
+            "WARNING: Path-Z VLA (dynamic-stack) C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

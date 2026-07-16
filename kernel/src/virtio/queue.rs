@@ -187,6 +187,44 @@ impl Virtqueue {
         Ok((vq, pfn))
     }
 
+    /// Reset the virtqueue to its freshly-initialized state.
+    ///
+    /// Re-zeroes the descriptor table and both rings, rebuilds the free
+    /// descriptor list, and clears the avail/used index tracking — the
+    /// same state produced by [`new`].  Reuses the existing backing frame,
+    /// so the caller must re-publish the queue to the device (via the
+    /// transport's queue-PFN register) after a device reset.
+    ///
+    /// Used by drivers to recover after a request times out: a timed-out
+    /// request leaves descriptors and DMA buffers owned by the device, so
+    /// the queue's free list and used-ring accounting are no longer safe
+    /// to reuse.  Resetting the device (which drops all outstanding
+    /// buffers) and then resetting the queue restores a consistent state.
+    // Queue layout arithmetic uses small values that fit in usize.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    pub fn reset(&mut self) {
+        // Zero the entire frame (descriptor table + avail ring + used ring).
+        // SAFETY: virt_base is the start of our exclusively-owned frame,
+        // FRAME_SIZE bytes long.
+        unsafe {
+            core::ptr::write_bytes(self.virt_base, 0, frame::FRAME_SIZE);
+        }
+
+        // Rebuild the free descriptor list (each `next` points to the
+        // following descriptor; the last terminates the list).
+        for i in 0..self.queue_size {
+            // SAFETY: i < queue_size, and queue_size * 16 < FRAME_SIZE
+            // (checked in new()), so the pointer stays within the frame.
+            let desc = unsafe { &mut *(self.virt_base.add(i as usize * 16) as *mut VirtqDesc) };
+            desc.next = if i + 1 < self.queue_size { i + 1 } else { 0xFFFF };
+        }
+
+        self.free_head = 0;
+        self.free_count = self.queue_size;
+        self.avail_idx = 0;
+        self.last_used_idx = 0;
+    }
+
     /// Allocate a descriptor from the free list.
     fn alloc_desc(&mut self) -> Option<u16> {
         if self.free_count == 0 {

@@ -58,6 +58,18 @@ pub const SECTOR_SIZE: usize = 512;
 /// Status: success.
 const VIRTIO_BLK_S_OK: u8 = 0;
 
+/// Polling-mode completion timeout, in spin iterations.
+///
+/// Only used during early boot before the IOAPIC is configured, where
+/// the driver busy-waits for the device to complete a request.  Sized
+/// generously so that a real device under heavy host load never spuriously
+/// times out (the previous 1M budget — a few milliseconds — was far too
+/// short under soak-test host contention and was the trigger for the
+/// virtqueue-desync cascade documented in known-issues as
+/// B-VIRTIO-BLK-WRITE-TIMEOUT), yet bounded so a genuinely dead device
+/// does not hang the boot forever.
+const POLL_TIMEOUT_SPINS: u32 = 100_000_000;
+
 // DMA buffer offsets within the request frame.
 const DMA_HEADER_OFFSET: usize = 0;           // 16 bytes
 const DMA_DATA_OFFSET: usize = 512;           // Up to 4096 bytes
@@ -266,7 +278,7 @@ impl VirtioBlkDevice {
             // forever even if the device IRQ is lost.
             let mut attempts = 0u32;
             loop {
-                if let Some((completed_head, _len)) = self.queue.poll_used() {
+                if let Some(completed_head) = self.poll_matching(head, op, sector) {
                     return Ok(completed_head);
                 }
 
@@ -277,7 +289,7 @@ impl VirtioBlkDevice {
                         "[virtio-blk] {} sector {} timed out (IRQ mode)",
                         op, sector,
                     );
-                    self.queue.free_chain(head);
+                    self.recover_after_timeout();
                     return Err(KernelError::TimedOut);
                 }
 
@@ -288,23 +300,104 @@ impl VirtioBlkDevice {
             // Polling fallback for early boot (before IOAPIC init).
             let mut spins = 0u32;
             loop {
-                if let Some((completed_head, _len)) = self.queue.poll_used() {
+                if let Some(completed_head) = self.poll_matching(head, op, sector) {
                     return Ok(completed_head);
                 }
 
                 spins = spins.wrapping_add(1);
-                if spins > 1_000_000 {
+                if spins > POLL_TIMEOUT_SPINS {
                     crate::serial_println!(
                         "[virtio-blk] {} sector {} timed out (polling)",
                         op, sector,
                     );
-                    self.queue.free_chain(head);
+                    self.recover_after_timeout();
                     return Err(KernelError::TimedOut);
                 }
 
                 core::hint::spin_loop();
             }
         }
+    }
+
+    /// Poll the used ring for the completion of *our* request (`head`).
+    ///
+    /// Because this is a single-outstanding driver sharing one DMA frame,
+    /// only one request is ever in flight, so the head of any completion
+    /// should equal `head`.  If a completion arrives for a *different*
+    /// head, it is a stale completion from a previously-timed-out request
+    /// that the device has finally returned (this should not happen after
+    /// [`recover_after_timeout`] resets the device, but is handled
+    /// defensively): its descriptors are reclaimed and polling continues.
+    ///
+    /// Returns `Some(head)` only when our own request has completed.
+    fn poll_matching(&mut self, head: u16, op: &str, sector: u64) -> Option<u16> {
+        while let Some((completed_head, _len)) = self.queue.poll_used() {
+            if completed_head == head {
+                return Some(completed_head);
+            }
+            // Stale completion for a request we already abandoned; reclaim
+            // its descriptors and keep looking for ours.
+            crate::serial_println!(
+                "[virtio-blk] {} sector {}: draining stale completion head={} (expected {})",
+                op, sector, completed_head, head,
+            );
+            self.queue.free_chain(completed_head);
+        }
+        None
+    }
+
+    /// Recover the device after a request timed out.
+    ///
+    /// A timed-out request leaves its descriptors *and* the shared DMA
+    /// buffer owned by the device.  Blindly freeing the descriptor chain
+    /// (the previous behaviour) and reusing the shared buffer corrupts the
+    /// virtqueue free list and desyncs the used ring — see known-issues
+    /// B-VIRTIO-BLK-WRITE-TIMEOUT, which manifested as an unrecoverable
+    /// cascade of write timeouts.  A full device + queue reset forces the
+    /// device to relinquish every outstanding buffer, so the next request
+    /// starts from a clean, consistent state.
+    fn recover_after_timeout(&mut self) {
+        match self.recover() {
+            Ok(()) => crate::serial_println!(
+                "[virtio-blk] device reset to recover from timeout"
+            ),
+            Err(e) => crate::serial_println!(
+                "[virtio-blk] device recovery after timeout FAILED: {:?}", e
+            ),
+        }
+    }
+
+    /// Re-run the legacy virtio init handshake to reclaim device ownership
+    /// of all outstanding buffers, then reset the virtqueue and re-publish
+    /// it to the device.  Reuses the existing queue backing frame and DMA
+    /// frame (the reset drops the device's references to them).
+    // PFN computation truncates a page-aligned address; feature/config
+    // arithmetic uses small device-provided values.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn recover(&mut self) -> KernelResult<()> {
+        // Reset → acknowledge → driver → features (mirrors init()).
+        self.transport.reset();
+        self.transport.set_status(STATUS_ACKNOWLEDGE);
+        self.transport.set_status(STATUS_DRIVER);
+        self.transport.set_guest_features(0);
+
+        // Re-select queue 0 and verify the size is unchanged.
+        self.transport.select_queue(0);
+        let queue_size = self.transport.queue_size();
+        if queue_size == 0 || queue_size != self.queue.queue_size() {
+            self.transport.set_status(crate::virtio::STATUS_FAILED);
+            return Err(KernelError::NoSuchDevice);
+        }
+
+        // Reset the virtqueue rings/free list (reuses the same frame) and
+        // re-publish its physical PFN to the device.
+        self.queue.reset();
+        let pfn = (self.queue.phys_addr() >> 12) as u32;
+        self.transport.set_queue_pfn(pfn);
+
+        // Device is live again.
+        self.transport.set_status(STATUS_DRIVER_OK);
+        Ok(())
     }
 
     /// Check the DMA status byte after a completed request.

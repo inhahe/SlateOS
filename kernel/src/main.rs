@@ -2287,6 +2287,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 58: GNU statement expressions (`({ ... })`) + `__typeof__`
+    // compiled + glibc-linked + run in ring 3. Proves the on-target tcc lowers
+    // the once-eval type-generic macro idiom (min/max, container_of) that glibc
+    // and Linux headers depend on. MAX(42, MAX(17, 37)) = 42.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_stmt_expr() {
+        serial_println!(
+            "WARNING: Path-Z statement-expression C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

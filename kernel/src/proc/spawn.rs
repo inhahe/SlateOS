@@ -15491,6 +15491,38 @@ int main(void){\n\
     run_hosted_cc_case("c11-atomic", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 58: GNU statement expressions (`({ ... })`) + `__typeof__`
+/// compiled by the on-target tcc, glibc-linked, and run in ring 3.
+///
+/// Statement expressions and `__typeof__` are the two GNU C extensions that
+/// underpin the type-generic, side-effect-safe macros used pervasively across
+/// real systems C — `container_of`, and the canonical `min`/`max`
+/// (`({ typeof(a) _x=(a); typeof(b) _y=(b); _x<_y?_x:_y; })`) that evaluate each
+/// argument exactly once. glibc's, the Linux kernel's, and most C library
+/// headers lean on them, so proving the on-target compiler lowers a
+/// statement-expression body (a block whose value is its last expression) and
+/// resolves `__typeof__` types correctly is a genuine prerequisite for compiling
+/// that ecosystem — a facility no other Path-Z part exercises. Pure
+/// userspace/codegen (only undefined symbol is `write`; no kernel path).
+///
+/// `MAX` is the classic once-eval statement-expression macro. With a `static
+/// volatile` seed (`seedfn()` → 42, defeating constant-folding),
+/// `MAX(s, MAX(17, s-5))` = `MAX(42, MAX(17, 37))` = `MAX(42, 37)` = 42, printed
+/// as its two decimal digits — captured file exactly `42\n` (3 bytes, exit 0).
+pub fn self_test_linux_real_glibc_cc_stmt_expr() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+#define MAX(a,b) ({ __typeof__(a) _x=(a); __typeof__(b) _y=(b); _x>_y?_x:_y; })\n\
+static int seedfn(void){ static volatile int s = 42; return s; }\n\
+int main(void){\n\
+  int s = seedfn();\n\
+  int r = MAX(s, MAX(17, s-5));\n\
+  char o[3]; o[0]=(char)(48+r/10); o[1]=(char)(48+r%10); o[2]=10;\n\
+  write(1,o,3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("stmt-expr", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

@@ -435,6 +435,7 @@ _One graphical session at a time. Fast user switching (suspend one session, star
 - [ ] `fs.execute` — run a file as a program (scopable per path). Required in addition to `proc.launch` — prevents running programs from untrusted locations. File must also have the executable attribute set.
 - [ ] `fs.metadata` — change file/directory metadata (capabilities, attributes)
 - [ ] `fs.bypass_recycle` — permanently delete without recycle bin (for non-temp directories)
+- [ ] `fs.recycle.policy` — read/set a filesystem's recycle-bin retention policy (max age/size/count + pruning strategy), scoped per drive/mount. Gates the per-drive policy get/set API in §2.3 → Per-Drive Recycle Bin Access & Management, so an app can't silently reconfigure trash retention on volumes it has no business touching. Browsing/reading a bin needs only `fs.read` on that bin; restoring needs `fs.write`/`fs.create` on the target; purging needs `fs.delete`; only *policy* changes need this capability.
 - [ ] All `fs.*` capabilities are separate (not grouped) — each represents a distinct risk level. Files and directories have separate capability requirement lists for each of read, write, create, delete, execute.
 - [ ] `fs.execute` applies to files only. Directories have no execute concept — traversal/opening a directory is `fs.read`. (Unix overloads "x" on directories to mean "traverse" — this is a historical quirk we don't replicate.)
 

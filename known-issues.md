@@ -14,7 +14,36 @@ work that should be done now."
 
 ## Active Bugs
 
-### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, DOES NOT REPRODUCE OFF-TARGET, WORKED-AROUND IN TESTS, ROOT-CAUSE OPEN 2026-07-16
+### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
+
+**UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression
+guard added).** On-target instrumentation was built and run to reproduce
+this live: a boot self-test (`self_test_tcc_diag_brace_init`, since
+removed) compiled **four distinct `memset`/`memcpy`-emitting constructs**
+(constant brace-init, runtime-value brace-init, a 256-byte zero-init
+array, and a struct-to-struct copy) **five times each = 20 on-target
+`tcc -vv` compiles**, plus two earlier single shots = **22 on-target
+compiles that all carried the extra undefined `memset`/`memcpy` symbol.
+Every one linked and ran cleanly (exit 0, valid dynamic ELF).** The
+documented deterministic trigger — "one extra undefined symbol makes the
+on-target link lose `main`" — is therefore **disproven**: `memset`
+presence is *not* sufficient to reproduce the failure. The original Part
+47 failure was thus either genuinely **intermittent/rare** (timing- or
+heap/VFS-state-dependent, like the sibling `B-WAITQ-IDLEPARK` lost-wakeup
+family) or was **already fixed** by an unrelated change since Part 47.
+Because no root cause could be pinned and no deterministic repro exists,
+the entry is downgraded from OPEN to **WATCH**.
+
+A permanent **regression guard** now exists:
+`self_test_linux_real_glibc_cc_brace_memset` (Path Z Part 56,
+`kernel/src/proc/spawn.rs`), wired into the boot self-tests, compiles +
+glibc-links + runs in ring 3 a program with a genuine runtime-`memset`
+aggregate brace-initialiser and asserts output `42\n`. If tcc ever
+regresses to losing `main` when a synthesised `memset` is present, that
+rung fails and emits a `self-test failed` WARNING the boot-test scans
+for. The field-init workaround in the other Path Z rungs is no longer
+strictly required (brace-init is proven reliable) but is harmless and
+left in place. The original OPEN analysis is retained below for history.
 
 **Symptom.** A hosted compile+link in a *single* on-target tcc invocation
 (`tcc -o /prog /prog.c`, the shape `run_hosted_cc_case` uses) fails with

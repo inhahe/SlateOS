@@ -2264,6 +2264,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 56: aggregate brace-initializer (runtime value → tcc-
+    // synthesised memset) compiled + glibc-linked + run in ring 3. Regression
+    // guard for B-TCC-LIBTCC1-MAIN (the once-observed "unresolved reference to
+    // 'main'" link failure that on-target instrumentation could not reproduce).
+    // seed(40)+1+1+0 = 42.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_brace_memset() {
+        serial_println!(
+            "WARNING: Path-Z brace-init/memset C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -14098,6 +14098,39 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
     }
 }
 
+/// Path Z Part 56 — hosted glibc-linked compile with an aggregate **brace
+/// initializer** (runtime value → tcc-synthesised `memset`).
+///
+/// Motivation: the `B-TCC-LIBTCC1-MAIN` bug tracked a once-observed on-target
+/// `tcc: error: unresolved reference to 'main'` link failure attributed to the
+/// extra undefined `memset` symbol that an aggregate brace-initialiser
+/// synthesises.  On-target instrumentation (22 compiles across four distinct
+/// `memset`/`memcpy`-emitting constructs, run under `tcc -vv`) could **not**
+/// reproduce it — every compile linked and ran cleanly — so the documented
+/// deterministic trigger is disproven and this rung stands as the permanent
+/// regression guard for it: a genuine runtime `memset` (a `struct box p = {
+/// seed, 1, 1, 0 };` where `seed` is a runtime value) that tcc lowers to a
+/// `memset` call resolved from glibc, compiled + glibc-linked + run in ring 3.
+/// `seed`(40)+1+1+0 == 42.  Only undefined symbols: `write` and `memset`.
+///
+/// If tcc ever regresses to losing `main` when a synthesised `memset` is
+/// present, this rung fails (surfacing a `self-test failed` WARNING the
+/// boot-test scans for) instead of the failure going unnoticed.
+pub fn self_test_linux_real_glibc_cc_brace_memset() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] = b"extern long write(int, const void *, unsigned long);\n\
+struct box { int a, b, c, d; };\n\
+static int seedfn(void){ static volatile int s = 40; return s; }\n\
+int main(void) {\n\
+  int seed = seedfn();\n\
+  struct box p = { seed, 1, 1, 0 };\n\
+  int t = p.a + p.b + p.c + p.d;\n\
+  char o[3]; o[0] = '0' + t / 10; o[1] = '0' + t % 10; o[2] = '\\n';\n\
+  write(1, o, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("brace-init-memset", HOSTED_SRC, b"42\n")
+}
+
 /// Path Z Part 36 — hosted glibc-linked compile (minimal `puts` surface).
 ///
 /// The smallest possible end-to-end proof: a hosted C program that declares

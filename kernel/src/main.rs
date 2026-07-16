@@ -2225,6 +2225,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 53: function-local static variable (persistent, once-init
+    // mutable state) in a tcc-built dynamic glibc binary. Prior rungs used only
+    // stack automatics + static const tables; a mutable function-local static
+    // must live in .data (function scope, static storage), be initialised once
+    // at load, and persist across calls. bump() returns ++counter (40->41->42);
+    // a volatile rep count forces two real calls. Only undefined sym: write.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_func_static() {
+        serial_println!(
+            "WARNING: Path-Z function-local-static C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

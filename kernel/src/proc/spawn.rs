@@ -15290,6 +15290,45 @@ int main(void){\n\
     run_hosted_cc_case("union-punning", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 53 — function-local `static` variable (persistent, once-initialised
+/// mutable state) in a freshly-tcc-built dynamic glibc binary.
+///
+/// Prior rungs used only automatic locals (fresh each call, on the stack) and a
+/// couple of `static const` read-only tables.  A *mutable* function-local
+/// `static` is different in two ways the compiler must get right: (1) placement
+/// — the variable is not on the stack but in the writable data image (`.data`
+/// for a non-zero initialiser, `.bto` for zero), with function scope but static
+/// storage duration; and (2) *persistence* — its value must survive across
+/// calls and be initialised exactly once at load, not re-set on entry.  This is
+/// the classic idiom for counters, one-shot latches, and lazy caches, and no
+/// earlier rung proved the compiled binary keeps such state across calls, so it
+/// is a genuine coverage gap.
+///
+/// `bump()` holds `static int counter = 40` and returns `++counter` each call.
+/// `main` calls it `reps` (= a `volatile` 2, so the loop cannot be unrolled and
+/// folded) times: the first call yields 41, the second 42 — the second call
+/// seeing 41 (not a re-initialised 40) is exactly what proves the static
+/// persisted.  `r` ends at 42, printed as its two decimal digits — captured file
+/// exactly `42\n` (3 bytes, exit 0).  Only undefined symbol is `write`.  Pure
+/// userspace/codegen (no kernel path).
+pub fn self_test_linux_real_glibc_cc_func_static() -> KernelResult<()> {
+    // `static int counter = 40` inside bump() has static storage duration but
+    // function scope: it lives in .data, is initialised once at load, and its
+    // value must persist across calls.  `volatile reps` stops the loop being
+    // unrolled+folded so the two real calls (41 then 42) actually execute.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int bump(void){ static int counter = 40; counter += 1; return counter; }\n\
+int main(void){\n\
+  volatile int reps = 2;\n\
+  int r = 0;\n\
+  for (int i = 0; i < reps; i++) r = bump();\n\
+  char c[3]; c[0] = (char)(48 + r / 10); c[1] = (char)(48 + r % 10); c[2] = 10;\n\
+  write(1, c, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("func-local-static", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

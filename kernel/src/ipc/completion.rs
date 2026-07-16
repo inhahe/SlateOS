@@ -438,6 +438,61 @@ pub fn notify(cp: CpHandle, source: WaitSource) {
     }
 }
 
+/// Softirq/ISR-safe variant of [`notify`] using only non-blocking locks.
+///
+/// [`notify`] acquires `CP_TABLE` and `SCHED` (via [`sched::wake`]) with
+/// blocking spinlocks.  That is correct from task/syscall context but is a
+/// deadlock hazard from softirq/interrupt context: a timer softirq runs with
+/// interrupts enabled and can preempt a task that already holds `SCHED` (its
+/// holders do not disable interrupts), so a blocking `SCHED.lock()` here would
+/// spin forever on the same CPU.  This variant is used by the timer-expiration
+/// softirq path ([`crate::ipc::timer::process_timer_expirations`]).
+///
+/// Returns `true` if the notification was fully delivered (event queued and any
+/// blocked waiter woken), or if there was nothing to do (port gone / source
+/// unregistered).  Returns `false` if `CP_TABLE` or `SCHED` was contended and
+/// the caller should retry on the next timer tick.  On the `false` path
+/// **nothing is committed** — no event is queued and no waiter is consumed — so
+/// a retry neither loses a wakeup nor duplicates an event.
+#[must_use]
+pub fn try_notify(cp: CpHandle, source: WaitSource) -> bool {
+    super::stats::completion_post();
+
+    let Some(mut table) = CP_TABLE.try_lock() else {
+        return false; // CP_TABLE contended — retry next tick.
+    };
+    let Some(port) = table.get_mut(&cp.id()) else {
+        return true; // Port gone — nothing to do, don't retry.
+    };
+
+    // Find the registration to get user_data.
+    let key = source.key();
+    let Some(reg) = port
+        .registrations
+        .iter()
+        .find(|r| r.source.key() == key)
+    else {
+        return true; // Source was unregistered — nothing to do.
+    };
+    let user_data = reg.user_data;
+
+    // If a waiter is blocked, wake it with `try_wake` (non-blocking) *before*
+    // committing the event.  If `SCHED` is contended we bail without queueing
+    // anything, so the next tick's retry is a clean redo (no lost wake, no
+    // duplicate event).  We hold `CP_TABLE` across the `try_wake`, matching the
+    // `CP_TABLE -> SCHED` lock order established by `notify` (which drops
+    // `CP_TABLE` before `wake`, but never acquires them in the reverse order).
+    if let Some(task_id) = port.waiter {
+        if !sched::try_wake(task_id) {
+            return false; // SCHED contended — retry next tick, nothing committed.
+        }
+        port.waiter = None;
+    }
+
+    port.event_queue.push(CompletionEvent { source, user_data });
+    true
+}
+
 /// Wait for completion events (blocking).
 ///
 /// Returns a vector of ready events (up to `MAX_EVENTS_PER_WAIT`).

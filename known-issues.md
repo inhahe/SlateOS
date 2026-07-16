@@ -181,6 +181,73 @@ the re-entrant `SCHED.lock()` that deadlocks, the outer frame is the holder.
 Then fix the re-entrancy (make the inner site non-blocking `try_lock`, or ensure
 SCHED is not held across a fault-prone / interruptible region).
 
+**LIKELY ROOT CAUSE FOUND (2026-07-15, static audit) — see
+B-COMPLETION-TIMER-IRQ-DEADLOCK below.** A static audit of *every* IRQ/softirq
+path that can reach a blocking `SCHED.lock()` found exactly one such site: the
+timer softirq's `ipc::timer::process_timer_expirations` → `completion::notify`
+→ blocking `sched::wake()`. A timer softirq runs with interrupts enabled and can
+preempt a task holding `SCHED` (holders don't disable interrupts), so if a
+completion-port timer happens to expire in that window the softirq's
+`sched::wake()` re-enters `SCHED.lock()` on the same CPU and spins forever —
+**exactly** this bug's signature (RIP=`spin_loop_hint`, RDI=`&SCHED`, IF set,
+"record shows unlocked" because the holder was mid acquire→record when the timer
+fired). The tcc ring-3 spawn just widens the window (lots of SCHED traffic). This
+is the same interrupt-reentrancy class as B-SYSCTL-IRQ-DEADLOCK. **Fixed** in the
+same pass (softirq-safe `completion::try_notify` + retry-on-contention in
+`process_timer_expirations`). Keep the acquire-stack instrumentation and the WATCH
+status until a long soak confirms the wedge no longer reproduces; if it *does*
+still fire after this fix, the acquire-stack dump will name the true site.
+
+### B-COMPLETION-TIMER-IRQ-DEADLOCK. Timer-softirq completion notify blocking-locks SCHED → same-CPU deadlock if it preempts a SCHED holder — ROOT-CAUSED & FIXED 2026-07-15
+
+**Class.** Interrupt-reentrancy deadlock on the global `SCHED` (and `CP_TABLE`)
+spinlock — the same broad family as B-SYSCTL-IRQ-DEADLOCK, and the strongly
+suspected root cause of B-SCHED-SPAWN-DEADLOCK (see above).
+
+**Root cause.** `ipc::timer::process_timer_expirations()` runs in the timer
+**softirq** (`softirq::handle_timer`, interrupts enabled). For each expired timer
+bound to a completion port it called `completion::notify()`, which takes the
+blocking `CP_TABLE.lock()` and then the blocking `sched::wake()` →
+`SCHED.lock()`. `SCHED` holders in `sched/mod.rs` do **not** disable interrupts,
+so the timer softirq can fire on a CPU that is mid-critical-section holding
+`SCHED` (or in the tiny acquire→record window). On the single-CPU boot the
+softirq's `SCHED.lock()` then spins forever waiting for a lock the *same* CPU
+holds — a self-deadlock. It only triggers when a completion-port timer expires
+in that exact window, hence the ~1-in-20-to-28 rarity the soak observed.
+
+**Audit scope (all clean except the one site).** Verified every other
+softirq/IRQ-reachable path is already non-blocking on `SCHED`:
+`#PF` handler (`try_resolve_fault`→`PROCESS_TABLE.try_lock`; `account_fault`,
+`panic_diagnostics`→`SCHED.try_lock`); timer preemption (`do_deferred_preempt`
+defers when `SCHED.is_locked()`); device-IRQ wake (`ioapic::handle_device_irq`
+→`sched::try_wake`); `softirq::handle_timer` sub-calls
+(`process_sleep_wakeups`→`wake_expired_sleeper` try_lock,
+`process_deferred_wakes`→`try_wake`, `push_balance`→`SCHED.try_lock`);
+`softirq::handle_sched`→`push_balance` (try_lock);
+`ktimer::process_expirations` (defers callbacks to the workqueue, no inline
+SCHED lock). Only `process_timer_expirations`→`completion::notify` blocked.
+
+**Fix.** Added `completion::try_notify(cp, source) -> bool` (softirq-safe:
+`CP_TABLE.try_lock()` + `sched::try_wake()`; commits **nothing** on contention —
+returns `false` so the caller retries next tick, avoiding both a lost wakeup and
+a duplicated event). Restructured `process_timer_expirations` to call
+`try_notify` *before* advancing/expiring the timer and to `continue` (leave the
+timer un-advanced, retry next ~10 ms tick) on contention. `completion::notify`
+(blocking) is unchanged for its task/syscall-context callers (`io_ring`,
+`syscall::handlers`) and `close()`. Contention is transient (SCHED/CP_TABLE held
+only briefly), so the bounded per-tick retry resolves within a tick or two.
+
+**Where it lives.** `kernel/src/ipc/completion.rs` (`try_notify`),
+`kernel/src/ipc/timer.rs` (`process_timer_expirations`). Detector:
+`scripts/wedge-soak.sh` (was catching it as B-SCHED-SPAWN-DEADLOCK).
+
+**Next step.** Boot-test, then run a long `wedge-soak.sh` to confirm the SCHED
+wedge no longer reproduces (it was ~1/20-28; a clean 40+ iteration soak is good
+evidence). This is a confirmed 4th instance of the raw-`spin::Mutex` deadlock
+class — see open-questions.md Q24 (recommendation was "escalate to C if a 3rd/4th
+shows up"; this is the interrupt-reentrancy sub-variant, already fixed reactively
+without a new lock type, consistent with the B-SYSCTL fix).
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

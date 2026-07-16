@@ -222,9 +222,24 @@ pub fn process_timer_expirations() {
             continue; // Not yet or inactive.
         }
 
-        // Timer has fired.
-        let interval = entry.interval.load(Ordering::Acquire);
+        // Timer has fired.  We run in softirq (timer-ISR) context, so we must
+        // NOT block on `CP_TABLE` / `SCHED` here — a blocking wake would spin
+        // forever if this softirq preempted a task that already holds `SCHED`
+        // (see `known-issues.md` B-COMPLETION-TIMER-IRQ-DEADLOCK).  Deliver the
+        // completion-port notification with non-blocking locks first, and only
+        // advance/expire the timer once it succeeds.  If a lock was contended,
+        // leave the timer un-advanced so the next tick retries — this avoids
+        // both a lost wakeup and a duplicated event.
+        let cp_raw = entry.cp_handle.load(Ordering::Acquire);
+        if cp_raw != 0 {
+            let cp = super::completion::CpHandle::from_raw(cp_raw);
+            let source = super::completion::WaitSource::Timer(handle);
+            if !super::completion::try_notify(cp, source) {
+                continue; // Contended — retry next tick; don't advance/expire.
+            }
+        }
 
+        let interval = entry.interval.load(Ordering::Acquire);
         if interval > 0 {
             // Periodic: advance the deadline and mark expired.
             let next_deadline = now.saturating_add(interval);
@@ -235,14 +250,6 @@ pub fn process_timer_expirations() {
         }
 
         entry.expired.store(true, Ordering::Release);
-
-        // Notify the associated completion port, if any.
-        let cp_raw = entry.cp_handle.load(Ordering::Acquire);
-        if cp_raw != 0 {
-            let cp = super::completion::CpHandle::from_raw(cp_raw);
-            let source = super::completion::WaitSource::Timer(handle);
-            super::completion::notify(cp, source);
-        }
     }
 }
 

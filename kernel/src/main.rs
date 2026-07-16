@@ -2309,6 +2309,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 60: a dense `switch` (lowered to an indexed jump table)
+    // compiled + glibc-linked + run in ring 3. Proves the on-target tcc builds
+    // and executes a switch jump table — the canonical option/argument-parser
+    // codegen shape — de-risking real coreutils/bash parser code. Sum = 42.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_switch() {
+        serial_println!(
+            "WARNING: Path-Z dense-switch C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

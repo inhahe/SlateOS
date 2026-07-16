@@ -15561,6 +15561,53 @@ int main(void){\n\
     run_hosted_cc_case("c11-generic", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 60: a dense `switch` (lowered to a jump table) compiled by the
+/// on-target tcc, glibc-linked, and run in ring 3.
+///
+/// A dense integer `switch` is the canonical option/argument-parser shape in
+/// real systems C (every coreutils `getopt` loop, every bash/readline state
+/// machine). When the case labels are contiguous, the compiler lowers the whole
+/// dispatch to an indexed **jump table** (an indirect `jmp` through a computed
+/// table slot) rather than a chain of compares — a distinct codegen path from
+/// the `&&label`/`goto *` computed-goto tested in Part (computed_goto): that one
+/// exercises *explicit* address-of-label indirect jumps, this one exercises the
+/// compiler's *implicit* switch-table construction and bounds/default handling.
+/// Proving the on-target tcc builds and executes a jump table correctly directly
+/// de-risks compiling real parser code. Pure userspace/codegen (only undefined
+/// symbol is `write`; no kernel path).
+///
+/// `weight(c)` is an 8-arm contiguous switch (`case 0..=7 → c+1`, else 0). Summed
+/// over `c = 0..=5` (loop bound from a `static volatile` seed = 5, defeating
+/// folding) gives `1+2+3+4+5+6 = 21`; `21 + seed(5) + 16 = 42`, printed as two
+/// decimal digits — captured file exactly `42\n` (3 bytes, exit 0).
+pub fn self_test_linux_real_glibc_cc_switch() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int seedfn(void){ static volatile int s = 5; return s; }\n\
+static int weight(int c){\n\
+  switch (c){\n\
+    case 0: return 1;\n\
+    case 1: return 2;\n\
+    case 2: return 3;\n\
+    case 3: return 4;\n\
+    case 4: return 5;\n\
+    case 5: return 6;\n\
+    case 6: return 7;\n\
+    case 7: return 8;\n\
+    default: return 0;\n\
+  }\n\
+}\n\
+int main(void){\n\
+  int base = seedfn();\n\
+  int t = 0;\n\
+  for (int i = 0; i <= base; i++) t += weight(i);\n\
+  t += base + 16;\n\
+  char o[3]; o[0]=(char)(48+t/10); o[1]=(char)(48+t%10); o[2]=10;\n\
+  write(1,o,3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("switch-table", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

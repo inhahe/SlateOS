@@ -2199,6 +2199,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 51: computed goto (GNU labels-as-values, &&label + goto *p) in
+    // a tcc-built dynamic glibc binary. Sibling to Part 50's indirect call: this
+    // is the indirect *jump* path (jmp *reg, no call/return), the mechanism real
+    // interpreters use for threaded bytecode dispatch. A static const table of
+    // label addresses (rodata + per-slot relocation) is indexed by a volatile
+    // selector. Only undefined sym: write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_computed_goto() {
+        serial_println!(
+            "WARNING: Path-Z computed-goto C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

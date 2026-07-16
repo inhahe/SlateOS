@@ -15206,6 +15206,50 @@ int main(void){\n\
     run_hosted_cc_case("funcptr-dispatch", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 51 — computed goto (GNU labels-as-values: `&&label` + `goto *p`)
+/// in a freshly-tcc-built dynamic glibc binary.
+///
+/// Part 50 covered an indirect *call* through a function pointer; this rung
+/// covers the sibling but distinct indirect *jump* codegen.  The GNU
+/// labels-as-values extension lets a program take the address of a *label*
+/// (`&&op1`) and jump to a runtime-computed one (`goto *ptr`), which the
+/// compiler lowers to a plain `jmp *reg` (no call/return, no stack frame change)
+/// plus — because the label addresses are stored in a `static` table — one
+/// intra-function relocation per slot that the linker resolves.  This is the
+/// mechanism real interpreters use for threaded dispatch (one indirect jump per
+/// bytecode op), a hot path where the direct-branch rungs give no coverage, so a
+/// compiled-on-target computed goto closes a genuine gap and also exercises
+/// tcc's support for the `&&`/`goto *` GNU extension itself.
+///
+/// A `volatile` selector `sel = 1` indexes a `static const` jump table of three
+/// label addresses; the taken branch (`op1`) sets `r = 42`, printed as its two
+/// decimal digits — captured file exactly `42\n` (3 bytes, exit 0).  `volatile`
+/// stops the compiler folding the jump to a static branch.  The table is
+/// `static const` (rodata + per-slot relocation, no runtime aggregate init → no
+/// synthesised `memset`, avoids B-TCC-LIBTCC1-MAIN); only undefined symbol is
+/// `write`.  Pure userspace/codegen (no kernel path).
+pub fn self_test_linux_real_glibc_cc_computed_goto() -> KernelResult<()> {
+    // `&&label` address-of-label + `goto *p` => an indirect `jmp *reg`; the
+    // `static const` table of label addresses lands in rodata with one
+    // relocation per slot (no runtime init/`memset`).  `volatile sel` forces the
+    // real computed jump rather than a compile-time-resolved direct branch.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+int main(void){\n\
+  volatile int sel = 1;\n\
+  static void *const tbl[3] = { &&op0, &&op1, &&op2 };\n\
+  int r = 0;\n\
+  goto *tbl[sel];\n\
+op0: r = 7;  goto done;\n\
+op1: r = 42; goto done;\n\
+op2: r = 99; goto done;\n\
+done:;\n\
+  char b[3]; b[0] = (char)(48 + r / 10); b[1] = (char)(48 + r % 10); b[2] = 10;\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("computed-goto", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

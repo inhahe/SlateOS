@@ -23,6 +23,78 @@ Format for each entry:
 
 ---
 
+## Q25 — Next large initiative: which giant external port to prioritize now that the self-hosting C toolchain + POSIX layer are comprehensive?
+
+**Status:** OPEN (logged 2026-07-16). This is a prioritization decision, not a
+blocker on *all* progress — Claude continues de-risking work in the meantime (see
+"in the meantime" below). It is surfaced because the roadmap's entire remaining
+unchecked frontier is now giant external ports, and picking among them has
+historically been the operator's call (Q3 §… / Q12 §36 / Q15 §40).
+
+**Context.** The on-target C toolchain is now proven end-to-end: `tcc` compiles C
+on-target, glibc dynamic linking + `ld.so` load + ring-3 execution all work, and
+the Path-Z self-test suite (Parts 1–58) validates a comprehensive set of C/GNU
+constructs (types, structs, unions, bitfields, float/long-double, VLAs, function
+pointers, computed goto, TLS, setjmp/longjmp, varargs, signals, ctors/dtors,
+inline asm, C11 atomics via libtcc1, GNU statement expressions + `__typeof__`,
+aggregate init, separate compilation, project headers). The POSIX layer (§2.5) is
+extraordinarily complete. So the prerequisites that historically gated the big
+ports are largely in place — the remaining work is the ports themselves.
+
+**Question.** Which of the roadmap's remaining giant initiatives should be next?
+
+**Options.**
+
+- **A. bash + coreutils (interactive shell userland).** *Pros:* smallest gap of
+  the remaining items — builds directly on the just-proven tcc/glibc/`ld.so`/
+  ring-3 path; unblocks a real self-hosting dev environment and essentially all
+  user-facing/CLI work; each coreutils tool is individually small so progress is
+  incremental and continuously shippable. *Cons:* bash itself (~150k LOC C) is
+  non-trivial; needs job control, terminal `tcsetattr`/pgrp semantics, and a
+  robust `fork`/`exec`/`waitpid` (a couple of the fork/exec paths are still WATCH
+  bugs — B-FORKEXEC-BOOT-HANG, B-PTHREAD-TEARDOWN-PF).
+- **B. Mesa / GPU userspace (3D).** *Pros:* unlocks hardware-accelerated
+  compositor + real GPU apps. *Cons:* explicitly deferred by Q18 until a virgl
+  test environment exists; large; blocked on that prerequisite.
+- **C. Chromium (~35M LOC C++).** *Pros:* the single highest-impact app (browser +
+  the "system web app" framework, VS Code, Electron apps). *Cons:* enormous;
+  needs GPU, audio, networking, and POSIX all *fully* mature; by far the biggest
+  single undertaking.
+- **D. WINE (Windows app compatibility).** *Pros:* runs unmodified Windows apps.
+  *Cons:* large; needs mature graphics + extensive PE-loader / Win32-syscall work;
+  higher risk, less incremental.
+- **E. Additional filesystems (Btrfs / F2FS / NTFS).** *Pros:* self-contained
+  kernel/fs ports with clear boundaries; moderate size; no userspace-graphics
+  dependency. *Cons:* lower immediate user-visible payoff than a shell/browser.
+- **F. fastpy build-system integration.** *Pros:* infrastructure (not an external
+  port) — unblocks writing OS userspace tools in Python-via-fastpy, which
+  `CLAUDE.md` explicitly encourages (package manager, settings UI, file indexer,
+  installer, etc.); force-multiplier for all subsequent userspace work. *Cons:*
+  depends on fastpy maturity; a build-system initiative in its own right.
+
+**Claude's recommendation.** **A (bash + coreutils) first, then F (fastpy
+integration).** A is the smallest, highest-leverage next step and builds directly
+on what was just proven; a working shell + coreutils is the natural foundation for
+everything else and is continuously shippable one tool at a time. F then unlocks
+the Python userspace lane for the many small system tools. B/C/D are larger and
+either gated (B on Q18/virgl) or dependent on more maturity (C/D on graphics+audio).
+
+**In the meantime (not blocked).** Claude is *not* idling on this: it continues
+de-risking the likely-next port (A) with bounded, valuable, non-port work —
+extending the on-target compile validation from single-construct probes to
+realistic multi-function programs (the actual prerequisite for compiling
+coreutils/bash), and keeping the toolchain/self-test green. If that de-risking
+line is exhausted and every remaining task is confirmed operator-gated, Claude
+will stop and let the loop end per the state-(3) rule rather than manufacture
+busywork.
+
+**Where it bites.** `userspace/shell/`, `posix/`, `roadmap.md` (line 1494 bash;
+line 24 fastpy; lines 5117–5119 filesystems; line 5032 Chromium; line 5114 WINE);
+fork/exec WATCH bugs in `known-issues.md` (B-FORKEXEC-BOOT-HANG,
+B-PTHREAD-TEARDOWN-PF) are the practical gates for A.
+
+---
+
 ## Q24 — Raw `spin::Mutex` holder-preemption: reactive fixes vs. a proactive kernel-wide audit
 
 **Status:** OPEN (logged 2026-07-15). Not blocking any current thread — Claude is

@@ -14,51 +14,68 @@ work that should be done now."
 
 ## Active Bugs
 
-### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link drops the `main` symbol whenever the source pulls in `libtcc1.a` (e.g. a struct/aggregate brace-initialiser → synthesised `memset`/`memcpy`) → `tcc: error: unresolved reference to 'main'`, exit 1 — DIAGNOSED, WORKED-AROUND IN TESTS, ROOT-CAUSE OPEN 2026-07-16
+### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, DOES NOT REPRODUCE OFF-TARGET, WORKED-AROUND IN TESTS, ROOT-CAUSE OPEN 2026-07-16
 
-**Symptom.** A hosted compile+link in a *single* tcc invocation
+**Symptom.** A hosted compile+link in a *single* on-target tcc invocation
 (`tcc -o /prog /prog.c`, the shape `run_hosted_cc_case` uses) fails with
 `tcc: error: unresolved reference to 'main'` (exit 1) — even though the
-source plainly defines `int main(void)` — *iff* the object references a
-symbol that tcc resolves from its own runtime archive `libtcc1.a`. The
-common trigger is an aggregate **brace initialiser** (`struct s x = {…};`)
-or a bulk struct copy, which tcc lowers to a synthesised `memset`/`memcpy`
-that lives in `libtcc1.a`.
+source plainly defines `int main(void)`. The trigger observed live was an
+aggregate **brace initialiser** (`struct s x = {…};`), which tcc lowers to
+a synthesised `memset` reference; the *field-wise* version of the same
+program (one fewer undefined symbol: only `write`) links and runs cleanly.
 
-**Reproduction / diagnosis.** Extract the rootfs tcc and run under WSL:
-`debugfs -R "dump /bin/tcc /tmp/tcc" rootfs.ext4`. Compile-only
-(`tcc -c prog.c -o prog.o`) *succeeds* and `nm prog.o` shows a good
-global `T main` — but also `U memset` when the source brace-initialises a
-struct. Rewriting the struct init field-by-field removes the `U memset`
-(only `U write` remains) and the one-shot compile+link then succeeds.
-Observed live in the Path Z Part 47 (struct-by-value) self-test before it
-was reworked to field-wise init; see `kernel/src/proc/spawn.rs`
-`self_test_linux_real_glibc_cc_struct` and its doc note.
+**IMPORTANT — earlier mechanism guess was wrong.** The first draft of this
+entry blamed `libtcc1.a` (claiming tcc resolves the synthesised
+`memset`/`memcpy` from its runtime archive and that perturbs the link).
+That is **incorrect**: `ar t`/`nm --print-armap` on the staged
+`libtcc1.a` show it defines the soft-float/atomic/alloca/va_list helpers
+but **not** `memset`/`memcpy` — those resolve from glibc (`libc.so.6`).
+So `libtcc1.a` is not pulled in by the brace-init program at all. The real
+differentiator is simply the *one extra undefined symbol* (`memset`), and
+the breakage is **on-target-specific**.
 
-**Why it matters.** This is not test-specific: it means the on-target C
-toolchain currently cannot compile+link (in one step) a large class of
-ordinary C programs — anything that brace-initialises an aggregate or
-otherwise makes tcc emit a `libtcc1.a` runtime helper. That's a lot of
-real C. The Path Z rungs sidestep it (they hand-roll init), but coreutils
-/ real projects will hit it.
+**Reproduction / diagnosis (what was actually done).** Extracted the whole
+staged toolchain from `rootfs.ext4` via `debugfs -R "dump …"` (tcc, crt1/
+crti/crtn.o, the `libc.so` GNU-ld GROUP script, `libc_nonshared.a`,
+`libtcc1.a`, `libc.so.6`, `ld-linux`) and re-ran the *extracted target
+tcc* under WSL:
+  - `tcc -c prog.c -o prog.o` → OK; `nm` shows good `T main`, plus
+    `U memset` for the brace-init variant vs. only `U write` for field-init.
+  - Full `tcc -o prog prog.c` (one-shot compile+link) → **exit 0 for BOTH
+    variants**, both with WSL's native crt/libc and with the OS's staged
+    crt + `libc.so` GROUP script + `libc_nonshared.a` + `libtcc1.a` forced
+    in explicitly via `-nostdlib`.
+So the `unresolved 'main'` failure **does not reproduce off-target** — it
+only happens when tcc runs *inside the OS* (under our Linux-syscall
+translation + VFS). That points at an OS-side interaction (tcc's file
+reads of the large `libc.so.6` / GROUP-script / archive parsing under our
+syscall+VFS layer, or a heap/symbol-table quirk in tcc keyed to the extra
+symbol), **not** an archive-index or link-ordering defect in the staged
+files themselves.
 
-**Where it lives.** The staging of `libtcc1.a` and tcc's runtime/lib
-search path for the hosted target — `scripts/` rootfs staging + wherever
-`libtcc1.a` is placed for `/bin/tcc`, and tcc's in-memory linker
-member-selection/symbol-ordering when an archive member is pulled in.
+**Why it matters.** The on-target C toolchain can currently mis-link (in
+one step) programs that carry an extra compiler-synthesised undefined
+symbol — most commonly aggregate brace initialisers (a lot of ordinary C).
+Path Z rungs sidestep it (hand-rolled field init); coreutils/real projects
+may hit it. Workaround: compile `-c` then link separately, or avoid the
+construct.
 
-**Proper fix (open).** Determine why pulling a `libtcc1.a` member into the
-in-memory link causes tcc to lose the `main` symbol. Hypotheses to check:
-(a) `libtcc1.a`'s archive symbol index (`ranlib`) is missing/stale so tcc's
-archive scan mis-orders member inclusion relative to the crt object that
-references `main`; (b) the staged `libtcc1.a` was built for a different
-tcc and its members define/pull symbols that shadow or reorder the crt;
-(c) tcc processes the archive *before* the crt1 object, so `main` (defined
-in the user object) is pruned as unreferenced at the point the archive is
-scanned. Fix likely = restage a matching `libtcc1.a` with a correct symbol
-index and/or correct the link input ordering (user object + crt before the
-runtime archive). Until fixed, on-target C that needs `memset`/`memcpy`
-helpers must be compiled `-c` then linked separately, or avoid brace init.
+**Where it lives.** On-target `tcc` (`/bin/tcc`, 0.9.28rc mob) running via
+the Linux-ABI syscall translation + VFS; the staging is in
+`stage_hosted_cc_support` (`kernel/src/proc/spawn.rs`). The self-test that
+first exposed it: `self_test_linux_real_glibc_cc_struct` (Path Z Part 47).
+
+**Proper fix (open — needs on-target instrumentation).** Because it only
+reproduces inside the OS, the next step is to capture what tcc actually
+does there: strace-equivalent of the failing link (there is already
+`scripts/extract-tcc-strace.sh` / `scripts/probe-tcc-hosted.sh`) to see
+whether a file read of `libc.so.6` / the GROUP script / `libc_nonshared.a`
+returns short/EOF-early, or whether tcc's dynamic-symbol lookup for
+`memset` walks into a region our VFS serves incorrectly. If a specific
+syscall/VFS read is returning wrong data for large files under tcc's
+access pattern, fix that; otherwise it may be a genuine tcc bug worth
+patching in the port. Until then the entry stays WATCH/OPEN with the
+field-init workaround in place.
 
 
 ### B-WAITQ-IDLEPARK. Intermittent boot hang in the waitqueue `wait_timeout_ns (expired)` self-test — CPU idle-parked with a Blocked task, lost-wakeup family — INSTRUMENTED, WATCH 2026-07-15

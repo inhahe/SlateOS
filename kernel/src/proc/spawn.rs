@@ -15038,22 +15038,26 @@ int main(void){\n\
 ///
 /// Implementation note (why the struct locals are field-initialised rather than
 /// brace-initialised): when tcc lowers a *brace initialiser* on an aggregate it
-/// emits a synthesised `memset`/`memcpy` and resolves it from its own runtime
-/// archive `libtcc1.a`.  Pulling that archive into the one-shot compile+link
-/// perturbs tcc's in-memory link ordering enough that it drops the `main`
-/// symbol (observed: `tcc: error: unresolved reference to 'main'`, tcc exit 1) —
-/// even though `-c` alone emits a perfectly good `main`.  Assigning each field
-/// individually keeps the object's only undefined symbol as `write` (identical
-/// link surface to Parts 45/46, which link cleanly) while still passing and
-/// returning the whole struct by value — so the aggregate ABI is fully covered
-/// without the fragile runtime-helper dependency.
+/// emits a synthesised `memset` reference.  On the target that one extra
+/// undefined symbol makes the one-shot `tcc -o prog prog.c` compile+link abort
+/// with a spurious `tcc: error: unresolved reference to 'main'` (tcc exit 1) —
+/// even though `-c` alone emits a perfectly good global `main`, and even though
+/// `memset` is provided by the linked glibc.  The failure does NOT reproduce
+/// off-target (re-running the extracted target tcc under WSL against the same
+/// staged crt/libc/libtcc1.a links the brace-init program cleanly), so it is an
+/// on-target tcc/link quirk, not an archive-index problem — see
+/// B-TCC-LIBTCC1-MAIN in known-issues.md.  Assigning each field individually
+/// keeps the object's only undefined symbol as `write` (identical link surface
+/// to Parts 45/46, which link cleanly) while still passing and returning the
+/// whole struct by value — so the aggregate ABI is fully covered without
+/// tripping the quirk.
 pub fn self_test_linux_real_glibc_cc_struct() -> KernelResult<()> {
     // 16-byte all-INTEGER struct => two eightbytes => passed/returned in GP
     // register pairs (never the MEMORY/hidden-pointer path).  `volatile` seed on
     // the first field defeats constant folding so the by-value pack/call/return
     // sequence is actually emitted rather than computed at compile time.  Fields
-    // are set individually (not via a brace initialiser) so tcc does not
-    // synthesise a `memset`/`memcpy` into `libtcc1.a` — see the doc note above.
+    // are set individually (not via a brace initialiser) so tcc does not emit a
+    // synthesised `memset` reference — see the doc note above / B-TCC-LIBTCC1-MAIN.
     const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
 struct box { int a, b, c, d; };\n\
 static struct box combine(struct box p, struct box q){\n\

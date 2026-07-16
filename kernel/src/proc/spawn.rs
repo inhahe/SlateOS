@@ -15250,6 +15250,46 @@ done:;\n\
     run_hosted_cc_case("computed-goto", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 52 — union type-punning (overlapping-member storage aliasing) in
+/// a freshly-tcc-built dynamic glibc binary.
+///
+/// No prior rung used a `union`.  A union makes several members *share* the same
+/// storage, so the compiler must lay them all at offset 0 and — crucially —
+/// treat a write through one member and a read through another as touching the
+/// same bytes (the compiler cannot cache the written value in a register across
+/// the differently-typed read; it must round-trip through memory).  Getting the
+/// overlap layout and the alias-through-memory behaviour right is a distinct
+/// codegen concern from the disjoint fields of a `struct` (Part 47) — and
+/// union type-punning is the standard C idiom for reinterpreting bytes (endian
+/// probes, float/int bit tricks, protocol headers), so a compiled-on-target
+/// union closes a real gap.
+///
+/// `union u { unsigned int i; unsigned char b[4]; }` overlaps a 32-bit int with
+/// a 4-byte array.  The program writes `u.i = 0x2A` (from a `volatile` seed so
+/// the write cannot be folded into the reads) and sums the four overlapping
+/// bytes `b[0..3]`; on this little-endian target `0x2A` lands in `b[0]` and the
+/// rest are 0, so the sum is 42 — reading it back through the *other* member
+/// proves the members truly alias.  Printed as its two decimal digits: captured
+/// file exactly `42\n` (3 bytes, exit 0).  Only undefined symbol is `write`
+/// (no aggregate init → does not trip B-TCC-LIBTCC1-MAIN).  Pure userspace/codegen.
+pub fn self_test_linux_real_glibc_cc_union() -> KernelResult<()> {
+    // Union overlaps `unsigned int i` and `unsigned char b[4]` at offset 0.
+    // Writing `.i` then reading `.b[..]` forces the compiler to round-trip
+    // through the shared storage (no register caching across the aliasing read).
+    // `volatile` seed defeats folding; little-endian puts 0x2A in b[0].
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+union u { unsigned int i; unsigned char b[4]; };\n\
+int main(void){\n\
+  volatile unsigned int seed = 0x0000002Au;\n\
+  union u u; u.i = seed;\n\
+  int total = (int)u.b[0] + (int)u.b[1] + (int)u.b[2] + (int)u.b[3];\n\
+  char c[3]; c[0] = (char)(48 + total / 10); c[1] = (char)(48 + total % 10); c[2] = 10;\n\
+  write(1, c, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("union-punning", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

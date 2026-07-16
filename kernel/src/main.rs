@@ -2212,6 +2212,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 52: union type-punning (overlapping-member storage aliasing) in
+    // a tcc-built dynamic glibc binary. No prior rung used a union: writing one
+    // member and reading an overlapping member forces the compiler to lay them
+    // at the same offset and round-trip through memory (no register caching
+    // across the aliasing read) — the standard byte-reinterpretation idiom,
+    // distinct from Part 47's disjoint struct fields. Only undefined sym: write.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_union() {
+        serial_println!(
+            "WARNING: Path-Z union type-punning C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

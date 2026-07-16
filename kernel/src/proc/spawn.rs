@@ -15523,6 +15523,44 @@ int main(void){\n\
     run_hosted_cc_case("stmt-expr", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 59: C11 `_Generic` type-generic selection compiled by the
+/// on-target tcc, glibc-linked, and run in ring 3.
+///
+/// `_Generic` is C11's compile-time type-directed selection primitive — the
+/// mechanism behind `<tgmath.h>` and every modern type-generic C macro that
+/// dispatches on the *static type* of its argument (e.g. picking `sinf`/`sin`/
+/// `sinl`, or a type-appropriate format/handler). It is a distinct front-end
+/// facility from everything else in this suite: the compiler must resolve the
+/// controlling expression's type, match it against the association list, and
+/// substitute the selected expression — all at translation time. Proving the
+/// on-target tcc implements it correctly is a real prerequisite for compiling
+/// modern C that leans on `<tgmath.h>`/type-generic headers. Pure userspace/
+/// codegen (only undefined symbol is `write`; no kernel path).
+///
+/// `TAG(x)` maps a controlling expression's static type to a weight
+/// (`int`→10, `long`→20, `double`→5, `char`→7, else 0). Applied to one variable
+/// of each type, `10 + 20 + 5 + 7` = 42. The values come from a `static volatile`
+/// seed so the compiler cannot fold the operands away — but the selection itself
+/// is inherently static (it depends only on the declared type), which is exactly
+/// the property under test. Printed as two decimal digits — captured file exactly
+/// `42\n` (3 bytes, exit 0).
+pub fn self_test_linux_real_glibc_cc_generic() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+#define TAG(x) _Generic((x), int: 10, long: 20, double: 5, char: 7, default: 0)\n\
+static int seedfn(void){ static volatile int s = 0; return s; }\n\
+int main(void){\n\
+  int i = seedfn();\n\
+  long l = seedfn();\n\
+  double d = seedfn();\n\
+  char c = (char)seedfn();\n\
+  int t = TAG(i) + TAG(l) + TAG(d) + TAG(c);\n\
+  char o[3]; o[0]=(char)(48+t/10); o[1]=(char)(48+t%10); o[2]=10;\n\
+  write(1,o,3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("c11-generic", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

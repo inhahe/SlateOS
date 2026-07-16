@@ -2298,6 +2298,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 59: C11 `_Generic` type-generic selection compiled + glibc-
+    // linked + run in ring 3. Proves the on-target tcc resolves the tgmath.h /
+    // type-generic-macro selection primitive at translation time. int+long+
+    // double+char weights 10+20+5+7 = 42.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_generic() {
+        serial_println!(
+            "WARNING: Path-Z C11 _Generic C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

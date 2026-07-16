@@ -123,6 +123,37 @@ escalate to **C** only if the *teardown* hypothesis gets a confirmed RIP capture
 Operator input still only needed on whether to pre-authorize that bounded
 teardown-path **C** sweep proactively.
 
+**Update (2026-07-15d) — a confirmed fourth instance, again the interrupt-
+reentrancy sub-variant; reactive-A still holding.** Root-caused
+**B-SCHED-SPAWN-DEADLOCK** (the intermittent tcc-ring-3-spawn boot wedge the soak
+kept re-catching) by static audit to a single blocking `SCHED.lock()` reachable
+from softirq context: the timer softirq's `ipc::timer::process_timer_expirations`
+→ `completion::notify` → `sched::wake()` (commit 67e224938,
+`known-issues.md` B-COMPLETION-TIMER-IRQ-DEADLOCK). Same **interrupt-reentrancy**
+sub-variant as B-SYSCTL (a lock taken blockingly from softirq while a task holds
+it — here `SCHED`, whose holders don't disable interrupts), not the holder-
+preemption sub-variant. Fixed reactively (approach A): softirq-safe
+`completion::try_notify` (try_lock + `try_wake`, commit-nothing-on-contention) +
+retry-next-tick in `process_timer_expirations` — no new lock type. As with the
+sysctl fix, I did the **bounded proactive audit** of the *whole* softirq/IRQ →
+`SCHED` surface (the `#PF` handler, `do_deferred_preempt`, `ioapic` device-IRQ
+wake, every `softirq::handle_timer`/`handle_sched` sub-call, `ktimer`) and found
+**this was the only blocking site** — everything else already uses
+`try_lock`/`try_wake` or defers to the workqueue. So the interrupt-reentrancy
+surface is now audited-clean *and* the one hole is closed.
+
+Tally: four confirmed instances, but **three of the four are the interrupt-
+reentrancy sub-variant** (sysctl, and now completion-timer→SCHED), all fixed with
+targeted `try_lock` + audit and **no new lock type** — the reactive approach has
+handled every interrupt-reentrancy case cleanly. Only the *holder-preemption*
+sub-variant (heap, container — the original two) is the one a **C**
+(`PreemptSpinMutex`) sweep would target, and no *new* holder-preemption instance
+has appeared since. **Recommendation unchanged: stay on A.** The only thing still
+worth the operator's input is whether to pre-authorize a bounded **C** sweep of
+the process-exit/teardown locks (`PROCESS_TABLE`/reaper/exit-hooks) *if* the
+still-unconfirmed `B-FORKEXEC-BOOT-HANG` teardown-wedge hypothesis ever gets a
+confirmed RIP capture. Not blocking anything.
+
 ---
 
 ## Q23 — Session model for daemon-backed AF_INET **server** sockets (accepted-connection independence)

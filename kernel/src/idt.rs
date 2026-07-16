@@ -1548,6 +1548,15 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
 static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Latched once the kernel commits to printing an unrecoverable kernel-fault
+/// report.  A fault taken *after* this is set is a nested fault from within the
+/// (stack-hungry) diagnostic path itself; the fatal handlers check this and
+/// halt immediately with a one-line report rather than recursing and
+/// overflowing the kernel stack into a #DF/#UD storm.  See the re-entrancy
+/// guard in `handle_page_fault` (root-caused from soak-20260715-235730-iter40).
+static FATAL_FAULT_IN_PROGRESS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Lowest canonical higher-half address. Used to sanity-check stack/frame
 /// pointers before dereferencing them in the NMI backtrace. Kernel *stacks* are
 /// not confined to the top −2 GiB (where the kernel image / `.text` lives):
@@ -1843,6 +1852,17 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
 #[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     count_vector(8);
+    // If we're already emitting a fatal report, this #DF is part of that death
+    // spiral (e.g. the diagnostic path overflowed the stack).  Emit one
+    // stack-cheap line and halt rather than running the full #DF diagnostics
+    // (which include a frame-walk that can fault again).
+    if FATAL_FAULT_IN_PROGRESS.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        serial_println!(
+            "NESTED #DF during fatal diagnostics: rip={:#x} err={:#x} rsp={:#x} — halting.",
+            frame.rip, error, frame.rsp
+        );
+        cpu::halt_loop();
+    }
     log_exception(8, frame.rip, error);
     // Double faults are always unrecoverable — even from ring 3.
     // By the time we get a #DF, the CPU has already failed to handle
@@ -2055,6 +2075,29 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
     }
 
+    // Re-entrancy guard for the unrecoverable kernel-fault path.
+    //
+    // Once we commit to printing a fatal kernel-#PF report we run *stack-hungry*
+    // diagnostics (RBP frame-walk, raw stack scan, formatting into serial).  If
+    // the fault that killed us corrupted the frame chain or a function pointer,
+    // those diagnostics can themselves fault.  Without a guard, that nested #PF
+    // re-enters this handler and restarts the whole report — each level burning
+    // ~2 KiB of kernel stack — until the stack overflows into a #DF, which then
+    // spirals into a #UD garbage-execution storm.  That is exactly what buried
+    // the real evidence in soak-20260715-235730-iter40 (a kernel jump to
+    // RIP=0x0): 4400 lines of cascade and no usable backtrace.
+    //
+    // If a fault arrives while `FATAL_FAULT_IN_PROGRESS` is set, emit one
+    // minimal, stack-cheap line and halt immediately — no recursion, so the
+    // first (real) fault's report stays intact and complete.
+    if FATAL_FAULT_IN_PROGRESS.load(core::sync::atomic::Ordering::Relaxed) {
+        serial_println!(
+            "NESTED #PF during fatal diagnostics: rip={:#x} cr2={:#x} err={:#x} — halting.",
+            frame.rip, cr2, error
+        );
+        cpu::halt_loop();
+    }
+
     // Make page-fault resolution preemptible.  #PF is dispatched through an
     // interrupt gate (IDT type 0xE), so we arrive here with IF=0.  Resolving a
     // fault can be *long*: demand-paging a subpaged file frame reads up to
@@ -2185,6 +2228,12 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     }
 
     // Unresolvable kernel page fault — halt.
+    //
+    // Commit to the unrecoverable path: arm the re-entrancy guard *before*
+    // touching any stack-hungry diagnostics below, so a nested fault within
+    // them halts cleanly (see the guard at the top of this handler) instead
+    // of recursing and overflowing the kernel stack.
+    FATAL_FAULT_IN_PROGRESS.store(true, core::sync::atomic::Ordering::Relaxed);
     mm::fault::record_fatal();
     log_exception(14, frame.rip, cr2);
     serial_println!(
@@ -2215,16 +2264,23 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         sched::current_cpu_id(),
     );
 
-    // Print stack backtrace for crash diagnostics.
-    crate::backtrace::print_current();
-
-    // Raw stack scan from the fault-time RSP. The RBP frame-walk above only
-    // shows the handler's own frames when the frame chain is broken — which is
-    // exactly what a control-flow hijack (corrupted return address / function
-    // pointer landing in a data region, e.g. B-PTHREAD-TEARDOWN-PF) looks like.
-    // The raw scan recovers the hijacked caller's origin by printing every
-    // stack slot that still holds a kernel-text-looking address.
+    // Raw stack scan FIRST, from the fault-time RSP.  Ordering matters: the
+    // scan is the safer probe — it validates every slot against known kernel
+    // stack regions before dereferencing, so it cannot itself fault — whereas
+    // the RBP frame-walk below blindly follows a (possibly corrupted) chain and
+    // *can* fault on a control-flow hijack.  Emitting the scan before the walk
+    // guarantees the return-address candidates that name the hijacked caller
+    // reach the serial log even if the subsequent walk trips the re-entrancy
+    // guard and halts.  A control-flow hijack (corrupted return address /
+    // function pointer landing in a data region, e.g. B-PTHREAD-TEARDOWN-PF, or
+    // a kernel jump to RIP=0x0) is exactly the case where the RBP chain is
+    // broken and only the raw scan recovers the culprit.
     crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
+    // Then the RBP frame-walk for a clean ordered backtrace when the chain is
+    // intact.  If it faults (broken chain), the re-entrancy guard halts us
+    // after the scan above has already been emitted.
+    crate::backtrace::print_current();
 
     serial_println!("FATAL: Unrecoverable kernel page fault. Halting.");
     cpu::halt_loop();

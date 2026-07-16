@@ -248,6 +248,82 @@ class — see open-questions.md Q24 (recommendation was "escalate to C if a 3rd/
 shows up"; this is the interrupt-reentrancy sub-variant, already fixed reactively
 without a new lock type, consistent with the B-SYSCTL fix).
 
+**UPDATE 2026-07-16 — CONFIRMED.** The confirmation soak
+(`soak-20260715-235730`) ran 40 iterations: the SCHED spinloop wedge did **not**
+reproduce in any of them (was ~1/20-28), strong evidence the fix holds. The soak
+*did* stop on a **different, pre-existing** wedge at iter40 — a kernel jump to
+`RIP=0x0` during the tcc-signal Path-Z self-test that cascaded into a kernel
+stack-overflow storm. That is unrelated to this deadlock (different signature: a
+control-flow hijack, not a spinloop) and is tracked separately as
+**B-KNULLJUMP-SIGNAL** below. Downgrading this entry's confidence: the fix is
+validated; leaving as ROOT-CAUSED & FIXED.
+
+### B-KNULLJUMP-SIGNAL. Rare kernel jump to `RIP=0x0` during the tcc-signal Path-Z self-test, cascading into a kernel-stack-overflow #DF/#UD storm — DIAGNOSTICS HARDENED, ROOT-CAUSE OPEN, WATCH 2026-07-16
+
+**Class.** A control-flow hijack in kernel context: the kernel executed a
+`call`/`jmp` through a **null (or corrupted) code pointer**, landing at
+`RIP=0x0`. This is *not* a spinlock/deadlock bug (distinct from
+B-COMPLETION-TIMER-IRQ-DEADLOCK, whose fix held across all 40 soak iterations).
+
+**Symptom / evidence.** Caught once by `scripts/wedge-soak.sh` at
+`build/hang-catches/soak-20260715-235730-iter40.{serial,regs}.txt` — 1 catch in
+40 boots (the tcc-signal test itself *passed cleanly* in iters 1/5/20/39, so this
+is rare and intermittent, not deterministic). Serial trace (iter40, line ~3262):
+
+```
+[spawn] Running REAL C compiler (tcc, HOSTED glibc link, signal, ring 3, Path Z) test...
+EXCEPTION: Page Fault (#PF) at 0x0, address=0x0, error=0x10   <- kernel I-fetch @ 0x0
+  Cause: not-present, read, kernel
+  CS=0x8 RFLAGS=0x10646 RSP=0xffffc100000270a0 SS=0x10
+EXCEPTION: Page Fault (#PF) at 0xffffffff815544fe, address=0x3c8fcd6c4d, error=0x0  <- diag path faults
+...  (recursive #PF storm, RIP==CR2 descending the kstack ~0x850/frame, error=0x11 NX)
+EXCEPTION: Double Fault (#DF) at 0xffffffff80fd2141
+  RSP 0xffffc10000017ff8 is in a kstack GUARD PAGE — KERNEL STACK OVERFLOW confirmed
+EXCEPTION: Invalid Opcode (#UD) ...  (garbage-execution storm in .data) -> NMI watchdog
+```
+
+The crash fires **immediately after** the "signal, ring 3, Path Z" banner and
+**before** the `[spawn] ELF validated` line that a clean run prints next — i.e.
+during kernel-side setup of the tcc-signal spawn, right after the *previous*
+test's task exited (`Process 222 ... now zombie` / `Task 188 exiting`). Prime
+suspicion: a use-after-free / teardown race on a kernel code pointer (a
+completion/workqueue/timer callback, or a saved return address) at the
+zombie-cleanup → next-spawn boundary. On UP the only concurrency is
+interrupt/softirq preemption, so a softirq firing mid-setup and invoking a
+freed/zeroed callback is a plausible mechanism. Not yet pinned.
+
+**Secondary bug (FIXED this session).** The single null-jump was *buried* under a
+4400-line cascade because the fatal kernel-`#PF` path ran stack-hungry
+diagnostics (RBP frame-walk + formatting) with **no re-entrancy guard**: when
+those diagnostics themselves faulted (the second `#PF` at `0xffffffff815544fe`),
+the nested `#PF` restarted the whole report, recursing ~2 KiB/level until the
+kstack overflowed into `#DF` → `#UD` storm → NMI watchdog. Fix in
+`kernel/src/idt.rs`:
+- Added `FATAL_FAULT_IN_PROGRESS: AtomicBool`. `handle_page_fault` checks it at
+  entry (before `sti`/resolve) and, if set, prints one minimal line and halts —
+  no recursion. It is armed at the start of the fatal kernel-`#PF` branch, before
+  any diagnostics. `handle_double_fault` swap-arms + checks it too.
+- Reordered the fatal-`#PF` diagnostics so the **safe** raw stack-scan
+  (`dump_stack_scan`, which validates every slot against known kstack regions
+  before dereferencing) runs *before* the `print_current` RBP walk (which blindly
+  follows a possibly-corrupted chain and can fault). This guarantees the
+  return-address candidates that name the hijacked caller reach serial even if
+  the walk trips the guard and halts.
+
+Net effect: the next time this null-jump reproduces, we get a single clean fault
+report **plus a stack-scan naming the caller of the null pointer**, instead of a
+stack-overflow storm that destroys the evidence.
+
+**Where it lives.** Bug: unknown (tcc-signal spawn setup / zombie-cleanup race).
+Diagnostics fix: `kernel/src/idt.rs` (`handle_page_fault`, `handle_double_fault`,
+`FATAL_FAULT_IN_PROGRESS`). Detector: `scripts/wedge-soak.sh`.
+
+**Next step.** Re-run `wedge-soak.sh` (long, 60+ iters) to re-catch with the new
+diagnostics and read off the caller from the stack-scan; that pins the corruption
+site so a proper root-cause fix can follow. Until then this is WATCH — rare,
+and the cascade (the part that took down the whole machine hard) is now contained
+to a clean halt.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

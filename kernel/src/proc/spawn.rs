@@ -15449,6 +15449,48 @@ int main(void){\n\
     run_hosted_cc_case("inline-asm", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 57: C11 `_Atomic` + `__atomic_fetch_add` builtin compiled by the
+/// on-target tcc, glibc-linked, and run in ring 3.
+///
+/// C11 atomics are their own codegen + runtime-library facility, distinct from
+/// everything else in this suite: tcc lowers the generic `__atomic_fetch_add`
+/// builtin on an aligned `int` to a call to the sized helper
+/// `__atomic_fetch_add_4`, which is *not* in glibc — it is provided by tcc's own
+/// `libtcc1.a` (verified present: `nm libtcc1.a` shows the full
+/// `__atomic_{add_fetch,fetch_add,exchange,...}_{1,2,4,8}` family). So this case
+/// proves two things at once that no other Path-Z part does: (1) the compiler's
+/// C11 `_Atomic` type + atomic-builtin lowering, and (2) that the hosted-compile
+/// link pulls the atomic runtime helpers out of `libtcc1.a` — the exact library
+/// whose linkage B-TCC-LIBTCC1-MAIN was about. A plain `_Atomic` lvalue read
+/// (`int t = c;`) is lowered inline (no extra undefined symbol), so the only
+/// undefined symbols in the object are `write` (glibc) and `__atomic_fetch_add_4`
+/// (libtcc1.a).
+///
+/// The loop count comes from a `static volatile` seed (`seedfn()` → 21) so the
+/// compiler cannot constant-fold the accumulation away; 21 iterations of `+= 2`
+/// give 42, printed as its two decimal digits — captured file exactly `42\n`
+/// (3 bytes, exit 0). `__ATOMIC_SEQ_CST` is defined locally because tcc, unlike
+/// gcc, does not predefine the memory-order macros. Pure userspace/codegen plus
+/// libtcc1 linkage (no kernel path).
+pub fn self_test_linux_real_glibc_cc_atomic() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+#ifndef __ATOMIC_SEQ_CST\n\
+#define __ATOMIC_SEQ_CST 5\n\
+#endif\n\
+static int seedfn(void){ static volatile int s = 21; return s; }\n\
+int main(void){\n\
+  _Atomic int c = 0;\n\
+  int n = seedfn();\n\
+  for (int i = 0; i < n; i++)\n\
+    __atomic_fetch_add(&c, 2, __ATOMIC_SEQ_CST);\n\
+  int t = c;\n\
+  char o[3]; o[0] = (char)(48 + t / 10); o[1] = (char)(48 + t % 10); o[2] = 10;\n\
+  write(1, o, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("c11-atomic", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

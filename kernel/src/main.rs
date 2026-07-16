@@ -2276,6 +2276,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 57: C11 `_Atomic` + `__atomic_fetch_add` builtin compiled +
+    // glibc-linked + run in ring 3. Proves atomic codegen AND that the sized
+    // atomic helper `__atomic_fetch_add_4` links out of tcc's libtcc1.a (glibc
+    // does not provide it). 21 iterations of += 2 = 42.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_atomic() {
+        serial_println!(
+            "WARNING: Path-Z C11 atomic C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

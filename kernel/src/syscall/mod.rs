@@ -34,4 +34,6 @@ pub mod trace;
 
 pub use dispatch::self_test;
 
-// TODO: io_uring submission path.
+// io_uring-style batched submission lives in `crate::ipc::io_ring` and is wired
+// into dispatch as SYS_IO_RING_SETUP / SYS_IO_RING_ENTER / SYS_IO_RING_DESTROY
+// (syscalls 260–269).

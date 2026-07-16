@@ -165,7 +165,17 @@ deadlocking acquirer, which the NMI frozen-RIP capture (always just
 always prints every CPU's acquire-stack (`SCHED acquire-stack cpuN: depth=… →
 [lvl] file:line:col`).
 
-**Next step.** Re-run `wedge-soak.sh` until it re-catches; read the
+**3rd soak (2026-07-15 run 215126, 60 iters, instrumented).** Ran the full
+acquire-stack build for 60 consecutive boots: `WEDGE_SOAK_DONE rc_caught=0` — the
+race did **not** fire this run (all 60 BOOT_OK, 93–113 s each). Consistent with
+the measured ~1-in-20-to-28 recurrence: 60 clean boots is within ordinary bad
+luck. No new artifact produced. Rather than keep re-running clean soaks (a
+no-edit verification loop), the diagnostic net is now **permanently baked into
+the kernel** (ba717f518), so the acquire-stack dump will fire automatically on
+the *next* wedge in any routine boot-test or soak — no dedicated hunt needed.
+
+**Next step.** WATCH — the instrumentation is in place. On the next re-catch
+(regs newer than `soak-20260715-204740-iter21`), read the
 `[liveness]   SCHED acquire-stack cpuN:` frames — the deepest (inner) frame is
 the re-entrant `SCHED.lock()` that deadlocks, the outer frame is the holder.
 Then fix the re-entrancy (make the inner site non-blocking `try_lock`, or ensure

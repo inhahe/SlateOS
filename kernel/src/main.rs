@@ -2159,6 +2159,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 48: long double / x87 80-bit extended-precision FP in a tcc-
+    // built dynamic glibc binary. Distinct from Part 46's SSE double: long double
+    // uses the x87 register stack (st0..st7, not XMM) and a separate ABI (args
+    // passed in memory, result in st0), so tcc must emit fldt/fstpt + x87 fmul/
+    // fadd + fisttp truncation — an untested codegen path. A volatile input
+    // defeats constant folding so real x87 + the memory-passing call sequence
+    // run. Only undefined symbol is write (no memset → avoids B-TCC-LIBTCC1-MAIN).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_longdouble() {
+        serial_println!(
+            "WARNING: Path-Z long-double (x87) C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -15079,6 +15079,48 @@ int main(void){\n\
     run_hosted_cc_case("struct-by-value", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 48 — `long double` / x87 80-bit extended-precision FP codegen and
+/// the x86_64 SysV `long double` ABI in a freshly-tcc-built dynamic glibc binary.
+///
+/// Part 46 covered SSE `double`, but on x86_64 `long double` is a *different*
+/// beast: it is the 80-bit x87 extended type, so it uses an entirely separate
+/// register file (the x87 stack `st(0)..st(7)`, not the XMM registers) and a
+/// separate ABI class — a `long double` argument is classified X87/X87UP →
+/// passed in *memory* (on the stack, 16-byte aligned), and the result is
+/// returned in `st(0)`.  tcc must emit x87 loads/stores (`fldt`/`fstpt`),
+/// x87 arithmetic (`fmulp`/`faddp`), and an x87→int truncation (`fisttp`) — none
+/// of which any prior rung exercised (the FP rung used SSE `mulsd`/`cvttsd2si`).
+/// x87 codegen is a distinct, easily-mis-lowered path (80-bit spill size, the
+/// implicit stack discipline), so a compiled-on-target `long double` program is
+/// a genuine coverage gap.  It also incidentally proves x87 state is sane across
+/// the glibc call path.
+///
+/// The program passes two `long double`s to `scale(x, f) = x*f + 0.5L`, so
+/// `scale(8.0L, 5.0L)` = 40.5; the `(int)` truncation yields 40, printed as its
+/// two decimal digits — captured file exactly `40\n` (3 bytes, exit 0).  The
+/// input is `volatile` so the compiler cannot constant-fold the arithmetic away
+/// and must emit real x87 instructions + the memory-passing ABI sequence.  Only
+/// undefined symbol is `write` (no `memset`/aggregate init → does not trip
+/// B-TCC-LIBTCC1-MAIN).  Pure userspace/codegen (no kernel path).
+pub fn self_test_linux_real_glibc_cc_longdouble() -> KernelResult<()> {
+    // `long double` on x86_64 == 80-bit x87 extended precision => x87 stack
+    // codegen + the X87 memory-passing ABI + st(0) return, a path distinct from
+    // Part 46's SSE double.  `volatile` input defeats constant folding so real
+    // x87 arithmetic + the memory-arg call sequence run.  `0.5L`/`8.0L`/`5.0L`
+    // literals keep the whole computation in `long double` (no double demotion).
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static long double scale(long double x, long double f){ return x * f + 0.5L; }\n\
+int main(void){\n\
+  volatile long double a = 8.0L;\n\
+  long double r = scale(a, 5.0L);\n\
+  int n = (int)r;\n\
+  char b[3]; b[0] = (char)(48 + n / 10); b[1] = (char)(48 + n % 10); b[2] = 10;\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("long-double-x87", HOSTED_SRC, b"40\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

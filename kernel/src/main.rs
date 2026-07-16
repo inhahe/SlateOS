@@ -2251,6 +2251,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 55: GCC-style inline assembly with operand constraints in a
+    // tcc-built dynamic glibc binary. Exercises tcc's inline-assembler (a
+    // separate subsystem from C codegen): parsing the constraint list, allocating
+    // registers for =r/r/tied-0 operands, and substituting them into the %0/%2
+    // template -- the mechanism real libc/drivers use for syscall/cpuid/atomics/
+    // MMIO. asm_add(20,22)=42 via a single addl. Only undefined sym: write.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_inline_asm() {
+        serial_println!(
+            "WARNING: Path-Z inline-asm C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

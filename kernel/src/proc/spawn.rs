@@ -15373,6 +15373,49 @@ int main(void){\n\
     run_hosted_cc_case("vla-dynstack", HOSTED_SRC, b"42\n")
 }
 
+/// Path Z Part 55 — GCC-style inline assembly with operand constraints in a
+/// freshly-tcc-built dynamic glibc binary.
+///
+/// Every prior rung stayed in pure C, so tcc's inline-assembler — a *separate*
+/// compiler subsystem from C codegen — was untested from compiled source.
+/// Extended `__asm__` with operand constraints is not a passthrough string: the
+/// compiler must parse the constraint list, *allocate registers* for each
+/// `"=r"`/`"r"` operand and a tied `"0"` input, substitute them into the `%0`/
+/// `%2` template placeholders, and honour the clobber/data-flow so the
+/// surrounding C sees the output.  Getting the register allocation and operand
+/// substitution right is a distinct, easily-broken facility, and it is the
+/// mechanism real libc/drivers use to emit `syscall`, `cpuid`, atomics, and
+/// MMIO — so proving the on-target compiler handles it closes a genuine,
+/// high-value gap (it unlocks a large class of systems C).
+///
+/// `asm_add(a, b)` computes `a + b` with a single `addl %2, %0` where `%0` is an
+/// output register tied to input `a` (constraint `"0"`) and `%2` is `b` in any
+/// register (`"r"`).  `asm_add(20, 22)` = 42 (the first operand from a
+/// `volatile` so the compiler cannot fold the add away and must actually route
+/// the values through the asm), printed as its two decimal digits — captured
+/// file exactly `42\n` (3 bytes, exit 0).  Only undefined symbol is `write`.
+/// Pure userspace/codegen (no kernel path).
+pub fn self_test_linux_real_glibc_cc_inline_asm() -> KernelResult<()> {
+    // Extended asm: "=r"(r) output, "0"(a) input tied to the output register,
+    // "r"(b) input in any GPR; tcc must allocate the regs and substitute them
+    // into `%0`/`%2`.  `volatile x` defeats folding so the add really runs
+    // through the asm rather than being computed at compile time.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+static int asm_add(int a, int b){\n\
+  int r;\n\
+  __asm__ (\"addl %2, %0\" : \"=r\"(r) : \"0\"(a), \"r\"(b));\n\
+  return r;\n\
+}\n\
+int main(void){\n\
+  volatile int x = 20;\n\
+  int r = asm_add(x, 22);\n\
+  char c[3]; c[0] = (char)(48 + r / 10); c[1] = (char)(48 + r % 10); c[2] = 10;\n\
+  write(1, c, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("inline-asm", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

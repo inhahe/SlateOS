@@ -2145,6 +2145,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 47: struct-by-value argument passing + return (the x86_64 SysV
+    // aggregate ABI) in a tcc-built dynamic glibc binary. Prior rungs passed only
+    // scalars, so the compiler's aggregate calling convention (eightbyte class-
+    // ification, small-struct register-pair packing, ≤16B all-INTEGER return in
+    // RAX:RDX) was untested from compiled code. A 16-byte struct passes in GP
+    // register pairs and returns in RAX:RDX; a volatile seed defeats constant
+    // folding so the real by-value pack/call/return sequence runs. Userspace-only.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_struct() {
+        serial_println!(
+            "WARNING: Path-Z struct-by-value C runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

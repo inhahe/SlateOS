@@ -15009,6 +15009,72 @@ int main(void){\n\
     run_hosted_cc_case("float", HOSTED_SRC, b"40\n")
 }
 
+/// Path Z Part 47 — struct-by-value argument passing *and* return (the x86_64
+/// SysV *aggregate* ABI) in a freshly-tcc-built dynamic glibc binary.
+///
+/// Every prior rung passed and returned only scalars (ints, pointers, one
+/// `double`) — so the compiler's aggregate calling convention was entirely
+/// untested from compiled code.  Passing/returning a `struct` by value is a
+/// distinct, notoriously tricky codegen path: the ABI *classifies* each
+/// aggregate into eightbytes (INTEGER / SSE / MEMORY), splits a small struct
+/// across multiple registers, and returns a ≤16-byte all-INTEGER struct in the
+/// `RAX:RDX` pair rather than through memory.  Getting the eightbyte boundary,
+/// the register-pair packing, and the field offsets right is a classic
+/// compiler-bug locus, so a compiled-on-target struct-by-value program closes a
+/// real coverage gap distinct from the scalar-integer, varargs, and FP ABIs.
+///
+/// The program uses a 16-byte `struct box { int a,b,c,d; }` — exactly two
+/// all-INTEGER eightbytes, so each argument is passed in a *pair* of GP
+/// registers (`p` in `rdi:rsi`, `q` in `rdx:rcx`) and the result comes back in
+/// `rax:rdx`, exercising the register-pair pack/unpack on both the call and
+/// return sides (not the >16-byte hidden-pointer/MEMORY path).  `combine` adds
+/// the two structs field-wise; the four sums (6, 8, 10, 18) total 42, printed as
+/// its two decimal digits — captured file exactly `42\n` (3 bytes, exit 0).  The
+/// first field is seeded from a `volatile` so the compiler cannot constant-fold
+/// the aggregate away and must emit the real by-value pack + call sequence.  Raw
+/// `write(2)` keeps ordering exact.  Pure userspace/codegen (no kernel path); the
+/// value is proving tcc's SysV aggregate ABI lowering produces a correct ring-3
+/// binary through the glibc call path.
+///
+/// Implementation note (why the struct locals are field-initialised rather than
+/// brace-initialised): when tcc lowers a *brace initialiser* on an aggregate it
+/// emits a synthesised `memset`/`memcpy` and resolves it from its own runtime
+/// archive `libtcc1.a`.  Pulling that archive into the one-shot compile+link
+/// perturbs tcc's in-memory link ordering enough that it drops the `main`
+/// symbol (observed: `tcc: error: unresolved reference to 'main'`, tcc exit 1) —
+/// even though `-c` alone emits a perfectly good `main`.  Assigning each field
+/// individually keeps the object's only undefined symbol as `write` (identical
+/// link surface to Parts 45/46, which link cleanly) while still passing and
+/// returning the whole struct by value — so the aggregate ABI is fully covered
+/// without the fragile runtime-helper dependency.
+pub fn self_test_linux_real_glibc_cc_struct() -> KernelResult<()> {
+    // 16-byte all-INTEGER struct => two eightbytes => passed/returned in GP
+    // register pairs (never the MEMORY/hidden-pointer path).  `volatile` seed on
+    // the first field defeats constant folding so the by-value pack/call/return
+    // sequence is actually emitted rather than computed at compile time.  Fields
+    // are set individually (not via a brace initialiser) so tcc does not
+    // synthesise a `memset`/`memcpy` into `libtcc1.a` — see the doc note above.
+    const HOSTED_SRC: &[u8] = b"extern long write(int fd, const void *buf, unsigned long n);\n\
+struct box { int a, b, c, d; };\n\
+static struct box combine(struct box p, struct box q){\n\
+  struct box r;\n\
+  r.a = p.a + q.a; r.b = p.b + q.b;\n\
+  r.c = p.c + q.c; r.d = p.d + q.d;\n\
+  return r;\n\
+}\n\
+int main(void){\n\
+  volatile int seed = 1;\n\
+  struct box p; p.a = seed; p.b = 2; p.c = 3; p.d = 4;\n\
+  struct box q; q.a = 5; q.b = 6; q.c = 7; q.d = 14;\n\
+  struct box r = combine(p, q);\n\
+  int total = r.a + r.b + r.c + r.d;\n\
+  char b[3]; b[0] = (char)(48 + total / 10); b[1] = (char)(48 + total % 10); b[2] = 10;\n\
+  write(1, b, 3);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("struct-by-value", HOSTED_SRC, b"42\n")
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

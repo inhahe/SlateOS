@@ -356,8 +356,20 @@ bug's exact signature (an async `call` through a corrupted/zeroed field →
   time — the exact moment this bug fires** (right after "Task N exiting"), so a
   clobbered hook slot now logs-and-skips rather than jumping the dying task's
   context to a wild address.
+- **`workqueue::worker_entry`** (`kernel/src/workqueue.rs`) called `(work.func)`
+  directly with no validation. This is the single chokepoint where *every*
+  submitted callback is finally invoked, so validating here covers all
+  submitters at once; a rejected entry is logged and dropped.
+- **`rcu::process_callbacks`** (`kernel/src/rcu.rs`) dispatches deferred
+  callbacks from the BSP softirq (`rcu::tick`) via `(cb.func)(cb.arg)` with no
+  validation; now `.text`-checked, logged + skipped on failure.
 - Exposed `idt::is_kernel_text` as `pub(crate)` (precise linker-symbol
   `__text_start..__text_end` bounds) as the shared validator.
+
+With these, **all five** kernel deferred-code-pointer dispatch sites (hrtimer,
+ktimer, exit-hooks, workqueue, rcu) now validate against `.text` before calling
+— whichever one is the corruption victim, the next occurrence self-reports which
+subsystem and what `arg` was involved instead of jumping to `RIP=0`.
 These are **not** the root-cause fix (the corruption *source* is still unknown),
 but they (a) are the correct defensive posture for dispatching a stored code
 pointer, and (b) convert the catastrophic wild-jump into a **named diagnostic

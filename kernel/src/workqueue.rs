@@ -258,8 +258,29 @@ extern "C" fn worker_entry(_arg: u64) {
             match item {
                 Some(work) => {
                     // Execute the work item outside the lock.
-                    (work.func)(work.arg);
-                    ITEMS_EXECUTED.fetch_add(1, Ordering::Relaxed);
+                    //
+                    // Defense-in-depth: this is the single chokepoint where
+                    // *every* submitted callback is finally `call`-ed, so
+                    // validate the stored function pointer against real `.text`
+                    // bounds here (covers all submitters at once).  A
+                    // validly-submitted `fn(u64)` always points into kernel
+                    // code; a value that doesn't means the queue entry was
+                    // corrupted (heap overrun / torn store) — jumping to it
+                    // would be the B-KNULLJUMP-SIGNAL class (a wild `call` in
+                    // kernel context).  Log which arg was involved and skip.
+                    let func_addr = work.func as *const () as u64;
+                    if crate::idt::is_kernel_text(func_addr) {
+                        (work.func)(work.arg);
+                        ITEMS_EXECUTED.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        serial_println!(
+                            "[workqueue] CRITICAL: refusing to execute corrupt work item \
+                             func={:#x} arg={:#x} — queue corruption; skipping \
+                             (see B-KNULLJUMP-SIGNAL)",
+                            func_addr, work.arg
+                        );
+                        ITEMS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 None => break, // Queue empty — go to sleep.
             }

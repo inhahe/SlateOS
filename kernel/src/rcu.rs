@@ -492,11 +492,26 @@ fn process_callbacks(completed_gp: u64) {
 
         match next_cb {
             Some(cb) => {
-                // Invoke with interrupts in their natural state — the
-                // callback may itself call rcu::call(), which now does
-                // its own without_interrupts wrap.
-                (cb.func)(cb.arg);
-                CALLBACKS_INVOKED.fetch_add(1, Ordering::Relaxed);
+                // Defense-in-depth: this dispatch runs from the BSP softirq
+                // (rcu::tick).  Validate the stored callback against real
+                // `.text` bounds before `call`-ing it — a corrupted queue
+                // entry would otherwise jump the softirq to a wild address
+                // (the B-KNULLJUMP-SIGNAL class).  A valid `fn(u64)` always
+                // points into kernel code.
+                let func_addr = cb.func as *const () as u64;
+                if crate::idt::is_kernel_text(func_addr) {
+                    // Invoke with interrupts in their natural state — the
+                    // callback may itself call rcu::call(), which now does
+                    // its own without_interrupts wrap.
+                    (cb.func)(cb.arg);
+                    CALLBACKS_INVOKED.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    serial_println!(
+                        "[rcu] CRITICAL: refusing to invoke corrupt callback func={:#x} \
+                         arg={:#x} — queue corruption; skipping (see B-KNULLJUMP-SIGNAL)",
+                        func_addr, cb.arg
+                    );
+                }
             }
             None => break,
         }

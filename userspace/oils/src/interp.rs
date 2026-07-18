@@ -40,6 +40,9 @@
 //!   unbounded producer terminates on `SIGPIPE`/`EPIPE` (`yes | head` exits).
 //!   A pipeline that includes a builtin, function, or compound stage still uses
 //!   the buffered path, so such a producer will not terminate early there.
+//!   Both paths publish every stage's exit code in `${PIPESTATUS[@]}` (in
+//!   pipeline order) and honour `set -o pipefail` (`$?` becomes the rightmost
+//!   non-zero stage's status; `set +o pipefail` restores last-stage semantics).
 //! - Compound commands accept trailing redirections
 //!   (`while read …; do …; done < file`, `for … done > out`, `{ …; } >> log`).
 //!   Input is fed through a shared cursor so successive `read`s in the body
@@ -112,6 +115,8 @@ pub struct Shell {
     name: String,
     last_status: i32,
     last_bg_pid: Option<u32>,
+    /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
+    pipefail: bool,
     pid: u32,
 }
 
@@ -135,6 +140,7 @@ impl Shell {
             name: "osh".to_string(),
             last_status: 0,
             last_bg_pid: None,
+            pipefail: false,
             pid: std::process::id(),
         }
     }
@@ -218,23 +224,44 @@ impl Shell {
     }
 
     fn exec_pipeline(&mut self, pipe: &Pipeline, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        let flow = if pipe.commands.len() == 1 {
-            self.exec_command(&pipe.commands[0], out, stdin)
+        let (statuses, flow) = if pipe.commands.len() == 1 {
+            let flow = self.exec_command(&pipe.commands[0], out, stdin);
+            (vec![self.last_status], flow)
         } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
             // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
             self.exec_concurrent_pipeline(&pipe.commands, out)
         } else {
             self.exec_buffered_pipeline(&pipe.commands, out)
         };
+        // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?`.
+        self.finish_pipeline(&statuses);
         if pipe.negated {
             self.last_status = i32::from(self.last_status == 0);
         }
         flow
     }
 
+    /// Store the per-stage exit codes in `${PIPESTATUS[@]}` and set `$?`.
+    ///
+    /// Without `pipefail`, `$?` is the last stage's status (POSIX). With
+    /// `set -o pipefail`, it is the rightmost non-zero stage (bash semantics),
+    /// or `0` when every stage succeeded.
+    fn finish_pipeline(&mut self, statuses: &[i32]) {
+        self.arrays.insert(
+            "PIPESTATUS".to_string(),
+            statuses.iter().map(i32::to_string).collect(),
+        );
+        self.last_status = if self.pipefail {
+            statuses.iter().rev().copied().find(|&s| s != 0).unwrap_or(0)
+        } else {
+            statuses.last().copied().unwrap_or(0)
+        };
+    }
+
     /// Run a multi-stage pipeline by buffering each stage's stdout and feeding
     /// it to the next stage's stdin. Not concurrent (see the module docs).
-    fn exec_buffered_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> Flow {
+    fn exec_buffered_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> (Vec<i32>, Flow) {
+        let mut statuses: Vec<i32> = Vec::with_capacity(cmds.len());
         let mut prev: Vec<u8> = Vec::new();
         let last = cmds.len() - 1;
         for (i, cmd) in cmds.iter().enumerate() {
@@ -247,20 +274,22 @@ impl Shell {
             };
             if i == last {
                 let flow = self.exec_command(cmd, out, &stdin);
+                statuses.push(self.last_status);
                 if let Flow::Exit(c) = flow {
-                    return Flow::Exit(c);
+                    return (statuses, Flow::Exit(c));
                 }
             } else {
                 let mut buf = Vec::new();
                 let mut cap = Out::Capture(&mut buf);
                 let flow = self.exec_command(cmd, &mut cap, &stdin);
+                statuses.push(self.last_status);
                 if let Flow::Exit(c) = flow {
-                    return Flow::Exit(c);
+                    return (statuses, Flow::Exit(c));
                 }
                 prev = buf;
             }
         }
-        Flow::Next
+        (statuses, Flow::Next)
     }
 
     /// A pipeline stage qualifies for the real-pipe (concurrent) path only if it
@@ -286,15 +315,19 @@ impl Shell {
     }
 
     /// Run an all-external pipeline with real OS pipes so the stages execute
-    /// concurrently. `$?` becomes the last stage's status (no `pipefail`). The
-    /// caller guarantees every stage passes [`Shell::stage_is_plain_external`].
-    fn exec_concurrent_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> Flow {
+    /// concurrently. Returns the per-stage exit codes (in pipeline order) so the
+    /// caller can publish `${PIPESTATUS[@]}` and apply `pipefail`. The caller
+    /// guarantees every stage passes [`Shell::stage_is_plain_external`].
+    fn exec_concurrent_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> (Vec<i32>, Flow) {
         let capturing = matches!(out, Out::Capture(_));
         let last = cmds.len().saturating_sub(1);
         let mut children: Vec<Child> = Vec::with_capacity(cmds.len());
         let mut prev_stdout: Option<ChildStdout> = None;
-        // Index within `children` of the last stage, once it has spawned.
-        let mut last_child_idx: Option<usize> = None;
+        // Per-stage exit code, indexed by pipeline position. Stages that expand
+        // to nothing default to 0 (an empty command succeeds).
+        let mut stage_status: Vec<i32> = vec![0; cmds.len()];
+        // Pipeline position of each spawned child, parallel to `children`.
+        let mut child_cmd_idx: Vec<usize> = Vec::with_capacity(cmds.len());
 
         for (i, cmd) in cmds.iter().enumerate() {
             let Command::Simple(sc) = cmd else {
@@ -352,9 +385,8 @@ impl Shell {
                 Ok(mut child) => {
                     if i != last {
                         prev_stdout = child.stdout.take();
-                    } else {
-                        last_child_idx = Some(children.len());
                     }
+                    child_cmd_idx.push(i);
                     children.push(child);
                 }
                 Err(e) => {
@@ -364,11 +396,9 @@ impl Shell {
                         eprintln!("osh: {program}: {e}");
                     }
                     prev_stdout = None;
-                    // If the last stage fails to spawn, report its failure status.
-                    if i == last {
-                        self.last_status =
-                            if e.kind() == io::ErrorKind::NotFound { 127 } else { 126 };
-                    }
+                    // A stage that fails to spawn reports 127 (not found) / 126.
+                    stage_status[i] =
+                        if e.kind() == io::ErrorKind::NotFound { 127 } else { 126 };
                 }
             }
         }
@@ -385,15 +415,14 @@ impl Shell {
             }
         }
 
-        // Wait for every child; the last stage's exit code is the pipeline
-        // status (if that stage failed to spawn, its status was set above).
-        for (i, mut child) in children.into_iter().enumerate() {
+        // Wait for every child and record its exit code at its pipeline position.
+        for (pos, mut child) in children.into_iter().enumerate() {
             let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
-            if Some(i) == last_child_idx {
-                self.last_status = code;
+            if let Some(&cmd_i) = child_cmd_idx.get(pos) {
+                stage_status[cmd_i] = code;
             }
         }
-        Flow::Next
+        (stage_status, Flow::Next)
     }
 
     fn exec_command(&mut self, cmd: &Command, out: &mut Out, stdin: &StdinSrc) -> Flow {
@@ -729,6 +758,7 @@ impl Shell {
             name: self.name.clone(),
             last_status: self.last_status,
             last_bg_pid: self.last_bg_pid,
+            pipefail: self.pipefail,
             pid: self.pid,
         }
     }
@@ -1870,11 +1900,35 @@ impl Shell {
     }
 
     fn builtin_set(&mut self, args: &[String]) -> i32 {
-        // `set -- a b c` replaces the positional parameters.
-        if args.first().map(String::as_str) == Some("--") {
-            self.positional = args[1..].to_vec();
-        } else if !args.is_empty() && !args[0].starts_with('-') {
-            self.positional = args.to_vec();
+        // `set -o pipefail` / `set +o pipefail` toggle the pipefail option.
+        // (`set -o` / `set +o` with an option name; only pipefail is honoured,
+        // other options are accepted and ignored.)
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-o" | "+o" => {
+                    let enable = args[i].starts_with('-');
+                    if let Some(opt) = args.get(i + 1) {
+                        if opt == "pipefail" {
+                            self.pipefail = enable;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+                "--" => {
+                    self.positional = args[i + 1..].to_vec();
+                    return 0;
+                }
+                other if !other.starts_with('-') && !other.starts_with('+') => {
+                    self.positional = args[i..].to_vec();
+                    return 0;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
         }
         0
     }
@@ -3271,5 +3325,55 @@ mod tests {
         // `$?` reflects the last stage, not earlier ones (no pipefail).
         assert_eq!(run("cmd /c exit 0 | cmd /c exit 5").1, 5);
         assert_eq!(run("cmd /c exit 7 | cmd /c exit 0").1, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipefail_reports_rightmost_nonzero_stage() {
+        // With pipefail, a middle/leftmost failure surfaces even though the last
+        // stage succeeds; the rightmost non-zero stage wins.
+        assert_eq!(run("set -o pipefail; cmd /c exit 7 | cmd /c exit 0").1, 7);
+        assert_eq!(
+            run("set -o pipefail; cmd /c exit 3 | cmd /c exit 5 | cmd /c exit 0").1,
+            5
+        );
+        // All-success pipeline is still 0 under pipefail.
+        assert_eq!(run("set -o pipefail; cmd /c exit 0 | cmd /c exit 0").1, 0);
+        // `set +o pipefail` restores last-stage semantics.
+        assert_eq!(
+            run("set -o pipefail; set +o pipefail; cmd /c exit 7 | cmd /c exit 0").1,
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipestatus_array_records_every_stage() {
+        // `${PIPESTATUS[@]}` holds one code per stage, in pipeline order.
+        let (o, _) =
+            run(r#"cmd /c exit 3 | cmd /c exit 0 | cmd /c exit 5; echo "${PIPESTATUS[@]}""#);
+        assert_eq!(o, "3 0 5\n");
+        // Individual subscripts are addressable.
+        let (o, _) = run(r#"cmd /c exit 4 | cmd /c exit 0; echo "${PIPESTATUS[0]}""#);
+        assert_eq!(o, "4\n");
+    }
+
+    #[test]
+    fn pipestatus_single_command_has_one_element() {
+        // A bare command still populates a one-element PIPESTATUS.
+        let (o, _) = run(r#"true; echo "${PIPESTATUS[@]}""#);
+        assert_eq!(o, "0\n");
+        let (o, _) = run(r#"false; echo "${PIPESTATUS[@]}""#);
+        assert_eq!(o, "1\n");
+    }
+
+    #[test]
+    fn pipefail_buffered_path_folds_status() {
+        // The buffered path (builtin stages) also honours pipefail + PIPESTATUS.
+        // `false | true` — last stage true, but pipefail surfaces the failure.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("set -o pipefail; false | true"), 1);
+        let (o, _) = run(r#"false | true; echo "${PIPESTATUS[@]}""#);
+        assert_eq!(o, "1 0\n");
     }
 }

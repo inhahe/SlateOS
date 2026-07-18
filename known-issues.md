@@ -103,16 +103,18 @@ resolved stderr file; handle `2>&1` fd duplication ordering. Intentional
 grow-phase scope limit, documented in the `interp.rs` module header. No
 test depends on the deferred behavior.
 
-### TD-OILS4. `osh` pipelines: buffered fallback (builtin/compound stage) isn't concurrent; no pipefail/PIPESTATUS — DEBT 2026-07-18
+### TD-OILS4. `osh` pipelines: buffered fallback (builtin/compound stage) isn't concurrent — DEBT 2026-07-18
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_pipeline`,
-`exec_concurrent_pipeline`, `exec_buffered_pipeline`,
+`exec_concurrent_pipeline`, `exec_buffered_pipeline`, `finish_pipeline`,
 `stage_is_plain_external`).
 
 **What:** A pipeline whose every stage is a plain external command (not a
 builtin/function/compound, no per-stage redirects) now runs concurrently
 over real OS pipes, so an unbounded producer terminates early on
-SIGPIPE/EPIPE (`yes | head` exits). Remaining gaps:
+SIGPIPE/EPIPE (`yes | head` exits). `pipefail` + `${PIPESTATUS[@]}` are
+now implemented (both paths record per-stage codes; `set -o pipefail`
+folds `$?` to the rightmost non-zero stage). Remaining gaps:
 1. **Buffered fallback isn't concurrent.** A pipeline that includes a
    builtin, shell function, or compound stage (e.g. `yes | head -1` where
    `head` is a builtin, or `producer | while read …`) still runs each
@@ -123,11 +125,7 @@ SIGPIPE/EPIPE (`yes | head` exits). Remaining gaps:
    SIGPIPE propagate. This needs the interpreter's `Out`/`StdinSrc` to
    accept OS pipe handles and the `Shell` state to be shareable/clonable
    across the stage threads (subshell-style clone per stage).
-2. **No `pipefail` / `PIPESTATUS`.** `$?` is always the last stage's exit
-   status; there is no `set -o pipefail` and no `${PIPESTATUS[@]}` array.
-   **Proper fix:** collect every stage's status into a `PIPESTATUS`
-   indexed array and, under `pipefail`, report the last non-zero.
-3. **Per-stage redirects force the buffered path.** A stage with its own
+2. **Per-stage redirects force the buffered path.** A stage with its own
    redirect (`a | b > f`) disqualifies the whole pipeline from the
    concurrent path. **Proper fix:** resolve each stage's `RedirPlan` when
    building its `Command`, overriding the pipe endpoints as needed

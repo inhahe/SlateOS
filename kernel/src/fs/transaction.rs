@@ -43,7 +43,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::Vfs;

@@ -21,7 +21,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 

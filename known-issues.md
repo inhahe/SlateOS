@@ -103,6 +103,39 @@ resolved stderr file; handle `2>&1` fd duplication ordering. Intentional
 grow-phase scope limit, documented in the `interp.rs` module header. No
 test depends on the deferred behavior.
 
+### TD-OILS4. `osh` pipelines: buffered fallback (builtin/compound stage) isn't concurrent; no pipefail/PIPESTATUS — DEBT 2026-07-18
+
+**Where:** `userspace/oils/src/interp.rs` (`exec_pipeline`,
+`exec_concurrent_pipeline`, `exec_buffered_pipeline`,
+`stage_is_plain_external`).
+
+**What:** A pipeline whose every stage is a plain external command (not a
+builtin/function/compound, no per-stage redirects) now runs concurrently
+over real OS pipes, so an unbounded producer terminates early on
+SIGPIPE/EPIPE (`yes | head` exits). Remaining gaps:
+1. **Buffered fallback isn't concurrent.** A pipeline that includes a
+   builtin, shell function, or compound stage (e.g. `yes | head -1` where
+   `head` is a builtin, or `producer | while read …`) still runs each
+   stage to completion, buffering stdout — so an unbounded producer in
+   such a pipeline will *not* terminate early. **Proper fix:** run every
+   stage (including in-process builtins/compound commands) on its own
+   thread with real pipe endpoints for stdin/stdout, so backpressure and
+   SIGPIPE propagate. This needs the interpreter's `Out`/`StdinSrc` to
+   accept OS pipe handles and the `Shell` state to be shareable/clonable
+   across the stage threads (subshell-style clone per stage).
+2. **No `pipefail` / `PIPESTATUS`.** `$?` is always the last stage's exit
+   status; there is no `set -o pipefail` and no `${PIPESTATUS[@]}` array.
+   **Proper fix:** collect every stage's status into a `PIPESTATUS`
+   indexed array and, under `pipefail`, report the last non-zero.
+3. **Per-stage redirects force the buffered path.** A stage with its own
+   redirect (`a | b > f`) disqualifies the whole pipeline from the
+   concurrent path. **Proper fix:** resolve each stage's `RedirPlan` when
+   building its `Command`, overriding the pipe endpoints as needed
+   (feeding here-doc `stdin_data` via a writer thread to avoid deadlock).
+
+Documented in the `interp.rs` module header. Tests cover the concurrent
+path (classifier + real-pipe data/status) but not the deferred gaps.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

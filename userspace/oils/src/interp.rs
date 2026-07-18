@@ -34,8 +34,12 @@
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
 //! - Pipelines are *buffered*, not concurrent: each stage runs to completion
-//!   and its output feeds the next. An unbounded producer (`yes | head`) will
-//!   not terminate early.
+//!   and its output feeds the next — *except* when every stage is a plain
+//!   external command (not a builtin/function, no per-stage redirects), in
+//!   which case the stages run concurrently connected by real OS pipes, so an
+//!   unbounded producer terminates on `SIGPIPE`/`EPIPE` (`yes | head` exits).
+//!   A pipeline that includes a builtin, function, or compound stage still uses
+//!   the buffered path, so such a producer will not terminate early there.
 //! - Compound commands accept trailing redirections
 //!   (`while read …; do …; done < file`, `for … done > out`, `{ …; } >> log`).
 //!   Input is fed through a shared cursor so successive `read`s in the body
@@ -47,7 +51,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
-use std::process::{Command as PCommand, Stdio};
+use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
@@ -216,6 +220,9 @@ impl Shell {
     fn exec_pipeline(&mut self, pipe: &Pipeline, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let flow = if pipe.commands.len() == 1 {
             self.exec_command(&pipe.commands[0], out, stdin)
+        } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
+            // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
+            self.exec_concurrent_pipeline(&pipe.commands, out)
         } else {
             self.exec_buffered_pipeline(&pipe.commands, out)
         };
@@ -251,6 +258,139 @@ impl Shell {
                     return Flow::Exit(c);
                 }
                 prev = buf;
+            }
+        }
+        Flow::Next
+    }
+
+    /// A pipeline stage qualifies for the real-pipe (concurrent) path only if it
+    /// is structurally a plain external command: a simple command with at least
+    /// one word, a *literal* command word that is neither a builtin nor a shell
+    /// function, and no per-stage redirections. The check is purely syntactic
+    /// (no expansion) so it has no side effects and never double-runs a command
+    /// substitution — anything it can't prove external falls back to buffering.
+    fn stage_is_plain_external(&self, cmd: &Command) -> bool {
+        let Command::Simple(sc) = cmd else {
+            return false;
+        };
+        if !sc.redirects.is_empty() {
+            return false;
+        }
+        let Some(first) = sc.words.first() else {
+            return false; // pure assignment (no command word)
+        };
+        let [WordPart::Literal(name)] = first.parts.as_slice() else {
+            return false; // command word uses expansion — resolve via buffered path
+        };
+        !is_builtin(name) && !self.funcs.contains_key(name)
+    }
+
+    /// Run an all-external pipeline with real OS pipes so the stages execute
+    /// concurrently. `$?` becomes the last stage's status (no `pipefail`). The
+    /// caller guarantees every stage passes [`Shell::stage_is_plain_external`].
+    fn exec_concurrent_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> Flow {
+        let capturing = matches!(out, Out::Capture(_));
+        let last = cmds.len().saturating_sub(1);
+        let mut children: Vec<Child> = Vec::with_capacity(cmds.len());
+        let mut prev_stdout: Option<ChildStdout> = None;
+        // Index within `children` of the last stage, once it has spawned.
+        let mut last_child_idx: Option<usize> = None;
+
+        for (i, cmd) in cmds.iter().enumerate() {
+            let Command::Simple(sc) = cmd else {
+                continue; // guaranteed Simple by the classifier
+            };
+            let mut argv: Vec<String> = Vec::new();
+            for w in &sc.words {
+                argv.extend(self.expand_word(w, true));
+            }
+            let assigns: Vec<(String, String)> = sc
+                .assignments
+                .iter()
+                .map(|a| self.assignment_prefix_value(a))
+                .collect();
+            let Some(program) = argv.first() else {
+                // Expanded to nothing (e.g. `$empty`) — skip this stage; its
+                // successor sees EOF on stdin.
+                prev_stdout = None;
+                continue;
+            };
+
+            let mut pc = PCommand::new(program);
+            pc.args(&argv[1..]);
+            for (k, v) in &self.vars {
+                if self.exported.contains(k) {
+                    pc.env(k, v);
+                }
+            }
+            for (k, v) in &assigns {
+                pc.env(k, v);
+            }
+
+            // stdin: first stage inherits; later stages read the previous pipe
+            // (or a closed/null stream if the previous stage failed to start).
+            if i == 0 {
+                pc.stdin(Stdio::inherit());
+            } else if let Some(so) = prev_stdout.take() {
+                pc.stdin(Stdio::from(so));
+            } else {
+                pc.stdin(Stdio::null());
+            }
+
+            // stdout: last stage → capture or inherit; earlier stages → a pipe.
+            if i == last {
+                if capturing {
+                    pc.stdout(Stdio::piped());
+                } else {
+                    pc.stdout(Stdio::inherit());
+                }
+            } else {
+                pc.stdout(Stdio::piped());
+            }
+
+            match pc.spawn() {
+                Ok(mut child) => {
+                    if i != last {
+                        prev_stdout = child.stdout.take();
+                    } else {
+                        last_child_idx = Some(children.len());
+                    }
+                    children.push(child);
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::NotFound {
+                        eprintln!("osh: {program}: command not found");
+                    } else {
+                        eprintln!("osh: {program}: {e}");
+                    }
+                    prev_stdout = None;
+                    // If the last stage fails to spawn, report its failure status.
+                    if i == last {
+                        self.last_status =
+                            if e.kind() == io::ErrorKind::NotFound { 127 } else { 126 };
+                    }
+                }
+            }
+        }
+
+        // Read the final stage's output into the capture buffer before waiting,
+        // so the producer isn't blocked on a full pipe (avoids deadlock).
+        if capturing
+            && let Some(mut so) = children.last_mut().and_then(|c| c.stdout.take())
+        {
+            let mut buf = Vec::new();
+            let _ = so.read_to_end(&mut buf);
+            if let Out::Capture(b) = out {
+                b.extend_from_slice(&buf);
+            }
+        }
+
+        // Wait for every child; the last stage's exit code is the pipeline
+        // status (if that stage failed to spawn, its status was set above).
+        for (i, mut child) in children.into_iter().enumerate() {
+            let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+            if Some(i) == last_child_idx {
+                self.last_status = code;
             }
         }
         Flow::Next
@@ -3088,5 +3228,48 @@ mod tests {
         // lines (the pipeline stage input is a shared cursor).
         let (o, _) = run("printf 'x\\ny\\nz\\n' | while read v; do echo \"<$v>\"; done");
         assert_eq!(o, "<x>\n<y>\n<z>\n");
+    }
+
+    #[test]
+    fn pipeline_classifier_routes_external_vs_builtin() {
+        let mut sh = Shell::new();
+        sh.funcs.insert("myfn".to_string(), parse("echo hi").unwrap());
+        let classify = |sh: &Shell, src: &str| -> bool {
+            let prog = parse(src).unwrap();
+            let cmds = &prog.items[0].list.first.commands;
+            cmds.iter().all(|c| sh.stage_is_plain_external(c))
+        };
+        // All-external → real-pipe (concurrent) path.
+        assert!(classify(&sh, "cat a | grep b | wc -l"));
+        // A builtin stage → buffered path.
+        assert!(!classify(&sh, "cat a | echo hi"));
+        assert!(!classify(&sh, "printf x | cat"));
+        // A per-stage redirection → buffered path.
+        assert!(!classify(&sh, "cat a | grep b > out"));
+        // A command word needing expansion can't be proven external → buffered.
+        assert!(!classify(&sh, "$cmd a | cat"));
+        // A shell function stage → buffered path.
+        assert!(!classify(&sh, "cat a | myfn"));
+        // A compound stage → buffered path.
+        assert!(!classify(&sh, "cat a | while read x; do echo $x; done"));
+    }
+
+    // The following exercise the real-OS-pipe path with actual external
+    // processes; they use `cmd` (always present on the Windows test host).
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_pipeline_carries_data() {
+        // Two `cmd` echoes feed Windows `sort`; the pipe must carry both lines.
+        let (o, _) = run(r#"cmd /c "echo b&echo a" | sort"#);
+        let norm = o.replace("\r\n", "\n");
+        assert_eq!(norm, "a\nb\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_pipeline_status_is_last_stage() {
+        // `$?` reflects the last stage, not earlier ones (no pipefail).
+        assert_eq!(run("cmd /c exit 0 | cmd /c exit 5").1, 5);
+        assert_eq!(run("cmd /c exit 7 | cmd /c exit 0").1, 0);
     }
 }

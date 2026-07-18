@@ -53,7 +53,7 @@
 //! - No per-process filtering (per-namespace only).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::interface::Ipv4Addr;
 use super::ipv6::{Ipv6Addr, NH_ICMPV6};

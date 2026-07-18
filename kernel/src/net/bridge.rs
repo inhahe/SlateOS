@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::virtio::net::MacAddress;

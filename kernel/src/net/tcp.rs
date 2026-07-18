@@ -119,7 +119,7 @@
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 

@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::KernelResult;
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet, NH_ICMPV6};

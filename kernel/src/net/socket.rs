@@ -43,7 +43,7 @@ use crate::net::netstack_client::NetstackConn;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// Unique per-socket id (also the value stored in `FdEntry::raw_handle`).
 type SocketId = u64;

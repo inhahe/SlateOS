@@ -35,7 +35,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::netns::NetNsId;

@@ -56,7 +56,7 @@ use alloc::vec::Vec;
 use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;

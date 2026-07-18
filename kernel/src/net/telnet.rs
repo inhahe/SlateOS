@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU16, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::KernelResult;
 

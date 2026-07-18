@@ -23,7 +23,7 @@
 //! aware ARP operations.  For the root namespace (ID 0), these
 //! delegate to the global cache.
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::virtio::net::MacAddress;

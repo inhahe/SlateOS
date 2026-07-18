@@ -27,7 +27,7 @@
 //! - No port forwarding / DNAT (future work)
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::netns::NetNsId;

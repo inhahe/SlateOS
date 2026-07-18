@@ -22,7 +22,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::virtio::net::MacAddress;
 

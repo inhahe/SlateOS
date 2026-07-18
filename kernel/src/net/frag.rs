@@ -49,7 +49,7 @@
 //!   for reassembly but the firewall runs on the reassembled datagram.
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::interface::Ipv4Addr;
 use super::ipv6::Ipv6Addr;

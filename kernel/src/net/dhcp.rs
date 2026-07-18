@@ -103,7 +103,7 @@ fn current_xid() -> u32 {
 // DHCP state
 // ---------------------------------------------------------------------------
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// DHCP client state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

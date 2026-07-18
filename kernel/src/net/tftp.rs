@@ -43,7 +43,7 @@ use alloc::{vec, vec::Vec};
 use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;

@@ -70,7 +70,7 @@ use alloc::vec;
 use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::crypto;
 use crate::error::{KernelError, KernelResult};

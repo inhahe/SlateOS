@@ -44,11 +44,15 @@
 //! - Pipelines run *concurrently* and stream. An all-external pipeline (every
 //!   stage a plain external command, no per-stage redirects) is wired with real
 //!   OS pipes between child processes. Any pipeline containing a builtin,
-//!   function, or compound stage uses the *threaded* path: each stage runs in
-//!   its own subshell on its own thread, connected by real OS pipes, so data
-//!   flows as it is produced rather than being buffered whole. Every stage is a
-//!   subshell (bash semantics, no lastpipe), so a stage's variable mutations do
-//!   not leak to the parent. Downstream early-exit propagates upstream: when a
+//!   function, or compound stage — or a stage with its own redirect — uses the
+//!   *threaded* path: each stage runs in its own subshell on its own thread,
+//!   connected by real OS pipes, so data flows as it is produced rather than
+//!   being buffered whole. A stage's own redirect composes with the inter-stage
+//!   pipe: `run_external`/`run_builtin` resolve the stage's `RedirPlan` against
+//!   the pipe endpoints, so `a | b > f` diverts `b`'s stdout to the file while
+//!   its stdin still streams from `a` (and likewise for `2>err`). Every stage is
+//!   a subshell (bash semantics, no lastpipe), so a stage's variable mutations
+//!   do not leak to the parent. Downstream early-exit propagates upstream: when a
 //!   consumer stops, an in-process producer's next write hits the `pipe_broken`
 //!   flag (the `SIGPIPE`/`EPIPE` analogue) and unwinds, and an external producer
 //!   terminates on the OS's broken-pipe signal (`yes | head` exits) on targets
@@ -3743,6 +3747,42 @@ mod tests {
         let (o, _) = run(r#"cmd /c "echo b&echo a" | sort"#);
         let norm = o.replace("\r\n", "\n");
         assert_eq!(norm, "a\nb\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipeline_stage_stdout_redirect_composes_with_pipe() {
+        // An external stage that carries its own `> file` redirect takes the
+        // threaded path (it is not "plain external"); the pipe must still feed
+        // its stdin while the redirect captures its stdout. Producer `cmd echo`
+        // → consumer `findstr` (matches every line) → file.
+        let f = std::env::temp_dir().join("osh_pipe_redir_stdout.txt");
+        let _ = std::fs::remove_file(&f);
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let script = format!(r#"cmd /c "echo hi" | findstr "h" > "{fp}""#);
+        run(&script);
+        let content = std::fs::read_to_string(&f).unwrap_or_default();
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(content.replace("\r\n", "\n"), "hi\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipeline_stage_stderr_redirect_composes_with_pipe() {
+        // The last stage's own `2> file` must capture its stderr even though its
+        // stdin is the inter-stage pipe. The consumer ignores stdin and writes
+        // to its stderr, which the redirect diverts to the file.
+        let f = std::env::temp_dir().join("osh_pipe_redir_stderr.txt");
+        let _ = std::fs::remove_file(&f);
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let script = format!(r#"cmd /c "echo E 1>&2" 2> "{fp}" | cmd /c "sort""#);
+        run(&script);
+        let content = std::fs::read_to_string(&f).unwrap_or_default();
+        let _ = std::fs::remove_file(&f);
+        // `echo E 1>&2` emits "E " (cmd keeps the space before the redirect),
+        // so the diverted stderr is "E \r\n". The point is that the redirect
+        // captured the stage's stderr while its stdout fed the downstream pipe.
+        assert_eq!(content.replace("\r\n", "\n"), "E \n");
     }
 
     #[cfg(windows)]

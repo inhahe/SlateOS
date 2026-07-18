@@ -2348,6 +2348,7 @@ impl Shell {
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
             "getopts" => self.builtin_getopts(args),
+            "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir),
             "read" => self.builtin_read(args, stdin, redir),
             "test" | "[" => self.builtin_test(name, args),
             "eval" => {
@@ -2813,6 +2814,107 @@ impl Shell {
             };
             self.vars.insert((*name).clone(), val);
         }
+        0
+    }
+
+    /// Read the entire current input source (here-doc/here-string, `< file`
+    /// redirect, pipeline cursor/pipe, or inherited stdin) to end-of-input.
+    fn read_all_bytes(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Vec<u8> {
+        use io::Read;
+        if let Some(data) = &redir.stdin_data {
+            return data.clone();
+        }
+        if let Some(path) = &redir.stdin {
+            return std::fs::read(path).unwrap_or_default();
+        }
+        let mut buf = Vec::new();
+        match stdin {
+            StdinSrc::Cursor(c) => {
+                let _ = c.borrow_mut().read_to_end(&mut buf);
+            }
+            StdinSrc::Pipe(r) => {
+                let _ = r.borrow_mut().read_to_end(&mut buf);
+            }
+            StdinSrc::Inherit => {
+                let _ = io::stdin().lock().read_to_end(&mut buf);
+            }
+        }
+        buf
+    }
+
+    /// The `mapfile`/`readarray [-t] [-d delim] [-n count] [-s skip] [-O origin]
+    /// [array]` builtin: read lines from standard input into an indexed array
+    /// (default `MAPFILE`). Each element retains the trailing delimiter unless
+    /// `-t` is given. Supports `-d` (alternate delimiter), `-n` (max count, 0 =
+    /// all), `-s` (skip leading lines), and `-O` (starting array index).
+    fn builtin_mapfile(&mut self, args: &[String], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
+        let mut strip = false;
+        let mut delim = b'\n';
+        let mut count: usize = 0; // 0 = unlimited
+        let mut skip: usize = 0;
+        let mut origin: usize = 0;
+        let mut array = String::from("MAPFILE");
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            match a.as_str() {
+                "-t" => strip = true,
+                "-d" => {
+                    i += 1;
+                    delim = args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0);
+                }
+                "-n" | "-c" => {
+                    i += 1;
+                    count = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                "-s" => {
+                    i += 1;
+                    skip = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                "-O" => {
+                    i += 1;
+                    origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                other if other.starts_with('-') && other.len() > 1 => {
+                    eprintln!("osh: mapfile: {other}: invalid option");
+                    return 2;
+                }
+                _ => array = a.clone(),
+            }
+            i += 1;
+        }
+
+        let data = self.read_all_bytes(stdin, redir);
+        // Split on the delimiter, keeping the delimiter on each piece (as bash
+        // does), except for a trailing empty piece after a final delimiter.
+        let mut pieces: Vec<Vec<u8>> = Vec::new();
+        let mut cur: Vec<u8> = Vec::new();
+        for &b in &data {
+            cur.push(b);
+            if b == delim {
+                pieces.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            pieces.push(cur);
+        }
+
+        let mut elems: BTreeMap<usize, String> = BTreeMap::new();
+        let mut idx = origin;
+        for piece in pieces.into_iter().skip(skip) {
+            if count != 0 && idx.saturating_sub(origin) >= count {
+                break;
+            }
+            let mut s = String::from_utf8_lossy(&piece).into_owned();
+            if strip && s.as_bytes().last() == Some(&delim) {
+                s.pop();
+            }
+            elems.insert(idx, s);
+            idx = idx.saturating_add(1);
+        }
+        self.vars.remove(&array);
+        self.assoc.remove(&array);
+        self.arrays.insert(array, elems);
         0
     }
 
@@ -3603,6 +3705,8 @@ fn is_builtin(name: &str) -> bool {
             | "set"
             | "shift"
             | "getopts"
+            | "mapfile"
+            | "readarray"
             | "read"
             | "test"
             | "["
@@ -3647,8 +3751,23 @@ fn split_ifs(s: &str) -> Vec<String> {
 
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
 fn format_printf(fmt: &str, args: &[String]) -> String {
+    // Bash reuses the format string until all arguments are consumed. Repeat the
+    // format while arguments remain, stopping if a pass consumes none (the
+    // format has no argument-consuming conversions) to avoid an infinite loop.
     let mut out = String::new();
     let mut arg_i = 0;
+    loop {
+        let start = arg_i;
+        out.push_str(&format_printf_once(fmt, args, &mut arg_i));
+        if arg_i >= args.len() || arg_i == start {
+            break;
+        }
+    }
+    out
+}
+
+fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
+    let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -3666,16 +3785,16 @@ fn format_printf(fmt: &str, args: &[String]) -> String {
             '%' => match chars.next() {
                 Some('%') => out.push('%'),
                 Some('s') => {
-                    out.push_str(args.get(arg_i).map_or("", String::as_str));
-                    arg_i += 1;
+                    out.push_str(args.get(*arg_i).map_or("", String::as_str));
+                    *arg_i += 1;
                 }
                 Some('d') => {
                     let n = args
-                        .get(arg_i)
+                        .get(*arg_i)
                         .and_then(|s| s.trim().parse::<i64>().ok())
                         .unwrap_or(0);
                     out.push_str(&n.to_string());
-                    arg_i += 1;
+                    *arg_i += 1;
                 }
                 Some(other) => {
                     out.push('%');
@@ -4034,6 +4153,40 @@ mod tests {
                    getopts \":ab:\" opt\n\
                    echo \"$opt $OPTARG\"";
         assert_eq!(run(src).0, ": b\n");
+    }
+
+    #[test]
+    fn mapfile_reads_lines() {
+        // -t strips the trailing newline from each element.
+        let src = "mapfile -t arr <<< $'a\\nb\\nc'\n\
+                   echo \"${#arr[@]}\"\n\
+                   echo \"${arr[0]}-${arr[1]}-${arr[2]}\"";
+        assert_eq!(run(src).0, "3\na-b-c\n");
+    }
+
+    #[test]
+    fn mapfile_keeps_delimiter_by_default() {
+        // Without -t, each element retains its trailing newline.
+        let src = "mapfile arr <<< $'x\\ny'\n\
+                   printf '[%s]' \"${arr[@]}\"";
+        assert_eq!(run(src).0, "[x\n][y\n]");
+    }
+
+    #[test]
+    fn printf_recycles_format() {
+        // The format string repeats until all arguments are consumed.
+        assert_eq!(run("printf '%s\\n' a b c").0, "a\nb\nc\n");
+        assert_eq!(run("printf '[%s:%d]' x 1 y 2").0, "[x:1][y:2]");
+        // No arg-consuming conversion → format emitted exactly once.
+        assert_eq!(run("printf 'hi\\n'").0, "hi\n");
+    }
+
+    #[test]
+    fn readarray_default_var_and_count() {
+        // Alias readarray, default MAPFILE array, and -n limit.
+        let src = "readarray -t -n 2 <<< $'1\\n2\\n3\\n4'\n\
+                   echo \"${#MAPFILE[@]} ${MAPFILE[0]} ${MAPFILE[1]}\"";
+        assert_eq!(run(src).0, "2 1 2\n");
     }
 
     #[test]

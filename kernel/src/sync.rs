@@ -501,62 +501,12 @@ impl<T> Mutex<T> {
     /// Emit a one-shot diagnostic for a lock that has been spun on for an
     /// abnormally long time. Non-fatal: the caller keeps spinning afterwards.
     ///
-    /// Reports the lock name, the wedged CPU and task, and — via lockdep —
-    /// the locks that CPU already holds (the key clue for an AB-BA deadlock
-    /// or convoy). Globally rate-limited to [`MAX_STALL_REPORTS`] so a
-    /// multi-CPU convoy cannot flood the serial log.
-    ///
-    /// Limitation: this prints via the serial port, so if the *serial* lock
-    /// itself is the deadlocked lock (or is held by this same CPU) the report
-    /// may not appear. That is an accepted edge case — the target failure
-    /// modes are the scheduler / cgroup-table locks, not serial.
+    /// Thin wrapper over the shared [`report_spin_stall`] free function so both
+    /// [`Mutex`] and [`PreemptSpinMutex`] produce identical stall diagnostics.
     #[cold]
     #[inline(never)]
     fn report_stall(&self, iters: u64) {
-        use crate::serial_println;
-
-        let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
-        if n >= MAX_STALL_REPORTS {
-            return;
-        }
-
-        let cpu = crate::sched::current_cpu_id();
-        let tid = crate::sched::current_task_id();
-        let name = core::str::from_utf8(self.name).unwrap_or("<non-utf8>");
-        let owner = self.owner.load(Ordering::Relaxed);
-        serial_println!(
-            "[sync] *** SPINLOCK STALL *** lock '{}' still not acquired after ~{}s of \
-             spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
-             the timer-driven liveness watchdog is blind to this if interrupts are \
-             disabled.",
-            name, STALL_SECONDS, cpu, tid, iters
-        );
-        // Name the holder: if `owner == tid`, this is a recursive self-deadlock
-        // (the spinning task already holds the lock); if `owner` is some other
-        // (possibly since-dead) task, the guard was leaked / the holder never
-        // released. `OWNER_NONE` means the physical lock shows free yet
-        // `try_lock` still fails — a lost-unlock / poisoned-flag desync.
-        if owner == OWNER_NONE {
-            serial_println!(
-                "[sync]   lock '{}' holder: NONE recorded (owner=unheld) — \
-                 lost-unlock or flag desync; spinner is task {} on cpu {}",
-                name, tid, cpu
-            );
-        } else if owner == tid {
-            serial_println!(
-                "[sync]   lock '{}' holder: task {} == spinner — RECURSIVE \
-                 self-deadlock (same task re-entered the lock)",
-                name, owner
-            );
-        } else {
-            serial_println!(
-                "[sync]   lock '{}' holder: task {} (spinner is task {}) — guard \
-                 held by another task; check whether it is still alive",
-                name, owner, tid
-            );
-        }
-        // The single most useful clue: what else this CPU already holds.
-        crate::lockdep::dump_held_locks(cpu);
+        report_spin_stall(self.name, &self.owner, iters);
     }
 
     /// Try to acquire the lock without blocking.
@@ -793,6 +743,348 @@ impl<T> Drop for MutexIrqGuard<'_, T> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared stall diagnostics
+// ---------------------------------------------------------------------------
+
+/// Emit a one-shot diagnostic for a lock that has been spun on for an
+/// abnormally long time. Non-fatal: the caller keeps spinning afterwards.
+///
+/// Reports the lock name, the wedged CPU and task, the recorded holder, and —
+/// via lockdep — the locks that CPU already holds (the key clue for an AB-BA
+/// deadlock or convoy). Globally rate-limited to [`MAX_STALL_REPORTS`] so a
+/// multi-CPU convoy cannot flood the serial log.
+///
+/// Shared by [`Mutex`] and [`PreemptSpinMutex`] so both lock types produce
+/// identical stall output. `owner` is the lock's diagnostic holder-id atomic
+/// (see [`Mutex::owner`] / [`PreemptSpinMutex`]); `OWNER_NONE` means unheld.
+///
+/// Limitation: this prints via the serial port, so if the *serial* lock itself
+/// is the deadlocked lock (or is held by this same CPU) the report may not
+/// appear. That is an accepted edge case — the target failure modes are the
+/// scheduler / cgroup-table / teardown locks, not serial.
+#[cold]
+#[inline(never)]
+fn report_spin_stall(name: &'static [u8], owner: &AtomicU64, iters: u64) {
+    use crate::serial_println;
+
+    let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
+    if n >= MAX_STALL_REPORTS {
+        return;
+    }
+
+    let cpu = crate::sched::current_cpu_id();
+    let tid = crate::sched::current_task_id();
+    let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
+    let owner = owner.load(Ordering::Relaxed);
+    serial_println!(
+        "[sync] *** SPINLOCK STALL *** lock '{}' still not acquired after ~{}s of \
+         spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
+         the timer-driven liveness watchdog is blind to this if interrupts are \
+         disabled.",
+        name, STALL_SECONDS, cpu, tid, iters
+    );
+    // Name the holder: if `owner == tid`, this is a recursive self-deadlock
+    // (the spinning task already holds the lock); if `owner` is some other
+    // (possibly since-dead) task, the guard was leaked / the holder never
+    // released. `OWNER_NONE` means the physical lock shows free yet `try_lock`
+    // still fails — a lost-unlock / poisoned-flag desync.
+    if owner == OWNER_NONE {
+        serial_println!(
+            "[sync]   lock '{}' holder: NONE recorded (owner=unheld) — \
+             lost-unlock or flag desync; spinner is task {} on cpu {}",
+            name, tid, cpu
+        );
+    } else if owner == tid {
+        serial_println!(
+            "[sync]   lock '{}' holder: task {} == spinner — RECURSIVE \
+             self-deadlock (same task re-entered the lock)",
+            name, owner
+        );
+    } else {
+        serial_println!(
+            "[sync]   lock '{}' holder: task {} (spinner is task {}) — guard \
+             held by another task; check whether it is still alive",
+            name, owner, tid
+        );
+    }
+    // The single most useful clue: what else this CPU already holds.
+    crate::lockdep::dump_held_locks(cpu);
+}
+
+/// Bounded-spin acquisition loop with stall detection, shared by the contended
+/// paths of both lock types.
+///
+/// Spins calling `try_acquire` until it returns `Some`, exactly like
+/// `spin::Mutex::lock()`, except that a spin lasting longer than
+/// [`STALL_SECONDS`] (TSC-measured, or [`STALL_FALLBACK_ITERS`] before the TSC
+/// is calibrated) fires a one-shot [`report_spin_stall`] naming the lock, then
+/// keeps spinning. `#[cold]`/`#[inline(never)]` so callers' fast paths stay lean.
+#[cold]
+#[inline(never)]
+fn spin_with_stall<G>(
+    name: &'static [u8],
+    owner: &AtomicU64,
+    mut try_acquire: impl FnMut() -> Option<G>,
+) -> G {
+    let threshold_cycles = crate::bench::tsc_freq().saturating_mul(STALL_SECONDS);
+    let start_tsc = crate::bench::rdtsc();
+    let mut iters: u64 = 0;
+    let mut warned = false;
+    loop {
+        if let Some(g) = try_acquire() {
+            return g;
+        }
+        core::hint::spin_loop();
+        iters = iters.wrapping_add(1);
+        if !warned && (iters & STALL_CHECK_MASK) == 0 {
+            let stalled = if threshold_cycles != 0 {
+                crate::bench::rdtsc().saturating_sub(start_tsc) >= threshold_cycles
+            } else {
+                iters >= STALL_FALLBACK_ITERS
+            };
+            if stalled {
+                warned = true;
+                report_spin_stall(name, owner, iters);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PreemptSpinMutex — preempt-aware spinlock without lockdep/contention tracking
+// ---------------------------------------------------------------------------
+
+/// A preempt-disabling spinlock for **hot leaf locks**.
+///
+/// This is the lightweight sibling of [`Mutex`]. Like `Mutex`, it disables
+/// involuntary preemption for the whole hold, so a holder can never be
+/// context-switched away mid-critical-section — which closes the
+/// *holder-preemption* single-CPU deadlock class that a raw [`spin::Mutex`]
+/// suffers (holder preempted while a second task spins on the lock forever).
+///
+/// Unlike `Mutex`, it does **not** register with lockdep, does **not** record
+/// contention statistics, and does **not** allocate a registry slot. That makes
+/// it the right choice for high-frequency **leaf** locks (locks that never
+/// nest another lock inside their critical section, so lockdep ordering checks
+/// add no value) where the per-acquire tracking cost of `Mutex` would matter.
+/// It retains the shared stall detector (via [`spin_with_stall`]) and a
+/// diagnostic owner stamp, so a genuine wedge still names the lock and holder.
+///
+/// ## Choosing between the lock types (Q24 / design-decisions §70)
+/// - **`PreemptSpinMutex`** — hot, uncontended, true leaf locks. Preempt-safe,
+///   minimal overhead, no ordering checks.
+/// - **[`Mutex`]** — contended and/or non-leaf locks, where lockdep ordering
+///   detection and contention stats are worth the ~5ns/acquire overhead.
+/// - **raw [`spin::Mutex`] + manual preempt** — reserved for the few locks that
+///   must stay raw (e.g. the global heap lock, which cannot call back into the
+///   allocator/scheduler tracking on its own acquire path).
+pub struct PreemptSpinMutex<T> {
+    inner: spin::Mutex<T>,
+    /// Human-readable name, used only in the stall diagnostic.
+    name: &'static [u8],
+    /// Diagnostic holder task-id (`OWNER_NONE` = unheld). Single relaxed store
+    /// per acquire/release; enables recursive-deadlock naming in a stall.
+    owner: AtomicU64,
+}
+
+// SAFETY: PreemptSpinMutex<T> is Send+Sync whenever T is Send (same as
+// spin::Mutex, which is the only shared interior state).
+unsafe impl<T: Send> Send for PreemptSpinMutex<T> {}
+unsafe impl<T: Send> Sync for PreemptSpinMutex<T> {}
+
+impl<T> PreemptSpinMutex<T> {
+    /// Create a new preempt-aware leaf spinlock with a default name.
+    #[allow(dead_code)]
+    pub const fn new(value: T) -> Self {
+        Self {
+            inner: spin::Mutex::new(value),
+            name: b"?",
+            owner: AtomicU64::new(OWNER_NONE),
+        }
+    }
+
+    /// Create a new preempt-aware leaf spinlock with a diagnostic name (shown
+    /// in stall reports). Keep it short.
+    #[allow(dead_code)]
+    pub const fn named(value: T, name: &'static [u8]) -> Self {
+        Self {
+            inner: spin::Mutex::new(value),
+            name,
+            owner: AtomicU64::new(OWNER_NONE),
+        }
+    }
+
+    /// Acquire the lock, returning a guard that releases on drop.
+    ///
+    /// Disables preemption before spinning (so the holder can't be preempted
+    /// even while contended) and re-enables it after the physical unlock in the
+    /// guard's `Drop`.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn lock(&self) -> PreemptSpinGuard<'_, T> {
+        // Disable involuntary preemption for the whole hold. Paired with
+        // `preempt_enable()` in `PreemptSpinGuard::drop`. Done before spinning
+        // so the holder can't be preempted while contended either.
+        crate::sched::preempt_disable();
+        let guard = match self.inner.try_lock() {
+            Some(g) => g,
+            None => spin_with_stall(self.name, &self.owner, || self.inner.try_lock()),
+        };
+        self.owner
+            .store(crate::sched::current_task_id(), Ordering::Relaxed);
+        PreemptSpinGuard {
+            guard: core::mem::ManuallyDrop::new(guard),
+            owner: &self.owner,
+        }
+    }
+
+    /// Try to acquire the lock without blocking. Returns `None` (and re-enables
+    /// preemption) if the lock is already held.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn try_lock(&self) -> Option<PreemptSpinGuard<'_, T>> {
+        crate::sched::preempt_disable();
+        match self.inner.try_lock() {
+            Some(guard) => {
+                self.owner
+                    .store(crate::sched::current_task_id(), Ordering::Relaxed);
+                Some(PreemptSpinGuard {
+                    guard: core::mem::ManuallyDrop::new(guard),
+                    owner: &self.owner,
+                })
+            }
+            None => {
+                // No guard will be created to undo the disable, so undo it here.
+                crate::sched::preempt_enable();
+                None
+            }
+        }
+    }
+
+    /// Acquire with interrupts disabled for the whole hold (`spin_lock_irqsave`
+    /// semantics), for a leaf lock reachable from BOTH task and interrupt/
+    /// exception context on the same CPU. See [`Mutex::lock_irqsave`] for the
+    /// full rationale and nesting behaviour — this mirrors it exactly.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn lock_irqsave(&self) -> PreemptSpinIrqGuard<'_, T> {
+        // Save-and-disable BEFORE acquiring so an interrupt landing between the
+        // acquire and the cli can't re-enter the lock. Only touch the hardware /
+        // tracker on the enabled→disabled edge so nesting inside an existing
+        // interrupts-off region neither double-restores nor corrupts the tracker.
+        let were_enabled = crate::cpu::interrupts_enabled();
+        if were_enabled {
+            // SAFETY: interrupts are restored to their prior state when the
+            // returned guard drops; the IDT is live (interrupts were enabled).
+            unsafe {
+                crate::cpu::cli();
+            }
+            crate::cpu::irqoff_tracker::record_disable();
+        }
+        let inner = self.lock();
+        PreemptSpinIrqGuard {
+            inner: core::mem::ManuallyDrop::new(inner),
+            restore_if: were_enabled,
+        }
+    }
+}
+
+/// RAII guard for [`PreemptSpinMutex::lock`]. Releases the physical lock, then
+/// re-enables preemption, on drop.
+pub struct PreemptSpinGuard<'a, T> {
+    /// Inner spin guard in `ManuallyDrop` so [`Drop`] can release the physical
+    /// lock *before* re-enabling preemption (order is load-bearing — see below).
+    guard: core::mem::ManuallyDrop<spin::MutexGuard<'a, T>>,
+    /// The owning lock's `owner` atomic, cleared to [`OWNER_NONE`] on release.
+    owner: &'a AtomicU64,
+}
+
+impl<T> Deref for PreemptSpinGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for PreemptSpinGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for PreemptSpinGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Clear the diagnostic owner stamp before the physical unlock so a
+        // stall reporter can never observe a freed lock still naming us.
+        self.owner.store(OWNER_NONE, Ordering::Relaxed);
+        // Ordering is critical: the *physical* lock must be released before we
+        // re-enable preemption. If we re-enabled first, a timer tick landing in
+        // the tiny window before the spin guard's own drop could involuntarily
+        // switch away while the lock is still physically held — exactly the
+        // deadlock the preempt-disable count exists to prevent. `ManuallyDrop`
+        // lets us force the unlock here, ahead of `preempt_enable`.
+        //
+        // SAFETY: `guard` is never touched again after this point (dropped
+        // exactly once, here), so taking it out of ManuallyDrop is sound.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.guard);
+        }
+        crate::sched::preempt_enable();
+    }
+}
+
+/// RAII guard for [`PreemptSpinMutex::lock_irqsave`]. On drop it releases the
+/// inner lock (which also re-enables preemption) FIRST, then restores the
+/// interrupt flag — the exact reverse of the acquire order. See
+/// [`MutexIrqGuard`] for the full ordering rationale.
+pub struct PreemptSpinIrqGuard<'a, T> {
+    inner: core::mem::ManuallyDrop<PreemptSpinGuard<'a, T>>,
+    restore_if: bool,
+}
+
+impl<T> Deref for PreemptSpinIrqGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for PreemptSpinIrqGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> Drop for PreemptSpinIrqGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Release the physical lock and re-enable preemption first (the inner
+        // guard's own Drop does both, in the correct order).
+        //
+        // SAFETY: `inner` is never touched again after this point (dropped
+        // exactly once, here), so taking it out of ManuallyDrop is sound.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.inner);
+        }
+        // Now restore interrupts, but only if we were the disabling edge.
+        if self.restore_if {
+            crate::cpu::irqoff_tracker::record_enable();
+            // SAFETY: interrupts were enabled when we acquired (that is exactly
+            // what `restore_if` records), so the IDT is live and re-enabling
+            // simply returns to the caller's prior state.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -836,6 +1128,36 @@ pub fn self_test() {
     // Test 4: Hold time is non-zero (we held the lock briefly).
     let hold = m.stats.total_hold_cycles.load(Ordering::Relaxed);
     serial_println!("[sync]   Total hold cycles: {}", hold);
+
+    // Test 5: PreemptSpinMutex basic lock/unlock + value mutation.
+    let p = PreemptSpinMutex::named(5u64, b"test-pmutex");
+    {
+        let mut g = p.lock();
+        assert_eq!(*g, 5);
+        *g = 11;
+    }
+    {
+        let g = p.lock();
+        assert_eq!(*g, 11);
+    }
+    serial_println!("[sync]   PreemptSpinMutex lock/unlock: OK");
+
+    // Test 6: PreemptSpinMutex try_lock succeeds when free, and fails (returns
+    // None, without leaking a preempt-disable) while the lock is held.
+    let p2 = PreemptSpinMutex::named(0u32, b"test-ptry");
+    {
+        let held = p2.lock();
+        assert!(
+            p2.try_lock().is_none(),
+            "try_lock must fail while the lock is held"
+        );
+        drop(held);
+    }
+    {
+        let g = p2.try_lock();
+        assert!(g.is_some(), "try_lock must succeed once released");
+    }
+    serial_println!("[sync]   PreemptSpinMutex try_lock: OK");
 
     serial_println!("[sync] Self-test PASSED");
 }

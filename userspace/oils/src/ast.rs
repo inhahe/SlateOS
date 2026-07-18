@@ -381,6 +381,15 @@ pub enum WordPart {
         /// for `[@]` (one field per key).
         star: bool,
     },
+    /// `${name@op}` — parameter transformation. `op` is a single operator
+    /// character: `Q` (quote for reuse), `U`/`u`/`L` (upper-all/upper-first/
+    /// lower-all), `E` (expand ANSI-C backslash escapes), `a` (attribute flags).
+    ParamTransform {
+        name: String,
+        /// Optional array subscript (`${a[i]@Q}`).
+        index: Option<Box<Word>>,
+        op: char,
+    },
 }
 
 /// An array subscript inside `${name[…]}`.

@@ -1419,6 +1419,40 @@ impl Shell {
         self.param_value(&target).unwrap_or_default()
     }
 
+    /// `${name@op}` parameter transformation. Supports `Q` (quote so the value
+    /// can be reused as shell input), `U`/`u`/`L` (upper-all/upper-first/
+    /// lower-all), `E` (expand ANSI-C backslash escapes), and `a` (attribute
+    /// flags — `a` for indexed array, `A` for associative, else empty).
+    fn param_transform(&mut self, name: &str, index: &Option<Box<Word>>, op: char) -> String {
+        // The `a` (attributes) transform reports type even for an unset scalar.
+        if op == 'a' {
+            let mut flags = String::new();
+            if self.assoc.contains_key(name) {
+                flags.push('A');
+            } else if self.arrays.contains_key(name) {
+                flags.push('a');
+            }
+            return flags;
+        }
+        let value = self.param_elem_value(name, index).unwrap_or_default();
+        match op {
+            'Q' => shell_quote(&value),
+            'U' => value.chars().flat_map(char::to_uppercase).collect(),
+            'u' => {
+                let mut cs = value.chars();
+                match cs.next() {
+                    Some(f) => f.to_uppercase().chain(cs).collect(),
+                    None => String::new(),
+                }
+            }
+            'L' => value.chars().flat_map(char::to_lowercase).collect(),
+            'E' => ansi_c_unescape(&value),
+            // `P` (prompt) and `K`/`k` (assoc key/value) are not implemented;
+            // return the value unchanged rather than erroring.
+            _ => value,
+        }
+    }
+
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables (scalars,
     /// indexed arrays, associative arrays) whose name begins with `prefix`,
     /// sorted (bash lists them in lexicographic order).
@@ -2130,6 +2164,9 @@ impl Shell {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
                 param_case(&value, &pat, *upper, *all)
+            }
+            WordPart::ParamTransform { name, index, op } => {
+                self.param_transform(name, index, *op)
             }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
@@ -3624,6 +3661,106 @@ fn param_case(value: &str, pattern: &[char], upper: bool, all: bool) -> String {
     out
 }
 
+/// Quote `s` so it can be reused verbatim as shell input (the `${v@Q}`
+/// transform). Simple safe words are returned unquoted; values with control
+/// characters use ANSI-C `$'…'` quoting; everything else is single-quoted with
+/// embedded single quotes escaped as `'\''`.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().any(char::is_control) {
+        let mut out = String::from("$'");
+        for c in s.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("\\'"),
+                c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    let safe = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(c));
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Expand ANSI-C backslash escapes in `s` (the `${v@E}` transform): the common
+/// `\n \t \r \\ \' \" \a \b \e \f \v` escapes, plus `\xHH` and `\0nnn`/`\nnn`
+/// numeric escapes. An unrecognized escape keeps its backslash.
+fn ansi_c_unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            Some('a') => out.push('\u{07}'),
+            Some('b') => out.push('\u{08}'),
+            Some('e' | 'E') => out.push('\u{1b}'),
+            Some('f') => out.push('\u{0c}'),
+            Some('v') => out.push('\u{0b}'),
+            Some('x') => {
+                let mut hex = String::new();
+                while hex.len() < 2 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                    hex.push(chars.next().unwrap_or('0'));
+                }
+                if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                    if let Some(ch) = char::from_u32(n) {
+                        out.push(ch);
+                    }
+                } else {
+                    out.push('\\');
+                    out.push('x');
+                }
+            }
+            Some(d @ '0'..='7') => {
+                let mut oct = String::from(d);
+                while oct.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
+                    oct.push(chars.next().unwrap_or('0'));
+                }
+                if let Ok(n) = u32::from_str_radix(&oct, 8)
+                    && let Some(ch) = char::from_u32(n)
+                {
+                    out.push(ch);
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// `${name:offset[:length]}` — a negative offset counts from the end; a negative
 /// length is an offset from the end.
 fn param_substr(value: &str, offset: i64, length: Option<i64>) -> String {
@@ -4209,6 +4346,25 @@ mod tests {
     fn brace_expansion_with_param() {
         // A parameter reference inside an alternative expands after braces.
         assert_eq!(run("v=Z; echo {$v,b}").0, "Z b\n");
+    }
+
+    #[test]
+    fn param_transform_quote_and_case() {
+        // @Q quotes a value with a space; @U/@u/@L transform case.
+        assert_eq!(run("x=\"a b\"; echo \"${x@Q}\"").0, "'a b'\n");
+        assert_eq!(run("x=hello; echo \"${x@U}\"").0, "HELLO\n");
+        assert_eq!(run("x=hello; echo \"${x@u}\"").0, "Hello\n");
+        assert_eq!(run("x=HeLLo; echo \"${x@L}\"").0, "hello\n");
+        // A simple safe word needs no quoting under @Q.
+        assert_eq!(run("x=word; echo \"${x@Q}\"").0, "word\n");
+    }
+
+    #[test]
+    fn param_transform_escape_and_attrs() {
+        // @E expands backslash escapes; @a reports array attributes.
+        assert_eq!(run("x='a\\tb'; printf '%s' \"${x@E}\"").0, "a\tb");
+        assert_eq!(run("declare -A m; m[k]=v; echo \"${m@a}\"").0, "A\n");
+        assert_eq!(run("a=(1 2 3); echo \"${a@a}\"").0, "a\n");
     }
 
     #[test]

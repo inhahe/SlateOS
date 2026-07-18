@@ -1073,6 +1073,19 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 pattern: Box::new(word_from_source(&pat)?),
             })
         }
+        // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
+        '@' => {
+            if rest.len() != 2 {
+                return Err(ParseError(format!(
+                    "unsupported parameter expansion '${{{raw}}}'"
+                )));
+            }
+            Ok(WordPart::ParamTransform {
+                name,
+                index: elem_index,
+                op: rest[1],
+            })
+        }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
         '/' => parse_param_replace(name, elem_index, &rest[1..]),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the

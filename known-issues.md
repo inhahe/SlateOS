@@ -56,10 +56,11 @@ associative arrays (`declare -A m`/`typeset`/`local`, `m[key]=v`,
 keys, `${#m[@]}`, `unset m[key]`; insertion-ordered, string subscripts)
 are implemented. Quoted `"${a[@]}"`/`"${!a[@]}"` keep one field per
 element; unquoted forms field-split. Remaining deferred pieces:
-1. **Negative indices** (`${a[-1]}` = last element) return empty; the
-   subscript must be a non-negative integer after arithmetic evaluation.
-   **Proper fix:** in `array_element`, map a negative index modulo the
-   array length (bash semantics).
+1. ~~**Negative indices** (`${a[-1]}` = last element) return empty.~~
+   **DONE 2026-07-18:** `array_element` resolves a negative subscript
+   from the end via `resolve_index` (`-1` = last; a scalar acts as a
+   one-element array); out-of-range negatives yield empty. Reads only —
+   negative index in an *assignment target* (`a[-1]=v`) is still TODO.
 2. **Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
    recognized — `VarLookup::get` only reads element 0 of a bare name.
    **Proper fix:** teach the arith lexer/evaluator about `name[expr]`.

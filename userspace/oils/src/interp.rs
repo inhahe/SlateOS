@@ -25,11 +25,12 @@
 //!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
-//! - Negative array indices and arithmetic subscripts inside `(( … ))` (`a[i]`)
-//!   are not supported. Mixing a subscript with a `${a[i]:-x}`-style operator is
-//!   rejected at parse time. Indexed arrays use a dense backing store, so a
-//!   sparse literal (`a=([5]=x)`) fills the gaps with empty elements (its
-//!   `${#a[@]}` and `${!a[@]}` reflect the dense form).
+//! - `${a[-1]}` negative subscripts count from the end (bash semantics; a
+//!   scalar acts as a one-element array). Still unsupported: arithmetic
+//!   subscripts inside `(( … ))` (`(( a[i] + 1 ))`). Mixing a subscript with a
+//!   `${a[i]:-x}`-style operator is rejected at parse time. Indexed arrays use
+//!   a dense backing store, so a sparse literal (`a=([5]=x)`) fills the gaps
+//!   with empty elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -1020,14 +1021,34 @@ impl Shell {
         }
     }
 
-    /// A single array element by index (scalar acts as element 0). `None` if the
-    /// index is out of range or negative.
+    /// Resolve a possibly-negative array subscript against a length, using bash
+    /// semantics: a negative index counts back from the end (`-1` is the last
+    /// element, `-2` the second-to-last, …). Returns `None` when the resolved
+    /// index is negative (out of range past the start); a non-negative result
+    /// past the end is left for the caller's bounds check.
+    fn resolve_index(idx: i64, len: usize) -> Option<usize> {
+        let abs = if idx < 0 {
+            // len + idx, e.g. -1 → len-1. Guard the conversions/overflow.
+            i64::try_from(len).ok()?.checked_add(idx)?
+        } else {
+            idx
+        };
+        usize::try_from(abs).ok()
+    }
+
+    /// A single array element by index (scalar acts as a one-element array).
+    /// Negative indices count from the end (`-1` = last). `None` if the index
+    /// is out of range.
     fn array_element(&self, name: &str, idx: i64) -> Option<String> {
-        let idx = usize::try_from(idx).ok()?;
         if let Some(a) = self.arrays.get(name) {
-            a.get(idx).cloned()
-        } else if idx == 0 {
-            self.vars.get(name).cloned()
+            let real = Self::resolve_index(idx, a.len())?;
+            a.get(real).cloned()
+        } else if let Some(v) = self.vars.get(name) {
+            // A scalar behaves as a one-element array at index 0.
+            match Self::resolve_index(idx, 1)? {
+                0 => Some(v.clone()),
+                _ => None,
+            }
         } else {
             None
         }
@@ -3301,6 +3322,20 @@ mod tests {
     fn array_append() {
         assert_eq!(run("a=(x y); a+=(z w); echo ${a[@]}").0, "x y z w\n");
         assert_eq!(run("a=(x y); a+=(z); echo ${#a[@]}").0, "3\n");
+    }
+
+    #[test]
+    fn array_negative_index() {
+        // -1 is the last element, -2 the second-to-last (bash semantics).
+        assert_eq!(run("a=(x y z); echo ${a[-1]}").0, "z\n");
+        assert_eq!(run("a=(x y z); echo ${a[-2]}").0, "y\n");
+        assert_eq!(run("a=(x y z); echo ${a[-3]}").0, "x\n");
+        // Out-of-range negative → empty (bash treats it as a bad subscript).
+        assert_eq!(run("a=(x y z); echo [${a[-4]}]").0, "[]\n");
+        // Length of the last element via ${#a[-1]}.
+        assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
+        // A scalar behaves as a one-element array: [-1] is the value.
+        assert_eq!(run("x=hello; echo ${x[-1]}").0, "hello\n");
     }
 
     #[test]

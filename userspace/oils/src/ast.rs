@@ -344,6 +344,20 @@ pub enum WordPart {
         all: bool,
         pattern: Box<Word>,
     },
+    /// `${!name}` — indirect expansion: the value of the variable whose *name*
+    /// is the value of `name` (e.g. `ref=x; x=hi; ${!ref}` → `hi`). The stored
+    /// string is the referring variable's name; the target may itself carry an
+    /// array subscript (`ref=a[0]`).
+    Indirect(String),
+    /// `${!prefix*}` / `${!prefix@}` — the names of all set variables that begin
+    /// with `prefix`. Unquoted, both field-split; the `*`/`@` distinction only
+    /// matters inside double quotes (`*` joins with the first IFS char, `@`
+    /// yields one field per name).
+    VarNames {
+        prefix: String,
+        /// `true` for the `*` form, `false` for the `@` form.
+        star: bool,
+    },
     /// `$(command)` / `` `command` `` command substitution.
     CommandSub(Program),
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).

@@ -1381,6 +1381,48 @@ impl Shell {
 
     /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
     /// (scalar context; `[@]`/`[*]` join with a space).
+    /// `${!ref}` — indirect expansion: read the variable whose name is the
+    /// value of `ref`. The referent may itself name an array element
+    /// (`ref=a[0]` / `ref=m[key]`).
+    fn expand_indirect(&mut self, refname: &str) -> String {
+        let Some(target) = self.param_value(refname) else {
+            return String::new();
+        };
+        if target.is_empty() {
+            return String::new();
+        }
+        // The referent may name an array element: `ref=a[0]`, `ref=m[key]`.
+        if let Some(open) = target.find('[')
+            && let Some(inner) = target.strip_suffix(']')
+        {
+            let name = &target[..open];
+            let sub = &inner[open + 1..];
+            if self.assoc.contains_key(name) {
+                return self.assoc_element(name, sub).unwrap_or_default();
+            }
+            let idx = self.eval_arith_raw(sub).unwrap_or(0);
+            return self.array_element(name, idx).unwrap_or_default();
+        }
+        self.param_value(&target).unwrap_or_default()
+    }
+
+    /// `${!prefix*}` / `${!prefix@}` — the names of all set variables (scalars,
+    /// indexed arrays, associative arrays) whose name begins with `prefix`,
+    /// sorted (bash lists them in lexicographic order).
+    fn var_names_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .vars
+            .keys()
+            .chain(self.arrays.keys())
+            .chain(self.assoc.keys())
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
@@ -1955,6 +1997,9 @@ impl Shell {
                             },
                         ] => Some(self.array_elements(name)),
                         [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
+                        [WordPart::VarNames { prefix, star: false }] => {
+                            Some(self.var_names_with_prefix(prefix))
+                        }
                         _ => None,
                     };
                     if let Some(items) = per_element {
@@ -2077,6 +2122,8 @@ impl Shell {
                 length,
             } => self.expand_array_ref(name, index, *length),
             WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
+            WordPart::Indirect(refname) => self.expand_indirect(refname),
+            WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
@@ -3711,6 +3758,44 @@ mod tests {
         assert_eq!(run("a=(foo bar); echo ${a[1]^^}").0, "BAR\n");
         // Empty/unset value yields empty.
         assert_eq!(run("echo [${nope^^}]").0, "[]\n");
+    }
+
+    #[test]
+    fn param_indirect_expansion() {
+        // `${!ref}` reads the variable named by `ref`.
+        assert_eq!(run("x=hello; ref=x; echo ${!ref}").0, "hello\n");
+        // Chained/renamed references.
+        assert_eq!(run("a=b; b=c; c=done; echo ${!a} ${!b}").0, "c done\n");
+        // Unset referent yields empty.
+        assert_eq!(run("echo [${!nope}]").0, "[]\n");
+        // Referent naming an array element.
+        assert_eq!(run("a=(x y z); ref='a[1]'; echo ${!ref}").0, "y\n");
+        assert_eq!(
+            run("declare -A m; m[k]=v; ref='m[k]'; echo ${!ref}").0,
+            "v\n"
+        );
+    }
+
+    #[test]
+    fn param_prefix_names() {
+        // `${!prefix*}` lists set variable names beginning with the prefix.
+        assert_eq!(run("aa=1; ab=2; ba=3; echo ${!a*}").0, "aa ab\n");
+        // `@` form behaves the same unquoted.
+        assert_eq!(run("foo1=x; foo2=y; echo ${!foo@}").0, "foo1 foo2\n");
+        // Names are sorted.
+        assert_eq!(run("v_c=1; v_a=2; v_b=3; echo ${!v_*}").0, "v_a v_b v_c\n");
+        // Quoted `@` form yields one field per name.
+        assert_eq!(
+            run("p1=x; p2=y; for n in \"${!p@}\"; do echo $n; done").0,
+            "p1\np2\n"
+        );
+        // Arrays and assoc arrays are included by name.
+        assert_eq!(
+            run("arr=(1 2); declare -A amap; amap[k]=v; ascore=9; echo ${!a*}").0,
+            "amap arr ascore\n"
+        );
+        // No match → empty.
+        assert_eq!(run("echo [${!zzz*}]").0, "[]\n");
     }
 
     #[test]

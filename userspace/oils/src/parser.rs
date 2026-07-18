@@ -967,19 +967,45 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         return Ok(WordPart::Length(after_hash.to_string()));
     }
     if let Some(after_bang) = raw.strip_prefix('!') {
+        // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
+        // `prefix`. Distinguished from the array-keys form (`${!a[@]}`) by
+        // ending in a bare `*`/`@` (no closing `]`). A valid name prefix is
+        // required so we don't mistake other expansions.
+        if let Some(prefix) = after_bang.strip_suffix('*')
+            && !prefix.contains('[')
+            && (prefix.is_empty() || is_valid_name(prefix))
+        {
+            return Ok(WordPart::VarNames {
+                prefix: prefix.to_string(),
+                star: true,
+            });
+        }
+        if let Some(prefix) = after_bang.strip_suffix('@')
+            && !prefix.contains('[')
+            && (prefix.is_empty() || is_valid_name(prefix))
+        {
+            return Ok(WordPart::VarNames {
+                prefix: prefix.to_string(),
+                star: false,
+            });
+        }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let bytes: Vec<char> = after_bang.chars().collect();
         let (name, subscript, remaining) = split_name_subscript(&bytes)?;
-        if let Some(index) = subscript
+        if let Some(index) = &subscript
             && remaining.is_empty()
             && matches!(index, ArrayIndex::All | ArrayIndex::Star)
         {
             return Ok(WordPart::ArrayKeys {
-                name,
                 star: matches!(index, ArrayIndex::Star),
+                name,
             });
         }
-        // `${!name}` indirection and `${!prefix*}` matching are not supported.
+        // `${!name}` — indirect expansion. The referent (`name`) must be a plain
+        // name; the target it names may itself carry a subscript.
+        if remaining.is_empty() && subscript.is_none() && is_valid_name(&name) {
+            return Ok(WordPart::Indirect(name));
+        }
         return Err(ParseError(format!(
             "unsupported parameter expansion '${{{raw}}}'"
         )));

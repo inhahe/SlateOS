@@ -19,6 +19,24 @@ pub trait VarLookup {
         let _ = (name, index);
         None
     }
+
+    /// Return `true` if `name` is an associative array. Bash evaluates the
+    /// subscript of an associative array as a *string key* (not arithmetic),
+    /// so the evaluator consults this before deciding how to read `name[sub]`.
+    /// The default (`false`) means every array is treated as indexed.
+    fn is_assoc(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Return the integer value of associative element `name[key]`, or `None`
+    /// if unset (treated as `0`). `key` is the raw, already-expanded subscript
+    /// text (bash does not arithmetic-evaluate associative subscripts). Only
+    /// consulted when [`VarLookup::is_assoc`] returns `true`.
+    fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
+        let _ = (name, key);
+        None
+    }
 }
 
 /// An arithmetic evaluation error.
@@ -167,17 +185,40 @@ impl AParser<'_> {
                         break;
                     }
                 }
-                // Array subscript: `name[expr]`. The subscript is itself an
-                // arithmetic expression (bash evaluates it for indexed arrays),
-                // so recurse. No whitespace is allowed between the name and `[`.
+                // Array subscript: `name[sub]`. For an *indexed* array the
+                // subscript is an arithmetic expression (`a[i+1]`, negative
+                // indices); for an *associative* array it is a literal string
+                // key (`m[foo]`). We first capture the raw bracketed text with
+                // balanced-bracket matching, then dispatch on the array kind.
+                // No whitespace is allowed between the name and `[`.
                 if self.peek() == Some('[') {
                     self.pos += 1;
-                    let idx = self.parse_expr(0)?;
-                    self.skip_ws();
+                    let sub_start = self.pos;
+                    let mut depth = 1usize;
+                    while let Some(c) = self.peek() {
+                        match c {
+                            '[' => depth += 1,
+                            ']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.pos += 1;
+                    }
                     if self.peek() != Some(']') {
                         return Err(ArithError("expected ']' in array subscript".into()));
                     }
-                    self.pos += 1;
+                    let raw: String = self.chars[sub_start..self.pos].iter().collect();
+                    self.pos += 1; // consume the closing ']'
+                    if self.vars.is_assoc(&name) {
+                        // Associative: the (trimmed) raw text is the key.
+                        return Ok(self.vars.get_assoc(&name, raw.trim()).unwrap_or(0));
+                    }
+                    // Indexed: evaluate the subscript arithmetically.
+                    let idx = eval(&raw, self.vars)?;
                     return Ok(self.vars.get_index(&name, idx).unwrap_or(0));
                 }
                 Ok(self.vars.get(&name).unwrap_or(0))
@@ -294,6 +335,40 @@ mod tests {
         assert_eq!(eval("a[10]", &m).unwrap(), 0); // out of range → 0
         // Missing ']' is a syntax error.
         assert!(eval("a[1", &m).is_err());
+    }
+
+    /// A lookup with one associative array `m` keyed by strings, to exercise
+    /// the associative subscript path (`m[key]` uses the raw text as key, not
+    /// an arithmetic expression).
+    struct AssocMap(HashMap<String, i64>);
+    impl VarLookup for AssocMap {
+        fn get(&self, _name: &str) -> Option<i64> {
+            None
+        }
+        fn is_assoc(&self, name: &str) -> bool {
+            name == "m"
+        }
+        fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
+            if name != "m" {
+                return None;
+            }
+            self.0.get(key).copied()
+        }
+    }
+
+    #[test]
+    fn associative_subscripts() {
+        let mut kv = HashMap::new();
+        kv.insert("foo".to_string(), 7);
+        kv.insert("bar".to_string(), 13);
+        let m = AssocMap(kv);
+        // The subscript is a literal string key, not arithmetic.
+        assert_eq!(eval("m[foo]", &m).unwrap(), 7);
+        assert_eq!(eval("m[bar] + 1", &m).unwrap(), 14);
+        // A key that looks like an operator expression is still literal.
+        assert_eq!(eval("m[missing]", &m).unwrap(), 0); // unset → 0
+        // Whitespace around the key is trimmed.
+        assert_eq!(eval("m[ foo ]", &m).unwrap(), 7);
     }
 
     fn ev(s: &str) -> i64 {

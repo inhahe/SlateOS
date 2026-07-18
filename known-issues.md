@@ -55,7 +55,7 @@ implemented surface — it is an intentional grow-phase scope limit gated on
 the slateos permission model, documented in the `interp.rs` module header.
 No test depends on the deferred behavior.
 
-### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, sparse indexed arrays, and negative-index assignment targets all implemented; one niche gap remains: associative subscripts inside `(( … ))`)
+### TD-OILS2. `osh` arrays — RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, sparse indexed arrays, negative-index assignment targets, and associative subscripts inside `(( … ))` all implemented)
 
 **Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
 `try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`,
@@ -83,8 +83,14 @@ element; unquoted forms field-split. Remaining deferred pieces:
    `name[expr]` (subscript is itself an arithmetic expression, so
    `a[i+1]` and negative `a[-1]` work) via the new defaulted
    `VarLookup::get_index`, which `Shell` implements over `array_element`.
-   Indexed arrays only; an associative subscript in `(( … ))` is
-   arith-evaluated (not treated as a string key) — niche, still TODO.
+   **Associative subscripts in `(( … ))` — DONE 2026-07-18:** the arith
+   parser captures the raw bracketed subscript text (balanced brackets) and
+   dispatches on array kind via the new `VarLookup::is_assoc`/`get_assoc`:
+   an associative subscript (`m[foo]`, `m[$k]`) is the literal string key
+   (not arith-evaluated), while an indexed subscript is still evaluated as
+   an arithmetic expression. `Shell` implements both over `assoc`/
+   `assoc_element`. Tests: `arith::associative_subscripts`,
+   `interp::arith_associative_subscript`.
 3. ~~**Subscript combined with an expansion operator**
    (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time.~~
    **DONE 2026-07-18:** the four operator variants (`ParamOp`,
@@ -105,11 +111,9 @@ element; unquoted forms field-split. Remaining deferred pieces:
    specifically; and a negative subscript counts back from
    `highest_index + 1` (bash semantics).
 
-Remaining niche gap: an associative subscript inside `(( … ))` is
-arith-evaluated rather than treated as a string key — still TODO.
-(Negative index in an *assignment target*, `a[-1]=v`, is now supported:
-it resolves from `highest_index + 1`, so `a[-1]=Q` overwrites the last
-element.)
+All previously-deferred pieces are now implemented. (Negative index in an
+*assignment target*, `a[-1]=v`, is supported: it resolves from
+`highest_index + 1`, so `a[-1]=Q` overwrites the last element.)
 
 ### TD-OILS3. `osh` compound-command redirections: stderr now honored — RESOLVED 2026-07-18
 

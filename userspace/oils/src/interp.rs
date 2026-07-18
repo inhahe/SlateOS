@@ -2750,6 +2750,17 @@ impl VarLookup for Shell {
         self.array_element(name, index)
             .and_then(|v| v.trim().parse::<i64>().ok())
     }
+
+    fn is_assoc(&self, name: &str) -> bool {
+        self.assoc.contains_key(name)
+    }
+
+    fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
+        // Bash reads an associative element's value as a number in `(( … ))`;
+        // an unset key (or a non-numeric value) evaluates to 0.
+        self.assoc_element(name, key)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    }
 }
 
 // ---- free helpers -----------------------------------------------------------
@@ -3742,6 +3753,28 @@ mod tests {
     fn nested_subshell_still_works() {
         // `( ( … ) )` with an inner space is nested subshells, not arithmetic.
         assert_eq!(run("( ( echo hi ) )").0, "hi\n");
+    }
+
+    #[test]
+    fn arith_associative_subscript() {
+        // Inside `(( … ))`/`$(( … ))` an associative element is read by its
+        // string key (not an arithmetic subscript), like bash.
+        assert_eq!(
+            run("declare -A m; m[foo]=7; m[bar]=13; echo $(( m[foo] + m[bar] ))").0,
+            "20\n"
+        );
+        // Used as a condition.
+        assert_eq!(
+            run("declare -A m; m[on]=1; if (( m[on] )); then echo yes; fi").0,
+            "yes\n"
+        );
+        // A key supplied via expansion works too (`$k` expands before arith).
+        assert_eq!(
+            run("declare -A m; m[foo]=5; k=foo; echo $(( m[$k] ))").0,
+            "5\n"
+        );
+        // An indexed array still uses arithmetic subscripts.
+        assert_eq!(run("a=(10 20 30); echo $(( a[1] + a[2] ))").0, "50\n");
     }
 
     fn field_lit(s: &str) -> Vec<EChar> {

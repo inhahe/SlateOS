@@ -51,7 +51,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Maximum number of container networks tracked at once.
 pub const MAX_NETWORKS: usize = 64;

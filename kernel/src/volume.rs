@@ -27,7 +27,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Root directory under which named-volume backing directories are created.
 pub const VOLUMES_ROOT: &str = "/var/lib/slate/volumes";

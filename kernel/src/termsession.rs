@@ -38,7 +38,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::console::{self, ConsoleSnapshot, ScrollbackBuffer, ScrollCell};
 use crate::error::{KernelError, KernelResult};

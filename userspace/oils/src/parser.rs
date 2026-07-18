@@ -5,8 +5,9 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, Assignment, Command, ForClause, FunctionDef, IfClause, Item, LoopClause,
-    ParamOp, Pipeline, Program, Redirect, RedirectOp, SimpleCommand, Word, WordPart,
+    AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, ForClause, FunctionDef, IfClause,
+    Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp, SimpleCommand, Word,
+    WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
 
@@ -172,6 +173,7 @@ impl Parser {
                 "while" => return self.parse_loop(false),
                 "until" => return self.parse_loop(true),
                 "for" => return self.parse_for(),
+                "case" => return self.parse_case(),
                 "{" => return self.parse_brace_group(),
                 other => {
                     return Err(ParseError(format!("unexpected reserved word '{other}'")));
@@ -303,6 +305,85 @@ impl Parser {
         Ok(Command::For(ForClause { var, words, body }))
     }
 
+    fn parse_case(&mut self) -> Result<Command, ParseError> {
+        self.expect_reserved("case")?;
+        let Some(Tok::Word(segs)) = self.peek() else {
+            return Err(ParseError("expected word after 'case'".into()));
+        };
+        let word = self.word_from_segs(&segs.clone())?;
+        self.pos += 1;
+        self.skip_newlines();
+        self.expect_reserved("in")?;
+        self.skip_newlines();
+        let mut items = Vec::new();
+        while self.reserved_here().as_deref() != Some("esac") {
+            if self.peek().is_none() {
+                return Err(ParseError("unterminated 'case' (expected 'esac')".into()));
+            }
+            // Optional leading '(' before the pattern list.
+            if self.at_op(Op::LParen) {
+                self.pos += 1;
+            }
+            // Pattern list: word ['|' word]*.
+            let mut patterns = Vec::new();
+            loop {
+                let Some(Tok::Word(segs)) = self.peek() else {
+                    return Err(ParseError("expected pattern in 'case'".into()));
+                };
+                patterns.push(self.word_from_segs(&segs.clone())?);
+                self.pos += 1;
+                if self.at_op(Op::Pipe) {
+                    self.pos += 1;
+                    continue;
+                }
+                break;
+            }
+            if !self.at_op(Op::RParen) {
+                return Err(ParseError("expected ')' after 'case' pattern".into()));
+            }
+            self.pos += 1;
+            let body = self.parse_case_body()?;
+            items.push(CaseItem { patterns, body });
+            if self.at_op(Op::DSemi) {
+                self.pos += 1;
+                self.skip_newlines();
+            } else {
+                // Only `esac` may legitimately follow a `;;`-less arm body.
+                self.skip_newlines();
+            }
+        }
+        self.expect_reserved("esac")?;
+        Ok(Command::Case(CaseClause { word, items }))
+    }
+
+    /// Parse a `case`-arm body: a command list terminated by `;;` or `esac`.
+    fn parse_case_body(&mut self) -> Result<Program, ParseError> {
+        let mut items = Vec::new();
+        loop {
+            self.skip_separators();
+            if self.peek().is_none()
+                || self.at_op(Op::DSemi)
+                || self.reserved_here().as_deref() == Some("esac")
+            {
+                break;
+            }
+            let list = self.parse_and_or()?;
+            let mut background = false;
+            match self.peek() {
+                Some(Tok::Op(Op::Amp)) => {
+                    background = true;
+                    self.pos += 1;
+                }
+                Some(Tok::Op(Op::Semi)) | Some(Tok::Newline) => {
+                    self.pos += 1;
+                }
+                _ => {}
+            }
+            items.push(Item { list, background });
+        }
+        Ok(Program { items })
+    }
+
     fn parse_simple(&mut self) -> Result<Command, ParseError> {
         let mut cmd = SimpleCommand::default();
         let mut seen_word = false;
@@ -332,7 +413,17 @@ impl Parser {
                     cmd.words.push(self.word_from_segs(&segs)?);
                     seen_word = true;
                 }
-                Some(Tok::Io(_)) | Some(Tok::Op(Op::Less | Op::Great | Op::DGreat | Op::GreatAnd | Op::LessAnd)) => {
+                Some(Tok::Io(_))
+                | Some(Tok::Op(
+                    Op::Less
+                    | Op::Great
+                    | Op::DGreat
+                    | Op::GreatAnd
+                    | Op::LessAnd
+                    | Op::DLess
+                    | Op::DLessDash
+                    | Op::TLess,
+                )) => {
                     let r = self.parse_redirect()?;
                     cmd.redirects.push(r);
                 }
@@ -358,14 +449,19 @@ impl Parser {
             Some(Tok::Op(Op::Great)) => RedirectOp::Write,
             Some(Tok::Op(Op::DGreat)) => RedirectOp::Append,
             Some(Tok::Op(Op::GreatAnd | Op::LessAnd)) => RedirectOp::DupOut,
+            Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,
+            Some(Tok::Op(Op::TLess)) => RedirectOp::HereStr,
             _ => return Err(ParseError("expected redirection operator".into())),
         };
         let fd = explicit_fd.unwrap_or(match op {
-            RedirectOp::Read => 0,
+            RedirectOp::Read | RedirectOp::HereDoc | RedirectOp::HereStr => 0,
             _ => 1,
         });
         let target = match self.bump() {
             Some(Tok::Word(segs)) => self.word_from_segs(&segs)?,
+            // The lexer emits the here-doc body as its own token right after the
+            // `<<`/`<<-` operator.
+            Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
             _ => return Err(ParseError("expected redirection target".into())),
         };
         Ok(Redirect { fd, op, target })
@@ -597,6 +693,46 @@ mod tests {
             panic!("expected loop");
         };
         assert!(!l.until);
+    }
+
+    #[test]
+    fn case_statement() {
+        let prog =
+            parse("case $x in a|b) echo ab;; *.txt) echo text;; *) echo default;; esac").unwrap();
+        let Command::Case(c) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected case");
+        };
+        assert_eq!(c.items.len(), 3);
+        assert_eq!(c.items[0].patterns.len(), 2);
+        assert_eq!(c.items[2].patterns.len(), 1);
+    }
+
+    #[test]
+    fn case_empty_and_final_no_dsemi() {
+        // Last arm may omit `;;`; an empty body is allowed.
+        let prog = parse("case y in x) ;; y) echo hit\nesac").unwrap();
+        let Command::Case(c) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected case");
+        };
+        assert_eq!(c.items.len(), 2);
+        assert!(c.items[0].body.items.is_empty());
+    }
+
+    #[test]
+    fn here_doc_and_here_string() {
+        let prog = parse("cat <<EOF\nhi\nEOF\n").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected simple");
+        };
+        assert_eq!(sc.redirects.len(), 1);
+        assert!(matches!(sc.redirects[0].op, RedirectOp::HereDoc));
+        assert_eq!(sc.redirects[0].fd, 0);
+
+        let prog2 = parse("cat <<< hello").unwrap();
+        let Command::Simple(sc2) = &prog2.items[0].list.first.commands[0] else {
+            panic!("expected simple");
+        };
+        assert!(matches!(sc2.redirects[0].op, RedirectOp::HereStr));
     }
 
     #[test]

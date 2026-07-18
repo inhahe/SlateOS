@@ -58,6 +58,8 @@ pub enum Command {
     For(ForClause),
     /// `name() { body; }` — a function definition.
     Function(FunctionDef),
+    /// `case word in pat) body ;; … esac`.
+    Case(CaseClause),
     /// `{ list; }` — a brace group (runs in the current shell).
     BraceGroup(Program),
     /// `( list )` — a subshell group.
@@ -109,6 +111,22 @@ pub struct ForClause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: String,
+    pub body: Program,
+}
+
+/// `case WORD in … esac` — match `word` against each item's patterns in order,
+/// running the body of the first matching item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseClause {
+    pub word: Word,
+    pub items: Vec<CaseItem>,
+}
+
+/// One `pat[|pat…]) body ;;` arm of a `case` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseItem {
+    /// Alternative glob patterns (`|`-separated); a match on any runs the body.
+    pub patterns: Vec<Word>,
     pub body: Program,
 }
 
@@ -186,4 +204,11 @@ pub enum RedirectOp {
     Read,
     /// `n>&m` — duplicate an fd (target parsed as the target fd number).
     DupOut,
+    /// `<< delim` (or `<<-`) — here-document. The redirect's `target` word holds
+    /// the already expansion-lowered body content; a quoted delimiter yields a
+    /// single literal part (no expansion).
+    HereDoc,
+    /// `<<< word` — here-string. The `target` word is expanded and fed to stdin
+    /// with a trailing newline.
+    HereStr,
 }

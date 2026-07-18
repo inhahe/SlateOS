@@ -3,16 +3,19 @@
 //! Executes a parsed [`Program`]: variable/parameter expansion, builtins,
 //! external command execution (real fork/exec via [`std::process::Command`]),
 //! pipelines, redirections, command substitution, arithmetic, and control
-//! flow (`if`/`while`/`until`/`for`, functions, `&&`/`||`, `;`).
+//! flow (`if`/`while`/`until`/`for`/`case`, functions, `&&`/`||`, `;`),
+//! here-documents (`<<`, `<<-`), and here-strings (`<<<`).
 //!
-//! ## Known MVP limitations (tracked for the grow phase — see the crate docs
-//! and `design-decisions.md §72`):
-//! - No pathname (glob) expansion yet: `*.txt` stays literal.
+//! ## Known limitations (tracked for the grow phase — see the crate docs and
+//! `design-decisions.md §72`):
+//! - No pathname (glob) expansion yet: `*.txt` stays literal on the command
+//!   line. (Glob *matching* is implemented for `case` patterns.)
 //! - Pipelines are *buffered*, not concurrent: each stage runs to completion
 //!   and its output feeds the next. An unbounded producer (`yes | head`) will
 //!   not terminate early.
 //! - Redirections attach to simple commands only, not to compound commands, so
-//!   `while read …; do …; done < file` is not yet supported.
+//!   `while read …; do …; done < file` is not yet supported. In particular,
+//!   `read` from a here-document reads only its first line.
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
@@ -22,8 +25,8 @@ use std::process::{Command as PCommand, Stdio};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, Command, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
-    RedirectOp, SimpleCommand, Word, WordPart,
+    AndOr, AndOrOp, CaseClause, Command, ForClause, IfClause, LoopClause, ParamOp, Pipeline,
+    Program, Redirect, RedirectOp, SimpleCommand, Word, WordPart,
 };
 use crate::parser::parse;
 
@@ -222,6 +225,7 @@ impl Shell {
                 self.last_status = 0;
                 Flow::Next
             }
+            Command::Case(c) => self.exec_case(c, out),
             Command::BraceGroup(p) => self.exec_program(p, out),
             Command::Subshell(p) => {
                 // A subshell gets a clone of the state; mutations don't escape.
@@ -321,6 +325,20 @@ impl Shell {
                     }
                 }
                 other => return other,
+            }
+        }
+        Flow::Next
+    }
+
+    fn exec_case(&mut self, c: &CaseClause, out: &mut Out) -> Flow {
+        let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
+        self.last_status = 0;
+        for item in &c.items {
+            for pat in &item.patterns {
+                let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
+                if glob_match(&pattern, &subject) {
+                    return self.exec_program(&item.body, out);
+                }
             }
         }
         Flow::Next
@@ -453,28 +471,34 @@ impl Shell {
             cmd.env(k, v);
         }
 
-        // stdin
+        // stdin — a here-doc/here-string body takes precedence, then a file
+        // redirect, then the inherited pipeline input.
         let mut input_bytes: Option<Vec<u8>> = None;
-        match &redir.stdin {
-            Some(path) => match std::fs::File::open(path) {
-                Ok(f) => {
-                    cmd.stdin(Stdio::from(f));
-                }
-                Err(e) => {
-                    eprintln!("osh: {path}: {e}");
-                    self.last_status = 1;
-                    return;
-                }
-            },
-            None => match stdin {
-                StdinSrc::Inherit => {
-                    cmd.stdin(Stdio::inherit());
-                }
-                StdinSrc::Bytes(b) => {
-                    input_bytes = Some(b.to_vec());
-                    cmd.stdin(Stdio::piped());
-                }
-            },
+        if let Some(data) = &redir.stdin_data {
+            input_bytes = Some(data.clone());
+            cmd.stdin(Stdio::piped());
+        } else {
+            match &redir.stdin {
+                Some(path) => match std::fs::File::open(path) {
+                    Ok(f) => {
+                        cmd.stdin(Stdio::from(f));
+                    }
+                    Err(e) => {
+                        eprintln!("osh: {path}: {e}");
+                        self.last_status = 1;
+                        return;
+                    }
+                },
+                None => match stdin {
+                    StdinSrc::Inherit => {
+                        cmd.stdin(Stdio::inherit());
+                    }
+                    StdinSrc::Bytes(b) => {
+                        input_bytes = Some(b.to_vec());
+                        cmd.stdin(Stdio::piped());
+                    }
+                },
+            }
         }
 
         // stdout
@@ -597,14 +621,32 @@ impl Shell {
     fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, String> {
         let mut plan = RedirPlan::default();
         for r in redirs {
-            let target = self.expand_to_string(&r.target);
             match r.op {
                 RedirectOp::Read => {
                     if r.fd == 0 {
-                        plan.stdin = Some(target);
+                        plan.stdin = Some(self.expand_to_string(&r.target));
+                        plan.stdin_data = None;
+                    }
+                }
+                RedirectOp::HereDoc => {
+                    if r.fd == 0 {
+                        // Here-doc bodies expand like a double-quoted context:
+                        // no tilde expansion, no field splitting, no globbing.
+                        let body = self.expand_double_quoted(&r.target.parts);
+                        plan.stdin = None;
+                        plan.stdin_data = Some(body.into_bytes());
+                    }
+                }
+                RedirectOp::HereStr => {
+                    if r.fd == 0 {
+                        let mut s = self.expand_to_string(&r.target);
+                        s.push('\n');
+                        plan.stdin = None;
+                        plan.stdin_data = Some(s.into_bytes());
                     }
                 }
                 RedirectOp::Write | RedirectOp::Append => {
+                    let target = self.expand_to_string(&r.target);
                     let append = matches!(r.op, RedirectOp::Append);
                     match r.fd {
                         2 => plan.stderr = Some((target, append)),
@@ -613,6 +655,7 @@ impl Shell {
                 }
                 RedirectOp::DupOut => {
                     // `2>&1` → stderr follows stdout; `1>&2` → the reverse.
+                    let target = self.expand_to_string(&r.target);
                     if r.fd == 2 && target == "1" {
                         plan.stderr = plan.stdout.clone();
                     } else if r.fd == 1 && target == "2" {
@@ -1155,6 +1198,13 @@ impl Shell {
     }
 
     fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<String> {
+        if let Some(data) = &redir.stdin_data {
+            // Here-doc/here-string: read the first line. (Multi-line `read`
+            // loops over here-docs require compound-command redirects, which are
+            // not yet supported — see the module limitations.)
+            let mut r = io::BufReader::new(&data[..]);
+            return read_one_line(&mut r);
+        }
         if let Some(path) = &redir.stdin {
             let f = std::fs::File::open(path).ok()?;
             let mut r = io::BufReader::new(f);
@@ -1187,8 +1237,96 @@ impl VarLookup for Shell {
 #[derive(Debug, Clone, Default)]
 struct RedirPlan {
     stdin: Option<String>,
+    /// In-memory stdin bytes from a here-document / here-string (takes
+    /// precedence over `stdin` and the inherited pipeline input).
+    stdin_data: Option<Vec<u8>>,
     stdout: Option<(String, bool)>,
     stderr: Option<(String, bool)>,
+}
+
+/// Match `text` against a shell glob `pattern` (`*`, `?`, `[...]`), anchored at
+/// both ends (as `case` patterns and `[[ … == … ]]` require). Uses iterative
+/// star-backtracking so it runs in linear space and near-linear time.
+fn glob_match(pattern: &[char], text: &[char]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Last '*' position in the pattern and the text index it was matched at, so
+    // we can backtrack and let the star consume one more character.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+            continue;
+        }
+        let m = if pi < pattern.len() {
+            glob_match_one(pattern, pi, text[ti])
+        } else {
+            None
+        };
+        match m {
+            Some((true, next)) => {
+                pi = next;
+                ti += 1;
+            }
+            _ => {
+                if let Some((sp, st)) = star {
+                    pi = sp + 1;
+                    ti = st + 1;
+                    star = Some((sp, st + 1));
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+/// Match a single non-`*` pattern element at `pi` against `ch`. Returns
+/// `(matched, index-after-the-element)`, or `None` if the pattern is exhausted.
+fn glob_match_one(pattern: &[char], pi: usize, ch: char) -> Option<(bool, usize)> {
+    match pattern.get(pi)? {
+        '?' => Some((true, pi + 1)),
+        '[' => Some(glob_match_class(pattern, pi, ch)),
+        c => Some((*c == ch, pi + 1)),
+    }
+}
+
+/// Match a `[...]` character class starting at `pattern[pi] == '['`. Supports
+/// ranges (`a-z`) and a leading `!`/`^` negation. An unterminated class is
+/// treated as a literal `[`.
+fn glob_match_class(pattern: &[char], pi: usize, ch: char) -> (bool, usize) {
+    let mut i = pi + 1;
+    let mut negate = false;
+    if matches!(pattern.get(i), Some('!' | '^')) {
+        negate = true;
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < pattern.len() {
+        let c = pattern[i];
+        if c == ']' && !first {
+            return (matched ^ negate, i + 1);
+        }
+        first = false;
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
+            if pattern[i] <= ch && ch <= pattern[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if c == ch {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    // Unterminated: treat the '[' literally.
+    (ch == '[', pi + 1)
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -1460,5 +1598,60 @@ mod tests {
     fn quoted_no_split() {
         let (o, _) = run(r#"x="a b c"; for w in "$x"; do echo $w; done"#);
         assert_eq!(o, "a b c\n");
+    }
+
+    #[test]
+    fn case_literal_and_glob() {
+        let (o, _) = run("case hello in h*) echo star;; *) echo other;; esac");
+        assert_eq!(o, "star\n");
+        let (o2, _) = run("case foo in a|foo|b) echo alt;; esac");
+        assert_eq!(o2, "alt\n");
+        let (o3, _) = run("case xyz in a*) echo a;; esac; echo done");
+        assert_eq!(o3, "done\n");
+    }
+
+    #[test]
+    fn case_uses_variable() {
+        let (o, _) = run("x=cat.txt; case $x in *.txt) echo text;; *.md) echo md;; esac");
+        assert_eq!(o, "text\n");
+    }
+
+    #[test]
+    fn case_char_class() {
+        let (o, _) = run("case 5 in [0-9]) echo digit;; *) echo no;; esac");
+        assert_eq!(o, "digit\n");
+    }
+
+    #[test]
+    fn here_string_read() {
+        let (o, _) = run("read x <<< hello; echo got $x");
+        assert_eq!(o, "got hello\n");
+    }
+
+    #[test]
+    fn here_doc_read_and_expand() {
+        let (o, _) = run("name=world\nread line <<EOF\nhi $name\nEOF\necho $line");
+        assert_eq!(o, "hi world\n");
+    }
+
+    #[test]
+    fn here_doc_quoted_delim_no_expand() {
+        let (o, _) = run("name=world\nread line <<'EOF'\nhi $name\nEOF\necho $line");
+        assert_eq!(o, "hi $name\n");
+    }
+
+    #[test]
+    fn glob_match_basics() {
+        let g = |p: &str, t: &str| glob_match(&p.chars().collect::<Vec<_>>(), &t.chars().collect::<Vec<_>>());
+        assert!(g("*", "anything"));
+        assert!(g("h?llo", "hello"));
+        assert!(g("a*c", "abbbc"));
+        assert!(!g("a*c", "abbb"));
+        assert!(g("[a-c]x", "bx"));
+        assert!(!g("[a-c]x", "dx"));
+        assert!(g("[!0-9]", "z"));
+        assert!(!g("[!0-9]", "5"));
+        assert!(g("file.txt", "file.txt"));
+        assert!(!g("file.txt", "file.md"));
     }
 }

@@ -24,6 +24,8 @@ pub enum Op {
     OrIf,
     Amp,
     Semi,
+    /// `;;` — terminates a `case` arm.
+    DSemi,
     LParen,
     RParen,
     Less,
@@ -31,6 +33,12 @@ pub enum Op {
     DGreat,
     GreatAnd,
     LessAnd,
+    /// `<<` — here-document.
+    DLess,
+    /// `<<-` — here-document with leading-tab stripping.
+    DLessDash,
+    /// `<<<` — here-string.
+    TLess,
 }
 
 /// A word fragment, preserving quoting for later expansion.
@@ -60,11 +68,29 @@ pub enum Tok {
     Io(i32),
     Op(Op),
     Newline,
+    /// A here-document body, captured after its introducing line. Emitted
+    /// immediately after the `<<`/`<<-` operator token that owns it.
+    HereDoc(Vec<Seg>),
 }
 
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
+    /// Here-documents whose bodies are pending collection at the next newline.
+    pending_heredocs: Vec<PendingHeredoc>,
+}
+
+/// A here-document awaiting its body (collected when the introducing line ends).
+struct PendingHeredoc {
+    /// The end delimiter (unquoted form).
+    delim: String,
+    /// `<<-`: strip leading tabs from body lines and the closing delimiter.
+    strip: bool,
+    /// Whether the body undergoes parameter/command/arith expansion (false when
+    /// the delimiter was quoted).
+    expand: bool,
+    /// Index into the output token stream of the placeholder to fill in.
+    tok_index: usize,
 }
 
 /// Tokenize `src` into a token stream.
@@ -75,6 +101,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
     let mut lx = Lexer {
         chars: src.chars().collect(),
         pos: 0,
+        pending_heredocs: Vec::new(),
     };
     lx.run()
 }
@@ -116,6 +143,9 @@ impl Lexer {
                 '\n' => {
                     self.pos += 1;
                     out.push(Tok::Newline);
+                    if !self.pending_heredocs.is_empty() {
+                        self.collect_heredocs(&mut out)?;
+                    }
                 }
                 '\r' => {
                     // Treat a bare CR (or CRLF) as insignificant whitespace so
@@ -148,7 +178,12 @@ impl Lexer {
                 }
                 ';' => {
                     self.pos += 1;
-                    out.push(Tok::Op(Op::Semi));
+                    if self.peek() == Some(';') {
+                        self.pos += 1;
+                        out.push(Tok::Op(Op::DSemi));
+                    } else {
+                        out.push(Tok::Op(Op::Semi));
+                    }
                 }
                 '(' => {
                     self.pos += 1;
@@ -160,11 +195,23 @@ impl Lexer {
                 }
                 '<' => {
                     self.pos += 1;
-                    if self.peek() == Some('&') {
-                        self.pos += 1;
-                        out.push(Tok::Op(Op::LessAnd));
-                    } else {
-                        out.push(Tok::Op(Op::Less));
+                    match self.peek() {
+                        Some('&') => {
+                            self.pos += 1;
+                            out.push(Tok::Op(Op::LessAnd));
+                        }
+                        Some('<') => {
+                            self.pos += 1;
+                            if self.peek() == Some('<') {
+                                // `<<<` here-string: the target is an ordinary
+                                // word parsed on this line.
+                                self.pos += 1;
+                                out.push(Tok::Op(Op::TLess));
+                            } else {
+                                self.lex_heredoc_op(&mut out);
+                            }
+                        }
+                        _ => out.push(Tok::Op(Op::Less)),
                     }
                 }
                 '>' => {
@@ -450,6 +497,113 @@ impl Lexer {
         }
     }
 
+    /// Handle a `<<` / `<<-` here-document operator: read the delimiter word on
+    /// the current line, emit the operator token plus a placeholder body token,
+    /// and record the here-doc for body collection at the next newline.
+    fn lex_heredoc_op(&mut self, out: &mut Vec<Tok>) {
+        let strip = self.peek() == Some('-');
+        if strip {
+            self.pos += 1;
+        }
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.pos += 1;
+        }
+        let (delim, expand) = self.read_heredoc_delim();
+        out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
+        let tok_index = out.len();
+        out.push(Tok::HereDoc(Vec::new()));
+        self.pending_heredocs.push(PendingHeredoc {
+            delim,
+            strip,
+            expand,
+            tok_index,
+        });
+    }
+
+    /// Read a here-document delimiter word. Any quoting (`'EOF'`, `"EOF"`,
+    /// `\EOF`) disables expansion of the body and is stripped from the delimiter.
+    fn read_heredoc_delim(&mut self) -> (String, bool) {
+        let mut delim = String::new();
+        let mut expand = true;
+        while let Some(c) = self.peek() {
+            match c {
+                ' ' | '\t' | '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
+                '\'' => {
+                    expand = false;
+                    self.pos += 1;
+                    while let Some(q) = self.bump() {
+                        if q == '\'' {
+                            break;
+                        }
+                        delim.push(q);
+                    }
+                }
+                '"' => {
+                    expand = false;
+                    self.pos += 1;
+                    while let Some(q) = self.bump() {
+                        if q == '"' {
+                            break;
+                        }
+                        delim.push(q);
+                    }
+                }
+                '\\' => {
+                    expand = false;
+                    self.pos += 1;
+                    if let Some(n) = self.bump() {
+                        delim.push(n);
+                    }
+                }
+                other => {
+                    delim.push(other);
+                    self.pos += 1;
+                }
+            }
+        }
+        (delim, expand)
+    }
+
+    /// Collect the bodies of all pending here-documents from the lines following
+    /// the just-consumed newline, in order, filling in their placeholder tokens.
+    fn collect_heredocs(&mut self, out: &mut [Tok]) -> Result<(), LexError> {
+        let pending = core::mem::take(&mut self.pending_heredocs);
+        for ph in pending {
+            let mut body = String::new();
+            loop {
+                if self.pos >= self.chars.len() {
+                    break; // EOF before the delimiter: accept what we have.
+                }
+                let start = self.pos;
+                while !matches!(self.peek(), None | Some('\n')) {
+                    self.pos += 1;
+                }
+                let mut line: String = self.chars[start..self.pos].iter().collect();
+                if self.peek() == Some('\n') {
+                    self.pos += 1;
+                }
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                let content = if ph.strip {
+                    line.trim_start_matches('\t')
+                } else {
+                    line.as_str()
+                };
+                if content == ph.delim {
+                    break;
+                }
+                body.push_str(content);
+                body.push('\n');
+            }
+            let segs = scan_heredoc_segs(&body, ph.expand)?;
+            if let Some(slot) = out.get_mut(ph.tok_index) {
+                *slot = Tok::HereDoc(segs);
+            }
+        }
+        Ok(())
+    }
+
     fn read_backtick(&mut self) -> Result<String, LexError> {
         let mut raw = String::new();
         loop {
@@ -476,6 +630,58 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut String) {
     if !lit.is_empty() {
         segs.push(Seg::Lit(core::mem::take(lit)));
     }
+}
+
+/// Lower a here-document body into segments. When `expand` is false (quoted
+/// delimiter) the whole body is a single literal; otherwise it is scanned like a
+/// double-quoted context (parameter/command/arith expansion, `"` literal).
+fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
+    if !expand {
+        return Ok(vec![Seg::Lit(body.to_string())]);
+    }
+    let mut lx = Lexer {
+        chars: body.chars().collect(),
+        pos: 0,
+        pending_heredocs: Vec::new(),
+    };
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut lit = String::new();
+    while let Some(c) = lx.peek() {
+        match c {
+            '\\' => {
+                lx.pos += 1;
+                match lx.peek() {
+                    Some(n @ ('$' | '`' | '\\')) => {
+                        lx.pos += 1;
+                        lit.push(n);
+                    }
+                    Some('\n') => {
+                        lx.pos += 1;
+                    }
+                    _ => lit.push('\\'),
+                }
+            }
+            '`' => {
+                lx.pos += 1;
+                flush_lit(&mut segs, &mut lit);
+                segs.push(Seg::CmdSub(lx.read_backtick()?));
+            }
+            '$' => {
+                if let Some(seg) = lx.read_dollar()? {
+                    flush_lit(&mut segs, &mut lit);
+                    segs.push(seg);
+                } else {
+                    lit.push('$');
+                }
+            }
+            other => {
+                lit.push(other);
+                lx.pos += 1;
+            }
+        }
+    }
+    flush_lit(&mut segs, &mut lit);
+    Ok(segs)
 }
 
 #[cfg(test)]
@@ -547,5 +753,42 @@ mod tests {
     fn unterminated_quote_errors() {
         assert!(tokenize("echo 'oops").is_err());
         assert!(tokenize(r#"echo "oops"#).is_err());
+    }
+
+    #[test]
+    fn double_semicolon() {
+        let toks = tokenize("a ;; b").unwrap();
+        assert!(toks.iter().any(|t| matches!(t, Tok::Op(Op::DSemi))));
+    }
+
+    #[test]
+    fn here_doc_body() {
+        let toks = tokenize("cat <<EOF\nline one\nline two\nEOF\n").unwrap();
+        // Op::DLess followed by a HereDoc token carrying the body.
+        let hd = toks.iter().find_map(|t| match t {
+            Tok::HereDoc(segs) => Some(segs.clone()),
+            _ => None,
+        });
+        let segs = hd.expect("here-doc token");
+        assert_eq!(segs, vec![Seg::Lit("line one\nline two\n".to_string())]);
+    }
+
+    #[test]
+    fn here_doc_strip_tabs() {
+        let toks = tokenize("cat <<-END\n\t\tindented\n\tEND\n").unwrap();
+        let segs = toks
+            .iter()
+            .find_map(|t| match t {
+                Tok::HereDoc(segs) => Some(segs.clone()),
+                _ => None,
+            })
+            .expect("here-doc token");
+        assert_eq!(segs, vec![Seg::Lit("indented\n".to_string())]);
+    }
+
+    #[test]
+    fn here_string_op() {
+        let toks = tokenize("cmd <<< word").unwrap();
+        assert!(toks.iter().any(|t| matches!(t, Tok::Op(Op::TLess))));
     }
 }

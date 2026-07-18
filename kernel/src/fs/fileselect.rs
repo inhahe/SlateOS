@@ -153,7 +153,7 @@ static NEXT_SET_ID: AtomicU64 = AtomicU64::new(1);
 static SELECT_COUNT: AtomicU64 = AtomicU64::new(0);
 static DESELECT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec;
 
 /// All active selection sets.

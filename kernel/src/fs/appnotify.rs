@@ -42,7 +42,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 

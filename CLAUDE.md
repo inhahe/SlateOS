@@ -201,6 +201,34 @@ cargo bench -p <crate-name>
 
 If a test fails, fix it before moving on. Do not comment out failing tests.
 
+### `scripts/run-timeout.py` — hang-proof test/command runner
+
+**Use this to run any command that could hang, deadlock, or leave orphans**
+— above all `cargo test` (a deadlocked test never exits on its own) and
+QEMU boot tests. Do **not** wrap such runs in coreutils `timeout`: `timeout`
+only kills the direct child (`cargo`), so the spawned test binaries — and
+any grandchildren they spawn (e.g. `std::process::Command` externals) —
+survive as orphans that spin for hours and flood output.
+
+`run-timeout.py` fixes this by putting the child in a Windows **Job Object**
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (POSIX: a process group + SIGKILL).
+On timeout, on Ctrl-C, or if the runner itself dies, the **entire process
+tree** is torn down atomically — grandchildren included. It streams the
+child's output live (no buffering that hides progress) and prints a
+heartbeat every `--poll` seconds so a long build never looks like a hang.
+
+```bash
+# python scripts/run-timeout.py [--poll SECS] <timeout_secs> <command> [args...]
+python scripts/run-timeout.py --poll 20 300 cargo test --target x86_64-pc-windows-gnu
+python scripts/run-timeout.py 60 ./scripts/boot-test.sh
+```
+
+Exit codes: the child's own code on normal completion; `124` timed out (tree
+killed); `125` failed to launch; `130` interrupted. Prefer this over bare
+`timeout` for anything that spawns external processes, and always run
+potentially-hanging test suites through it in the background so a genuine
+deadlock is bounded and can never orphan.
+
 ---
 
 ## Performance — Benchmark Everything Critical

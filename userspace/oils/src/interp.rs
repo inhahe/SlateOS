@@ -3756,6 +3756,18 @@ mod tests {
     }
 
     #[test]
+    fn arith_ternary_and_comma() {
+        // Ternary in `$(( … ))` is a common idiom for conditional values.
+        assert_eq!(run("x=5; echo $(( x > 3 ? 100 : 200 ))").0, "100\n");
+        assert_eq!(run("x=1; echo $(( x > 3 ? 100 : 200 ))").0, "200\n");
+        // Comma evaluates all, yields the last.
+        assert_eq!(run("echo $(( 1 + 1, 2 * 5 ))").0, "10\n");
+        // As a `(( … ))` command, the exit status reflects the final value.
+        assert_eq!(run("(( 1 ? 1 : 0 ))").1, 0);
+        assert_eq!(run("(( 1 ? 0 : 1 ))").1, 1);
+    }
+
+    #[test]
     fn arith_associative_subscript() {
         // Inside `(( … ))`/`$(( … ))` an associative element is read by its
         // string key (not an arithmetic subscript), like bash.

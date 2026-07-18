@@ -196,6 +196,41 @@ Documented in the `interp.rs` module header. Tests cover the threaded
 streaming path (subshell isolation, in-process early-termination,
 classifier routing) but not the deferred per-stage-redirect gap.
 
+### TD-OILS5. `osh` arithmetic: assignment/increment operators not supported (`(( x = … ))`, `+=`, `++`, C-style `for (( ; ; ))`) — DEBT 2026-07-18
+
+**Where:** `userspace/oils/src/arith.rs` (`VarLookup` trait, `eval`,
+`AParser::parse_expr`/`parse_unary`/`parse_atom`),
+`userspace/oils/src/interp.rs` (`impl VarLookup for Shell`,
+`expand_arith_params`, `exec_arith`), `userspace/oils/src/parser.rs`
+(`for` loop parsing — for a future C-style `for (( … ))`).
+
+**What:** The arithmetic evaluator (`$(( … ))` and `(( … ))`) now supports
+the full operator set *except mutation*: `+ - * / %`, all comparisons,
+`&& || !`, bitwise `& | ^ ~ << >>`, the ternary `?:`, the comma operator,
+parentheses, unary `+`/`-`, and array subscripts (indexed arithmetic +
+associative string key). **Missing:** the assignment family
+(`x = e`, `x += e`, `-= *= /= %= <<= >>= &= |= ^=`) and pre/post
+increment/decrement (`++x`, `x++`, `--x`, `x--`). These *mutate* shell
+variables, so the pure `eval(expr, &dyn VarLookup) -> i64` design can't
+express them: `VarLookup` is read-only (`get`/`get_index`/`get_assoc`).
+
+**Proper fix:** (1) change `VarLookup` to expose a mutation hook — either
+`fn set(&mut self, name: &str, value: i64)` / `set_index` / `set_assoc`,
+which forces `eval` to take `&mut dyn VarLookup` (ripples to every call
+site: `exec_arith`, `eval_arith_word`, and the recursive subscript
+`eval(&raw, self.vars)` in `parse_atom`) — or refactor `arith` to build a
+small AST and evaluate it against a mutable environment. (2) Add lexer/
+parser tokens for the assignment operators and `++`/`--` at the correct
+precedence (assignment is right-associative and looser than `?:` but
+tighter than `,`). (3) Make the ternary branch-lazy once side effects
+exist (currently both branches are evaluated — noted in `parse_ternary`).
+(4) With arithmetic assignment in place, add the **C-style `for (( init;
+cond; update ))` loop** to the parser + interpreter (`for (( i=0; i<n;
+i++ )); do …; done`) — a very common bash idiom that depends on all of the
+above. **No test depends on the missing behavior.** Until then, users can
+use `x=$(( x + 1 ))` (command-level assignment) and the `while (( … ))`
+loop form instead of C-style `for`.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

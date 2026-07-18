@@ -1,9 +1,12 @@
 //! Integer arithmetic evaluator for `$(( … ))` and (later) `(( … ))`.
 //!
 //! Supports the common C-like operators bash arithmetic exposes: `+ - * / %`,
-//! comparisons, `&& || !`, bitwise `& | ^ ~ << >>`, parentheses, unary `+`/`-`,
-//! and bare variable names (which resolve to their integer value, defaulting to
-//! `0`). Numbers are 64-bit signed.
+//! comparisons, `&& || !`, bitwise `& | ^ ~ << >>`, the ternary conditional
+//! `?:`, the comma operator, parentheses, unary `+`/`-`, and bare variable
+//! names (which resolve to their integer value, defaulting to `0`). Array
+//! elements (`a[i]` arithmetic index, `m[key]` associative string key) resolve
+//! via [`VarLookup`]. Numbers are 64-bit signed. Assignment/increment
+//! (`= += ++ …`) are not yet supported — see known-issues TD-OILS5.
 
 /// Resolves a bare variable name to its integer value during evaluation.
 pub trait VarLookup {
@@ -60,7 +63,7 @@ pub fn eval(expr: &str, vars: &dyn VarLookup) -> Result<i64, ArithError> {
         vars,
     };
     p.skip_ws();
-    let v = p.parse_expr(0)?;
+    let v = p.parse_comma()?;
     p.skip_ws();
     if p.pos != p.chars.len() {
         return Err(ArithError(format!(
@@ -121,6 +124,46 @@ impl AParser<'_> {
         None
     }
 
+    /// Comma operator (`e1, e2, …`) — the loosest-binding arithmetic operator.
+    /// Every operand is evaluated left-to-right; the value is the last one.
+    fn parse_comma(&mut self) -> Result<i64, ArithError> {
+        let mut v = self.parse_ternary()?;
+        loop {
+            self.skip_ws();
+            if self.peek() == Some(',') {
+                self.pos += 1;
+                v = self.parse_ternary()?;
+            } else {
+                break;
+            }
+        }
+        Ok(v)
+    }
+
+    /// Ternary conditional `cond ? then : else` — binds looser than every
+    /// binary operator and is right-associative (`a ? b : c ? d : e` parses as
+    /// `a ? b : (c ? d : e)`).
+    fn parse_ternary(&mut self) -> Result<i64, ArithError> {
+        let cond = self.parse_expr(0)?;
+        self.skip_ws();
+        if self.peek() != Some('?') {
+            return Ok(cond);
+        }
+        self.pos += 1; // consume '?'
+        // NOTE: both branches are evaluated because parsing and evaluation are
+        // fused in this design. That is harmless while arithmetic has no side
+        // effects; when assignment/increment land (see known-issues TD-OILS5),
+        // this must become branch-lazy (evaluate only the taken side).
+        let then_v = self.parse_ternary()?;
+        self.skip_ws();
+        if self.peek() != Some(':') {
+            return Err(ArithError("expected ':' in ternary expression".into()));
+        }
+        self.pos += 1; // consume ':'
+        let else_v = self.parse_ternary()?;
+        Ok(if cond != 0 { then_v } else { else_v })
+    }
+
     fn parse_expr(&mut self, min_bp: u8) -> Result<i64, ArithError> {
         let mut lhs = self.parse_unary()?;
         loop {
@@ -166,7 +209,9 @@ impl AParser<'_> {
         match self.peek() {
             Some('(') => {
                 self.pos += 1;
-                let v = self.parse_expr(0)?;
+                // A parenthesised group is a full expression: ternary and comma
+                // are allowed inside (`(a ? b : c)`, `(a, b)`).
+                let v = self.parse_comma()?;
                 self.skip_ws();
                 if self.peek() != Some(')') {
                     return Err(ArithError("expected ')'".into()));
@@ -404,5 +449,38 @@ mod tests {
     #[test]
     fn div_zero() {
         assert!(eval("1 / 0", &Map(HashMap::new())).is_err());
+    }
+
+    #[test]
+    fn ternary() {
+        assert_eq!(ev("1 ? 10 : 20"), 10);
+        assert_eq!(ev("0 ? 10 : 20"), 20);
+        // Condition is a full comparison expression.
+        assert_eq!(ev("3 > 2 ? 100 : 200"), 100);
+        // Right-associative: a ? b : c ? d : e == a ? b : (c ? d : e).
+        assert_eq!(ev("0 ? 1 : 0 ? 2 : 3"), 3);
+        assert_eq!(ev("0 ? 1 : 1 ? 2 : 3"), 2);
+        // Nested in a larger expression / parentheses.
+        assert_eq!(ev("(1 ? 2 : 3) + 4"), 6);
+        // Missing ':' is a syntax error.
+        assert!(eval("1 ? 2", &Map(HashMap::new())).is_err());
+    }
+
+    #[test]
+    fn comma() {
+        assert_eq!(ev("1, 2, 3"), 3);
+        assert_eq!(ev("(1 + 1, 2 * 3)"), 6);
+        // Comma binds looser than ternary.
+        assert_eq!(ev("1 ? 5 : 9, 7"), 7);
+    }
+
+    #[test]
+    fn variables_in_ternary() {
+        let mut m = HashMap::new();
+        m.insert("x".to_string(), 5);
+        m.insert("y".to_string(), 0);
+        let vars = Map(m);
+        assert_eq!(eval("x ? x * 2 : -1", &vars).unwrap(), 10);
+        assert_eq!(eval("y ? 99 : x + 1", &vars).unwrap(), 6);
     }
 }

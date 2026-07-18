@@ -1491,7 +1491,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Clean/prune old entries by age
 
 ### 2.7 Shell and basic userspace tools
-- [ ] Port bash (POSIX compatibility)
+- [ ] Port **Oils (OSH)** — a bash-*superset* shell — for POSIX compatibility (replaces bash; this is the "A" initiative in the large-initiative ordering above, NOT bash itself). See roadmap-detailed.md §2.7.
 - [x] Port or adopt Nushell as default shell (Rust, structured data piping) — full nu binary builds AND RUNS on nightly-x86_64-pc-windows-msvc (verified 2026-06-03: `cargo build --target x86_64-pc-windows-msvc --bin nu` produces a 100 MiB nu.exe that successfully executes `nu -c "1 + 2"` → `3`, `nu --version` → `0.112.3`, and `nu -c "ls | first 3 | get name"` returns a structured table.  The default feature set (including os, network, mimalloc) builds cleanly — not just os-minimal.  See todo.txt "Roadmap §2.7" entry for the gnu→msvc finding and the two upstream-grade fixes committed inside the nushell tree: (1) scripts/build.rs skip-on-missing rc.exe and (2) nu-cmd-extra/build.rs from_reader→from_str portability fix)
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
@@ -5434,6 +5434,18 @@ Phase 1.1 (boot) ──→ 1.2 (memory) ──→ 1.3 (scheduler) ──→ 1.4 
 
 ## Notes
 
+- **Large-initiative ordering (operator-fixed 2026-07-18 — do NOT re-ask).** Now
+  that the self-hosting C toolchain + POSIX layer are comprehensive, the remaining
+  giant initiatives are executed in this fixed order (Q25 → design-decisions.md §69):
+  1. **Oils (OSH) + coreutils** — the interactive-shell userland. Oils is a
+     bash-*superset* shell (roadmap-detailed.md §2.7), **not** bash itself.
+  2. **fastpy build-system integration** — unlocks the Python-via-fastpy userspace lane.
+  3. **Mesa / GPU userspace (3D)** — gated by Q18 until a virgl test environment exists.
+  4. **Chromium** — browser + system-web-app / Electron framework.
+  5. **WINE** — Windows app compatibility.
+  6. **Additional filesystems** — Btrfs / F2FS / NTFS.
+  Pick the next one whenever the current initiative lands; the operator has already
+  set the order, so there's no need to ask which comes next.
 - **Don't write custom filesystems early.** Port ext4. Data loss bugs are unforgivable.
 - **Don't write a custom browser.** Port Chromium. It's huge but unlocks three things at once.
 - **GPU drivers are the hardest part.** Start with AMD (open source). Intel second. NVIDIA last (via Linux compat layer).

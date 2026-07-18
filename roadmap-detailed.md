@@ -341,6 +341,48 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
 
+#### Guaranteed Resource Headroom for Interactive / Critical Processes
+_Goal: regular desktop use (compositor, window manager, input handling, shell,
+foreground app) never hangs, stalls, or feels sluggish because a runaway or
+greedy workload (a compile, a backup, an indexer, a misbehaving app) has soaked
+up all of a resource. Reserve a configurable slice of each contended resource
+that background/best-effort work can never fully consume, so critical work always
+has capacity available. This is a QoS/reservation model, distinct from mere
+priority: high priority still competes for the resource, whereas a reservation
+carves out capacity that lower classes cannot touch._
+- [ ] **CPU-bandwidth reservation.** Keep a configurable fraction of CPU time
+  (per-CPU and/or system-wide) always available to a designated *critical* class
+  (compositor, WM, input, audio, the focused foreground app). Implement as a
+  cap/floor on the aggregate CPU share that background/best-effort cgroups can
+  consume (e.g. throttle non-critical classes so they never exceed `100% −
+  reserved%`), integrated with the existing cgroup CPU controller and workload
+  profiles. Reservation is enforced even under full load, so the desktop stays
+  responsive while a heavy build runs. Tunable per workload profile (Desktop
+  reserves more for interactivity; Server/Database may reserve little).
+- [ ] **RAM headroom reservation.** Keep a configurable amount of physical RAM
+  free/reclaimable for critical processes so allocations and page faults on the
+  desktop path don't stall waiting on reclaim/swap. Enforce a *minimum free* /
+  *reserved* pool that best-effort workloads' allocations must respect (they get
+  throttled or pushed to reclaim/swap before critical work is starved), building
+  on the existing `mm.min_free_pages` / reclaim / swappiness machinery and cgroup
+  memory limits. Prevents the "everything freezes while the system thrashes swap"
+  failure mode. (Committed-memory-by-default already prevents silent overcommit;
+  this adds an interactivity floor on top.)
+- [ ] **I/O-bandwidth reservation (disk / I/O bus).** Keep a configurable share of
+  disk / I/O-bus bandwidth (and queue depth) reserved for critical/foreground I/O
+  so a bulk background job (backup, indexer, dedup, `cp` of a huge file) can't
+  saturate the device and make the desktop's small reads/writes lag. Implement as
+  a floor for the critical I/O class in the existing BFQ-style I/O scheduler
+  (background/idle classes throttled to `total − reserved` when critical I/O is
+  pending), coordinated with `resource.io_priority` and the idle-priority class.
+- [ ] Reservation amounts are tunable (per workload profile + admin-capability
+  override) and documented; a sane Desktop-profile default ships out of the box.
+  _Note: verify each reservation is physically meaningful for the resource — CPU
+  and I/O bandwidth reservation are well-defined; RAM "reservation" is a
+  free-pool/min-watermark floor rather than a rate. Where a reservation doesn't
+  make sense for a given resource, prefer the min-free-floor formulation over a
+  rate cap._
+
 ### 1.4 IPC and Syscalls
 
 #### Syscall Dispatch
@@ -989,6 +1031,8 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
     - [ ] App entries persist for the full windowing session even after the app stops outputting, so the user can pre-mute an app that's about to play (e.g., mute the browser tab before the video starts). Entries are dropped when the app exits.
   - [ ] **"Audio settings…" button** at the bottom of the popup that opens the full audio settings dialog (§3.7 → Audio Settings dialog). Single dialog covers both output and input — no separate "output settings" and "input settings" entry points; one place to go.
 - [ ] Sound history: view which programs recently played sounds, button to go to that app's sound capabilities
+  - [ ] **Attribute to the *real* originating app, not the service that relayed it.** When audio is played through an OS service or intermediary process (a shared audio daemon, a notification service, a media-key handler, a "play sound" helper, etc.), the history must show the actual application that requested the sound — not the service program. This requires the audio path to carry the originating app's identity (process metadata / a submitted "on-behalf-of" attribution token) through the service so the mixer/history can resolve it. Fall back to the relaying service only when no originating identity is available.
+  - [ ] **Sub-app / tab granularity where the app supplies it.** For multiplexed apps that host many independent sound sources — most importantly **Chromium**, which can play audio from many tabs — the history should identify *which tab* (or sub-context) played the sound, not just "Chromium". Surface this via app-supplied metadata embedded in / attached to the audio stream (e.g. a per-stream name such as the tab title/URL, or a sub-stream identifier the app registers). Same mechanism generalizes to any app that names its individual output streams (media players with multiple sources, multi-document apps, etc.).
 
 #### Desktop
 - [ ] Desktop icons: snap-to-grid or free placement (user option)
@@ -1052,6 +1096,16 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 
 ##### Tier 1 — Window Decorations
 - [ ] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment
+- [ ] **Title-text overflow styling (CSS-like `text-overflow`).** When the window
+  title is too long to fit the available title-bar width, the theme/style controls
+  how it is truncated. Support at least: (a) **clip** (hard cut), (b) **ellipsis at
+  the end** (`"Long docume…"`), and (c) a **"keep the tail" / ellipsis-at-start**
+  mode that shows a leading ellipsis followed by the *rightmost* N characters that
+  fit (`"…ort/final.txt"`) — useful for paths and filenames where the end is the
+  distinguishing part. Truncation is measured in fitted glyphs, not a fixed char
+  count, so it adapts to the actual pixel width. Same property vocabulary is shared
+  with taskbar tab labels (Tier 2 — Taskbar/Panel Styling) so both truncate
+  consistently.
 - [ ] Window border: radius, width, color
 - [ ] Window shadow: offset, blur, color, spread
 - [ ] Aero-style blurry transparency (taskbar and/or window title bars)
@@ -1081,6 +1135,14 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Transparency/blur level
 - [ ] Icon spacing
 - [ ] Visual treatment (color, border, shadow) — not position or size (those are layout settings, not theme)
+- [ ] **Taskbar tab-label overflow styling (CSS-like `text-overflow`).** When a
+  taskbar entry shows an app/window name (optional label mode, §Taskbar) and the
+  label is wider than the tab, the theme controls truncation using the *same*
+  property set as window titles: **clip**, **end-ellipsis**, or **start-ellipsis /
+  keep-the-tail** (leading `…` + the rightmost N glyphs that fit). Truncation is
+  fitted to actual pixel width, not a fixed char count, and updates live as tabs
+  grow/shrink (more windows open, taskbar resized). Shared vocabulary with Tier 1
+  window-title overflow so tabs and titles behave identically.
 
 ##### Tier 3 — Sound Scheme (nice-to-have, add later)
 - [ ] System sounds: notification, error, login, logout, empty recycle bin, etc.
@@ -1164,6 +1226,18 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [ ] Tabs view
 - [ ] Grid view
 - [ ] Color picker (like qtpyrc's)
+- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes).
+  - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
+    the user tentatively/temporarily changes any font attribute* (hovers or
+    highlights a family, changes the size, toggles bold/italic, etc.) — before the
+    dialog is committed with OK. This lets the host app show a **live preview** of
+    the setting as the user browses (e.g. re-render the document/target text in the
+    tentatively-selected font in real time), then either keep the final choice on
+    accept or revert to the original on cancel. Distinct signals for *tentative
+    change* (may fire many times, freely revertible) vs. *committed* (OK) vs.
+    *cancelled* (revert), so apps can preview without persisting. The same
+    tentative-vs-committed event pattern generalizes to the color picker and other
+    attribute-choosing dialogs where live preview is useful.
 - [ ] Scroll bars (auto-hide when nothing to scroll)
 - [ ] Tooltips
 - [ ] Modal and non-modal dialogs
@@ -1649,6 +1723,20 @@ _The theme editor makes it easy for non-technical users to create themes, which 
 - [ ] Port Chromium (~35M lines C++)
   - [ ] **Name renderer/helper processes so Process Explorer can map each to its tab.** Chromium spawns a process per site/tab (renderer), plus GPU/utility/network-service helpers. When the user opens Process Explorer (§4.3) and sees a fleet of Chromium processes, each must carry a human-meaningful name that identifies *which tab* (or which helper role) it is — e.g. "Chromium — GitHub · Pull Request #123 (renderer)", "Chromium — GPU process", "Chromium — Network service" — not an opaque `chromium-bin ... --type=renderer` command line. Wire Chromium's per-process title/description (it already tracks the primary document title and process type internally) into whatever OS mechanism sets a process's Process-Explorer display name, updating the renderer's name when the tab navigates or the title changes. This makes "which Chromium process is eating my CPU/RAM" answerable at a glance and lets the user kill a single runaway tab's process without guessing. Ties into §4.3 launch-provenance (the raw `--type=` command line is still shown as provenance; the friendly per-tab name is the primary label).
 - [ ] System web app framework (shared Chromium, not per-app Electron)
+  - [ ] **Electron-compatible app runtime backed by the shared system Chromium.**
+    Ship an Electron-like runtime (Chromium renderer + a Node-compatible main
+    process + the Electron-shaped app/BrowserWindow/IPC APIs) that is served by the
+    *one* system Chromium install rather than each app bundling its own ~100–200 MB
+    copy of Chromium+Node. The goal: existing Electron apps (VS Code, Slack,
+    Discord, Obsidian, etc.) run **without shipping the entire browser** — they
+    provide only their HTML/JS/CSS + main-process code and link against the shared
+    runtime. Provide enough of Electron's main/renderer API surface (or a
+    compatibility shim over it) that mainstream Electron apps run unmodified or with
+    minimal patches; version the shared runtime so apps can target a known API
+    level. Each such app still gets its own sandboxed renderer/main processes (named
+    per §4.7 so Process Explorer maps them), but the heavy Chromium/Node binaries
+    are deduplicated system-wide (content-addressed store, §pkg). This is the OS's
+    answer to "every Electron app ships a browser": one browser, many web apps.
 - [ ] Port VS Code (via Chromium + Node.js) — full IDE, not just an editor
   - [ ] Build from the **open-source `Code - OSS` tree (MIT)**, not Microsoft's branded binary. Microsoft's MIT license permits doing essentially anything with the open-source source **except** connecting it to the **Microsoft Visual Studio Marketplace** (that endpoint is reserved for the official MS build). So the port must ship pointed at an open extension registry (e.g. **Open VSX**) or a self-hosted registry instead of the MS marketplace — same constraint VSCodium operates under.
   - [ ] Integrate with our native toolchains so build/debug/run work out of the box: the **ported C/C++ compiler** (gcc/clang via POSIX layer), the **Rust compiler** (native target), and the **fastpy Python compiler** (AOT). Ship/auto-detect language extensions and task/launch templates wired to these toolchains, plus debugger integration against the OS crash-dump/postmortem debugger and the `debug.*` capabilities.
@@ -1751,6 +1839,48 @@ Every program using `libautomation` automatically exposes these events without a
 | `lifecycle.closing` | Program is about to close (can be subscribed to for cleanup) | `{pid, reason, timestamp}` |
 | `lifecycle.idle` | No user input for configurable duration | `{idle_seconds, timestamp}` |
 | `lifecycle.active` | User input resumes after idle | `{timestamp}` |
+
+#### Automatic Widget-Level Exposure (every interactive widget gets this for free)
+
+Beyond the app-author-declared events/actions above, **every interactive widget
+built with the GUI toolkit (§3.5) automatically exposes itself to the automation
+API** — no per-app code required. The toolkit maintains a live, walkable tree of
+the app's widgets (an accessibility/UI-automation tree, à la Windows UIAutomation
+/ AT-SPI / macOS AX), and any program holding the right capability can **identify**
+and **interact with** individual controls. This is what makes generic UI
+automation, macro recording/replay, and assistive tech work against apps whose
+authors never wrote a single automation handler.
+
+- [ ] **Automatic exposure by the toolkit.** Buttons, checkboxes, radios, toggles,
+  text fields, combo boxes, list/tree/grid rows and cells, menu items, tabs,
+  sliders, scrollbars, ribbon commands, etc. are each surfaced as an automation
+  node the moment they're created — the app opts *out*, not in. Custom-drawn or
+  canvas widgets can supply their own nodes via a toolkit hook so they aren't
+  invisible to automation.
+- [ ] **Identify (query/enumerate).** Walk the widget tree; query each node's
+  role/type, label/accessible name, value/state (checked, text, selection,
+  enabled/visible/focused), bounds, and a stable within-app identifier. Find
+  widgets by role, name, text, or path so a script can locate "the *Save* button"
+  or "the search field" without pixel coordinates. Exposed as standard automation
+  meta-commands/actions (e.g. `ui.tree`, `ui.find`, `ui.get`, read-only
+  `ui.*` properties) alongside `describe`.
+- [ ] **Interact (invoke).** Perform the widget's semantic action through the
+  toolkit — click/press a button, toggle a checkbox, set a slider/field value,
+  select a list item or menu entry, focus/scroll a control — routed through the
+  real widget so it behaves exactly as a user action (validation, events,
+  enabled-state all honored). No synthetic pixel clicks needed. Actions respect
+  the widget's own enabled/visibility state (a disabled control refuses invoke).
+- [ ] **Capability-gated, same model as the rest of the framework.** Enumerating a
+  program's widget tree needs `automation.connect` + a new
+  `automation.ui_inspect` right; interacting needs `automation.invoke` +
+  `automation.ui_control`. Sensitive/destructive widgets (a "Delete" button, a
+  password field) can demand an elevated right, and password/secure-entry fields
+  are never readable via automation regardless of capability. Assistive tools
+  (screen readers, switch access, voice control) consume the *same* tree, so
+  automation and accessibility share one implementation.
+- [ ] `automate` CLI and the `on`/`invoke` shell builtins gain widget-tree
+  subcommands (e.g. `automate ui <program> tree|find|invoke`) so widget
+  automation is scriptable exactly like declared actions.
 
 #### Shell Integration
 

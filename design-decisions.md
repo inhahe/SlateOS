@@ -4574,3 +4574,190 @@ copy exactly the datagram bytes, matching `recvfrom` semantics.
 gap); roadmap netstack Phase 5. This commit lands the ring ABI + helpers +
 unit tests; the daemon UDP socket table, kernel `UdpConn` client, and the
 `sys_socket(SOCK_DGRAM)`/`sendto`/`recvfrom` fd wiring build on it in follow-ups.
+
+---
+
+## 69. Next large initiatives (Q25) — order the remaining giant ports: **A(Oils+coreutils) → F(fastpy) → B(Mesa/GPU) → C(Chromium) → D(WINE) → E(filesystems)**
+
+**Date:** 2026-07-18
+
+**Decided by:** Operator (Claude recommended "A first, then F"; the operator
+adopted that and fixed the full ordering of the remaining initiatives).
+
+**Context.** With the self-hosting C toolchain (tcc on-target, glibc + `ld.so`
+dynamic linking, ring-3 execution, the Path-Z self-test suite) and the POSIX
+layer both comprehensive, the roadmap's entire remaining unchecked frontier is
+"giant external ports." Picking the order among them has historically been the
+operator's call (open-questions Q25).
+
+**Decision.**
+- **Do the interactive-shell userland first.** The item labeled "bash" in Q25
+  option A is **not bash** — the shell we port is **Oils (OSH)**, the
+  bash-compatible *superset* already on the roadmap ("Port Oils (bash-compatible,
+  replaces bash for POSIX compatibility)", `roadmap-detailed.md` §2.7 Shells,
+  ~line 861). OSH runs existing bash scripts (superset) and is the POSIX/bash
+  compatibility shell; Nushell remains the default *interactive* shell. So Q25-A
+  = **Oils + coreutils**, not a bash port.
+- **Fixed order for the remaining giant initiatives** (so this need not be
+  re-asked later):
+  1. **A — Oils (OSH) + coreutils** (interactive shell userland).
+  2. **F — fastpy build-system integration** (unblocks writing OS userspace
+     tools in Python-via-fastpy: package manager, settings UI, file indexer,
+     installer, etc.).
+  3. **B — Mesa / GPU userspace** (3D; still gated by Q18 on a virgl test
+     environment — see that item).
+  4. **C — Chromium** (browser + "system web app"/Electron framework).
+  5. **D — WINE** (Windows app compatibility).
+  6. **E — Additional filesystems** (Btrfs / F2FS / NTFS).
+
+**Rationale.** A is the smallest, highest-leverage next step and builds directly
+on the just-proven tcc/glibc/`ld.so`/ring-3 path; a working shell + coreutils is
+the natural foundation for everything else and is continuously shippable one tool
+at a time. F then unlocks the Python userspace lane (a force-multiplier for the
+many small system tools `CLAUDE.md` says to write in fastpy). B/C/D/E are larger
+and either gated (B on Q18/virgl) or dependent on more maturity (C/D on
+graphics+audio); E is self-contained and lowest immediate payoff, so it sorts
+last.
+
+**Alternatives considered.** Leading with B/C/D/E instead of A/F — rejected:
+they are larger, some are gated, and none give the incremental
+shell-plus-coreutils foundation that unblocks the most subsequent work. Doing F
+before A — rejected: fastpy integration is valuable but the shell/coreutils
+userland is the more universal unblocker and the smaller gap from what's proven.
+
+**Where it lives.** `roadmap.md` (line ~1494 bash/Oils; line ~24 fastpy; lines
+~5117–5119 filesystems; line ~5032 Chromium; line ~5114 WINE);
+`roadmap-detailed.md` §2.7. The practical gates for A are the fork/exec WATCH
+bugs in `known-issues.md` (B-FORKEXEC-BOOT-HANG, B-PTHREAD-TEARDOWN-PF).
+
+**How to reverse.** Re-open Q25 and re-sequence; the ordering is guidance for
+task-selection, not a code commitment, so reversing costs nothing but a new
+decision.
+
+---
+
+## 70. Raw `spin::Mutex` holder-preemption (Q24) — **proactive kernel-wide audit/conversion (option B)**, not reactive-only
+
+**Date:** 2026-07-18
+
+**Decided by:** Operator (Claude recommended **A**, reactive, with **C** as an
+escalation; the operator **overruled** and chose **B** — "Let's not have
+technical debt and do it the right way").
+
+**Context.** The kernel had (at decision time) four confirmed single-CPU
+deadlocks on raw `spin::Mutex` locks across two sub-variants — *holder-preemption*
+(heap, `container::TABLE`) and *interrupt-reentrancy* (`sysctl::REGISTRY`,
+completion-timer→`SCHED`). A raw `spin::Mutex` neither disables preemption on
+acquire (so a holder can be preempted mid-section and a second task spins forever
+on one CPU) nor is IRQ-safe by construction. The preempt-aware
+`crate::sync::Mutex` prevents the holder-preemption class, but ~476 kernel files
+import raw `spin::` locks. Claude had been fixing each caught instance reactively.
+
+**Decision.** Do the **proactive audit/conversion (option B)** rather than
+continuing reactive-only. Eliminate the whole deadlock class deliberately instead
+of waiting for the soak to surface each latent instance. This is explicitly a
+"no technical debt, do it right" call by the operator.
+
+**Rationale (operator).** Two deadlock sub-variants and four instances already
+found means the latent-instance tail is real; leaving it to chance (reactive-A)
+is accepting known technical debt. A deliberate audit removes the class and can
+add lockdep/owner-tracking where it pays.
+
+**Execution guidance (to keep B safe — it "can't be a blind sed").**
+- **Not a mechanical `use spin::Mutex` → `crate::sync::Mutex` sweep.** Some locks
+  are deliberately raw and must stay raw + manual preempt discipline (e.g. the
+  global heap lock — lockdep can't allocate under it). Triage each lock.
+- Prefer a **preempt-aware, non-lockdep spinlock** (the `PreemptSpinMutex` idea
+  from option C: `preempt_disable/enable` around the raw spin, no registry) for
+  hot **leaf** locks where lockdep would be pure overhead; reserve
+  `crate::sync::Mutex` (full lockdep + owner tracking) for **contended, non-leaf**
+  locks where ordering bugs are plausible and the registration cost is
+  affordable.
+- Keep IRQ-context acquirers on `try_lock`/`without_interrupts` (the
+  interrupt-reentrancy surface — timer hard-IRQ, softirq→`SCHED`, `#PF` — was
+  already audited clean; don't regress it).
+- Do it **incrementally and validated** — convert in reviewable batches, keep
+  `scripts/wedge-soak.sh` green between batches, and expect a flood of
+  newly-surfaced lock-ordering reports from lockdep to triage as locks are
+  registered.
+
+**Alternatives considered.** **A (reactive)** — rejected by the operator as
+leaving known latent debt. **C (middle path, convert only contended non-leaf
+locks)** — folded into B as the *execution technique* (add `PreemptSpinMutex`,
+choose per-lock) rather than the whole scope.
+
+**Where it lives.** `kernel/src/sync.rs` (`Mutex`; add `PreemptSpinMutex`); every
+`use spin::Mutex` site (~476 files); already-fixed anchors `kernel/src/mm/heap.rs`,
+`kernel/src/container.rs`, `sysctl` (B-SYSCTL-IRQ-DEADLOCK),
+completion-timer→SCHED (B-COMPLETION-TIMER-IRQ-DEADLOCK). Detector:
+`scripts/wedge-soak.sh`. Track the audit as a roadmap task.
+
+**How to reverse.** Stop the sweep and fall back to reactive-A; already-converted
+locks stay converted (no harm). Reversing is cheap since each conversion is
+independently sound.
+
+---
+
+## 71. Daemon-backed AF_INET **server** sockets (Q23) — **shared refcounted session (option A)**, and a standing "don't gold-plate interim netstack work" guideline
+
+**Date:** 2026-07-18
+
+**Decided by:** Operator (Claude recommended **A**; operator chose **A** and
+added a guideline about interim/stop-gap work — see below).
+
+**Context.** In the userspace netstack daemon, a session == one SHM ring; `OP_ACCEPT`
+installs the newly-established connection into the *listener's own* session on the
+*same* ring, so a listening socket and all its accepted connections physically
+share one ring. Linux instead gives every accepted fd a fully independent socket.
+This fork gates the final AF_INET/AF_INET6 server socket-fd wiring
+(`sys_bind`/`sys_listen`/`sys_accept4`), which in turn is the last gate on
+flipping `net.userspace` on by default.
+
+**Decision.** **Option A — shared, refcounted session, no daemon-ABI change.**
+The listening `SocketInner` owns the session; each accepted socket is a new fd
+holding an `Arc` on the same session with its own conn_id. Per-connection `close`
+sends `OP_CLOSE` for that conn_id; the session's `OP_STOP` fires only when the
+last reference (listener or any accepted socket) drops — giving Linux-correct
+*lifetime* semantics (closing the listener no longer kills already-accepted
+connections). The known limitation — all connections under one listener funnel
+through one ring/lock, so a *blocking* op on one accepted conn can stall others
+until its deadline — is accepted as temporary (a non-issue for the
+`accept`+`poll`+non-blocking-I/O server pattern).
+
+**Rationale.** The whole per-op synchronous socket path is explicitly a stepping
+stone to the async, always-on socket server, which will replace the ring-per-op
+model wholesale. Paying for option B's daemon-ABI complexity (accept-into-a-fresh-
+ring, migrating `TcpConn` between sessions) now, only to rework it at the async
+cutover, is poor value. A fixes the correctness-critical *lifetime* semantics with
+zero protocol change.
+
+**Operator guideline recorded with this decision (applies beyond Q23).** The
+operator questioned doing *any* stop-gap netstack work that the async migration
+will replace, and picked A specifically because it is the **minimal** interim
+step. Standing guidance going forward: **do not gold-plate interim/throwaway
+netstack infrastructure.** For the server-socket path, that means A only — do not
+invest in per-connection ring independence (option B) or other elaboration before
+the async socket server; if genuine per-connection concurrency is ever needed
+before that cutover, revisit. (Note: the *client* socket path already built —
+connect/recv/send/poll, IPv6 — is interim-but-*used* real functionality, not
+throwaway; the async migration replaces the ring-per-op transport mechanism, not
+the syscall-level behavior. The part most at risk of rework, and therefore kept
+minimal, is exactly this server-socket layer.)
+
+**Alternatives considered.** **B (accept-into-a-fresh-ring, daemon-ABI change)** —
+true per-connection independence/concurrency, but a costlier-to-reverse protocol
+commitment that the async cutover would largely redo; rejected as poor value for
+an interim layer. Deferring server sockets entirely until the async migration —
+considered (the operator floated it) but A is cheap enough and unblocks the
+`net.userspace` default-flip for server programs now.
+
+**Where it lives.** `kernel/src/net/socket.rs` (`SockState`, `SocketInner`,
+`SOCKET_TABLE`; a shared `Arc<Mutex<Session>>`), `kernel/src/net/netstack_client.rs`
+(a `Session` abstraction hosting multiple conn_ids), `kernel/src/syscall/linux.rs`
+(`sys_bind`/`sys_listen`/`sys_accept4` routing). Tracking: known-issues
+D-NETSOCK-SYNC; `net-userspace-migration.md`; the 5.7 default-flip.
+
+**How to reverse.** Switch to B by extending the accept ABI (SQE carries a ring
+handle; daemon `OP_RING_TCP`-attaches it and migrates connection state between
+session tables) — or skip straight to the async socket server, which supersedes
+the whole question.

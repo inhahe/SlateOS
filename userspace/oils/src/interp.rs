@@ -207,6 +207,13 @@ pub struct Shell {
     /// The value of `OPTIND` `getopts` last saw, so an external reset
     /// (`OPTIND=1`) is detected and the intra-argument cursor is cleared.
     getopts_optind: usize,
+    /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned).
+    seconds_anchor: std::time::Instant,
+    /// Base value added to elapsed seconds for `$SECONDS` (set by assignment).
+    seconds_base: u64,
+    /// State for the `$RANDOM` pseudo-random generator. `Cell` so a read
+    /// (`param_value(&self)`) can advance it; assigning `RANDOM=n` reseeds it.
+    rng: std::cell::Cell<u32>,
 }
 
 impl Default for Shell {
@@ -235,6 +242,10 @@ impl Shell {
             stderr_stack: Vec::new(),
             getopts_col: 0,
             getopts_optind: 1,
+            seconds_anchor: std::time::Instant::now(),
+            seconds_base: 0,
+            // Seed `$RANDOM` from the wall clock so successive runs differ.
+            rng: std::cell::Cell::new(initial_rng_seed()),
         }
     }
 
@@ -1140,6 +1151,9 @@ impl Shell {
             stderr_stack: Vec::new(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
+            seconds_anchor: self.seconds_anchor,
+            seconds_base: self.seconds_base,
+            rng: std::cell::Cell::new(self.rng.get()),
         }
     }
 
@@ -1152,6 +1166,22 @@ impl Shell {
         match &a.value {
             AssignRhs::Scalar(w) => {
                 let val = self.expand_to_string(w);
+                // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
+                // elapsed-seconds counter. Both are dynamic and not stored in
+                // `vars` (reads go through `param_value`'s special arms).
+                if a.index.is_none() && !a.append {
+                    if a.name == "RANDOM" {
+                        if let Ok(seed) = val.trim().parse::<u32>() {
+                            self.rng.set(seed);
+                        }
+                        return;
+                    }
+                    if a.name == "SECONDS" {
+                        self.seconds_base = val.trim().parse::<u64>().unwrap_or(0);
+                        self.seconds_anchor = std::time::Instant::now();
+                        return;
+                    }
+                }
                 if let Some(idx_word) = &a.index {
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
@@ -2236,6 +2266,16 @@ impl Shell {
         }
     }
 
+    /// Advance the `$RANDOM` generator and return a value in `0..=32767`
+    /// (matching bash's 15-bit range). Uses a classic LCG; `param_value` reads
+    /// through `&self`, so the state lives behind a `Cell`.
+    fn next_random(&self) -> u32 {
+        // Numerical Recipes LCG constants.
+        let next = self.rng.get().wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.rng.set(next);
+        (next >> 16) & 0x7fff
+    }
+
     /// Resolve a parameter's value; `None` means unset.
     fn param_value(&self, name: &str) -> Option<String> {
         match name {
@@ -2246,6 +2286,18 @@ impl Shell {
             "@" | "*" => Some(self.positional.join(" ")),
             "0" => Some(self.name.clone()),
             "-" => Some(String::new()),
+            "BASHPID" => Some(self.pid.to_string()),
+            "RANDOM" => Some(self.next_random().to_string()),
+            "SECONDS" => Some(
+                self.seconds_base
+                    .saturating_add(self.seconds_anchor.elapsed().as_secs())
+                    .to_string(),
+            ),
+            "EPOCHSECONDS" => Some(unix_time().0.to_string()),
+            "EPOCHREALTIME" => {
+                let (secs, micros) = unix_time();
+                Some(format!("{secs}.{micros:06}"))
+            }
             _ => {
                 if let Ok(n) = name.parse::<usize>() {
                     if n == 0 {
@@ -3661,6 +3713,21 @@ fn param_case(value: &str, pattern: &[char], upper: bool, all: bool) -> String {
     out
 }
 
+/// Current Unix time as `(seconds, microseconds)`. Falls back to `(0, 0)` if
+/// the system clock is before the epoch (should not happen).
+fn unix_time() -> (u64, u32) {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or((0, 0), |d| (d.as_secs(), d.subsec_micros()))
+}
+
+/// A nonzero seed for `$RANDOM`, derived from the wall clock.
+fn initial_rng_seed() -> u32 {
+    let (secs, micros) = unix_time();
+    let mixed = (secs as u32).wrapping_mul(1_000_003).wrapping_add(micros);
+    if mixed == 0 { 0x2545_F491 } else { mixed }
+}
+
 /// Quote `s` so it can be reused verbatim as shell input (the `${v@Q}`
 /// transform). Simple safe words are returned unquoted; values with control
 /// characters use ANSI-C `$'…'` quoting; everything else is single-quoted with
@@ -4357,6 +4424,20 @@ mod tests {
         assert_eq!(run("x=HeLLo; echo \"${x@L}\"").0, "hello\n");
         // A simple safe word needs no quoting under @Q.
         assert_eq!(run("x=word; echo \"${x@Q}\"").0, "word\n");
+    }
+
+    #[test]
+    fn special_var_random() {
+        // Deterministic when reseeded, and within bash's 15-bit range.
+        assert_eq!(run("RANDOM=1; a=$RANDOM; RANDOM=1; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo same").0, "same\n");
+        assert_eq!(run("RANDOM=7; r=$RANDOM; [ \"$r\" -ge 0 ] && [ \"$r\" -lt 32768 ] && echo ok").0, "ok\n");
+    }
+
+    #[test]
+    fn special_var_seconds_and_epoch() {
+        assert_eq!(run("echo $SECONDS").0, "0\n");
+        assert_eq!(run("SECONDS=100; echo $SECONDS").0, "100\n");
+        assert_eq!(run("[ $EPOCHSECONDS -gt 1000000000 ] && echo ok").0, "ok\n");
     }
 
     #[test]

@@ -1,0 +1,13 @@
+
+add to roadmap-detailed css styling for taskbar tabs and window titles so that a person can use the feature to, e.g., show the ellipses character followed by the rightmost N characters of the text that will fit into the space if it won't all fit. 
+
+add to roadmap-detailed to always allow a certain amount of CPU bandwidth to be free for certain critical processes so as not to make regular desktop use hang temporarily or be sluggish/lagged, if this actually makes any sense. and the same for a certain amount of free RAM and a certain amount of free i/o-bus/disk-i/o bandwidth, if those make any sense?
+
+add to roadmap-detailed to have the os's font picker dialog able to issue an event whenever the user temporarily selects a font, font size, or whatever. that way the app can, for example, show a live preview of the font setting as the user is selecting.
+
+add to roadmap-detailed.md make every interactive widget autimatically expose functions to identify and interact with them to programs with the right capability. and to make a version of Chromium that can function like Electron so that Electron-like apps don't have to ship the entire browser, if it's not already in the roadmap.
+
+add to the roadmap-detailed section about the sound-history showing app that it should show the actual app that played it even if it did it through a an OS service program, if it doesn't already say that. also, have it able to say which tab in Chromium played the sound. this could be through metadata embedded in processes such as a name.
+
+
+^^ all done

@@ -71,14 +71,19 @@
 //!   (`while read …; do …; done < file`, `for … done > out`, `{ …; } >> log`).
 //!   Input is fed through a shared cursor so successive `read`s in the body
 //!   consume successive lines; captured stdout is written to the target file.
-//!   A compound command's *stderr* is not yet redirectable (only stdout/stdin).
+//!   A compound command's *stderr* is also redirectable (`{ …; } 2> err`,
+//!   `for … done 2>&1`) via a `stderr_stack` consulted by every fd-2 write;
+//!   `2>&1` into a captured stdout folds stderr in after the body (not
+//!   byte-interleaved).
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
+use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
@@ -134,6 +139,31 @@ enum StdinSrc<'a> {
     Pipe(RefCell<io::BufReader<io::PipeReader>>),
 }
 
+/// Where a command's *stderr* (fd 2) is currently directed. Pushed onto
+/// [`Shell::stderr_stack`] while executing the body of a compound command that
+/// carries a stderr redirect (`{ …; } 2> err`, `for … done 2>&1`). An empty
+/// stack means fd 2 is the shell's real stderr (the default).
+///
+/// All handles are `Arc`-based so the enclosing [`Shell`] stays `Send` — a
+/// pipeline stage's subshell clone is moved into a scoped thread. (Clones reset
+/// the stack to empty via [`Shell::clone_for_subshell`], so the `Arc` contents
+/// never actually cross a thread boundary, but the type must still be `Send`.)
+enum StderrTarget {
+    /// `2> file` / `2>> file` — write to this already-opened file (shared by all
+    /// commands in the group via `try_clone`).
+    File(Arc<File>),
+    /// `2>&1` where stdout is a downstream pipe — merge into the same pipe so
+    /// stdout and stderr interleave at the reader (bash `… 2>&1 | next`).
+    Pipe(Arc<io::PipeWriter>),
+    /// `2>&1`/stderr capture into a buffer — used when the surrounding stdout is
+    /// itself captured (command substitution `$( … 2>&1 )`). The buffer is
+    /// merged into the stdout capture once the body finishes (line-level
+    /// interleaving with stdout is not preserved — see the module limitations).
+    Buffer(Arc<Mutex<Vec<u8>>>),
+    /// `2>&1` where stdout is the shell's real stdout — write to fd 1.
+    Stdout,
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
@@ -162,6 +192,12 @@ pub struct Shell {
     /// Only ever set on a per-stage subshell clone, never the top-level shell.
     pipe_broken: bool,
     pid: u32,
+    /// Active stderr (fd 2) redirections, innermost last. Empty = real stderr.
+    /// Pushed/popped by [`Shell::exec_redirected`] around a compound command's
+    /// body so its stderr redirect (`{ …; } 2> err`) covers every command in
+    /// the group. Consulted by [`Shell::emit_stderr`] (diagnostics/`>&2`) and
+    /// [`Shell::run_external`] (child fd 2). Reset to empty in subshell clones.
+    stderr_stack: Vec<StderrTarget>,
 }
 
 impl Default for Shell {
@@ -187,6 +223,7 @@ impl Shell {
             pipefail: false,
             pipe_broken: false,
             pid: std::process::id(),
+            stderr_stack: Vec::new(),
         }
     }
 
@@ -677,8 +714,11 @@ impl Shell {
     /// lines. Output redirects (`> file`, `>> file`) capture the command's
     /// entire stdout and write it to the file when it finishes.
     ///
-    /// Limitation: stderr redirection (`2> file`, `2>&1`) on a *compound*
-    /// command is not captured — only stdin and stdout are handled here.
+    /// Stderr redirects (`2> file`, `2>> file`, `2>&1`) push a [`StderrTarget`]
+    /// onto [`Shell::stderr_stack`] for the duration of the body, so every
+    /// command in the group — externals, builtin diagnostics, and `>&2` writes —
+    /// honours the redirect. `1>&2` (`stdout_to_stderr`) routes the body's stdout
+    /// to the current stderr sink.
     fn exec_redirected(
         &mut self,
         inner: &Command,
@@ -689,7 +729,7 @@ impl Shell {
         let plan = match self.resolve_redirects(redirects) {
             Ok(p) => p,
             Err(msg) => {
-                eprintln!("osh: {msg}");
+                self.errln(&format!("osh: {msg}"));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -702,7 +742,7 @@ impl Shell {
             match std::fs::read(path) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    eprintln!("osh: {path}: {e}");
+                    self.errln(&format!("osh: {path}: {e}"));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -711,8 +751,55 @@ impl Shell {
             None
         };
 
-        // Capture stdout when redirected to a file.
-        let mut capture: Option<Vec<u8>> = if plan.stdout.is_some() {
+        // ---- stderr setup: push a target covering the whole body ----
+        // `stderr_merge_buf` is the buffer whose bytes must be folded into the
+        // stdout capture once the body finishes (the `2>&1`-into-captured-stdout
+        // case, where fd 1 and fd 2 share a command-substitution buffer).
+        let mut pushed_stderr = false;
+        let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
+        if let Some((path, append)) = &plan.stderr {
+            match open_out(path, *append) {
+                Ok(f) => {
+                    self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                    pushed_stderr = true;
+                }
+                Err(e) => {
+                    self.errln(&format!("osh: {path}: {e}"));
+                    self.last_status = 1;
+                    return Flow::Next;
+                }
+            }
+        } else if plan.stderr_to_stdout {
+            // `2>&1` with fd 1 not a file: mirror fd 1's live sink.
+            match out {
+                Out::Capture(_) => {
+                    let buf = Arc::new(Mutex::new(Vec::new()));
+                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(&buf)));
+                    stderr_merge_buf = Some(buf);
+                    pushed_stderr = true;
+                }
+                Out::Pipe(w) => match w.try_clone() {
+                    Ok(wp) => {
+                        self.stderr_stack.push(StderrTarget::Pipe(Arc::new(wp)));
+                        pushed_stderr = true;
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: pipe: {e}"));
+                        self.last_status = 1;
+                        return Flow::Next;
+                    }
+                },
+                Out::Inherit => {
+                    self.stderr_stack.push(StderrTarget::Stdout);
+                    pushed_stderr = true;
+                }
+            }
+        }
+
+        // Capture stdout when it is redirected to a file (`> f`) or routed to
+        // stderr (`1>&2`); otherwise the body writes straight to `out`.
+        let stdout_to_err = plan.stdout_to_stderr && plan.stdout.is_none();
+        let mut capture: Option<Vec<u8>> = if plan.stdout.is_some() || stdout_to_err {
             Some(Vec::new())
         } else {
             None
@@ -738,20 +825,38 @@ impl Shell {
             }
         };
 
-        // Write captured stdout to the target file.
-        if let (Some(buf), Some((path, append))) = (capture, plan.stdout) {
-            match open_out(&path, append) {
-                Ok(mut f) => {
-                    if let Err(e) = f.write_all(&buf) {
-                        eprintln!("osh: {path}: {e}");
+        // Finalise captured stdout: to the target file, or to the stderr sink
+        // (`1>&2`) — the latter while the stderr target is still on the stack.
+        if let Some(buf) = capture {
+            if let Some((path, append)) = &plan.stdout {
+                match open_out(path, *append) {
+                    Ok(mut f) => {
+                        if let Err(e) = f.write_all(&buf) {
+                            self.errln(&format!("osh: {path}: {e}"));
+                            self.last_status = 1;
+                        }
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: {path}: {e}"));
                         self.last_status = 1;
                     }
                 }
-                Err(e) => {
-                    eprintln!("osh: {path}: {e}");
-                    self.last_status = 1;
-                }
+            } else if stdout_to_err {
+                self.emit_stderr(&buf);
             }
+        }
+
+        if pushed_stderr {
+            self.stderr_stack.pop();
+        }
+
+        // Fold captured stderr (`2>&1` into a captured stdout) into `out` after
+        // the target is popped. Interleaving with stdout is not preserved.
+        if let Some(buf) = stderr_merge_buf
+            && let Ok(g) = buf.lock()
+            && let Out::Capture(obuf) = out
+        {
+            obuf.extend_from_slice(&g);
         }
         flow
     }
@@ -910,6 +1015,11 @@ impl Shell {
             pipefail: self.pipefail,
             pipe_broken: false,
             pid: self.pid,
+            // A subshell inherits fd 2 = the shell's real stderr; any active
+            // compound-command stderr redirect does not carry into a pipeline
+            // stage's own subshell (and keeping the `Arc`s off the clone is what
+            // lets `Shell` stay `Send` for the scoped-thread pipeline).
+            stderr_stack: Vec::new(),
         }
     }
 
@@ -1327,7 +1437,7 @@ impl Shell {
                         cmd.stdin(Stdio::from(f));
                     }
                     Err(e) => {
-                        eprintln!("osh: {path}: {e}");
+                        self.errln(&format!("osh: {path}: {e}"));
                         self.last_status = 1;
                         return;
                     }
@@ -1355,7 +1465,7 @@ impl Shell {
                                 cmd.stdin(Stdio::from(rp));
                             }
                             Err(e) => {
-                                eprintln!("osh: pipe: {e}");
+                                self.errln(&format!("osh: pipe: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -1373,13 +1483,27 @@ impl Shell {
                     cmd.stdout(Stdio::from(f));
                 }
                 Err(e) => {
-                    eprintln!("osh: {path}: {e}");
+                    self.errln(&format!("osh: {path}: {e}"));
                     self.last_status = 1;
                     return;
                 }
             },
             None => {
-                if capturing {
+                if redir.stdout_to_stderr {
+                    // `1>&2` and fd 2 is not a file: send fd 1 to the current
+                    // stderr sink (an enclosing compound `2>` redirect, or the
+                    // shell's real stderr).
+                    match self.child_stdio_for_stderr() {
+                        Ok(s) => {
+                            cmd.stdout(s);
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {e}"));
+                            self.last_status = 1;
+                            return;
+                        }
+                    }
+                } else if capturing {
                     cmd.stdout(Stdio::piped());
                 } else if let Out::Pipe(w) = out {
                     // Stream the child's stdout straight into the downstream pipe
@@ -1390,7 +1514,7 @@ impl Shell {
                             cmd.stdout(Stdio::from(wp));
                         }
                         Err(e) => {
-                            eprintln!("osh: pipe: {e}");
+                            self.errln(&format!("osh: pipe: {e}"));
                             self.last_status = 1;
                             return;
                         }
@@ -1401,16 +1525,79 @@ impl Shell {
             }
         }
 
-        // stderr
+        // stderr routing precedence:
+        //   1. an explicit per-command `2> file` / `2>> file`
+        //   2. `2>&1` (`stderr_to_stdout`) — follow fd 1's live sink
+        //   3. an enclosing compound command's stderr redirect (`stderr_stack`)
+        //   4. otherwise inherit the shell's real stderr
+        // When fd 2 must be captured into a buffer we pipe it and drain the
+        // child's stderr after spawn (`stderr_capture`).
+        let mut stderr_capture: Option<Arc<Mutex<Vec<u8>>>> = None;
+        // For `2>&1` with a captured stdout, fd 2 is appended to the same
+        // capture buffer as fd 1.
+        let mut stderr_to_stdout_capture = false;
         if let Some((path, append)) = &redir.stderr {
             match open_out(path, *append) {
                 Ok(f) => {
                     cmd.stderr(Stdio::from(f));
                 }
                 Err(e) => {
-                    eprintln!("osh: {path}: {e}");
+                    self.errln(&format!("osh: {path}: {e}"));
                     self.last_status = 1;
                     return;
+                }
+            }
+        } else if redir.stderr_to_stdout {
+            // `2>&1` and fd 1 is not a file (else the file target was copied
+            // into `redir.stderr` already): mirror fd 1's live sink.
+            if capturing {
+                cmd.stderr(Stdio::piped());
+                stderr_to_stdout_capture = true;
+            } else if let Out::Pipe(w) = out {
+                match w.try_clone() {
+                    Ok(wp) => {
+                        cmd.stderr(Stdio::from(wp));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: pipe: {e}"));
+                        self.last_status = 1;
+                        return;
+                    }
+                }
+            } else {
+                cmd.stderr(Stdio::inherit());
+            }
+        } else {
+            match self.stderr_stack.last() {
+                None => {}
+                Some(StderrTarget::File(f)) => match f.try_clone() {
+                    Ok(fc) => {
+                        cmd.stderr(Stdio::from(fc));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: stderr: {e}"));
+                        self.last_status = 1;
+                        return;
+                    }
+                },
+                Some(StderrTarget::Pipe(p)) => match p.try_clone() {
+                    Ok(pc) => {
+                        cmd.stderr(Stdio::from(pc));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: pipe: {e}"));
+                        self.last_status = 1;
+                        return;
+                    }
+                },
+                Some(StderrTarget::Buffer(b)) => {
+                    cmd.stderr(Stdio::piped());
+                    stderr_capture = Some(Arc::clone(b));
+                }
+                // Real fd 1: inherit (fd 2 → terminal, same visual result at the
+                // shell's controlling terminal).
+                Some(StderrTarget::Stdout) => {
+                    cmd.stderr(Stdio::inherit());
                 }
             }
         }
@@ -1419,10 +1606,10 @@ impl Shell {
             Ok(c) => c,
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
-                    eprintln!("osh: {}: command not found", argv[0]);
+                    self.errln(&format!("osh: {}: command not found", argv[0]));
                     self.last_status = 127;
                 } else {
-                    eprintln!("osh: {}: {e}", argv[0]);
+                    self.errln(&format!("osh: {}: {e}", argv[0]));
                     self.last_status = 126;
                 }
                 return;
@@ -1435,10 +1622,28 @@ impl Shell {
             let _ = si.write_all(&bytes); // child may exit early; ignore EPIPE
         }
 
+        // Drain a piped stderr into its capture buffer before waiting, so a child
+        // that fills the stderr pipe cannot deadlock on a full buffer.
+        if let Some(buf) = &stderr_capture
+            && let Some(mut se) = child.stderr.take()
+        {
+            let mut captured = Vec::new();
+            let _ = se.read_to_end(&mut captured);
+            if let Ok(mut g) = buf.lock() {
+                g.extend_from_slice(&captured);
+            }
+        }
+
         if capturing {
             let mut captured = Vec::new();
             if let Some(mut so) = child.stdout.take() {
                 let _ = so.read_to_end(&mut captured);
+            }
+            // `2>&1` into a capture: fold fd 2 into the same buffer after fd 1.
+            if stderr_to_stdout_capture
+                && let Some(mut se) = child.stderr.take()
+            {
+                let _ = se.read_to_end(&mut captured);
             }
             if let Out::Capture(buf) = out {
                 buf.extend_from_slice(&captured);
@@ -1450,7 +1655,7 @@ impl Shell {
                 self.last_status = status.code().unwrap_or(1);
             }
             Err(e) => {
-                eprintln!("osh: wait failed: {e}");
+                self.errln(&format!("osh: wait failed: {e}"));
                 self.last_status = 1;
             }
         }
@@ -1533,11 +1738,23 @@ impl Shell {
                 }
                 RedirectOp::DupOut => {
                     // `2>&1` → stderr follows stdout; `1>&2` → the reverse.
+                    // When the followed fd already targets a file, copy that file
+                    // target directly; otherwise flag the dup so the executor
+                    // routes fd 2→fd 1 (or fd 1→fd 2) to the live sink (pipe,
+                    // terminal, or capture), not just to a file path.
                     let target = self.expand_to_string(&r.target);
                     if r.fd == 2 && target == "1" {
-                        plan.stderr = plan.stdout.clone();
+                        if plan.stdout.is_some() {
+                            plan.stderr = plan.stdout.clone();
+                        } else {
+                            plan.stderr_to_stdout = true;
+                        }
                     } else if r.fd == 1 && target == "2" {
-                        plan.stdout = plan.stderr.clone();
+                        if plan.stderr.is_some() {
+                            plan.stdout = plan.stderr.clone();
+                        } else {
+                            plan.stdout_to_stderr = true;
+                        }
                     }
                 }
             }
@@ -2328,6 +2545,12 @@ impl Shell {
     }
 
     fn write_bytes(&mut self, out: &mut Out, redir: &RedirPlan, bytes: &[u8]) -> i32 {
+        // `1>&2` on the builtin (e.g. `echo msg >&2`): the builtin's stdout is
+        // the current stderr sink, not the ambient stdout.
+        if redir.stdout_to_stderr && redir.stdout.is_none() {
+            self.emit_stderr(bytes);
+            return 0;
+        }
         // A `>`/`>>` redirect on the builtin wins over the ambient sink.
         if let Some((path, append)) = &redir.stdout {
             match open_out(path, *append) {
@@ -2338,7 +2561,7 @@ impl Shell {
                     0
                 }
                 Err(e) => {
-                    eprintln!("osh: {path}: {e}");
+                    self.errln(&format!("osh: {path}: {e}"));
                     1
                 }
             }
@@ -2370,6 +2593,69 @@ impl Shell {
                     }
                 }
             }
+        }
+    }
+
+    /// Write raw bytes to the current stderr (fd 2) — the innermost active
+    /// [`StderrTarget`], or the shell's real stderr when none is active. Used
+    /// for command diagnostics and `>&2` builtin output so both honour a
+    /// compound command's `2>` redirect.
+    fn emit_stderr(&self, bytes: &[u8]) {
+        match self.stderr_stack.last() {
+            None => {
+                let e = io::stderr();
+                let mut lock = e.lock();
+                let _ = lock.write_all(bytes);
+                let _ = lock.flush();
+            }
+            Some(StderrTarget::Stdout) => {
+                let o = io::stdout();
+                let mut lock = o.lock();
+                let _ = lock.write_all(bytes);
+                let _ = lock.flush();
+            }
+            // `&File`/`&PipeWriter` both implement `Write`; the shared handle is
+            // append-positioned (files opened once) so concurrent writers from
+            // several group commands interleave without clobbering.
+            Some(StderrTarget::File(f)) => {
+                let _ = (&**f).write_all(bytes);
+            }
+            Some(StderrTarget::Pipe(p)) => {
+                let _ = (&**p).write_all(bytes);
+            }
+            Some(StderrTarget::Buffer(b)) => {
+                if let Ok(mut g) = b.lock() {
+                    g.extend_from_slice(bytes);
+                }
+            }
+        }
+    }
+
+    /// Write a diagnostic line (a trailing newline is appended) to the current
+    /// stderr. Replaces bare `eprintln!` in command-execution paths so shell
+    /// error messages honour an active `2>`/`2>&1` redirect, as in bash.
+    fn errln(&self, msg: &str) {
+        let mut line = msg.as_bytes().to_vec();
+        line.push(b'\n');
+        self.emit_stderr(&line);
+    }
+
+    /// Build a child-process [`Stdio`] that writes to the current stderr sink.
+    /// Used for `1>&2` (`stdout_to_stderr`) on an external command. The
+    /// buffer-capture sink can't back a live child fd, so it (and the real-fd-1
+    /// `Stdout` case) fall back to inheriting fd 2 — a rare edge documented in
+    /// the module limitations.
+    fn child_stdio_for_stderr(&self) -> Result<Stdio, String> {
+        match self.stderr_stack.last() {
+            None | Some(StderrTarget::Stdout | StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),
+            Some(StderrTarget::File(f)) => f
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(|e| format!("stderr: {e}")),
+            Some(StderrTarget::Pipe(p)) => p
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(|e| format!("pipe: {e}")),
         }
     }
 
@@ -2431,6 +2717,12 @@ struct RedirPlan {
     stdin_data: Option<Vec<u8>>,
     stdout: Option<(String, bool)>,
     stderr: Option<(String, bool)>,
+    /// `2>&1` — fd 2 follows fd 1 (stderr goes wherever stdout currently goes).
+    /// Distinct from `stderr` (a file path) so the merge works even when stdout
+    /// is a pipe/terminal/capture rather than a file.
+    stderr_to_stdout: bool,
+    /// `1>&2` — fd 1 follows fd 2 (stdout goes wherever stderr currently goes).
+    stdout_to_stderr: bool,
 }
 
 /// A single expanded character tagged with whether it came from a quoted
@@ -3737,6 +4029,56 @@ mod tests {
     fn compound_while_read_from_heredoc() {
         let (o, _) = run("while read l; do echo [$l]; done <<EOF\nfoo\nbar\nEOF");
         assert_eq!(o, "[foo]\n[bar]\n");
+    }
+
+    #[test]
+    fn compound_stderr_redirect_to_file() {
+        // `2> file` on a brace group must capture the group's stderr (including
+        // an inner `>&2`) to the file while stdout still reaches the outer sink.
+        let path = uniq_path("stderrfile");
+        let (o, _) = run(&format!(
+            "{{ echo out; echo err >&2; }} 2> {path}"
+        ));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(o, "out\n");
+        assert_eq!(contents, "err\n");
+    }
+
+    #[test]
+    fn compound_stderr_append_redirect() {
+        let path = uniq_path("stderrappend");
+        run(&format!("{{ echo a >&2; }} 2> {path}"));
+        run(&format!("{{ echo b >&2; }} 2>> {path}"));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "a\nb\n");
+    }
+
+    #[test]
+    fn compound_stderr_to_stdout_in_capture() {
+        // `2>&1` inside command substitution folds the group's stderr into the
+        // captured stdout.
+        let (o, _) = run("x=$( { echo a; echo b >&2; } 2>&1 ); echo \"$x\"");
+        assert_eq!(o, "a\nb\n");
+    }
+
+    #[test]
+    fn compound_stderr_to_stdout_top_level_capture() {
+        // Same merge when the outer sink is a plain capture (not a subshell).
+        let (o, _) = run("{ echo a; echo b >&2; } 2>&1");
+        assert_eq!(o, "a\nb\n");
+    }
+
+    #[test]
+    fn compound_for_loop_stderr_redirect() {
+        let path = uniq_path("forstderr");
+        run(&format!(
+            "for x in 1 2; do echo e$x >&2; done 2> {path}"
+        ));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "e1\ne2\n");
     }
 
     #[test]

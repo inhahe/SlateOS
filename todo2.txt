@@ -1,5 +1,8 @@
-[DONE -> roadmap-detailed.md §1.5 Capability Types — UI, `ui.theme.*` family] add capability to change theme elements, like for example the mouse pointer outside of the app's own space. make them finer grained by theme element if you think you should.
-  -> Added a per-axis `ui.theme.*` capability family: cursor, colors, window_decorations, icons, widget_style, fonts, sounds, wallpaper, animation, terminal, plus a `ui.theme.full` wholesale grant. Split per theme axis (fixed predefined set, so per-axis names, not scope-per-string) so consent is least-privilege. Cursor axis (the operator's mouse-pointer example — changing the pointer seen over the whole desktop) is the highest-attention one with an anti-abuse theme-reset chord + no-invisible-cursor guard. Self-window styling still needs no capability; only global/cross-boundary theme mutation is gated.
+make sure you write about the new test harness in claude.md or something
 
-Tell Fable 5 to analyze the most critical parts of the OS (memory management, task scheduling, IPC, what else? capability robustness?) and optimize them.
+^ pending
+
+maybe you should create a program that can run a test in the background but with a timeout in the case of a hang or orphan (and/or constantly poll to see if the process is still running and return with a message if not)
+
+^ doing
 

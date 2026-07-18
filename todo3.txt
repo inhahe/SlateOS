@@ -1,3 +1,7 @@
+Tell Fable 5 to analyze the most critical parts of the OS (memory management, task scheduling, IPC, what else? capability robustness?) and optimize them. Look for (a) optimal speed, (b) optimal behavior (no desktop stalls or sluggishness under any conditions), bugs, and air-tight security. Maybe also check i/o bus/disc i/o to make sure the OS can't become sluggish?
+Also /graphify with Fable 5. Make a script to update to the latest graphify, and run it.
+^^ The above is not to be done until the OS is pretty much done or at least the affected parts are. (We'd still have to run graphify after the whole OS is done)
+
 make a logo with midjourney (already paying $10/mo for it), a rectangular slab of slate with 'Slate OS' carved into it
 
 Let me find the next int-truncation candidate. The sys_rt_sigprocmask wrapper has structural issues beyond truncation — I'll leave that for a dedicated batch. Let me check other syscalls.

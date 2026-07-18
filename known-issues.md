@@ -2622,19 +2622,52 @@ tracking. Safe because container locks are only taken in task context (never ISR
 and `EVENT_LOG` is a leaf (never acquires TABLE), so no ordering inversion.
 
 **SYSTEMIC NOTE — raw `spin::Mutex` holder-preemption is a latent class, not a
-one-off.** This is now the **second** confirmed instance (heap, then container
-TABLE). The kernel has ~476 files importing `spin::` — any raw `spin::Mutex`
-whose critical section can be involuntarily preempted *and* is contended across
-tasks is a latent holder-preemption deadlock on a single CPU. Most are safe (true
-leaf locks, trivially short sections, or never contended under preemption), so a
-blanket conversion of all 476 is neither cheap nor obviously correct (it would
-drag every lock into lockdep, exploding its scope and surfacing much triage). The
-current strategy is **reactive but principled**: the armed hang soak
+one-off.** Confirmed instances: heap, container `TABLE` (holder-preemption);
+`sysctl::REGISTRY`, completion-timer→`SCHED` (interrupt-reentrancy). The kernel
+has ~476 files importing `spin::` — any raw `spin::Mutex` whose critical section
+can be involuntarily preempted *and* is contended across tasks is a latent
+holder-preemption deadlock on a single CPU. Most are safe (true leaf locks,
+trivially short sections, or never contended under preemption).
+
+**STRATEGY UPDATE 2026-07-18 — Q24 RESOLVED: operator chose the PROACTIVE
+audit/conversion (option B), see `design-decisions.md` §70.** The prior
+reactive-only strategy (below) is superseded. We are now deliberately eliminating
+the class rather than waiting for the soak to surface each instance. Execution is
+per-lock triage (NOT a blind sed):
+- **Hot / cold leaf locks** (the ~230 `fs/*.rs` procfs config & stat stores, and
+  other true leaves) → the new **`PreemptSpinMutex`** in `kernel/src/sync.rs`
+  (commit 03cccdd5f): `preempt_disable` around a raw `spin::Mutex`, no lockdep,
+  shares the stall detector. Closes holder-preemption without dragging cold locks
+  into lockdep. Conversion is a per-file import swap
+  (`use spin::Mutex;` → `use crate::sync::PreemptSpinMutex as Mutex;`); the
+  compiler validates API compat, and converting is strictly safe (it can only
+  *introduce* a problem if the section already sleeps while holding the lock,
+  which would already be a latent deadlock under raw spin).
+- **Contended, non-leaf / ordering-sensitive locks** (core FS: `vfs`, `handle`,
+  `fdtable`, `pipe`, `overlay`, `ext4/*`, `memfs`, `cache`, mount/notify families;
+  and cross-subsystem locks) → `crate::sync::Mutex` (full lockdep + owner
+  tracking) so ordering bugs are caught.
+- **Deliberately-raw** (global heap lock — lockdep can't allocate under it; SCHED)
+  → keep raw + manual `preempt_disable`/`enable`.
+- IRQ-context acquirers stay on `try_lock`/`without_interrupts` (don't regress the
+  already-clean interrupt-reentrancy surface).
+
+**Rollout progress (running checklist):**
+- [x] `PreemptSpinMutex` primitive + self-tests (Test 5/6), boot-green (03cccdd5f).
+- [ ] Convert `fs/*.rs` cold leaf config/stat stores → `PreemptSpinMutex`, in
+  reviewable batches, boot-test + wedge-soak between batches (~230 files).
+- [ ] Route core-FS contended locks → `crate::sync::Mutex` (lockdep), triage the
+  lock-ordering reports that surface.
+- [ ] Sweep non-fs subsystem raw locks (`net/`, `ipc/`, drivers) per the same
+  triage.
+- [ ] Final full wedge-soak (switch-off + switch-on) clean.
+
+**Superseded reactive strategy (kept for context):** the armed hang soak
 (`scripts/wedge-soak.sh`) reliably reproduces these under stress; each catch names
 the exact lock via the backtrace; convert *that* lock to `crate::sync::Mutex`
 (or, for true leaf/allocation locks like the heap, keep raw + manual
-preempt_disable/enable). Whether to do a broader proactive audit/conversion is a
-larger architectural tradeoff — see `open-questions.md`.
+preempt_disable/enable). This remains the fallback if the proactive sweep is
+paused.
 
 **END-TO-END VALIDATION 2026-07-15 — ring-3 socket capstone passes on the
 switch-on spawn-heavy path.** With both holder-preemption fixes in, the deferred

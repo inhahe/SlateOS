@@ -677,7 +677,9 @@ impl Shell {
             Some(words) => {
                 let mut v = Vec::new();
                 for w in words {
-                    v.extend(self.expand_word(w, true));
+                    for bw in crate::brace::expand_braces(w) {
+                        v.extend(self.expand_word(&bw, true));
+                    }
                 }
                 v
             }
@@ -1469,7 +1471,11 @@ impl Shell {
         // before any prefix assignments take effect).
         let mut argv: Vec<String> = Vec::new();
         for w in &sc.words {
-            argv.extend(self.expand_word(w, true));
+            // Brace expansion runs first (textually, before parameter/other
+            // expansion), turning one word into one or more words.
+            for bw in crate::brace::expand_braces(w) {
+                argv.extend(self.expand_word(&bw, true));
+            }
         }
 
         // Pure assignment (no command word): persist the variables/arrays.
@@ -4179,6 +4185,30 @@ mod tests {
         assert_eq!(run("printf '[%s:%d]' x 1 y 2").0, "[x:1][y:2]");
         // No arg-consuming conversion → format emitted exactly once.
         assert_eq!(run("printf 'hi\\n'").0, "hi\n");
+    }
+
+    #[test]
+    fn brace_expansion_command_words() {
+        assert_eq!(run("echo a{b,c,d}e").0, "abe ace ade\n");
+        assert_eq!(run("echo {1..5}").0, "1 2 3 4 5\n");
+        assert_eq!(run("echo {1..9..2}").0, "1 3 5 7 9\n");
+        assert_eq!(run("echo file{01..03}.txt").0, "file01.txt file02.txt file03.txt\n");
+        assert_eq!(run("echo {a..c}{1,2}").0, "a1 a2 b1 b2 c1 c2\n");
+        // Quoted braces stay literal; invalid braces stay literal.
+        assert_eq!(run("echo '{a,b}'").0, "{a,b}\n");
+        assert_eq!(run("echo {abc}").0, "{abc}\n");
+    }
+
+    #[test]
+    fn brace_expansion_in_for_loop() {
+        let (o, _) = run("for i in {1..3}; do echo x$i; done");
+        assert_eq!(o, "x1\nx2\nx3\n");
+    }
+
+    #[test]
+    fn brace_expansion_with_param() {
+        // A parameter reference inside an alternative expands after braces.
+        assert_eq!(run("v=Z; echo {$v,b}").0, "Z b\n");
     }
 
     #[test]

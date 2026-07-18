@@ -141,7 +141,7 @@ pub struct Sidebar {
 
 static BUILD_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Section visibility preferences.
 static HIDDEN_SECTIONS: Mutex<Vec<SectionKind>> = Mutex::new(Vec::new());

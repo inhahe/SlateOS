@@ -156,7 +156,7 @@ static NEXT_EXT_ID: AtomicU64 = AtomicU64::new(1);
 static BUILD_COUNT: AtomicU64 = AtomicU64::new(0);
 static EXECUTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Registered extensions.
 static EXTENSIONS: Mutex<Vec<MenuExtension>> = Mutex::new(Vec::new());

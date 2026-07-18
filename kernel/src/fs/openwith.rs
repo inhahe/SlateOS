@@ -108,7 +108,7 @@ pub struct OpenWithResult {
 static OPEN_COUNT: AtomicU64 = AtomicU64::new(0);
 static DEFAULT_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Recent choices.
 static RECENT: Mutex<Vec<RecentChoice>> = Mutex::new(Vec::new());

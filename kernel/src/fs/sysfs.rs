@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Hostname state

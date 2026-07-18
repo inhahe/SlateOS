@@ -202,7 +202,7 @@ pub struct DesktopLayout {
 static LOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static ARRANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Current desktop layout.
 static LAYOUT: Mutex<Option<DesktopLayout>> = Mutex::new(None);

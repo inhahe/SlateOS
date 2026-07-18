@@ -189,7 +189,7 @@ pub enum IconSource {
 static LOOKUP_COUNT: AtomicU64 = AtomicU64::new(0);
 static REGISTER_COUNT: AtomicU64 = AtomicU64::new(0);
 
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Registered file types.
 static TYPES: Mutex<Vec<FileType>> = Mutex::new(Vec::new());

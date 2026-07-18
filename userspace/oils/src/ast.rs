@@ -69,6 +69,13 @@ pub enum Command {
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
     /// non-zero, 1 if zero). The `String` holds the raw arithmetic text.
     Arith(String),
+    /// A compound command with trailing redirections, e.g.
+    /// `while read l; do …; done < file` or `{ …; } > out`. Simple commands
+    /// carry their own redirects; this wraps the non-simple forms.
+    Redirected {
+        inner: Box<Command>,
+        redirects: Vec<Redirect>,
+    },
 }
 
 /// A `[[ … ]]` conditional expression tree.

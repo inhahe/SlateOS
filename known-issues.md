@@ -67,6 +67,28 @@ unquoted `${a[@]}` field-splits). Deferred pieces:
 All are intentional grow-phase scope limits, documented in the
 `interp.rs` module header. No test depends on the deferred behavior.
 
+### TD-OILS3. `osh` compound-command redirections: only stdin/stdout, not stderr — DEBT 2026-07-18
+
+**Where:** `userspace/oils/src/interp.rs` (`exec_redirected`),
+`userspace/oils/src/parser.rs` (`with_redirects`, `at_redirect_start`),
+`userspace/oils/src/ast.rs` (`Command::Redirected`).
+
+**What:** Trailing redirections on compound commands are supported
+(`while read …; done < file`, `for … done > out`, `{ …; } >> log`,
+subshell/`if`/`case`/`(( ))` bodies, pipeline-into-`while read`). Input
+is fed via a shared `StdinSrc::Cursor` (`RefCell<io::Cursor<Vec<u8>>>`)
+so successive `read`s in the body consume successive lines; the compound's
+stdout is captured into a buffer and written to the target file after the
+body runs. Deferred piece: **stderr redirection on a compound command**
+(`{ …; } 2> err`, `2>&1` on a loop) is not honored — only fd 0 (stdin)
+and fd 1 (stdout) are wired. `exec_redirected` resolves the redirect plan
+but ignores a `plan.stderr` target. **Proper fix:** capture the body's
+stderr alongside stdout (a second `Out::Capture`-style sink, or thread a
+stderr target through the `Out`/`Flow` execution path) and write it to the
+resolved stderr file; handle `2>&1` fd duplication ordering. Intentional
+grow-phase scope limit, documented in the `interp.rs` module header. No
+test depends on the deferred behavior.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

@@ -26,12 +26,15 @@
 //! - Pipelines are *buffered*, not concurrent: each stage runs to completion
 //!   and its output feeds the next. An unbounded producer (`yes | head`) will
 //!   not terminate early.
-//! - Redirections attach to simple commands only, not to compound commands, so
-//!   `while read …; do …; done < file` is not yet supported. In particular,
-//!   `read` from a here-document reads only its first line.
+//! - Compound commands accept trailing redirections
+//!   (`while read …; do …; done < file`, `for … done > out`, `{ …; } >> log`).
+//!   Input is fed through a shared cursor so successive `read`s in the body
+//!   consume successive lines; captured stdout is written to the target file.
+//!   A compound command's *stderr* is not yet redirectable (only stdout/stdin).
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Command as PCommand, Stdio};
@@ -71,8 +74,11 @@ enum Out<'a> {
 enum StdinSrc<'a> {
     /// Inherit the shell's real stdin.
     Inherit,
-    /// Read from these bytes (previous pipeline stage / here-string).
-    Bytes(&'a [u8]),
+    /// Read from a shared, position-tracking byte cursor. Used for pipeline
+    /// stage input and compound-command `< file` / here-doc redirects so that
+    /// repeated `read` calls (e.g. `while read …; done < file`) consume
+    /// successive lines rather than restarting from the beginning.
+    Cursor(&'a RefCell<io::Cursor<Vec<u8>>>),
 }
 
 /// The shell interpreter and its mutable session state.
@@ -145,7 +151,7 @@ impl Shell {
             }
         };
         let mut out = Out::Inherit;
-        match self.exec_program(&prog, &mut out) {
+        match self.exec_program(&prog, &mut out, &StdinSrc::Inherit) {
             Flow::Exit(code) => {
                 self.last_status = code;
                 code
@@ -154,7 +160,7 @@ impl Shell {
         }
     }
 
-    fn exec_program(&mut self, prog: &Program, out: &mut Out) -> Flow {
+    fn exec_program(&mut self, prog: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
         for item in &prog.items {
             if item.background {
                 // Only a single external simple command is truly backgrounded;
@@ -162,7 +168,7 @@ impl Shell {
                 self.exec_background(&item.list);
                 continue;
             }
-            let flow = self.exec_and_or(&item.list, out, &StdinSrc::Inherit);
+            let flow = self.exec_and_or(&item.list, out, stdin);
             match flow {
                 Flow::Next => {}
                 other => return other,
@@ -209,10 +215,12 @@ impl Shell {
         let mut prev: Vec<u8> = Vec::new();
         let last = cmds.len() - 1;
         for (i, cmd) in cmds.iter().enumerate() {
+            let stage_cursor;
             let stdin = if i == 0 {
                 StdinSrc::Inherit
             } else {
-                StdinSrc::Bytes(&prev)
+                stage_cursor = RefCell::new(io::Cursor::new(std::mem::take(&mut prev)));
+                StdinSrc::Cursor(&stage_cursor)
             };
             if i == last {
                 let flow = self.exec_command(cmd, out, &stdin);
@@ -235,22 +243,25 @@ impl Shell {
     fn exec_command(&mut self, cmd: &Command, out: &mut Out, stdin: &StdinSrc) -> Flow {
         match cmd {
             Command::Simple(sc) => self.exec_simple(sc, out, stdin),
-            Command::If(c) => self.exec_if(c, out),
-            Command::Loop(c) => self.exec_loop(c, out),
-            Command::For(c) => self.exec_for(c, out),
+            Command::If(c) => self.exec_if(c, out, stdin),
+            Command::Loop(c) => self.exec_loop(c, out, stdin),
+            Command::For(c) => self.exec_for(c, out, stdin),
             Command::Function(f) => {
                 self.funcs.insert(f.name.clone(), f.body.clone());
                 self.last_status = 0;
                 Flow::Next
             }
-            Command::Case(c) => self.exec_case(c, out),
+            Command::Case(c) => self.exec_case(c, out, stdin),
             Command::Cond(e) => self.exec_cond(e),
             Command::Arith(raw) => self.exec_arith(raw),
-            Command::BraceGroup(p) => self.exec_program(p, out),
+            Command::BraceGroup(p) => self.exec_program(p, out, stdin),
+            Command::Redirected { inner, redirects } => {
+                self.exec_redirected(inner, redirects, out, stdin)
+            }
             Command::Subshell(p) => {
                 // A subshell gets a clone of the state; mutations don't escape.
                 let mut sub = self.clone_for_subshell();
-                let flow = sub.exec_program(p, out);
+                let flow = sub.exec_program(p, out, stdin);
                 self.last_status = sub.last_status;
                 // Propagate an explicit exit from the subshell as a status only.
                 match flow {
@@ -264,33 +275,33 @@ impl Shell {
         }
     }
 
-    fn exec_if(&mut self, c: &IfClause, out: &mut Out) -> Flow {
-        let flow = self.exec_program(&c.cond, out);
+    fn exec_if(&mut self, c: &IfClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        let flow = self.exec_program(&c.cond, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
         }
         if self.last_status == 0 {
-            return self.exec_program(&c.body, out);
+            return self.exec_program(&c.body, out, stdin);
         }
         for (cond, body) in &c.elifs {
-            let flow = self.exec_program(cond, out);
+            let flow = self.exec_program(cond, out, stdin);
             if !matches!(flow, Flow::Next) {
                 return flow;
             }
             if self.last_status == 0 {
-                return self.exec_program(body, out);
+                return self.exec_program(body, out, stdin);
             }
         }
         if let Some(eb) = &c.else_body {
-            return self.exec_program(eb, out);
+            return self.exec_program(eb, out, stdin);
         }
         self.last_status = 0;
         Flow::Next
     }
 
-    fn exec_loop(&mut self, c: &LoopClause, out: &mut Out) -> Flow {
+    fn exec_loop(&mut self, c: &LoopClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         loop {
-            let flow = self.exec_program(&c.cond, out);
+            let flow = self.exec_program(&c.cond, out, stdin);
             if !matches!(flow, Flow::Next) {
                 return flow;
             }
@@ -299,7 +310,7 @@ impl Shell {
             if !run {
                 break;
             }
-            match self.exec_program(&c.body, out) {
+            match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
                     if n > 1 {
@@ -318,7 +329,7 @@ impl Shell {
         Flow::Next
     }
 
-    fn exec_for(&mut self, c: &ForClause, out: &mut Out) -> Flow {
+    fn exec_for(&mut self, c: &ForClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let items: Vec<String> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
@@ -331,7 +342,7 @@ impl Shell {
         };
         for item in items {
             self.vars.insert(c.var.clone(), item);
-            match self.exec_program(&c.body, out) {
+            match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
                     if n > 1 {
@@ -350,18 +361,105 @@ impl Shell {
         Flow::Next
     }
 
-    fn exec_case(&mut self, c: &CaseClause, out: &mut Out) -> Flow {
+    fn exec_case(&mut self, c: &CaseClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
         self.last_status = 0;
         for item in &c.items {
             for pat in &item.patterns {
                 let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
                 if glob_match(&pattern, &subject) {
-                    return self.exec_program(&item.body, out);
+                    return self.exec_program(&item.body, out, stdin);
                 }
             }
         }
         Flow::Next
+    }
+
+    /// Execute a compound command carrying trailing redirections.
+    ///
+    /// Input redirects (`< file`, here-doc `<<`, here-string `<<<`) load their
+    /// bytes into a shared position-tracking cursor that is threaded through the
+    /// whole command, so a `while read …; done < file` loop consumes successive
+    /// lines. Output redirects (`> file`, `>> file`) capture the command's
+    /// entire stdout and write it to the file when it finishes.
+    ///
+    /// Limitation: stderr redirection (`2> file`, `2>&1`) on a *compound*
+    /// command is not captured — only stdin and stdout are handled here.
+    fn exec_redirected(
+        &mut self,
+        inner: &Command,
+        redirects: &[Redirect],
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> Flow {
+        let plan = match self.resolve_redirects(redirects) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("osh: {msg}");
+                self.last_status = 1;
+                return Flow::Next;
+            }
+        };
+
+        // Establish the input bytes (if the command redirects stdin).
+        let input_bytes: Option<Vec<u8>> = if let Some(data) = plan.stdin_data.clone() {
+            Some(data)
+        } else if let Some(path) = &plan.stdin {
+            match std::fs::read(path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    eprintln!("osh: {path}: {e}");
+                    self.last_status = 1;
+                    return Flow::Next;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Capture stdout when redirected to a file.
+        let mut capture: Option<Vec<u8>> = if plan.stdout.is_some() {
+            Some(Vec::new())
+        } else {
+            None
+        };
+
+        let flow = {
+            let input_cursor;
+            let owned_stdin;
+            let sin: &StdinSrc = match input_bytes {
+                Some(bytes) => {
+                    input_cursor = RefCell::new(io::Cursor::new(bytes));
+                    owned_stdin = StdinSrc::Cursor(&input_cursor);
+                    &owned_stdin
+                }
+                None => stdin,
+            };
+            match &mut capture {
+                Some(buf) => {
+                    let mut o = Out::Capture(buf);
+                    self.exec_command(inner, &mut o, sin)
+                }
+                None => self.exec_command(inner, out, sin),
+            }
+        };
+
+        // Write captured stdout to the target file.
+        if let (Some(buf), Some((path, append))) = (capture, plan.stdout) {
+            match open_out(&path, append) {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(&buf) {
+                        eprintln!("osh: {path}: {e}");
+                        self.last_status = 1;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("osh: {path}: {e}");
+                    self.last_status = 1;
+                }
+            }
+        }
+        flow
     }
 
     /// Execute a `[[ … ]]` conditional expression: exit 0 if true, 1 if false.
@@ -657,7 +755,7 @@ impl Shell {
         args: &[String],
         assigns: &[(String, String)],
         out: &mut Out,
-        _stdin: &StdinSrc,
+        stdin: &StdinSrc,
         _redir: &RedirPlan,
     ) -> Flow {
         let Some(body) = self.funcs.get(name).cloned() else {
@@ -674,7 +772,7 @@ impl Shell {
             })
             .collect();
 
-        let flow = self.exec_program(&body, out);
+        let flow = self.exec_program(&body, out, stdin);
 
         self.positional = saved_pos;
         for (k, old) in saved {
@@ -736,8 +834,12 @@ impl Shell {
                     StdinSrc::Inherit => {
                         cmd.stdin(Stdio::inherit());
                     }
-                    StdinSrc::Bytes(b) => {
-                        input_bytes = Some(b.to_vec());
+                    StdinSrc::Cursor(c) => {
+                        // Feed the external the cursor's remaining bytes (from the
+                        // current position to the end), advancing the cursor.
+                        let mut rest = Vec::new();
+                        let _ = c.borrow_mut().read_to_end(&mut rest);
+                        input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
                     }
                 },
@@ -1178,7 +1280,7 @@ impl Shell {
         let mut buf = Vec::new();
         {
             let mut out = Out::Capture(&mut buf);
-            let _ = self.exec_program(prog, &mut out);
+            let _ = self.exec_program(prog, &mut out, &StdinSrc::Inherit);
         }
         let mut s = String::from_utf8_lossy(&buf).into_owned();
         // Strip trailing newlines, as command substitution does.
@@ -1586,9 +1688,11 @@ impl Shell {
             return read_one_line(&mut r);
         }
         match stdin {
-            StdinSrc::Bytes(b) => {
-                let mut r = io::BufReader::new(*b);
-                read_one_line(&mut r)
+            StdinSrc::Cursor(c) => {
+                // `io::Cursor` implements `BufRead`; `read_line` advances its
+                // position exactly past the consumed newline, so successive
+                // reads yield successive lines.
+                read_one_line(&mut *c.borrow_mut())
             }
             StdinSrc::Inherit => {
                 let stdin = io::stdin();
@@ -2255,7 +2359,7 @@ mod tests {
         let prog = parse(src).expect("parse");
         {
             let mut out = Out::Capture(&mut buf);
-            sh.exec_program(&prog, &mut out);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
@@ -2651,5 +2755,82 @@ mod tests {
     fn array_from_glob_and_expansion() {
         // Array elements undergo splitting/expansion.
         assert_eq!(run("s='p q'; a=($s r); echo ${#a[@]}").0, "3\n");
+    }
+
+    /// A unique cwd-relative temp path (no `set_current_dir`, so parallel-safe).
+    fn uniq_path(tag: &str) -> String {
+        format!(
+            "osh_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        )
+    }
+
+    #[test]
+    fn compound_while_read_from_file() {
+        let path = uniq_path("whileread");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").expect("write");
+        let (o, _) = run(&format!(
+            "while read line; do echo \"got:$line\"; done < {path}"
+        ));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(o, "got:alpha\ngot:beta\ngot:gamma\n");
+    }
+
+    #[test]
+    fn compound_for_loop_output_redirect() {
+        let path = uniq_path("forout");
+        let (_, _) = run(&format!("for x in 1 2 3; do echo n$x; done > {path}"));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "n1\nn2\nn3\n");
+    }
+
+    #[test]
+    fn compound_output_append_redirect() {
+        let path = uniq_path("append");
+        run(&format!("for x in a b; do echo $x; done > {path}"));
+        run(&format!("for x in c d; do echo $x; done >> {path}"));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "a\nb\nc\nd\n");
+    }
+
+    #[test]
+    fn compound_brace_group_redirect() {
+        let path = uniq_path("brace");
+        run(&format!("{{ echo one; echo two; }} > {path}"));
+        let contents = std::fs::read_to_string(&path).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "one\ntwo\n");
+    }
+
+    #[test]
+    fn compound_while_read_from_heredoc() {
+        let (o, _) = run("while read l; do echo [$l]; done <<EOF\nfoo\nbar\nEOF");
+        assert_eq!(o, "[foo]\n[bar]\n");
+    }
+
+    #[test]
+    fn compound_read_count_lines() {
+        // Classic idiom: count lines via a redirected while-read loop.
+        let path = uniq_path("count");
+        std::fs::write(&path, "l1\nl2\nl3\nl4\n").expect("write");
+        let (o, _) = run(&format!(
+            "n=0; while read _; do n=$((n+1)); done < {path}; echo $n"
+        ));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(o, "4\n");
+    }
+
+    #[test]
+    fn pipeline_into_while_read() {
+        // Feeding a while-read loop from a pipeline must consume successive
+        // lines (the pipeline stage input is a shared cursor).
+        let (o, _) = run("printf 'x\\ny\\nz\\n' | while read v; do echo \"<$v>\"; done");
+        assert_eq!(o, "<x>\n<y>\n<z>\n");
     }
 }

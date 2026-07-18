@@ -168,30 +168,33 @@ impl Parser {
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
         if let Some(w) = self.reserved_here() {
-            match w.as_str() {
-                "if" => return self.parse_if(),
-                "while" => return self.parse_loop(false),
-                "until" => return self.parse_loop(true),
-                "for" => return self.parse_for(),
-                "case" => return self.parse_case(),
-                "{" => return self.parse_brace_group(),
+            let cmd = match w.as_str() {
+                "if" => self.parse_if()?,
+                "while" => self.parse_loop(false)?,
+                "until" => self.parse_loop(true)?,
+                "for" => self.parse_for()?,
+                "case" => self.parse_case()?,
+                "{" => self.parse_brace_group()?,
                 other => {
                     return Err(ParseError(format!("unexpected reserved word '{other}'")));
                 }
-            }
+            };
+            return self.with_redirects(cmd);
         }
         if self.at_op(Op::LParen) {
-            return self.parse_subshell();
+            let cmd = self.parse_subshell()?;
+            return self.with_redirects(cmd);
         }
         // `(( expr ))` arithmetic command (lexed as a single token).
         if let Some(Tok::ArithCmd(raw)) = self.peek() {
             let raw = raw.clone();
             self.pos += 1;
-            return Ok(Command::Arith(raw));
+            return self.with_redirects(Command::Arith(raw));
         }
         // `[[ expr ]]` conditional expression.
         if self.bare_word_here().as_deref() == Some("[[") {
-            return self.parse_cond();
+            let cmd = self.parse_cond()?;
+            return self.with_redirects(cmd);
         }
         // Function definition: `name ( )`.
         if let Some(name) = self.bare_word_here()
@@ -205,6 +208,41 @@ impl Parser {
             return Ok(Command::Function(FunctionDef { name, body }));
         }
         self.parse_simple()
+    }
+
+    /// Is the current token the start of a redirection (`<`, `>`, `>>`, `2>`, …)?
+    fn at_redirect_start(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(Tok::Io(_))
+                | Some(Tok::Op(
+                    Op::Less
+                        | Op::Great
+                        | Op::DGreat
+                        | Op::GreatAnd
+                        | Op::LessAnd
+                        | Op::DLess
+                        | Op::DLessDash
+                        | Op::TLess,
+                ))
+        )
+    }
+
+    /// Attach any trailing redirections to a compound command, wrapping it in a
+    /// [`Command::Redirected`] when at least one is present.
+    fn with_redirects(&mut self, inner: Command) -> Result<Command, ParseError> {
+        let mut redirects = Vec::new();
+        while self.at_redirect_start() {
+            redirects.push(self.parse_redirect()?);
+        }
+        if redirects.is_empty() {
+            Ok(inner)
+        } else {
+            Ok(Command::Redirected {
+                inner: Box::new(inner),
+                redirects,
+            })
+        }
     }
 
     /// Parse a `{ … }` or `( … )` body used as a function body.

@@ -271,6 +271,9 @@ pub enum WordPart {
     /// `${name:-word}`-style parameter expansion with an operator.
     ParamOp {
         name: String,
+        /// Optional array subscript: `${a[i]:-word}` operates on element `i`.
+        /// `None` for a plain scalar/`${name:-word}`.
+        index: Option<Box<Word>>,
         op: ParamOp,
         arg: Box<Word>,
     },
@@ -278,6 +281,8 @@ pub enum WordPart {
     /// a matching prefix (`#`) or suffix (`%`); doubled operator = longest match.
     ParamTrim {
         name: String,
+        /// Optional array subscript (`${a[i]#pat}`).
+        index: Option<Box<Word>>,
         /// `true` for `%`/`%%` (suffix); `false` for `#`/`##` (prefix).
         suffix: bool,
         /// `true` for the doubled form (longest match).
@@ -288,6 +293,8 @@ pub enum WordPart {
     /// arithmetic; a negative offset counts from the end).
     ParamSubstr {
         name: String,
+        /// Optional array subscript (`${a[i]:off:len}`).
+        index: Option<Box<Word>>,
         offset: Box<Word>,
         length: Option<Box<Word>>,
     },
@@ -296,6 +303,8 @@ pub enum WordPart {
     /// end) — pattern substitution.
     ParamReplace {
         name: String,
+        /// Optional array subscript (`${a[i]/pat/repl}`).
+        index: Option<Box<Word>>,
         all: bool,
         anchor: ReplaceAnchor,
         pattern: Box<Word>,

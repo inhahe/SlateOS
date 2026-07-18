@@ -953,19 +953,35 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
     }
     let bytes: Vec<char> = raw.chars().collect();
     let (name, subscript, rest) = split_name_subscript(&bytes)?;
-    if let Some(index) = subscript {
-        if !rest.is_empty() {
-            // Combining a subscript with a `:-`/`#`/`/` operator is not yet supported.
+    // A subscript may be combined with an operator: `${a[i]:-def}`, `${a[i]#pat}`,
+    // etc. Only a specific `[expr]` index is allowed with an operator — `[@]`/`[*]`
+    // + operator (bulk transform) is not supported.
+    let elem_index: Option<Box<Word>> = match subscript {
+        None => None,
+        Some(ArrayIndex::Index(w)) => {
+            if rest.is_empty() {
+                return Ok(WordPart::ArrayRef {
+                    name,
+                    index: ArrayIndex::Index(w),
+                    length: false,
+                });
+            }
+            Some(w)
+        }
+        Some(index @ (ArrayIndex::All | ArrayIndex::Star)) => {
+            if rest.is_empty() {
+                return Ok(WordPart::ArrayRef {
+                    name,
+                    index,
+                    length: false,
+                });
+            }
+            // `${a[@]:-x}` / `${a[*]#pat}` (bulk element transform) is unsupported.
             return Err(ParseError(format!(
                 "unsupported parameter expansion '${{{raw}}}'"
             )));
         }
-        return Ok(WordPart::ArrayRef {
-            name,
-            index,
-            length: false,
-        });
-    }
+    };
     if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
@@ -978,13 +994,14 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             let pat: String = rest[pat_start..].iter().collect();
             Ok(WordPart::ParamTrim {
                 name,
+                index: elem_index,
                 suffix,
                 longest,
                 pattern: Box::new(word_from_source(&pat)?),
             })
         }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
-        '/' => parse_param_replace(name, &rest[1..]),
+        '/' => parse_param_replace(name, elem_index, &rest[1..]),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) => {
@@ -999,6 +1016,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             };
             Ok(WordPart::ParamSubstr {
                 name,
+                index: elem_index,
                 offset: Box::new(word_from_source(&off_str)?),
                 length,
             })
@@ -1024,6 +1042,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             };
             Ok(WordPart::ParamOp {
                 name,
+                index: elem_index,
                 op,
                 arg: Box::new(word_from_source(&arg_str)?),
             })
@@ -1032,7 +1051,11 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
 }
 
 /// Parse the body of a `${name/…}` substitution (chars after the first `/`).
-fn parse_param_replace(name: String, body: &[char]) -> Result<WordPart, ParseError> {
+fn parse_param_replace(
+    name: String,
+    index: Option<Box<Word>>,
+    body: &[char],
+) -> Result<WordPart, ParseError> {
     let mut i = 0;
     let mut all = false;
     let mut anchor = ReplaceAnchor::None;
@@ -1076,6 +1099,7 @@ fn parse_param_replace(name: String, body: &[char]) -> Result<WordPart, ParseErr
     }
     Ok(WordPart::ParamReplace {
         name,
+        index,
         all,
         anchor,
         pattern: Box::new(word_from_source(&pattern)?),

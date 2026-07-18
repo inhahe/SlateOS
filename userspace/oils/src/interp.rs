@@ -28,10 +28,14 @@
 //! - `${a[-1]}` negative subscripts count from the end (bash semantics; a
 //!   scalar acts as a one-element array). Array elements are addressable inside
 //!   arithmetic (`$(( a[i] + 1 ))`, `(( a[-1] ))`); the subscript is itself an
-//!   arithmetic expression. Mixing a subscript with a `${a[i]:-x}`-style
-//!   operator is still rejected at parse time. Indexed arrays use a dense
-//!   backing store, so a sparse literal (`a=([5]=x)`) fills the gaps with empty
-//!   elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
+//!   arithmetic expression. A subscript may be combined with a parameter
+//!   operator (`${a[i]:-def}`, `${a[i]#pat}`, `${a[i]:off:len}`,
+//!   `${a[i]/pat/repl}`, and `${a[i]:=v}` which writes the element back);
+//!   associative subscripts use the string key. Combining `[@]`/`[*]` with an
+//!   operator (a bulk element transform) is still rejected at parse time.
+//!   Indexed arrays use a dense backing store, so a sparse literal
+//!   (`a=([5]=x)`) fills the gaps with empty elements (its `${#a[@]}` and
+//!   `${!a[@]}` reflect the dense form).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -1064,6 +1068,54 @@ impl Shell {
             .map(|(_, v)| v.clone())
     }
 
+    /// Resolve the base value for a parameter expansion operator, honoring an
+    /// optional element subscript. `None` (no subscript) reads the scalar/plain
+    /// parameter; `Some(w)` reads element `w` — a string key for associative
+    /// arrays, else an arithmetic index for indexed arrays. Returns `None` when
+    /// the parameter/element is unset.
+    fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<String> {
+        match index {
+            None => self.param_value(name),
+            Some(w) => {
+                if self.assoc.contains_key(name) {
+                    let key = self.expand_to_string(w);
+                    self.assoc_element(name, &key)
+                } else {
+                    let idx = self.eval_arith_word(w);
+                    self.array_element(name, idx)
+                }
+            }
+        }
+    }
+
+    /// Write `value` back to a parameter or array element, honoring an optional
+    /// subscript. Used by `${name[i]:=default}` (assign-default). Out-of-range
+    /// negative indices are ignored (matching bash's "bad subscript" no-op here).
+    fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) {
+        match index {
+            None => {
+                self.vars.insert(name.to_string(), value);
+            }
+            Some(w) => {
+                if self.assoc.contains_key(name) {
+                    let key = self.expand_to_string(w);
+                    self.assoc_set(name, key, value, false);
+                } else {
+                    let idx = self.eval_arith_word(w);
+                    let arr = self.arrays.entry(name.to_string()).or_default();
+                    if let Some(real) = Self::resolve_index(idx, arr.len()) {
+                        if real >= arr.len() {
+                            arr.resize(real.saturating_add(1), String::new());
+                        }
+                        if let Some(slot) = arr.get_mut(real) {
+                            *slot = value;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
     /// (scalar context; `[@]`/`[*]` join with a space).
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
@@ -1595,35 +1647,43 @@ impl Shell {
                 .param_value(name)
                 .map_or(0, |v| v.chars().count())
                 .to_string(),
-            WordPart::ParamOp { name, op, arg } => self.expand_param_op(name, *op, arg),
+            WordPart::ParamOp {
+                name,
+                index,
+                op,
+                arg,
+            } => self.expand_param_op(name, index, *op, arg),
             WordPart::ParamTrim {
                 name,
+                index,
                 suffix,
                 longest,
                 pattern,
             } => {
-                let value = self.param_value(name).unwrap_or_default();
+                let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
                 param_trim(&value, &pat, *suffix, *longest)
             }
             WordPart::ParamSubstr {
                 name,
+                index,
                 offset,
                 length,
             } => {
-                let value = self.param_value(name).unwrap_or_default();
+                let value = self.param_elem_value(name, index).unwrap_or_default();
                 let off = self.eval_arith_word(offset);
                 let len = length.as_ref().map(|l| self.eval_arith_word(l));
                 param_substr(&value, off, len)
             }
             WordPart::ParamReplace {
                 name,
+                index,
                 all,
                 anchor,
                 pattern,
                 replacement,
             } => {
-                let value = self.param_value(name).unwrap_or_default();
+                let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
                 let repl = self.expand_to_string(replacement);
                 param_replace(&value, &pat, &repl, *all, *anchor)
@@ -1642,8 +1702,14 @@ impl Shell {
         }
     }
 
-    fn expand_param_op(&mut self, name: &str, op: ParamOp, arg: &Word) -> String {
-        let cur = self.param_value(name);
+    fn expand_param_op(
+        &mut self,
+        name: &str,
+        index: &Option<Box<Word>>,
+        op: ParamOp,
+        arg: &Word,
+    ) -> String {
+        let cur = self.param_elem_value(name, index);
         let is_set_nonempty = cur.as_ref().is_some_and(|v| !v.is_empty());
         match op {
             ParamOp::UseDefault => {
@@ -1658,7 +1724,7 @@ impl Shell {
                     cur.unwrap_or_default()
                 } else {
                     let v = self.expand_to_string(arg);
-                    self.vars.insert(name.to_string(), v.clone());
+                    self.assign_elem(name, index, v.clone());
                     v
                 }
             }
@@ -3356,6 +3422,36 @@ mod tests {
         // A (( … )) command: a[0] is non-zero → success (exit 0).
         assert_eq!(run("a=(5 0); (( a[0] ))").1, 0);
         assert_eq!(run("a=(5 0); (( a[1] ))").1, 1); // zero → exit 1
+    }
+
+    #[test]
+    fn array_element_with_operator() {
+        // `:-` use-default on a present vs. absent element.
+        assert_eq!(run("a=(x y z); echo ${a[1]:-def}").0, "y\n");
+        assert_eq!(run("a=(x y z); echo ${a[9]:-def}").0, "def\n");
+        // Negative subscript combined with an operator.
+        assert_eq!(run("a=(x y z); echo ${a[-1]:-def}").0, "z\n");
+        assert_eq!(run("a=(x y z); echo ${a[-9]:-def}").0, "def\n");
+        // `:+` use-alternate: element set → arg; unset → empty.
+        assert_eq!(run("a=(x y); echo [${a[0]:+set}]").0, "[set]\n");
+        assert_eq!(run("a=(x y); echo [${a[5]:+set}]").0, "[]\n");
+        // Prefix/suffix trim on an element.
+        assert_eq!(run("a=(foo.txt bar.md); echo ${a[0]%.txt}").0, "foo\n");
+        assert_eq!(run("a=(abcabc); echo ${a[0]#a}").0, "bcabc\n");
+        // Substring on an element.
+        assert_eq!(run("a=(hello world); echo ${a[1]:0:3}").0, "wor\n");
+        // Pattern replacement on an element.
+        assert_eq!(run("a=(a-b-c); echo ${a[0]//-/_}").0, "a_b_c\n");
+        // `:=` assign-default writes the element back.
+        assert_eq!(run("a=(x); echo ${a[2]:=new}; echo ${a[2]}").0, "new\nnew\n");
+        // Associative element with an operator (string key).
+        assert_eq!(
+            run("declare -A m; m[k]=v; echo ${m[k]:-def} ${m[nope]:-def}").0,
+            "v def\n"
+        );
+        // Combining `[@]`/`[*]` with an operator is rejected at parse time.
+        assert!(parse("echo ${a[@]:-def}").is_err());
+        assert!(parse("echo ${a[*]#pat}").is_err());
     }
 
     #[test]

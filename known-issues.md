@@ -38,7 +38,7 @@ Neither is a correctness bug in the implemented surface — they are
 intentional grow-phase scope limits, documented in the `interp.rs`
 module header. No test depends on the deferred behavior.
 
-### TD-OILS2. `osh` arrays: no negative/arith subscripts in `(( ))`, no subscript+operator combo — DEBT 2026-07-18 (UPDATED 2026-07-18: associative arrays + `declare -A m=(…)` one-liner now implemented)
+### TD-OILS2. `osh` arrays: dense backing store for sparse indexed arrays — DEBT 2026-07-18 (UPDATED 2026-07-18: associative arrays, negative/arith subscripts, and subscript+operator combos now implemented; only the dense-store limitation and a couple of niche reads remain)
 
 **Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
 `try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`,
@@ -68,10 +68,16 @@ element; unquoted forms field-split. Remaining deferred pieces:
    `VarLookup::get_index`, which `Shell` implements over `array_element`.
    Indexed arrays only; an associative subscript in `(( … ))` is
    arith-evaluated (not treated as a string key) — niche, still TODO.
-3. **Subscript combined with an expansion operator**
-   (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time to avoid
-   wrong results. **Proper fix:** thread the subscript through the
-   `ParamOp`/`ParamTrim`/… variants so the operator applies per element.
+3. ~~**Subscript combined with an expansion operator**
+   (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time.~~
+   **DONE 2026-07-18:** the four operator variants (`ParamOp`,
+   `ParamTrim`, `ParamSubstr`, `ParamReplace`) now carry an optional
+   `index: Option<Box<Word>>`. The parser attaches a `[expr]` subscript to
+   the operator (rejecting only `[@]`/`[*]` + operator, a bulk transform).
+   `param_elem_value` resolves the element base value (associative key vs.
+   arithmetic index, negatives from the end), and `${a[i]:=v}` writes the
+   element back via `assign_elem`. All of `${a[i]:-def}`, `:+`, `:?`,
+   `#`/`##`/`%`/`%%`, `:off:len`, and `/pat/repl` work per element.
 4. **Indexed arrays use a dense backing store** (`Vec<String>`), so a
    sparse literal (`a=([5]=x)`) fills gaps with empty elements and its
    `${#a[@]}`/`${!a[@]}` reflect the dense form (bash keeps them sparse).

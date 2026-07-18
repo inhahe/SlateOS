@@ -7172,6 +7172,10 @@ name = "oha-cli"
 version = "0.1.0"
 
 [[package]]
+name = "oils"
+version = "0.1.0"
+
+[[package]]
 name = "okta-cli"
 version = "0.1.0"
 

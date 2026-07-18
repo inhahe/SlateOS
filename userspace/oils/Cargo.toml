@@ -1,0 +1,13 @@
+[package]
+name = "oils"
+version = "0.1.0"
+edition = "2024"
+description = "Oils (OSH) — a bash/POSIX-superset shell for SlateOS (Rust reimplementation; see design-decisions.md §72)"
+
+[[bin]]
+name = "osh"
+path = "src/main.rs"
+
+[lib]
+name = "osh"
+path = "src/lib.rs"

@@ -4799,3 +4799,57 @@ D-NETSOCK-SYNC; `net-userspace-migration.md`; the 5.7 default-flip.
 handle; daemon `OP_RING_TCP`-attaches it and migrates connection state between
 session tables) — or skip straight to the async socket server, which supersedes
 the whole question.
+
+## 72. Oils (OSH) port strategy (Q25-A) — **Rust reimplementation of the OSH language in-tree**, not a C++ `oils-for-unix` cross-compile
+
+**Decided by:** Claude (operator-approved scope) — the operator committed to "port
+Oils (OSH), a bash-*superset* shell (NOT bash itself)" as the first large
+initiative (§69, Q25→A). *How* to port it (faithful C++ cross-compile vs. Rust
+reimplementation) is the sub-decision recorded here. Flagged to the operator as
+open-question **Q26** because it is large and costly-to-reverse; proceeding on the
+prerequisite-forced default while the operator is away.
+
+**Decision.** Build `userspace/oils` as a **real Rust reimplementation** of the
+OSH language (a bash/POSIX superset shell that actually forks/execs external
+programs on SlateOS), matching the pattern already used for **coreutils** (85
+real Rust tools) and the existing 1194-line `userspace/coreutils/src/bin/sh.rs`
+minimal POSIX shell. **Not** a cross-compile of upstream Oils' C++
+(`oils-for-unix`) tarball.
+
+**Why (the decisive prerequisite fact).** There is **no C/C++ → `x86_64-slateos`
+cross-toolchain in this repo** — verified: no crate/build.rs/script references a
+C++ cross-compile to slateos, and every "port" to date is either a Rust
+reimplementation (coreutils) or a Rust personality binary (the in-tree
+`userspace/nushell` is a *stub* that simulates output; the real `nu.exe` was only
+verified building against the **Windows host** target, never slateos).
+Cross-compiling `oils-for-unix` would first require standing up an entire C++
+cross-toolchain **and** a slateos libc/CRT sufficient for Oils' POSIX use — a
+separate, massive, unlisted prerequisite initiative. A Rust reimplementation is
+the only path that yields a **running** shell on the OS now, and it is the honest
+match to the operator's intent (Q24 was spent specifically de-risking the
+fork/exec teardown deadlock so this shell can fork/exec for real — a stub would
+not exercise that at all).
+
+**Alternatives considered.**
+- **C++ `oils-for-unix` cross-compile (faithful port).** Pro: bit-for-bit OSH
+  semantics, no reimplementation risk. Con: blocked on a non-existent C++/slateos
+  toolchain + libc — not buildable today; would deliver nothing runnable for a
+  long time. Rejected as prerequisite-blocked.
+- **Extend the existing coreutils `sh.rs` in place.** Pro: least new code. Con:
+  that binary is deliberately a *minimal POSIX sh*; growing it to a bash-superset
+  OSH would bloat the coreutils crate and blur the "one crate = one deliverable"
+  layout. A dedicated `userspace/oils` crate keeps the OSH shell reviewable and
+  independently buildable/testable, and lets `sh.rs` stay a small POSIX baseline.
+- **Rust stub personality (like the checked-in nushell).** Rejected — a shell
+  that only prints simulated output is not a "port," does not run programs, and
+  wastes the Q24 fork/exec de-risking.
+
+**How to reverse.** If a C++/slateos toolchain is later built (e.g. as part of the
+Mesa/Chromium/WINE initiatives, which need C/C++ anyway), the faithful
+`oils-for-unix` cross-compile can replace `userspace/oils` — the crate is an
+isolated userspace binary with no other code depending on its internals, so the
+swap is local. Until then the Rust OSH shell is the deliverable.
+
+**Where it lives.** `userspace/oils/` (new crate; auto-registered via the
+`userspace/*` workspace glob). Roadmap: §2.7 "Port Oils (OSH)" (roadmap.md:1494).
+Tracking: open-questions.md Q26.

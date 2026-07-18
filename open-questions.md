@@ -23,18 +23,40 @@ Format for each entry:
 
 ---
 
-## (no open questions)
+## Q26 — Oils (OSH) port strategy: Rust reimplementation now vs. faithful C++ `oils-for-unix` cross-compile later
 
-All previously-deferred operator decisions have been resolved — see the
-"Recently resolved" list below and `design-decisions.md` for full rationale.
-New decisions should be appended above the "Earlier deferred operator
-decisions" divider as `## Q26 …`.
+**Status:** OPEN (proceeding on the prerequisite-forced default; heads-up only).
+
+**Question.** You committed (§69/Q25→A) to porting **Oils (OSH)** — a bash-superset
+shell — as the first large initiative. *How* should it be ported?
+
+**Options.**
+- **(A) Rust reimplementation in-tree (`userspace/oils`)** — a real Rust shell
+  implementing the OSH language that forks/execs on SlateOS, matching the
+  coreutils reimplementation pattern.
+  - *Pro:* only path that builds/runs **today**; consistent with existing
+    userspace; honest use of the Q24 fork/exec de-risking. *Con:* not bit-for-bit
+    upstream OSH; reimplementation effort + fidelity risk on obscure bash corners.
+- **(B) Faithful C++ `oils-for-unix` cross-compile** — build the real upstream.
+  - *Pro:* exact OSH semantics, no reimplementation. *Con:* **blocked** — no
+    C/C++→`x86_64-slateos` toolchain or libc/CRT exists yet; standing that up is a
+    separate massive initiative. Delivers nothing runnable in the near term.
+
+**Claude's recommendation / what I'm doing meanwhile.** Proceeding with **(A)** —
+it is the only prerequisite-satisfiable path and the reversal cost is local (the
+crate is an isolated userspace binary; if a C++/slateos toolchain later lands via
+the Mesa/Chromium/WINE work, swap in the real `oils-for-unix`). Full rationale in
+`design-decisions.md §72`. If you'd rather gate this behind first building the
+C++ toolchain, say so and I'll re-order.
+
+**Where it bites.** `userspace/oils/` (new crate); roadmap.md:1494; the existing
+minimal `userspace/coreutils/src/bin/sh.rs` stays a small POSIX baseline.
 
 ---
 
 Earlier deferred operator decisions (Q1–Q25) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q26 …`.
+full rationale. New decisions should be appended above this line as `## Q27 …`.
 
 ---
 

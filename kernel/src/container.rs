@@ -6609,11 +6609,18 @@ pub fn self_test() {
 
     // Test 20: a container with published ports (`-p host:container`) installs
     // host-port NAT forwards at run() time, targeting the container's own IP,
-    // and tears them down on stop()/delete().  Unlike the jail/volume tests,
-    // the forwards are per-netns container state (not per-PID), installed
-    // synchronously by run() before it returns and unaffected by the init
-    // process's lifetime — so reading them back is deterministic even though
-    // run() spawns a real (short-lived) init process.
+    // and tears them down on stop()/delete().  The forwards are per-netns
+    // container state (not per-PID), installed synchronously by run() before it
+    // returns.  They are, however, coupled to the init process's lifetime: when
+    // the init exits, `notify_init_exit` transitions the container to Stopped
+    // and flushes the forwards (Docker's "a container lives as long as its
+    // init").  HELLO_ELF exits immediately, so the read-back below must observe
+    // the forwards *before* the enqueued-but-not-yet-run init can be scheduled
+    // and flush them.  On the single-CPU boot self-test, disabling preemption
+    // across run() and the read-back guarantees no context switch to the init
+    // task in that window, making the assertion deterministic.  (Previously an
+    // instant-exit init could win the race and flush the forwards first — a
+    // timing-dependent flake that preemption-timing changes made observable.)
     {
         use crate::net::nat::NatProto;
         static HELLO_ELF: &[u8] = include_bytes!(
@@ -6655,18 +6662,27 @@ pub fn self_test() {
         );
 
         let opts = crate::proc::spawn::SpawnOptions::new("port-init");
+        // Install-then-read the forwards atomically w.r.t. the scheduler: run()
+        // enqueues (but does not run) the init and installs the forwards; the
+        // init's death handler is the only thing that flushes them.  Keeping
+        // preemption disabled from just before run() through the read-back
+        // ensures the init cannot be scheduled to exit-and-flush in between on
+        // this single-CPU boot self-test.  We snapshot the forwards inside the
+        // window and assert on the snapshot after re-enabling preemption.
+        crate::sched::preempt_disable();
         let pid = run(ct_port, HELLO_ELF, &opts).expect("run port container");
+        let tcp_snapshot = crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080);
+        let udp_snapshot = crate::net::nat::lookup_port_forward(NatProto::Udp, 5353);
+        crate::sched::preempt_enable();
 
         // After run, the forwards are live, targeting the container IP.
-        let tcp = crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080)
-            .expect("tcp forward installed");
+        let tcp = tcp_snapshot.expect("tcp forward installed");
         assert_eq!(tcp.container_port, 8080);
         assert_eq!(
             tcp.container_ip,
             crate::net::interface::Ipv4Addr::new(10, 7, 0, 9),
         );
-        let udp = crate::net::nat::lookup_port_forward(NatProto::Udp, 5353)
-            .expect("udp forward installed");
+        let udp = udp_snapshot.expect("udp forward installed");
         assert_eq!(udp.container_port, 53);
         // Publishing on a running container is rejected.
         assert!(add_port_publish(ct_port, NatProto::Tcp, 9090, 90).is_err());

@@ -1033,6 +1033,20 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 pattern: Box::new(word_from_source(&pat)?),
             })
         }
+        // Case modification: `^`, `^^` (upper), `,`, `,,` (lower).
+        '^' | ',' => {
+            let upper = rest[0] == '^';
+            let all = rest.get(1) == Some(&rest[0]);
+            let pat_start = if all { 2 } else { 1 };
+            let pat: String = rest[pat_start..].iter().collect();
+            Ok(WordPart::ParamCase {
+                name,
+                index: elem_index,
+                upper,
+                all,
+                pattern: Box::new(word_from_source(&pat)?),
+            })
+        }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
         '/' => parse_param_replace(name, elem_index, &rest[1..]),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the

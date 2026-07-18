@@ -2058,6 +2058,17 @@ impl Shell {
                 let repl = self.expand_to_string(replacement);
                 param_replace(&value, &pat, &repl, *all, *anchor)
             }
+            WordPart::ParamCase {
+                name,
+                index,
+                upper,
+                all,
+                pattern,
+            } => {
+                let value = self.param_elem_value(name, index).unwrap_or_default();
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                param_case(&value, &pat, *upper, *all)
+            }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
             WordPart::ArrayRef {
@@ -3248,6 +3259,46 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> Str
     value.to_string()
 }
 
+/// `${name^pat}` / `${name^^pat}` (upper) / `${name,pat}` / `${name,,pat}`
+/// (lower) — case modification. `pattern` selects which characters convert (a
+/// glob matched against a single character); an empty pattern matches any
+/// character. `all` converts every matching character; otherwise only the
+/// first character of the value is considered (and only converted if it
+/// matches `pattern`).
+fn param_case(value: &str, pattern: &[char], upper: bool, all: bool) -> String {
+    // An empty pattern matches every character (bash: `^^`/`,,` with no
+    // pattern uppercases/lowercases the whole value).
+    let matches_char = |ch: char| pattern.is_empty() || glob_match(pattern, &[ch]);
+    let convert = |ch: char| {
+        if upper {
+            // `char::to_uppercase`/`to_lowercase` can yield multiple chars
+            // (e.g. 'ß' → "SS"); bash uses towupper/towlower per rune, but the
+            // multi-char expansion is the closest correct Unicode behavior.
+            ch.to_uppercase().collect::<String>()
+        } else {
+            ch.to_lowercase().collect::<String>()
+        }
+    };
+    let mut out = String::with_capacity(value.len());
+    let mut done = false;
+    for ch in value.chars() {
+        if !done && matches_char(ch) {
+            out.push_str(&convert(ch));
+            if !all {
+                done = true;
+            }
+        } else {
+            out.push(ch);
+            if !all {
+                // For the single-char form only the first character is
+                // eligible; everything after is copied verbatim.
+                done = true;
+            }
+        }
+    }
+    out
+}
+
 /// `${name:offset[:length]}` — a negative offset counts from the end; a negative
 /// length is an offset from the end.
 fn param_substr(value: &str, offset: i64, length: Option<i64>) -> String {
@@ -3638,6 +3689,28 @@ mod tests {
         assert_eq!(run("x=foo.tar.gz; echo ${x##*.}").0, "gz\n");
         assert_eq!(run("x=foo.tar.gz; echo ${x%.*}").0, "foo.tar\n");
         assert_eq!(run("x=foo.tar.gz; echo ${x%%.*}").0, "foo\n");
+    }
+
+    #[test]
+    fn param_case_modification() {
+        // Doubled `^^`/`,,` convert every character.
+        assert_eq!(run("x=hello; echo ${x^^}").0, "HELLO\n");
+        assert_eq!(run("x=HELLO; echo ${x,,}").0, "hello\n");
+        // Single `^`/`,` convert only the first character.
+        assert_eq!(run("x=hello; echo ${x^}").0, "Hello\n");
+        assert_eq!(run("x=HELLO; echo ${x,}").0, "hELLO\n");
+        // A pattern selects which characters convert.
+        assert_eq!(run("x=hello; echo ${x^^[aeiou]}").0, "hEllO\n");
+        assert_eq!(run("x=HELLO; echo ${x,,[AEIOU]}").0, "HeLLo\n");
+        // Single form only converts the first char if it matches the pattern.
+        assert_eq!(run("x=hello; echo ${x^[b]}").0, "hello\n");
+        assert_eq!(run("x=hello; echo ${x^[h]}").0, "Hello\n");
+        // Mixed already-cased input is normalized.
+        assert_eq!(run("x=\"Hello World\"; echo \"${x^^}\"").0, "HELLO WORLD\n");
+        // Works on array elements.
+        assert_eq!(run("a=(foo bar); echo ${a[1]^^}").0, "BAR\n");
+        // Empty/unset value yields empty.
+        assert_eq!(run("echo [${nope^^}]").0, "[]\n");
     }
 
     #[test]

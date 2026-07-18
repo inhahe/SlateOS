@@ -328,6 +328,22 @@ pub enum WordPart {
         pattern: Box<Word>,
         replacement: Box<Word>,
     },
+    /// `${name^pat}` / `${name^^pat}` (upper-case) / `${name,pat}` /
+    /// `${name,,pat}` (lower-case) — case modification. `all` is the doubled
+    /// operator (convert every character whose value matches `pattern`);
+    /// otherwise only the first character is considered. `pattern` selects
+    /// which characters convert (a glob matched against one character at a
+    /// time); an empty pattern matches any character.
+    ParamCase {
+        name: String,
+        /// Optional array subscript (`${a[i]^^}`).
+        index: Option<Box<Word>>,
+        /// `true` for `^`/`^^` (upper); `false` for `,`/`,,` (lower).
+        upper: bool,
+        /// `true` for the doubled form (every matching character).
+        all: bool,
+        pattern: Box<Word>,
+    },
     /// `$(command)` / `` `command` `` command substitution.
     CommandSub(Program),
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).

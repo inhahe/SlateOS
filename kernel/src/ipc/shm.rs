@@ -42,7 +42,7 @@ use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::mm::page_table;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants

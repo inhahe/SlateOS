@@ -50,7 +50,7 @@ use crate::mm::user::{read_user, validate_user_write};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -68,7 +68,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants

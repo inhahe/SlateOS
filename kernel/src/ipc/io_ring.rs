@@ -65,7 +65,7 @@
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Ring entry structures

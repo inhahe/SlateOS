@@ -51,7 +51,7 @@ use crate::ipc::channel::{self, ChannelHandle};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -12,14 +12,24 @@
 //! pattern is left literal (bash default, no `nullglob`).
 //!
 //! Indexed arrays are supported: `a=(x y z)`, `a[i]=v`, `a+=(w)`, `${a[i]}`,
-//! `${a[@]}`/`${a[*]}`, `${#a[@]}`, and `unset a[i]`. `"${a[@]}"` preserves
+//! `${a[@]}`/`${a[*]}`, `${#a[@]}`, `${!a[@]}` (indices), and `unset a[i]`.
+//! Array literals may be keyed/sparse (`a=([2]=x y)`). `"${a[@]}"` preserves
 //! element boundaries (one field per element).
+//!
+//! Associative arrays: `declare -A m` (also `typeset`/`local`) then `m[key]=v`,
+//! `m=([k1]=v1 [k2]=v2)`, `${m[key]}`, `${m[@]}`/`${m[*]}` (values, insertion
+//! order), `${!m[@]}` (keys), `${#m[@]}`, and `unset m[key]`. Subscripts on an
+//! associative array are string keys (expanded, not arithmetic).
 //!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
-//! - No *associative* arrays (`declare -A`) yet. Negative array indices and
-//!   arithmetic subscripts inside `(( … ))` (`a[i]`) are not supported. Mixing
-//!   a subscript with a `${a[i]:-x}`-style operator is rejected at parse time.
+//! - The combined one-liner `declare -A m=([k]=v)` is not accepted (an array
+//!   literal after a command word is a parse error); use `declare -A m` then a
+//!   separate `m=([k]=v)`. Negative array indices and arithmetic subscripts
+//!   inside `(( … ))` (`a[i]`) are not supported. Mixing a subscript with a
+//!   `${a[i]:-x}`-style operator is rejected at parse time. Indexed arrays use
+//!   a dense backing store, so a sparse literal (`a=([5]=x)`) fills the gaps
+//!   with empty elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -41,7 +51,8 @@ use std::process::{Command as PCommand, Stdio};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, ArrayIndex, AssignRhs, Assignment, CaseClause, Command, CondBinOp, CondExpr,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, Command, CondBinOp,
+    CondExpr,
     ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp,
     ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -87,6 +98,10 @@ pub struct Shell {
     /// Indexed arrays: `name=(a b c)` and `name[i]=v`. Kept separate from
     /// `vars`; `${name}` reads element 0, `${name[@]}`/`${name[*]}` read all.
     arrays: HashMap<String, Vec<String>>,
+    /// Associative arrays (`declare -A m; m[key]=v`). Insertion-ordered
+    /// key/value pairs for deterministic iteration. A name present here is
+    /// associative: subscripts are string keys, not arithmetic indices.
+    assoc: HashMap<String, Vec<(String, String)>>,
     exported: HashSet<String>,
     funcs: HashMap<String, Program>,
     positional: Vec<String>,
@@ -109,6 +124,7 @@ impl Shell {
         Shell {
             vars: HashMap::new(),
             arrays: HashMap::new(),
+            assoc: HashMap::new(),
             exported: HashSet::new(),
             funcs: HashMap::new(),
             positional: Vec::new(),
@@ -566,6 +582,7 @@ impl Shell {
         Shell {
             vars: self.vars.clone(),
             arrays: self.arrays.clone(),
+            assoc: self.assoc.clone(),
             exported: self.exported.clone(),
             funcs: self.funcs.clone(),
             positional: self.positional.clone(),
@@ -581,25 +598,32 @@ impl Shell {
     /// Apply a standalone assignment to shell state, handling scalars, indexed
     /// elements (`name[i]=v`), whole arrays (`name=(a b c)`), and append (`+=`).
     fn apply_assignment(&mut self, a: &Assignment) {
+        let is_assoc = self.assoc.contains_key(&a.name);
         match &a.value {
             AssignRhs::Scalar(w) => {
                 let val = self.expand_to_string(w);
                 if let Some(idx_word) = &a.index {
-                    // `name[i]=val` — indexed element assignment.
-                    let idx = self.eval_arith_word(idx_word);
-                    let Ok(idx) = usize::try_from(idx) else {
-                        eprintln!("osh: {}: bad array subscript", a.name);
-                        return;
-                    };
-                    let arr = self.arrays.entry(a.name.clone()).or_default();
-                    if idx >= arr.len() {
-                        arr.resize(idx.saturating_add(1), String::new());
-                    }
-                    if let Some(slot) = arr.get_mut(idx) {
-                        if a.append {
-                            slot.push_str(&val);
-                        } else {
-                            *slot = val;
+                    if is_assoc {
+                        // `name[key]=val` — associative element (string key).
+                        let key = self.expand_to_string(idx_word);
+                        self.assoc_set(&a.name, key, val, a.append);
+                    } else {
+                        // `name[i]=val` — indexed element assignment.
+                        let idx = self.eval_arith_word(idx_word);
+                        let Ok(idx) = usize::try_from(idx) else {
+                            eprintln!("osh: {}: bad array subscript", a.name);
+                            return;
+                        };
+                        let arr = self.arrays.entry(a.name.clone()).or_default();
+                        if idx >= arr.len() {
+                            arr.resize(idx.saturating_add(1), String::new());
+                        }
+                        if let Some(slot) = arr.get_mut(idx) {
+                            if a.append {
+                                slot.push_str(&val);
+                            } else {
+                                *slot = val;
+                            }
                         }
                     }
                 } else if a.append {
@@ -618,17 +642,82 @@ impl Shell {
                     self.vars.insert(a.name.clone(), val);
                 }
             }
-            AssignRhs::Array(words) => {
-                let mut elems: Vec<String> = Vec::new();
-                for w in words {
-                    elems.extend(self.expand_word(w, true));
+            AssignRhs::Array(items) if is_assoc => {
+                // Associative literal: `m=([k]=v …)` (m already `declare -A`).
+                if !a.append {
+                    self.assoc.insert(a.name.clone(), Vec::new());
                 }
-                if a.append {
-                    self.arrays.entry(a.name.clone()).or_default().extend(elems);
-                } else {
-                    self.arrays.insert(a.name.clone(), elems);
+                for e in items {
+                    match e {
+                        ArrayElem::Keyed { index, value } => {
+                            let key = self.expand_to_string(index);
+                            let val = self.expand_to_string(value);
+                            self.assoc_set(&a.name, key, val, false);
+                        }
+                        ArrayElem::Positional(_) => {
+                            eprintln!(
+                                "osh: {}: must use subscript when assigning associative array",
+                                a.name
+                            );
+                        }
+                    }
                 }
             }
+            AssignRhs::Array(items) => {
+                // Indexed literal: positional elements append at the running
+                // index; `[i]=v` elements place at an explicit index.
+                let mut elems: Vec<String> = if a.append {
+                    self.arrays.get(&a.name).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let mut next = elems.len();
+                for e in items {
+                    match e {
+                        ArrayElem::Positional(w) => {
+                            for v in self.expand_word(w, true) {
+                                if next >= elems.len() {
+                                    elems.resize(next.saturating_add(1), String::new());
+                                }
+                                if let Some(slot) = elems.get_mut(next) {
+                                    *slot = v;
+                                }
+                                next = next.saturating_add(1);
+                            }
+                        }
+                        ArrayElem::Keyed { index, value } => {
+                            let idx = self.eval_arith_word(index);
+                            let val = self.expand_to_string(value);
+                            if let Ok(idx) = usize::try_from(idx) {
+                                if idx >= elems.len() {
+                                    elems.resize(idx.saturating_add(1), String::new());
+                                }
+                                if let Some(slot) = elems.get_mut(idx) {
+                                    *slot = val;
+                                }
+                                next = idx.saturating_add(1);
+                            } else {
+                                eprintln!("osh: {}: bad array subscript", a.name);
+                            }
+                        }
+                    }
+                }
+                self.arrays.insert(a.name.clone(), elems);
+            }
+        }
+    }
+
+    /// Set an associative-array element, creating the array if needed.
+    fn assoc_set(&mut self, name: &str, key: String, val: String, append: bool) {
+        let map = self.assoc.entry(name.to_string()).or_default();
+        if let Some(slot) = map.iter_mut().find(|(k, _)| *k == key) {
+            if append {
+                slot.1.push_str(&val);
+            } else {
+                slot.1 = val;
+            }
+        } else {
+            map.push((key, val));
         }
     }
 
@@ -637,10 +726,13 @@ impl Shell {
     fn assignment_prefix_value(&mut self, a: &Assignment) -> (String, String) {
         let val = match &a.value {
             AssignRhs::Scalar(w) => self.expand_to_string(w),
-            AssignRhs::Array(words) => {
+            AssignRhs::Array(items) => {
                 let mut elems: Vec<String> = Vec::new();
-                for w in words {
-                    elems.extend(self.expand_word(w, true));
+                for e in items {
+                    match e {
+                        ArrayElem::Positional(w) => elems.extend(self.expand_word(w, true)),
+                        ArrayElem::Keyed { value, .. } => elems.push(self.expand_to_string(value)),
+                    }
                 }
                 elems.join(" ")
             }
@@ -648,12 +740,27 @@ impl Shell {
         (a.name.clone(), val)
     }
 
-    /// All elements of `name`, treating a plain scalar as a one-element array.
+    /// All values of `name`, treating a plain scalar as a one-element array.
     fn array_elements(&self, name: &str) -> Vec<String> {
-        if let Some(a) = self.arrays.get(name) {
+        if let Some(m) = self.assoc.get(name) {
+            m.iter().map(|(_, v)| v.clone()).collect()
+        } else if let Some(a) = self.arrays.get(name) {
             a.clone()
         } else if let Some(v) = self.vars.get(name) {
             vec![v.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The keys (associative) or indices (indexed) of `name`, in order.
+    fn array_keys(&self, name: &str) -> Vec<String> {
+        if let Some(m) = self.assoc.get(name) {
+            m.iter().map(|(k, _)| k.clone()).collect()
+        } else if let Some(a) = self.arrays.get(name) {
+            (0..a.len()).map(|i| i.to_string()).collect()
+        } else if self.vars.contains_key(name) {
+            vec!["0".to_string()]
         } else {
             Vec::new()
         }
@@ -672,6 +779,15 @@ impl Shell {
         }
     }
 
+    /// An associative-array value by string key.
+    fn assoc_element(&self, name: &str, key: &str) -> Option<String> {
+        self.assoc
+            .get(name)?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
     /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
     /// (scalar context; `[@]`/`[*]` join with a space).
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
@@ -685,8 +801,14 @@ impl Shell {
                 }
             }
             ArrayIndex::Index(w) => {
-                let idx = self.eval_arith_word(w);
-                let val = self.array_element(name, idx);
+                // Associative subscripts are string keys, not arithmetic.
+                let val = if self.assoc.contains_key(name) {
+                    let key = self.expand_to_string(w);
+                    self.assoc_element(name, &key)
+                } else {
+                    let idx = self.eval_arith_word(w);
+                    self.array_element(name, idx)
+                };
                 if length {
                     val.map_or(0, |v| v.chars().count()).to_string()
                 } else {
@@ -1088,15 +1210,20 @@ impl Shell {
                 WordPart::DoubleQuoted(parts) => {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
                     // preserving embedded whitespace; empty arrays yield no field.
-                    if let [
-                        WordPart::ArrayRef {
-                            name,
-                            index: ArrayIndex::All,
-                            length: false,
-                        },
-                    ] = parts.as_slice()
-                    {
-                        for (i, el) in self.array_elements(name).into_iter().enumerate() {
+                    // `"${!arr[@]}"` does the same over the keys/indices.
+                    let per_element: Option<Vec<String>> = match parts.as_slice() {
+                        [
+                            WordPart::ArrayRef {
+                                name,
+                                index: ArrayIndex::All,
+                                length: false,
+                            },
+                        ] => Some(self.array_elements(name)),
+                        [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
+                        _ => None,
+                    };
+                    if let Some(items) = per_element {
+                        for (i, el) in items.into_iter().enumerate() {
                             if i > 0 {
                                 fields.push(std::mem::take(&mut cur));
                             }
@@ -1195,6 +1322,7 @@ impl Shell {
                 index,
                 length,
             } => self.expand_array_ref(name, index, *length),
+            WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
@@ -1264,7 +1392,11 @@ impl Shell {
                     }
                     return self.positional.get(n - 1).cloned();
                 }
-                // A plain array reference (`$arr` / `${arr}`) reads element 0.
+                // A plain array reference (`$arr` / `${arr}`) reads element 0
+                // (indexed) or the value at key "0" (associative).
+                if let Some(m) = self.assoc.get(name) {
+                    return m.iter().find(|(k, _)| k == "0").map(|(_, v)| v.clone());
+                }
                 if let Some(arr) = self.arrays.get(name) {
                     return arr.first().cloned();
                 }
@@ -1393,6 +1525,7 @@ impl Shell {
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args),
+            "declare" | "typeset" | "local" => self.builtin_declare(args),
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
@@ -1509,6 +1642,64 @@ impl Shell {
         0
     }
 
+    /// `declare`/`typeset`/`local`: create typed variables. Supports `-A`
+    /// (associative array), `-a` (indexed array), and scalar `name=value`.
+    /// Other type flags (`-r`, `-x`, `-i`, `-g`, …) are accepted but only
+    /// `-x`/`-g`'s export effect via a following `export` is honoured elsewhere;
+    /// here they are parsed and ignored. The combined form `declare -A m=(…)`
+    /// is not supported (parse restriction) — use `declare -A m; m=([k]=v …)`.
+    fn builtin_declare(&mut self, args: &[String]) -> i32 {
+        let mut assoc = false;
+        let mut indexed = false;
+        let mut export = false;
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = arg.strip_prefix('-') {
+                for c in flags.chars() {
+                    match c {
+                        'A' => assoc = true,
+                        'a' => indexed = true,
+                        'x' => export = true,
+                        _ => {} // -r/-i/-g/-l/-u/-n/-p: accepted, no effect here.
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        for name_val in &args[i..] {
+            let (name, value) = match name_val.find('=') {
+                Some(eq) => (&name_val[..eq], Some(name_val[eq + 1..].to_string())),
+                None => (name_val.as_str(), None),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if assoc {
+                self.assoc.entry(name.to_string()).or_default();
+            } else if indexed {
+                self.arrays.entry(name.to_string()).or_default();
+            }
+            if let Some(v) = value {
+                if assoc || indexed {
+                    // `declare -A m=str` / `-a a=str` — scalar init unsupported;
+                    // ignore the value (bash would treat str as element/key).
+                } else {
+                    self.vars.insert(name.to_string(), v);
+                }
+            }
+            if export {
+                self.exported.insert(name.to_string());
+            }
+        }
+        0
+    }
+
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
         for a in args {
             // `unset name[i]` removes a single element; `unset name` removes the
@@ -1518,7 +1709,10 @@ impl Shell {
             {
                 let name = &a[..open];
                 let idx_src = &a[open + 1..a.len() - 1];
-                if let Some(arr) = self.arrays.get_mut(name)
+                if let Some(map) = self.assoc.get_mut(name) {
+                    // Associative: remove by string key.
+                    map.retain(|(k, _)| k != idx_src);
+                } else if let Some(arr) = self.arrays.get_mut(name)
                     && let Ok(idx) = idx_src.parse::<usize>()
                     && idx < arr.len()
                 {
@@ -1528,6 +1722,7 @@ impl Shell {
             }
             self.vars.remove(a);
             self.arrays.remove(a);
+            self.assoc.remove(a);
             self.exported.remove(a);
             self.funcs.remove(a);
         }
@@ -2190,6 +2385,9 @@ fn is_builtin(name: &str) -> bool {
             | "echo"
             | "printf"
             | "export"
+            | "declare"
+            | "typeset"
+            | "local"
             | "unset"
             | "set"
             | "shift"
@@ -2755,6 +2953,64 @@ mod tests {
     fn array_from_glob_and_expansion() {
         // Array elements undergo splitting/expansion.
         assert_eq!(run("s='p q'; a=($s r); echo ${#a[@]}").0, "3\n");
+    }
+
+    #[test]
+    fn array_keyed_literal_indexed() {
+        // `[i]=v` elements place at an explicit index; positional resume after.
+        assert_eq!(run("a=([2]=x y); echo ${a[2]} ${a[3]}").0, "x y\n");
+        assert_eq!(run("a=(p [5]=q); echo ${a[0]} ${a[5]}").0, "p q\n");
+    }
+
+    #[test]
+    fn assoc_basic_set_and_read() {
+        let src = "declare -A m; m[foo]=1; m[bar]=2; echo ${m[foo]} ${m[bar]}";
+        assert_eq!(run(src).0, "1 2\n");
+    }
+
+    #[test]
+    fn assoc_all_values_and_keys() {
+        // Values and keys come back in insertion order.
+        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${m[@]}").0, "x y\n");
+        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${!m[@]}").0, "a b\n");
+    }
+
+    #[test]
+    fn assoc_length_and_overwrite() {
+        assert_eq!(run("declare -A m; m[a]=1; m[b]=2; echo ${#m[@]}").0, "2\n");
+        // Re-assigning a key overwrites in place (count unchanged).
+        let src = "declare -A m; m[k]=1; m[k]=2; echo ${m[k]}; echo ${#m[@]}";
+        assert_eq!(run(src).0, "2\n1\n");
+    }
+
+    #[test]
+    fn assoc_literal_init() {
+        let src = "declare -A m; m=([x]=1 [y]=2); echo ${m[x]} ${m[y]}; echo ${#m[@]}";
+        assert_eq!(run(src).0, "1 2\n2\n");
+    }
+
+    #[test]
+    fn assoc_expanded_key() {
+        // The subscript on assignment/read is a string key, expanded not arith'd.
+        assert_eq!(run("declare -A m; k=foo; m[$k]=bar; echo ${m[foo]}").0, "bar\n");
+    }
+
+    #[test]
+    fn assoc_unset_key() {
+        let src = "declare -A m; m[a]=1; m[b]=2; unset m[a]; echo ${!m[@]}; echo ${#m[@]}";
+        assert_eq!(run(src).0, "b\n1\n");
+    }
+
+    #[test]
+    fn assoc_quoted_all_preserves_fields() {
+        let src = r#"declare -A m; m[a]="x y"; m[b]=z; for v in "${m[@]}"; do echo "[$v]"; done"#;
+        assert_eq!(run(src).0, "[x y]\n[z]\n");
+    }
+
+    #[test]
+    fn assoc_bare_ref_reads_key_zero() {
+        // `$m` on an associative array reads the value at key "0", not "first".
+        assert_eq!(run("declare -A m; m[foo]=a; m[0]=z; echo $m").0, "z\n");
     }
 
     /// A unique cwd-relative temp path (no `set_current_dir`, so parallel-safe).

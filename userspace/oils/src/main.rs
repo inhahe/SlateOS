@@ -141,5 +141,5 @@ fn print_help() {
     println!("here-documents and here-strings, variables and parameter expansion,");
     println!("command and arithmetic substitution, if/while/until/for/case,");
     println!("functions, [[ … ]] conditionals, (( … )) arithmetic commands,");
-    println!("filename globbing, indexed arrays, and && || ; operators.");
+    println!("filename globbing, indexed and associative arrays, and && || ; operators.");
 }

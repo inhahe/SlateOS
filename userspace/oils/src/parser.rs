@@ -5,7 +5,8 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, Command, CondBinOp,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, Command,
+    CondBinOp,
     CondExpr, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp, Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -591,15 +592,15 @@ impl Parser {
                     else {
                         unreachable!("peek matched ArrayAssign");
                     };
-                    let mut words = Vec::with_capacity(elems.len());
+                    let mut items = Vec::with_capacity(elems.len());
                     for segs in &elems {
-                        words.push(self.word_from_segs(segs)?);
+                        items.push(parse_array_elem(segs)?);
                     }
                     cmd.assignments.push(Assignment {
                         name,
                         index: None,
                         append,
-                        value: AssignRhs::Array(words),
+                        value: AssignRhs::Array(items),
                     });
                 }
                 Some(Tok::Io(_))
@@ -671,6 +672,14 @@ impl Parser {
         let Some(Seg::Lit(first)) = segs.first() else {
             return Ok(None);
         };
+        // A subscript containing expansions spans multiple segments, e.g.
+        // `m[$k]=v` → [Lit("m["), Param("k"), Lit("]=v")]. The first segment
+        // then has `[` but no closing `]`, so `=` isn't in it — handle here.
+        if let Some(open) = first.find('[')
+            && !first[open..].contains(']')
+        {
+            return self.spanning_subscript_assignment(segs, first, open);
+        }
         let Some(eq) = first.find('=') else {
             return Ok(None);
         };
@@ -717,6 +726,95 @@ impl Parser {
     fn word_from_segs(&self, segs: &[Seg]) -> Result<Word, ParseError> {
         word_from_segs(segs)
     }
+
+    /// Parse `name[SUBSCRIPT]=value` / `name[SUBSCRIPT]+=value` where the
+    /// subscript spans multiple segments (contains `$…` expansions). `open` is
+    /// the byte offset of `[` in the first (literal) segment.
+    fn spanning_subscript_assignment(
+        &self,
+        segs: &[Seg],
+        first: &str,
+        open: usize,
+    ) -> Result<Option<Assignment>, ParseError> {
+        let name = &first[..open];
+        if name.is_empty() || !is_valid_name(name) {
+            return Ok(None);
+        }
+        // Subscript segments: the first seg's text after `[`, then whole
+        // segments, up to the segment that carries the closing `]`.
+        let mut sub_segs: Vec<Seg> = Vec::new();
+        let after_open = &first[open + 1..];
+        if !after_open.is_empty() {
+            sub_segs.push(Seg::Lit(after_open.to_string()));
+        }
+        let mut value_segs: Vec<Seg> = Vec::new();
+        let mut append = false;
+        let mut found = false;
+        for seg in &segs[1..] {
+            if found {
+                value_segs.push(seg.clone());
+                continue;
+            }
+            if let Seg::Lit(s) = seg
+                && let Some(close) = s.find(']')
+            {
+                let before = &s[..close];
+                if !before.is_empty() {
+                    sub_segs.push(Seg::Lit(before.to_string()));
+                }
+                let rest = &s[close + 1..];
+                let val_lit = if let Some(v) = rest.strip_prefix("+=") {
+                    append = true;
+                    v
+                } else if let Some(v) = rest.strip_prefix('=') {
+                    v
+                } else {
+                    // `]` not immediately followed by `=` — not an assignment.
+                    return Ok(None);
+                };
+                if !val_lit.is_empty() {
+                    value_segs.push(Seg::Lit(val_lit.to_string()));
+                }
+                found = true;
+                continue;
+            }
+            sub_segs.push(seg.clone());
+        }
+        if !found || sub_segs.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Assignment {
+            name: name.to_string(),
+            index: Some(self.word_from_segs(&sub_segs)?),
+            append,
+            value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
+        }))
+    }
+}
+
+/// Parse one array-literal element: either `[sub]=value` (keyed) or a bare
+/// positional value. A keyed element is recognised when the first segment is a
+/// literal that starts with `[` and contains `]=` (so the subscript is literal
+/// text — an expanded key like `[$k]=v` inside a literal falls back to
+/// positional; use element assignment `m[$k]=v` for that).
+fn parse_array_elem(segs: &[Seg]) -> Result<ArrayElem, ParseError> {
+    if let Some(Seg::Lit(first)) = segs.first()
+        && first.starts_with('[')
+        && let Some(close_eq) = first.find("]=")
+    {
+        let index = word_from_source(&first[1..close_eq])?;
+        let mut value_segs: Vec<Seg> = Vec::new();
+        let after = &first[close_eq + 2..];
+        if !after.is_empty() {
+            value_segs.push(Seg::Lit(after.to_string()));
+        }
+        value_segs.extend_from_slice(&segs[1..]);
+        return Ok(ArrayElem::Keyed {
+            index,
+            value: word_from_segs(&value_segs)?,
+        });
+    }
+    Ok(ArrayElem::Positional(word_from_segs(segs)?))
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).
@@ -812,6 +910,24 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             });
         }
         return Ok(WordPart::Length(after_hash.to_string()));
+    }
+    if let Some(after_bang) = raw.strip_prefix('!') {
+        // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
+        let bytes: Vec<char> = after_bang.chars().collect();
+        let (name, subscript, remaining) = split_name_subscript(&bytes)?;
+        if let Some(index) = subscript
+            && remaining.is_empty()
+            && matches!(index, ArrayIndex::All | ArrayIndex::Star)
+        {
+            return Ok(WordPart::ArrayKeys {
+                name,
+                star: matches!(index, ArrayIndex::Star),
+            });
+        }
+        // `${!name}` indirection and `${!prefix*}` matching are not supported.
+        return Err(ParseError(format!(
+            "unsupported parameter expansion '${{{raw}}}'"
+        )));
     }
     let bytes: Vec<char> = raw.chars().collect();
     let (name, subscript, rest) = split_name_subscript(&bytes)?;
@@ -1239,6 +1355,45 @@ mod tests {
         };
         assert!(sc.assignments[0].index.is_some());
         assert!(matches!(sc.assignments[0].value, AssignRhs::Scalar(_)));
+    }
+
+    #[test]
+    fn assoc_keyed_literal_and_keys_parsing() {
+        // `${!m[@]}` → ArrayKeys.
+        let prog = parse("echo ${!m[@]} ${!m[*]}").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(matches!(
+            sc.words[1].parts[0],
+            WordPart::ArrayKeys { star: false, .. }
+        ));
+        assert!(matches!(
+            sc.words[2].parts[0],
+            WordPart::ArrayKeys { star: true, .. }
+        ));
+        // Keyed array-literal element `[k]=v`.
+        let prog = parse("m=([a]=1 plain)").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        let AssignRhs::Array(items) = &sc.assignments[0].value else {
+            panic!("expected array literal");
+        };
+        assert!(matches!(items[0], ArrayElem::Keyed { .. }));
+        assert!(matches!(items[1], ArrayElem::Positional(_)));
+    }
+
+    #[test]
+    fn spanning_subscript_assignment_parsing() {
+        // `m[$k]=v` — subscript spans segments; still recognised as assignment.
+        let prog = parse("m[$k]=v").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(sc.assignments[0].index.is_some());
+        assert!(!sc.assignments[0].append);
+        assert!(sc.words.is_empty());
     }
 
     #[test]

@@ -172,9 +172,20 @@ pub struct Assignment {
 pub enum AssignRhs {
     /// `name=word` — a scalar value (no field splitting or globbing).
     Scalar(Word),
-    /// `name=(w1 w2 …)` — an array literal; each word is split and globbed like
-    /// a command argument.
-    Array(Vec<Word>),
+    /// `name=(w1 w2 …)` — an array literal; each element is a positional value
+    /// (split/globbed like a command argument) or a keyed `[sub]=value` pair.
+    Array(Vec<ArrayElem>),
+}
+
+/// One element of an array literal `(…)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayElem {
+    /// A bare value word — assigned to the next index (indexed arrays) or an
+    /// error for associative arrays (bash requires keys there).
+    Positional(Word),
+    /// `[sub]=value` — an explicit subscript. For an indexed array `sub` is an
+    /// arithmetic index; for an associative array it is a string key.
+    Keyed { index: Word, value: Word },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +310,14 @@ pub enum WordPart {
         /// `true` for the `${#…}` form: element count for `@`/`*`, or the length
         /// of a specific element for an index.
         length: bool,
+    },
+    /// `${!name[@]}` / `${!name[*]}` — the *keys* (associative array) or
+    /// *indices* (indexed array) of `name`.
+    ArrayKeys {
+        name: String,
+        /// `true` for `[*]` (join with the first IFS char when quoted); `false`
+        /// for `[@]` (one field per key).
+        star: bool,
     },
 }
 

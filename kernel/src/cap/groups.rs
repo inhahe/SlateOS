@@ -41,7 +41,7 @@
 //! | `process`     | Process(READ\|WRITE), Thread(READ\|WRITE) |
 //! | `ipc`         | Channel+Pipe+SharedMemory+EventFd+CompletionPort(READ\|WRITE) |
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::rights::Rights;
 use super::ResourceType;

@@ -40,7 +40,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::sched::task::TaskId;

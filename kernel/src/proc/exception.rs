@@ -37,7 +37,7 @@
 use crate::proc::pcb::ProcessId;
 use crate::serial_println;
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Exception codes — hardware exceptions mapped to stable numeric codes

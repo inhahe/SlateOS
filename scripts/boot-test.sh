@@ -165,12 +165,53 @@ WATCHDOG_ARGS=()
 # NMI delivery entirely (the silent BSP-dead wedge never takes the injected NMI,
 # so the in-guest handler dump is blind; the emulator's own view is not).
 MONITOR_ARGS=()
-MONITOR_PORT="${MONITOR_PORT:-55123}"
+
+# Pick a TCP port for the HMP monitor that QEMU can actually bind.  On Windows,
+# whole ranges are *reserved* (Hyper-V/WSL "excludedportrange") and a bind into
+# one fails with "Failed to bind socket: Input/output error" — QEMU then exits
+# instantly and every armed boot fails ~2 s in (this silently wasted a full
+# wedge-soak run: the old hardcoded 55123 sits inside the reserved 55053-55152
+# range).  Choose the first candidate at/above a base port that is neither in
+# any excluded range nor currently LISTENing.  Falls back to the base port when
+# the query tools are unavailable (non-Windows), so Linux/CI behaviour is
+# unchanged.  An explicit MONITOR_PORT env override always wins.
+pick_monitor_port() {
+    local base="$1" p="" excl="" listen=""
+    # Excluded ranges as "start end" pairs (Windows only; empty elsewhere).
+    if command -v netsh &>/dev/null; then
+        excl="$(netsh interface ipv4 show excludedportrange protocol=tcp 2>/dev/null \
+                | grep -E '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+' \
+                | awk '{print $1" "$2}')"
+    fi
+    # Currently-listening local TCP ports (best-effort).
+    if command -v netstat &>/dev/null; then
+        listen="$(netstat -ano 2>/dev/null | grep -iE 'LISTEN' \
+                  | grep -oE ':[0-9]+' | tr -d ':' | sort -u)"
+    fi
+    for p in $(seq "$base" $((base + 200))); do
+        local bad=0 s e
+        while read -r s e; do
+            [ -z "$s" ] && continue
+            if [ "$p" -ge "$s" ] && [ "$p" -le "$e" ]; then bad=1; break; fi
+        done <<< "$excl"
+        [ "$bad" -eq 1 ] && continue
+        if [ -n "$listen" ] && printf '%s\n' "$listen" | grep -qx "$p"; then continue; fi
+        echo "$p"; return 0
+    done
+    echo "$base"  # nothing free found; let QEMU try the base and report
+}
+
+if [ -n "${MONITOR_PORT:-}" ]; then
+    MONITOR_PORT_SRC="env override"
+else
+    MONITOR_PORT="$(pick_monitor_port 57000)"
+    MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+fi
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action "watchdog=$WATCHDOG_ACTION")
     MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
     echo "=== Hard-lockup watchdog ENABLED (i6300esb -> $WATCHDOG_ACTION) ==="
-    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT) ==="
+    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 
 # Capture the frozen guest CPU state over the HMP monitor socket, then resolve

@@ -2282,7 +2282,26 @@ reproduces. This spinlock-deadlock issue is considered **fixed**. As predicted,
 a *distinct* wedge with a different signature then appeared (iter05, see next
 entry) — that is a separate lost-wakeup/hang issue, not this deadlock.
 
----
+**Recurrence 2026-07-18 (Q24 wedge-soak — pthread yield-budget flake, NOT a
+lock regression).** During the final validation soak for the Q24 raw-`spin::Mutex`
+holder-preemption conversion (`MONITOR_PORT=57321 MAX_ITERS=6`), **no wedge was
+caught in 6 armed boots** (the holder-preemption race did not fire — Q24's
+core goal validated), but iter 02 tripped the B-PTHREAD-YIELDBUDGET flake:
+`[spawn] FAIL: real glibc pthread — process did not exit within 262144 yields
+(state=Some(Running))` → `WARNING: Path-Z real glibc pthread self-test failed:
+TimedOut`. Notable twist: this fired at a **normal** BOOT_OK time (133 s), not the
+historically-heavy ~217–229 s runs — because the budget counts *scheduler yields*,
+not wall-clock, and Q24's preemption-timing changes (leaf locks now
+`PreemptSpinMutex`, i.e. preempt-disabling) legitimately shift how many yields the
+driver burns while the child runs. This is **not** a Q24 correctness regression:
+the futex primitive was already proven sound (2026-07-01 audit), the implicated
+machinery is the ring-3 clone/CoW/thread-teardown path (untouched by Q24), and
+5/6 pthread runs in this very soak passed. Second-order harness quirk reconfirmed:
+the *non-fatal* `TimedOut` WARNING string literally contains "self-test failed",
+so `boot-test.sh check_selftest_failures` flags the boot FAILED even though the
+warning is meant to be non-fatal — extra motivation for the long-deferred harness
+fix (wait on a real exit signal / adaptive budget rather than a fixed yield count,
+and/or make the WARNING text not collide with the failure-grep phrase).
 
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**

@@ -3799,6 +3799,27 @@ mod tests {
     }
 
     #[test]
+    fn ansi_c_quoting() {
+        // Common C escapes.
+        assert_eq!(run("printf '%s' $'a\\tb'").0, "a\tb");
+        assert_eq!(run("printf '%s' $'line1\\nline2'").0, "line1\nline2");
+        // A literal backslash and a single quote inside.
+        assert_eq!(run("printf '%s' $'a\\\\b'").0, "a\\b");
+        assert_eq!(run("printf '%s' $'it\\'s'").0, "it's");
+        // Hex and octal escapes.
+        assert_eq!(run("printf '%s' $'\\x41\\x42'").0, "AB"); // 0x41=A 0x42=B
+        assert_eq!(run("printf '%s' $'\\101\\102'").0, "AB"); // octal 101=A 102=B
+        // Unicode escape.
+        assert_eq!(run("printf '%s' $'\\u00e9'").0, "\u{e9}"); // é
+        // No expansion inside $'…' (a `$var` stays literal).
+        assert_eq!(run("x=hi; printf '%s' $'$x'").0, "$x");
+        // Unknown escape keeps the backslash.
+        assert_eq!(run("printf '%s' $'\\q'").0, "\\q");
+        // Concatenation with adjacent text.
+        assert_eq!(run("echo pre$'\\t'post").0, "pre\tpost\n");
+    }
+
+    #[test]
     fn param_substring() {
         assert_eq!(run("x=abcdef; echo ${x:2}").0, "cdef\n");
         assert_eq!(run("x=abcdef; echo ${x:2:3}").0, "cde\n");

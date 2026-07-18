@@ -140,5 +140,6 @@ fn print_help() {
     println!("A bash/POSIX-superset shell (OSH). Supports pipes, redirections,");
     println!("here-documents and here-strings, variables and parameter expansion,");
     println!("command and arithmetic substitution, if/while/until/for/case,");
-    println!("functions, and && || ; operators.");
+    println!("functions, [[ … ]] conditionals, (( … )) arithmetic commands,");
+    println!("and && || ; operators.");
 }

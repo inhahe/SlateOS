@@ -14,6 +14,30 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS1. `osh` `[[ … ]]` conditional gaps: no `=~` regex match; `-r`/`-x` file tests approximated as "exists" — DEBT 2026-07-18
+
+**Where:** `userspace/oils/src/parser.rs` (`parse_cond_primary` rejects
+`=~`), `userspace/oils/src/interp.rs` (`cond_unary` permission tests).
+
+**What:** The bash conditional command `[[ … ]]` is implemented (string
+`==`/`=`/`!=` with glob-or-literal RHS, `<`/`>` ordering, numeric
+`-eq…-ge`, unary file/string tests, `!`/`&&`/`||`/`(…)`), but two pieces
+are deferred:
+1. `=~` (POSIX ERE regex match) — no regex engine exists yet, so the
+   parser rejects `[[ x =~ pat ]]` with a clear error rather than
+   producing wrong results. **Proper fix:** implement a small ERE matcher
+   (or port one) and wire it into `CondBinOp`; then accept `=~`, matching
+   the RHS as a regex and populating `BASH_REMATCH`.
+2. `-r` and `-x` file tests are approximated as "path exists" (`-w` is
+   "exists and not read-only") because the host has no portable mode-bit
+   check and the slateos permission model isn't wired into `osh` yet.
+   **Proper fix:** query the real per-file permission bits once the
+   slateos userspace permission API is available.
+
+Neither is a correctness bug in the implemented surface — they are
+intentional grow-phase scope limits, documented in the `interp.rs`
+module header. No test depends on the deferred behavior.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

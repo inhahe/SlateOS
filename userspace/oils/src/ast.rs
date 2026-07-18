@@ -64,6 +64,76 @@ pub enum Command {
     BraceGroup(Program),
     /// `( list )` — a subshell group.
     Subshell(Program),
+    /// `[[ expr ]]` — bash conditional expression (exit 0 if true, 1 if false).
+    Cond(CondExpr),
+    /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
+    /// non-zero, 1 if zero). The `String` holds the raw arithmetic text.
+    Arith(String),
+}
+
+/// A `[[ … ]]` conditional expression tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CondExpr {
+    /// A single word — true if it expands to a non-empty string.
+    Word(Word),
+    /// Unary file/string test: `-e -f -d -r -w -x -s` (file), `-z -n` (string).
+    Unary(UnaryOp, Word),
+    /// Binary comparison between two words.
+    Binary(Box<Word>, CondBinOp, Box<Word>),
+    /// `! expr` — logical negation.
+    Not(Box<CondExpr>),
+    /// `expr && expr` — logical AND (short-circuiting).
+    And(Box<CondExpr>, Box<CondExpr>),
+    /// `expr || expr` — logical OR (short-circuiting).
+    Or(Box<CondExpr>, Box<CondExpr>),
+}
+
+/// Unary test operators inside `[[ … ]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// `-e` — path exists.
+    Exists,
+    /// `-f` — exists and is a regular file.
+    File,
+    /// `-d` — exists and is a directory.
+    Dir,
+    /// `-r` — readable.
+    Readable,
+    /// `-w` — writable.
+    Writable,
+    /// `-x` — executable.
+    Executable,
+    /// `-s` — exists and has non-zero size.
+    NonEmptyFile,
+    /// `-z` — string has zero length.
+    ZeroLen,
+    /// `-n` — string has non-zero length.
+    NonZeroLen,
+}
+
+/// Binary comparison operators inside `[[ … ]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CondBinOp {
+    /// `==` / `=` — glob-pattern match (RHS is a pattern unless quoted).
+    StrEq,
+    /// `!=` — negated glob-pattern match.
+    StrNe,
+    /// `<` — left string sorts before right (byte order).
+    StrLt,
+    /// `>` — left string sorts after right (byte order).
+    StrGt,
+    /// `-eq` — numeric equality.
+    NumEq,
+    /// `-ne` — numeric inequality.
+    NumNe,
+    /// `-lt` — numeric less-than.
+    NumLt,
+    /// `-le` — numeric less-than-or-equal.
+    NumLe,
+    /// `-gt` — numeric greater-than.
+    NumGt,
+    /// `-ge` — numeric greater-than-or-equal.
+    NumGe,
 }
 
 /// A simple command with variable assignments, words, and redirections.

@@ -4,12 +4,16 @@
 //! external command execution (real fork/exec via [`std::process::Command`]),
 //! pipelines, redirections, command substitution, arithmetic, and control
 //! flow (`if`/`while`/`until`/`for`/`case`, functions, `&&`/`||`, `;`),
-//! here-documents (`<<`, `<<-`), and here-strings (`<<<`).
+//! here-documents (`<<`, `<<-`), here-strings (`<<<`), `[[ … ]]` conditional
+//! expressions, and `(( … ))` arithmetic commands.
 //!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
 //! - No pathname (glob) expansion yet: `*.txt` stays literal on the command
-//!   line. (Glob *matching* is implemented for `case` patterns.)
+//!   line. (Glob *matching* is implemented for `case` and `[[ == ]]` patterns.)
+//! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
+//!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
+//!   approximated as "exists" pending the slateos permission model.
 //! - Pipelines are *buffered*, not concurrent: each stage runs to completion
 //!   and its output feeds the next. An unbounded producer (`yes | head`) will
 //!   not terminate early.
@@ -25,8 +29,9 @@ use std::process::{Command as PCommand, Stdio};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, CaseClause, Command, ForClause, IfClause, LoopClause, ParamOp, Pipeline,
-    Program, Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, Word, WordPart,
+    AndOr, AndOrOp, CaseClause, Command, CondBinOp, CondExpr, ForClause, IfClause, LoopClause,
+    ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word,
+    WordPart,
 };
 use crate::parser::parse;
 
@@ -226,6 +231,8 @@ impl Shell {
                 Flow::Next
             }
             Command::Case(c) => self.exec_case(c, out),
+            Command::Cond(e) => self.exec_cond(e),
+            Command::Arith(raw) => self.exec_arith(raw),
             Command::BraceGroup(p) => self.exec_program(p, out),
             Command::Subshell(p) => {
                 // A subshell gets a clone of the state; mutations don't escape.
@@ -342,6 +349,106 @@ impl Shell {
             }
         }
         Flow::Next
+    }
+
+    /// Execute a `[[ … ]]` conditional expression: exit 0 if true, 1 if false.
+    fn exec_cond(&mut self, e: &CondExpr) -> Flow {
+        let ok = self.cond_eval(e);
+        self.last_status = i32::from(!ok);
+        Flow::Next
+    }
+
+    /// Execute a `(( … ))` arithmetic command: exit 0 if the value is non-zero.
+    fn exec_arith(&mut self, raw: &str) -> Flow {
+        let expanded = self.expand_arith_params(raw);
+        match arith::eval(&expanded, self) {
+            Ok(v) => self.last_status = i32::from(v == 0),
+            Err(e) => {
+                eprintln!("osh: arithmetic: {e}");
+                self.last_status = 1;
+            }
+        }
+        Flow::Next
+    }
+
+    /// Evaluate a `[[ … ]]` conditional expression tree to a boolean.
+    fn cond_eval(&mut self, e: &CondExpr) -> bool {
+        match e {
+            CondExpr::Word(w) => !self.expand_to_string(w).is_empty(),
+            CondExpr::Not(inner) => !self.cond_eval(inner),
+            CondExpr::And(a, b) => self.cond_eval(a) && self.cond_eval(b),
+            CondExpr::Or(a, b) => self.cond_eval(a) || self.cond_eval(b),
+            CondExpr::Unary(op, w) => self.cond_unary(*op, w),
+            CondExpr::Binary(l, op, r) => self.cond_binary(l, *op, r),
+        }
+    }
+
+    fn cond_unary(&mut self, op: UnaryOp, w: &Word) -> bool {
+        // `-z`/`-n` operate on the string value; the rest are file tests.
+        match op {
+            UnaryOp::ZeroLen => self.expand_to_string(w).is_empty(),
+            UnaryOp::NonZeroLen => !self.expand_to_string(w).is_empty(),
+            _ => {
+                let path = self.expand_to_string(w);
+                let meta = std::fs::metadata(&path);
+                match op {
+                    UnaryOp::Exists => meta.is_ok(),
+                    UnaryOp::File => meta.map(|m| m.is_file()).unwrap_or(false),
+                    UnaryOp::Dir => meta.map(|m| m.is_dir()).unwrap_or(false),
+                    UnaryOp::NonEmptyFile => {
+                        meta.map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+                    }
+                    // Best-effort permission tests: `-r` ≈ exists, `-w` ≈ exists
+                    // and not read-only, `-x` ≈ exists. Proper mode-bit checks
+                    // arrive with the slateos permission model (see todo.txt).
+                    UnaryOp::Readable => meta.is_ok(),
+                    UnaryOp::Writable => meta.map(|m| !m.permissions().readonly()).unwrap_or(false),
+                    UnaryOp::Executable => meta.is_ok(),
+                    UnaryOp::ZeroLen | UnaryOp::NonZeroLen => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn cond_binary(&mut self, l: &Word, op: CondBinOp, r: &Word) -> bool {
+        match op {
+            CondBinOp::StrEq | CondBinOp::StrNe => {
+                let subject: Vec<char> = self.expand_to_string(l).chars().collect();
+                let rhs = self.expand_to_string(r);
+                // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
+                let matched = if word_is_all_quoted(r) {
+                    subject.iter().collect::<String>() == rhs
+                } else {
+                    let pat: Vec<char> = rhs.chars().collect();
+                    glob_match(&pat, &subject)
+                };
+                if matches!(op, CondBinOp::StrEq) {
+                    matched
+                } else {
+                    !matched
+                }
+            }
+            CondBinOp::StrLt => self.expand_to_string(l) < self.expand_to_string(r),
+            CondBinOp::StrGt => self.expand_to_string(l) > self.expand_to_string(r),
+            CondBinOp::NumEq
+            | CondBinOp::NumNe
+            | CondBinOp::NumLt
+            | CondBinOp::NumLe
+            | CondBinOp::NumGt
+            | CondBinOp::NumGe => {
+                let a = self.eval_arith_word(l);
+                let b = self.eval_arith_word(r);
+                match op {
+                    CondBinOp::NumEq => a == b,
+                    CondBinOp::NumNe => a != b,
+                    CondBinOp::NumLt => a < b,
+                    CondBinOp::NumLe => a <= b,
+                    CondBinOp::NumGt => a > b,
+                    CondBinOp::NumGe => a >= b,
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 
     fn clone_for_subshell(&self) -> Shell {
@@ -1287,6 +1394,16 @@ struct RedirPlan {
     stderr: Option<(String, bool)>,
 }
 
+/// Whether every part of a word is quoted (single- or double-quoted). Used by
+/// `[[ … == … ]]` to decide whether the right-hand side is a literal string
+/// (fully quoted) or a glob pattern (any unquoted part).
+fn word_is_all_quoted(w: &Word) -> bool {
+    !w.parts.is_empty()
+        && w.parts
+            .iter()
+            .all(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)))
+}
+
 /// Match `text` against a shell glob `pattern` (`*`, `?`, `[...]`), anchored at
 /// both ends (as `case` patterns and `[[ … == … ]]` require). Uses iterative
 /// star-backtracking so it runs in linear space and near-linear time.
@@ -1841,5 +1958,88 @@ mod tests {
         assert!(!g("[!0-9]", "5"));
         assert!(g("file.txt", "file.txt"));
         assert!(!g("file.txt", "file.md"));
+    }
+
+    #[test]
+    fn cond_string_equality() {
+        assert_eq!(run("[[ foo == foo ]]").1, 0);
+        assert_eq!(run("[[ foo == bar ]]").1, 1);
+        assert_eq!(run("[[ foo != bar ]]").1, 0);
+        assert_eq!(run("x=hello; [[ $x = hello ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_glob_and_quoting() {
+        // Unquoted RHS is a glob pattern.
+        assert_eq!(run("[[ foobar == foo* ]]").1, 0);
+        assert_eq!(run("[[ foobar == baz* ]]").1, 1);
+        // Quoted RHS is a literal, so the `*` does not match.
+        assert_eq!(run("[[ foobar == \"foo*\" ]]").1, 1);
+        assert_eq!(run("[[ 'foo*' == \"foo*\" ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_numeric() {
+        assert_eq!(run("[[ 3 -gt 2 ]]").1, 0);
+        assert_eq!(run("[[ 2 -gt 3 ]]").1, 1);
+        assert_eq!(run("[[ 5 -eq 5 ]]").1, 0);
+        assert_eq!(run("x=4; [[ $x -le 4 ]]").1, 0);
+        // Operands undergo arithmetic evaluation.
+        assert_eq!(run("[[ 2+2 -eq 4 ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_string_len() {
+        assert_eq!(run("[[ -z \"\" ]]").1, 0);
+        assert_eq!(run("[[ -n foo ]]").1, 0);
+        assert_eq!(run("x=; [[ -z $x ]]").1, 0);
+        assert_eq!(run("x=set; [[ -n $x ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_logical_and_grouping() {
+        assert_eq!(run("[[ 1 -eq 1 && 2 -eq 2 ]]").1, 0);
+        assert_eq!(run("[[ 1 -eq 1 && 2 -eq 3 ]]").1, 1);
+        assert_eq!(run("[[ 1 -eq 2 || 3 -eq 3 ]]").1, 0);
+        assert_eq!(run("[[ ! 1 -eq 2 ]]").1, 0);
+        assert_eq!(run("[[ ( 1 -eq 1 || 1 -eq 2 ) && 3 -eq 3 ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_string_ordering() {
+        assert_eq!(run("[[ abc < abd ]]").1, 0);
+        assert_eq!(run("[[ abd < abc ]]").1, 1);
+        assert_eq!(run("[[ b > a ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_in_if() {
+        assert_eq!(run("if [[ foo == foo ]]; then echo yes; fi").0, "yes\n");
+        assert_eq!(
+            run("x=3; if [[ $x -gt 5 ]]; then echo big; else echo small; fi").0,
+            "small\n"
+        );
+    }
+
+    #[test]
+    fn arith_command_status() {
+        assert_eq!(run("(( 1 + 1 ))").1, 0);
+        assert_eq!(run("(( 0 ))").1, 1);
+        assert_eq!(run("(( 5 > 3 ))").1, 0);
+        assert_eq!(run("(( 3 > 5 ))").1, 1);
+    }
+
+    #[test]
+    fn arith_command_with_vars() {
+        assert_eq!(run("x=4; (( x > 3 ))").1, 0);
+        assert_eq!(run("x=2; (( x > 3 ))").1, 1);
+        // Used as a condition.
+        assert_eq!(run("x=10; if (( x > 5 )); then echo big; fi").0, "big\n");
+    }
+
+    #[test]
+    fn nested_subshell_still_works() {
+        // `( ( … ) )` with an inner space is nested subshells, not arithmetic.
+        assert_eq!(run("( ( echo hi ) )").0, "hi\n");
     }
 }

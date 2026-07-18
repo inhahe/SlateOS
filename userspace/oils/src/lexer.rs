@@ -71,6 +71,8 @@ pub enum Tok {
     /// A here-document body, captured after its introducing line. Emitted
     /// immediately after the `<<`/`<<-` operator token that owns it.
     HereDoc(Vec<Seg>),
+    /// `(( … ))` — an arithmetic command, holding the raw expression text.
+    ArithCmd(String),
 }
 
 struct Lexer {
@@ -187,7 +189,15 @@ impl Lexer {
                 }
                 '(' => {
                     self.pos += 1;
-                    out.push(Tok::Op(Op::LParen));
+                    // `((` (with no intervening space) begins an arithmetic
+                    // command; `( (` (a space between) is nested subshells.
+                    if self.peek() == Some('(') {
+                        self.pos += 1;
+                        let raw = self.read_arith()?;
+                        out.push(Tok::ArithCmd(raw));
+                    } else {
+                        out.push(Tok::Op(Op::LParen));
+                    }
                 }
                 ')' => {
                     self.pos += 1;

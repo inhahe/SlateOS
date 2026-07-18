@@ -5,9 +5,9 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, ForClause, FunctionDef, IfClause,
-    Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
-    SimpleCommand, Word, WordPart,
+    AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, CondBinOp, CondExpr, ForClause,
+    FunctionDef, IfClause, Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp,
+    ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
 
@@ -182,6 +182,16 @@ impl Parser {
         }
         if self.at_op(Op::LParen) {
             return self.parse_subshell();
+        }
+        // `(( expr ))` arithmetic command (lexed as a single token).
+        if let Some(Tok::ArithCmd(raw)) = self.peek() {
+            let raw = raw.clone();
+            self.pos += 1;
+            return Ok(Command::Arith(raw));
+        }
+        // `[[ expr ]]` conditional expression.
+        if self.bare_word_here().as_deref() == Some("[[") {
+            return self.parse_cond();
         }
         // Function definition: `name ( )`.
         if let Some(name) = self.bare_word_here()
@@ -382,6 +392,122 @@ impl Parser {
             items.push(Item { list, background });
         }
         Ok(Program { items })
+    }
+
+    /// Parse a `[[ … ]]` conditional expression. The opening `[[` word is at
+    /// the current position; parsing stops at the matching `]]` word.
+    fn parse_cond(&mut self) -> Result<Command, ParseError> {
+        // Consume `[[`.
+        self.pos += 1;
+        let expr = self.parse_cond_or()?;
+        if self.bare_word_here().as_deref() != Some("]]") {
+            return Err(ParseError("expected ']]' to close '[['".into()));
+        }
+        self.pos += 1;
+        Ok(Command::Cond(expr))
+    }
+
+    fn parse_cond_or(&mut self) -> Result<CondExpr, ParseError> {
+        let mut left = self.parse_cond_and()?;
+        while self.at_op(Op::OrIf) {
+            self.pos += 1;
+            let right = self.parse_cond_and()?;
+            left = CondExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_cond_and(&mut self) -> Result<CondExpr, ParseError> {
+        let mut left = self.parse_cond_not()?;
+        while self.at_op(Op::AndIf) {
+            self.pos += 1;
+            let right = self.parse_cond_not()?;
+            left = CondExpr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_cond_not(&mut self) -> Result<CondExpr, ParseError> {
+        if self.bare_word_here().as_deref() == Some("!") {
+            self.pos += 1;
+            let inner = self.parse_cond_not()?;
+            return Ok(CondExpr::Not(Box::new(inner)));
+        }
+        self.parse_cond_primary()
+    }
+
+    fn parse_cond_primary(&mut self) -> Result<CondExpr, ParseError> {
+        // Parenthesised sub-expression.
+        if self.at_op(Op::LParen) {
+            self.pos += 1;
+            let inner = self.parse_cond_or()?;
+            if !self.at_op(Op::RParen) {
+                return Err(ParseError("expected ')' in '[[ … ]]'".into()));
+            }
+            self.pos += 1;
+            return Ok(inner);
+        }
+        // Unary operator: `-f WORD`, `-z WORD`, …
+        if let Some(text) = self.bare_word_here()
+            && let Some(op) = unary_op_from(&text)
+        {
+            self.pos += 1;
+            let operand = self.expect_cond_word()?;
+            return Ok(CondExpr::Unary(op, operand));
+        }
+        // Otherwise: WORD [ binop WORD ].
+        let left = self.expect_cond_word()?;
+        if let Some(op) = self.peek_cond_binop() {
+            if matches!(op, RawBinOp::Regex) {
+                return Err(ParseError(
+                    "'=~' (regex match) is not yet supported in '[[ … ]]'".into(),
+                ));
+            }
+            self.advance_cond_binop();
+            let right = self.expect_cond_word()?;
+            return Ok(CondExpr::Binary(
+                Box::new(left),
+                op.into_bin_op(),
+                Box::new(right),
+            ));
+        }
+        Ok(CondExpr::Word(left))
+    }
+
+    /// Expect a word operand inside `[[ … ]]` (not an operator/closer).
+    fn expect_cond_word(&mut self) -> Result<Word, ParseError> {
+        if let Some(Tok::Word(segs)) = self.peek() {
+            let segs = segs.clone();
+            // `]]` is the closer, never an operand.
+            if let [Seg::Lit(s)] = segs.as_slice()
+                && s == "]]"
+            {
+                return Err(ParseError("unexpected ']]' (expected operand)".into()));
+            }
+            self.pos += 1;
+            return self.word_from_segs(&segs);
+        }
+        Err(ParseError("expected operand in '[[ … ]]'".into()))
+    }
+
+    /// Peek at a binary operator following an operand, without consuming.
+    fn peek_cond_binop(&self) -> Option<RawBinOp> {
+        match self.peek() {
+            Some(Tok::Op(Op::Less)) => Some(RawBinOp::StrLt),
+            Some(Tok::Op(Op::Great)) => Some(RawBinOp::StrGt),
+            Some(Tok::Word(segs)) => {
+                if let [Seg::Lit(s)] = segs.as_slice() {
+                    raw_binop_from(s)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn advance_cond_binop(&mut self) {
+        self.pos += 1;
     }
 
     fn parse_simple(&mut self) -> Result<Command, ParseError> {
@@ -722,6 +848,74 @@ fn is_valid_name(s: &str) -> bool {
     it.all(is_name_char)
 }
 
+/// Map a `[[ … ]]` unary operator string to its [`UnaryOp`].
+fn unary_op_from(s: &str) -> Option<UnaryOp> {
+    Some(match s {
+        "-e" => UnaryOp::Exists,
+        "-f" => UnaryOp::File,
+        "-d" => UnaryOp::Dir,
+        "-r" => UnaryOp::Readable,
+        "-w" => UnaryOp::Writable,
+        "-x" => UnaryOp::Executable,
+        "-s" => UnaryOp::NonEmptyFile,
+        "-z" => UnaryOp::ZeroLen,
+        "-n" => UnaryOp::NonZeroLen,
+        _ => return None,
+    })
+}
+
+/// Raw binary operator recognised inside `[[ … ]]` (before lowering; `Regex`
+/// is recognised so it can be rejected with a clear message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawBinOp {
+    StrEq,
+    StrNe,
+    StrLt,
+    StrGt,
+    Regex,
+    NumEq,
+    NumNe,
+    NumLt,
+    NumLe,
+    NumGt,
+    NumGe,
+}
+
+impl RawBinOp {
+    fn into_bin_op(self) -> CondBinOp {
+        match self {
+            RawBinOp::StrEq => CondBinOp::StrEq,
+            RawBinOp::StrNe => CondBinOp::StrNe,
+            RawBinOp::StrLt => CondBinOp::StrLt,
+            RawBinOp::StrGt => CondBinOp::StrGt,
+            // `Regex` is rejected before lowering; map defensively to StrEq.
+            RawBinOp::Regex => CondBinOp::StrEq,
+            RawBinOp::NumEq => CondBinOp::NumEq,
+            RawBinOp::NumNe => CondBinOp::NumNe,
+            RawBinOp::NumLt => CondBinOp::NumLt,
+            RawBinOp::NumLe => CondBinOp::NumLe,
+            RawBinOp::NumGt => CondBinOp::NumGt,
+            RawBinOp::NumGe => CondBinOp::NumGe,
+        }
+    }
+}
+
+/// Map a `[[ … ]]` binary operator word to its [`RawBinOp`].
+fn raw_binop_from(s: &str) -> Option<RawBinOp> {
+    Some(match s {
+        "==" | "=" => RawBinOp::StrEq,
+        "!=" => RawBinOp::StrNe,
+        "=~" => RawBinOp::Regex,
+        "-eq" => RawBinOp::NumEq,
+        "-ne" => RawBinOp::NumNe,
+        "-lt" => RawBinOp::NumLt,
+        "-le" => RawBinOp::NumLe,
+        "-gt" => RawBinOp::NumGt,
+        "-ge" => RawBinOp::NumGe,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +1049,52 @@ mod tests {
     fn negated_pipeline() {
         let prog = parse("! false").unwrap();
         assert!(prog.items[0].list.first.negated);
+    }
+
+    #[test]
+    fn cond_expression() {
+        let prog = parse("[[ $x == foo ]]").unwrap();
+        let Command::Cond(CondExpr::Binary(_, op, _)) = &prog.items[0].list.first.commands[0]
+        else {
+            panic!("expected cond binary");
+        };
+        assert_eq!(*op, CondBinOp::StrEq);
+    }
+
+    #[test]
+    fn cond_logical_precedence() {
+        // `||` binds looser than `&&`: a || b && c parses as a || (b && c).
+        let prog = parse("[[ 1 -eq 1 || 2 -eq 2 && 3 -eq 3 ]]").unwrap();
+        let Command::Cond(CondExpr::Or(_, right)) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected top-level Or");
+        };
+        assert!(matches!(**right, CondExpr::And(_, _)));
+    }
+
+    #[test]
+    fn cond_regex_rejected() {
+        assert!(parse("[[ $x =~ foo ]]").is_err());
+    }
+
+    #[test]
+    fn arith_command() {
+        let prog = parse("(( x + 1 ))").unwrap();
+        let Command::Arith(raw) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected arith command");
+        };
+        assert_eq!(raw.trim(), "x + 1");
+    }
+
+    #[test]
+    fn double_paren_vs_nested_subshell() {
+        // `((` = arithmetic; `( (` = nested subshell.
+        assert!(matches!(
+            parse("(( 1 ))").unwrap().items[0].list.first.commands[0],
+            Command::Arith(_)
+        ));
+        assert!(matches!(
+            parse("( ( echo ) )").unwrap().items[0].list.first.commands[0],
+            Command::Subshell(_)
+        ));
     }
 }

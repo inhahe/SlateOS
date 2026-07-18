@@ -39,7 +39,7 @@
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@
 //! - Rik van Riel, "Object-based Reverse Mapping" (2004 OLS)
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

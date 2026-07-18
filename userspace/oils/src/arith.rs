@@ -1,16 +1,27 @@
-//! Integer arithmetic evaluator for `$(( … ))` and (later) `(( … ))`.
+//! Integer arithmetic evaluator for `$(( … ))` and `(( … ))`.
 //!
-//! Supports the common C-like operators bash arithmetic exposes: `+ - * / %`,
+//! Supports the operator set bash arithmetic exposes: `+ - * / % **`,
 //! comparisons, `&& || !`, bitwise `& | ^ ~ << >>`, the ternary conditional
-//! `?:`, the comma operator, parentheses, unary `+`/`-`, and bare variable
-//! names (which resolve to their integer value, defaulting to `0`). Array
-//! elements (`a[i]` arithmetic index, `m[key]` associative string key) resolve
-//! via [`VarLookup`]. Numbers are 64-bit signed. Assignment/increment
-//! (`= += ++ …`) are not yet supported — see known-issues TD-OILS5.
+//! `?:`, the comma operator, parentheses, unary `+`/`-`, **assignment**
+//! (`= += -= *= /= %= <<= >>= &= |= ^=`), **pre/post increment/decrement**
+//! (`++x`, `x++`, `--x`, `x--`), and bare variable names (which resolve to
+//! their integer value, defaulting to `0`). Array elements (`a[i]` arithmetic
+//! index, `m[key]` associative string key) resolve and assign via
+//! [`VarLookup`]. Numbers are 64-bit signed.
+//!
+//! Expressions are parsed into a small [`Expr`] AST and then evaluated against
+//! a mutable [`VarLookup`]. The two-phase design is what makes assignment
+//! possible: an lvalue (`x`, `a[i]`, `m[key]`) can be recognised structurally
+//! before its right-hand side is evaluated, and `&&`/`||`/`?:` short-circuit so
+//! side effects only happen on the branch actually taken.
 
-/// Resolves a bare variable name to its integer value during evaluation.
+/// Resolves and mutates variables during arithmetic evaluation.
+///
+/// The read methods (`get`/`get_index`/`get_assoc`) return `None` for an unset
+/// variable/element (the evaluator treats that as `0`). The write methods have
+/// empty defaults so a read-only implementor need not provide them.
 pub trait VarLookup {
-    /// Return the variable's value, or `None` if unset (treated as `0`).
+    /// Return the scalar variable's value, or `None` if unset (treated as `0`).
     fn get(&self, name: &str) -> Option<i64>;
 
     /// Return the integer value of the array element `name[index]`, or `None`
@@ -40,6 +51,21 @@ pub trait VarLookup {
         let _ = (name, key);
         None
     }
+
+    /// Assign `value` to the scalar variable `name` (arithmetic `x = …`).
+    fn set(&mut self, name: &str, value: i64) {
+        let _ = (name, value);
+    }
+
+    /// Assign `value` to the indexed element `name[index]` (`a[i] = …`).
+    fn set_index(&mut self, name: &str, index: i64, value: i64) {
+        let _ = (name, index, value);
+    }
+
+    /// Assign `value` to the associative element `name[key]` (`m[key] = …`).
+    fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+        let _ = (name, key, value);
+    }
 }
 
 /// An arithmetic evaluation error.
@@ -52,25 +78,82 @@ impl core::fmt::Display for ArithError {
     }
 }
 
-/// Evaluate an arithmetic expression string.
+/// A parsed arithmetic expression.
+#[derive(Debug, Clone)]
+enum Expr {
+    Num(i64),
+    /// Bare scalar variable.
+    Var(String),
+    /// Indexed array element `name[index]` (subscript is arithmetic).
+    Index(String, Box<Expr>),
+    /// Associative array element `name[key]` (subscript is a literal key).
+    Assoc(String, String),
+    Neg(Box<Expr>),
+    Not(Box<Expr>),
+    BitNot(Box<Expr>),
+    /// A binary operation; the operator is one of the [`apply`]/short-circuit
+    /// tokens (`+`, `-`, `*`, `/`, `%`, `**`, `<<`, `>>`, comparisons, `&`,
+    /// `^`, `|`, `&&`, `||`).
+    Bin(String, Box<Expr>, Box<Expr>),
+    /// `cond ? then : else`.
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `left , right` — evaluate both, yield `right`.
+    Comma(Box<Expr>, Box<Expr>),
+    /// Assignment. `op` is `None` for plain `=`, or `Some(base)` for a compound
+    /// assignment whose base binary operator is `base` (e.g. `+=` → `"+"`).
+    Assign(Lvalue, Option<String>, Box<Expr>),
+    /// Pre-increment/decrement (`++x`/`--x`): mutate, then yield the new value.
+    /// `true` = increment, `false` = decrement.
+    PreIncr(Lvalue, bool),
+    /// Post-increment/decrement (`x++`/`x--`): yield the old value, then mutate.
+    PostIncr(Lvalue, bool),
+}
+
+/// An assignable location (the left side of `=`, `+=`, `++`, …).
+#[derive(Debug, Clone)]
+enum Lvalue {
+    Var(String),
+    Index(String, Box<Expr>),
+    Assoc(String, String),
+}
+
+/// A resolved location — array subscripts already evaluated to a concrete
+/// index/key, so load and store don't re-evaluate (and re-trigger side
+/// effects) the subscript expression.
+enum ResolvedLv {
+    Var(String),
+    Index(String, i64),
+    Assoc(String, String),
+}
+
+/// Evaluate an arithmetic expression string against a mutable variable
+/// environment (assignment/increment operators mutate `vars`).
 ///
 /// # Errors
-/// Returns [`ArithError`] on a syntax error or division by zero.
-pub fn eval(expr: &str, vars: &dyn VarLookup) -> Result<i64, ArithError> {
+/// Returns [`ArithError`] on a syntax error, division/modulo by zero, a
+/// negative exponent, or assignment to a non-lvalue.
+pub fn eval(expr: &str, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
+    // Parse with an immutable borrow, then evaluate with the mutable borrow.
+    let ast = parse(expr, &*vars)?;
+    eval_expr(&ast, vars)
+}
+
+/// Parse an arithmetic expression into an AST (no evaluation, no mutation).
+fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
     let mut p = AParser {
         chars: expr.chars().collect(),
         pos: 0,
         vars,
     };
     p.skip_ws();
-    let v = p.parse_comma()?;
+    let e = p.parse_comma()?;
     p.skip_ws();
     if p.pos != p.chars.len() {
         return Err(ArithError(format!(
             "unexpected trailing input in arithmetic: '{expr}'"
         )));
     }
-    Ok(v)
+    Ok(e)
 }
 
 struct AParser<'a> {
@@ -79,21 +162,40 @@ struct AParser<'a> {
     vars: &'a dyn VarLookup,
 }
 
-/// Binary operator table entry: (token, left binding power, is right-assoc).
-fn binop(sym: &str) -> Option<u8> {
+/// Binding power (and right-associativity) of a binary operator, or `None` if
+/// `sym` is not a binary operator. Higher power binds tighter.
+fn binop_bp(sym: &str) -> Option<(u8, bool)> {
     Some(match sym {
-        "||" => 1,
-        "&&" => 2,
-        "|" => 3,
-        "^" => 4,
-        "&" => 5,
-        "==" | "!=" => 6,
-        "<" | ">" | "<=" | ">=" => 7,
-        "<<" | ">>" => 8,
-        "+" | "-" => 9,
-        "*" | "/" | "%" => 10,
+        "||" => (1, false),
+        "&&" => (2, false),
+        "|" => (3, false),
+        "^" => (4, false),
+        "&" => (5, false),
+        "==" | "!=" => (6, false),
+        "<" | ">" | "<=" | ">=" => (7, false),
+        "<<" | ">>" => (8, false),
+        "+" | "-" => (9, false),
+        "*" | "/" | "%" => (10, false),
+        "**" => (11, true), // exponentiation, right-associative
         _ => return None,
     })
+}
+
+/// Is `sym` an assignment operator (`=`, `+=`, `<<=`, …)?
+fn is_assign_op(sym: &str) -> bool {
+    matches!(
+        sym,
+        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^="
+    )
+}
+
+/// The base binary operator of an assignment operator (`+=` → `Some("+")`),
+/// or `None` for plain `=`.
+fn assign_base(sym: &str) -> Option<String> {
+    match sym {
+        "=" => None,
+        other => Some(other.trim_end_matches('=').to_string()),
+    }
 }
 
 impl AParser<'_> {
@@ -107,86 +209,120 @@ impl AParser<'_> {
         self.chars.get(self.pos).copied()
     }
 
-    /// Read the operator symbol at the cursor (longest match), without
-    /// consuming. Returns the symbol text.
-    fn peek_op(&self) -> Option<String> {
+    /// The longest operator token at the cursor (without consuming). Recognises
+    /// 3-, 2-, and 1-character operators, including assignment and
+    /// increment/decrement forms so the binary-operator parser can tell `+`
+    /// from `+=`/`++`.
+    fn read_op(&self) -> Option<String> {
+        let three: String = self.chars[self.pos..].iter().take(3).collect();
+        if matches!(three.as_str(), "<<=" | ">>=") {
+            return Some(three);
+        }
         let two: String = self.chars[self.pos..].iter().take(2).collect();
         if matches!(
             two.as_str(),
-            "||" | "&&" | "==" | "!=" | "<=" | ">=" | "<<" | ">>"
+            "**" | "==" | "!=" | "<=" | ">=" | "<<" | ">>" | "&&" | "||" | "++" | "--" | "+="
+                | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
         ) {
             return Some(two);
         }
         let one = self.peek()?;
-        if "+-*/%|^&<>".contains(one) {
+        if "+-*/%|^&<>=!~".contains(one) {
             return Some(one.to_string());
         }
         None
     }
 
     /// Comma operator (`e1, e2, …`) — the loosest-binding arithmetic operator.
-    /// Every operand is evaluated left-to-right; the value is the last one.
-    fn parse_comma(&mut self) -> Result<i64, ArithError> {
-        let mut v = self.parse_ternary()?;
+    fn parse_comma(&mut self) -> Result<Expr, ArithError> {
+        let mut e = self.parse_assign()?;
         loop {
             self.skip_ws();
             if self.peek() == Some(',') {
                 self.pos += 1;
-                v = self.parse_ternary()?;
+                let r = self.parse_assign()?;
+                e = Expr::Comma(Box::new(e), Box::new(r));
             } else {
                 break;
             }
         }
-        Ok(v)
+        Ok(e)
     }
 
-    /// Ternary conditional `cond ? then : else` — binds looser than every
-    /// binary operator and is right-associative (`a ? b : c ? d : e` parses as
-    /// `a ? b : (c ? d : e)`).
-    fn parse_ternary(&mut self) -> Result<i64, ArithError> {
-        let cond = self.parse_expr(0)?;
+    /// Assignment (`lv = e`, `lv += e`, …) — right-associative, binds looser
+    /// than the ternary. If no assignment operator follows, this is just the
+    /// ternary it parsed.
+    fn parse_assign(&mut self) -> Result<Expr, ArithError> {
+        let lhs = self.parse_ternary()?;
+        self.skip_ws();
+        if let Some(op) = self.read_op()
+            && is_assign_op(&op)
+        {
+            let lv = lvalue_of(lhs)?;
+            self.pos += op.chars().count();
+            let rhs = self.parse_assign()?;
+            return Ok(Expr::Assign(lv, assign_base(&op), Box::new(rhs)));
+        }
+        Ok(lhs)
+    }
+
+    /// Ternary conditional `cond ? then : else` — right-associative.
+    fn parse_ternary(&mut self) -> Result<Expr, ArithError> {
+        let cond = self.parse_binary(0)?;
         self.skip_ws();
         if self.peek() != Some('?') {
             return Ok(cond);
         }
         self.pos += 1; // consume '?'
-        // NOTE: both branches are evaluated because parsing and evaluation are
-        // fused in this design. That is harmless while arithmetic has no side
-        // effects; when assignment/increment land (see known-issues TD-OILS5),
-        // this must become branch-lazy (evaluate only the taken side).
-        let then_v = self.parse_ternary()?;
+        // The middle may itself be an assignment (`c ? x = 1 : y`).
+        let then_e = self.parse_assign()?;
         self.skip_ws();
         if self.peek() != Some(':') {
             return Err(ArithError("expected ':' in ternary expression".into()));
         }
         self.pos += 1; // consume ':'
-        let else_v = self.parse_ternary()?;
-        Ok(if cond != 0 { then_v } else { else_v })
+        let else_e = self.parse_ternary()?;
+        Ok(Expr::Ternary(
+            Box::new(cond),
+            Box::new(then_e),
+            Box::new(else_e),
+        ))
     }
 
-    fn parse_expr(&mut self, min_bp: u8) -> Result<i64, ArithError> {
+    /// Precedence-climbing parse of binary operators (`||` … `**`).
+    fn parse_binary(&mut self, min_bp: u8) -> Result<Expr, ArithError> {
         let mut lhs = self.parse_unary()?;
         loop {
             self.skip_ws();
-            let Some(op) = self.peek_op() else { break };
-            let Some(bp) = binop(&op) else { break };
+            let Some(op) = self.read_op() else { break };
+            let Some((bp, right)) = binop_bp(&op) else {
+                break;
+            };
             if bp < min_bp {
                 break;
             }
             self.pos += op.chars().count();
-            self.skip_ws();
-            let rhs = self.parse_expr(bp + 1)?;
-            lhs = apply(&op, lhs, rhs)?;
+            let next_min = if right { bp } else { bp + 1 };
+            let rhs = self.parse_binary(next_min)?;
+            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
         }
         Ok(lhs)
     }
 
-    fn parse_unary(&mut self) -> Result<i64, ArithError> {
+    fn parse_unary(&mut self) -> Result<Expr, ArithError> {
         self.skip_ws();
+        if let Some(op) = self.read_op()
+            && (op == "++" || op == "--")
+        {
+            self.pos += 2;
+            let operand = self.parse_unary()?;
+            let lv = lvalue_of(operand)?;
+            return Ok(Expr::PreIncr(lv, op == "++"));
+        }
         match self.peek() {
             Some('-') => {
                 self.pos += 1;
-                Ok(self.parse_unary()?.wrapping_neg())
+                Ok(Expr::Neg(Box::new(self.parse_unary()?)))
             }
             Some('+') => {
                 self.pos += 1;
@@ -194,32 +330,46 @@ impl AParser<'_> {
             }
             Some('!') => {
                 self.pos += 1;
-                Ok(i64::from(self.parse_unary()? == 0))
+                Ok(Expr::Not(Box::new(self.parse_unary()?)))
             }
             Some('~') => {
                 self.pos += 1;
-                Ok(!self.parse_unary()?)
+                Ok(Expr::BitNot(Box::new(self.parse_unary()?)))
             }
-            _ => self.parse_atom(),
+            _ => self.parse_postfix(),
         }
     }
 
-    fn parse_atom(&mut self) -> Result<i64, ArithError> {
+    /// A primary atom followed by an optional postfix `++`/`--`.
+    fn parse_postfix(&mut self) -> Result<Expr, ArithError> {
+        let e = self.parse_atom()?;
+        self.skip_ws();
+        if let Some(op) = self.read_op()
+            && (op == "++" || op == "--")
+        {
+            let lv = lvalue_of(e)?;
+            self.pos += 2;
+            return Ok(Expr::PostIncr(lv, op == "++"));
+        }
+        Ok(e)
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr, ArithError> {
         self.skip_ws();
         match self.peek() {
             Some('(') => {
                 self.pos += 1;
-                // A parenthesised group is a full expression: ternary and comma
-                // are allowed inside (`(a ? b : c)`, `(a, b)`).
-                let v = self.parse_comma()?;
+                // A parenthesised group is a full expression: ternary, comma,
+                // and assignment are allowed inside.
+                let e = self.parse_comma()?;
                 self.skip_ws();
                 if self.peek() != Some(')') {
                     return Err(ArithError("expected ')'".into()));
                 }
                 self.pos += 1;
-                Ok(v)
+                Ok(e)
             }
-            Some(c) if c.is_ascii_digit() => self.parse_number(),
+            Some(c) if c.is_ascii_digit() => Ok(Expr::Num(self.parse_number()?)),
             Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                 let mut name = String::new();
                 while let Some(c) = self.peek() {
@@ -230,12 +380,12 @@ impl AParser<'_> {
                         break;
                     }
                 }
-                // Array subscript: `name[sub]`. For an *indexed* array the
-                // subscript is an arithmetic expression (`a[i+1]`, negative
-                // indices); for an *associative* array it is a literal string
-                // key (`m[foo]`). We first capture the raw bracketed text with
-                // balanced-bracket matching, then dispatch on the array kind.
-                // No whitespace is allowed between the name and `[`.
+                // Array subscript `name[sub]`: for an indexed array the
+                // subscript is an arithmetic expression (`a[i+1]`, negatives);
+                // for an associative array it is a literal string key
+                // (`m[foo]`). Capture the raw bracketed text (balanced
+                // brackets), then dispatch on the array kind. No whitespace is
+                // allowed between the name and `[`.
                 if self.peek() == Some('[') {
                     self.pos += 1;
                     let sub_start = self.pos;
@@ -259,14 +409,14 @@ impl AParser<'_> {
                     let raw: String = self.chars[sub_start..self.pos].iter().collect();
                     self.pos += 1; // consume the closing ']'
                     if self.vars.is_assoc(&name) {
-                        // Associative: the (trimmed) raw text is the key.
-                        return Ok(self.vars.get_assoc(&name, raw.trim()).unwrap_or(0));
+                        return Ok(Expr::Assoc(name, raw.trim().to_string()));
                     }
-                    // Indexed: evaluate the subscript arithmetically.
-                    let idx = eval(&raw, self.vars)?;
-                    return Ok(self.vars.get_index(&name, idx).unwrap_or(0));
+                    // Indexed: parse the subscript as its own arithmetic
+                    // expression (evaluated later against the live environment).
+                    let sub_ast = parse(&raw, self.vars)?;
+                    return Ok(Expr::Index(name, Box::new(sub_ast)));
                 }
-                Ok(self.vars.get(&name).unwrap_or(0))
+                Ok(Expr::Var(name))
             }
             other => Err(ArithError(format!(
                 "unexpected character in arithmetic: {other:?}"
@@ -296,11 +446,134 @@ impl AParser<'_> {
     }
 }
 
+/// Convert a parsed expression into an lvalue, or error if it is not
+/// assignable (bash: "attempted assignment to non-variable").
+fn lvalue_of(e: Expr) -> Result<Lvalue, ArithError> {
+    match e {
+        Expr::Var(n) => Ok(Lvalue::Var(n)),
+        Expr::Index(n, ix) => Ok(Lvalue::Index(n, ix)),
+        Expr::Assoc(n, k) => Ok(Lvalue::Assoc(n, k)),
+        _ => Err(ArithError("attempted assignment to non-variable".into())),
+    }
+}
+
+fn eval_expr(e: &Expr, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
+    match e {
+        Expr::Num(n) => Ok(*n),
+        Expr::Var(n) => Ok(vars.get(n).unwrap_or(0)),
+        Expr::Index(n, ix) => {
+            let i = eval_expr(ix, vars)?;
+            Ok(vars.get_index(n, i).unwrap_or(0))
+        }
+        Expr::Assoc(n, k) => Ok(vars.get_assoc(n, k).unwrap_or(0)),
+        Expr::Neg(x) => Ok(eval_expr(x, vars)?.wrapping_neg()),
+        Expr::Not(x) => Ok(i64::from(eval_expr(x, vars)? == 0)),
+        Expr::BitNot(x) => Ok(!eval_expr(x, vars)?),
+        Expr::Bin(op, l, r) => match op.as_str() {
+            // Short-circuit: the right operand's side effects only happen when
+            // the left doesn't already decide the result.
+            "&&" => {
+                if eval_expr(l, vars)? == 0 {
+                    Ok(0)
+                } else {
+                    Ok(i64::from(eval_expr(r, vars)? != 0))
+                }
+            }
+            "||" => {
+                if eval_expr(l, vars)? != 0 {
+                    Ok(1)
+                } else {
+                    Ok(i64::from(eval_expr(r, vars)? != 0))
+                }
+            }
+            _ => {
+                let a = eval_expr(l, vars)?;
+                let b = eval_expr(r, vars)?;
+                apply(op, a, b)
+            }
+        },
+        Expr::Ternary(c, t, f) => {
+            if eval_expr(c, vars)? != 0 {
+                eval_expr(t, vars)
+            } else {
+                eval_expr(f, vars)
+            }
+        }
+        Expr::Comma(l, r) => {
+            eval_expr(l, vars)?;
+            eval_expr(r, vars)
+        }
+        Expr::Assign(lv, base, rhs) => {
+            let loc = resolve_lv(lv, vars)?;
+            let v = match base {
+                None => eval_expr(rhs, vars)?,
+                Some(op) => {
+                    let cur = load_rlv(&loc, vars);
+                    let b = eval_expr(rhs, vars)?;
+                    apply(op, cur, b)?
+                }
+            };
+            store_rlv(&loc, v, vars);
+            Ok(v)
+        }
+        Expr::PreIncr(lv, inc) => {
+            let loc = resolve_lv(lv, vars)?;
+            let step = if *inc { 1 } else { -1 };
+            let v = load_rlv(&loc, vars).wrapping_add(step);
+            store_rlv(&loc, v, vars);
+            Ok(v)
+        }
+        Expr::PostIncr(lv, inc) => {
+            let loc = resolve_lv(lv, vars)?;
+            let old = load_rlv(&loc, vars);
+            let step = if *inc { 1 } else { -1 };
+            store_rlv(&loc, old.wrapping_add(step), vars);
+            Ok(old)
+        }
+    }
+}
+
+/// Resolve an lvalue's location once (evaluating an index subscript), so a
+/// read-modify-write op doesn't evaluate the subscript twice.
+fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup) -> Result<ResolvedLv, ArithError> {
+    Ok(match lv {
+        Lvalue::Var(n) => ResolvedLv::Var(n.clone()),
+        Lvalue::Index(n, ix) => {
+            let i = eval_expr(ix, vars)?;
+            ResolvedLv::Index(n.clone(), i)
+        }
+        Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
+    })
+}
+
+fn load_rlv(loc: &ResolvedLv, vars: &dyn VarLookup) -> i64 {
+    match loc {
+        ResolvedLv::Var(n) => vars.get(n).unwrap_or(0),
+        ResolvedLv::Index(n, i) => vars.get_index(n, *i).unwrap_or(0),
+        ResolvedLv::Assoc(n, k) => vars.get_assoc(n, k).unwrap_or(0),
+    }
+}
+
+fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) {
+    match loc {
+        ResolvedLv::Var(n) => vars.set(n, v),
+        ResolvedLv::Index(n, i) => vars.set_index(n, *i, v),
+        ResolvedLv::Assoc(n, k) => vars.set_assoc(n, k, v),
+    }
+}
+
 fn apply(op: &str, a: i64, b: i64) -> Result<i64, ArithError> {
     Ok(match op {
         "+" => a.wrapping_add(b),
         "-" => a.wrapping_sub(b),
         "*" => a.wrapping_mul(b),
+        "**" => {
+            if b < 0 {
+                return Err(ArithError("exponent less than 0".into()));
+            }
+            let exp = u32::try_from(b).map_err(|_| ArithError("exponent too large".into()))?;
+            a.wrapping_pow(exp)
+        }
         "/" => {
             if b == 0 {
                 return Err(ArithError("division by zero".into()));
@@ -335,10 +608,14 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[derive(Default)]
     struct Map(HashMap<String, i64>);
     impl VarLookup for Map {
         fn get(&self, name: &str) -> Option<i64> {
             self.0.get(name).copied()
+        }
+        fn set(&mut self, name: &str, value: i64) {
+            self.0.insert(name.to_string(), value);
         }
     }
 
@@ -352,6 +629,9 @@ mod tests {
         fn get(&self, name: &str) -> Option<i64> {
             self.scalars.get(name).copied()
         }
+        fn set(&mut self, name: &str, value: i64) {
+            self.scalars.insert(name.to_string(), value);
+        }
         fn get_index(&self, name: &str, index: i64) -> Option<i64> {
             if name != "a" {
                 return None;
@@ -363,28 +643,52 @@ mod tests {
             };
             usize::try_from(real).ok().and_then(|i| self.a.get(i).copied())
         }
+        fn set_index(&mut self, name: &str, index: i64, value: i64) {
+            if name != "a" {
+                return;
+            }
+            if let Ok(i) = usize::try_from(index)
+                && i < self.a.len()
+            {
+                self.a[i] = value;
+            }
+        }
     }
 
     #[test]
     fn array_subscripts() {
         let mut scalars = HashMap::new();
         scalars.insert("i".to_string(), 2);
-        let m = ArrMap {
+        let mut m = ArrMap {
             scalars,
             a: vec![10, 20, 30, 40],
         };
-        assert_eq!(eval("a[0]", &m).unwrap(), 10);
-        assert_eq!(eval("a[i]", &m).unwrap(), 30); // i = 2
-        assert_eq!(eval("a[i+1] + 1", &m).unwrap(), 41); // a[3]=40, +1
-        assert_eq!(eval("a[-1]", &m).unwrap(), 40); // negative from end
-        assert_eq!(eval("a[10]", &m).unwrap(), 0); // out of range → 0
+        assert_eq!(eval("a[0]", &mut m).unwrap(), 10);
+        assert_eq!(eval("a[i]", &mut m).unwrap(), 30); // i = 2
+        assert_eq!(eval("a[i+1] + 1", &mut m).unwrap(), 41); // a[3]=40, +1
+        assert_eq!(eval("a[-1]", &mut m).unwrap(), 40); // negative from end
+        assert_eq!(eval("a[10]", &mut m).unwrap(), 0); // out of range → 0
         // Missing ']' is a syntax error.
-        assert!(eval("a[1", &m).is_err());
+        assert!(eval("a[1", &mut m).is_err());
     }
 
-    /// A lookup with one associative array `m` keyed by strings, to exercise
-    /// the associative subscript path (`m[key]` uses the raw text as key, not
-    /// an arithmetic expression).
+    #[test]
+    fn indexed_assignment_and_incr() {
+        let mut m = ArrMap {
+            scalars: HashMap::new(),
+            a: vec![10, 20, 30],
+        };
+        assert_eq!(eval("a[0] = 99", &mut m).unwrap(), 99);
+        assert_eq!(m.a[0], 99);
+        assert_eq!(eval("a[1] += 5", &mut m).unwrap(), 25);
+        assert_eq!(m.a[1], 25);
+        // Post-increment yields the old value, then mutates.
+        assert_eq!(eval("a[2]++", &mut m).unwrap(), 30);
+        assert_eq!(m.a[2], 31);
+    }
+
+    /// A lookup with one associative array `m` keyed by strings.
+    #[derive(Default)]
     struct AssocMap(HashMap<String, i64>);
     impl VarLookup for AssocMap {
         fn get(&self, _name: &str) -> Option<i64> {
@@ -399,6 +703,11 @@ mod tests {
             }
             self.0.get(key).copied()
         }
+        fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+            if name == "m" {
+                self.0.insert(key.to_string(), value);
+            }
+        }
     }
 
     #[test]
@@ -406,18 +715,21 @@ mod tests {
         let mut kv = HashMap::new();
         kv.insert("foo".to_string(), 7);
         kv.insert("bar".to_string(), 13);
-        let m = AssocMap(kv);
+        let mut m = AssocMap(kv);
         // The subscript is a literal string key, not arithmetic.
-        assert_eq!(eval("m[foo]", &m).unwrap(), 7);
-        assert_eq!(eval("m[bar] + 1", &m).unwrap(), 14);
+        assert_eq!(eval("m[foo]", &mut m).unwrap(), 7);
+        assert_eq!(eval("m[bar] + 1", &mut m).unwrap(), 14);
         // A key that looks like an operator expression is still literal.
-        assert_eq!(eval("m[missing]", &m).unwrap(), 0); // unset → 0
+        assert_eq!(eval("m[missing]", &mut m).unwrap(), 0); // unset → 0
         // Whitespace around the key is trimmed.
-        assert_eq!(eval("m[ foo ]", &m).unwrap(), 7);
+        assert_eq!(eval("m[ foo ]", &mut m).unwrap(), 7);
+        // Assignment to an associative element.
+        assert_eq!(eval("m[foo] = 100", &mut m).unwrap(), 100);
+        assert_eq!(m.0.get("foo"), Some(&100));
     }
 
     fn ev(s: &str) -> i64 {
-        eval(s, &Map(HashMap::new())).unwrap()
+        eval(s, &mut Map::default()).unwrap()
     }
 
     #[test]
@@ -439,16 +751,80 @@ mod tests {
     }
 
     #[test]
+    fn exponent() {
+        assert_eq!(ev("2 ** 10"), 1024);
+        assert_eq!(ev("3 ** 0"), 1);
+        // Right-associative: 2 ** 3 ** 2 == 2 ** (3 ** 2) == 2 ** 9 == 512.
+        assert_eq!(ev("2 ** 3 ** 2"), 512);
+        // Binds tighter than unary minus applies to the base? -2 ** 2 = -(2**2).
+        assert_eq!(ev("2 ** 2 * 3"), 12);
+        // Negative exponent is an error.
+        assert!(eval("2 ** -1", &mut Map::default()).is_err());
+    }
+
+    #[test]
     fn variables() {
         let mut m = HashMap::new();
         m.insert("x".to_string(), 10);
         m.insert("y".to_string(), 4);
-        assert_eq!(eval("x * y + 2", &Map(m)).unwrap(), 42);
+        assert_eq!(eval("x * y + 2", &mut Map(m)).unwrap(), 42);
+    }
+
+    #[test]
+    fn assignment_scalars() {
+        let mut m = Map::default();
+        assert_eq!(eval("x = 5", &mut m).unwrap(), 5);
+        assert_eq!(m.get("x"), Some(5));
+        // Compound assignment.
+        assert_eq!(eval("x += 3", &mut m).unwrap(), 8);
+        assert_eq!(eval("x *= 2", &mut m).unwrap(), 16);
+        assert_eq!(eval("x -= 1", &mut m).unwrap(), 15);
+        assert_eq!(eval("x /= 5", &mut m).unwrap(), 3);
+        assert_eq!(m.get("x"), Some(3));
+        // Right-associative chained assignment: y = z = 7.
+        assert_eq!(eval("y = z = 7", &mut m).unwrap(), 7);
+        assert_eq!(m.get("y"), Some(7));
+        assert_eq!(m.get("z"), Some(7));
+        // Assigning to a literal is an error.
+        assert!(eval("3 = 4", &mut Map::default()).is_err());
+    }
+
+    #[test]
+    fn increment_decrement() {
+        let mut m = Map::default();
+        m.set("x", 5);
+        // Pre-increment yields the new value.
+        assert_eq!(eval("++x", &mut m).unwrap(), 6);
+        assert_eq!(m.get("x"), Some(6));
+        // Post-increment yields the old value.
+        assert_eq!(eval("x++", &mut m).unwrap(), 6);
+        assert_eq!(m.get("x"), Some(7));
+        // Pre/post decrement.
+        assert_eq!(eval("--x", &mut m).unwrap(), 6);
+        assert_eq!(eval("x--", &mut m).unwrap(), 6);
+        assert_eq!(m.get("x"), Some(5));
+        // Increment on an unset variable starts from 0.
+        assert_eq!(eval("++fresh", &mut m).unwrap(), 1);
+    }
+
+    #[test]
+    fn short_circuit_side_effects() {
+        // The right operand of && is skipped when the left is false, so its
+        // assignment side effect must not happen.
+        let mut m = Map::default();
+        eval("0 && (y = 9)", &mut m).unwrap();
+        assert_eq!(m.get("y"), None);
+        eval("1 || (z = 9)", &mut m).unwrap();
+        assert_eq!(m.get("z"), None);
+        // The taken branch of a ternary runs; the other doesn't.
+        eval("1 ? (a = 1) : (b = 2)", &mut m).unwrap();
+        assert_eq!(m.get("a"), Some(1));
+        assert_eq!(m.get("b"), None);
     }
 
     #[test]
     fn div_zero() {
-        assert!(eval("1 / 0", &Map(HashMap::new())).is_err());
+        assert!(eval("1 / 0", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -463,7 +839,7 @@ mod tests {
         // Nested in a larger expression / parentheses.
         assert_eq!(ev("(1 ? 2 : 3) + 4"), 6);
         // Missing ':' is a syntax error.
-        assert!(eval("1 ? 2", &Map(HashMap::new())).is_err());
+        assert!(eval("1 ? 2", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -472,6 +848,11 @@ mod tests {
         assert_eq!(ev("(1 + 1, 2 * 3)"), 6);
         // Comma binds looser than ternary.
         assert_eq!(ev("1 ? 5 : 9, 7"), 7);
+        // Comma sequences assignments (the C-style for-loop update idiom).
+        let mut m = Map::default();
+        assert_eq!(eval("i = 0, j = 10", &mut m).unwrap(), 10);
+        assert_eq!(m.get("i"), Some(0));
+        assert_eq!(m.get("j"), Some(10));
     }
 
     #[test]
@@ -479,8 +860,8 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("x".to_string(), 5);
         m.insert("y".to_string(), 0);
-        let vars = Map(m);
-        assert_eq!(eval("x ? x * 2 : -1", &vars).unwrap(), 10);
-        assert_eq!(eval("y ? 99 : x + 1", &vars).unwrap(), 6);
+        let mut vars = Map(m);
+        assert_eq!(eval("x ? x * 2 : -1", &mut vars).unwrap(), 10);
+        assert_eq!(eval("y ? 99 : x + 1", &mut vars).unwrap(), 6);
     }
 }

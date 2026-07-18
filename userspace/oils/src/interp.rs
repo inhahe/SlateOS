@@ -90,7 +90,8 @@ use crate::arith::{self, VarLookup};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, Command, CondBinOp,
     CondExpr,
-    ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp,
+    ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
+    RedirectOp,
     ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::parser::parse;
@@ -578,6 +579,7 @@ impl Shell {
             Command::If(c) => self.exec_if(c, out, stdin),
             Command::Loop(c) => self.exec_loop(c, out, stdin),
             Command::For(c) => self.exec_for(c, out, stdin),
+            Command::ForArith(c) => self.exec_for_arith(c, out, stdin),
             Command::Function(f) => {
                 self.funcs.insert(f.name.clone(), f.body.clone());
                 self.last_status = 0;
@@ -688,6 +690,65 @@ impl Shell {
                     }
                 }
                 other => return other,
+            }
+        }
+        Flow::Next
+    }
+
+    /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
+    /// mutating shell state for any assignment/increment operators. Returns the
+    /// value, or `None` after printing the error.
+    fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
+        let expanded = self.expand_arith_params(raw);
+        match arith::eval(&expanded, self) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("osh: arithmetic: {e}");
+                None
+            }
+        }
+    }
+
+    /// C-style `for (( init; cond; update )); do body; done`. `init` runs once;
+    /// the loop runs while `cond` is non-zero (an empty `cond` is always true);
+    /// `update` runs after each iteration (including after `continue`). An
+    /// arithmetic error in any section aborts the loop with status 1.
+    fn exec_for_arith(&mut self, c: &ForArithClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        self.last_status = 0;
+        if !c.init.is_empty() && self.eval_arith_raw(&c.init).is_none() {
+            self.last_status = 1;
+            return Flow::Next;
+        }
+        loop {
+            if !c.cond.is_empty() {
+                match self.eval_arith_raw(&c.cond) {
+                    Some(0) => break,
+                    Some(_) => {}
+                    None => {
+                        self.last_status = 1;
+                        return Flow::Next;
+                    }
+                }
+            }
+            match self.exec_program(&c.body, out, stdin) {
+                Flow::Next => {}
+                Flow::Break(n) => {
+                    if n > 1 {
+                        return Flow::Break(n - 1);
+                    }
+                    break;
+                }
+                Flow::Continue(n) => {
+                    if n > 1 {
+                        return Flow::Continue(n - 1);
+                    }
+                    // `continue` still runs the update section below.
+                }
+                other => return other,
+            }
+            if !c.update.is_empty() && self.eval_arith_raw(&c.update).is_none() {
+                self.last_status = 1;
+                return Flow::Next;
             }
         }
         Flow::Next
@@ -2761,6 +2822,24 @@ impl VarLookup for Shell {
         self.assoc_element(name, key)
             .and_then(|v| v.trim().parse::<i64>().ok())
     }
+
+    fn set(&mut self, name: &str, value: i64) {
+        self.vars.insert(name.to_string(), value.to_string());
+    }
+
+    fn set_index(&mut self, name: &str, index: i64, value: i64) {
+        // Mirror the indexed branch of `assign_elem`: negative indices count
+        // back from `highest_index + 1` (bash sparse semantics).
+        let arr = self.arrays.entry(name.to_string()).or_default();
+        let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
+        if let Some(real) = Self::resolve_index(index, bound) {
+            arr.insert(real, value.to_string());
+        }
+    }
+
+    fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+        self.assoc_set(name, key.to_string(), value.to_string(), false);
+    }
 }
 
 // ---- free helpers -----------------------------------------------------------
@@ -3765,6 +3844,72 @@ mod tests {
         // As a `(( … ))` command, the exit status reflects the final value.
         assert_eq!(run("(( 1 ? 1 : 0 ))").1, 0);
         assert_eq!(run("(( 1 ? 0 : 1 ))").1, 1);
+    }
+
+    #[test]
+    fn arith_assignment_command() {
+        // `(( x = … ))` writes back to the shell scalar.
+        assert_eq!(run("(( x = 5 )); echo $x").0, "5\n");
+        // Compound assignment reads-modifies-writes.
+        assert_eq!(run("x=5; (( x += 3 )); echo $x").0, "8\n");
+        assert_eq!(run("x=10; (( x -= 4 )); echo $x").0, "6\n");
+        assert_eq!(run("x=3; (( x *= 4 )); echo $x").0, "12\n");
+        assert_eq!(run("x=20; (( x /= 6 )); echo $x").0, "3\n");
+        assert_eq!(run("x=20; (( x %= 6 )); echo $x").0, "2\n");
+        assert_eq!(run("x=1; (( x <<= 4 )); echo $x").0, "16\n");
+        assert_eq!(run("x=6; (( x &= 4 )); echo $x").0, "4\n");
+        // The exit status reflects the assigned value (0 → exit 1).
+        assert_eq!(run("(( x = 0 ))").1, 1);
+        assert_eq!(run("(( x = 7 ))").1, 0);
+    }
+
+    #[test]
+    fn arith_increment_command() {
+        // Pre/post increment and decrement mutate the shell scalar.
+        assert_eq!(run("x=5; (( x++ )); echo $x").0, "6\n");
+        assert_eq!(run("x=5; (( ++x )); echo $x").0, "6\n");
+        assert_eq!(run("x=5; (( x-- )); echo $x").0, "4\n");
+        assert_eq!(run("x=5; (( --x )); echo $x").0, "4\n");
+        // Post-increment yields the old value in `$(( … ))`.
+        assert_eq!(run("x=5; echo $(( x++ )); echo $x").0, "5\n6\n");
+        // Pre-increment yields the new value.
+        assert_eq!(run("x=5; echo $(( ++x )); echo $x").0, "6\n6\n");
+        // Increment on an unset variable starts from 0.
+        assert_eq!(run("echo $(( n++ )); echo $n").0, "0\n1\n");
+    }
+
+    #[test]
+    fn arith_assignment_array_elements() {
+        // Assign to an indexed array element inside arithmetic.
+        assert_eq!(run("a=(10 20 30); (( a[1] = 99 )); echo ${a[1]}").0, "99\n");
+        assert_eq!(run("a=(10 20 30); (( a[0] += 5 )); echo ${a[0]}").0, "15\n");
+        assert_eq!(run("a=(10 20 30); (( a[2]++ )); echo ${a[2]}").0, "31\n");
+        // Assign to an associative element by string key.
+        assert_eq!(
+            run("declare -A m; m[foo]=7; (( m[foo] += 3 )); echo ${m[foo]}").0,
+            "10\n"
+        );
+    }
+
+    #[test]
+    fn arith_c_style_for_loop() {
+        // Classic counting loop.
+        assert_eq!(
+            run("for (( i=0; i<3; i++ )); do echo $i; done").0,
+            "0\n1\n2\n"
+        );
+        // Multiple init/update via comma.
+        assert_eq!(
+            run("for (( i=0, j=10; i<3; i++, j-- )); do echo $i:$j; done").0,
+            "0:10\n1:9\n2:8\n"
+        );
+        // Empty sections mean forever/true; `break` exits.
+        assert_eq!(
+            run("i=0; for (( ; ; )); do echo $i; (( i++ )); (( i >= 2 )) && break; done").0,
+            "0\n1\n"
+        );
+        // A false condition from the start runs the body zero times.
+        assert_eq!(run("for (( i=5; i<3; i++ )); do echo $i; done").0, "");
     }
 
     #[test]

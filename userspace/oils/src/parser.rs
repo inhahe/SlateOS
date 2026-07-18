@@ -7,7 +7,8 @@
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, Command,
     CondBinOp,
-    CondExpr, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp, Pipeline, Program,
+    CondExpr, ForArithClause, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp,
+    Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
@@ -320,6 +321,13 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("for")?;
+        // C-style `for (( init; cond; update ))` — the `(( … ))` lexes as a
+        // single `ArithCmd` token carrying the raw `init; cond; update` text.
+        if let Some(Tok::ArithCmd(raw)) = self.peek() {
+            let raw = raw.clone();
+            self.pos += 1;
+            return self.parse_for_arith(&raw);
+        }
         let var = self
             .bare_word_here()
             .ok_or_else(|| ParseError("expected variable name after 'for'".into()))?;
@@ -352,6 +360,33 @@ impl Parser {
         let body = self.parse_program(&["done"])?;
         self.expect_reserved("done")?;
         Ok(Command::For(ForClause { var, words, body }))
+    }
+
+    /// Parse the body of a C-style `for (( init; cond; update ))` loop, given
+    /// the raw `init; cond; update` text captured from the arithmetic token.
+    /// The three sections are split on `;`; an omitted section is empty (an
+    /// empty condition is treated as always-true at run time).
+    fn parse_for_arith(&mut self, raw: &str) -> Result<Command, ParseError> {
+        let parts: Vec<&str> = raw.split(';').collect();
+        if parts.len() != 3 {
+            return Err(ParseError(
+                "C-style for loop requires 'for (( init; cond; update ))'".into(),
+            ));
+        }
+        let init = parts[0].trim().to_string();
+        let cond = parts[1].trim().to_string();
+        let update = parts[2].trim().to_string();
+        // An optional separator (`;`/newline) may precede `do`.
+        self.skip_separators();
+        self.expect_reserved("do")?;
+        let body = self.parse_program(&["done"])?;
+        self.expect_reserved("done")?;
+        Ok(Command::ForArith(ForArithClause {
+            init,
+            cond,
+            update,
+            body,
+        }))
     }
 
     fn parse_case(&mut self) -> Result<Command, ParseError> {

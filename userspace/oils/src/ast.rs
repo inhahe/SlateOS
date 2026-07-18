@@ -56,6 +56,9 @@ pub enum Command {
     Loop(LoopClause),
     /// `for name in words; do body; done`.
     For(ForClause),
+    /// `for (( init; cond; update )); do body; done` — C-style arithmetic for
+    /// loop. Each section holds the raw arithmetic text (empty = omitted).
+    ForArith(ForArithClause),
     /// `name() { body; }` — a function definition.
     Function(FunctionDef),
     /// `case word in pat) body ;; … esac`.
@@ -219,6 +222,17 @@ pub struct ForClause {
     pub var: String,
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,
+    pub body: Program,
+}
+
+/// `for (( init; cond; update ))` — the C-style arithmetic for loop. Each
+/// section is the raw arithmetic-expression text; an empty string means the
+/// section was omitted (an omitted condition is treated as always-true).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForArithClause {
+    pub init: String,
+    pub cond: String,
+    pub update: String,
     pub body: Program,
 }
 

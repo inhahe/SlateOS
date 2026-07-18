@@ -1576,6 +1576,16 @@ impl Shell {
             return self.exec_declare_with_arrays(&argv, &sc.decl_arrays);
         }
 
+        // `command …` (bypass shell functions) and `builtin …` (force builtin
+        // lookup) re-dispatch a sub-command, so they are handled before the
+        // normal function/builtin/external resolution below.
+        if name == "command" {
+            return self.exec_command_builtin(&argv, &assigns, out, stdin, &redir);
+        }
+        if name == "builtin" {
+            return self.exec_builtin_builtin(&argv, &assigns, out, stdin, &redir);
+        }
+
         // Function?
         if self.funcs.contains_key(&name) {
             return self.call_function(&name, &argv[1..], &assigns, out, stdin, &redir);
@@ -1631,6 +1641,146 @@ impl Shell {
             Flow::Return | Flow::Next => Flow::Next,
             other => other,
         }
+    }
+
+    /// `command [-v|-V] [-p] name [args]` — run `name` bypassing shell
+    /// functions (builtin if it is one, else external), or describe it with
+    /// `-v` (terse: name/path) / `-V` (verbose).
+    fn exec_command_builtin(
+        &mut self,
+        argv: &[String],
+        assigns: &[(String, String)],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> Flow {
+        let mut i = 1;
+        let mut terse = false;
+        let mut verbose = false;
+        while i < argv.len() && argv[i].starts_with('-') && argv[i].len() > 1 {
+            match argv[i].as_str() {
+                "-v" => terse = true,
+                "-V" => verbose = true,
+                "-p" => {} // "default PATH" — we use the current PATH.
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                other => {
+                    self.errln(&format!("osh: command: {other}: invalid option"));
+                    self.last_status = 2;
+                    return Flow::Next;
+                }
+            }
+            i += 1;
+        }
+        let rest = &argv[i..];
+        let Some(target) = rest.first() else {
+            self.last_status = 0;
+            return Flow::Next;
+        };
+        if terse || verbose {
+            return self.command_describe(target, verbose, out, redir);
+        }
+        // Run `target` bypassing functions.
+        if is_builtin(target) {
+            return self.run_builtin(target, rest, assigns, out, stdin, redir);
+        }
+        self.run_external(rest, assigns, out, stdin, redir);
+        Flow::Next
+    }
+
+    /// `builtin name [args]` — run the shell builtin `name` even if a function
+    /// of the same name exists.
+    fn exec_builtin_builtin(
+        &mut self,
+        argv: &[String],
+        assigns: &[(String, String)],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> Flow {
+        let Some(sub) = argv.get(1) else {
+            self.last_status = 0;
+            return Flow::Next;
+        };
+        if is_builtin(sub) {
+            let sub = sub.clone();
+            return self.run_builtin(&sub, &argv[1..], assigns, out, stdin, redir);
+        }
+        self.errln(&format!("osh: builtin: {sub}: not a shell builtin"));
+        self.last_status = 1;
+        Flow::Next
+    }
+
+    /// Implement `command -v`/`-V`: report how `target` would be resolved.
+    fn command_describe(
+        &mut self,
+        target: &str,
+        verbose: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Flow {
+        if self.funcs.contains_key(target) {
+            let line = if verbose {
+                format!("{target} is a function")
+            } else {
+                target.to_string()
+            };
+            let _ = self.write_line(out, redir, &line);
+            self.last_status = 0;
+        } else if is_builtin(target) {
+            let line = if verbose {
+                format!("{target} is a shell builtin")
+            } else {
+                target.to_string()
+            };
+            let _ = self.write_line(out, redir, &line);
+            self.last_status = 0;
+        } else if let Some(path) = self.find_in_path(target) {
+            let ps = path.to_string_lossy().into_owned();
+            let line = if verbose {
+                format!("{target} is {ps}")
+            } else {
+                ps
+            };
+            let _ = self.write_line(out, redir, &line);
+            self.last_status = 0;
+        } else {
+            if verbose {
+                self.errln(&format!("osh: command: {target}: not found"));
+            }
+            self.last_status = 1;
+        }
+        Flow::Next
+    }
+
+    /// Search `$PATH` for an executable named `name`. A name containing a slash
+    /// is checked directly. Returns the first matching regular file.
+    fn find_in_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        use std::path::Path;
+        if name.contains('/') || name.contains('\\') {
+            let p = Path::new(name);
+            return p.is_file().then(|| p.to_path_buf());
+        }
+        let path = self
+            .param_value("PATH")
+            .or_else(|| std::env::var("PATH").ok())?;
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(name);
+            if cand.is_file() {
+                return Some(cand);
+            }
+            // Host convenience: try common Windows executable extensions.
+            #[cfg(windows)]
+            for ext in ["exe", "cmd", "bat"] {
+                let c = cand.with_extension(ext);
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+        }
+        None
     }
 
     fn run_external(
@@ -3917,6 +4067,8 @@ fn is_builtin(name: &str) -> bool {
             | "getopts"
             | "mapfile"
             | "readarray"
+            | "command"
+            | "builtin"
             | "read"
             | "test"
             | "["
@@ -4424,6 +4576,19 @@ mod tests {
         assert_eq!(run("x=HeLLo; echo \"${x@L}\"").0, "hello\n");
         // A simple safe word needs no quoting under @Q.
         assert_eq!(run("x=word; echo \"${x@Q}\"").0, "word\n");
+    }
+
+    #[test]
+    fn command_and_builtin_builtins() {
+        assert_eq!(run("command echo hi").0, "hi\n");
+        assert_eq!(run("builtin echo hi").0, "hi\n");
+        assert_eq!(run("command -v echo").0, "echo\n");
+        assert_eq!(run("command -V echo").0, "echo is a shell builtin\n");
+        // A function shadowing a builtin is bypassed by `command`.
+        assert_eq!(run("echo() { printf OVERRIDE; }; command echo hi").0, "hi\n");
+        // -v on a function prints the name; an unknown name → status 1, no output.
+        assert_eq!(run("greet() { :; }; command -v greet").0, "greet\n");
+        assert_eq!(run("command -v no_such_cmd_xyz; echo $?").0, "1\n");
     }
 
     #[test]

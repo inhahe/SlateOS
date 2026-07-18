@@ -6,8 +6,8 @@
 
 use crate::ast::{
     AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, ForClause, FunctionDef, IfClause,
-    Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp, SimpleCommand, Word,
-    WordPart,
+    Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
+    SimpleCommand, Word, WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
 
@@ -563,33 +563,121 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         i = 1;
     }
     let name: String = bytes[..i].iter().collect();
-    let remainder: String = bytes[i..].iter().collect();
-    if remainder.is_empty() {
+    let rest: Vec<char> = bytes[i..].to_vec();
+    if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
-    // Operator: optional ':' then one of -=+?.
-    let mut chs = remainder.chars();
-    let mut c = chs.next().unwrap_or('\0');
-    if c == ':' {
-        c = chs.next().unwrap_or('\0');
-    }
-    let arg_str: String = chs.collect();
-    let op = match c {
-        '-' => ParamOp::UseDefault,
-        '=' => ParamOp::AssignDefault,
-        '+' => ParamOp::UseAlternate,
-        '?' => ParamOp::ErrorIfUnset,
-        _ => {
-            return Err(ParseError(format!(
-                "unsupported parameter expansion '${{{raw}}}'"
-            )));
+    match rest[0] {
+        // Prefix / suffix trimming: `#`, `##`, `%`, `%%`.
+        '#' | '%' => {
+            let suffix = rest[0] == '%';
+            let longest = rest.get(1) == Some(&rest[0]);
+            let pat_start = if longest { 2 } else { 1 };
+            let pat: String = rest[pat_start..].iter().collect();
+            Ok(WordPart::ParamTrim {
+                name,
+                suffix,
+                longest,
+                pattern: Box::new(word_from_source(&pat)?),
+            })
         }
-    };
-    let arg = word_from_source(&arg_str)?;
-    Ok(WordPart::ParamOp {
+        // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
+        '/' => parse_param_replace(name, &rest[1..]),
+        // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
+        // use/assign/alt/error operator, handled below.
+        ':' if !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) => {
+            let body: String = rest[1..].iter().collect();
+            let (off_str, len_str) = match body.find(':') {
+                Some(idx) => (body[..idx].to_string(), Some(body[idx + 1..].to_string())),
+                None => (body, None),
+            };
+            let length = match len_str {
+                Some(s) => Some(Box::new(word_from_source(&s)?)),
+                None => None,
+            };
+            Ok(WordPart::ParamSubstr {
+                name,
+                offset: Box::new(word_from_source(&off_str)?),
+                length,
+            })
+        }
+        // `:-`, `:=`, `:+`, `:?` and the colon-less `-=+?` forms.
+        _ => {
+            let mut chs = rest.iter();
+            let mut c = *chs.next().unwrap_or(&'\0');
+            if c == ':' {
+                c = *chs.next().unwrap_or(&'\0');
+            }
+            let arg_str: String = chs.collect();
+            let op = match c {
+                '-' => ParamOp::UseDefault,
+                '=' => ParamOp::AssignDefault,
+                '+' => ParamOp::UseAlternate,
+                '?' => ParamOp::ErrorIfUnset,
+                _ => {
+                    return Err(ParseError(format!(
+                        "unsupported parameter expansion '${{{raw}}}'"
+                    )));
+                }
+            };
+            Ok(WordPart::ParamOp {
+                name,
+                op,
+                arg: Box::new(word_from_source(&arg_str)?),
+            })
+        }
+    }
+}
+
+/// Parse the body of a `${name/…}` substitution (chars after the first `/`).
+fn parse_param_replace(name: String, body: &[char]) -> Result<WordPart, ParseError> {
+    let mut i = 0;
+    let mut all = false;
+    let mut anchor = ReplaceAnchor::None;
+    match body.first() {
+        Some('/') => {
+            all = true;
+            i = 1;
+        }
+        Some('#') => {
+            anchor = ReplaceAnchor::Start;
+            i = 1;
+        }
+        Some('%') => {
+            anchor = ReplaceAnchor::End;
+            i = 1;
+        }
+        _ => {}
+    }
+    // Pattern runs to the next unescaped '/'; the remainder is the replacement.
+    let mut pattern = String::new();
+    let mut replacement = String::new();
+    let mut in_repl = false;
+    while i < body.len() {
+        let c = body[i];
+        if !in_repl && c == '\\' && body.get(i + 1) == Some(&'/') {
+            pattern.push('/');
+            i += 2;
+            continue;
+        }
+        if !in_repl && c == '/' {
+            in_repl = true;
+            i += 1;
+            continue;
+        }
+        if in_repl {
+            replacement.push(c);
+        } else {
+            pattern.push(c);
+        }
+        i += 1;
+    }
+    Ok(WordPart::ParamReplace {
         name,
-        op,
-        arg: Box::new(arg),
+        all,
+        anchor,
+        pattern: Box::new(word_from_source(&pattern)?),
+        replacement: Box::new(word_from_source(&replacement)?),
     })
 }
 

@@ -26,7 +26,7 @@ use std::process::{Command as PCommand, Stdio};
 use crate::arith::{self, VarLookup};
 use crate::ast::{
     AndOr, AndOrOp, CaseClause, Command, ForClause, IfClause, LoopClause, ParamOp, Pipeline,
-    Program, Redirect, RedirectOp, SimpleCommand, Word, WordPart,
+    Program, Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, Word, WordPart,
 };
 use crate::parser::parse;
 
@@ -747,6 +747,38 @@ impl Shell {
                 .map_or(0, |v| v.chars().count())
                 .to_string(),
             WordPart::ParamOp { name, op, arg } => self.expand_param_op(name, *op, arg),
+            WordPart::ParamTrim {
+                name,
+                suffix,
+                longest,
+                pattern,
+            } => {
+                let value = self.param_value(name).unwrap_or_default();
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                param_trim(&value, &pat, *suffix, *longest)
+            }
+            WordPart::ParamSubstr {
+                name,
+                offset,
+                length,
+            } => {
+                let value = self.param_value(name).unwrap_or_default();
+                let off = self.eval_arith_word(offset);
+                let len = length.as_ref().map(|l| self.eval_arith_word(l));
+                param_substr(&value, off, len)
+            }
+            WordPart::ParamReplace {
+                name,
+                all,
+                anchor,
+                pattern,
+                replacement,
+            } => {
+                let value = self.param_value(name).unwrap_or_default();
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let repl = self.expand_to_string(replacement);
+                param_replace(&value, &pat, &repl, *all, *anchor)
+            }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
             // Literal/quoted handled by callers.
@@ -838,6 +870,17 @@ impl Shell {
             s.pop();
         }
         s
+    }
+
+    /// Expand a word to a string and evaluate it as an arithmetic expression
+    /// (used for `${name:offset:length}`). Errors/empties yield `0`.
+    fn eval_arith_word(&mut self, w: &Word) -> i64 {
+        let s = self.expand_to_string(w);
+        let s = s.trim();
+        if s.is_empty() {
+            return 0;
+        }
+        arith::eval(s, self).unwrap_or(0)
     }
 
     fn arith_sub(&mut self, expr: &str) -> String {
@@ -1329,6 +1372,120 @@ fn glob_match_class(pattern: &[char], pi: usize, ch: char) -> (bool, usize) {
     (ch == '[', pi + 1)
 }
 
+/// Longest match of `pattern` starting at `text[start]`; returns the end index
+/// (exclusive) of the match, or `None`. Used by `${…/…/…}` substitution.
+fn glob_match_at(pattern: &[char], text: &[char], start: usize) -> Option<usize> {
+    for j in (start..=text.len()).rev() {
+        if glob_match(pattern, &text[start..j]) {
+            return Some(j);
+        }
+    }
+    None
+}
+
+/// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`.
+fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> String {
+    let v: Vec<char> = value.chars().collect();
+    if suffix {
+        // Remove a matching suffix `v[k..]`, keeping `v[..k]`. Shortest match =
+        // largest k; longest match = smallest k.
+        let range: Vec<usize> = if longest {
+            (0..=v.len()).collect()
+        } else {
+            (0..=v.len()).rev().collect()
+        };
+        for k in range {
+            if glob_match(pattern, &v[k..]) {
+                return v[..k].iter().collect();
+            }
+        }
+    } else {
+        // Remove a matching prefix `v[..k]`, keeping `v[k..]`. Shortest match =
+        // smallest k; longest match = largest k.
+        let range: Vec<usize> = if longest {
+            (0..=v.len()).rev().collect()
+        } else {
+            (0..=v.len()).collect()
+        };
+        for k in range {
+            if glob_match(pattern, &v[..k]) {
+                return v[k..].iter().collect();
+            }
+        }
+    }
+    value.to_string()
+}
+
+/// `${name:offset[:length]}` — a negative offset counts from the end; a negative
+/// length is an offset from the end.
+fn param_substr(value: &str, offset: i64, length: Option<i64>) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let n = chars.len() as i64;
+    let mut start = offset;
+    if start < 0 {
+        start += n;
+    }
+    start = start.clamp(0, n);
+    let end = match length {
+        None => n,
+        Some(len) if len < 0 => (n + len).max(start),
+        Some(len) => (start + len).min(n),
+    };
+    let end = end.clamp(start, n);
+    chars[start as usize..end as usize].iter().collect()
+}
+
+/// `${name/pat/repl}` and friends.
+fn param_replace(
+    value: &str,
+    pattern: &[char],
+    replacement: &str,
+    all: bool,
+    anchor: ReplaceAnchor,
+) -> String {
+    let v: Vec<char> = value.chars().collect();
+    match anchor {
+        ReplaceAnchor::Start => {
+            if let Some(end) = glob_match_at(pattern, &v, 0) {
+                let mut s = replacement.to_string();
+                s.extend(v[end..].iter());
+                return s;
+            }
+            value.to_string()
+        }
+        ReplaceAnchor::End => {
+            for i in 0..=v.len() {
+                if glob_match(pattern, &v[i..]) {
+                    let mut s: String = v[..i].iter().collect();
+                    s.push_str(replacement);
+                    return s;
+                }
+            }
+            value.to_string()
+        }
+        ReplaceAnchor::None => {
+            let mut result = String::new();
+            let mut i = 0;
+            let mut done = false;
+            while i < v.len() {
+                let can_replace = !done || all;
+                if can_replace
+                    && let Some(end) = glob_match_at(pattern, &v, i)
+                    && end > i
+                {
+                    result.push_str(replacement);
+                    i = end;
+                    done = true;
+                    continue;
+                }
+                result.push(v[i]);
+                i += 1;
+            }
+            result
+        }
+    }
+}
+
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -1638,6 +1795,37 @@ mod tests {
     fn here_doc_quoted_delim_no_expand() {
         let (o, _) = run("name=world\nread line <<'EOF'\nhi $name\nEOF\necho $line");
         assert_eq!(o, "hi $name\n");
+    }
+
+    #[test]
+    fn param_trim_prefix_suffix() {
+        assert_eq!(run("x=foo.tar.gz; echo ${x#*.}").0, "tar.gz\n");
+        assert_eq!(run("x=foo.tar.gz; echo ${x##*.}").0, "gz\n");
+        assert_eq!(run("x=foo.tar.gz; echo ${x%.*}").0, "foo.tar\n");
+        assert_eq!(run("x=foo.tar.gz; echo ${x%%.*}").0, "foo\n");
+    }
+
+    #[test]
+    fn param_substring() {
+        assert_eq!(run("x=abcdef; echo ${x:2}").0, "cdef\n");
+        assert_eq!(run("x=abcdef; echo ${x:2:3}").0, "cde\n");
+        assert_eq!(run("x=abcdef; echo ${x: -2}").0, "ef\n");
+        assert_eq!(run("x=abcdef; echo ${x:1:-1}").0, "bcde\n");
+    }
+
+    #[test]
+    fn param_replace_forms() {
+        assert_eq!(run("x=aXbXc; echo ${x/X/-}").0, "a-bXc\n");
+        assert_eq!(run("x=aXbXc; echo ${x//X/-}").0, "a-b-c\n");
+        assert_eq!(run("x=abcabc; echo ${x/#abc/Z}").0, "Zabc\n");
+        assert_eq!(run("x=abcabc; echo ${x/%abc/Z}").0, "abcZ\n");
+        assert_eq!(run("x=hello; echo ${x//l/}").0, "heo\n");
+    }
+
+    #[test]
+    fn param_ops_still_work() {
+        assert_eq!(run("echo ${u:-default}").0, "default\n");
+        assert_eq!(run("x=set; echo ${x:+yes}").0, "yes\n");
     }
 
     #[test]

@@ -164,6 +164,33 @@ pub enum WordPart {
         op: ParamOp,
         arg: Box<Word>,
     },
+    /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}` — remove
+    /// a matching prefix (`#`) or suffix (`%`); doubled operator = longest match.
+    ParamTrim {
+        name: String,
+        /// `true` for `%`/`%%` (suffix); `false` for `#`/`##` (prefix).
+        suffix: bool,
+        /// `true` for the doubled form (longest match).
+        longest: bool,
+        pattern: Box<Word>,
+    },
+    /// `${name:offset}` / `${name:offset:length}` — substring (offset/length are
+    /// arithmetic; a negative offset counts from the end).
+    ParamSubstr {
+        name: String,
+        offset: Box<Word>,
+        length: Option<Box<Word>>,
+    },
+    /// `${name/pat/repl}` (first) / `${name//pat/repl}` (all) /
+    /// `${name/#pat/repl}` (anchored at start) / `${name/%pat/repl}` (anchored at
+    /// end) — pattern substitution.
+    ParamReplace {
+        name: String,
+        all: bool,
+        anchor: ReplaceAnchor,
+        pattern: Box<Word>,
+        replacement: Box<Word>,
+    },
     /// `$(command)` / `` `command` `` command substitution.
     CommandSub(Program),
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).
@@ -183,6 +210,17 @@ pub enum ParamOp {
     UseAlternate,
     /// `:?` error if unset or null.
     ErrorIfUnset,
+}
+
+/// Where a `${name/pat/repl}` substitution is anchored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceAnchor {
+    /// Match anywhere (`/` or `//`).
+    None,
+    /// Anchored at the start of the value (`/#`).
+    Start,
+    /// Anchored at the end of the value (`/%`).
+    End,
 }
 
 /// A single redirection.

@@ -5,9 +5,9 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, CondBinOp, CondExpr, ForClause,
-    FunctionDef, IfClause, Item, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp,
-    ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
+    AndOr, AndOrOp, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, Command, CondBinOp,
+    CondExpr, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp, Pipeline, Program,
+    Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
 
@@ -539,6 +539,31 @@ impl Parser {
                     cmd.words.push(self.word_from_segs(&segs)?);
                     seen_word = true;
                 }
+                Some(Tok::ArrayAssign { .. }) => {
+                    if seen_word {
+                        return Err(ParseError(
+                            "array assignment is only valid before the command word".into(),
+                        ));
+                    }
+                    let Some(Tok::ArrayAssign {
+                        name,
+                        append,
+                        elems,
+                    }) = self.bump()
+                    else {
+                        unreachable!("peek matched ArrayAssign");
+                    };
+                    let mut words = Vec::with_capacity(elems.len());
+                    for segs in &elems {
+                        words.push(self.word_from_segs(segs)?);
+                    }
+                    cmd.assignments.push(Assignment {
+                        name,
+                        index: None,
+                        append,
+                        value: AssignRhs::Array(words),
+                    });
+                }
                 Some(Tok::Io(_))
                 | Some(Tok::Op(
                     Op::Less
@@ -602,7 +627,8 @@ impl Parser {
         }
     }
 
-    /// Recognise `NAME=value` (before the first command word).
+    /// Recognise `NAME=value`, `NAME+=value`, or `NAME[index]=value` (before the
+    /// first command word).
     fn try_assignment(&self, segs: &[Seg]) -> Result<Option<Assignment>, ParseError> {
         let Some(Seg::Lit(first)) = segs.first() else {
             return Ok(None);
@@ -610,10 +636,29 @@ impl Parser {
         let Some(eq) = first.find('=') else {
             return Ok(None);
         };
-        let name = &first[..eq];
-        if name.is_empty() || !is_valid_name(name) {
-            return Ok(None);
+        let mut lhs = &first[..eq];
+        // `+=` append.
+        let append = lhs.ends_with('+');
+        if append {
+            lhs = &lhs[..lhs.len() - 1];
         }
+        // Optional `[index]` subscript.
+        let (name, index) = if let Some(open) = lhs.find('[') {
+            if !lhs.ends_with(']') {
+                return Ok(None);
+            }
+            let name = &lhs[..open];
+            let idx_src = &lhs[open + 1..lhs.len() - 1];
+            if name.is_empty() || !is_valid_name(name) || idx_src.is_empty() {
+                return Ok(None);
+            }
+            (name, Some(word_from_source(idx_src)?))
+        } else {
+            if lhs.is_empty() || !is_valid_name(lhs) {
+                return Ok(None);
+            }
+            (lhs, None)
+        };
         // Build the value word from the remainder of the first seg plus the
         // rest of the segments.
         let mut value_segs: Vec<Seg> = Vec::new();
@@ -624,7 +669,9 @@ impl Parser {
         value_segs.extend_from_slice(&segs[1..]);
         Ok(Some(Assignment {
             name: name.to_string(),
-            value: self.word_from_segs(&value_segs)?,
+            index,
+            append,
+            value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
         }))
     }
 
@@ -662,20 +709,20 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
 }
 
 /// Parse the inner text of a `${ … }` expansion.
-fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
-    if let Some(rest) = raw.strip_prefix('#') {
-        if rest.is_empty() {
-            // `${#}` is the positional-parameter count — treat as `$#`.
-            return Ok(WordPart::Param("#".into()));
-        }
-        return Ok(WordPart::Length(rest.to_string()));
-    }
-    // Read the parameter name (a name, a single special char, or digits).
-    let bytes: Vec<char> = raw.chars().collect();
-    let mut i = 0;
+/// Split a `${…}` body into `(name, optional-subscript, remaining-chars)`.
+///
+/// The name is a run of name chars, a run of digits, or a single special
+/// character. If a `[…]` subscript immediately follows the name, it is parsed
+/// into an [`ArrayIndex`] and the characters after the closing `]` are returned
+/// as the remainder (for operator forms). The closing bracket is taken as the
+/// last `]` in the body so arithmetic subscripts like `arr[i+1]` still parse.
+fn split_name_subscript(
+    bytes: &[char],
+) -> Result<(String, Option<ArrayIndex>, Vec<char>), ParseError> {
     if bytes.is_empty() {
         return Err(ParseError("empty '${}' expansion".into()));
     }
+    let mut i = 0;
     if bytes[0].is_ascii_digit() {
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
@@ -685,11 +732,64 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             i += 1;
         }
     } else {
-        // A special single-char parameter.
+        // A special single-char parameter (`@`, `*`, `?`, `#`, `!`, `$`, …).
         i = 1;
     }
     let name: String = bytes[..i].iter().collect();
-    let rest: Vec<char> = bytes[i..].to_vec();
+    if bytes.get(i) == Some(&'[')
+        && let Some(rel) = bytes[i..].iter().rposition(|&c| c == ']')
+    {
+        let close = i + rel;
+        let inner: String = bytes[i + 1..close].iter().collect();
+        let index = match inner.as_str() {
+            "@" => ArrayIndex::All,
+            "*" => ArrayIndex::Star,
+            "" => return Err(ParseError("empty array subscript '[]'".into())),
+            _ => ArrayIndex::Index(Box::new(word_from_source(&inner)?)),
+        };
+        return Ok((name, Some(index), bytes[close + 1..].to_vec()));
+    }
+    Ok((name, None, bytes[i..].to_vec()))
+}
+
+fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
+    if let Some(after_hash) = raw.strip_prefix('#') {
+        if after_hash.is_empty() {
+            // `${#}` is the positional-parameter count — treat as `$#`.
+            return Ok(WordPart::Param("#".into()));
+        }
+        let bytes: Vec<char> = after_hash.chars().collect();
+        let (name, subscript, remaining) = split_name_subscript(&bytes)?;
+        if let Some(index) = subscript {
+            if !remaining.is_empty() {
+                return Err(ParseError(format!(
+                    "unsupported parameter expansion '${{{raw}}}'"
+                )));
+            }
+            // `${#name[@]}` / `${#name[i]}` — array element count / element length.
+            return Ok(WordPart::ArrayRef {
+                name,
+                index,
+                length: true,
+            });
+        }
+        return Ok(WordPart::Length(after_hash.to_string()));
+    }
+    let bytes: Vec<char> = raw.chars().collect();
+    let (name, subscript, rest) = split_name_subscript(&bytes)?;
+    if let Some(index) = subscript {
+        if !rest.is_empty() {
+            // Combining a subscript with a `:-`/`#`/`/` operator is not yet supported.
+            return Err(ParseError(format!(
+                "unsupported parameter expansion '${{{raw}}}'"
+            )));
+        }
+        return Ok(WordPart::ArrayRef {
+            name,
+            index,
+            length: false,
+        });
+    }
     if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
@@ -1034,6 +1134,73 @@ mod tests {
         };
         assert!(matches!(sc.words[1].parts[0], WordPart::ParamOp { .. }));
         assert!(matches!(sc.words[2].parts[0], WordPart::Length(_)));
+    }
+
+    #[test]
+    fn array_ref_parsing() {
+        let prog = parse("echo ${a[0]} ${a[@]} ${a[*]} ${#a[@]}").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(matches!(
+            sc.words[1].parts[0],
+            WordPart::ArrayRef {
+                index: ArrayIndex::Index(_),
+                length: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sc.words[2].parts[0],
+            WordPart::ArrayRef {
+                index: ArrayIndex::All,
+                length: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sc.words[3].parts[0],
+            WordPart::ArrayRef {
+                index: ArrayIndex::Star,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sc.words[4].parts[0],
+            WordPart::ArrayRef {
+                index: ArrayIndex::All,
+                length: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn array_assignment_parsing() {
+        let prog = parse("a=(one two three)").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        let AssignRhs::Array(words) = &sc.assignments[0].value else {
+            panic!("expected array assignment");
+        };
+        assert_eq!(words.len(), 3);
+        assert!(!sc.assignments[0].append);
+    }
+
+    #[test]
+    fn array_append_and_index_assignment() {
+        let prog = parse("a+=(x); a[2]=y").unwrap();
+        let Command::Simple(app) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(app.assignments[0].append);
+        let idx = parse("a[2]=y").unwrap();
+        let Command::Simple(sc) = &idx.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(sc.assignments[0].index.is_some());
+        assert!(matches!(sc.assignments[0].value, AssignRhs::Scalar(_)));
     }
 
     #[test]

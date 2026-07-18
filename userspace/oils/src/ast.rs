@@ -147,10 +147,27 @@ pub struct SimpleCommand {
     pub redirects: Vec<Redirect>,
 }
 
+/// A variable assignment: `name=value`, `name+=value`, `name[i]=value`, or an
+/// array assignment `name=(w1 w2 …)` / `name+=(…)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
     pub name: String,
-    pub value: Word,
+    /// `name[index]=…` — the (arithmetic) subscript, if present. Only valid for
+    /// scalar right-hand sides.
+    pub index: Option<Word>,
+    /// `+=` (append) rather than `=` (replace).
+    pub append: bool,
+    pub value: AssignRhs,
+}
+
+/// The right-hand side of an [`Assignment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignRhs {
+    /// `name=word` — a scalar value (no field splitting or globbing).
+    Scalar(Word),
+    /// `name=(w1 w2 …)` — an array literal; each word is split and globbed like
+    /// a command argument.
+    Array(Vec<Word>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +284,26 @@ pub enum WordPart {
     ArithSub(String),
     /// `${#name}` — the length of the parameter's value.
     Length(String),
+    /// `${name[index]}`, `${name[@]}`, `${name[*]}`, and their `${#…}` length
+    /// forms — indexed-array references.
+    ArrayRef {
+        name: String,
+        index: ArrayIndex,
+        /// `true` for the `${#…}` form: element count for `@`/`*`, or the length
+        /// of a specific element for an index.
+        length: bool,
+    },
+}
+
+/// An array subscript inside `${name[…]}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayIndex {
+    /// `[expr]` — a specific element (the expression is evaluated arithmetically).
+    Index(Box<Word>),
+    /// `[@]` — all elements, each a separate word when quoted.
+    All,
+    /// `[*]` — all elements joined by the first IFS character when quoted.
+    Star,
 }
 
 /// Parameter-expansion operators inside `${name OP word}`.

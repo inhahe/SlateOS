@@ -73,6 +73,14 @@ pub enum Tok {
     HereDoc(Vec<Seg>),
     /// `(( … ))` — an arithmetic command, holding the raw expression text.
     ArithCmd(String),
+    /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
+    /// word captured as its own [`Seg`] list.
+    ArrayAssign {
+        name: String,
+        /// `+=` (append) rather than `=`.
+        append: bool,
+        elems: Vec<Vec<Seg>>,
+    },
 }
 
 struct Lexer {
@@ -259,10 +267,82 @@ impl Lexer {
                         out.push(Tok::Word(self.read_word()?));
                     }
                 }
+                c if is_name_start(c) => {
+                    // A leading identifier may begin an array assignment
+                    // `name=( … )` / `name+=( … )`; otherwise it's a plain word.
+                    if let Some(tok) = self.try_array_assign()? {
+                        out.push(tok);
+                    } else {
+                        out.push(Tok::Word(self.read_word()?));
+                    }
+                }
                 _ => out.push(Tok::Word(self.read_word()?)),
             }
         }
         Ok(out)
+    }
+
+    /// Try to lex an array assignment `name=( … )` / `name+=( … )` at the current
+    /// position. Returns `None` (and restores the position) if the input does
+    /// not match that shape, so a plain word is read instead.
+    fn try_array_assign(&mut self) -> Result<Option<Tok>, LexError> {
+        let start = self.pos;
+        let mut name = String::new();
+        while let Some(c) = self.peek() {
+            if is_name_char(c) {
+                name.push(c);
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        let append = self.peek() == Some('+');
+        let eq_at = self.pos + usize::from(append);
+        if name.is_empty()
+            || self.chars.get(eq_at) != Some(&'=')
+            || self.chars.get(eq_at + 1) != Some(&'(')
+        {
+            self.pos = start;
+            return Ok(None);
+        }
+        // Commit: consume the optional `+`, the `=`, and the `(`.
+        self.pos = eq_at + 2;
+        let mut elems: Vec<Vec<Seg>> = Vec::new();
+        loop {
+            while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+                self.pos += 1;
+            }
+            match self.peek() {
+                Some(')') => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(LexError(
+                        "unterminated array assignment (expected ')')".into(),
+                    ));
+                }
+                Some('#') => {
+                    while !matches!(self.peek(), None | Some('\n')) {
+                        self.pos += 1;
+                    }
+                }
+                _ => {
+                    let segs = self.read_word()?;
+                    if segs.is_empty() {
+                        return Err(LexError(
+                            "unexpected operator in array assignment".into(),
+                        ));
+                    }
+                    elems.push(segs);
+                }
+            }
+        }
+        Ok(Some(Tok::ArrayAssign {
+            name,
+            append,
+            elems,
+        }))
     }
 
     /// Read one word (until an unquoted operator, blank, or newline).

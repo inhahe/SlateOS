@@ -11,9 +11,15 @@
 //! command arguments, honoring quoting and the leading-dot rule; an unmatched
 //! pattern is left literal (bash default, no `nullglob`).
 //!
+//! Indexed arrays are supported: `a=(x y z)`, `a[i]=v`, `a+=(w)`, `${a[i]}`,
+//! `${a[@]}`/`${a[*]}`, `${#a[@]}`, and `unset a[i]`. `"${a[@]}"` preserves
+//! element boundaries (one field per element).
+//!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
-//! - No indexed/associative arrays yet (`arr=(a b c)`, `${arr[@]}`).
+//! - No *associative* arrays (`declare -A`) yet. Negative array indices and
+//!   arithmetic subscripts inside `(( … ))` (`a[i]`) are not supported. Mixing
+//!   a subscript with a `${a[i]:-x}`-style operator is rejected at parse time.
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -32,9 +38,9 @@ use std::process::{Command as PCommand, Stdio};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, CaseClause, Command, CondBinOp, CondExpr, ForClause, IfClause, LoopClause,
-    ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word,
-    WordPart,
+    AndOr, AndOrOp, ArrayIndex, AssignRhs, Assignment, CaseClause, Command, CondBinOp, CondExpr,
+    ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect, RedirectOp,
+    ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::parser::parse;
 
@@ -72,6 +78,9 @@ enum StdinSrc<'a> {
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
+    /// Indexed arrays: `name=(a b c)` and `name[i]=v`. Kept separate from
+    /// `vars`; `${name}` reads element 0, `${name[@]}`/`${name[*]}` read all.
+    arrays: HashMap<String, Vec<String>>,
     exported: HashSet<String>,
     funcs: HashMap<String, Program>,
     positional: Vec<String>,
@@ -93,6 +102,7 @@ impl Shell {
     pub fn new() -> Self {
         Shell {
             vars: HashMap::new(),
+            arrays: HashMap::new(),
             exported: HashSet::new(),
             funcs: HashMap::new(),
             positional: Vec::new(),
@@ -457,6 +467,7 @@ impl Shell {
     fn clone_for_subshell(&self) -> Shell {
         Shell {
             vars: self.vars.clone(),
+            arrays: self.arrays.clone(),
             exported: self.exported.clone(),
             funcs: self.funcs.clone(),
             positional: self.positional.clone(),
@@ -467,28 +478,150 @@ impl Shell {
         }
     }
 
+    // ---- assignments and arrays ---------------------------------------------
+
+    /// Apply a standalone assignment to shell state, handling scalars, indexed
+    /// elements (`name[i]=v`), whole arrays (`name=(a b c)`), and append (`+=`).
+    fn apply_assignment(&mut self, a: &Assignment) {
+        match &a.value {
+            AssignRhs::Scalar(w) => {
+                let val = self.expand_to_string(w);
+                if let Some(idx_word) = &a.index {
+                    // `name[i]=val` — indexed element assignment.
+                    let idx = self.eval_arith_word(idx_word);
+                    let Ok(idx) = usize::try_from(idx) else {
+                        eprintln!("osh: {}: bad array subscript", a.name);
+                        return;
+                    };
+                    let arr = self.arrays.entry(a.name.clone()).or_default();
+                    if idx >= arr.len() {
+                        arr.resize(idx.saturating_add(1), String::new());
+                    }
+                    if let Some(slot) = arr.get_mut(idx) {
+                        if a.append {
+                            slot.push_str(&val);
+                        } else {
+                            *slot = val;
+                        }
+                    }
+                } else if a.append {
+                    // `name+=val` — append to the scalar (or to element 0 of an array).
+                    if let Some(arr) = self.arrays.get_mut(&a.name) {
+                        if let Some(first) = arr.first_mut() {
+                            first.push_str(&val);
+                        } else {
+                            arr.push(val);
+                        }
+                    } else {
+                        let cur = self.vars.get(&a.name).cloned().unwrap_or_default();
+                        self.vars.insert(a.name.clone(), cur + &val);
+                    }
+                } else {
+                    self.vars.insert(a.name.clone(), val);
+                }
+            }
+            AssignRhs::Array(words) => {
+                let mut elems: Vec<String> = Vec::new();
+                for w in words {
+                    elems.extend(self.expand_word(w, true));
+                }
+                if a.append {
+                    self.arrays.entry(a.name.clone()).or_default().extend(elems);
+                } else {
+                    self.arrays.insert(a.name.clone(), elems);
+                }
+            }
+        }
+    }
+
+    /// Collapse an assignment into a `(name, value)` pair for command-prefix use
+    /// (`FOO=bar cmd`). Arrays join their elements with a single space.
+    fn assignment_prefix_value(&mut self, a: &Assignment) -> (String, String) {
+        let val = match &a.value {
+            AssignRhs::Scalar(w) => self.expand_to_string(w),
+            AssignRhs::Array(words) => {
+                let mut elems: Vec<String> = Vec::new();
+                for w in words {
+                    elems.extend(self.expand_word(w, true));
+                }
+                elems.join(" ")
+            }
+        };
+        (a.name.clone(), val)
+    }
+
+    /// All elements of `name`, treating a plain scalar as a one-element array.
+    fn array_elements(&self, name: &str) -> Vec<String> {
+        if let Some(a) = self.arrays.get(name) {
+            a.clone()
+        } else if let Some(v) = self.vars.get(name) {
+            vec![v.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A single array element by index (scalar acts as element 0). `None` if the
+    /// index is out of range or negative.
+    fn array_element(&self, name: &str, idx: i64) -> Option<String> {
+        let idx = usize::try_from(idx).ok()?;
+        if let Some(a) = self.arrays.get(name) {
+            a.get(idx).cloned()
+        } else if idx == 0 {
+            self.vars.get(name).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
+    /// (scalar context; `[@]`/`[*]` join with a space).
+    fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
+        match index {
+            ArrayIndex::All | ArrayIndex::Star => {
+                let elems = self.array_elements(name);
+                if length {
+                    elems.len().to_string()
+                } else {
+                    elems.join(" ")
+                }
+            }
+            ArrayIndex::Index(w) => {
+                let idx = self.eval_arith_word(w);
+                let val = self.array_element(name, idx);
+                if length {
+                    val.map_or(0, |v| v.chars().count()).to_string()
+                } else {
+                    val.unwrap_or_default()
+                }
+            }
+        }
+    }
+
     // ---- simple command execution -------------------------------------------
 
     fn exec_simple(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        // Expand assignment values first.
-        let mut assigns: Vec<(String, String)> = Vec::with_capacity(sc.assignments.len());
-        for a in &sc.assignments {
-            assigns.push((a.name.clone(), self.expand_to_string(&a.value)));
-        }
-
-        // Expand the command words into argv.
+        // Expand the command words into argv (with the current variable values,
+        // before any prefix assignments take effect).
         let mut argv: Vec<String> = Vec::new();
         for w in &sc.words {
             argv.extend(self.expand_word(w, true));
         }
 
-        // Pure assignment (no command word): persist the variables.
+        // Pure assignment (no command word): persist the variables/arrays.
         if argv.is_empty() {
-            for (k, v) in assigns {
-                self.vars.insert(k, v);
+            for a in &sc.assignments {
+                self.apply_assignment(a);
             }
             self.last_status = 0;
             return Flow::Next;
+        }
+
+        // Command present: build scalar env prefixes (`FOO=bar cmd`). Array and
+        // indexed prefix assignments collapse to a space-joined scalar.
+        let mut assigns: Vec<(String, String)> = Vec::with_capacity(sc.assignments.len());
+        for a in &sc.assignments {
+            assigns.push(self.assignment_prefix_value(a));
         }
 
         // Resolve redirections (targets are expanded now).
@@ -851,9 +984,28 @@ impl Shell {
                     started = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    let s = self.expand_double_quoted(parts);
-                    push_chars(&mut cur, &s, true);
-                    started = true;
+                    // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
+                    // preserving embedded whitespace; empty arrays yield no field.
+                    if let [
+                        WordPart::ArrayRef {
+                            name,
+                            index: ArrayIndex::All,
+                            length: false,
+                        },
+                    ] = parts.as_slice()
+                    {
+                        for (i, el) in self.array_elements(name).into_iter().enumerate() {
+                            if i > 0 {
+                                fields.push(std::mem::take(&mut cur));
+                            }
+                            push_chars(&mut cur, &el, true);
+                            started = true;
+                        }
+                    } else {
+                        let s = self.expand_double_quoted(parts);
+                        push_chars(&mut cur, &s, true);
+                        started = true;
+                    }
                 }
                 other => {
                     let val = self.expand_dynamic(other);
@@ -936,6 +1088,11 @@ impl Shell {
             }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
+            WordPart::ArrayRef {
+                name,
+                index,
+                length,
+            } => self.expand_array_ref(name, index, *length),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
@@ -1004,6 +1161,10 @@ impl Shell {
                         return Some(self.name.clone());
                     }
                     return self.positional.get(n - 1).cloned();
+                }
+                // A plain array reference (`$arr` / `${arr}`) reads element 0.
+                if let Some(arr) = self.arrays.get(name) {
+                    return arr.first().cloned();
                 }
                 self.vars
                     .get(name)
@@ -1248,7 +1409,23 @@ impl Shell {
 
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
         for a in args {
+            // `unset name[i]` removes a single element; `unset name` removes the
+            // whole variable/array/function.
+            if let Some(open) = a.find('[')
+                && a.ends_with(']')
+            {
+                let name = &a[..open];
+                let idx_src = &a[open + 1..a.len() - 1];
+                if let Some(arr) = self.arrays.get_mut(name)
+                    && let Ok(idx) = idx_src.parse::<usize>()
+                    && idx < arr.len()
+                {
+                    arr.remove(idx);
+                }
+                continue;
+            }
             self.vars.remove(a);
+            self.arrays.remove(a);
             self.exported.remove(a);
             self.funcs.remove(a);
         }
@@ -2411,5 +2588,68 @@ mod tests {
     fn glob_no_match_stays_literal() {
         // With no match and no `nullglob`, the pattern is left as the word.
         assert_eq!(run("echo osh_definitely_no_such_glob_*.zzz").0, "osh_definitely_no_such_glob_*.zzz\n");
+    }
+
+    #[test]
+    fn array_literal_and_index() {
+        assert_eq!(run("a=(one two three); echo ${a[0]}").0, "one\n");
+        assert_eq!(run("a=(one two three); echo ${a[2]}").0, "three\n");
+        // A bare reference reads element 0.
+        assert_eq!(run("a=(one two three); echo $a").0, "one\n");
+        // Out-of-range index expands to empty.
+        assert_eq!(run("a=(one two); echo x${a[9]}y").0, "xy\n");
+    }
+
+    #[test]
+    fn array_all_and_star() {
+        assert_eq!(run("a=(x y z); echo ${a[@]}").0, "x y z\n");
+        assert_eq!(run("a=(x y z); echo ${a[*]}").0, "x y z\n");
+    }
+
+    #[test]
+    fn array_length() {
+        assert_eq!(run("a=(a b c d); echo ${#a[@]}").0, "4\n");
+        assert_eq!(run("a=(a b c d); echo ${#a[*]}").0, "4\n");
+        // Length of a specific element.
+        assert_eq!(run("a=(hi hello); echo ${#a[1]}").0, "5\n");
+    }
+
+    #[test]
+    fn array_indexed_assignment() {
+        assert_eq!(run("a=(x y z); a[1]=Q; echo ${a[@]}").0, "x Q z\n");
+        // Assigning past the end grows the array with empty slots.
+        assert_eq!(run("a=(x); a[3]=w; echo ${#a[@]}").0, "4\n");
+    }
+
+    #[test]
+    fn array_append() {
+        assert_eq!(run("a=(x y); a+=(z w); echo ${a[@]}").0, "x y z w\n");
+        assert_eq!(run("a=(x y); a+=(z); echo ${#a[@]}").0, "3\n");
+    }
+
+    #[test]
+    fn array_quoted_all_preserves_fields() {
+        // "${a[@]}" keeps element boundaries even with embedded spaces.
+        let out = run(r#"a=("a b" c); for w in "${a[@]}"; do echo "[$w]"; done"#).0;
+        assert_eq!(out, "[a b]\n[c]\n");
+    }
+
+    #[test]
+    fn array_unquoted_all_splits() {
+        // Unquoted ${a[@]} field-splits, so "a b" becomes two words.
+        let out = run(r#"a=("a b" c); for w in ${a[@]}; do echo "[$w]"; done"#).0;
+        assert_eq!(out, "[a]\n[b]\n[c]\n");
+    }
+
+    #[test]
+    fn array_unset() {
+        assert_eq!(run("a=(x y z); unset a[1]; echo ${a[@]}").0, "x z\n");
+        assert_eq!(run("a=(x y z); unset a; echo ${#a[@]}").0, "0\n");
+    }
+
+    #[test]
+    fn array_from_glob_and_expansion() {
+        // Array elements undergo splitting/expansion.
+        assert_eq!(run("s='p q'; a=($s r); echo ${#a[@]}").0, "3\n");
     }
 }

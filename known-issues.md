@@ -38,6 +38,35 @@ Neither is a correctness bug in the implemented surface — they are
 intentional grow-phase scope limits, documented in the `interp.rs`
 module header. No test depends on the deferred behavior.
 
+### TD-OILS2. `osh` indexed arrays: no associative arrays, no negative/arith subscripts in `(( ))`, no subscript+operator combo — DEBT 2026-07-18
+
+**Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
+`try_assignment`), `userspace/oils/src/interp.rs` (`apply_assignment`,
+`expand_array_ref`, `array_element`, `array_elements`, `VarLookup::get`).
+
+**What:** Indexed arrays are implemented (`a=(x y z)`, `a[i]=v`,
+`a+=(w)`/`a+=str`, `${a[i]}`, `${a[@]}`/`${a[*]}`, `${#a[@]}`/`${#a[i]}`,
+`unset a[i]`/`unset a`; quoted `"${a[@]}"` keeps one field per element,
+unquoted `${a[@]}` field-splits). Deferred pieces:
+1. **Associative arrays** (`declare -A m; m[key]=v`) are not supported —
+   only integer-indexed arrays. **Proper fix:** add a
+   `HashMap<String, HashMap<String,String>>` store keyed by `declare -A`
+   plus string-subscript handling in `split_name_subscript`.
+2. **Negative indices** (`${a[-1]}` = last element) return empty; the
+   subscript must be a non-negative integer after arithmetic evaluation.
+   **Proper fix:** in `array_element`, map a negative index modulo the
+   array length (bash semantics).
+3. **Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
+   recognized — `VarLookup::get` only reads element 0 of a bare name.
+   **Proper fix:** teach the arith lexer/evaluator about `name[expr]`.
+4. **Subscript combined with an expansion operator**
+   (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time to avoid
+   wrong results. **Proper fix:** thread the subscript through the
+   `ParamOp`/`ParamTrim`/… variants so the operator applies per element.
+
+All are intentional grow-phase scope limits, documented in the
+`interp.rs` module header. No test depends on the deferred behavior.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

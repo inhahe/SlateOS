@@ -87,6 +87,10 @@ pub enum CondExpr {
     Unary(UnaryOp, Word),
     /// Binary comparison between two words.
     Binary(Box<Word>, CondBinOp, Box<Word>),
+    /// `lhs =~ rhs` — POSIX-ERE regex match. The RHS undergoes parameter
+    /// expansion; on a successful match the interpreter populates the
+    /// `BASH_REMATCH` array with the whole match and capture groups.
+    Regex(Box<Word>, Box<Word>),
     /// `! expr` — logical negation.
     Not(Box<CondExpr>),
     /// `expr && expr` — logical AND (short-circuiting).

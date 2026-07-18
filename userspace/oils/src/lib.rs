@@ -19,6 +19,7 @@
 
 pub mod arith;
 pub mod ast;
+pub mod ere;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

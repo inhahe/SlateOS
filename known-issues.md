@@ -14,29 +14,42 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS1. `osh` `[[ … ]]` conditional gaps: no `=~` regex match; `-r`/`-x` file tests approximated as "exists" — DEBT 2026-07-18
+### TD-OILS1. `osh` `[[ … ]]` conditional gaps: `=~` quote-aware literal matching; `-r`/`-x` file tests approximated as "exists" — MOSTLY RESOLVED 2026-07-18 (`=~` regex match implemented; only the quote-literal nuance and the permission-bit tests remain)
 
-**Where:** `userspace/oils/src/parser.rs` (`parse_cond_primary` rejects
-`=~`), `userspace/oils/src/interp.rs` (`cond_unary` permission tests).
+**Where:** `userspace/oils/src/ere.rs` (Pike-VM ERE engine),
+`userspace/oils/src/lexer.rs` (`read_word_regex`, `cond_depth`/`regex_next`),
+`userspace/oils/src/parser.rs` (`parse_cond_primary` → `CondExpr::Regex`),
+`userspace/oils/src/interp.rs` (`cond_regex`, `cond_unary` permission tests).
 
 **What:** The bash conditional command `[[ … ]]` is implemented (string
 `==`/`=`/`!=` with glob-or-literal RHS, `<`/`>` ordering, numeric
-`-eq…-ge`, unary file/string tests, `!`/`&&`/`||`/`(…)`), but two pieces
-are deferred:
-1. `=~` (POSIX ERE regex match) — no regex engine exists yet, so the
-   parser rejects `[[ x =~ pat ]]` with a clear error rather than
-   producing wrong results. **Proper fix:** implement a small ERE matcher
-   (or port one) and wire it into `CondBinOp`; then accept `=~`, matching
-   the RHS as a regex and populating `BASH_REMATCH`.
-2. `-r` and `-x` file tests are approximated as "path exists" (`-w` is
-   "exists and not read-only") because the host has no portable mode-bit
-   check and the slateos permission model isn't wired into `osh` yet.
-   **Proper fix:** query the real per-file permission bits once the
-   slateos userspace permission API is available.
+`-eq…-ge`, unary file/string tests, `!`/`&&`/`||`/`(…)`), and `=~` regex
+matching now works:
+- `=~` (POSIX ERE regex match) — **RESOLVED.** An in-tree linear-time
+  Pike-VM/Thompson-NFA ERE engine (`ere.rs`, ReDoS-safe: no catastrophic
+  backtracking) compiles the RHS pattern and matches the LHS. The lexer
+  reads the `=~` RHS as one regex word (so `(`, `)`, `|`, `<`, `>` are
+  literal metacharacters, not shell operators); the RHS still undergoes
+  parameter expansion. On a successful match the `BASH_REMATCH` indexed
+  array is populated (`[0]` = whole match, `[i]` = capture group `i`;
+  unmatched optional groups become empty strings), and it is cleared on a
+  non-match. A malformed pattern reports to stderr and yields false.
+  **Remaining nuance:** bash matches *quoted* spans of the RHS literally
+  (regex metacharacters within quotes are treated as ordinary chars) while
+  unquoted spans are regex. We currently expand the whole RHS to a string
+  and treat all of it as the pattern, so e.g. `[[ a.b =~ "a.b" ]]` matches
+  `axb` too (the quoted `.` is not forced literal). **Proper fix:** thread
+  per-segment quoting through to `cond_regex` and regex-escape the quoted
+  spans before concatenating into the pattern.
+- `-r` and `-x` file tests are approximated as "path exists" (`-w` is
+  "exists and not read-only") because the host has no portable mode-bit
+  check and the slateos permission model isn't wired into `osh` yet.
+  **Proper fix:** query the real per-file permission bits once the
+  slateos userspace permission API is available.
 
-Neither is a correctness bug in the implemented surface — they are
-intentional grow-phase scope limits, documented in the `interp.rs`
-module header. No test depends on the deferred behavior.
+Neither remaining item is a correctness bug in the implemented surface —
+they are intentional grow-phase scope limits, documented in the
+`interp.rs` module header. No test depends on the deferred behavior.
 
 ### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, sparse indexed arrays, and negative-index assignment targets all implemented; one niche gap remains: associative subscripts inside `(( … ))`)
 

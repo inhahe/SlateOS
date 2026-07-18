@@ -497,13 +497,11 @@ impl Parser {
         // Otherwise: WORD [ binop WORD ].
         let left = self.expect_cond_word()?;
         if let Some(op) = self.peek_cond_binop() {
-            if matches!(op, RawBinOp::Regex) {
-                return Err(ParseError(
-                    "'=~' (regex match) is not yet supported in '[[ … ]]'".into(),
-                ));
-            }
             self.advance_cond_binop();
             let right = self.expect_cond_word()?;
+            if matches!(op, RawBinOp::Regex) {
+                return Ok(CondExpr::Regex(Box::new(left), Box::new(right)));
+            }
             return Ok(CondExpr::Binary(
                 Box::new(left),
                 op.into_bin_op(),
@@ -1499,8 +1497,12 @@ mod tests {
     }
 
     #[test]
-    fn cond_regex_rejected() {
-        assert!(parse("[[ $x =~ foo ]]").is_err());
+    fn cond_regex_parses() {
+        let prog = parse("[[ $x =~ foo ]]").unwrap();
+        assert!(matches!(
+            prog.items[0].list.first.commands[0],
+            Command::Cond(CondExpr::Regex(_, _))
+        ));
     }
 
     #[test]

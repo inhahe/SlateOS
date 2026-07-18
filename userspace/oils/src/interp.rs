@@ -38,9 +38,15 @@
 //!   assigned elements, `${!a[@]}` lists only the assigned indices, `unset
 //!   a[i]` leaves a gap (no shift), and a negative subscript counts back from
 //!   `highest_index + 1`.
-//! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
-//!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
-//!   approximated as "exists" pending the slateos permission model.
+//! - `[[ … ]]` supports `=~` (POSIX-ERE regex match) via the in-tree linear-time
+//!   Pike-VM engine in [`crate::ere`] (ReDoS-safe — no catastrophic backtracking).
+//!   The RHS undergoes parameter expansion; on a successful match `BASH_REMATCH`
+//!   is populated (`[0]` = whole match, `[i]` = capture group `i`). The lexer
+//!   reads the `=~` RHS as one regex word so `(`, `)`, `|`, `<`, `>` are literal
+//!   metacharacters. Quote-aware literal matching (bash matches quoted RHS spans
+//!   literally rather than as regex) is not yet implemented — the whole expanded
+//!   RHS is treated as the pattern; see `known-issues.md` TD-OILS1. The `-r`/`-x`
+//!   file tests are approximated as "exists" pending the slateos permission model.
 //! - Pipelines run *concurrently* and stream. An all-external pipeline (every
 //!   stage a plain external command, no per-stage redirects) is wired with real
 //!   OS pipes between child processes. Any pipeline containing a builtin,
@@ -779,6 +785,46 @@ impl Shell {
             CondExpr::Or(a, b) => self.cond_eval(a) || self.cond_eval(b),
             CondExpr::Unary(op, w) => self.cond_unary(*op, w),
             CondExpr::Binary(l, op, r) => self.cond_binary(l, *op, r),
+            CondExpr::Regex(l, r) => self.cond_regex(l, r),
+        }
+    }
+
+    /// Evaluate `lhs =~ rhs` (POSIX-ERE match). On success, populate the
+    /// `BASH_REMATCH` indexed array (element 0 = whole match, i = capture i;
+    /// unmatched groups become empty strings) and return true. A malformed
+    /// pattern reports an error to stderr and yields false (matching bash,
+    /// which returns status 2 — we surface false without aborting the shell).
+    fn cond_regex(&mut self, l: &Word, r: &Word) -> bool {
+        let subject = self.expand_to_string(l);
+        // NOTE (quoting): bash matches quoted portions of the RHS literally and
+        // unquoted portions as regex. We currently expand the whole RHS to a
+        // string and treat it entirely as a pattern; the quote-aware literal
+        // refinement is tracked in known-issues.md (TD-OILS1).
+        let pattern = self.expand_to_string(r);
+        let re = match crate::ere::Regex::new(&pattern) {
+            Ok(re) => re,
+            Err(e) => {
+                eprintln!("osh: [[: =~: invalid regex: {}", e.0);
+                return false;
+            }
+        };
+        match re.captures(&subject) {
+            Some(groups) => {
+                // Each capture slot maps 1:1 to a BASH_REMATCH index; unmatched
+                // optional groups are stored as empty strings, as bash does.
+                let elems: BTreeMap<usize, String> = groups
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, g)| (i, g.unwrap_or_default()))
+                    .collect();
+                self.arrays.insert("BASH_REMATCH".to_string(), elems);
+                true
+            }
+            None => {
+                // A failed match clears BASH_REMATCH (bash empties it).
+                self.arrays.insert("BASH_REMATCH".to_string(), BTreeMap::new());
+                false
+            }
         }
     }
 
@@ -3263,6 +3309,49 @@ mod tests {
             run("x=3; if [[ $x -gt 5 ]]; then echo big; else echo small; fi").0,
             "small\n"
         );
+    }
+
+    #[test]
+    fn cond_regex_match() {
+        // Basic ERE match sets a zero exit status.
+        assert_eq!(run("[[ abc123 =~ ^[a-z]+[0-9]+$ ]]").1, 0);
+        // Non-match yields status 1.
+        assert_eq!(run("[[ abc =~ ^[0-9]+$ ]]").1, 1);
+    }
+
+    #[test]
+    fn cond_regex_in_if() {
+        assert_eq!(
+            run("if [[ foo42 =~ [0-9]+ ]]; then echo num; else echo none; fi").0,
+            "num\n"
+        );
+    }
+
+    #[test]
+    fn cond_regex_bash_rematch() {
+        // Whole match in [0], captures in [1..]; extract via ${BASH_REMATCH[n]}.
+        let (o, _) = run(
+            "[[ 2026-07-18 =~ ([0-9]+)-([0-9]+)-([0-9]+) ]]; \
+             echo \"${BASH_REMATCH[0]} ${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}\"",
+        );
+        assert_eq!(o, "2026-07-18 2026 07 18\n");
+    }
+
+    #[test]
+    fn cond_regex_rhs_expansion() {
+        // The RHS undergoes parameter expansion before compilation.
+        assert_eq!(run("p='^h.*o$'; [[ hello =~ $p ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_regex_invalid_pattern() {
+        // A malformed regex yields false (non-zero status), not a crash.
+        assert_ne!(run("[[ x =~ ( ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_regex_negated() {
+        assert_eq!(run("[[ ! abc =~ [0-9] ]] && echo nonum").0, "nonum\n");
     }
 
     #[test]

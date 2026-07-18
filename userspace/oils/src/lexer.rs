@@ -88,6 +88,13 @@ struct Lexer {
     pos: usize,
     /// Here-documents whose bodies are pending collection at the next newline.
     pending_heredocs: Vec<PendingHeredoc>,
+    /// Nesting depth of open `[[ … ]]` conditionals. Used to enable regex-word
+    /// lexing for the RHS of `=~` (where `(`, `)`, `|`, … are literal regex
+    /// metacharacters, not shell operators).
+    cond_depth: usize,
+    /// Set immediately after emitting a `=~` word inside `[[ … ]]`; the next
+    /// word is read in regex mode.
+    regex_next: bool,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -112,6 +119,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
         chars: src.chars().collect(),
         pos: 0,
         pending_heredocs: Vec::new(),
+        cond_depth: 0,
+        regex_next: false,
     };
     lx.run()
 }
@@ -149,6 +158,17 @@ impl Lexer {
                 self.pos += 1;
             }
             let Some(c) = self.peek() else { break };
+            // RHS of `=~`: read the whole regex as one word so that `(`, `)`,
+            // `|`, `<`, `>` are literal metacharacters rather than shell
+            // operators. Only unquoted whitespace terminates it (bash semantics).
+            if self.regex_next {
+                self.regex_next = false;
+                if !matches!(c, '\n' | '\r') {
+                    let segs = self.read_word_regex()?;
+                    self.emit_word(&mut out, segs);
+                    continue;
+                }
+            }
             match c {
                 '\n' => {
                     self.pos += 1;
@@ -264,7 +284,8 @@ impl Lexer {
                             out.push(Tok::Word(vec![Seg::Lit(digits)]));
                         }
                     } else {
-                        out.push(Tok::Word(self.read_word()?));
+                        let segs = self.read_word()?;
+                        self.emit_word(&mut out, segs);
                     }
                 }
                 c if is_name_start(c) => {
@@ -273,10 +294,14 @@ impl Lexer {
                     if let Some(tok) = self.try_array_assign()? {
                         out.push(tok);
                     } else {
-                        out.push(Tok::Word(self.read_word()?));
+                        let segs = self.read_word()?;
+                        self.emit_word(&mut out, segs);
                     }
                 }
-                _ => out.push(Tok::Word(self.read_word()?)),
+                _ => {
+                    let segs = self.read_word()?;
+                    self.emit_word(&mut out, segs);
+                }
             }
         }
         Ok(out)
@@ -346,6 +371,77 @@ impl Lexer {
     }
 
     /// Read one word (until an unquoted operator, blank, or newline).
+    /// Push a plain word token, tracking `[[ … ]]` depth and the `=~` regex
+    /// trigger so the RHS is lexed in regex mode.
+    fn emit_word(&mut self, out: &mut Vec<Tok>, segs: Vec<Seg>) {
+        // Detect the bare-literal words `[[`, `]]`, and `=~` to drive the
+        // regex-RHS lexing mode. A word is "bare" when it is a single unquoted
+        // literal segment.
+        if let [Seg::Lit(s)] = segs.as_slice() {
+            match s.as_str() {
+                "[[" => self.cond_depth = self.cond_depth.saturating_add(1),
+                "]]" => self.cond_depth = self.cond_depth.saturating_sub(1),
+                "=~" if self.cond_depth > 0 => self.regex_next = true,
+                _ => {}
+            }
+        }
+        out.push(Tok::Word(segs));
+    }
+
+    /// Read the RHS of `=~` as a single word. Regex metacharacters (`(`, `)`,
+    /// `|`, `<`, `>`, `#`, `;`, `&`) are literal; only unquoted whitespace or a
+    /// newline terminates the word. Quotes and `$…` expansions still apply
+    /// (the RHS undergoes parameter expansion in bash).
+    fn read_word_regex(&mut self) -> Result<Vec<Seg>, LexError> {
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut lit = String::new();
+        while let Some(c) = self.peek() {
+            match c {
+                ' ' | '\t' | '\n' | '\r' => break,
+                '\'' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let s = self.read_single_quote()?;
+                    segs.push(Seg::Sq(s));
+                }
+                '"' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let inner = self.read_double_quote()?;
+                    segs.push(Seg::Dq(inner));
+                }
+                '`' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let raw = self.read_backtick()?;
+                    segs.push(Seg::CmdSub(raw));
+                }
+                '\\' => {
+                    self.pos += 1;
+                    if let Some(next) = self.bump()
+                        && next != '\n'
+                    {
+                        lit.push(next);
+                    }
+                }
+                '$' => {
+                    if let Some(seg) = self.read_dollar()? {
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(seg);
+                    } else {
+                        lit.push('$');
+                    }
+                }
+                other => {
+                    lit.push(other);
+                    self.pos += 1;
+                }
+            }
+        }
+        flush_lit(&mut segs, &mut lit);
+        Ok(segs)
+    }
+
     fn read_word(&mut self) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
@@ -733,6 +829,8 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
         chars: body.chars().collect(),
         pos: 0,
         pending_heredocs: Vec::new(),
+        cond_depth: 0,
+        regex_next: false,
     };
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = String::new();

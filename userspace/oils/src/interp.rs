@@ -2687,11 +2687,28 @@ impl Shell {
     }
 
     fn builtin_printf(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let Some(fmt) = args.first() else {
+        // `-v var`: store the result in the shell variable `var` instead of
+        // writing it to stdout.
+        let mut i = 0;
+        let mut assign_var: Option<String> = None;
+        if args.first().map(String::as_str) == Some("-v") {
+            let Some(name) = args.get(1) else {
+                eprintln!("osh: printf: -v: option requires an argument");
+                return 2;
+            };
+            assign_var = Some(name.clone());
+            i = 2;
+        }
+        let Some(fmt) = args.get(i) else {
             return 0;
         };
-        let text = format_printf(fmt, &args[1..]);
-        self.write_bytes(out, redir, text.as_bytes())
+        let text = format_printf(fmt, &args[i + 1..]);
+        if let Some(name) = assign_var {
+            self.vars.insert(name, text);
+            0
+        } else {
+            self.write_bytes(out, redir, text.as_bytes())
+        }
     }
 
     fn builtin_export(&mut self, args: &[String]) -> i32 {
@@ -4137,6 +4154,10 @@ fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
                 Some('r') => out.push('\r'),
+                Some('a') => out.push('\x07'),
+                Some('b') => out.push('\x08'),
+                Some('f') => out.push('\x0c'),
+                Some('v') => out.push('\x0b'),
                 Some('\\') => out.push('\\'),
                 Some(other) => {
                     out.push('\\');
@@ -4144,30 +4165,198 @@ fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
                 }
                 None => out.push('\\'),
             },
-            '%' => match chars.next() {
-                Some('%') => out.push('%'),
-                Some('s') => {
-                    out.push_str(args.get(*arg_i).map_or("", String::as_str));
-                    *arg_i += 1;
-                }
-                Some('d') => {
-                    let n = args
-                        .get(*arg_i)
-                        .and_then(|s| s.trim().parse::<i64>().ok())
-                        .unwrap_or(0);
-                    out.push_str(&n.to_string());
-                    *arg_i += 1;
-                }
-                Some(other) => {
-                    out.push('%');
-                    out.push(other);
-                }
-                None => out.push('%'),
-            },
+            '%' => format_conversion(&mut chars, args, arg_i, &mut out),
             other => out.push(other),
         }
     }
     out
+}
+
+/// Parse and render a single `%…` printf conversion. `chars` is positioned just
+/// after the `%`. Supports flags (`-+ #0`), width and precision (numeric only),
+/// and the conversions `% s d i u x X o c b q f e g E G`.
+fn format_conversion(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    args: &[String],
+    arg_i: &mut usize,
+    out: &mut String,
+) {
+    // Literal `%%` short-circuit (no flags/width may precede it).
+    if chars.peek() == Some(&'%') {
+        chars.next();
+        out.push('%');
+        return;
+    }
+
+    // Collect flags.
+    let mut spec = String::from("%");
+    let mut left = false;
+    let mut zero = false;
+    while let Some(&c) = chars.peek() {
+        match c {
+            '-' => left = true,
+            '0' => zero = true,
+            '+' | ' ' | '#' => {}
+            _ => break,
+        }
+        spec.push(c);
+        chars.next();
+    }
+    // Width.
+    let mut width = String::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            width.push(c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    // Precision.
+    let mut prec: Option<String> = None;
+    if chars.peek() == Some(&'.') {
+        chars.next();
+        let mut p = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                p.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        prec = Some(p);
+    }
+
+    let width_n: usize = width.parse().unwrap_or(0);
+    let prec_n: Option<usize> = prec.as_ref().map(|p| p.parse().unwrap_or(0));
+
+    let Some(conv) = chars.next() else {
+        // Trailing bare `%…` with no conversion: emit literally.
+        out.push_str(&spec);
+        out.push_str(&width);
+        if let Some(p) = &prec {
+            out.push('.');
+            out.push_str(p);
+        }
+        return;
+    };
+
+    let next_arg = |arg_i: &mut usize| -> String {
+        let v = args.get(*arg_i).cloned().unwrap_or_default();
+        *arg_i += 1;
+        v
+    };
+
+    let rendered = match conv {
+        's' => {
+            let mut s = next_arg(arg_i);
+            if let Some(p) = prec_n {
+                s.truncate(p);
+            }
+            s
+        }
+        'b' => {
+            // Interpret backslash escapes in the argument.
+            ansi_c_unescape(&next_arg(arg_i))
+        }
+        'q' => shell_quote(&next_arg(arg_i)),
+        'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
+        'd' | 'i' => {
+            let n = parse_printf_int(&next_arg(arg_i));
+            n.to_string()
+        }
+        'u' => parse_printf_int(&next_arg(arg_i)).cast_unsigned().to_string(),
+        'x' => format!("{:x}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
+        'X' => format!("{:X}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
+        'o' => format!("{:o}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
+        'f' | 'F' => {
+            let f = parse_printf_float(&next_arg(arg_i));
+            format!("{:.*}", prec_n.unwrap_or(6), f)
+        }
+        'e' | 'E' => {
+            let f = parse_printf_float(&next_arg(arg_i));
+            let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
+            let s = normalize_exp(&s);
+            if conv == 'E' { s.to_uppercase() } else { s }
+        }
+        'g' | 'G' => {
+            let f = parse_printf_float(&next_arg(arg_i));
+            let s = format!("{f}");
+            if conv == 'G' { s.to_uppercase() } else { s }
+        }
+        other => {
+            // Unknown conversion: emit literally.
+            let mut s = spec.clone();
+            s.push_str(&width);
+            if let Some(p) = &prec {
+                s.push('.');
+                s.push_str(p);
+            }
+            s.push(other);
+            out.push_str(&s);
+            return;
+        }
+    };
+
+    // Apply field width padding (numeric width only).
+    if rendered.chars().count() < width_n {
+        let pad = width_n - rendered.chars().count();
+        if left {
+            out.push_str(&rendered);
+            out.extend(std::iter::repeat_n(' ', pad));
+        } else {
+            // Zero-pad only for numeric conversions.
+            let pad_ch = if zero && matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G') {
+                '0'
+            } else {
+                ' '
+            };
+            out.extend(std::iter::repeat_n(pad_ch, pad));
+            out.push_str(&rendered);
+        }
+    } else {
+        out.push_str(&rendered);
+    }
+}
+
+/// Parse an integer argument for printf, tolerating leading/trailing whitespace,
+/// a leading `0x`/`0` base prefix, and a leading `'c` character-code form.
+fn parse_printf_int(s: &str) -> i64 {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
+        return rest.chars().next().map_or(0, |c| i64::from(u32::from(c)));
+    }
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).unwrap_or(0);
+    }
+    if let Some(hex) = t.strip_prefix("-0x").or_else(|| t.strip_prefix("-0X")) {
+        return i64::from_str_radix(hex, 16).map(|n| -n).unwrap_or(0);
+    }
+    t.parse::<i64>().unwrap_or(0)
+}
+
+fn parse_printf_float(s: &str) -> f64 {
+    s.trim().parse::<f64>().unwrap_or(0.0)
+}
+
+/// Rust formats exponents as `1.5e2`; C/bash use `1.5e+02`. Normalize to the
+/// C-style two-digit signed exponent.
+fn normalize_exp(s: &str) -> String {
+    if let Some(pos) = s.find('e') {
+        let (mant, exp) = s.split_at(pos);
+        let exp = &exp[1..];
+        let (sign, digits) = if let Some(d) = exp.strip_prefix('-') {
+            ('-', d)
+        } else if let Some(d) = exp.strip_prefix('+') {
+            ('+', d)
+        } else {
+            ('+', exp)
+        };
+        format!("{mant}e{sign}{digits:0>2}")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Evaluate a `test`/`[` expression. Returns the boolean result (true = success).
@@ -4541,6 +4730,45 @@ mod tests {
         assert_eq!(run("printf '[%s:%d]' x 1 y 2").0, "[x:1][y:2]");
         // No arg-consuming conversion → format emitted exactly once.
         assert_eq!(run("printf 'hi\\n'").0, "hi\n");
+    }
+
+    #[test]
+    fn printf_assign_with_v() {
+        assert_eq!(run("printf -v out '%s-%s' a b; echo \"$out\"").0, "a-b\n");
+        // -v suppresses stdout output.
+        assert_eq!(run("printf -v x 'hi'").0, "");
+    }
+
+    #[test]
+    fn printf_integer_conversions() {
+        assert_eq!(run("printf '%x' 255").0, "ff");
+        assert_eq!(run("printf '%X' 255").0, "FF");
+        assert_eq!(run("printf '%o' 8").0, "10");
+        assert_eq!(run("printf '%i' 42").0, "42");
+        assert_eq!(run("printf '%u' 5").0, "5");
+        // Hex input to %d.
+        assert_eq!(run("printf '%d' 0xff").0, "255");
+    }
+
+    #[test]
+    fn printf_width_and_precision() {
+        assert_eq!(run("printf '%5d' 42").0, "   42");
+        assert_eq!(run("printf '%-5d|' 42").0, "42   |");
+        assert_eq!(run("printf '%05d' 42").0, "00042");
+        assert_eq!(run("printf '%.2s' abcd").0, "ab");
+    }
+
+    #[test]
+    fn printf_q_b_and_c_conversions() {
+        assert_eq!(run("printf '%q' 'a b'").0, "'a b'");
+        assert_eq!(run("printf '%b' 'a\\tb'").0, "a\tb");
+        assert_eq!(run("printf '%c' xyz").0, "x");
+    }
+
+    #[test]
+    fn printf_float_conversion() {
+        assert_eq!(run("printf '%.2f' 3.14159").0, "3.14");
+        assert_eq!(run("printf '%f' 1").0, "1.000000");
     }
 
     #[test]

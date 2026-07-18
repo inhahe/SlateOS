@@ -878,13 +878,16 @@ impl Shell {
                         let key = self.expand_to_string(idx_word);
                         self.assoc_set(&a.name, key, val, a.append);
                     } else {
-                        // `name[i]=val` — indexed element assignment.
-                        let idx = self.eval_arith_word(idx_word);
-                        let Ok(idx) = usize::try_from(idx) else {
+                        // `name[i]=val` — indexed element assignment. A negative
+                        // index counts back from `highest_index + 1` (bash:
+                        // `a[-1]=v` overwrites the last element).
+                        let raw = self.eval_arith_word(idx_word);
+                        let arr = self.arrays.entry(a.name.clone()).or_default();
+                        let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
+                        let Some(idx) = Self::resolve_index(raw, bound) else {
                             eprintln!("osh: {}: bad array subscript", a.name);
                             return;
                         };
-                        let arr = self.arrays.entry(a.name.clone()).or_default();
                         if a.append {
                             arr.entry(idx).or_default().push_str(&val);
                         } else {
@@ -3405,6 +3408,11 @@ mod tests {
         assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
         // A scalar behaves as a one-element array: [-1] is the value.
         assert_eq!(run("x=hello; echo ${x[-1]}").0, "hello\n");
+        // Negative index in an assignment target overwrites from the end.
+        assert_eq!(run("a=(x y z); a[-1]=Q; echo ${a[@]}").0, "x y Q\n");
+        assert_eq!(run("a=(x y z); a[-2]=Q; echo ${a[@]}").0, "x Q z\n");
+        // Out-of-range negative assignment is a no-op error (array unchanged).
+        assert_eq!(run("a=(x y); a[-9]=Q; echo ${a[@]}").0, "x y\n");
     }
 
     #[test]

@@ -38,7 +38,7 @@ Neither is a correctness bug in the implemented surface — they are
 intentional grow-phase scope limits, documented in the `interp.rs`
 module header. No test depends on the deferred behavior.
 
-### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, and sparse indexed arrays all implemented; only two niche gaps remain: negative index in an assignment target `a[-1]=v`, and associative subscripts inside `(( … ))`)
+### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, sparse indexed arrays, and negative-index assignment targets all implemented; one niche gap remains: associative subscripts inside `(( … ))`)
 
 **Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
 `try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`,
@@ -88,10 +88,11 @@ element; unquoted forms field-split. Remaining deferred pieces:
    specifically; and a negative subscript counts back from
    `highest_index + 1` (bash semantics).
 
-Remaining niche gaps: negative index in an *assignment target*
-(`a[-1]=v`) and an associative subscript inside `(( … ))` (arith-evaluated
-rather than treated as a string key) are still TODO. These are documented
-in the `interp.rs` module header.
+Remaining niche gap: an associative subscript inside `(( … ))` is
+arith-evaluated rather than treated as a string key — still TODO.
+(Negative index in an *assignment target*, `a[-1]=v`, is now supported:
+it resolves from `highest_index + 1`, so `a[-1]=Q` overwrites the last
+element.)
 
 ### TD-OILS3. `osh` compound-command redirections: only stdin/stdout, not stderr — DEBT 2026-07-18
 

@@ -97,36 +97,49 @@ resolved stderr file; handle `2>&1` fd duplication ordering. Intentional
 grow-phase scope limit, documented in the `interp.rs` module header. No
 test depends on the deferred behavior.
 
-### TD-OILS4. `osh` pipelines: buffered fallback (builtin/compound stage) isn't concurrent — DEBT 2026-07-18
+### TD-OILS4. `osh` pipelines: per-stage redirects not yet composed with inter-stage pipes — DEBT 2026-07-18 (threaded streaming pipeline landed 2026-07-18)
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_pipeline`,
-`exec_concurrent_pipeline`, `exec_buffered_pipeline`, `finish_pipeline`,
+`exec_concurrent_pipeline`, `exec_threaded_pipeline`, `finish_pipeline`,
 `stage_is_plain_external`).
 
-**What:** A pipeline whose every stage is a plain external command (not a
-builtin/function/compound, no per-stage redirects) now runs concurrently
-over real OS pipes, so an unbounded producer terminates early on
-SIGPIPE/EPIPE (`yes | head` exits). `pipefail` + `${PIPESTATUS[@]}` are
-now implemented (both paths record per-stage codes; `set -o pipefail`
-folds `$?` to the rightmost non-zero stage). Remaining gaps:
-1. **Buffered fallback isn't concurrent.** A pipeline that includes a
-   builtin, shell function, or compound stage (e.g. `yes | head -1` where
-   `head` is a builtin, or `producer | while read …`) still runs each
-   stage to completion, buffering stdout — so an unbounded producer in
-   such a pipeline will *not* terminate early. **Proper fix:** run every
-   stage (including in-process builtins/compound commands) on its own
-   thread with real pipe endpoints for stdin/stdout, so backpressure and
-   SIGPIPE propagate. This needs the interpreter's `Out`/`StdinSrc` to
-   accept OS pipe handles and the `Shell` state to be shareable/clonable
-   across the stage threads (subshell-style clone per stage).
-2. **Per-stage redirects force the buffered path.** A stage with its own
-   redirect (`a | b > f`) disqualifies the whole pipeline from the
-   concurrent path. **Proper fix:** resolve each stage's `RedirPlan` when
-   building its `Command`, overriding the pipe endpoints as needed
-   (feeding here-doc `stdin_data` via a writer thread to avoid deadlock).
+**What:** Pipelines now run **concurrently and stream** on every path.
+An all-external pipeline wires real OS pipes between child processes; any
+pipeline containing a builtin/function/compound stage uses the *threaded*
+path (`exec_threaded_pipeline`): each stage runs in its own subshell on
+its own thread, connected by real OS pipes (`io::pipe`), via the new
+`Out::Pipe`/`StdinSrc::Pipe` endpoints and the `pipe_broken` flag (the
+in-process SIGPIPE analogue — a builtin write to a closed downstream pipe
+returns exit 141 and unwinds the stage). Downstream early-exit propagates
+upstream: an in-process producer stops on `pipe_broken`; an external
+producer stops on the OS broken-pipe signal on targets that deliver it.
+`pipefail` + `${PIPESTATUS[@]}` record per-stage codes on both paths.
+This resolves the former "buffered fallback isn't concurrent" gap.
 
-Documented in the `interp.rs` module header. Tests cover the concurrent
-path (classifier + real-pipe data/status) but not the deferred gaps.
+Remaining gap:
+1. **Per-stage redirects aren't composed with the inter-stage pipe.** A
+   stage with its own redirect (`a | b > f`) is routed to the threaded
+   path (it's not "plain external"), and the redirect is applied by the
+   stage, but the redirect target and the inter-stage pipe endpoint are
+   not yet merged for the *external* concurrent path — e.g. `a | b 2>err`
+   where `b` is external. **Proper fix:** resolve each stage's `RedirPlan`
+   when building its `Command`, overriding/duplicating the pipe endpoints
+   as needed (feeding here-doc `stdin_data` via a writer thread to avoid
+   deadlock).
+
+**Note on external-producer early-termination testing:** relying on the
+OS to kill an unbounded *external* producer when its consumer exits is a
+target-OS property (bash uses SIGPIPE; slateos delivers EPIPE), not shell
+logic. The Windows test host can't exercise it — `cmd`'s `echo` ignores
+broken-pipe writes and loops forever, so `Child::wait` never returns.
+The shell-side cascade is covered by
+`threaded_pipeline_inprocess_producer_terminates_early`; there is
+intentionally no external-producer variant (see the comment in
+`interp.rs` tests).
+
+Documented in the `interp.rs` module header. Tests cover the threaded
+streaming path (subshell isolation, in-process early-termination,
+classifier routing) but not the deferred per-stage-redirect gap.
 
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 

@@ -33,9 +33,11 @@
 //!   `${a[i]/pat/repl}`, and `${a[i]:=v}` which writes the element back);
 //!   associative subscripts use the string key. Combining `[@]`/`[*]` with an
 //!   operator (a bulk element transform) is still rejected at parse time.
-//!   Indexed arrays use a dense backing store, so a sparse literal
-//!   (`a=([5]=x)`) fills the gaps with empty elements (its `${#a[@]}` and
-//!   `${!a[@]}` reflect the dense form).
+//!   Indexed arrays are sparse (an ordered `index → value` map): a sparse
+//!   literal (`a=([5]=x)`) stores a single element, `${#a[@]}` counts only
+//!   assigned elements, `${!a[@]}` lists only the assigned indices, `unset
+//!   a[i]` leaves a gap (no shift), and a negative subscript counts back from
+//!   `highest_index + 1`.
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -64,7 +66,7 @@
 //!   background jobs run synchronously.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 
@@ -127,7 +129,11 @@ pub struct Shell {
     vars: HashMap<String, String>,
     /// Indexed arrays: `name=(a b c)` and `name[i]=v`. Kept separate from
     /// `vars`; `${name}` reads element 0, `${name[@]}`/`${name[*]}` read all.
-    arrays: HashMap<String, Vec<String>>,
+    /// Sparse by construction: an ordered `index → value` map, so `a=([5]=x)`
+    /// stores a single entry at 5 (no gap-filling) and `${!a[@]}` lists only the
+    /// indices actually assigned. `BTreeMap` keeps iteration in ascending-index
+    /// order, matching bash's `${a[@]}`/`${!a[@]}` traversal.
+    arrays: HashMap<String, BTreeMap<usize, String>>,
     /// Associative arrays (`declare -A m; m[key]=v`). Insertion-ordered
     /// key/value pairs for deterministic iteration. A name present here is
     /// associative: subscripts are string keys, not arithmetic indices.
@@ -286,7 +292,11 @@ impl Shell {
     fn finish_pipeline(&mut self, statuses: &[i32]) {
         self.arrays.insert(
             "PIPESTATUS".to_string(),
-            statuses.iter().map(i32::to_string).collect(),
+            statuses
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (i, s.to_string()))
+                .collect(),
         );
         self.last_status = if self.pipefail {
             statuses.iter().rev().copied().find(|&s| s != 0).unwrap_or(0)
@@ -875,25 +885,16 @@ impl Shell {
                             return;
                         };
                         let arr = self.arrays.entry(a.name.clone()).or_default();
-                        if idx >= arr.len() {
-                            arr.resize(idx.saturating_add(1), String::new());
-                        }
-                        if let Some(slot) = arr.get_mut(idx) {
-                            if a.append {
-                                slot.push_str(&val);
-                            } else {
-                                *slot = val;
-                            }
+                        if a.append {
+                            arr.entry(idx).or_default().push_str(&val);
+                        } else {
+                            arr.insert(idx, val);
                         }
                     }
                 } else if a.append {
                     // `name+=val` — append to the scalar (or to element 0 of an array).
                     if let Some(arr) = self.arrays.get_mut(&a.name) {
-                        if let Some(first) = arr.first_mut() {
-                            first.push_str(&val);
-                        } else {
-                            arr.push(val);
-                        }
+                        arr.entry(0).or_default().push_str(&val);
                     } else {
                         let cur = self.vars.get(&a.name).cloned().unwrap_or_default();
                         self.vars.insert(a.name.clone(), cur + &val);
@@ -925,23 +926,21 @@ impl Shell {
             }
             AssignRhs::Array(items) => {
                 // Indexed literal: positional elements append at the running
-                // index; `[i]=v` elements place at an explicit index.
-                let mut elems: Vec<String> = if a.append {
+                // index; `[i]=v` elements place at an explicit index. Stored
+                // sparsely (a BTreeMap), so gaps between explicit indices are
+                // absent rather than filled with empty strings.
+                let mut elems: BTreeMap<usize, String> = if a.append {
                     self.arrays.get(&a.name).cloned().unwrap_or_default()
                 } else {
-                    Vec::new()
+                    BTreeMap::new()
                 };
-                let mut next = elems.len();
+                // Append continues after the highest existing index.
+                let mut next = elems.keys().next_back().map_or(0, |k| k.saturating_add(1));
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
                             for v in self.expand_word(w, true) {
-                                if next >= elems.len() {
-                                    elems.resize(next.saturating_add(1), String::new());
-                                }
-                                if let Some(slot) = elems.get_mut(next) {
-                                    *slot = v;
-                                }
+                                elems.insert(next, v);
                                 next = next.saturating_add(1);
                             }
                         }
@@ -949,12 +948,7 @@ impl Shell {
                             let idx = self.eval_arith_word(index);
                             let val = self.expand_to_string(value);
                             if let Ok(idx) = usize::try_from(idx) {
-                                if idx >= elems.len() {
-                                    elems.resize(idx.saturating_add(1), String::new());
-                                }
-                                if let Some(slot) = elems.get_mut(idx) {
-                                    *slot = val;
-                                }
+                                elems.insert(idx, val);
                                 next = idx.saturating_add(1);
                             } else {
                                 eprintln!("osh: {}: bad array subscript", a.name);
@@ -1005,7 +999,7 @@ impl Shell {
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(_, v)| v.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
-            a.clone()
+            a.values().cloned().collect()
         } else if let Some(v) = self.vars.get(name) {
             vec![v.clone()]
         } else {
@@ -1018,7 +1012,7 @@ impl Shell {
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(k, _)| k.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
-            (0..a.len()).map(|i| i.to_string()).collect()
+            a.keys().map(usize::to_string).collect()
         } else if self.vars.contains_key(name) {
             vec!["0".to_string()]
         } else {
@@ -1046,8 +1040,11 @@ impl Shell {
     /// is out of range.
     fn array_element(&self, name: &str, idx: i64) -> Option<String> {
         if let Some(a) = self.arrays.get(name) {
-            let real = Self::resolve_index(idx, a.len())?;
-            a.get(real).cloned()
+            // Negative indices count back from `highest_index + 1` (bash sparse
+            // semantics), not from the element count.
+            let bound = a.keys().next_back().map_or(0, |k| k.saturating_add(1));
+            let real = Self::resolve_index(idx, bound)?;
+            a.get(&real).cloned()
         } else if let Some(v) = self.vars.get(name) {
             // A scalar behaves as a one-element array at index 0.
             match Self::resolve_index(idx, 1)? {
@@ -1103,13 +1100,9 @@ impl Shell {
                 } else {
                     let idx = self.eval_arith_word(w);
                     let arr = self.arrays.entry(name.to_string()).or_default();
-                    if let Some(real) = Self::resolve_index(idx, arr.len()) {
-                        if real >= arr.len() {
-                            arr.resize(real.saturating_add(1), String::new());
-                        }
-                        if let Some(slot) = arr.get_mut(real) {
-                            *slot = value;
-                        }
+                    let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
+                    if let Some(real) = Self::resolve_index(idx, bound) {
+                        arr.insert(real, value);
                     }
                 }
             }
@@ -1777,7 +1770,7 @@ impl Shell {
                     return m.iter().find(|(k, _)| k == "0").map(|(_, v)| v.clone());
                 }
                 if let Some(arr) = self.arrays.get(name) {
-                    return arr.first().cloned();
+                    return arr.get(&0).cloned();
                 }
                 self.vars
                     .get(name)
@@ -2135,9 +2128,10 @@ impl Shell {
                     map.retain(|(k, _)| k != idx_src);
                 } else if let Some(arr) = self.arrays.get_mut(name)
                     && let Ok(idx) = idx_src.parse::<usize>()
-                    && idx < arr.len()
                 {
-                    arr.remove(idx);
+                    // Sparse: remove only that index (leaves a gap, bash
+                    // semantics — no shifting of higher elements down).
+                    arr.remove(&idx);
                 }
                 continue;
             }
@@ -3387,8 +3381,10 @@ mod tests {
     #[test]
     fn array_indexed_assignment() {
         assert_eq!(run("a=(x y z); a[1]=Q; echo ${a[@]}").0, "x Q z\n");
-        // Assigning past the end grows the array with empty slots.
-        assert_eq!(run("a=(x); a[3]=w; echo ${#a[@]}").0, "4\n");
+        // Assigning past the end adds one sparse element (bash: no gap-fill), so
+        // the element count is 2 (indices 0 and 3), not 4.
+        assert_eq!(run("a=(x); a[3]=w; echo ${#a[@]}").0, "2\n");
+        assert_eq!(run("a=(x); a[3]=w; echo ${a[3]}").0, "w\n");
     }
 
     #[test]
@@ -3452,6 +3448,30 @@ mod tests {
         // Combining `[@]`/`[*]` with an operator is rejected at parse time.
         assert!(parse("echo ${a[@]:-def}").is_err());
         assert!(parse("echo ${a[*]#pat}").is_err());
+    }
+
+    #[test]
+    fn sparse_indexed_array() {
+        // A sparse literal does NOT fill the gaps: only the assigned indices
+        // exist, so the element count is the number of set elements.
+        assert_eq!(run("a=([5]=x); echo ${#a[@]}").0, "1\n");
+        assert_eq!(run("a=([5]=x); echo ${!a[@]}").0, "5\n");
+        // Multiple explicit indices keep their gaps; `${a[@]}` and `${!a[@]}`
+        // iterate in ascending-index order.
+        assert_eq!(run("a=([2]=a [5]=b); echo ${a[@]}").0, "a b\n");
+        assert_eq!(run("a=([2]=a [5]=b); echo ${!a[@]}").0, "2 5\n");
+        // A plain `${a}` reads index 0 specifically — empty when unset.
+        assert_eq!(run("a=([5]=x); echo [${a}]").0, "[]\n");
+        assert_eq!(run("a=([5]=x); echo [${a[0]}]").0, "[]\n");
+        // Negative index counts from the highest index + 1, not the count.
+        assert_eq!(run("a=([2]=a [5]=b); echo ${a[-1]}").0, "b\n");
+        // `unset a[i]` removes only that index (leaves a gap, no shift down).
+        assert_eq!(run("a=(x y z); unset a[1]; echo ${!a[@]}").0, "0 2\n");
+        assert_eq!(run("a=(x y z); unset a[1]; echo ${a[@]}").0, "x z\n");
+        // Positional elements after a keyed one resume at that index + 1.
+        assert_eq!(run("a=([2]=x y); echo ${!a[@]}").0, "2 3\n");
+        // A sparse `a[i]=v` past the end adds one entry, not a filled range.
+        assert_eq!(run("a=([5]=x); a[10]=y; echo ${#a[@]}").0, "2\n");
     }
 
     #[test]

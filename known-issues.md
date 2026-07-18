@@ -38,7 +38,7 @@ Neither is a correctness bug in the implemented surface — they are
 intentional grow-phase scope limits, documented in the `interp.rs`
 module header. No test depends on the deferred behavior.
 
-### TD-OILS2. `osh` arrays: dense backing store for sparse indexed arrays — DEBT 2026-07-18 (UPDATED 2026-07-18: associative arrays, negative/arith subscripts, and subscript+operator combos now implemented; only the dense-store limitation and a couple of niche reads remain)
+### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, and sparse indexed arrays all implemented; only two niche gaps remain: negative index in an assignment target `a[-1]=v`, and associative subscripts inside `(( … ))`)
 
 **Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
 `try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`,
@@ -78,13 +78,20 @@ element; unquoted forms field-split. Remaining deferred pieces:
    arithmetic index, negatives from the end), and `${a[i]:=v}` writes the
    element back via `assign_elem`. All of `${a[i]:-def}`, `:+`, `:?`,
    `#`/`##`/`%`/`%%`, `:off:len`, and `/pat/repl` work per element.
-4. **Indexed arrays use a dense backing store** (`Vec<String>`), so a
-   sparse literal (`a=([5]=x)`) fills gaps with empty elements and its
-   `${#a[@]}`/`${!a[@]}` reflect the dense form (bash keeps them sparse).
-   **Proper fix:** back indexed arrays with an ordered index→value map.
+4. ~~**Indexed arrays use a dense backing store** (`Vec<String>`), so a
+   sparse literal (`a=([5]=x)`) fills gaps with empty elements.~~
+   **DONE 2026-07-18:** `arrays` is now `HashMap<String, BTreeMap<usize,
+   String>>` — sparse by construction. `a=([5]=x)` stores one element;
+   `${#a[@]}` counts only assigned elements; `${!a[@]}` lists only the
+   assigned indices (ascending); `unset a[i]` removes just that index
+   (leaves a gap, no shift-down); `${a}`/`${a[0]}` read index 0
+   specifically; and a negative subscript counts back from
+   `highest_index + 1` (bash semantics).
 
-All are intentional grow-phase scope limits, documented in the
-`interp.rs` module header. No test depends on the deferred behavior.
+Remaining niche gaps: negative index in an *assignment target*
+(`a[-1]=v`) and an associative subscript inside `(( … ))` (arith-evaluated
+rather than treated as a string key) are still TODO. These are documented
+in the `interp.rs` module header.
 
 ### TD-OILS3. `osh` compound-command redirections: only stdin/stdout, not stderr — DEBT 2026-07-18
 

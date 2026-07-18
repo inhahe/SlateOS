@@ -7,10 +7,13 @@
 //! here-documents (`<<`, `<<-`), here-strings (`<<<`), `[[ … ]]` conditional
 //! expressions, and `(( … ))` arithmetic commands.
 //!
+//! Pathname (glob) expansion (`*.txt`, `src/*.rs`, `[abc]?.log`) applies to
+//! command arguments, honoring quoting and the leading-dot rule; an unmatched
+//! pattern is left literal (bash default, no `nullglob`).
+//!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
-//! - No pathname (glob) expansion yet: `*.txt` stays literal on the command
-//!   line. (Glob *matching* is implemented for `case` and `[[ == ]]` patterns.)
+//! - No indexed/associative arrays yet (`arr=(a b c)`, `${arr[@]}`).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -779,10 +782,20 @@ impl Shell {
     /// Expand a word, optionally field-splitting the results of unquoted
     /// expansions. Returns zero or more fields.
     fn expand_word(&mut self, word: &Word, split: bool) -> Vec<String> {
-        let mut fields: Vec<String> = Vec::new();
+        if split {
+            // Command-argument context: field-split unquoted expansions, then
+            // apply pathname (glob) expansion to each resulting field.
+            let fields = self.expand_word_annotated(word);
+            let mut out = Vec::new();
+            for f in fields {
+                glob_or_literal(&f, &mut out);
+            }
+            return out;
+        }
+        // Non-splitting context (assignment values, redirect targets, `[[ ]]`
+        // operands): concatenate everything into one field, no splitting/glob.
         let mut cur = String::new();
         let mut started = false;
-
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -802,21 +815,56 @@ impl Shell {
                     cur.push_str(&self.expand_double_quoted(parts));
                     started = true;
                 }
-                _ => {
-                    let val = self.expand_dynamic(part);
-                    if split {
-                        let pieces = split_ifs(&val);
-                        if !pieces.is_empty() {
-                            cur.push_str(&pieces[0]);
-                            started = true;
-                            for extra in &pieces[1..] {
-                                fields.push(std::mem::take(&mut cur));
-                                cur = extra.clone();
-                            }
-                        }
+                other => {
+                    cur.push_str(&self.expand_dynamic(other));
+                    started = true;
+                }
+            }
+        }
+        if started {
+            vec![cur]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Expand a word into fields of quote-annotated characters (splitting
+    /// unquoted expansions on IFS). The quoting flag lets a later glob step
+    /// treat quoted metacharacters as literals.
+    fn expand_word_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
+        let mut fields: Vec<Vec<EChar>> = Vec::new();
+        let mut cur: Vec<EChar> = Vec::new();
+        let mut started = false;
+        for (idx, part) in word.parts.iter().enumerate() {
+            match part {
+                WordPart::Literal(s) => {
+                    let s = if idx == 0 {
+                        self.tilde_expand(s)
                     } else {
-                        cur.push_str(&val);
+                        s.clone()
+                    };
+                    push_chars(&mut cur, &s, false);
+                    started = true;
+                }
+                WordPart::SingleQuoted(s) => {
+                    push_chars(&mut cur, s, true);
+                    started = true;
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    let s = self.expand_double_quoted(parts);
+                    push_chars(&mut cur, &s, true);
+                    started = true;
+                }
+                other => {
+                    let val = self.expand_dynamic(other);
+                    let pieces = split_ifs(&val);
+                    if !pieces.is_empty() {
+                        push_chars(&mut cur, &pieces[0], false);
                         started = true;
+                        for extra in &pieces[1..] {
+                            fields.push(std::mem::take(&mut cur));
+                            push_chars(&mut cur, extra, false);
+                        }
                     }
                 }
             }
@@ -1392,6 +1440,254 @@ struct RedirPlan {
     stdin_data: Option<Vec<u8>>,
     stdout: Option<(String, bool)>,
     stderr: Option<(String, bool)>,
+}
+
+/// A single expanded character tagged with whether it came from a quoted
+/// context. Quoted characters are exempt from field splitting (already done)
+/// and pathname (glob) expansion — a quoted `*` matches a literal `*`.
+#[derive(Clone, Copy)]
+struct EChar {
+    c: char,
+    quoted: bool,
+}
+
+/// Append the characters of `s` to `buf`, tagging each with `quoted`.
+fn push_chars(buf: &mut Vec<EChar>, s: &str, quoted: bool) {
+    for c in s.chars() {
+        buf.push(EChar { c, quoted });
+    }
+}
+
+/// Apply pathname expansion to one annotated field, pushing the results (or the
+/// literal field, if it has no unquoted metacharacter or matches nothing) into
+/// `out`. This implements bash's default (no-`nullglob`) behavior: an
+/// unmatched pattern is left as the literal word.
+fn glob_or_literal(field: &[EChar], out: &mut Vec<String>) {
+    let has_meta = field
+        .iter()
+        .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
+    let literal: String = field.iter().map(|e| e.c).collect();
+    if !has_meta {
+        out.push(literal);
+        return;
+    }
+    let mut matches = glob_expand_field(field);
+    if matches.is_empty() {
+        out.push(literal);
+    } else {
+        matches.sort();
+        out.append(&mut matches);
+    }
+}
+
+/// A compiled glob pattern token (for one path component).
+enum PatTok {
+    /// `*` — match any run of characters.
+    Star,
+    /// `?` — match any single character.
+    Any,
+    /// A literal character (either an ordinary char or a quoted metacharacter).
+    Lit(char),
+    /// `[...]` character class.
+    Class { negate: bool, items: Vec<ClassItem> },
+}
+
+enum ClassItem {
+    Ch(char),
+    Range(char, char),
+}
+
+/// Compile one annotated path component into glob tokens. Quoted characters are
+/// always literal; unquoted `* ? [` are special.
+fn compile_glob(comp: &[EChar]) -> Vec<PatTok> {
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < comp.len() {
+        let e = comp[i];
+        if e.quoted {
+            toks.push(PatTok::Lit(e.c));
+            i += 1;
+            continue;
+        }
+        match e.c {
+            '*' => {
+                toks.push(PatTok::Star);
+                i += 1;
+            }
+            '?' => {
+                toks.push(PatTok::Any);
+                i += 1;
+            }
+            '[' => {
+                if let Some((tok, next)) = compile_class(comp, i) {
+                    toks.push(tok);
+                    i = next;
+                } else {
+                    toks.push(PatTok::Lit('['));
+                    i += 1;
+                }
+            }
+            c => {
+                toks.push(PatTok::Lit(c));
+                i += 1;
+            }
+        }
+    }
+    toks
+}
+
+/// Compile a `[...]` class starting at `comp[start] == '['`. Returns the token
+/// and the index just past the closing `]`, or `None` if unterminated.
+fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
+    let mut i = start + 1;
+    let mut negate = false;
+    if matches!(comp.get(i).map(|e| e.c), Some('!' | '^')) {
+        negate = true;
+        i += 1;
+    }
+    let mut items = Vec::new();
+    let mut first = true;
+    while i < comp.len() {
+        let c = comp[i].c;
+        if c == ']' && !first {
+            return Some((PatTok::Class { negate, items }, i + 1));
+        }
+        first = false;
+        if i + 2 < comp.len() && comp[i + 1].c == '-' && comp[i + 2].c != ']' {
+            items.push(ClassItem::Range(c, comp[i + 2].c));
+            i += 3;
+        } else {
+            items.push(ClassItem::Ch(c));
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Match a compiled glob against a filename (anchored, star-backtracking).
+fn match_glob_toks(toks: &[PatTok], name: &[char]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < name.len() {
+        if matches!(toks.get(pi), Some(PatTok::Star)) {
+            star = Some((pi, ti));
+            pi += 1;
+            continue;
+        }
+        let matched = match toks.get(pi) {
+            Some(PatTok::Any) => true,
+            Some(PatTok::Lit(c)) => *c == name[ti],
+            Some(PatTok::Class { negate, items }) => {
+                class_matches(items, name[ti]) ^ *negate
+            }
+            _ => false,
+        };
+        if matched {
+            pi += 1;
+            ti += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    while matches!(toks.get(pi), Some(PatTok::Star)) {
+        pi += 1;
+    }
+    pi == toks.len()
+}
+
+fn class_matches(items: &[ClassItem], ch: char) -> bool {
+    items.iter().any(|it| match it {
+        ClassItem::Ch(c) => *c == ch,
+        ClassItem::Range(a, b) => *a <= ch && ch <= *b,
+    })
+}
+
+/// Whether a compiled component's first token is a literal `.` — controls the
+/// hidden-file rule (a leading `.` in a name is only matched explicitly).
+fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
+    matches!(toks.first(), Some(PatTok::Lit('.')))
+}
+
+/// Expand an annotated field containing at least one unquoted metacharacter
+/// against the filesystem, returning the matching paths (unsorted).
+fn glob_expand_field(field: &[EChar]) -> Vec<String> {
+    let absolute = field.first().is_some_and(|e| e.c == '/');
+    // Split into non-empty components on '/'.
+    let mut comps: Vec<Vec<EChar>> = Vec::new();
+    let mut cur: Vec<EChar> = Vec::new();
+    for &e in field {
+        if e.c == '/' {
+            if !cur.is_empty() {
+                comps.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(e);
+        }
+    }
+    if !cur.is_empty() {
+        comps.push(cur);
+    }
+    if comps.is_empty() {
+        return Vec::new();
+    }
+    let mut cands: Vec<String> = vec![if absolute { "/".to_string() } else { String::new() }];
+    for comp in &comps {
+        let has_meta = comp
+            .iter()
+            .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
+        let comp_literal: String = comp.iter().map(|e| e.c).collect();
+        let mut next: Vec<String> = Vec::new();
+        for base in &cands {
+            if has_meta {
+                let dir = if base.is_empty() { "." } else { base.as_str() };
+                let toks = compile_glob(comp);
+                let allow_dot = glob_starts_with_dot(&toks);
+                let Ok(rd) = std::fs::read_dir(dir) else {
+                    continue;
+                };
+                let mut names: Vec<String> = Vec::new();
+                for ent in rd.flatten() {
+                    let name = ent.file_name().to_string_lossy().into_owned();
+                    let nch: Vec<char> = name.chars().collect();
+                    if nch.first() == Some(&'.') && !allow_dot {
+                        continue;
+                    }
+                    if match_glob_toks(&toks, &nch) {
+                        names.push(name);
+                    }
+                }
+                names.sort();
+                for name in names {
+                    next.push(join_glob(base, &name));
+                }
+            } else {
+                let joined = join_glob(base, &comp_literal);
+                if std::path::Path::new(&joined).exists() {
+                    next.push(joined);
+                }
+            }
+        }
+        cands = next;
+    }
+    cands
+}
+
+/// Join a base path and a component with a single `/` separator, preserving a
+/// leading-`/` (absolute) base and cwd-relative (empty) base.
+fn join_glob(base: &str, name: &str) -> String {
+    if base.is_empty() {
+        name.to_string()
+    } else if base == "/" {
+        format!("/{name}")
+    } else if base.ends_with('/') {
+        format!("{base}{name}")
+    } else {
+        format!("{base}/{name}")
+    }
 }
 
 /// Whether every part of a word is quoted (single- or double-quoted). Used by
@@ -2041,5 +2337,79 @@ mod tests {
     fn nested_subshell_still_works() {
         // `( ( … ) )` with an inner space is nested subshells, not arithmetic.
         assert_eq!(run("( ( echo hi ) )").0, "hi\n");
+    }
+
+    fn field_lit(s: &str) -> Vec<EChar> {
+        s.chars().map(|c| EChar { c, quoted: false }).collect()
+    }
+
+    #[test]
+    fn glob_toks_match() {
+        let f = |p: &str, n: &str| {
+            match_glob_toks(&compile_glob(&field_lit(p)), &n.chars().collect::<Vec<_>>())
+        };
+        assert!(f("*.txt", "a.txt"));
+        assert!(!f("*.txt", "a.log"));
+        assert!(f("h?llo", "hello"));
+        assert!(f("[ab]?", "a1"));
+        assert!(!f("[ab]?", "c1"));
+        assert!(f("[!0-9]x", "zx"));
+        assert!(!f("[!0-9]x", "5x"));
+    }
+
+    #[test]
+    fn glob_quoted_metachar_is_literal() {
+        // A quoted `*` is a literal star, never a pattern.
+        let mut field = field_lit("");
+        field.push(EChar { c: '*', quoted: true });
+        let toks = compile_glob(&field);
+        assert!(match_glob_toks(&toks, &['*']));
+        assert!(!match_glob_toks(&toks, &['a']));
+    }
+
+    #[test]
+    fn glob_filesystem_expansion() {
+        // Use a uniquely-named cwd-relative dir to avoid the process-wide-cwd
+        // race between parallel tests (no `set_current_dir`).
+        let uniq = format!(
+            "osh_globtest_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::path::Path::new(&uniq);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+
+        let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+
+        // `*.txt` matches the two text files (sorted), not the log or hidden.
+        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")))
+            .iter()
+            .map(|p| basename(p))
+            .collect();
+        txt.sort();
+        assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
+
+        // `*` honors the leading-dot rule (no `.hidden`).
+        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")));
+        assert!(all.iter().all(|p| !p.ends_with(".hidden")));
+        assert_eq!(all.len(), 3);
+
+        // An explicit leading `.` matches hidden files.
+        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")));
+        assert!(dot.iter().any(|p| p.ends_with(".hidden")));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn glob_no_match_stays_literal() {
+        // With no match and no `nullglob`, the pattern is left as the word.
+        assert_eq!(run("echo osh_definitely_no_such_glob_*.zzz").0, "osh_definitely_no_such_glob_*.zzz\n");
     }
 }

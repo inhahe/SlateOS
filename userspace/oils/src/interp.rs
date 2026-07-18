@@ -43,10 +43,11 @@
 //!   The RHS undergoes parameter expansion; on a successful match `BASH_REMATCH`
 //!   is populated (`[0]` = whole match, `[i]` = capture group `i`). The lexer
 //!   reads the `=~` RHS as one regex word so `(`, `)`, `|`, `<`, `>` are literal
-//!   metacharacters. Quote-aware literal matching (bash matches quoted RHS spans
-//!   literally rather than as regex) is not yet implemented — the whole expanded
-//!   RHS is treated as the pattern; see `known-issues.md` TD-OILS1. The `-r`/`-x`
-//!   file tests are approximated as "exists" pending the slateos permission model.
+//!   metacharacters. The RHS is quote-aware (`regex_pattern_from_rhs`): quoted
+//!   spans (`"a.b"`, `'a.b'`, `"$p"`) match literally — their metacharacters are
+//!   escaped — while unquoted spans (`a.b`, `$p`) are live regex, per bash. The
+//!   `-r`/`-x` file tests are approximated as "exists" pending the slateos
+//!   permission model.
 //! - Pipelines run *concurrently* and stream. An all-external pipeline (every
 //!   stage a plain external command, no per-stage redirects) is wired with real
 //!   OS pipes between child processes. Any pipeline containing a builtin,
@@ -901,15 +902,16 @@ impl Shell {
     /// which returns status 2 — we surface false without aborting the shell).
     fn cond_regex(&mut self, l: &Word, r: &Word) -> bool {
         let subject = self.expand_to_string(l);
-        // NOTE (quoting): bash matches quoted portions of the RHS literally and
-        // unquoted portions as regex. We currently expand the whole RHS to a
-        // string and treat it entirely as a pattern; the quote-aware literal
-        // refinement is tracked in known-issues.md (TD-OILS1).
-        let pattern = self.expand_to_string(r);
+        // Quote-aware RHS: bash treats *unquoted* portions of the pattern as
+        // regex and *quoted* portions (single/double quotes) as literal text —
+        // so `[[ a.b =~ "a.b" ]]` matches only the literal, while `[[ … =~ a.b ]]`
+        // lets `.` be any char. `regex_pattern_from_rhs` escapes the metacharacters
+        // of quoted segments and passes unquoted ones through untouched.
+        let pattern = self.regex_pattern_from_rhs(r);
         let re = match crate::ere::Regex::new(&pattern) {
             Ok(re) => re,
             Err(e) => {
-                eprintln!("osh: [[: =~: invalid regex: {}", e.0);
+                self.errln(&format!("osh: [[: =~: invalid regex: {}", e.0));
                 return false;
             }
         };
@@ -931,6 +933,50 @@ impl Shell {
                 false
             }
         }
+    }
+
+    /// Build the ERE pattern for a `=~` right-hand side, honouring bash's
+    /// quote-aware rule: characters that come from *quoted* word parts
+    /// (single- or double-quoted, including the expanded contents of a
+    /// double-quoted `"$var"`) are matched literally — their regex
+    /// metacharacters are backslash-escaped — while *unquoted* parts (bare
+    /// literals and unquoted `$var`/`$(…)` expansions) contribute active regex
+    /// syntax. No field splitting or globbing is performed (this is `[[ … ]]`).
+    fn regex_pattern_from_rhs(&mut self, word: &Word) -> String {
+        fn escape_ere(s: &str, out: &mut String) {
+            for c in s.chars() {
+                // The full ERE metacharacter set; escaping any other char is a
+                // no-op but escaping these makes the segment match literally.
+                if matches!(
+                    c,
+                    '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+                        | '|'
+                ) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+        let mut pattern = String::new();
+        for part in &word.parts {
+            match part {
+                // Unquoted literal text is live regex syntax.
+                WordPart::Literal(s) => pattern.push_str(s),
+                // Single quotes: everything literal.
+                WordPart::SingleQuoted(s) => escape_ere(s, &mut pattern),
+                // Double quotes: expand (params/cmd-sub run) but the result is
+                // matched literally, per bash.
+                WordPart::DoubleQuoted(parts) => {
+                    let s = self.expand_double_quoted(parts);
+                    escape_ere(&s, &mut pattern);
+                }
+                // Unquoted dynamic parts (`$var`, `${…}`, `$(…)`, `$((…))`):
+                // their expansion is live regex, so a variable can carry a
+                // pattern (`p='^h.*o$'; [[ hello =~ $p ]]`).
+                other => pattern.push_str(&self.expand_dynamic(other)),
+            }
+        }
+        pattern
     }
 
     fn cond_unary(&mut self, op: UnaryOp, w: &Word) -> bool {
@@ -3644,6 +3690,36 @@ mod tests {
     #[test]
     fn cond_regex_negated() {
         assert_eq!(run("[[ ! abc =~ [0-9] ]] && echo nonum").0, "nonum\n");
+    }
+
+    #[test]
+    fn cond_regex_double_quoted_rhs_is_literal() {
+        // A double-quoted RHS matches literally: `.` is a real dot, not "any".
+        assert_eq!(run("[[ a.b =~ \"a.b\" ]]").1, 0);
+        assert_eq!(run("[[ axb =~ \"a.b\" ]]").1, 1);
+        // Unquoted, the same text is a regex and `.` matches any char.
+        assert_eq!(run("[[ axb =~ a.b ]]").1, 0);
+    }
+
+    #[test]
+    fn cond_regex_single_quoted_rhs_is_literal() {
+        assert_eq!(run("[[ a.b =~ 'a.b' ]]").1, 0);
+        assert_eq!(run("[[ axb =~ 'a.b' ]]").1, 1);
+    }
+
+    #[test]
+    fn cond_regex_mixed_quoting() {
+        // Only the quoted `.` is literal; the surrounding text stays regex.
+        assert_eq!(run("[[ a.b =~ a\".\"b ]]").1, 0);
+        assert_eq!(run("[[ axb =~ a\".\"b ]]").1, 1);
+    }
+
+    #[test]
+    fn cond_regex_quoted_var_is_literal() {
+        // Quoted expansion is literal; unquoted expansion is a live pattern.
+        assert_eq!(run("p='a.b'; [[ a.b =~ \"$p\" ]]").1, 0);
+        assert_eq!(run("p='a.b'; [[ axb =~ \"$p\" ]]").1, 1);
+        assert_eq!(run("p='a.b'; [[ axb =~ $p ]]").1, 0);
     }
 
     #[test]

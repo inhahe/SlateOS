@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS1. `osh` `[[ … ]]` conditional gaps: `=~` quote-aware literal matching; `-r`/`-x` file tests approximated as "exists" — MOSTLY RESOLVED 2026-07-18 (`=~` regex match implemented; only the quote-literal nuance and the permission-bit tests remain)
+### TD-OILS1. `osh` `[[ … ]]` conditional gaps: `-r`/`-x` file tests approximated as "exists" — MOSTLY RESOLVED 2026-07-18 (`=~` regex match + quote-aware literal RHS implemented; only the permission-bit tests remain, gated on the slateos permission model)
 
 **Where:** `userspace/oils/src/ere.rs` (Pike-VM ERE engine),
 `userspace/oils/src/lexer.rs` (`read_word_regex`, `cond_depth`/`regex_next`),
@@ -34,22 +34,26 @@ matching now works:
   array is populated (`[0]` = whole match, `[i]` = capture group `i`;
   unmatched optional groups become empty strings), and it is cleared on a
   non-match. A malformed pattern reports to stderr and yields false.
-  **Remaining nuance:** bash matches *quoted* spans of the RHS literally
-  (regex metacharacters within quotes are treated as ordinary chars) while
-  unquoted spans are regex. We currently expand the whole RHS to a string
-  and treat all of it as the pattern, so e.g. `[[ a.b =~ "a.b" ]]` matches
-  `axb` too (the quoted `.` is not forced literal). **Proper fix:** thread
-  per-segment quoting through to `cond_regex` and regex-escape the quoted
-  spans before concatenating into the pattern.
+  **Quote-aware RHS — RESOLVED 2026-07-18.** `cond_regex` now builds the
+  pattern via `regex_pattern_from_rhs`, which walks the RHS `Word`'s parts:
+  unquoted `Literal`/dynamic (`$var`, `$(…)`) parts contribute live regex
+  syntax, while single- and double-quoted parts (including an expanded
+  `"$p"`) are backslash-escaped so their metacharacters match literally —
+  so `[[ a.b =~ "a.b" ]]` matches only the literal `a.b`, `[[ axb =~ a.b ]]`
+  still matches (regex `.`), and `p='a.b'; [[ axb =~ $p ]]` matches while
+  `[[ axb =~ "$p" ]]` does not. Tests: `cond_regex_double_quoted_rhs_is_literal`,
+  `cond_regex_single_quoted_rhs_is_literal`, `cond_regex_mixed_quoting`,
+  `cond_regex_quoted_var_is_literal`.
 - `-r` and `-x` file tests are approximated as "path exists" (`-w` is
   "exists and not read-only") because the host has no portable mode-bit
   check and the slateos permission model isn't wired into `osh` yet.
   **Proper fix:** query the real per-file permission bits once the
   slateos userspace permission API is available.
 
-Neither remaining item is a correctness bug in the implemented surface —
-they are intentional grow-phase scope limits, documented in the
-`interp.rs` module header. No test depends on the deferred behavior.
+The remaining `-r`/`-x` approximation is not a correctness bug in the
+implemented surface — it is an intentional grow-phase scope limit gated on
+the slateos permission model, documented in the `interp.rs` module header.
+No test depends on the deferred behavior.
 
 ### TD-OILS2. `osh` arrays — MOSTLY RESOLVED 2026-07-18 (associative arrays, negative/arith subscripts, subscript+operator combos, sparse indexed arrays, and negative-index assignment targets all implemented; one niche gap remains: associative subscripts inside `(( … ))`)
 

@@ -200,6 +200,13 @@ pub struct Shell {
     /// the group. Consulted by [`Shell::emit_stderr`] (diagnostics/`>&2`) and
     /// [`Shell::run_external`] (child fd 2). Reset to empty in subshell clones.
     stderr_stack: Vec<StderrTarget>,
+    /// `getopts` cursor within the current argument (0 = at the start of a new
+    /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
+    /// flag group like `-abc` across successive `getopts` calls.
+    getopts_col: usize,
+    /// The value of `OPTIND` `getopts` last saw, so an external reset
+    /// (`OPTIND=1`) is detected and the intra-argument cursor is cleared.
+    getopts_optind: usize,
 }
 
 impl Default for Shell {
@@ -226,6 +233,8 @@ impl Shell {
             pipe_broken: false,
             pid: std::process::id(),
             stderr_stack: Vec::new(),
+            getopts_col: 0,
+            getopts_optind: 1,
         }
     }
 
@@ -1127,6 +1136,8 @@ impl Shell {
             // stage's own subshell (and keeping the `Arc`s off the clone is what
             // lets `Shell` stay `Send` for the scoped-thread pipeline).
             stderr_stack: Vec::new(),
+            getopts_col: self.getopts_col,
+            getopts_optind: self.getopts_optind,
         }
     }
 
@@ -2336,6 +2347,7 @@ impl Shell {
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
+            "getopts" => self.builtin_getopts(args),
             "read" => self.builtin_read(args, stdin, redir),
             "test" | "[" => self.builtin_test(name, args),
             "eval" => {
@@ -2620,6 +2632,164 @@ impl Shell {
             0
         } else {
             1
+        }
+    }
+
+    /// The `getopts optstring name [args...]` builtin: POSIX-style option
+    /// parser. Reads one option per invocation, tracking position across calls
+    /// via the `OPTIND` shell variable and the internal `getopts_col` cursor
+    /// (for bundled flags like `-abc`). Sets `name` to the option character,
+    /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
+    /// the end of the option list.
+    fn builtin_getopts(&mut self, args: &[String]) -> i32 {
+        let optstring = match args.first() {
+            Some(s) => s.clone(),
+            None => {
+                eprintln!("osh: getopts: usage: getopts optstring name [arg ...]");
+                return 2;
+            }
+        };
+        let name = match args.get(1) {
+            Some(s) => s.clone(),
+            None => {
+                eprintln!("osh: getopts: usage: getopts optstring name [arg ...]");
+                return 2;
+            }
+        };
+        let silent = optstring.starts_with(':');
+        // Arguments to scan: explicit args after `name`, else the positionals.
+        let pos: Vec<String> = if args.len() > 2 {
+            args[2..].to_vec()
+        } else {
+            self.positional.clone()
+        };
+        let mut optind = self
+            .vars
+            .get("OPTIND")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+        if optind == 0 {
+            optind = 1;
+        }
+        // If OPTIND was reset externally (e.g. `OPTIND=1`), restart bundling.
+        if optind != self.getopts_optind {
+            self.getopts_col = 0;
+        }
+
+        loop {
+            // No more arguments to scan. (optind >= 1 is guaranteed above.)
+            if optind > pos.len() {
+                self.getopts_col = 0;
+                self.getopts_optind = optind;
+                self.vars.insert("OPTIND".to_string(), optind.to_string());
+                return 1;
+            }
+            let arg = &pos[optind - 1];
+            if self.getopts_col == 0 {
+                // Start of a fresh argument.
+                if !arg.starts_with('-') || arg == "-" {
+                    self.getopts_optind = optind;
+                    self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    return 1;
+                }
+                if arg == "--" {
+                    optind += 1;
+                    self.getopts_col = 0;
+                    self.getopts_optind = optind;
+                    self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    return 1;
+                }
+                self.getopts_col = 1;
+            }
+            let chars: Vec<char> = arg.chars().collect();
+            if self.getopts_col >= chars.len() {
+                // Exhausted this argument's flags; advance to the next.
+                optind += 1;
+                self.getopts_col = 0;
+                continue;
+            }
+            let opt = chars[self.getopts_col];
+            self.getopts_col += 1;
+
+            // Look the option up in the optstring (skipping ':' modifiers).
+            let ospec: Vec<char> = optstring.chars().collect();
+            let mut found = false;
+            let mut takes_arg = false;
+            for (i, &c) in ospec.iter().enumerate() {
+                if c == ':' {
+                    continue;
+                }
+                if c == opt {
+                    found = true;
+                    takes_arg = ospec.get(i + 1) == Some(&':');
+                    break;
+                }
+            }
+
+            let arg_exhausted = self.getopts_col >= chars.len();
+
+            if !found {
+                self.vars.insert(name.clone(), "?".to_string());
+                if silent {
+                    self.vars.insert("OPTARG".to_string(), opt.to_string());
+                } else {
+                    eprintln!("osh: getopts: illegal option -- {opt}");
+                    self.vars.remove("OPTARG");
+                }
+                if arg_exhausted {
+                    optind += 1;
+                    self.getopts_col = 0;
+                }
+                self.getopts_optind = optind;
+                self.vars.insert("OPTIND".to_string(), optind.to_string());
+                return 0;
+            }
+
+            if takes_arg {
+                if !arg_exhausted {
+                    // Remainder of the current argument is the option-argument.
+                    let optarg: String = chars[self.getopts_col..].iter().collect();
+                    self.vars.insert("OPTARG".to_string(), optarg);
+                    optind += 1;
+                    self.getopts_col = 0;
+                } else if optind < pos.len() {
+                    // The next argument is the option-argument.
+                    let optarg = pos[optind].clone();
+                    self.vars.insert("OPTARG".to_string(), optarg);
+                    optind += 2;
+                    self.getopts_col = 0;
+                } else {
+                    // Missing required argument.
+                    optind += 1;
+                    self.getopts_col = 0;
+                    if silent {
+                        self.vars.insert(name.clone(), ":".to_string());
+                        self.vars.insert("OPTARG".to_string(), opt.to_string());
+                    } else {
+                        eprintln!("osh: getopts: option requires an argument -- {opt}");
+                        self.vars.insert(name.clone(), "?".to_string());
+                        self.vars.remove("OPTARG");
+                    }
+                    self.getopts_optind = optind;
+                    self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    return 0;
+                }
+                self.vars.insert(name.clone(), opt.to_string());
+                self.getopts_optind = optind;
+                self.vars.insert("OPTIND".to_string(), optind.to_string());
+                return 0;
+            }
+
+            // Plain flag with no argument.
+            self.vars.insert(name.clone(), opt.to_string());
+            self.vars.remove("OPTARG");
+            if arg_exhausted {
+                optind += 1;
+                self.getopts_col = 0;
+            }
+            self.getopts_optind = optind;
+            self.vars.insert("OPTIND".to_string(), optind.to_string());
+            return 0;
         }
     }
 
@@ -3432,6 +3602,7 @@ fn is_builtin(name: &str) -> bool {
             | "unset"
             | "set"
             | "shift"
+            | "getopts"
             | "read"
             | "test"
             | "["
@@ -3817,6 +3988,52 @@ mod tests {
         assert_eq!(run("printf '%s' $'\\q'").0, "\\q");
         // Concatenation with adjacent text.
         assert_eq!(run("echo pre$'\\t'post").0, "pre\tpost\n");
+    }
+
+    #[test]
+    fn getopts_basic() {
+        // Flags, an option with an argument, and the OPTIND/remaining split.
+        let src = "set -- -a -b val -c foo bar\n\
+                   out=\n\
+                   while getopts \"ab:c\" opt; do\n\
+                     case $opt in\n\
+                       a) out=\"$out a\" ;;\n\
+                       b) out=\"$out b=$OPTARG\" ;;\n\
+                       c) out=\"$out c\" ;;\n\
+                     esac\n\
+                   done\n\
+                   shift $((OPTIND - 1))\n\
+                   echo \"opts:$out rest:$*\"";
+        assert_eq!(run(src).0, "opts: a b=val c rest:foo bar\n");
+    }
+
+    #[test]
+    fn getopts_bundled_flags() {
+        // Bundled short flags like -abc are parsed one per call.
+        let src = "set -- -abc\n\
+                   out=\n\
+                   while getopts \"abc\" opt; do out=\"$out$opt\"; done\n\
+                   echo \"$out\"";
+        assert_eq!(run(src).0, "abc\n");
+    }
+
+    #[test]
+    fn getopts_unknown_option() {
+        // Unknown option sets opt to '?'; silent mode (leading ':') puts the
+        // bad char in OPTARG instead of printing to stderr.
+        let src = "set -- -x\n\
+                   getopts \":ab\" opt\n\
+                   echo \"$opt $OPTARG\"";
+        assert_eq!(run(src).0, "? x\n");
+    }
+
+    #[test]
+    fn getopts_missing_argument_silent() {
+        // Missing required argument in silent mode: opt=':' and OPTARG=optchar.
+        let src = "set -- -b\n\
+                   getopts \":ab:\" opt\n\
+                   echo \"$opt $OPTARG\"";
+        assert_eq!(run(src).0, ": b\n");
     }
 
     #[test]

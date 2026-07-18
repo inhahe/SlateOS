@@ -37,7 +37,7 @@
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

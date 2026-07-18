@@ -50,7 +50,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::PreemptSpinMutex as Mutex;
 use crate::hypervisor::{self, Hypervisor};
 use crate::serial_println;
 

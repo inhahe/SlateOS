@@ -17,19 +17,19 @@
 //! element boundaries (one field per element).
 //!
 //! Associative arrays: `declare -A m` (also `typeset`/`local`) then `m[key]=v`,
-//! `m=([k1]=v1 [k2]=v2)`, `${m[key]}`, `${m[@]}`/`${m[*]}` (values, insertion
-//! order), `${!m[@]}` (keys), `${#m[@]}`, and `unset m[key]`. Subscripts on an
-//! associative array are string keys (expanded, not arithmetic).
+//! `m=([k1]=v1 [k2]=v2)`, or the combined one-liner `declare -A m=([k]=v)`;
+//! `${m[key]}`, `${m[@]}`/`${m[*]}` (values, insertion order), `${!m[@]}`
+//! (keys), `${#m[@]}`, and `unset m[key]`. Subscripts on an associative array
+//! are string keys (expanded, not arithmetic). The one-liner works for indexed
+//! arrays too (`declare -a a=(x y)` / the flagless `declare a=(x y)`).
 //!
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
-//! - The combined one-liner `declare -A m=([k]=v)` is not accepted (an array
-//!   literal after a command word is a parse error); use `declare -A m` then a
-//!   separate `m=([k]=v)`. Negative array indices and arithmetic subscripts
-//!   inside `(( … ))` (`a[i]`) are not supported. Mixing a subscript with a
-//!   `${a[i]:-x}`-style operator is rejected at parse time. Indexed arrays use
-//!   a dense backing store, so a sparse literal (`a=([5]=x)`) fills the gaps
-//!   with empty elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
+//! - Negative array indices and arithmetic subscripts inside `(( … ))` (`a[i]`)
+//!   are not supported. Mixing a subscript with a `${a[i]:-x}`-style operator is
+//!   rejected at parse time. Indexed arrays use a dense backing store, so a
+//!   sparse literal (`a=([5]=x)`) fills the gaps with empty elements (its
+//!   `${#a[@]}` and `${!a[@]}` reflect the dense form).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -1026,6 +1026,12 @@ impl Shell {
 
         let name = argv[0].clone();
 
+        // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
+        // to the command as `decl_arrays`; apply them with the declared kind.
+        if !sc.decl_arrays.is_empty() && matches!(name.as_str(), "declare" | "typeset" | "local") {
+            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays);
+        }
+
         // Function?
         if self.funcs.contains_key(&name) {
             return self.call_function(&name, &argv[1..], &assigns, out, stdin, &redir);
@@ -1868,6 +1874,48 @@ impl Shell {
             }
         }
         0
+    }
+
+    /// Handle the combined `declare -A m=([k]=v)` / `declare -a a=(x y)` form,
+    /// where the array literal is an operand of a declaration builtin. Flags and
+    /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
+    /// each array literal is then marked with the declared kind (`-A` → assoc,
+    /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
+    fn exec_declare_with_arrays(&mut self, argv: &[String], decl_arrays: &[Assignment]) -> Flow {
+        // Determine the array kind from the leading dashed flags.
+        let mut assoc = false;
+        let mut indexed = false;
+        for arg in &argv[1..] {
+            let Some(flags) = arg.strip_prefix('-') else {
+                break; // first non-flag operand — flags are done
+            };
+            if flags == "-" {
+                break; // `--` ends option parsing
+            }
+            for c in flags.chars() {
+                match c {
+                    'A' => assoc = true,
+                    'a' => indexed = true,
+                    _ => {}
+                }
+            }
+        }
+        // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`).
+        let status = self.builtin_declare(&argv[1..]);
+        // Mark each array name's kind before applying, so `apply_assignment`
+        // routes the literal to the associative or indexed store correctly.
+        for a in decl_arrays {
+            if assoc {
+                self.assoc.entry(a.name.clone()).or_default();
+            } else if indexed {
+                self.arrays.entry(a.name.clone()).or_default();
+            }
+            // Default (no flag): an array literal makes an indexed array — which
+            // `apply_assignment` already does for a name absent from `assoc`.
+            self.apply_assignment(a);
+        }
+        self.last_status = status;
+        Flow::Next
     }
 
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
@@ -3205,6 +3253,29 @@ mod tests {
     fn assoc_bare_ref_reads_key_zero() {
         // `$m` on an associative array reads the value at key "0", not "first".
         assert_eq!(run("declare -A m; m[foo]=a; m[0]=z; echo $m").0, "z\n");
+    }
+
+    #[test]
+    fn declare_assoc_oneliner() {
+        // The combined `declare -A m=([k]=v)` form now works in one statement.
+        let src = "declare -A m=([x]=1 [y]=2); echo ${m[x]} ${m[y]}; echo ${#m[@]}";
+        assert_eq!(run(src).0, "1 2\n2\n");
+    }
+
+    #[test]
+    fn declare_indexed_oneliner() {
+        // `declare -a a=(x y z)` (and the flagless `declare a=(…)`) make an
+        // indexed array in one statement.
+        assert_eq!(run("declare -a a=(x y z); echo ${a[1]} ${#a[@]}").0, "y 3\n");
+        assert_eq!(run("declare a=(p q); echo ${a[@]}").0, "p q\n");
+    }
+
+    #[test]
+    fn declare_assoc_oneliner_is_associative() {
+        // A `-A` one-liner must be associative (string subscripts), not indexed:
+        // a non-numeric key must round-trip.
+        let src = "declare -A m=([foo]=bar); echo ${m[foo]}; echo ${!m[@]}";
+        assert_eq!(run(src).0, "bar\nfoo\n");
     }
 
     /// A unique cwd-relative temp path (no `set_current_dir`, so parallel-safe).

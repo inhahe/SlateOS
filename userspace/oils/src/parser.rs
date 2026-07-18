@@ -579,7 +579,11 @@ impl Parser {
                     seen_word = true;
                 }
                 Some(Tok::ArrayAssign { .. }) => {
-                    if seen_word {
+                    // After the command word, an array literal is only allowed as
+                    // an operand of a declaration builtin (`declare -A m=([k]=v)`);
+                    // anywhere else it's a syntax error.
+                    let is_decl_operand = seen_word && is_declaration_command(&cmd.words);
+                    if seen_word && !is_decl_operand {
                         return Err(ParseError(
                             "array assignment is only valid before the command word".into(),
                         ));
@@ -596,12 +600,17 @@ impl Parser {
                     for segs in &elems {
                         items.push(parse_array_elem(segs)?);
                     }
-                    cmd.assignments.push(Assignment {
+                    let assign = Assignment {
                         name,
                         index: None,
                         append,
                         value: AssignRhs::Array(items),
-                    });
+                    };
+                    if is_decl_operand {
+                        cmd.decl_arrays.push(assign);
+                    } else {
+                        cmd.assignments.push(assign);
+                    }
                 }
                 Some(Tok::Io(_))
                 | Some(Tok::Op(
@@ -815,6 +824,19 @@ fn parse_array_elem(segs: &[Seg]) -> Result<ArrayElem, ParseError> {
         });
     }
     Ok(ArrayElem::Positional(word_from_segs(segs)?))
+}
+
+/// True when the command word (`words[0]`) is a declaration builtin, so that a
+/// following array literal (`declare -A m=([k]=v)`) is parsed as an operand
+/// rather than rejected. The word must be a single unquoted literal.
+fn is_declaration_command(words: &[Word]) -> bool {
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let [WordPart::Literal(name)] = first.parts.as_slice() else {
+        return false;
+    };
+    matches!(name.as_str(), "declare" | "typeset" | "local")
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).
@@ -1394,6 +1416,27 @@ mod tests {
         assert!(sc.assignments[0].index.is_some());
         assert!(!sc.assignments[0].append);
         assert!(sc.words.is_empty());
+    }
+
+    #[test]
+    fn declare_array_operand_parsing() {
+        // `declare -A m=([k]=v)` — the array literal after the command word is
+        // captured as a declaration operand, not a leading prefix assignment.
+        let prog = parse("declare -A m=([k]=v)").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!();
+        };
+        assert!(sc.assignments.is_empty());
+        assert_eq!(sc.decl_arrays.len(), 1);
+        assert_eq!(sc.decl_arrays[0].name, "m");
+        // The command word and its flag are ordinary words.
+        assert_eq!(sc.words.len(), 2);
+    }
+
+    #[test]
+    fn array_literal_after_plain_command_rejected() {
+        // Only declaration builtins may take an array-literal operand.
+        assert!(parse("foo m=(a b)").is_err());
     }
 
     #[test]

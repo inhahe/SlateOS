@@ -152,6 +152,11 @@ pub struct SimpleCommand {
     pub words: Vec<Word>,
     /// Redirections attached to this command.
     pub redirects: Vec<Redirect>,
+    /// Array-literal operands appearing *after* a declaration command word,
+    /// e.g. the `m=([k]=v)` in `declare -A m=([k]=v)`. Only populated when the
+    /// command word is a declaration builtin (`declare`/`typeset`/`local`);
+    /// the interpreter applies these with the declared array kind.
+    pub decl_arrays: Vec<Assignment>,
 }
 
 /// A variable assignment: `name=value`, `name+=value`, `name[i]=value`, or an

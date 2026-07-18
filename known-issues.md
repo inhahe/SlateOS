@@ -38,11 +38,12 @@ Neither is a correctness bug in the implemented surface — they are
 intentional grow-phase scope limits, documented in the `interp.rs`
 module header. No test depends on the deferred behavior.
 
-### TD-OILS2. `osh` arrays: no negative/arith subscripts in `(( ))`, no subscript+operator combo, no `declare -A m=(…)` one-liner — DEBT 2026-07-18 (UPDATED 2026-07-18: associative arrays now implemented)
+### TD-OILS2. `osh` arrays: no negative/arith subscripts in `(( ))`, no subscript+operator combo — DEBT 2026-07-18 (UPDATED 2026-07-18: associative arrays + `declare -A m=(…)` one-liner now implemented)
 
 **Where:** `userspace/oils/src/parser.rs` (`split_name_subscript`,
-`try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`),
-`userspace/oils/src/interp.rs` (`apply_assignment`, `expand_array_ref`,
+`try_assignment`, `spanning_subscript_assignment`, `parse_array_elem`,
+`is_declaration_command`), `userspace/oils/src/interp.rs`
+(`apply_assignment`, `exec_declare_with_arrays`, `expand_array_ref`,
 `array_element`, `assoc_element`, `array_elements`, `array_keys`,
 `builtin_declare`, `VarLookup::get`).
 
@@ -50,30 +51,23 @@ module header. No test depends on the deferred behavior.
 keyed/sparse literals `a=([2]=x y)`, `${a[i]}`, `${a[@]}`/`${a[*]}`,
 `${#a[@]}`/`${#a[i]}`, `${!a[@]}` indices, `unset a[i]`/`unset a`) **and**
 associative arrays (`declare -A m`/`typeset`/`local`, `m[key]=v`,
-`m=([k]=v …)`, `${m[key]}`, `${m[@]}`/`${m[*]}` values, `${!m[@]}` keys,
-`${#m[@]}`, `unset m[key]`; insertion-ordered, string subscripts) are
-implemented. Quoted `"${a[@]}"`/`"${!a[@]}"` keep one field per element;
-unquoted forms field-split. Remaining deferred pieces:
-1. **The combined `declare -A m=([k]=v)` one-liner** is a parse error (an
-   array literal `name=(…)` after a command word is rejected by
-   `parse_command`). Use `declare -A m; m=([k]=v …)`. **Proper fix:** in
-   `parse_command`, when the command word is a declaration builtin
-   (`declare`/`typeset`/`local`/`export`/`readonly`), accept a trailing
-   `ArrayAssign` token and route it to the builtin (e.g. via a dedicated
-   assignment field on `SimpleCommand`) so the `-A`/`-a` flag is known
-   before the literal is applied.
-2. **Negative indices** (`${a[-1]}` = last element) return empty; the
+`m=([k]=v …)`, the combined one-liner `declare -A m=([k]=v)` /
+`declare -a a=(x y)`, `${m[key]}`, `${m[@]}`/`${m[*]}` values, `${!m[@]}`
+keys, `${#m[@]}`, `unset m[key]`; insertion-ordered, string subscripts)
+are implemented. Quoted `"${a[@]}"`/`"${!a[@]}"` keep one field per
+element; unquoted forms field-split. Remaining deferred pieces:
+1. **Negative indices** (`${a[-1]}` = last element) return empty; the
    subscript must be a non-negative integer after arithmetic evaluation.
    **Proper fix:** in `array_element`, map a negative index modulo the
    array length (bash semantics).
-3. **Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
+2. **Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
    recognized — `VarLookup::get` only reads element 0 of a bare name.
    **Proper fix:** teach the arith lexer/evaluator about `name[expr]`.
-4. **Subscript combined with an expansion operator**
+3. **Subscript combined with an expansion operator**
    (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time to avoid
    wrong results. **Proper fix:** thread the subscript through the
    `ParamOp`/`ParamTrim`/… variants so the operator applies per element.
-5. **Indexed arrays use a dense backing store** (`Vec<String>`), so a
+4. **Indexed arrays use a dense backing store** (`Vec<String>`), so a
    sparse literal (`a=([5]=x)`) fills gaps with empty elements and its
    `${#a[@]}`/`${!a[@]}` reflect the dense form (bash keeps them sparse).
    **Proper fix:** back indexed arrays with an ordered index→value map.

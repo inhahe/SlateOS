@@ -9,6 +9,16 @@
 pub trait VarLookup {
     /// Return the variable's value, or `None` if unset (treated as `0`).
     fn get(&self, name: &str) -> Option<i64>;
+
+    /// Return the integer value of the array element `name[index]`, or `None`
+    /// if unset/out-of-range (treated as `0`). `index` has already been
+    /// evaluated arithmetically (so `(( a[i+1] ))` and negative indices work).
+    /// The default ignores subscripts — implementors backed by arrays override
+    /// it.
+    fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+        let _ = (name, index);
+        None
+    }
 }
 
 /// An arithmetic evaluation error.
@@ -157,6 +167,19 @@ impl AParser<'_> {
                         break;
                     }
                 }
+                // Array subscript: `name[expr]`. The subscript is itself an
+                // arithmetic expression (bash evaluates it for indexed arrays),
+                // so recurse. No whitespace is allowed between the name and `[`.
+                if self.peek() == Some('[') {
+                    self.pos += 1;
+                    let idx = self.parse_expr(0)?;
+                    self.skip_ws();
+                    if self.peek() != Some(']') {
+                        return Err(ArithError("expected ']' in array subscript".into()));
+                    }
+                    self.pos += 1;
+                    return Ok(self.vars.get_index(&name, idx).unwrap_or(0));
+                }
                 Ok(self.vars.get(&name).unwrap_or(0))
             }
             other => Err(ArithError(format!(
@@ -231,6 +254,46 @@ mod tests {
         fn get(&self, name: &str) -> Option<i64> {
             self.0.get(name).copied()
         }
+    }
+
+    /// A lookup with one indexed array `a` plus scalar variables, so the
+    /// subscript path can be exercised in isolation.
+    struct ArrMap {
+        scalars: HashMap<String, i64>,
+        a: Vec<i64>,
+    }
+    impl VarLookup for ArrMap {
+        fn get(&self, name: &str) -> Option<i64> {
+            self.scalars.get(name).copied()
+        }
+        fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+            if name != "a" {
+                return None;
+            }
+            let real = if index < 0 {
+                i64::try_from(self.a.len()).ok()? + index
+            } else {
+                index
+            };
+            usize::try_from(real).ok().and_then(|i| self.a.get(i).copied())
+        }
+    }
+
+    #[test]
+    fn array_subscripts() {
+        let mut scalars = HashMap::new();
+        scalars.insert("i".to_string(), 2);
+        let m = ArrMap {
+            scalars,
+            a: vec![10, 20, 30, 40],
+        };
+        assert_eq!(eval("a[0]", &m).unwrap(), 10);
+        assert_eq!(eval("a[i]", &m).unwrap(), 30); // i = 2
+        assert_eq!(eval("a[i+1] + 1", &m).unwrap(), 41); // a[3]=40, +1
+        assert_eq!(eval("a[-1]", &m).unwrap(), 40); // negative from end
+        assert_eq!(eval("a[10]", &m).unwrap(), 0); // out of range → 0
+        // Missing ']' is a syntax error.
+        assert!(eval("a[1", &m).is_err());
     }
 
     fn ev(s: &str) -> i64 {

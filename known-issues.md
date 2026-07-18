@@ -61,9 +61,13 @@ element; unquoted forms field-split. Remaining deferred pieces:
    from the end via `resolve_index` (`-1` = last; a scalar acts as a
    one-element array); out-of-range negatives yield empty. Reads only —
    negative index in an *assignment target* (`a[-1]=v`) is still TODO.
-2. **Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
-   recognized — `VarLookup::get` only reads element 0 of a bare name.
-   **Proper fix:** teach the arith lexer/evaluator about `name[expr]`.
+2. ~~**Arithmetic subscripts inside `(( … ))`** (`(( a[i] + 1 ))`) are not
+   recognized.~~ **DONE 2026-07-18:** the arith parser recognizes
+   `name[expr]` (subscript is itself an arithmetic expression, so
+   `a[i+1]` and negative `a[-1]` work) via the new defaulted
+   `VarLookup::get_index`, which `Shell` implements over `array_element`.
+   Indexed arrays only; an associative subscript in `(( … ))` is
+   arith-evaluated (not treated as a string key) — niche, still TODO.
 3. **Subscript combined with an expansion operator**
    (`${a[i]:-default}`, `${a[@]#pat}`) is rejected at parse time to avoid
    wrong results. **Proper fix:** thread the subscript through the

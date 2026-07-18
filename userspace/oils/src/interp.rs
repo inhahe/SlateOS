@@ -26,11 +26,12 @@
 //! ## Known limitations (tracked for the grow phase — see the crate docs and
 //! `design-decisions.md §72`):
 //! - `${a[-1]}` negative subscripts count from the end (bash semantics; a
-//!   scalar acts as a one-element array). Still unsupported: arithmetic
-//!   subscripts inside `(( … ))` (`(( a[i] + 1 ))`). Mixing a subscript with a
-//!   `${a[i]:-x}`-style operator is rejected at parse time. Indexed arrays use
-//!   a dense backing store, so a sparse literal (`a=([5]=x)`) fills the gaps
-//!   with empty elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
+//!   scalar acts as a one-element array). Array elements are addressable inside
+//!   arithmetic (`$(( a[i] + 1 ))`, `(( a[-1] ))`); the subscript is itself an
+//!   arithmetic expression. Mixing a subscript with a `${a[i]:-x}`-style
+//!   operator is still rejected at parse time. Indexed arrays use a dense
+//!   backing store, so a sparse literal (`a=([5]=x)`) fills the gaps with empty
+//!   elements (its `${#a[@]}` and `${!a[@]}` reflect the dense form).
 //! - `[[ … ]]` does not yet support `=~` (regex match — no regex engine yet);
 //!   the parser rejects it with a clear message. The `-r`/`-x` file tests are
 //!   approximated as "exists" pending the slateos permission model.
@@ -2298,6 +2299,12 @@ impl VarLookup for Shell {
     fn get(&self, name: &str) -> Option<i64> {
         self.param_value(name).and_then(|v| v.trim().parse::<i64>().ok())
     }
+
+    fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+        // `array_element` already applies bash negative-index semantics.
+        self.array_element(name, index)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    }
 }
 
 // ---- free helpers -----------------------------------------------------------
@@ -3336,6 +3343,19 @@ mod tests {
         assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
         // A scalar behaves as a one-element array: [-1] is the value.
         assert_eq!(run("x=hello; echo ${x[-1]}").0, "hello\n");
+    }
+
+    #[test]
+    fn arith_array_subscript() {
+        // Array elements are addressable inside $(( … )) and (( … )).
+        assert_eq!(run("a=(10 20 30); echo $(( a[1] ))").0, "20\n");
+        assert_eq!(run("a=(10 20 30); i=2; echo $(( a[i] + 1 ))").0, "31\n");
+        assert_eq!(run("a=(10 20 30); echo $(( a[i+1] ))").0, "20\n"); // i unset → 0, a[1]
+        // Negative subscript inside arithmetic (last element).
+        assert_eq!(run("a=(10 20 30); echo $(( a[-1] ))").0, "30\n");
+        // A (( … )) command: a[0] is non-zero → success (exit 0).
+        assert_eq!(run("a=(5 0); (( a[0] ))").1, 0);
+        assert_eq!(run("a=(5 0); (( a[1] ))").1, 1); // zero → exit 1
     }
 
     #[test]

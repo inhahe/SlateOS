@@ -230,7 +230,7 @@ mod linux_sigaction_table {
     use super::{LinuxSigaction, SIG_DFL};
     use crate::proc::pcb::ProcessId;
     use alloc::collections::BTreeMap;
-    use spin::Mutex;
+    use crate::sync::PreemptSpinMutex as Mutex;
 
     /// Global table: pid -> (signum -> entry).
     ///
@@ -1215,7 +1215,7 @@ pub mod restart {
 pub mod restart_block {
     use crate::sched::task::TaskId;
     use alloc::collections::BTreeMap;
-    use spin::Mutex;
+    use crate::sync::PreemptSpinMutex as Mutex;
 
     /// A saved `nanosleep`-family resume: the absolute hrtimer-clock deadline
     /// to sleep until, and the user `rem` pointer (0 = none) to update if the

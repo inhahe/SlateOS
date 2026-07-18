@@ -4696,6 +4696,44 @@ completion-timer→SCHED (B-COMPLETION-TIMER-IRQ-DEADLOCK). Detector:
 locks stay converted (no harm). Reversing is cheap since each conversion is
 independently sound.
 
+**Execution status / triage outcome (2026-07-18).** The sweep converted, in
+reviewable per-subsystem batches (each boot-tested green before commit):
+- **`PreemptSpinMutex`** (preempt-disabling, no lockdep) for hot/cold *leaf*
+  locks held briefly in process/thread context: most of `fs/` (procfs stat/config
+  stores), `ipc/` leaves (channel, completion, epoll, eventfd, inotify, memfd,
+  pipe, semaphore, service_limits, shm, signalfd, stream_socket, timerfd,
+  alsa_pcm), `mm/` service locks (mempool, page_cache, rmap, vmalloc),
+  `proc/{exception,thread_clone}`, `cap/file_tags`, and driver/service leaves
+  (blkdev, cnetwork, drvmon, initproc, ksyms, logpersist, netns, pidns, reslimit,
+  scfilter, sockact, svcstart, syshealth, termsession, userns, volume,
+  drm/{card_fd,dumb_mmap,mod,hotplug}, power, devhotplug, devpower, udriver,
+  vmguest, acpi/mod, bench, eventlog, kshell, syscall/linux).
+- **`crate::sync::Mutex`** (full lockdep + owner tracking + preempt-disable) for
+  contended non-leaf/nested locks: core-FS contended locks, `ipc/{futex,io_ring,
+  namespace,service}`, all of `net/` (28 files, uniform), `cap/groups`
+  (GROUPS→NEXT_ID nesting), `kevent`.
+- **Deliberately kept RAW** (holder-preemption does not apply — the lock is only
+  taken with interrupts already off, or in panic/scheduler-core context where a
+  preempt-aware wrapper is wrong or circular): `kernel/src/sync.rs` itself (the
+  backing store — never convert); the scheduler core (`sched/{mod,priority_rr,
+  waitqueue,kchannel}` — circular with `preempt_disable`); IRQ/panic-context
+  primitives `console`, `klog`, `tty` (keyboard IRQ input), `rng`
+  (`add_interrupt_entropy` runs in ISR), `sysctl` (reached from an ISR),
+  `serial` (`lock_irqsave`), `hrtimer`/`workqueue` (acquired under
+  `without_interrupts`), `proc/{itimer,signal}` (all sites under
+  `without_interrupts`), and the hardware device drivers whose ISRs take their
+  locks (`e1000`, `hda`, `xhci`, `virtio/{blk,net}`, `iommu_remap`). These
+  acquire on `try_lock`/`without_interrupts` or run with IRQs disabled, so a
+  timer preemption of the holder cannot occur.
+
+One pre-existing **flaky self-test** surfaced (not a conversion bug): the
+container port-forward Test-20 (`container.rs`) spawned an instantly-exiting
+init and asserted the host-port NAT forwards were still live, but a container's
+forwards are flushed by `notify_init_exit` the moment its init exits — a race the
+new preemption timing made observable. Fixed by snapshotting the forwards inside
+a `preempt_disable`/`enable` window straddling `run()` (the single-CPU boot test
+then cannot schedule the init to flush in between).
+
 ---
 
 ## 71. Daemon-backed AF_INET **server** sockets (Q23) — **shared refcounted session (option A)**, and a standing "don't gold-plate interim netstack work" guideline

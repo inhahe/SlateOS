@@ -214,6 +214,23 @@ pub struct Shell {
     /// State for the `$RANDOM` pseudo-random generator. `Cell` so a read
     /// (`param_value(&self)`) can advance it; assigning `RANDOM=n` reseeds it.
     rng: std::cell::Cell<u32>,
+    /// `set -e` (errexit): exit the shell when a command fails, except in the
+    /// exempt positions (conditions, non-final `&&`/`||` operands, negated
+    /// pipelines) tracked by [`Shell::errexit_suppress`].
+    errexit: bool,
+    /// `set -u` (nounset): expanding an unset variable is an error that aborts.
+    nounset: bool,
+    /// `set -x` (xtrace): print each simple command (prefixed `+ `) to stderr
+    /// before executing it.
+    xtrace: bool,
+    /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
+    /// negated commands). While `> 0`, a failing command does not trigger
+    /// errexit. Incremented around condition evaluation; reset in subshells.
+    errexit_suppress: u32,
+    /// Set by expansion when `nounset` is on and an unset variable is referenced;
+    /// the simple-command driver checks and aborts (`Flow::Exit(1)`) after
+    /// expanding its words.
+    unbound_error: bool,
 }
 
 impl Default for Shell {
@@ -246,6 +263,11 @@ impl Shell {
             seconds_base: 0,
             // Seed `$RANDOM` from the wall clock so successive runs differ.
             rng: std::cell::Cell::new(initial_rng_seed()),
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            errexit_suppress: 0,
+            unbound_error: false,
         }
     }
 
@@ -314,11 +336,16 @@ impl Shell {
     }
 
     fn exec_and_or(&mut self, ao: &AndOr, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        let n_rest = ao.rest.len();
         let flow = self.exec_pipeline(&ao.first, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
         }
-        for (op, pipe) in &ao.rest {
+        // Track whether the *final* structural element of the list executed. Per
+        // POSIX, `set -e` ignores the failure of any command in an AND-OR list
+        // other than the one following the final `&&`/`||`.
+        let mut ran_final = n_rest == 0;
+        for (idx, (op, pipe)) in ao.rest.iter().enumerate() {
             let run = match op {
                 AndOrOp::And => self.last_status == 0,
                 AndOrOp::Or => self.last_status != 0,
@@ -328,9 +355,34 @@ impl Shell {
                 if !matches!(flow, Flow::Next) {
                     return flow;
                 }
+                ran_final = idx + 1 == n_rest;
+            } else {
+                ran_final = false;
             }
         }
+        // errexit: exit when the final command executed failed, unless we are in
+        // an exempt context (condition/negation) or the final pipeline is negated
+        // (whose status inversion already exempts it).
+        let final_pipe = ao.rest.last().map_or(&ao.first, |(_, p)| p);
+        if self.errexit
+            && self.errexit_suppress == 0
+            && ran_final
+            && !final_pipe.negated
+            && self.last_status != 0
+        {
+            return Flow::Exit(self.last_status);
+        }
         Flow::Next
+    }
+
+    /// Execute a `Program` used as a condition (if/while/until test), with
+    /// errexit suppressed for its duration so a failing test does not exit the
+    /// shell under `set -e`.
+    fn exec_condition(&mut self, p: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        self.errexit_suppress += 1;
+        let flow = self.exec_program(p, out, stdin);
+        self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
+        flow
     }
 
     fn exec_pipeline(&mut self, pipe: &Pipeline, out: &mut Out, stdin: &StdinSrc) -> Flow {
@@ -630,7 +682,7 @@ impl Shell {
     }
 
     fn exec_if(&mut self, c: &IfClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        let flow = self.exec_program(&c.cond, out, stdin);
+        let flow = self.exec_condition(&c.cond, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
         }
@@ -638,7 +690,7 @@ impl Shell {
             return self.exec_program(&c.body, out, stdin);
         }
         for (cond, body) in &c.elifs {
-            let flow = self.exec_program(cond, out, stdin);
+            let flow = self.exec_condition(cond, out, stdin);
             if !matches!(flow, Flow::Next) {
                 return flow;
             }
@@ -654,8 +706,13 @@ impl Shell {
     }
 
     fn exec_loop(&mut self, c: &LoopClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // POSIX: the loop's exit status is that of the last body execution, or 0
+        // if the body never ran. Track it so a failing *condition* test (whose
+        // non-zero status ends the loop) does not leak out — which matters under
+        // `set -e`.
+        let mut body_status = 0;
         loop {
-            let flow = self.exec_program(&c.cond, out, stdin);
+            let flow = self.exec_condition(&c.cond, out, stdin);
             if !matches!(flow, Flow::Next) {
                 return flow;
             }
@@ -679,7 +736,9 @@ impl Shell {
                 }
                 other => return other,
             }
+            body_status = self.last_status;
         }
+        self.last_status = body_status;
         Flow::Next
     }
 
@@ -696,6 +755,8 @@ impl Shell {
             }
             None => self.positional.clone(),
         };
+        // A `for` over an empty list runs no body and has exit status 0.
+        let mut body_status = 0;
         for item in items {
             self.vars.insert(c.var.clone(), item);
             match self.exec_program(&c.body, out, stdin) {
@@ -713,7 +774,9 @@ impl Shell {
                 }
                 other => return other,
             }
+            body_status = self.last_status;
         }
+        self.last_status = body_status;
         Flow::Next
     }
 
@@ -1154,6 +1217,12 @@ impl Shell {
             seconds_anchor: self.seconds_anchor,
             seconds_base: self.seconds_base,
             rng: std::cell::Cell::new(self.rng.get()),
+            errexit: self.errexit,
+            nounset: self.nounset,
+            xtrace: self.xtrace,
+            // A subshell starts outside any condition/negation context.
+            errexit_suppress: 0,
+            unbound_error: false,
         }
     }
 
@@ -1542,6 +1611,14 @@ impl Shell {
             }
         }
 
+        // `set -u`: a reference to an unset variable during expansion aborts the
+        // shell (matching a non-interactive bash under nounset).
+        if self.unbound_error {
+            self.unbound_error = false;
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
+
         // Pure assignment (no command word): persist the variables/arrays.
         if argv.is_empty() {
             for a in &sc.assignments {
@@ -1549,6 +1626,15 @@ impl Shell {
             }
             self.last_status = 0;
             return Flow::Next;
+        }
+
+        // `set -x`: trace the command (prefixed with PS4's default `+ `) to
+        // stderr before running it.
+        if self.xtrace {
+            let mut line = String::from("+ ");
+            line.push_str(&argv.join(" "));
+            line.push('\n');
+            self.emit_stderr(line.as_bytes());
         }
 
         // Command present: build scalar env prefixes (`FOO=bar cmd`). Array and
@@ -2288,11 +2374,20 @@ impl Shell {
     /// Expand a dynamic word part (parameter/command/arithmetic) to a string.
     fn expand_dynamic(&mut self, part: &WordPart) -> String {
         match part {
-            WordPart::Param(name) => self.param_value(name).unwrap_or_default(),
-            WordPart::Length(name) => self
-                .param_value(name)
-                .map_or(0, |v| v.chars().count())
-                .to_string(),
+            WordPart::Param(name) => match self.param_value(name) {
+                Some(v) => v,
+                None => {
+                    self.note_unbound(name);
+                    String::new()
+                }
+            },
+            WordPart::Length(name) => match self.param_value(name) {
+                Some(v) => v.chars().count().to_string(),
+                None => {
+                    self.note_unbound(name);
+                    "0".to_string()
+                }
+            },
             WordPart::ParamOp {
                 name,
                 index,
@@ -2424,6 +2519,17 @@ impl Shell {
         let next = self.rng.get().wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.rng.set(next);
         (next >> 16) & 0x7fff
+    }
+
+    /// Record a reference to an unset parameter. Under `set -u` (nounset) this
+    /// flags an error (checked by the simple-command driver, which aborts) and
+    /// prints a diagnostic; special parameters (`$@`, `$*`, `$?`, `$!`, etc.)
+    /// are always considered set and never trigger it.
+    fn note_unbound(&mut self, name: &str) {
+        if self.nounset && !is_special_param(name) {
+            self.unbound_error = true;
+            self.emit_stderr(format!("osh: {name}: unbound variable\n").as_bytes());
+        }
     }
 
     /// Resolve a parameter's value; `None` means unset.
@@ -2855,37 +2961,68 @@ impl Shell {
     }
 
     fn builtin_set(&mut self, args: &[String]) -> i32 {
-        // `set -o pipefail` / `set +o pipefail` toggle the pipefail option.
-        // (`set -o` / `set +o` with an option name; only pipefail is honoured,
-        // other options are accepted and ignored.)
+        // Handle option flags (`-e`/`-u`/`-x`/… as clusters, `-o name`) and, on
+        // the first non-option operand, reset the positional parameters. `--`
+        // ends option processing; a bare `-`/`+` is ignored.
         let mut i = 0;
         while i < args.len() {
-            match args[i].as_str() {
-                "-o" | "+o" => {
-                    let enable = args[i].starts_with('-');
-                    if let Some(opt) = args.get(i + 1) {
-                        if opt == "pipefail" {
-                            self.pipefail = enable;
-                        }
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                }
+            let arg = &args[i];
+            match arg.as_str() {
                 "--" => {
                     self.positional = args[i + 1..].to_vec();
                     return 0;
                 }
-                other if !other.starts_with('-') && !other.starts_with('+') => {
-                    self.positional = args[i..].to_vec();
-                    return 0;
+                "-" | "+" => {
+                    i += 1;
+                }
+                "-o" | "+o" => {
+                    let enable = arg.starts_with('-');
+                    if let Some(opt) = args.get(i + 1) {
+                        self.set_named_option(opt, enable);
+                        i += 2;
+                    } else {
+                        // `set -o` with no name: list options (not implemented);
+                        // accept as a no-op.
+                        i += 1;
+                    }
+                }
+                s if s.starts_with('-') || s.starts_with('+') => {
+                    let enable = s.starts_with('-');
+                    for c in s[1..].chars() {
+                        self.set_short_option(c, enable);
+                    }
+                    i += 1;
                 }
                 _ => {
-                    i += 1;
+                    self.positional = args[i..].to_vec();
+                    return 0;
                 }
             }
         }
         0
+    }
+
+    /// Apply a single-letter `set` option (`-e`/`-u`/`-x`/…). Unknown letters are
+    /// accepted and ignored for compatibility.
+    fn set_short_option(&mut self, c: char, enable: bool) {
+        match c {
+            'e' => self.errexit = enable,
+            'u' => self.nounset = enable,
+            'x' => self.xtrace = enable,
+            _ => {}
+        }
+    }
+
+    /// Apply a `set -o NAME` / `set +o NAME` long option. Unknown names are
+    /// accepted and ignored.
+    fn set_named_option(&mut self, name: &str, enable: bool) {
+        match name {
+            "pipefail" => self.pipefail = enable,
+            "errexit" => self.errexit = enable,
+            "nounset" => self.nounset = enable,
+            "xtrace" => self.xtrace = enable,
+            _ => {}
+        }
     }
 
     fn builtin_shift(&mut self, args: &[String]) -> i32 {
@@ -4128,6 +4265,12 @@ fn split_ifs(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_string).collect()
 }
 
+/// A special shell parameter that is always considered "set" for `nounset`
+/// purposes (referencing it never yields an unbound-variable error).
+fn is_special_param(name: &str) -> bool {
+    matches!(name, "@" | "*" | "#" | "?" | "$" | "!" | "0" | "-" | "_")
+}
+
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
 fn format_printf(fmt: &str, args: &[String]) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
@@ -4769,6 +4912,56 @@ mod tests {
     fn printf_float_conversion() {
         assert_eq!(run("printf '%.2f' 3.14159").0, "3.14");
         assert_eq!(run("printf '%f' 1").0, "1.000000");
+    }
+
+    #[test]
+    fn set_errexit_exits_on_failure() {
+        // A failing command aborts the script under `set -e`.
+        let (o, s) = run("set -e; false; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // A successful command chain still runs to completion.
+        assert_eq!(run("set -e; true; echo after").0, "after\n");
+    }
+
+    #[test]
+    fn set_errexit_condition_exempt() {
+        // Failing commands in a condition do not trigger errexit.
+        assert_eq!(run("set -e; if false; then echo t; fi; echo done").0, "done\n");
+        assert_eq!(run("set -e; while false; do echo x; done; echo done").0, "done\n");
+        // A non-final `&&` operand failure is exempt; a negated command too.
+        assert_eq!(run("set -e; false && echo skip; echo done").0, "done\n");
+        assert_eq!(run("set -e; ! true; echo done").0, "done\n");
+    }
+
+    #[test]
+    fn set_errexit_final_and_or_fires() {
+        // The command after the final `&&` is subject to errexit.
+        let (o, s) = run("set -e; true && false; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn set_nounset_aborts_on_unset() {
+        let (o, s) = run("set -u; echo $undefined; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // A default/alternate operator suppresses the error.
+        assert_eq!(run("set -u; echo ${undefined:-ok}").0, "ok\n");
+        // Special parameters are always considered set.
+        assert_eq!(run("set -u; echo $#").0, "0\n");
+        // Set variables expand normally.
+        assert_eq!(run("set -u; x=hi; echo $x").0, "hi\n");
+    }
+
+    #[test]
+    fn set_can_disable_options() {
+        // `set +e` turns errexit back off.
+        assert_eq!(run("set -e; set +e; false; echo after").0, "after\n");
+        // Long-form option names work too.
+        let (_, s) = run("set -o nounset; echo $undefined; echo after");
+        assert_eq!(s, 1);
     }
 
     #[test]

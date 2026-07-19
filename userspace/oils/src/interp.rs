@@ -559,11 +559,11 @@ impl Shell {
             arr.insert(i, v.to_string());
         }
         self.arrays.insert("BASH_VERSINFO".to_string(), arr);
-        // bash marks BASH_VERSINFO readonly; osh does not, to avoid it appearing
-        // in `readonly -p` output (which still uses osh's `readonly name=val`
-        // listing form rather than bash's `declare -ar` array form — see
-        // TD-OILS-RO-ARRAY in known-issues.md). A script clobbering it is rare
-        // and low-harm.
+        // bash marks BASH_VERSINFO readonly; match that so scripts probing the
+        // level can't clobber it. The `readonly -p` / `declare -p` listing now
+        // renders readonly arrays correctly (TD-OILS-RO-ARRAY fixed), so this no
+        // longer surfaces malformed output.
+        self.readonly.insert("BASH_VERSINFO".to_string());
     }
 
     /// Set `$0`, the shell/script name.
@@ -3229,8 +3229,15 @@ impl Shell {
 
         // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
         // to the command as `decl_arrays`; apply them with the declared kind.
-        if !sc.decl_arrays.is_empty() && matches!(name.as_str(), "declare" | "typeset" | "local") {
-            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays);
+        // `readonly`/`export` also accept inline array literals (`readonly
+        // arr=(1 2)`), applying their implied `-r`/`-x` attribute.
+        if !sc.decl_arrays.is_empty()
+            && matches!(
+                name.as_str(),
+                "declare" | "typeset" | "local" | "readonly" | "export"
+            )
+        {
+            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays, out, &redir);
         }
 
         // `command …` (bypass shell functions) and `builtin …` (force builtin
@@ -7643,8 +7650,15 @@ impl Shell {
     /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
     /// each array literal is then marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
-    fn exec_declare_with_arrays(&mut self, argv: &[String], decl_arrays: &[Assignment]) -> Flow {
-        let is_local = argv.first().map(String::as_str) == Some("local");
+    fn exec_declare_with_arrays(
+        &mut self,
+        argv: &[String],
+        decl_arrays: &[Assignment],
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Flow {
+        let cmd = argv.first().map(String::as_str).unwrap_or("");
+        let is_local = cmd == "local";
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(b"osh: local: can only be used in a function\n");
             self.last_status = 1;
@@ -7661,8 +7675,9 @@ impl Shell {
         let mut integer = false;
         let mut unset_integer = false;
         let mut case_dir: Option<u8> = None;
-        let mut readonly = false;
-        let mut export = false;
+        // `readonly`/`export` imply the corresponding attribute on every name.
+        let mut readonly = cmd == "readonly";
+        let mut export = cmd == "export";
         let mut nameref = false;
         let mut unset_nameref = false;
         for arg in &argv[1..] {
@@ -7693,8 +7708,19 @@ impl Shell {
         // As with scalar `declare`, an array declaration inside a function is
         // local by default unless `-g` was given.
         let make_local = is_local || (!global && !self.local_frames.is_empty());
-        // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`).
-        let status = self.builtin_declare(&argv[1..], is_local);
+        // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`). For
+        // `readonly`/`export`, route scalar operands through their own builtin —
+        // but only when a non-flag operand is present, so an array-literal-only
+        // invocation (`readonly arr=(1 2)`) never slips into listing mode.
+        let has_scalar_operand = argv[1..]
+            .iter()
+            .any(|a| a != "--" && !a.starts_with(['-', '+']));
+        let status = match cmd {
+            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
+            "export" if has_scalar_operand => self.builtin_export(&argv[1..]),
+            "readonly" | "export" => 0,
+            _ => self.builtin_declare(&argv[1..], is_local),
+        };
         // Mark each array name's kind + attributes before applying the literal,
         // so `apply_assignment` routes to the right store and (for `-i`)
         // evaluates the values arithmetically.
@@ -7786,13 +7812,24 @@ impl Shell {
         }
         names.extend(&args[i..]);
         if names.is_empty() || print_only {
-            let mut ro: Vec<&String> = self.readonly.iter().collect();
+            let mut ro: Vec<String> = self.readonly.iter().cloned().collect();
             ro.sort();
             let mut listing = String::new();
-            for name in ro {
-                match self.vars.get(name) {
-                    Some(v) => listing.push_str(&format!("readonly {name}={v}\n")),
-                    None => listing.push_str(&format!("readonly {name}\n")),
+            for name in &ro {
+                // bash's `readonly -p` reuses `declare -p` formatting: scalars
+                // as `declare -r name="value"`, arrays as `declare -ar name=(…)`,
+                // and a valueless readonly as a bare `declare -r name`.
+                match self.format_declare_def(name) {
+                    Some(def) => {
+                        listing.push_str(&def);
+                        listing.push('\n');
+                    }
+                    None => {
+                        listing.push_str(&format!(
+                            "declare {} {name}\n",
+                            self.declare_attr_flags(name, "")
+                        ));
+                    }
                 }
             }
             return self.write_bytes(out, redir, listing.as_bytes());
@@ -7993,7 +8030,9 @@ impl Shell {
             let a = &self.resolve_ref_name(a);
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
-                self.emit_stderr(format!("osh: {a}: cannot unset: readonly variable\n").as_bytes());
+                self.emit_stderr(
+                    format!("osh: unset: {a}: cannot unset: readonly variable\n").as_bytes(),
+                );
                 return 1;
             }
             // `unset name[i]` removes a single element; `unset name` removes the
@@ -8003,6 +8042,14 @@ impl Shell {
                 && a.ends_with(']')
             {
                 let name = &a[..open];
+                // An element of a readonly array cannot be unset either — bash
+                // reports the base name as the readonly variable.
+                if self.readonly.contains(name) {
+                    self.emit_stderr(
+                        format!("osh: unset: {name}: cannot unset: readonly variable\n").as_bytes(),
+                    );
+                    return 1;
+                }
                 let idx_src = &a[open + 1..a.len() - 1];
                 if let Some(map) = self.assoc.get_mut(name) {
                     // Associative: remove by string key.
@@ -13365,6 +13412,48 @@ mod tests {
     }
 
     #[test]
+    fn readonly_export_array_literal() {
+        // `readonly arr=(1 2)` binds the array and applies the readonly attr,
+        // formatting via `declare -p` as an indexed readonly array.
+        assert_eq!(
+            run("readonly arr=(1 2); echo \"${arr[1]}\"; declare -p arr").0,
+            "2\ndeclare -ar arr=([0]=\"1\" [1]=\"2\")\n"
+        );
+        // `export arr=(1 2)` binds and marks the array exported (`-ax`).
+        assert_eq!(
+            run("export arr=(1 2); declare -p arr").0,
+            "declare -ax arr=([0]=\"1\" [1]=\"2\")\n"
+        );
+        // `readonly -A m=([k]=v)` gives a readonly associative array.
+        assert_eq!(
+            run("readonly -A m=([k]=v); echo \"${m[k]}\"; declare -p m").0,
+            "v\ndeclare -Ar m=([k]=\"v\" )\n"
+        );
+        // A scalar operand alongside an array literal is applied too.
+        assert_eq!(
+            run("readonly x=1 arr=(9 8); echo \"$x ${arr[0]}\"; declare -p x").0,
+            "1 9\ndeclare -r x=\"1\"\n"
+        );
+    }
+
+    #[test]
+    fn readonly_array_element_cannot_unset() {
+        // An element of a readonly array cannot be unset (bash reports the base
+        // name), and the array is left intact.
+        let (out, status) = run("readonly arr=(1 2); unset arr[0]; echo $?; declare -p arr");
+        assert_eq!(
+            out,
+            "1\ndeclare -ar arr=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(status, 0); // last command (declare -p) succeeds
+        // A readonly associative element is likewise protected.
+        assert_eq!(
+            run("readonly -A m=([k]=v); unset m[k]; declare -p m").0,
+            "declare -Ar m=([k]=\"v\" )\n"
+        );
+    }
+
+    #[test]
     fn printf_time_conversion() {
         // Epoch 0 = 1970-01-01 00:00:00 UTC (a Thursday, day-of-year 001).
         assert_eq!(run("printf '%(%F)T\\n' 0").0, "1970-01-01\n");
@@ -13638,8 +13727,11 @@ mod tests {
 
     #[test]
     fn readonly_print_lists_vars() {
-        let (o, _) = run("readonly a=1; readonly b=2; readonly -p");
-        assert_eq!(o, "readonly a=1\nreadonly b=2\n");
+        // `readonly -p` reuses `declare -p` formatting (bash), not the old
+        // `readonly name=value` form. Filter to the names under test so the
+        // always-readonly BASH_VERSINFO line doesn't interfere.
+        let (o, _) = run("readonly a=1; readonly b=2; readonly -p | grep ' [ab]='");
+        assert_eq!(o, "declare -r a=\"1\"\ndeclare -r b=\"2\"\n");
     }
 
     #[test]

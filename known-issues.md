@@ -146,9 +146,22 @@ attribute flag nor a well-formed `name[sub]?=value` assignment, emit
 `osh: declare: \`ARG': not a valid identifier` to stderr and set the exit
 status to 1 (accumulating the worst status across args).
 
-### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19
+### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19 — ✅ FIXED 2026-07-19
 
-**Where:** `userspace/oils/src/interp.rs` `builtin_readonly` listing branch
+**Status:** FIXED. `builtin_readonly`'s listing branch now reuses
+`format_declare_def` (falling back to `declare {flags} {name}` for valueless
+readonly names), so scalars print as `declare -r name="value"` and arrays as
+`declare -ar name=([0]="v" …)` / `declare -Ar name=(…)`, matching bash. With
+the listing fixed, `BASH_VERSINFO` is now seeded **readonly** in
+`seed_shell_vars` (clobbering it is rejected, and it appears correctly in
+`readonly -p`). Additionally, inline array literals on `readonly`/`export`
+(`readonly arr=(1 2)`, `export -A m=([k]=v)`) are now supported — the parser's
+`is_declaration_command` accepts them and `exec_declare_with_arrays` applies
+the implied `-r`/`-x` attribute — and unsetting an element of a readonly array
+is now correctly rejected. Covered by `readonly_print_lists_vars`,
+`readonly_export_array_literal`, and `readonly_array_element_cannot_unset`.
+
+**Where (was):** `userspace/oils/src/interp.rs` `builtin_readonly` listing branch
 (~7370–7380): it looks up each readonly name only in `self.vars` and prints
 `readonly {name}={value}` (or `readonly {name}` when not a scalar).
 

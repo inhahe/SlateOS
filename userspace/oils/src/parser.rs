@@ -1008,9 +1008,11 @@ fn parse_array_elem(segs: &[Seg]) -> Result<ArrayElem, ParseError> {
     Ok(ArrayElem::Positional(word_from_segs(segs)?))
 }
 
-/// True when the command word (`words[0]`) is a declaration builtin, so that a
-/// following array literal (`declare -A m=([k]=v)`) is parsed as an operand
-/// rather than rejected. The word must be a single unquoted literal.
+/// True when the command word (`words[0]`) is a declaration/assignment builtin,
+/// so that a following array literal (`declare -A m=([k]=v)`, `readonly a=(1 2)`)
+/// is parsed as an operand rather than rejected. The word must be a single
+/// unquoted literal. bash treats `declare`/`typeset`/`local`/`export`/`readonly`
+/// as assignment builtins that accept `name=(…)` compound-array arguments.
 fn is_declaration_command(words: &[Word]) -> bool {
     let Some(first) = words.first() else {
         return false;
@@ -1018,7 +1020,10 @@ fn is_declaration_command(words: &[Word]) -> bool {
     let [WordPart::Literal(name)] = first.parts.as_slice() else {
         return false;
     };
-    matches!(name.as_str(), "declare" | "typeset" | "local")
+    matches!(
+        name.as_str(),
+        "declare" | "typeset" | "local" | "export" | "readonly"
+    )
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).

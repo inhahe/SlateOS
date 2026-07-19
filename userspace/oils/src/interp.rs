@@ -2106,7 +2106,219 @@ impl Shell {
             return self.transform_assign(name);
         }
         let value = self.param_elem_value(name, index).unwrap_or_default();
+        if op == 'P' {
+            return self.prompt_expand(&value);
+        }
         Self::transform_value(&value, op)
+    }
+
+    /// `${var@P}` — expand `var`'s value as a prompt string, interpreting the
+    /// bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`, `\D{fmt}`,
+    /// …). Backslash escapes not recognised keep the backslash and following
+    /// character. Time-based escapes render in UTC (no local-timezone model
+    /// yet, consistent with the `%(…)T` printf conversion — see TD-OILS9).
+    fn prompt_expand(&self, s: &str) -> String {
+        let (epoch, _) = unix_time();
+        let epoch = epoch as i64;
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            let Some(&e) = chars.peek() else {
+                out.push('\\');
+                break;
+            };
+            match e {
+                'a' => {
+                    out.push('\u{07}');
+                    chars.next();
+                }
+                'e' => {
+                    out.push('\u{1b}');
+                    chars.next();
+                }
+                'n' => {
+                    out.push('\n');
+                    chars.next();
+                }
+                'r' => {
+                    out.push('\r');
+                    chars.next();
+                }
+                '\\' => {
+                    out.push('\\');
+                    chars.next();
+                }
+                'd' => {
+                    out.push_str(&format_strftime("%a %b %e", epoch));
+                    chars.next();
+                }
+                'D' => {
+                    chars.next(); // consume 'D'
+                    // `\D{format}` — strftime; `\D{}` uses bash's default `%X`
+                    // (we render 24h HH:MM:SS). A missing `{` leaves `\D` alone.
+                    if chars.peek() == Some(&'{') {
+                        chars.next(); // consume '{'
+                        let mut fmt = String::new();
+                        for fc in chars.by_ref() {
+                            if fc == '}' {
+                                break;
+                            }
+                            fmt.push(fc);
+                        }
+                        let fmt = if fmt.is_empty() { "%H:%M:%S" } else { &fmt };
+                        out.push_str(&format_strftime(fmt, epoch));
+                    } else {
+                        out.push_str("\\D");
+                    }
+                }
+                't' => {
+                    out.push_str(&format_strftime("%H:%M:%S", epoch));
+                    chars.next();
+                }
+                'T' => {
+                    out.push_str(&format_strftime("%I:%M:%S", epoch));
+                    chars.next();
+                }
+                '@' => {
+                    out.push_str(&format_strftime("%I:%M %p", epoch));
+                    chars.next();
+                }
+                'A' => {
+                    out.push_str(&format_strftime("%H:%M", epoch));
+                    chars.next();
+                }
+                'h' => {
+                    let host = self.prompt_hostname();
+                    let short = host.split('.').next().unwrap_or(&host);
+                    out.push_str(short);
+                    chars.next();
+                }
+                'H' => {
+                    out.push_str(&self.prompt_hostname());
+                    chars.next();
+                }
+                'u' => {
+                    out.push_str(&self.prompt_username());
+                    chars.next();
+                }
+                's' => {
+                    // Shell name — basename of `$0`.
+                    let arg0 = self.param_value("0").unwrap_or_default();
+                    let base = arg0.rsplit(['/', '\\']).next().unwrap_or(&arg0);
+                    out.push_str(base);
+                    chars.next();
+                }
+                'j' => {
+                    let n = self.jobs.iter().filter(|j| j.status.is_none()).count();
+                    out.push_str(&n.to_string());
+                    chars.next();
+                }
+                'l' => {
+                    out.push_str("tty");
+                    chars.next();
+                }
+                'v' => {
+                    out.push_str("5.2");
+                    chars.next();
+                }
+                'V' => {
+                    out.push_str("5.2.0");
+                    chars.next();
+                }
+                'w' => {
+                    out.push_str(&self.prompt_cwd(false));
+                    chars.next();
+                }
+                'W' => {
+                    out.push_str(&self.prompt_cwd(true));
+                    chars.next();
+                }
+                '!' | '#' => {
+                    // History / command number — no interactive history model,
+                    // so bash's first-command value.
+                    out.push('1');
+                    chars.next();
+                }
+                '$' => {
+                    // `#` for the super-user, `$` otherwise. We infer root from
+                    // the user name (no UID model on-target yet).
+                    let root = self.prompt_username() == "root";
+                    out.push(if root { '#' } else { '$' });
+                    chars.next();
+                }
+                '[' | ']' => {
+                    // Non-printing-sequence delimiters: bash emits \001/\002
+                    // markers; for display we drop them.
+                    chars.next();
+                }
+                '0'..='7' => {
+                    // `\nnn` — up to three octal digits.
+                    let mut digits = String::new();
+                    while digits.len() < 3 {
+                        match chars.peek() {
+                            Some(&d @ '0'..='7') => {
+                                digits.push(d);
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    if let Ok(byte) = u8::from_str_radix(&digits, 8) {
+                        out.push(byte as char);
+                    }
+                }
+                _ => {
+                    // Unknown escape: keep the backslash and the character.
+                    out.push('\\');
+                    out.push(e);
+                    chars.next();
+                }
+            }
+        }
+        out
+    }
+
+    /// The host name for prompt `\h`/`\H` — from `$HOSTNAME`, else `localhost`.
+    fn prompt_hostname(&self) -> String {
+        self.param_value("HOSTNAME")
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "localhost".to_string())
+    }
+
+    /// The user name for prompt `\u` — from `$USER`, then `$LOGNAME`, else
+    /// `user`.
+    fn prompt_username(&self) -> String {
+        self.param_value("USER")
+            .filter(|u| !u.is_empty())
+            .or_else(|| self.param_value("LOGNAME").filter(|u| !u.is_empty()))
+            .unwrap_or_else(|| "user".to_string())
+    }
+
+    /// The working directory for prompt `\w` (full, `$HOME`→`~`) or `\W`
+    /// (basename only).
+    fn prompt_cwd(&self, basename_only: bool) -> String {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if basename_only {
+            let base = cwd.rsplit(['/', '\\']).next().unwrap_or(&cwd);
+            return if base.is_empty() { "/".to_string() } else { base.to_string() };
+        }
+        if let Some(home) = self.param_value("HOME").filter(|h| !h.is_empty()) {
+            if cwd == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = cwd.strip_prefix(&home)
+                && rest.starts_with(['/', '\\'])
+            {
+                return format!("~{rest}");
+            }
+        }
+        cwd
     }
 
     /// `${name@A}` — a re-inputtable assignment/`declare` statement that would
@@ -2146,8 +2358,9 @@ impl Shell {
             }
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
             'E' => ansi_c_unescape(value),
-            // `P` (prompt) and `K`/`k` (assoc key/value) are not implemented;
-            // return the value unchanged rather than erroring.
+            // `P` (prompt) is handled in `param_transform` (it needs shell
+            // state); `K`/`k` (assoc key/value) go through the bulk path.
+            // Anything else: return the value unchanged rather than erroring.
             _ => value.to_string(),
         }
     }
@@ -8700,6 +8913,26 @@ mod tests {
         assert_eq!(run("x='a\\tb'; printf '%s' \"${x@E}\"").0, "a\tb");
         assert_eq!(run("declare -A m; m[k]=v; echo \"${m@a}\"").0, "A\n");
         assert_eq!(run("a=(1 2 3); echo \"${a@a}\"").0, "a\n");
+    }
+
+    #[test]
+    fn param_transform_prompt() {
+        // @P expands prompt escapes using shell state.
+        assert_eq!(
+            run("USER=alice; HOSTNAME=box.example.com; p='\\u@\\h'; echo \"${p@P}\"").0,
+            "alice@box\n"
+        );
+        // \H is the full hostname; \n/\\ and unknown escapes.
+        assert_eq!(
+            run("HOSTNAME=box.example.com; p='\\H'; echo \"${p@P}\"").0,
+            "box.example.com\n"
+        );
+        // \w with HOME contraction is exercised indirectly; here test \s (shell
+        // name from $0), octal, and a literal-preserving unknown escape.
+        assert_eq!(run("p='\\061\\062'; echo \"${p@P}\"").0, "12\n"); // \061=1 \062=2
+        assert_eq!(run("p='a\\qb'; echo \"${p@P}\"").0, "a\\qb\n"); // unknown escape kept
+        // Defaults when USER/HOSTNAME unset.
+        assert_eq!(run("unset USER LOGNAME; p='\\u'; echo \"${p@P}\"").0, "user\n");
     }
 
     #[test]

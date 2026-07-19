@@ -1132,7 +1132,7 @@ impl Shell {
             }
             self.emit_stderr(ps3.as_bytes());
             let line = match self.read_line(stdin, &redir) {
-                Some(l) => l,
+                Some((l, _)) => l,
                 None => {
                     // EOF: bash emits a newline and terminates the loop.
                     self.emit_stderr(b"\n");
@@ -7946,7 +7946,9 @@ impl Shell {
             }
         } else {
             match self.read_line(rd_stdin, rd_redir) {
-                Some(l) => (l, true),
+                // A final line ending at EOF without a newline is a partial
+                // read: the value is still assigned, but status is 1 (bash).
+                Some((l, terminated)) => (l, terminated),
                 None => return 1, // EOF
             }
         };
@@ -8510,7 +8512,7 @@ impl Shell {
         }
     }
 
-    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<String> {
+    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(String, bool)> {
         if let Some(data) = &redir.stdin_data {
             // Here-doc/here-string: read the first line. (Multi-line `read`
             // loops over here-docs require compound-command redirects, which are
@@ -9883,16 +9885,22 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     opts.open(map_device_path(path))
 }
 
-fn read_one_line<R: BufRead>(r: &mut R) -> Option<String> {
+/// Read one newline-terminated line, returning `(text, terminated)` where
+/// `terminated` is true when an actual `\n` delimiter was consumed and false
+/// when the input ended (EOF) before any newline. `read` reports status 1 for
+/// an unterminated final line (matching bash), so the caller needs to know
+/// which case occurred. Returns `None` only on immediate EOF with no bytes.
+fn read_one_line<R: BufRead>(r: &mut R) -> Option<(String, bool)> {
     let mut line = String::new();
     let n = r.read_line(&mut line).ok()?;
     if n == 0 {
         return None;
     }
+    let terminated = line.ends_with('\n');
     while line.ends_with('\n') || line.ends_with('\r') {
         line.pop();
     }
-    Some(line)
+    Some((line, terminated))
 }
 
 /// Read a record for `read -d`/`-n`/`-N`. Reads byte-by-byte so streaming
@@ -11494,6 +11502,20 @@ mod tests {
         // Without -r, a backslash escapes the next char; with -r it is literal.
         assert_eq!(run("read x <<< 'a\\tb'; echo \"$x\"").0, "atb\n");
         assert_eq!(run("read -r x <<< 'a\\tb'; echo \"$x\"").0, "a\\tb\n");
+    }
+
+    #[test]
+    fn read_partial_final_line_status_one() {
+        // A final line ending at EOF without a newline still assigns the value
+        // but reports status 1 (matching bash). Here: two reads of "a\nb" — the
+        // first line is newline-terminated (rc 0), the second hits EOF (rc 1).
+        let (o, _) = run(
+            "printf 'a\\nb' | { read x; echo \"rc1=$? x=$x\"; read y; echo \"rc2=$? y=$y\"; }",
+        );
+        assert_eq!(o, "rc1=0 x=a\nrc2=1 y=b\n");
+        // A newline-terminated single line reports success.
+        let (o2, _) = run("printf 'a\\n' | { read x; echo \"rc=$? x=$x\"; }");
+        assert_eq!(o2, "rc=0 x=a\n");
     }
 
     #[test]

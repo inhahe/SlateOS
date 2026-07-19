@@ -5147,6 +5147,7 @@ impl Shell {
             }
             "source" | "." => self.builtin_source(args),
             "type" => self.builtin_type(args, out, redir),
+            "compgen" => self.builtin_compgen(args, out, redir),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
@@ -8133,6 +8134,227 @@ impl Shell {
         }
     }
 
+    /// `compgen [options] [word]` — generate completion candidates and print
+    /// each one matching the optional prefix `word` on its own line.
+    ///
+    /// Supported option subset: `-W wordlist` (IFS-split candidate list),
+    /// action selectors (`-A action` plus the `-a -b -c -d -e -f -k -v`
+    /// shortcuts: alias, builtin, command, directory, export, file, keyword,
+    /// variable — and `-A function`), `-P prefix` / `-S suffix` (added to each
+    /// match after filtering), and `-X filterpat` (glob-remove matches; a
+    /// leading `!` inverts to keep-only). Returns 0 if at least one candidate
+    /// was produced, else 1 (matching bash). The interactive/programmable
+    /// selectors that require a live completion context (`-F`/`-C`/`-o`/`-G`
+    /// and the user/group/job/service actions) are parsed-and-ignored so
+    /// scripts that pass them still run without error.
+    fn builtin_compgen(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        const KEYWORDS: &[&str] = &[
+            "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do",
+            "done", "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
+        ];
+
+        let mut wordlists: Vec<String> = Vec::new();
+        let mut actions: Vec<String> = Vec::new();
+        let mut prefix = String::new();
+        let mut suffix = String::new();
+        let mut filter: Option<String> = None;
+        let mut word = String::new();
+        let mut word_seen = false;
+
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            match a {
+                // Options taking a following argument.
+                "-W" | "-A" | "-P" | "-S" | "-X" | "-F" | "-C" | "-o" | "-G" => {
+                    i += 1;
+                    let val = args.get(i).cloned();
+                    match a {
+                        "-W" => {
+                            if let Some(v) = val {
+                                wordlists.push(v);
+                            }
+                        }
+                        "-A" => {
+                            if let Some(v) = val {
+                                actions.push(v);
+                            }
+                        }
+                        "-P" => prefix = val.unwrap_or_default(),
+                        "-S" => suffix = val.unwrap_or_default(),
+                        "-X" => filter = val,
+                        // Accepted but not implemented (need a live context).
+                        _ => {}
+                    }
+                }
+                "-a" => actions.push("alias".into()),
+                "-b" => actions.push("builtin".into()),
+                "-c" => actions.push("command".into()),
+                "-d" => actions.push("directory".into()),
+                "-e" => actions.push("export".into()),
+                "-f" => actions.push("file".into()),
+                "-g" => actions.push("group".into()),
+                "-j" => actions.push("job".into()),
+                "-k" => actions.push("keyword".into()),
+                "-s" => actions.push("service".into()),
+                "-u" => actions.push("user".into()),
+                "-v" => actions.push("variable".into()),
+                _ => {
+                    if !word_seen {
+                        word = args[i].clone();
+                        word_seen = true;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        // ---- gather raw candidates from every specified source ----
+        let mut cands: Vec<String> = Vec::new();
+        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
+        let ifs_chars: Vec<char> = ifs.chars().collect();
+        for wl in &wordlists {
+            for tok in wl.split(|c| ifs_chars.contains(&c)).filter(|s| !s.is_empty()) {
+                cands.push(tok.to_string());
+            }
+        }
+        for action in &actions {
+            match action.as_str() {
+                "function" => cands.extend(self.funcs.keys().cloned()),
+                "alias" => cands.extend(self.aliases.keys().cloned()),
+                "builtin" => cands.extend(BUILTIN_NAMES.iter().map(|s| (*s).to_string())),
+                "keyword" => cands.extend(KEYWORDS.iter().map(|s| (*s).to_string())),
+                "variable" | "arrayvar" => {
+                    cands.extend(self.vars.keys().cloned());
+                    cands.extend(self.arrays.keys().cloned());
+                    cands.extend(self.assoc.keys().cloned());
+                }
+                "export" => cands.extend(self.exported.iter().cloned()),
+                "command" => {
+                    cands.extend(BUILTIN_NAMES.iter().map(|s| (*s).to_string()));
+                    cands.extend(KEYWORDS.iter().map(|s| (*s).to_string()));
+                    cands.extend(self.funcs.keys().cloned());
+                    cands.extend(self.aliases.keys().cloned());
+                    cands.extend(self.compgen_path_commands(&word));
+                }
+                "file" => cands.extend(self.compgen_paths(&word, false)),
+                "directory" => cands.extend(self.compgen_paths(&word, true)),
+                // group/job/service/user and any unknown action: nothing.
+                _ => {}
+            }
+        }
+
+        // ---- keep candidates that start with the word prefix ----
+        let mut list: Vec<String> = cands.into_iter().filter(|c| c.starts_with(&word)).collect();
+
+        // ---- -X filterpat: glob-remove (leading '!' keeps only matches) ----
+        if let Some(pat) = &filter
+            && !pat.is_empty()
+        {
+            let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+            let (invert, p) = match pat.strip_prefix('!') {
+                Some(rest) => (true, rest),
+                None => (false, pat.as_str()),
+            };
+            let pchars: Vec<char> = p.chars().collect();
+            list.retain(|c| {
+                let tchars: Vec<char> = c.chars().collect();
+                let m = glob_match(&pchars, &tchars, extglob);
+                // Default: drop matches. `!pat`: keep only matches.
+                if invert { m } else { !m }
+            });
+        }
+
+        // ---- decorate with -P/-S and emit one per line ----
+        let empty = list.is_empty();
+        let mut result = String::new();
+        for c in &list {
+            result.push_str(&prefix);
+            result.push_str(c);
+            result.push_str(&suffix);
+            result.push('\n');
+        }
+        let write_status = self.write_bytes(out, redir, result.as_bytes());
+        // bash: status 1 when no candidates were produced, else the write status.
+        if empty { 1 } else { write_status }
+    }
+
+    /// Filesystem completion for `compgen -f`/`-d`: treat `word` as a partial
+    /// path, list entries of its directory component whose names start with the
+    /// basename component, and return each as `dirprefix + name`. `dirs_only`
+    /// restricts results to directories (`-d`).
+    fn compgen_paths(&self, word: &str, dirs_only: bool) -> Vec<String> {
+        // Split into the directory prefix (kept verbatim on each result) and the
+        // basename to prefix-match. `foo/ba` -> dir "foo/", base "ba"; "ba" ->
+        // dir "" (cwd), base "ba".
+        let (dir_prefix, dir_path, base) = match word.rfind('/') {
+            Some(idx) => {
+                let dp = &word[..=idx];
+                let path = if idx == 0 { "/".to_string() } else { word[..idx].to_string() };
+                (dp.to_string(), path, word[idx + 1..].to_string())
+            }
+            None => (String::new(), ".".to_string(), word.to_string()),
+        };
+        let Ok(rd) = std::fs::read_dir(&dir_path) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&base) {
+                continue;
+            }
+            // Hidden files only appear when the base explicitly starts with '.'.
+            if name.starts_with('.') && !base.starts_with('.') {
+                continue;
+            }
+            if dirs_only && !ent.path().is_dir() {
+                continue;
+            }
+            out.push(format!("{dir_prefix}{name}"));
+        }
+        out
+    }
+
+    /// Command-name candidates for `compgen -c`/`-A command`: every executable
+    /// basename found on `$PATH`. Scans all PATH directories (the caller's
+    /// prefix filter trims the results). On Windows the common executable
+    /// extensions are stripped so bare command names are offered.
+    fn compgen_path_commands(&self, _word: &str) -> Vec<String> {
+        let path = match self.param_value("PATH") {
+            Some(p) => p,
+            None if !self.env_imported => std::env::var("PATH").unwrap_or_default(),
+            None => return Vec::new(),
+        };
+        let mut out: Vec<String> = Vec::new();
+        for dir in std::env::split_paths(&path) {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for ent in rd.flatten() {
+                if ent.path().is_dir() {
+                    continue;
+                }
+                let raw = ent.file_name().to_string_lossy().into_owned();
+                #[cfg(windows)]
+                let name = {
+                    let mut n = raw;
+                    for ext in [".exe", ".cmd", ".bat", ".com"] {
+                        if let Some(stripped) = n.strip_suffix(ext) {
+                            n = stripped.to_string();
+                            break;
+                        }
+                    }
+                    n
+                };
+                #[cfg(not(windows))]
+                let name = raw;
+                out.push(name);
+            }
+        }
+        out
+    }
+
     fn builtin_type(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Shell keywords recognized by `type` (reserved words that introduce or
         // punctuate compound commands).
@@ -9739,6 +9961,11 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("source", "source filename [arguments]", "Execute commands from a file in the current shell."),
     (".", ". filename [arguments]", "Execute commands from a file (synonym for source)."),
     ("type", "type [-afptP] name ...", "Display information about command type."),
+    (
+        "compgen",
+        "compgen [-abcdefkv] [-A action] [-W wordlist] [-P prefix] [-S suffix] [-X filterpat] [word]",
+        "Display possible completions depending on the options.",
+    ),
     ("trap", "trap [-lp] [[action] signal_spec ...]", "Trap signals and other events."),
     ("jobs", "jobs [-lp] [jobspec ...]", "Display status of jobs."),
     ("wait", "wait [-n] [-p var] [id ...]", "Wait for jobs to complete and report status."),
@@ -9766,7 +9993,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
     "exec",
-    "exit", "return", "break", "continue", "enable", "alias", "unalias", "help",
+    "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -12557,6 +12784,43 @@ mod tests {
         assert_eq!(run("set -xu; echo $-").0, "huxB\n");
         // Disabling drops the flag again.
         assert_eq!(run("set -e; set +e; echo $-").0, "hB\n");
+    }
+
+    #[test]
+    fn compgen_wordlist_and_prefix() {
+        // `-W` splits on IFS; the trailing word prefix-filters the candidates,
+        // preserving wordlist order (no sort).
+        assert_eq!(run("compgen -W 'foo bar baz' ba").0, "bar\nbaz\n");
+        // No trailing word: every candidate is offered.
+        assert_eq!(run("compgen -W 'one two three'").0, "one\ntwo\nthree\n");
+        // No match: no output, status 1.
+        let (o, st) = run("compgen -W 'foo bar' xyz; echo \"st=$?\"");
+        assert_eq!(o, "st=1\n");
+        assert_eq!(st, 0);
+    }
+
+    #[test]
+    fn compgen_actions_and_decorate() {
+        // Function/builtin/variable actions draw from live shell state.
+        assert_eq!(run("f1(){ :; }; f2(){ :; }; compgen -A function f2").0, "f2\n");
+        assert_eq!(run("compgen -b tru").0, "true\n");
+        // Variables come from a hash map (unordered); sort before asserting.
+        let vout = run("xy=1; xyz=2; z=3; compgen -v xy").0;
+        let mut vars: Vec<&str> = vout.lines().collect();
+        vars.sort_unstable();
+        assert_eq!(vars, vec!["xy", "xyz"]);
+        // -P prefix / -S suffix wrap each match (applied after filtering).
+        assert_eq!(run("compgen -P 'p_' -S '!' -W 'a ab' a").0, "p_a!\np_ab!\n");
+    }
+
+    #[test]
+    fn compgen_filter_pattern() {
+        // -X removes matches; a leading '!' keeps only matches.
+        assert_eq!(
+            run("compgen -W 'a.txt b.log c.txt' -X '*.log'").0,
+            "a.txt\nc.txt\n"
+        );
+        assert_eq!(run("compgen -W 'a b c' -X '!b'").0, "b\n");
     }
 
     #[test]

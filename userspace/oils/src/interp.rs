@@ -250,6 +250,10 @@ pub struct Shell {
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
     readonly: HashSet<String>,
+    /// `shopt` option toggles (e.g. `nullglob`, `dotglob`, `nocaseglob`). Only
+    /// options present with `true` are enabled; absent/`false` = default off.
+    /// Inherited by subshell clones.
+    shopt: HashMap<String, bool>,
 }
 
 impl Default for Shell {
@@ -289,6 +293,7 @@ impl Shell {
             unbound_error: false,
             local_frames: Vec::new(),
             readonly: HashSet::new(),
+            shopt: HashMap::new(),
         }
     }
 
@@ -1393,6 +1398,7 @@ impl Shell {
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
             readonly: self.readonly.clone(),
+            shopt: self.shopt.clone(),
         }
     }
 
@@ -2481,9 +2487,11 @@ impl Shell {
             // Command-argument context: field-split unquoted expansions, then
             // apply pathname (glob) expansion to each resulting field.
             let fields = self.expand_word_annotated(word);
+            let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
+            let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
             let mut out = Vec::new();
             for f in fields {
-                glob_or_literal(&f, &mut out);
+                glob_or_literal(&f, &mut out, nullglob, dotglob);
             }
             return out;
         }
@@ -2984,6 +2992,7 @@ impl Shell {
             }
             "local" => self.builtin_declare(args, true),
             "readonly" => self.builtin_readonly(args, out, redir),
+            "shopt" => self.builtin_shopt(args, out, redir),
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
@@ -3403,6 +3412,107 @@ impl Shell {
                 self.vars.insert(name.to_string(), v);
             }
             self.readonly.insert(name.to_string());
+        }
+        status
+    }
+
+    /// `shopt [-s|-u] [-q] [optname …]` — set/unset/query shell option toggles.
+    ///
+    /// Supported options: `nullglob`, `dotglob`, `nocaseglob`, `nocasematch`,
+    /// `extglob`, `globstar`, `failglob`. Only `nullglob` and `dotglob`
+    /// currently affect behavior (pathname expansion); the rest are stored so
+    /// scripts that toggle them don't error, and `shopt` reports them
+    /// faithfully. `-s` enables, `-u` disables, `-q` suppresses output (status
+    /// only). With no option flag, listing/query mode is used.
+    fn builtin_shopt(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Known option names. Unknown names are an error (like bash).
+        const KNOWN: &[&str] = &[
+            "nullglob",
+            "dotglob",
+            "nocaseglob",
+            "nocasematch",
+            "extglob",
+            "globstar",
+            "failglob",
+            "histappend",
+            "checkwinsize",
+            "cmdhist",
+            "lithist",
+            "autocd",
+        ];
+        let mut set = false;
+        let mut unset = false;
+        let mut quiet = false;
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            match arg.as_str() {
+                "-s" => set = true,
+                "-u" => unset = true,
+                "-q" => quiet = true,
+                // `-o` restricts to `set -o` options; not modeled here — accept
+                // and ignore so `shopt -o …` doesn't hard-error.
+                "-o" | "-p" => {}
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                s if s.starts_with('-') && s.len() > 1 => {
+                    self.emit_stderr(format!("osh: shopt: {s}: invalid option\n").as_bytes());
+                    return 2;
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+        let names: Vec<&String> = args[i..].iter().collect();
+
+        // Query/list mode: neither -s nor -u.
+        if !set && !unset {
+            if names.is_empty() {
+                // List all known options with their on/off state.
+                let mut listing = String::new();
+                for opt in KNOWN {
+                    let on = self.shopt.get(*opt).copied().unwrap_or(false);
+                    listing.push_str(&format!("{opt}\t{}\n", if on { "on" } else { "off" }));
+                }
+                if quiet {
+                    return 0;
+                }
+                return self.write_bytes(out, redir, listing.as_bytes());
+            }
+            // Query specific names: status 0 iff all named options are set.
+            let mut all_on = true;
+            let mut listing = String::new();
+            for name in &names {
+                if !KNOWN.contains(&name.as_str()) {
+                    self.emit_stderr(
+                        format!("osh: shopt: {name}: invalid shell option name\n").as_bytes(),
+                    );
+                    return 1;
+                }
+                let on = self.shopt.get(name.as_str()).copied().unwrap_or(false);
+                if !on {
+                    all_on = false;
+                }
+                listing.push_str(&format!("{name}\t{}\n", if on { "on" } else { "off" }));
+            }
+            if !quiet {
+                self.write_bytes(out, redir, listing.as_bytes());
+            }
+            return i32::from(!all_on);
+        }
+
+        // Set/unset mode.
+        let mut status = 0;
+        for name in names {
+            if !KNOWN.contains(&name.as_str()) {
+                self.emit_stderr(
+                    format!("osh: shopt: {name}: invalid shell option name\n").as_bytes(),
+                );
+                status = 1;
+                continue;
+            }
+            self.shopt.insert(name.clone(), set);
         }
         status
     }
@@ -4142,7 +4252,7 @@ fn push_chars(buf: &mut Vec<EChar>, s: &str, quoted: bool) {
 /// literal field, if it has no unquoted metacharacter or matches nothing) into
 /// `out`. This implements bash's default (no-`nullglob`) behavior: an
 /// unmatched pattern is left as the literal word.
-fn glob_or_literal(field: &[EChar], out: &mut Vec<String>) {
+fn glob_or_literal(field: &[EChar], out: &mut Vec<String>, nullglob: bool, dotglob: bool) {
     let has_meta = field
         .iter()
         .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
@@ -4151,9 +4261,14 @@ fn glob_or_literal(field: &[EChar], out: &mut Vec<String>) {
         out.push(literal);
         return;
     }
-    let mut matches = glob_expand_field(field);
+    let mut matches = glob_expand_field(field, dotglob);
     if matches.is_empty() {
-        out.push(literal);
+        // Default (no `nullglob`): an unmatched pattern is left as the literal
+        // word. With `nullglob` on, the word is removed entirely (produces no
+        // field).
+        if !nullglob {
+            out.push(literal);
+        }
     } else {
         matches.sort();
         out.append(&mut matches);
@@ -4294,7 +4409,7 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 
 /// Expand an annotated field containing at least one unquoted metacharacter
 /// against the filesystem, returning the matching paths (unsorted).
-fn glob_expand_field(field: &[EChar]) -> Vec<String> {
+fn glob_expand_field(field: &[EChar], dotglob: bool) -> Vec<String> {
     let absolute = field.first().is_some_and(|e| e.c == '/');
     // Split into non-empty components on '/'.
     let mut comps: Vec<Vec<EChar>> = Vec::new();
@@ -4325,7 +4440,10 @@ fn glob_expand_field(field: &[EChar]) -> Vec<String> {
             if has_meta {
                 let dir = if base.is_empty() { "." } else { base.as_str() };
                 let toks = compile_glob(comp);
-                let allow_dot = glob_starts_with_dot(&toks);
+                // A leading `.` in a filename is only matched when the pattern
+                // itself begins with a literal dot, or when `dotglob` is set.
+                // Even with `dotglob`, `.` and `..` are never matched by a glob.
+                let allow_dot = dotglob || glob_starts_with_dot(&toks);
                 let Ok(rd) = std::fs::read_dir(dir) else {
                     continue;
                 };
@@ -4334,6 +4452,9 @@ fn glob_expand_field(field: &[EChar]) -> Vec<String> {
                     let name = ent.file_name().to_string_lossy().into_owned();
                     let nch: Vec<char> = name.chars().collect();
                     if nch.first() == Some(&'.') && !allow_dot {
+                        continue;
+                    }
+                    if dotglob && !glob_starts_with_dot(&toks) && (name == "." || name == "..") {
                         continue;
                     }
                     if match_glob_toks(&toks, &nch) {
@@ -4748,6 +4869,7 @@ fn is_builtin(name: &str) -> bool {
             | "typeset"
             | "local"
             | "readonly"
+            | "shopt"
             | "unset"
             | "set"
             | "shift"
@@ -6245,7 +6367,7 @@ mod tests {
         let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")))
+        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false)
             .iter()
             .map(|p| basename(p))
             .collect();
@@ -6253,12 +6375,12 @@ mod tests {
         assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")));
+        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false);
         assert!(all.iter().all(|p| !p.ends_with(".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")));
+        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
@@ -6268,6 +6390,64 @@ mod tests {
     fn glob_no_match_stays_literal() {
         // With no match and no `nullglob`, the pattern is left as the word.
         assert_eq!(run("echo osh_definitely_no_such_glob_*.zzz").0, "osh_definitely_no_such_glob_*.zzz\n");
+    }
+
+    #[test]
+    fn shopt_nullglob_removes_unmatched() {
+        // With `nullglob`, an unmatched glob produces no word at all.
+        assert_eq!(
+            run("shopt -s nullglob; echo x osh_no_such_glob_*.zzz y").0,
+            "x y\n"
+        );
+        // Unsetting restores the literal-word default.
+        assert_eq!(
+            run("shopt -s nullglob; shopt -u nullglob; echo osh_no_such_glob_*.zzz").0,
+            "osh_no_such_glob_*.zzz\n"
+        );
+    }
+
+    #[test]
+    fn shopt_query_status() {
+        // `shopt -q name` returns 0 iff the option is set.
+        assert_eq!(run("shopt -q nullglob; echo $?").0, "1\n");
+        assert_eq!(run("shopt -s nullglob; shopt -q nullglob; echo $?").0, "0\n");
+    }
+
+    #[test]
+    fn shopt_unknown_name_errors() {
+        // An unknown option name is a status-1 error.
+        assert_eq!(run("shopt -s no_such_option_xyz; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn shopt_dotglob_includes_hidden() {
+        let uniq = format!(
+            "osh_dotglob_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::path::Path::new(&uniq);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        for n in ["a.txt", ".hidden"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+
+        // Without dotglob, `*` skips the dotfile; with it, the dotfile is
+        // included (but never `.`/`..`).
+        let field = field_lit(&format!("{uniq}/*"));
+        let plain = glob_expand_field(&field, false);
+        assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
+        let with_dot = glob_expand_field(&field, true);
+        assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
+        assert!(with_dot.iter().all(|p| {
+            let b = p.rsplit('/').next().unwrap_or(p);
+            b != "." && b != ".."
+        }));
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

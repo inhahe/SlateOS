@@ -2408,21 +2408,47 @@ impl Shell {
         }
     }
 
+    /// Attribute-flag letters for a variable, in `declare -p` order: the kind
+    /// (`a` indexed / `A` associative) followed by `n` (nameref), `i` (integer),
+    /// `l` (lower), `u` (upper), `r` (readonly), `x` (exported). Empty when the
+    /// variable has no attributes. Shared by the `${var@a}` transform.
+    fn attr_flag_letters(&self, name: &str) -> String {
+        let mut s = String::new();
+        if self.assoc.contains_key(name) {
+            s.push('A');
+        } else if self.arrays.contains_key(name) {
+            s.push('a');
+        }
+        if self.nameref_attr.contains(name) {
+            s.push('n');
+        }
+        if self.integer_attr.contains(name) {
+            s.push('i');
+        }
+        if self.lower_attr.contains(name) {
+            s.push('l');
+        }
+        if self.upper_attr.contains(name) {
+            s.push('u');
+        }
+        if self.readonly.contains(name) {
+            s.push('r');
+        }
+        if self.exported.contains(name) {
+            s.push('x');
+        }
+        s
+    }
+
     /// `${name@op}` parameter transformation. Supports `Q` (quote so the value
     /// can be reused as shell input), `U`/`u`/`L` (upper-all/upper-first/
     /// lower-all), `E` (expand ANSI-C backslash escapes), `a` (attribute
-    /// flags — `a` for indexed array, `A` for associative, else empty), and `A`
+    /// flags — the kind plus `n`/`i`/`l`/`u`/`r`/`x`, else empty), and `A`
     /// (a re-inputtable assignment/`declare` statement recreating the variable).
     fn param_transform(&mut self, name: &str, index: &Option<Box<Word>>, op: char) -> String {
         // The `a` (attributes) transform reports type even for an unset scalar.
         if op == 'a' {
-            let mut flags = String::new();
-            if self.assoc.contains_key(name) {
-                flags.push('A');
-            } else if self.arrays.contains_key(name) {
-                flags.push('a');
-            }
-            return flags;
+            return self.attr_flag_letters(name);
         }
         // `@A` recreates an assignment/`declare` statement for the variable.
         if op == 'A' {
@@ -11488,6 +11514,15 @@ mod tests {
         assert_eq!(run("x='a\\tb'; printf '%s' \"${x@E}\"").0, "a\tb");
         assert_eq!(run("declare -A m; m[k]=v; echo \"${m@a}\"").0, "A\n");
         assert_eq!(run("a=(1 2 3); echo \"${a@a}\"").0, "a\n");
+        // Scalar attributes: integer, readonly, export, lower/upper.
+        assert_eq!(run("declare -i n=5; echo \"${n@a}\"").0, "i\n");
+        assert_eq!(run("readonly r=1; echo \"${r@a}\"").0, "r\n");
+        assert_eq!(run("export e=1; echo \"${e@a}\"").0, "x\n");
+        assert_eq!(run("declare -l lo=X; echo \"${lo@a}\"").0, "l\n");
+        // Combined attributes render in declare -p order (kind, n, i, l, u, r, x).
+        assert_eq!(run("declare -ir z=5; echo \"${z@a}\"").0, "ir\n");
+        // A plain scalar has no attribute flags.
+        assert_eq!(run("p=1; echo \"[${p@a}]\"").0, "[]\n");
     }
 
     #[test]

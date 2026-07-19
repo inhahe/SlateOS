@@ -3288,7 +3288,7 @@ impl Shell {
             "readonly" => self.builtin_readonly(args, out, redir),
             "shopt" => self.builtin_shopt(args, out, redir),
             "unset" => self.builtin_unset(args),
-            "set" => self.builtin_set(args),
+            "set" => self.builtin_set(args, out, redir),
             "shift" => self.builtin_shift(args),
             "getopts" => self.builtin_getopts(args),
             "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir),
@@ -4528,7 +4528,7 @@ impl Shell {
         0
     }
 
-    fn builtin_set(&mut self, args: &[String]) -> i32 {
+    fn builtin_set(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Handle option flags (`-e`/`-u`/`-x`/… as clusters, `-o name`) and, on
         // the first non-option operand, reset the positional parameters. `--`
         // ends option processing; a bare `-`/`+` is ignored.
@@ -4549,9 +4549,10 @@ impl Shell {
                         self.set_named_option(opt, enable);
                         i += 2;
                     } else {
-                        // `set -o` with no name: list options (not implemented);
-                        // accept as a no-op.
-                        i += 1;
+                        // Bare `set -o` lists options in `name  on/off` columns;
+                        // `set +o` lists them as re-inputtable `set ±o name` lines.
+                        let text = self.format_option_list(!enable);
+                        return self.write_bytes(out, redir, text.as_bytes());
                     }
                 }
                 s if s.starts_with('-') || s.starts_with('+') => {
@@ -4591,6 +4592,28 @@ impl Shell {
             "xtrace" => self.xtrace = enable,
             _ => {}
         }
+    }
+
+    /// Render the `set -o` / `set +o` option listing. With `reinput` false
+    /// (`set -o`), each line is `name<pad>on|off`; with `reinput` true
+    /// (`set +o`), each line is a re-inputtable `set -o name` / `set +o name`.
+    /// Only the options this shell actually models are listed, in alphabetical
+    /// order, so the reported state is always truthful.
+    fn format_option_list(&self, reinput: bool) -> String {
+        // Alphabetical, matching bash's ordering of these names.
+        let opts = ["errexit", "nounset", "pipefail", "xtrace"];
+        let mut s = String::new();
+        for name in opts {
+            let on = self.shell_option_enabled(name);
+            if reinput {
+                let flag = if on { "-o" } else { "+o" };
+                s.push_str(&format!("set {flag} {name}\n"));
+            } else {
+                let state = if on { "on" } else { "off" };
+                s.push_str(&format!("{name:<15}{state}\n"));
+            }
+        }
+        s
     }
 
     /// Return whether the named `set -o` option is currently enabled. Used by the
@@ -9588,6 +9611,25 @@ mod tests {
         assert_eq!(run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0, "off\n");
         // Unknown option names are reported disabled (bash returns false).
         assert_eq!(run("[[ -o bogus ]] && echo on || echo off").0, "off\n");
+    }
+
+    #[test]
+    fn set_o_lists_options() {
+        // `set -o` prints each modelled option with its on/off state.
+        let (o, s) = run("set -e; set -o");
+        assert_eq!(s, 0);
+        assert!(o.contains("errexit        on\n"), "got {o:?}");
+        assert!(o.contains("nounset        off\n"), "got {o:?}");
+        assert!(o.contains("pipefail       off\n"), "got {o:?}");
+        assert!(o.contains("xtrace         off\n"), "got {o:?}");
+    }
+
+    #[test]
+    fn set_plus_o_lists_reinputtable() {
+        // `set +o` prints re-inputtable `set -o NAME` / `set +o NAME` lines.
+        let (o, _) = run("set -o pipefail; set +o");
+        assert!(o.contains("set +o errexit\n"), "got {o:?}");
+        assert!(o.contains("set -o pipefail\n"), "got {o:?}");
     }
 
     #[test]

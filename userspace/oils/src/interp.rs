@@ -254,6 +254,10 @@ pub struct Shell {
     /// options present with `true` are enabled; absent/`false` = default off.
     /// Inherited by subshell clones.
     shopt: HashMap<String, bool>,
+    /// Names with the integer attribute (`declare -i`). Assignments to these are
+    /// evaluated as arithmetic before storing (`x=5+3` stores `8`, `x+=2` adds).
+    /// Inherited by subshell clones.
+    integer_attr: HashSet<String>,
 }
 
 impl Default for Shell {
@@ -294,6 +298,7 @@ impl Shell {
             local_frames: Vec::new(),
             readonly: HashSet::new(),
             shopt: HashMap::new(),
+            integer_attr: HashSet::new(),
         }
     }
 
@@ -1414,6 +1419,7 @@ impl Shell {
             local_frames: Vec::new(),
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
+            integer_attr: self.integer_attr.clone(),
         }
     }
 
@@ -1449,36 +1455,90 @@ impl Shell {
                         return true;
                     }
                 }
+                // With the integer attribute (`declare -i`), the value is an
+                // arithmetic expression: it is evaluated before storing, and
+                // `+=` performs numeric addition rather than string append.
+                let is_int = self.integer_attr.contains(&a.name);
                 if let Some(idx_word) = &a.index {
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
                         let key = self.expand_to_string(idx_word);
-                        self.assoc_set(&a.name, key, val, a.append);
+                        let stored = if is_int {
+                            let base = if a.append {
+                                self.assoc_element(&a.name, &key)
+                                    .and_then(|s| s.trim().parse::<i64>().ok())
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0))
+                                .to_string()
+                        } else {
+                            val
+                        };
+                        // Integer append already folded the old value in, so
+                        // store (not append) the computed result.
+                        self.assoc_set(&a.name, key, stored, a.append && !is_int);
                     } else {
                         // `name[i]=val` — indexed element assignment. A negative
                         // index counts back from `highest_index + 1` (bash:
                         // `a[-1]=v` overwrites the last element).
                         let raw = self.eval_arith_word(idx_word);
-                        let arr = self.arrays.entry(a.name.clone()).or_default();
-                        let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
+                        let bound = self
+                            .arrays
+                            .get(&a.name)
+                            .and_then(|arr| arr.keys().next_back().copied())
+                            .map_or(0, |k| k.saturating_add(1));
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             eprintln!("osh: {}: bad array subscript", a.name);
                             return true;
                         };
-                        if a.append {
-                            arr.entry(idx).or_default().push_str(&val);
+                        let int_val = if is_int {
+                            let base = if a.append {
+                                self.arrays
+                                    .get(&a.name)
+                                    .and_then(|arr| arr.get(&idx))
+                                    .and_then(|s| s.trim().parse::<i64>().ok())
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            Some(base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0)))
                         } else {
-                            arr.insert(idx, val);
+                            None
+                        };
+                        let arr = self.arrays.entry(a.name.clone()).or_default();
+                        match int_val {
+                            Some(n) => {
+                                arr.insert(idx, n.to_string());
+                            }
+                            None if a.append => {
+                                arr.entry(idx).or_default().push_str(&val);
+                            }
+                            None => {
+                                arr.insert(idx, val);
+                            }
                         }
                     }
                 } else if a.append {
                     // `name+=val` — append to the scalar (or to element 0 of an array).
-                    if let Some(arr) = self.arrays.get_mut(&a.name) {
+                    if is_int {
+                        let base = self
+                            .vars
+                            .get(&a.name)
+                            .and_then(|c| c.trim().parse::<i64>().ok())
+                            .unwrap_or(0);
+                        let sum = base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0));
+                        self.vars.insert(a.name.clone(), sum.to_string());
+                    } else if let Some(arr) = self.arrays.get_mut(&a.name) {
                         arr.entry(0).or_default().push_str(&val);
                     } else {
                         let cur = self.vars.get(&a.name).cloned().unwrap_or_default();
                         self.vars.insert(a.name.clone(), cur + &val);
                     }
+                } else if is_int {
+                    let n = self.eval_arith_raw(&val).unwrap_or(0);
+                    self.vars.insert(a.name.clone(), n.to_string());
                 } else {
                     self.vars.insert(a.name.clone(), val);
                 }
@@ -3279,20 +3339,34 @@ impl Shell {
         let mut indexed = false;
         let mut export = false;
         let mut readonly = false;
+        // Integer attribute: `-i` sets it, `+i` removes it.
+        let mut integer = false;
+        let mut unset_integer = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = arg.strip_prefix('-') {
+            // Flags may be introduced with `-` (enable) or `+` (disable).
+            let enable = arg.starts_with('-');
+            if let Some(flags) = arg.strip_prefix(['-', '+'])
+                && !flags.is_empty()
+            {
                 for c in flags.chars() {
                     match c {
                         'A' => assoc = true,
                         'a' => indexed = true,
                         'x' => export = true,
                         'r' => readonly = true,
-                        _ => {} // -i/-g/-l/-u/-n/-p: accepted, no effect here.
+                        'i' => {
+                            if enable {
+                                integer = true;
+                            } else {
+                                unset_integer = true;
+                            }
+                        }
+                        _ => {} // -g/-l/-u/-n/-p: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -3324,10 +3398,22 @@ impl Shell {
             } else if indexed {
                 self.arrays.entry(name.to_string()).or_default();
             }
+            // Apply/remove the integer attribute before binding the value, so a
+            // `declare -i x=5+3` initial value is evaluated arithmetically.
+            if integer {
+                self.integer_attr.insert(name.to_string());
+            } else if unset_integer {
+                self.integer_attr.remove(name);
+            }
             if let Some(v) = value {
                 if assoc || indexed {
                     // `declare -A m=str` / `-a a=str` — scalar init unsupported;
                     // ignore the value (bash would treat str as element/key).
+                } else if self.integer_attr.contains(name) {
+                    // Integer attribute: the initializer is an arithmetic
+                    // expression, evaluated and stored as its decimal value.
+                    let n = self.eval_arith_raw(&v).unwrap_or(0);
+                    self.vars.insert(name.to_string(), n.to_string());
                 } else {
                     self.vars.insert(name.to_string(), v);
                 }
@@ -6803,6 +6889,22 @@ mod tests {
         assert_eq!(run("echo $(( 8#17 ))").0, "15\n");
         assert_eq!(run("echo $(( 017 ))").0, "15\n");
         assert_eq!(run("echo $(( 64#_ ))").0, "63\n");
+    }
+
+    #[test]
+    fn declare_integer_attribute() {
+        // `declare -i` makes later plain assignments evaluate arithmetically.
+        assert_eq!(run("declare -i x; x=5+3; echo $x").0, "8\n");
+        // The initializer on the declare itself is also evaluated.
+        assert_eq!(run("declare -i y=2*3; echo $y").0, "6\n");
+        // `+=` on an integer variable performs numeric addition.
+        assert_eq!(run("declare -i z=10; z+=5; echo $z").0, "15\n");
+        // A non-numeric expression evaluates to 0.
+        assert_eq!(run("declare -i q=abc; echo $q").0, "0\n");
+        // `+i` removes the attribute; assignments become plain strings again.
+        assert_eq!(run("declare -i w=4; declare +i w; w=1+2; echo $w").0, "1+2\n");
+        // Integer array elements are evaluated too.
+        assert_eq!(run("declare -ia arr; arr[0]=3+4; echo ${arr[0]}").0, "7\n");
     }
 
     #[test]

@@ -2601,9 +2601,10 @@ impl Shell {
             let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
             let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
             let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+            let globstar = self.shopt.get("globstar").copied().unwrap_or(false);
             let mut out = Vec::new();
             for f in fields {
-                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob, extglob);
+                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob, extglob, globstar);
             }
             return out;
         }
@@ -4620,6 +4621,7 @@ fn glob_or_literal(
     dotglob: bool,
     nocaseglob: bool,
     extglob: bool,
+    globstar: bool,
 ) {
     let has_meta = field_has_glob_meta(field, extglob);
     let literal: String = field.iter().map(|e| e.c).collect();
@@ -4627,7 +4629,7 @@ fn glob_or_literal(
         out.push(literal);
         return;
     }
-    let mut matches = glob_expand_field(field, dotglob, nocaseglob, extglob);
+    let mut matches = glob_expand_field(field, dotglob, nocaseglob, extglob, globstar);
     if matches.is_empty() {
         // Default (no `nullglob`): an unmatched pattern is left as the literal
         // word. With `nullglob` on, the word is removed entirely (produces no
@@ -4880,7 +4882,13 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 
 /// Expand an annotated field containing at least one unquoted metacharacter
 /// against the filesystem, returning the matching paths (unsorted).
-fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool, extglob: bool) -> Vec<String> {
+fn glob_expand_field(
+    field: &[EChar],
+    dotglob: bool,
+    nocaseglob: bool,
+    extglob: bool,
+    globstar: bool,
+) -> Vec<String> {
     let absolute = field.first().is_some_and(|e| e.c == '/');
     // Split into non-empty components on '/'.
     let mut comps: Vec<Vec<EChar>> = Vec::new();
@@ -4900,8 +4908,24 @@ fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool, extglob: 
     if comps.is_empty() {
         return Vec::new();
     }
+    let last = comps.len().saturating_sub(1);
     let mut cands: Vec<String> = vec![if absolute { "/".to_string() } else { String::new() }];
-    for comp in &comps {
+    for (ci, comp) in comps.iter().enumerate() {
+        // `**` with `globstar` matches across directory levels: as an
+        // intermediate component it stands for the base plus every descendant
+        // directory (zero-or-more levels), and as the final component it stands
+        // for every descendant file *and* directory.
+        if globstar && is_globstar_comp(comp) {
+            let terminal = ci == last;
+            let mut next: Vec<String> = Vec::new();
+            for base in &cands {
+                globstar_walk(base, dotglob, terminal, &mut next);
+            }
+            next.sort();
+            next.dedup();
+            cands = next;
+            continue;
+        }
         let has_meta = field_has_glob_meta(comp, extglob);
         let comp_literal: String = comp.iter().map(|e| e.c).collect();
         let mut next: Vec<String> = Vec::new();
@@ -4966,6 +4990,53 @@ fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool, extglob: 
         cands = next;
     }
     cands
+}
+
+/// Whether a path component is the globstar token `**` (both characters
+/// unquoted). Only meaningful when `shopt -s globstar` is set.
+fn is_globstar_comp(comp: &[EChar]) -> bool {
+    comp.len() == 2 && comp.iter().all(|e| e.c == '*' && !e.quoted)
+}
+
+/// Expand a `**` (globstar) component under `base`. When `terminal` (the last
+/// path component), appends every descendant file and directory of `base`;
+/// otherwise appends `base` itself (the zero-levels case) plus every descendant
+/// directory — the candidate directories for the following component. Dotfiles
+/// are skipped unless `dotglob`. Symlinked directories are not recursed into
+/// (matching bash ≥ 4.3), which also prevents symlink-loop infinite recursion.
+fn globstar_walk(base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
+    if !terminal && (base.is_empty() || std::path::Path::new(base).is_dir()) {
+        out.push(base.to_string());
+    }
+    globstar_descend(base, dotglob, terminal, out);
+}
+
+/// Recursive worker for [`globstar_walk`]: descends `base`, pushing matching
+/// descendants. In terminal mode every entry is pushed; otherwise only
+/// directories (which are also the ones recursed into).
+fn globstar_descend(base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
+    let dir = if base.is_empty() { "." } else { base };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !dotglob {
+            continue;
+        }
+        let is_dir = ent.file_type().is_ok_and(|t| t.is_dir());
+        entries.push((name, is_dir));
+    }
+    for (name, is_dir) in entries {
+        let path = join_glob(base, &name);
+        if terminal || is_dir {
+            out.push(path.clone());
+        }
+        if is_dir {
+            globstar_descend(&path, dotglob, terminal, out);
+        }
+    }
 }
 
 /// Join a base path and a component with a single `/` separator, preserving a
@@ -7047,7 +7118,7 @@ mod tests {
         let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false, false)
+        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
             .iter()
             .map(|p| basename(p))
             .collect();
@@ -7055,15 +7126,83 @@ mod tests {
         assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false, false);
+        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false, false, false);
         assert!(all.iter().all(|p| !p.ends_with(".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false, false);
+        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn glob_globstar_recursive() {
+        // Build a small tree:  root/{a.rs, sub/{b.rs, deep/c.rs}}
+        let uniq = format!(
+            "osh_gstar_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let root = std::path::Path::new(&uniq);
+        std::fs::create_dir_all(root.join("sub").join("deep")).expect("mkdir");
+        std::fs::File::create(root.join("a.rs")).expect("touch");
+        std::fs::File::create(root.join("sub").join("b.rs")).expect("touch");
+        std::fs::File::create(root.join("sub").join("deep").join("c.rs")).expect("touch");
+
+        // `root/**/*.rs` with globstar finds every .rs at any depth.
+        let mut rs = glob_expand_field(
+            &field_lit(&format!("{uniq}/**/*.rs")),
+            false,
+            false,
+            false,
+            true,
+        );
+        rs.sort();
+        assert_eq!(
+            rs,
+            vec![
+                format!("{uniq}/a.rs"),
+                format!("{uniq}/sub/b.rs"),
+                format!("{uniq}/sub/deep/c.rs"),
+            ]
+        );
+
+        // Without globstar, `**` behaves like `*` (single level only).
+        let one = glob_expand_field(
+            &field_lit(&format!("{uniq}/**/*.rs")),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(one, vec![format!("{uniq}/sub/b.rs")]);
+
+        // Terminal `**` lists every descendant file and directory.
+        let mut all = glob_expand_field(
+            &field_lit(&format!("{uniq}/**")),
+            false,
+            false,
+            false,
+            true,
+        );
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                format!("{uniq}/a.rs"),
+                format!("{uniq}/sub"),
+                format!("{uniq}/sub/b.rs"),
+                format!("{uniq}/sub/deep"),
+                format!("{uniq}/sub/deep/c.rs"),
+            ]
+        );
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -7084,10 +7223,10 @@ mod tests {
 
         // Case-sensitive: lowercase pattern misses the uppercase-extension file.
         let field = field_lit(&format!("{uniq}/*.txt"));
-        let cs = glob_expand_field(&field, false, false, false);
+        let cs = glob_expand_field(&field, false, false, false, false);
         assert!(cs.is_empty());
         // With nocaseglob, `*.txt` matches `Notes.TXT`.
-        let ci = glob_expand_field(&field, false, true, false);
+        let ci = glob_expand_field(&field, false, true, false, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with("Notes.TXT"));
 
@@ -7146,9 +7285,9 @@ mod tests {
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field(&field, false, false, false);
+        let plain = glob_expand_field(&field, false, false, false, false);
         assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
-        let with_dot = glob_expand_field(&field, true, false, false);
+        let with_dot = glob_expand_field(&field, true, false, false, false);
         assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
         assert!(with_dot.iter().all(|p| {
             let b = p.rsplit('/').next().unwrap_or(p);

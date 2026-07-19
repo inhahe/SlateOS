@@ -1707,16 +1707,69 @@ impl Shell {
                         self.last_status = 1;
                     }
                 },
-                ExtraFdOp::AliasStd(n) => match self.snapshot_std_fd(*n) {
-                    Ok(f) => {
-                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                ExtraFdOp::AliasStd(n) => {
+                    // `N>&1` (N ≥ 3 dup'ing fd 1) on a compound command that is a
+                    // *pipeline stage* must alias fd N to the stage's output pipe,
+                    // not the ambient terminal / persistent `exec` stdout that
+                    // `snapshot_std_fd(1)` returns. Otherwise a `>&N` write inside
+                    // the body (e.g. `{ echo x >&3; } 3>&1 | cat`) leaks past the
+                    // pipe and the downstream stage sees nothing.
+                    let handle = match (*n, &*out) {
+                        (1, Out::Pipe(w)) => pipe_writer_to_file(w),
+                        _ => self.snapshot_std_fd(*n),
+                    };
+                    match handle {
+                        Ok(f) => {
+                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {fd}: {e}"));
+                            self.last_status = 1;
+                        }
                     }
-                    Err(e) => {
-                        self.errln(&format!("osh: {fd}: {e}"));
-                        self.last_status = 1;
-                    }
-                },
+                }
                 ExtraFdOp::Close => {} // already removed above
+            }
+        }
+
+        // `{ …; } 1>&N` / `{ …; } 2>&N` (N ≥ 3): route fd 1 / fd 2 to the write
+        // descriptor fd N currently holds — bash dup's the std fd onto fd N's
+        // target for the body's whole duration. The lookup runs *after* the
+        // scoped extra fds above are installed, so a same-command `3>f 1>&3`
+        // resolves fd 3 correctly. `stdout_to_fd`/`stderr_to_fd` are mutually
+        // exclusive with the file / `>&1` / `>&2` cases (the resolver clears the
+        // others), so it is safe to feed the fd-N handle through the existing
+        // `stdout_file` / `stderr_file` machinery. An unbound N fails the whole
+        // command (bash: "N: Bad file descriptor").
+        let mut fd_alias_error = false;
+        if stdout_file.is_none()
+            && let Some(n) = plan.stdout_to_fd
+        {
+            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
+                Some(Ok(c)) => stdout_file = Some(Arc::new(c)),
+                _ => {
+                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.last_status = 1;
+                    fd_alias_error = true;
+                }
+            }
+        }
+        if !fd_alias_error
+            && stderr_file.is_none()
+            && let Some(n) = plan.stderr_to_fd
+        {
+            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
+                Some(Ok(c)) => {
+                    let f = Arc::new(c);
+                    self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(&f)));
+                    pushed_stderr = true;
+                    stderr_file = Some(f);
+                }
+                _ => {
+                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.last_status = 1;
+                    fd_alias_error = true;
+                }
             }
         }
 
@@ -1744,7 +1797,12 @@ impl Shell {
             .as_ref()
             .map(|f| self.exec_stderr.replace(Arc::clone(f)));
 
-        let flow = {
+        let flow = if fd_alias_error {
+            // A `1>&N` / `2>&N` alias named an unbound descriptor: the command
+            // fails without running its body (matching bash), but the redirect
+            // scope is still torn down below.
+            Flow::Next
+        } else {
             let input_cursor;
             let owned_stdin;
             let sin: &StdinSrc = match input_bytes {
@@ -11991,6 +12049,26 @@ fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
     Ok(std::fs::File::from(owned))
 }
 
+/// Duplicate an anonymous-pipe write end into an owned [`File`] referencing the
+/// same OS pipe. Lets a compound command's `N>&1` alias (fd N ≥ 3 dup'ing fd 1)
+/// land on the *pipeline stage's* output pipe — writing to the returned handle
+/// streams into the same pipe the stage's stdout feeds, so `>&N` inside the body
+/// reaches the downstream stage instead of the terminal.
+#[cfg(unix)]
+fn pipe_writer_to_file(w: &io::PipeWriter) -> io::Result<std::fs::File> {
+    let cloned = w.try_clone()?;
+    Ok(std::fs::File::from(std::os::fd::OwnedFd::from(cloned)))
+}
+
+/// Windows counterpart of the Unix `pipe_writer_to_file`.
+#[cfg(windows)]
+fn pipe_writer_to_file(w: &io::PipeWriter) -> io::Result<std::fs::File> {
+    let cloned = w.try_clone()?;
+    Ok(std::fs::File::from(
+        std::os::windows::io::OwnedHandle::from(cloned),
+    ))
+}
+
 /// Read one newline-terminated line, returning `(text, terminated)` where
 /// `terminated` is true when an actual `\n` delimiter was consumed and false
 /// when the input ended (EOF) before any newline. `read` reports status 1 for
@@ -18847,6 +18925,61 @@ mod tests {
             run_exec_redirect("{ echo o; echo e >&2; } 2>&1 > \"{FILE}\""),
             "o\n"
         );
+    }
+
+    #[test]
+    fn compound_stdout_alias_fd_routes_to_target() {
+        // `{ …; } 1>&N` (N ≥ 3) on a compound command must dup fd 1 onto fd N's
+        // target for the body — the body's stdout lands in fd 3's file, not the
+        // ambient stdout. Regression: `exec_with_redirects` ignored
+        // `stdout_to_fd`, so the body wrote to the inherited stdout instead.
+        assert_eq!(
+            run_exec_redirect("exec 3> \"{FILE}\"\n{ echo hi; echo two; } 1>&3\nexec 3>&-"),
+            "hi\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn compound_stderr_alias_fd_routes_to_target() {
+        // `{ …; } 2>&N`: fd 2 dup'd onto fd N's target for the body. A `>&2`
+        // write inside the group reaches fd 3's file.
+        assert_eq!(
+            run_exec_redirect("exec 3> \"{FILE}\"\n{ echo err >&2; } 2>&3\nexec 3>&-"),
+            "err\n"
+        );
+    }
+
+    #[test]
+    fn subshell_stderr_alias_fd_routes_to_target() {
+        // The `2>&N` alias sets a scoped `exec_stderr`, so a *subshell* body
+        // (which inherits `exec_stderr` but not `stderr_stack`) also reaches
+        // fd N's target — matching bash fd inheritance.
+        assert_eq!(
+            run_exec_redirect("exec 3> \"{FILE}\"\n( echo err >&2 ) 2>&3\nexec 3>&-"),
+            "err\n"
+        );
+    }
+
+    #[test]
+    fn compound_stdout_alias_to_pipe_reaches_downstream() {
+        // `{ …; } 3>&1 | downstream` where fd 1 is the OS pipe to the next stage:
+        // a `>&3` write inside the body must land in the pipe (reaching the
+        // downstream stage), not leak to the ambient terminal. Regression:
+        // `AliasStd(1)` snapshotted the persistent/real fd 1 instead of the
+        // stage's `Out::Pipe`.
+        let (o, s) = run("{ echo x >&3; } 3>&1 | cat");
+        assert_eq!(s, 0);
+        assert_eq!(o, "x\n");
+    }
+
+    #[test]
+    fn compound_stdout_alias_unbound_fd_fails() {
+        // `{ …; } 1>&N` with N unbound is a status-1 "Bad file descriptor" and
+        // the body does not run (matching bash).
+        let (o, s) = run("{ echo hi; } 1>&9; echo done");
+        assert_eq!(s, 0); // final `echo done` status
+        assert!(!o.contains("hi"), "body ran despite bad fd: {o:?}");
+        assert!(o.contains("done"));
     }
 
     #[cfg(windows)]

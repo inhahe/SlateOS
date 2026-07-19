@@ -678,6 +678,16 @@ fn part_src(p: &WordPart) -> String {
             format!("${{{}{}{}}}", name_sub(name, index), op, word_src(pattern))
         }
         WordPart::Indirect(name) => format!("${{!{name}}}"),
+        WordPart::IndirectOp { target, .. } => {
+            // The `target` carries the referent name as a placeholder, so
+            // rendering it yields `${ref<op>}`; splice the indirection `!` in
+            // after the opening `${` to recover `${!ref<op>}`.
+            let inner = part_src(target);
+            match inner.strip_prefix("${") {
+                Some(rest) => format!("${{!{rest}"),
+                None => inner,
+            }
+        }
         WordPart::VarNames { prefix, star } => {
             format!("${{!{prefix}{}}}", if *star { "*" } else { "@" })
         }

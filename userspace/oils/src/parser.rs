@@ -1316,8 +1316,32 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         }
         // `${!name}` — indirect expansion. The referent (`name`) must be a plain
         // name; the target it names may itself carry a subscript.
-        if remaining.is_empty() && subscript.is_none() && is_valid_name(&name) {
-            return Ok(WordPart::Indirect(name));
+        if subscript.is_none() && is_valid_name(&name) {
+            if remaining.is_empty() {
+                return Ok(WordPart::Indirect(name));
+            }
+            // `${!ref<op>}` — indirect expansion combined with a modifier
+            // (`${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`, …).
+            // Parse the modifier as if it were written against `ref` directly;
+            // the placeholder name is rewritten to the resolved target at
+            // expansion time. Only scalar modifiers combine with indirection.
+            let modifier_src: String =
+                name.chars().chain(remaining.iter().copied()).collect();
+            let target = parse_braced_param(&modifier_src)?;
+            if matches!(
+                target,
+                WordPart::ParamOp { .. }
+                    | WordPart::ParamTrim { .. }
+                    | WordPart::ParamSubstr { .. }
+                    | WordPart::ParamReplace { .. }
+                    | WordPart::ParamCase { .. }
+                    | WordPart::ParamTransform { .. }
+            ) {
+                return Ok(WordPart::IndirectOp {
+                    refname: name,
+                    target: Box::new(target),
+                });
+            }
         }
         return Err(ParseError(format!(
             "unsupported parameter expansion '${{{raw}}}'"

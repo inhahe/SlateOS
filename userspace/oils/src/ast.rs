@@ -408,6 +408,17 @@ pub enum WordPart {
     /// string is the referring variable's name; the target may itself carry an
     /// array subscript (`ref=a[0]`).
     Indirect(String),
+    /// `${!ref<op>}` — indirect expansion *combined with* a modifier, e.g.
+    /// `${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`. Bash forms the
+    /// target variable name from the value of `refname`, then applies the rest of
+    /// the substitution to *that* variable. `target` is the modifier expansion
+    /// (a `ParamOp`/`ParamTrim`/`ParamSubstr`/`ParamReplace`/`ParamCase`/
+    /// `ParamTransform`) parsed with `refname` as a placeholder name; at expansion
+    /// time the placeholder is rewritten to the resolved target name.
+    IndirectOp {
+        refname: String,
+        target: Box<WordPart>,
+    },
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables that begin
     /// with `prefix`. Unquoted, both field-split; the `*`/`@` distinction only
     /// matters inside double quotes (`*` joins with the first IFS char, `@`

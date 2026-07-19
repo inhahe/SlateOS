@@ -5437,6 +5437,33 @@ impl Shell {
             } => self.expand_array_ref(name, index, *length),
             WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
             WordPart::Indirect(refname) => self.expand_indirect(refname),
+            WordPart::IndirectOp { refname, target } => {
+                // `${!ref<op>}`: resolve the target variable *name* (the value of
+                // `ref`, or the nameref chain's endpoint), then apply the modifier
+                // to that variable. Mirrors `expand_indirect`'s error handling for
+                // an unset pointer / invalid target name.
+                let tname = if self.nameref_attr.contains(refname) {
+                    self.resolve_ref_name(refname)
+                } else {
+                    match self.param_value(refname) {
+                        Some(t) => t,
+                        None => {
+                            self.emit_stderr(
+                                format!("osh: {refname}: invalid indirect expansion\n").as_bytes(),
+                            );
+                            self.unbound_error = true;
+                            return String::new();
+                        }
+                    }
+                };
+                if !is_valid_indirect_target(&tname) {
+                    self.emit_stderr(format!("osh: {tname}: invalid variable name\n").as_bytes());
+                    self.unbound_error = true;
+                    return String::new();
+                }
+                let renamed = rename_param_target(target, &tname);
+                self.expand_dynamic(&renamed)
+            }
             WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
@@ -12302,6 +12329,83 @@ fn is_valid_indirect_target(s: &str) -> bool {
     bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
 }
 
+/// Clone a scalar-modifier `WordPart` (the `target` of a `${!ref<op>}` indirect
+/// expansion), replacing its parameter name with the resolved target name. Only
+/// the modifier variants that can follow indirection are handled; anything else
+/// is returned unchanged (the parser guarantees `target` is one of these).
+fn rename_param_target(part: &WordPart, new_name: &str) -> WordPart {
+    let name = new_name.to_string();
+    match part.clone() {
+        WordPart::ParamOp {
+            index,
+            op,
+            colon,
+            arg,
+            ..
+        } => WordPart::ParamOp {
+            name,
+            index,
+            op,
+            colon,
+            arg,
+        },
+        WordPart::ParamTrim {
+            index,
+            suffix,
+            longest,
+            pattern,
+            ..
+        } => WordPart::ParamTrim {
+            name,
+            index,
+            suffix,
+            longest,
+            pattern,
+        },
+        WordPart::ParamSubstr {
+            index,
+            offset,
+            length,
+            ..
+        } => WordPart::ParamSubstr {
+            name,
+            index,
+            offset,
+            length,
+        },
+        WordPart::ParamReplace {
+            index,
+            all,
+            anchor,
+            pattern,
+            replacement,
+            ..
+        } => WordPart::ParamReplace {
+            name,
+            index,
+            all,
+            anchor,
+            pattern,
+            replacement,
+        },
+        WordPart::ParamCase {
+            index,
+            mode,
+            all,
+            pattern,
+            ..
+        } => WordPart::ParamCase {
+            name,
+            index,
+            mode,
+            all,
+            pattern,
+        },
+        WordPart::ParamTransform { index, op, .. } => WordPart::ParamTransform { name, index, op },
+        other => other,
+    }
+}
+
 /// Remove `read`'s backslash escapes from a whole line (non-`-r` mode): a
 /// backslash makes the following character literal.
 fn unescape_read_line(s: &str) -> String {
@@ -14446,6 +14550,35 @@ mod tests {
         assert_eq!(
             run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
             "<a b>\n<c>\n"
+        );
+    }
+
+    #[test]
+    fn indirect_expansion_with_modifier() {
+        // `${!ref<op>}` resolves the target NAME via `ref`, then applies the
+        // modifier to that variable (bash). Covers the use/default, case,
+        // trim, substring, replace and transform modifiers.
+        assert_eq!(run("foo=bar; x=foo; echo ${!x:-def}").0, "bar\n");
+        assert_eq!(run("x=foo; echo ${!x:-def}").0, "def\n"); // foo unset
+        assert_eq!(run("foo=bar; x=foo; echo ${!x^^}").0, "BAR\n");
+        assert_eq!(run("foo=Hello; x=foo; echo ${!x,,}").0, "hello\n");
+        assert_eq!(run("foo=barbaz; x=foo; echo ${!x#bar}").0, "baz\n");
+        assert_eq!(run("foo=barbaz; x=foo; echo ${!x##*a}").0, "z\n");
+        assert_eq!(run("foo=abcdef; x=foo; echo ${!x:2:3}").0, "cde\n");
+        assert_eq!(run("foo=banana; x=foo; echo ${!x//a/X}").0, "bXnXnX\n");
+        assert_eq!(run("foo=bar; x=foo; echo ${!x:+SET}").0, "SET\n");
+        // `:=` assigns to the *resolved target*, not the pointer.
+        assert_eq!(
+            run("x=foo; echo ${!x:=assigned}; echo post=$foo").0,
+            "assigned\npost=assigned\n"
+        );
+        // Unset pointer with a modifier is still a fatal invalid indirection.
+        let (o, s) = run("echo ${!nope:-x}; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // Round-trips through the unparser (`${!ref<op>}`).
+        assert_eq!(
+            crate::unparse::program_inline(&parse("echo ${!x:-def}").unwrap()).trim(),
+            "echo ${!x:-def}"
         );
     }
 

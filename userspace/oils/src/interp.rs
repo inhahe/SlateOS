@@ -344,6 +344,12 @@ pub struct Shell {
     /// the simple-command driver checks and aborts (`Flow::Exit(1)`) after
     /// expanding its words.
     unbound_error: bool,
+    /// Set when an arithmetic evaluation error occurs while expanding a
+    /// `$(( … ))` substitution in a word or assignment value. The simple-command
+    /// driver checks and skips the command (status 1, `Flow::Next`) after
+    /// expansion, matching bash (which discards the command on an arithmetic
+    /// error rather than running it with a bogus value).
+    arith_error: bool,
     /// Stack of function-local variable scopes. Each frame records the variables
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
@@ -472,6 +478,7 @@ impl Shell {
             noclobber: false,
             errexit_suppress: 0,
             unbound_error: false,
+            arith_error: false,
             local_frames: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
@@ -1144,7 +1151,13 @@ impl Shell {
     /// mutating shell state for any assignment/increment operators. Returns the
     /// value, or `None` after printing the error.
     fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
+        // `(( … ))` commands, `let`, and arithmetic array subscripts report
+        // their own errors and set their own status — a nested `$(( … ))` here
+        // must not additionally trip the simple-command abort flag, so save and
+        // restore it around the sub-expansion.
+        let saved_arith_error = self.arith_error;
         let expanded = self.expand_arith_params(raw);
+        self.arith_error = saved_arith_error;
         match arith::eval(&expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -1799,6 +1812,7 @@ impl Shell {
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
+            arith_error: false,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
@@ -2863,6 +2877,16 @@ impl Shell {
             return Flow::Exit(1);
         }
 
+        // An arithmetic error while expanding a command word (`echo $((1/0))`)
+        // discards the command with status 1, matching bash (which does not run
+        // the command with a fabricated value). Assignment-value/prefix arith
+        // errors are checked after their own expansion below.
+        if self.arith_error {
+            self.arith_error = false;
+            self.last_status = 1;
+            return Flow::Next;
+        }
+
         // Pure assignment (no command word): persist the variables/arrays.
         // A readonly-variable rejection makes the whole command fail (status 1).
         if argv.is_empty() {
@@ -2879,7 +2903,10 @@ impl Shell {
                     ok = false;
                 }
             }
-            if !ok {
+            if !ok || self.arith_error {
+                // A readonly rejection or an arithmetic error in a value makes
+                // the assignment fail with status 1.
+                self.arith_error = false;
                 self.last_status = 1;
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
@@ -2904,6 +2931,14 @@ impl Shell {
         let mut assigns: Vec<(String, String)> = Vec::with_capacity(sc.assignments.len());
         for a in &sc.assignments {
             assigns.push(self.assignment_prefix_value(a));
+        }
+
+        // An arithmetic error while expanding a prefix assignment value
+        // (`x=$((1/0)) cmd`) discards the command with status 1 (bash).
+        if self.arith_error {
+            self.arith_error = false;
+            self.last_status = 1;
+            return Flow::Next;
         }
 
         // A readonly variable cannot be set even as a temporary command prefix
@@ -4695,6 +4730,10 @@ impl Shell {
             Ok(v) => v.to_string(),
             Err(e) => {
                 eprintln!("osh: arithmetic: {e}");
+                // An arithmetic error in a `$(( … ))` word/value substitution
+                // makes the whole simple command abort (bash) rather than run
+                // with a fabricated value; the driver consumes this flag.
+                self.arith_error = true;
                 "0".to_string()
             }
         }
@@ -10870,6 +10909,21 @@ mod tests {
         let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
         assert_eq!(o2, "<hello world\nsecond line>\n");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn arith_error_in_word_aborts_command() {
+        // Division by zero in a `$(( … ))` word discards the command (bash) —
+        // no bogus "0" is echoed — and the next command still runs with $? = 1.
+        let (o, _) = run("echo $((10/0)) 2>/dev/null; echo \"next=$?\"");
+        assert_eq!(o, "next=1\n");
+        // An arithmetic error in an assignment value fails the assignment.
+        let (o2, _) = run("x=$((1/0)) 2>/dev/null; echo \"st=$?\"");
+        assert_eq!(o2, "st=1\n");
+        // A `(( … ))` command reports its own error/status and does not leak the
+        // abort flag onto the following command.
+        let (o3, _) = run("(( 1/0 )) 2>/dev/null; echo ok");
+        assert_eq!(o3, "ok\n");
     }
 
     #[test]

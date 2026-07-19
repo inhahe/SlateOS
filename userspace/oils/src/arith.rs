@@ -21,15 +21,21 @@
 /// variable/element (the evaluator treats that as `0`). The write methods have
 /// empty defaults so a read-only implementor need not provide them.
 pub trait VarLookup {
-    /// Return the scalar variable's value, or `None` if unset (treated as `0`).
-    fn get(&self, name: &str) -> Option<i64>;
+    /// Return the scalar variable's raw *string* value, or `None` if unset
+    /// (treated as `0`). The value is not a plain integer: bash recursively
+    /// evaluates it as an arithmetic expression, so `b=a; a=5; $((b))` yields
+    /// `5` and `x="2+3"; $((x))` yields `5`. The evaluator performs that
+    /// recursion (with a depth guard for cycles like `x=x`); implementors just
+    /// return the stored text.
+    fn get_str(&self, name: &str) -> Option<String>;
 
-    /// Return the integer value of the array element `name[index]`, or `None`
-    /// if unset/out-of-range (treated as `0`). `index` has already been
+    /// Return the raw *string* value of the array element `name[index]`, or
+    /// `None` if unset/out-of-range (treated as `0`). `index` has already been
     /// evaluated arithmetically (so `(( a[i+1] ))` and negative indices work).
-    /// The default ignores subscripts — implementors backed by arrays override
-    /// it.
-    fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+    /// Like [`VarLookup::get_str`], the value is recursively arithmetic-
+    /// evaluated. The default ignores subscripts — array-backed implementors
+    /// override it.
+    fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
         let _ = (name, index);
         None
     }
@@ -43,11 +49,12 @@ pub trait VarLookup {
         false
     }
 
-    /// Return the integer value of associative element `name[key]`, or `None`
-    /// if unset (treated as `0`). `key` is the raw, already-expanded subscript
-    /// text (bash does not arithmetic-evaluate associative subscripts). Only
+    /// Return the raw *string* value of associative element `name[key]`, or
+    /// `None` if unset (treated as `0`). `key` is the raw, already-expanded
+    /// subscript text (bash does not arithmetic-evaluate associative
+    /// subscripts). The value string is recursively arithmetic-evaluated. Only
     /// consulted when [`VarLookup::is_assoc`] returns `true`.
-    fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
+    fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
         let _ = (name, key);
         None
     }
@@ -135,7 +142,51 @@ enum ResolvedLv {
 pub fn eval(expr: &str, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
     // Parse with an immutable borrow, then evaluate with the mutable borrow.
     let ast = parse(expr, &*vars)?;
-    eval_expr(&ast, vars)
+    eval_expr(&ast, vars, 0)
+}
+
+/// Maximum depth of recursive variable evaluation (`b=a; a=b` would loop
+/// forever). bash reports "expression recursion level exceeded" at a similar
+/// bound. Each level re-parses the value string (itself a recursive-descent
+/// walk), so this is kept well below what would overflow the native stack; no
+/// legitimate variable-indirection chain approaches it.
+const RECURSION_LIMIT: u32 = 128;
+
+/// Evaluate a variable's raw string *value* as an arithmetic expression, the
+/// way bash does: `b="a"` with `a=5` yields `5`, `x="2+3"` yields `5`, and an
+/// unset/empty value yields `0`. `depth` guards against reference cycles.
+fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(0);
+    }
+    // Fast path: a plain decimal literal (the overwhelmingly common case — loop
+    // counters, sizes) needs no re-parse. A leading zero means octal, so defer
+    // those (and hex / `base#n` / sub-expressions) to the full parser below.
+    if let Some(n) = plain_decimal(t) {
+        return Ok(n);
+    }
+    if depth >= RECURSION_LIMIT {
+        return Err(ArithError(format!(
+            "{t}: expression recursion level exceeded (error token is \"{t}\")"
+        )));
+    }
+    let expr = parse(t, vars)?;
+    eval_expr(&expr, vars, depth + 1)
+}
+
+/// Parse `t` as a plain decimal integer (optionally signed), returning `None`
+/// for anything that needs the full arithmetic parser: empty, non-digits, or a
+/// leading-zero form (`010`) which arithmetic treats as octal.
+fn plain_decimal(t: &str) -> Option<i64> {
+    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None; // octal — let the full parser apply base rules
+    }
+    t.parse::<i64>().ok()
 }
 
 /// Parse an arithmetic expression into an AST (no evaluation, no mutation).
@@ -516,59 +567,70 @@ fn lvalue_of(e: Expr) -> Result<Lvalue, ArithError> {
     }
 }
 
-fn eval_expr(e: &Expr, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
+fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
     match e {
         Expr::Num(n) => Ok(*n),
-        Expr::Var(n) => Ok(vars.get(n).unwrap_or(0)),
+        // A variable read resolves the raw value string and (like bash)
+        // recursively evaluates it as an arithmetic expression.
+        Expr::Var(n) => match vars.get_str(n) {
+            Some(s) => str_to_val(&s, vars, depth),
+            None => Ok(0),
+        },
         Expr::Index(n, ix) => {
-            let i = eval_expr(ix, vars)?;
-            Ok(vars.get_index(n, i).unwrap_or(0))
+            let i = eval_expr(ix, vars, depth)?;
+            match vars.get_index_str(n, i) {
+                Some(s) => str_to_val(&s, vars, depth),
+                None => Ok(0),
+            }
         }
-        Expr::Assoc(n, k) => Ok(vars.get_assoc(n, k).unwrap_or(0)),
-        Expr::Neg(x) => Ok(eval_expr(x, vars)?.wrapping_neg()),
-        Expr::Not(x) => Ok(i64::from(eval_expr(x, vars)? == 0)),
-        Expr::BitNot(x) => Ok(!eval_expr(x, vars)?),
+        Expr::Assoc(n, k) => match vars.get_assoc_str(n, k) {
+            Some(s) => str_to_val(&s, vars, depth),
+            None => Ok(0),
+        },
+        Expr::Neg(x) => Ok(eval_expr(x, vars, depth)?.wrapping_neg()),
+        Expr::Not(x) => Ok(i64::from(eval_expr(x, vars, depth)? == 0)),
+        Expr::BitNot(x) => Ok(!eval_expr(x, vars, depth)?),
         Expr::Bin(op, l, r) => match op.as_str() {
             // Short-circuit: the right operand's side effects only happen when
             // the left doesn't already decide the result.
             "&&" => {
-                if eval_expr(l, vars)? == 0 {
+                if eval_expr(l, vars, depth)? == 0 {
                     Ok(0)
                 } else {
-                    Ok(i64::from(eval_expr(r, vars)? != 0))
+                    Ok(i64::from(eval_expr(r, vars, depth)? != 0))
                 }
             }
             "||" => {
-                if eval_expr(l, vars)? != 0 {
+                if eval_expr(l, vars, depth)? != 0 {
                     Ok(1)
                 } else {
-                    Ok(i64::from(eval_expr(r, vars)? != 0))
+                    Ok(i64::from(eval_expr(r, vars, depth)? != 0))
                 }
             }
             _ => {
-                let a = eval_expr(l, vars)?;
-                let b = eval_expr(r, vars)?;
+                let a = eval_expr(l, vars, depth)?;
+                let b = eval_expr(r, vars, depth)?;
                 apply(op, a, b)
             }
         },
         Expr::Ternary(c, t, f) => {
-            if eval_expr(c, vars)? != 0 {
-                eval_expr(t, vars)
+            if eval_expr(c, vars, depth)? != 0 {
+                eval_expr(t, vars, depth)
             } else {
-                eval_expr(f, vars)
+                eval_expr(f, vars, depth)
             }
         }
         Expr::Comma(l, r) => {
-            eval_expr(l, vars)?;
-            eval_expr(r, vars)
+            eval_expr(l, vars, depth)?;
+            eval_expr(r, vars, depth)
         }
         Expr::Assign(lv, base, rhs) => {
-            let loc = resolve_lv(lv, vars)?;
+            let loc = resolve_lv(lv, vars, depth)?;
             let v = match base {
-                None => eval_expr(rhs, vars)?,
+                None => eval_expr(rhs, vars, depth)?,
                 Some(op) => {
-                    let cur = load_rlv(&loc, vars);
-                    let b = eval_expr(rhs, vars)?;
+                    let cur = load_rlv(&loc, vars, depth)?;
+                    let b = eval_expr(rhs, vars, depth)?;
                     apply(op, cur, b)?
                 }
             };
@@ -576,15 +638,15 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
             Ok(v)
         }
         Expr::PreIncr(lv, inc) => {
-            let loc = resolve_lv(lv, vars)?;
+            let loc = resolve_lv(lv, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
-            let v = load_rlv(&loc, vars).wrapping_add(step);
+            let v = load_rlv(&loc, vars, depth)?.wrapping_add(step);
             store_rlv(&loc, v, vars);
             Ok(v)
         }
         Expr::PostIncr(lv, inc) => {
-            let loc = resolve_lv(lv, vars)?;
-            let old = load_rlv(&loc, vars);
+            let loc = resolve_lv(lv, vars, depth)?;
+            let old = load_rlv(&loc, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
             store_rlv(&loc, old.wrapping_add(step), vars);
             Ok(old)
@@ -594,22 +656,31 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
 
 /// Resolve an lvalue's location once (evaluating an index subscript), so a
 /// read-modify-write op doesn't evaluate the subscript twice.
-fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup) -> Result<ResolvedLv, ArithError> {
+fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<ResolvedLv, ArithError> {
     Ok(match lv {
         Lvalue::Var(n) => ResolvedLv::Var(n.clone()),
         Lvalue::Index(n, ix) => {
-            let i = eval_expr(ix, vars)?;
+            let i = eval_expr(ix, vars, depth)?;
             ResolvedLv::Index(n.clone(), i)
         }
         Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
     })
 }
 
-fn load_rlv(loc: &ResolvedLv, vars: &dyn VarLookup) -> i64 {
+fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
     match loc {
-        ResolvedLv::Var(n) => vars.get(n).unwrap_or(0),
-        ResolvedLv::Index(n, i) => vars.get_index(n, *i).unwrap_or(0),
-        ResolvedLv::Assoc(n, k) => vars.get_assoc(n, k).unwrap_or(0),
+        ResolvedLv::Var(n) => match vars.get_str(n) {
+            Some(s) => str_to_val(&s, vars, depth),
+            None => Ok(0),
+        },
+        ResolvedLv::Index(n, i) => match vars.get_index_str(n, *i) {
+            Some(s) => str_to_val(&s, vars, depth),
+            None => Ok(0),
+        },
+        ResolvedLv::Assoc(n, k) => match vars.get_assoc_str(n, k) {
+            Some(s) => str_to_val(&s, vars, depth),
+            None => Ok(0),
+        },
     }
 }
 
@@ -669,9 +740,16 @@ mod tests {
 
     #[derive(Default)]
     struct Map(HashMap<String, i64>);
-    impl VarLookup for Map {
+    impl Map {
+        /// Test-only convenience: read a scalar back as an integer to assert on
+        /// values stored by arithmetic assignment.
         fn get(&self, name: &str) -> Option<i64> {
             self.0.get(name).copied()
+        }
+    }
+    impl VarLookup for Map {
+        fn get_str(&self, name: &str) -> Option<String> {
+            self.0.get(name).map(i64::to_string)
         }
         fn set(&mut self, name: &str, value: i64) {
             self.0.insert(name.to_string(), value);
@@ -685,13 +763,13 @@ mod tests {
         a: Vec<i64>,
     }
     impl VarLookup for ArrMap {
-        fn get(&self, name: &str) -> Option<i64> {
-            self.scalars.get(name).copied()
+        fn get_str(&self, name: &str) -> Option<String> {
+            self.scalars.get(name).map(i64::to_string)
         }
         fn set(&mut self, name: &str, value: i64) {
             self.scalars.insert(name.to_string(), value);
         }
-        fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+        fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
             if name != "a" {
                 return None;
             }
@@ -700,7 +778,10 @@ mod tests {
             } else {
                 index
             };
-            usize::try_from(real).ok().and_then(|i| self.a.get(i).copied())
+            usize::try_from(real)
+                .ok()
+                .and_then(|i| self.a.get(i))
+                .map(i64::to_string)
         }
         fn set_index(&mut self, name: &str, index: i64, value: i64) {
             if name != "a" {
@@ -750,17 +831,17 @@ mod tests {
     #[derive(Default)]
     struct AssocMap(HashMap<String, i64>);
     impl VarLookup for AssocMap {
-        fn get(&self, _name: &str) -> Option<i64> {
+        fn get_str(&self, _name: &str) -> Option<String> {
             None
         }
         fn is_assoc(&self, name: &str) -> bool {
             name == "m"
         }
-        fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
+        fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
             if name != "m" {
                 return None;
             }
-            self.0.get(key).copied()
+            self.0.get(key).map(i64::to_string)
         }
         fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
             if name == "m" {
@@ -785,6 +866,53 @@ mod tests {
         // Assignment to an associative element.
         assert_eq!(eval("m[foo] = 100", &mut m).unwrap(), 100);
         assert_eq!(m.0.get("foo"), Some(&100));
+    }
+
+    /// A string-backed scalar lookup, so recursive value evaluation (a value
+    /// that is itself a variable name or an expression) can be exercised.
+    #[derive(Default)]
+    struct StrMap(HashMap<String, String>);
+    impl VarLookup for StrMap {
+        fn get_str(&self, name: &str) -> Option<String> {
+            self.0.get(name).cloned()
+        }
+        fn set(&mut self, name: &str, value: i64) {
+            self.0.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    #[test]
+    fn recursive_variable_evaluation() {
+        let mut m = StrMap::default();
+        m.0.insert("a".into(), "5".into());
+        m.0.insert("b".into(), "a".into()); // b -> a -> 5
+        m.0.insert("c".into(), "b".into()); // c -> b -> a -> 5
+        m.0.insert("expr".into(), "2+3".into()); // value is an expression
+        m.0.insert("mixed".into(), "a * 2".into()); // uses another var
+        assert_eq!(eval("b", &mut m).unwrap(), 5);
+        assert_eq!(eval("c", &mut m).unwrap(), 5);
+        assert_eq!(eval("expr", &mut m).unwrap(), 5);
+        assert_eq!(eval("expr * 2", &mut m).unwrap(), 10);
+        assert_eq!(eval("mixed", &mut m).unwrap(), 10);
+        // A value naming an unset variable evaluates to 0.
+        m.0.insert("u".into(), "missing".into());
+        assert_eq!(eval("u + 1", &mut m).unwrap(), 1);
+        // A leading-zero value keeps octal semantics through the recursion.
+        m.0.insert("oct".into(), "010".into());
+        assert_eq!(eval("oct", &mut m).unwrap(), 8);
+    }
+
+    #[test]
+    fn recursive_variable_cycle_is_bounded() {
+        let mut m = StrMap::default();
+        m.0.insert("x".into(), "x".into()); // self-reference
+        let e = eval("x", &mut m).unwrap_err();
+        assert!(e.0.contains("recursion level exceeded"), "{}", e.0);
+        // Mutual cycle a -> b -> a.
+        let mut m2 = StrMap::default();
+        m2.0.insert("a".into(), "b".into());
+        m2.0.insert("b".into(), "a".into());
+        assert!(eval("a", &mut m2).is_err());
     }
 
     fn ev(s: &str) -> i64 {

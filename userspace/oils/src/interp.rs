@@ -8583,25 +8583,25 @@ impl Shell {
 
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
-    fn get(&self, name: &str) -> Option<i64> {
-        self.param_value(name).and_then(|v| v.trim().parse::<i64>().ok())
+    fn get_str(&self, name: &str) -> Option<String> {
+        // Return the raw value string; the arithmetic evaluator recursively
+        // evaluates it (`b=a; a=5; $((b))` → 5), including octal/hex literals.
+        self.param_value(name)
     }
 
-    fn get_index(&self, name: &str, index: i64) -> Option<i64> {
+    fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
         // `array_element` already applies bash negative-index semantics.
         self.array_element(name, index)
-            .and_then(|v| v.trim().parse::<i64>().ok())
     }
 
     fn is_assoc(&self, name: &str) -> bool {
         self.assoc.contains_key(name)
     }
 
-    fn get_assoc(&self, name: &str, key: &str) -> Option<i64> {
-        // Bash reads an associative element's value as a number in `(( … ))`;
-        // an unset key (or a non-numeric value) evaluates to 0.
+    fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
+        // An unset key (or empty value) evaluates to 0; a non-empty value is
+        // recursively arithmetic-evaluated by the caller.
         self.assoc_element(name, key)
-            .and_then(|v| v.trim().parse::<i64>().ok())
     }
 
     fn set(&mut self, name: &str, value: i64) {

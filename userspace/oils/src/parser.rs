@@ -1349,6 +1349,9 @@ enum RawBinOp {
     NumLe,
     NumGt,
     NumGe,
+    FileNewer,
+    FileOlder,
+    SameFile,
 }
 
 impl RawBinOp {
@@ -1366,6 +1369,9 @@ impl RawBinOp {
             RawBinOp::NumLe => CondBinOp::NumLe,
             RawBinOp::NumGt => CondBinOp::NumGt,
             RawBinOp::NumGe => CondBinOp::NumGe,
+            RawBinOp::FileNewer => CondBinOp::FileNewer,
+            RawBinOp::FileOlder => CondBinOp::FileOlder,
+            RawBinOp::SameFile => CondBinOp::SameFile,
         }
     }
 }
@@ -1382,6 +1388,9 @@ fn raw_binop_from(s: &str) -> Option<RawBinOp> {
         "-le" => RawBinOp::NumLe,
         "-gt" => RawBinOp::NumGt,
         "-ge" => RawBinOp::NumGe,
+        "-nt" => RawBinOp::FileNewer,
+        "-ot" => RawBinOp::FileOlder,
+        "-ef" => RawBinOp::SameFile,
         _ => return None,
     })
 }

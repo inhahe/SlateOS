@@ -372,6 +372,25 @@ script** (only function returns), and an `exit N` *inside* an `ERR`/`DEBUG`/
 handler runs via a nested `run_source` whose `Flow::Exit` is swallowed). Both
 are edge cases; the fix is to thread the handler's flow out of `fire_trap`.
 
+### TD-OILS12. `osh` `-ef` file test uses path canonicalization, not device+inode — OPEN (low priority, gated on portable inode access)
+
+**Where:** `userspace/oils/src/interp.rs` (`file_cmp`, used by both `test`/`[`
+`eval_binary` and `[[ … ]]` `cond_binary`).
+
+**What:** the `-ef` operator (`a -ef b` — "same file") is implemented by
+comparing `std::fs::canonicalize(a)` to `canonicalize(b)`. bash compares the
+device number and inode from `stat(2)`, which also makes two **hard links to
+the same inode under different names** compare equal. `std::fs::Metadata` does
+not expose device/inode portably across our host (`x86_64-pc-windows-gnu`) and
+the custom `x86_64-slateos` target, so distinct-name hard links are *not*
+detected as the same file. The common cases — the same path spelled two ways,
+or paths that resolve to the same target through symlinks — are handled
+correctly, since they canonicalize identically.
+
+**Proper fix:** once SlateOS exposes a stable file identity (device+inode, or a
+file-ID equivalent) through the VFS/`stat` path, compare those instead of
+canonical paths. The `-nt`/`-ot` mtime comparisons are already exact.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

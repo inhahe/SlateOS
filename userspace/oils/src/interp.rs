@@ -1446,6 +1446,15 @@ impl Shell {
                     _ => unreachable!(),
                 }
             }
+            CondBinOp::FileNewer => {
+                file_cmp("-nt", &self.expand_to_string(l), &self.expand_to_string(r))
+            }
+            CondBinOp::FileOlder => {
+                file_cmp("-ot", &self.expand_to_string(l), &self.expand_to_string(r))
+            }
+            CondBinOp::SameFile => {
+                file_cmp("-ef", &self.expand_to_string(l), &self.expand_to_string(r))
+            }
         }
     }
 
@@ -6760,6 +6769,38 @@ fn eval_binary(l: &str, op: &str, r: &str) -> bool {
                 _ => false,
             }
         }
+        "-nt" | "-ot" | "-ef" => file_cmp(op, l, r),
+        _ => false,
+    }
+}
+
+/// File-comparison test operators shared by `test`/`[` and `[[ … ]]`:
+/// `-nt` (newer-than), `-ot` (older-than), `-ef` (same file).
+///
+/// `-nt`/`-ot` compare modification times, with bash's existence rule: `a -nt b`
+/// is also true when `a` exists and `b` does not (and symmetrically for `-ot`).
+/// `-ef` compares canonicalized paths — the portable stand-in for a
+/// device+inode match, which the standard library does not expose across our
+/// host and target (true hard links to *different* names are not detected; see
+/// known-issues TD-OILS12).
+fn file_cmp(op: &str, l: &str, r: &str) -> bool {
+    let lmtime = std::fs::metadata(l).and_then(|m| m.modified()).ok();
+    let rmtime = std::fs::metadata(r).and_then(|m| m.modified()).ok();
+    match op {
+        "-nt" => match (lmtime, rmtime) {
+            (Some(a), Some(b)) => a > b,
+            (Some(_), None) => true,
+            _ => false,
+        },
+        "-ot" => match (lmtime, rmtime) {
+            (Some(a), Some(b)) => a < b,
+            (None, Some(_)) => true,
+            _ => false,
+        },
+        "-ef" => match (std::fs::canonicalize(l), std::fs::canonicalize(r)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -8376,6 +8417,48 @@ mod tests {
         let mut sh = Shell::new();
         sh.run_source("trap 'RET=1' RETURN\nf() { :; }\nf");
         assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn test_file_comparison_operators() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir();
+        let a = base.join(format!("osh_ntef_{}_{nanos}_a", std::process::id()));
+        let b = base.join(format!("osh_ntef_{}_{nanos}_b", std::process::id()));
+        std::fs::write(&a, b"x").expect("write a");
+        // Ensure b's mtime is strictly later than a's.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&b, b"y").expect("write b");
+        let pa = a.to_string_lossy().replace('\\', "/");
+        let pb = b.to_string_lossy().replace('\\', "/");
+
+        // `[[ … ]]` form.
+        assert_eq!(run(&format!("[[ {pb} -nt {pa} ]] && echo yes")).0, "yes\n");
+        assert_eq!(run(&format!("[[ {pa} -ot {pb} ]] && echo yes")).0, "yes\n");
+        assert_eq!(
+            run(&format!("[[ {pa} -nt {pb} ]] && echo yes || echo no")).0,
+            "no\n"
+        );
+        assert_eq!(run(&format!("[[ {pa} -ef {pa} ]] && echo yes")).0, "yes\n");
+        assert_eq!(
+            run(&format!("[[ {pa} -ef {pb} ]] && echo yes || echo no")).0,
+            "no\n"
+        );
+
+        // `test` / `[` form.
+        assert_eq!(run(&format!("[ {pb} -nt {pa} ] && echo yes")).0, "yes\n");
+        assert_eq!(run(&format!("test {pa} -ef {pa} && echo yes")).0, "yes\n");
+
+        // Existence rule: a exists, missing sibling does not → `-nt` is true.
+        let missing = base.join(format!("osh_ntef_{}_{nanos}_gone", std::process::id()));
+        let pm = missing.to_string_lossy().replace('\\', "/");
+        assert_eq!(run(&format!("[[ {pa} -nt {pm} ]] && echo yes")).0, "yes\n");
+
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
     }
 
     #[test]

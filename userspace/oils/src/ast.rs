@@ -158,6 +158,14 @@ pub enum CondBinOp {
     NumGt,
     /// `-ge` — numeric greater-than-or-equal.
     NumGe,
+    /// `-nt` — left file is newer than right (by mtime), or left exists and
+    /// right does not.
+    FileNewer,
+    /// `-ot` — left file is older than right (by mtime), or right exists and
+    /// left does not.
+    FileOlder,
+    /// `-ef` — left and right refer to the same file (same canonical path).
+    SameFile,
 }
 
 /// A simple command with variable assignments, words, and redirections.

@@ -5771,6 +5771,68 @@ fn format_conversion(
     let width_n: usize = width.parse().unwrap_or(0);
     let prec_n: Option<usize> = prec.as_ref().map(|p| p.parse().unwrap_or(0));
 
+    // `%(FORMAT)T` — strftime-style time conversion. The parenthesised format
+    // occupies the position of the conversion character and is followed by `T`.
+    // It consumes one argument: seconds since the Unix epoch (missing, empty, or
+    // a negative value ⇒ the current time; bash's `-2` "shell start" is
+    // approximated as now here). Time is rendered in UTC.
+    if chars.peek() == Some(&'(') {
+        chars.next();
+        let mut tfmt = String::new();
+        let mut depth = 1usize;
+        for c in chars.by_ref() {
+            match c {
+                '(' => {
+                    depth += 1;
+                    tfmt.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    tfmt.push(c);
+                }
+                _ => tfmt.push(c),
+            }
+        }
+        // Consume the trailing `T` conversion letter if present.
+        if chars.peek() == Some(&'T') {
+            chars.next();
+        }
+        let secs: i64 = {
+            let has_arg = args.get(*arg_i).is_some();
+            if has_arg {
+                let raw = args.get(*arg_i).cloned().unwrap_or_default();
+                *arg_i += 1;
+                let n = parse_printf_int(&raw);
+                #[allow(clippy::cast_possible_wrap)]
+                if n < 0 { unix_time().0 as i64 } else { n }
+            } else {
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    unix_time().0 as i64
+                }
+            }
+        };
+        let rendered = format_strftime(&tfmt, secs);
+        // String-style field-width padding (never zero-padded).
+        let len = rendered.chars().count();
+        if len < width_n {
+            let pad = width_n - len;
+            if left {
+                out.push_str(&rendered);
+                out.extend(std::iter::repeat_n(' ', pad));
+            } else {
+                out.extend(std::iter::repeat_n(' ', pad));
+                out.push_str(&rendered);
+            }
+        } else {
+            out.push_str(&rendered);
+        }
+        return;
+    }
+
     let Some(conv) = chars.next() else {
         // Trailing bare `%…` with no conversion: emit literally.
         out.push_str(&spec);
@@ -5862,6 +5924,178 @@ fn format_conversion(
 
 /// Parse an integer argument for printf, tolerating leading/trailing whitespace,
 /// a leading `0x`/`0` base prefix, and a leading `'c` character-code form.
+/// Convert a day count relative to 1970-01-01 into a civil `(year, month,
+/// day)`. Uses Howard Hinnant's `civil_from_days` algorithm (valid for the
+/// full proleptic Gregorian range).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m as u32, d)
+}
+
+/// Inverse of [`civil_from_days`]: day count relative to 1970-01-01 for a
+/// civil date. Used to derive the day-of-year.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mi = i64::from(m);
+    let doy = (153 * (if m > 2 { mi - 3 } else { mi + 9 }) + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
+/// seconds since the Unix epoch; the broken-down time is computed in **UTC**
+/// (SlateOS has no timezone database — see known-issues TD-OILS). Supports the
+/// common specifiers `%Y %C %y %m %d %e %H %I %M %S %p %P %A %a %B %b %h %j %u
+/// %w %s %n %t %F %T %R %D %%`; an unknown `%x` is emitted verbatim.
+fn format_strftime(fmt: &str, epoch: i64) -> String {
+    const WDAY_FULL: [&str; 7] = [
+        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    ];
+    const WDAY_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MON_FULL: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December",
+    ];
+    const MON_ABBR: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let days = epoch.div_euclid(86_400);
+    let rem = epoch.rem_euclid(86_400);
+    let hour = (rem / 3600) as u32;
+    let minute = ((rem % 3600) / 60) as u32;
+    let second = (rem % 60) as u32;
+    let (year, month, day) = civil_from_days(days);
+    // 1970-01-01 was a Thursday (index 4 with Sunday = 0).
+    let wday = (((days + 4) % 7 + 7) % 7) as usize;
+    let yday = days - days_from_civil(year, 1, 1) + 1;
+    let mon_i = (month.max(1) - 1) as usize;
+
+    // Render one specifier letter to `out`. `%F`/`%T`/`%R`/`%D` recurse.
+    fn emit(out: &mut String, c: char, ctx: &StrftimeCtx) {
+        match c {
+            'Y' => out.push_str(&ctx.year.to_string()),
+            'C' => out.push_str(&format!("{:02}", ctx.year.div_euclid(100))),
+            'y' => out.push_str(&format!("{:02}", ctx.year.rem_euclid(100))),
+            'm' => out.push_str(&format!("{:02}", ctx.month)),
+            'd' => out.push_str(&format!("{:02}", ctx.day)),
+            'e' => out.push_str(&format!("{:2}", ctx.day)),
+            'H' => out.push_str(&format!("{:02}", ctx.hour)),
+            'I' => {
+                let h12 = match ctx.hour % 12 {
+                    0 => 12,
+                    h => h,
+                };
+                out.push_str(&format!("{h12:02}"));
+            }
+            'M' => out.push_str(&format!("{:02}", ctx.minute)),
+            'S' => out.push_str(&format!("{:02}", ctx.second)),
+            'p' => out.push_str(if ctx.hour < 12 { "AM" } else { "PM" }),
+            'P' => out.push_str(if ctx.hour < 12 { "am" } else { "pm" }),
+            'A' => out.push_str(ctx.wday_full),
+            'a' => out.push_str(ctx.wday_abbr),
+            'B' => out.push_str(ctx.mon_full),
+            'b' | 'h' => out.push_str(ctx.mon_abbr),
+            'j' => out.push_str(&format!("{:03}", ctx.yday)),
+            'u' => out.push_str(&(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
+            'w' => out.push_str(&ctx.wday.to_string()),
+            's' => out.push_str(&ctx.epoch.to_string()),
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            '%' => out.push('%'),
+            'F' => {
+                for k in ['Y', '-', 'm', '-', 'd'] {
+                    if k == '-' {
+                        out.push('-');
+                    } else {
+                        emit(out, k, ctx);
+                    }
+                }
+            }
+            'T' => {
+                emit(out, 'H', ctx);
+                out.push(':');
+                emit(out, 'M', ctx);
+                out.push(':');
+                emit(out, 'S', ctx);
+            }
+            'R' => {
+                emit(out, 'H', ctx);
+                out.push(':');
+                emit(out, 'M', ctx);
+            }
+            'D' => {
+                emit(out, 'm', ctx);
+                out.push('/');
+                emit(out, 'd', ctx);
+                out.push('/');
+                emit(out, 'y', ctx);
+            }
+            other => {
+                out.push('%');
+                out.push(other);
+            }
+        }
+    }
+
+    let ctx = StrftimeCtx {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        wday,
+        yday,
+        epoch,
+        wday_full: WDAY_FULL[wday],
+        wday_abbr: WDAY_ABBR[wday],
+        mon_full: MON_FULL[mon_i],
+        mon_abbr: MON_ABBR[mon_i],
+    };
+    let mut out = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some(sp) => emit(&mut out, sp, &ctx),
+                None => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Broken-down UTC time plus preformatted name strings, passed to the
+/// `strftime` specifier renderer.
+struct StrftimeCtx {
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    wday: usize,
+    yday: i64,
+    epoch: i64,
+    wday_full: &'static str,
+    wday_abbr: &'static str,
+    mon_full: &'static str,
+    mon_abbr: &'static str,
+}
+
 fn parse_printf_int(s: &str) -> i64 {
     let t = s.trim();
     if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
@@ -6565,6 +6799,27 @@ mod tests {
     fn printf_float_conversion() {
         assert_eq!(run("printf '%.2f' 3.14159").0, "3.14");
         assert_eq!(run("printf '%f' 1").0, "1.000000");
+    }
+
+    #[test]
+    fn printf_time_conversion() {
+        // Epoch 0 = 1970-01-01 00:00:00 UTC (a Thursday, day-of-year 001).
+        assert_eq!(run("printf '%(%F)T\\n' 0").0, "1970-01-01\n");
+        assert_eq!(run("printf '%(%A)T\\n' 0").0, "Thursday\n");
+        assert_eq!(run("printf '%(%j)T\\n' 0").0, "001\n");
+        // 12-hour clock: midnight is 12 AM.
+        assert_eq!(run("printf '%(%I %p)T\\n' 0").0, "12 AM\n");
+        // A known later timestamp: 1000000000 = 2001-09-09 01:46:40 UTC (Sunday).
+        assert_eq!(
+            run("printf '%(%Y-%m-%d %H:%M:%S)T\\n' 1000000000").0,
+            "2001-09-09 01:46:40\n"
+        );
+        assert_eq!(run("printf '%(%B %a)T\\n' 1000000000").0, "September Sun\n");
+        // `%T`/`%R` compound specifiers.
+        assert_eq!(run("printf '%(%T)T\\n' 1000000000").0, "01:46:40\n");
+        assert_eq!(run("printf '%(%R)T\\n' 1000000000").0, "01:46\n");
+        // A negative argument means "now"; just check it produces 4-digit year.
+        assert_eq!(run("printf '%(%Y)T\\n' -1").0.trim().len(), 4);
     }
 
     #[test]

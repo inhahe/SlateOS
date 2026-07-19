@@ -304,6 +304,27 @@ script enables group lexing only for later commands. Deferred: the current
 behavior is a deliberate, documented superset tradeoff and `!(cmd)`
 no-space negated subshells are vanishingly rare.
 
+### TD-OILS9. `osh` `printf '%(FMT)T'`: time is always formatted in UTC, not local time — OPEN (low priority, gated on timezone infrastructure)
+
+**Where:** `userspace/oils/src/interp.rs` (`format_strftime`, called from
+`format_conversion`'s `%(…)T` branch).
+
+**What:** bash's `printf '%(FMT)T'` formats the broken-down time in the
+shell's *local* timezone (honoring `$TZ` / the system zone). Our
+implementation renders the time in **UTC** because SlateOS has no timezone
+database and no `$TZ` handling yet. All calendar math (`civil_from_days` /
+`days_from_civil`) and the specifier set (`%Y %C %y %m %d %e %H %I %M %S %p
+%P %A %a %B %b %h %j %u %w %s %n %t %F %T %R %D %%`) are correct; only the
+zone offset is missing. Also, bash's `-2` argument ("time the shell was
+started") is approximated as the current time, since `format_printf` is a
+free function without access to the shell's start instant.
+
+**Proper fix:** once SlateOS grows a timezone database / `$TZ` parsing,
+apply the local UTC offset (and DST rules) before breaking the epoch down,
+and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
+UTC formatting is correct and deterministic, and scripts that need a
+specific zone can compute the offset explicitly.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

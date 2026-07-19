@@ -2684,7 +2684,18 @@ impl Shell {
         let end = match length {
             Some(l) => {
                 let l = self.eval_arith_index(l);
-                if l < 0 { (n + l).max(start) } else { (start + l).min(n) }
+                // Unlike a string substring (where a negative length counts back
+                // from the end of the string), an array / positional-parameter
+                // slice rejects a negative length as a fatal expansion error
+                // (bash: "N: substring expression < 0"). Route it through the
+                // same fatal-arith abort machinery so the shell aborts at the
+                // main level and the subshell fails without aborting the parent.
+                if l < 0 {
+                    self.errln(&format!("osh: {l}: substring expression < 0"));
+                    self.arith_error = true;
+                    return Vec::new();
+                }
+                (start + l).min(n)
             }
             None => n,
         };
@@ -14139,6 +14150,26 @@ mod tests {
     }
 
     #[test]
+    fn array_slice_negative_length_is_fatal() {
+        // An array / positional-parameter slice rejects a *negative length* as a
+        // fatal expansion error ("N: substring expression < 0"), unlike a string
+        // substring where a negative length counts back from the end. Fatal at
+        // the main shell (status 1, aborts), status 1 without aborting the parent
+        // inside a subshell.
+        assert_eq!(run("a=(1 2 3 4 5); echo ${a[@]:1:-1}; echo after"), (String::new(), 1));
+        assert_eq!(run("a=(1 2 3); echo ${a[*]:0:-5}; echo after"), (String::new(), 1));
+        assert_eq!(run("set -- a b c d e; echo ${@:1:-1}; echo after"), (String::new(), 1));
+        // Subshell: fails with 1 but the parent survives to run `echo done`.
+        assert_eq!(run("(a=(1 2 3); echo ${a[@]:0:-1}); echo done").1, 0);
+        assert_eq!(run("x=$(a=(1 2 3); echo ${a[@]:0:-1}); echo $?").0, "1\n");
+        // A string substring keeps its from-the-end negative-length semantics.
+        assert_eq!(run("s=abcdef; echo ${s:1:-1}").0, "bcde\n");
+        // A zero or positive length still slices normally.
+        assert_eq!(run("a=(1 2 3 4 5); echo \"[${a[@]:1:0}]\"").0, "[]\n");
+        assert_eq!(run("a=(1 2 3 4 5); echo ${a[@]:1:2}").0, "2 3\n");
+    }
+
+    #[test]
     fn arith_error_diagnostic_honors_stderr_redirect() {
         // Arithmetic-error diagnostics go through the shell's stderr routing, so
         // a command-scoped `2>/dev/null` silences them (bash parity) — regression
@@ -18601,9 +18632,11 @@ mod tests {
         // `${a[@]:off:len}` selects a run of elements by position.
         assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:2}").0, "one two\n");
         assert_eq!(run("a=(zero one two three four); echo ${a[@]:2}").0, "two three four\n");
-        // Negative offset counts from the end; negative length trims from the end.
+        // Negative offset counts from the end. A negative *length*, unlike a
+        // string substring, is a fatal error for an array slice (bash: "N:
+        // substring expression < 0") — see `array_slice_negative_length_is_fatal`.
         assert_eq!(run("a=(zero one two three four); echo \"${a[@]: -2}\"").0, "three four\n");
-        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:-1}").0, "one two three\n");
+        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:-1}"), (String::new(), 1));
         // Quoted slice preserves one field per element (spaces inside survive).
         assert_eq!(
             run("a=('a b' 'c d' e); for x in \"${a[@]:0:2}\"; do echo \"[$x]\"; done").0,

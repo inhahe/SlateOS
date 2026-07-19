@@ -1729,6 +1729,16 @@ the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic. Still
 the resolved executable path, and add a computed `BASHOPTS`. The identity
 *default* (for host runs and pre-login target state) needs the operator's call.
 
+**Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
+`param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `BASHOPTS`/`EUID`/…)
+return a value when read directly (`echo $BASHPID`) but are **not listed** by the
+name-prefix expansions `${!BASH*}` / `${!BASH@}`, because those enumerate only the
+concrete `vars`/`arrays`/`assoc` maps. bash includes every dynamic variable in the
+prefix listing. Fixing this needs the prefix-match code to also consider the set of
+known dynamic-variable names (a static name list checked alongside the maps).
+Low-value (prefix enumeration of `BASH*` is rare in scripts) and coupled to the
+broader "define the missing `BASH*` vars" work above, so parked here.
+
 ### TD-OILS-BUILTIN-USAGE. `osh` builtins omit bash's second `NAME: usage: …` synopsis line on a usage error — OPEN (low priority, cosmetic stderr text) 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — the usage-error paths of

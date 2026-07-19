@@ -1340,9 +1340,11 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 name,
             });
         }
-        // `${!name}` — indirect expansion. The referent (`name`) must be a plain
-        // name; the target it names may itself carry a subscript.
-        if subscript.is_none() && is_valid_name(&name) {
+        // `${!name}` — indirect expansion. The referent (`name`) may be a plain
+        // identifier, a positional parameter (`${!1}`), or a special parameter
+        // (`${!#}`, `${!$}`, …). Its *value* is then used as the parameter name
+        // to expand. The named target may itself carry a subscript.
+        if subscript.is_none() && is_indirect_referent(&name) {
             if remaining.is_empty() {
                 return Ok(WordPart::Indirect(name));
             }
@@ -1350,23 +1352,26 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             // (`${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`, …).
             // Parse the modifier as if it were written against `ref` directly;
             // the placeholder name is rewritten to the resolved target at
-            // expansion time. Only scalar modifiers combine with indirection.
-            let modifier_src: String =
-                name.chars().chain(remaining.iter().copied()).collect();
-            let target = parse_braced_param(&modifier_src)?;
-            if matches!(
-                target,
-                WordPart::ParamOp { .. }
-                    | WordPart::ParamTrim { .. }
-                    | WordPart::ParamSubstr { .. }
-                    | WordPart::ParamReplace { .. }
-                    | WordPart::ParamCase { .. }
-                    | WordPart::ParamTransform { .. }
-            ) {
-                return Ok(WordPart::IndirectOp {
-                    refname: name,
-                    target: Box::new(target),
-                });
+            // expansion time. Only scalar modifiers combine with indirection,
+            // and only a plain-name referent may carry a trailing modifier.
+            if is_valid_name(&name) {
+                let modifier_src: String =
+                    name.chars().chain(remaining.iter().copied()).collect();
+                let target = parse_braced_param(&modifier_src)?;
+                if matches!(
+                    target,
+                    WordPart::ParamOp { .. }
+                        | WordPart::ParamTrim { .. }
+                        | WordPart::ParamSubstr { .. }
+                        | WordPart::ParamReplace { .. }
+                        | WordPart::ParamCase { .. }
+                        | WordPart::ParamTransform { .. }
+                ) {
+                    return Ok(WordPart::IndirectOp {
+                        refname: name,
+                        target: Box::new(target),
+                    });
+                }
             }
         }
         return Err(ParseError(format!(
@@ -1747,6 +1752,18 @@ fn is_valid_name(s: &str) -> bool {
         _ => return false,
     }
     it.all(is_name_char)
+}
+
+/// A referent usable in a *bare* indirect expansion `${!name}`: a plain
+/// identifier, a positional parameter (all digits, `${!1}`), or a special
+/// single-char parameter. bash accepts `#`, `?`, and `-` here but **rejects**
+/// `$` and `!` (`${!$}`/`${!!}` are a "bad substitution"), and `@`/`*` are
+/// consumed earlier as the variable-name listing forms (`${!prefix@}`). The
+/// referent's value is then used as the parameter name to expand.
+fn is_indirect_referent(name: &str) -> bool {
+    is_valid_name(name)
+        || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
+        || matches!(name, "#" | "?" | "-")
 }
 
 /// True when a `>&`/`<&` target denotes an fd duplication (a bare number or

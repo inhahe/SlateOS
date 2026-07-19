@@ -1595,6 +1595,46 @@ conversion error in stream order (e.g. take `&mut impl Write` for stdout plus an
 error sink, or yield an ordered `Vec<PrintfEvent>`), done alongside ERRLINE so the
 whole merged stream matches.
 
+### TD-OILS-INDIRECT-AT-STAR. `${!@}` / `${!*}` list variable names instead of indirecting through `$@`/`$*` — MINOR 2026-07-19
+
+**Where:** `userspace/oils/src/parser.rs` — `parse_braced_param`, the `${!…}`
+branch (~1308). The empty-prefix cases `${!*}` and `${!@}` are caught by the
+`strip_suffix('*')` / `strip_suffix('@')` name-listing logic (`WordPart::VarNames`
+with `prefix == ""`).
+
+**Symptom:** bash treats `${!@}` and `${!*}` (empty prefix) as *indirect
+expansion through the positional list* `$@` / `$*`, not as the "list all variable
+names" form. Only a **non-empty** prefix (`${!PATH@}`, `${!BASH_@}`) triggers
+name-listing.
+
+```
+set -- a b c; echo "${!@}"    →  bash: "a b c: invalid variable name" (exit 1)
+                                  osh:  ALLUSERSPROFILE APPDATA … (every var name)
+foo=1; echo "${!@}"           →  bash: (empty, exit 0)   [no positionals → nothing]
+                                  osh:  … foo (every var name)
+```
+
+So bash resolves `${!@}` = `${!<value-of-$@>}`: with `set -- a b c`, `$@`
+expands to `a b c`, which as a single indirect target name is invalid; with no
+positionals, `$@` expands to nothing, so the whole thing is empty (no error).
+osh instead lists every set variable name.
+
+**Why deferred:** the fix is more than flipping the prefix guard. It needs (1) the
+listing branch to require a **non-empty** valid prefix so `${!@}`/`${!*}` fall
+through, (2) `@`/`*` added to the accepted indirect referents (they resolve via
+`param_value("@"/"*")`), and (3) a special case so an **empty** `$@`/`$*` (no
+positionals) yields empty *without* the "invalid variable name" fatal that a
+non-empty-but-malformed target produces — bash distinguishes "nothing to
+indirect" from "indirect through a bad name". That empty-positionals rule is the
+subtle part and is easy to get wrong, so it was split from the `${!#}`/`${!N}`
+special/positional-referent fix (which is done). Genuinely obscure form.
+
+**Proper fix:** in `parse_braced_param`, gate the `${!prefix@}`/`${!prefix*}`
+listing on `!prefix.is_empty()`; extend `is_indirect_referent` to accept `@`/`*`;
+and in `expand_indirect` treat a `@`/`*` referent whose positional list is empty
+as an empty (non-fatal) result rather than routing an empty string through
+`is_valid_indirect_target`.
+
 ### TD-OILS-READ-T0-POLL. `read -t 0` readiness on a live pipe/tty is exact only on Windows — MINOR 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `input_available_now` and the

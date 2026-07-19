@@ -15543,6 +15543,29 @@ mod tests {
     }
 
     #[test]
+    fn indirect_special_and_positional_referents() {
+        // `${!#}` — indirect through `$#` (the count) selects the LAST
+        // positional parameter (bash). With three args, that is the third.
+        assert_eq!(run("set -- a b c; echo ${!#}").0, "c\n");
+        assert_eq!(run("set -- x y z w; echo ${!#}").0, "w\n");
+        // `${!N}` — indirect through a positional: the value of `$N` names the
+        // variable to expand.
+        assert_eq!(run("V=hi; set -- V; echo ${!1}").0, "hi\n");
+        assert_eq!(run("b=BB; set -- a b c; echo ${!2}").0, "BB\n");
+        // `${!?}` — indirect through `$?`. After a `true`, `$?` is 0, so this
+        // resolves `${!0}` = `$0` (the shell name); just check it is non-empty
+        // and does not error.
+        assert_eq!(run("true; echo [${!?}]").1, 0);
+        // `${!-}` — indirect through `$-` (option flags); those flag letters are
+        // not a set variable, so it expands empty without error.
+        assert_eq!(run("echo [${!-}]").0, "[]\n");
+        // `$` and `!` are NOT valid indirect referents (bash: "bad
+        // substitution"); osh rejects them at parse time.
+        assert!(parse("echo ${!$}").is_err());
+        assert!(parse("echo ${!!}").is_err());
+    }
+
+    #[test]
     fn indirect_expansion_with_modifier() {
         // `${!ref<op>}` resolves the target NAME via `ref`, then applies the
         // modifier to that variable (bash). Covers the use/default, case,

@@ -436,6 +436,8 @@ fn redirect_src(r: &Redirect) -> String {
         RedirectOp::Write => fd_prefixed(r.fd, 1, ">", &word_src(&r.target)),
         RedirectOp::Clobber => fd_prefixed(r.fd, 1, ">|", &word_src(&r.target)),
         RedirectOp::Append => fd_prefixed(r.fd, 1, ">>", &word_src(&r.target)),
+        RedirectOp::WriteBoth => format!("&>{}", word_src(&r.target)),
+        RedirectOp::AppendBoth => format!("&>>{}", word_src(&r.target)),
         RedirectOp::Read => fd_prefixed(r.fd, 0, "<", &word_src(&r.target)),
         RedirectOp::DupOut => fd_prefixed(r.fd, 1, ">&", &word_src(&r.target)),
         // Here-docs are re-emitted as here-strings (same bytes to stdin); a

@@ -293,6 +293,8 @@ impl Parser {
                         | Op::DGreat
                         | Op::GreatAnd
                         | Op::LessAnd
+                        | Op::AmpGreat
+                        | Op::AmpDGreat
                         | Op::DLess
                         | Op::DLessDash
                         | Op::TLess,
@@ -779,6 +781,8 @@ impl Parser {
                     | Op::DGreat
                     | Op::GreatAnd
                     | Op::LessAnd
+                    | Op::AmpGreat
+                    | Op::AmpDGreat
                     | Op::DLess
                     | Op::DLessDash
                     | Op::TLess,
@@ -803,12 +807,23 @@ impl Parser {
         } else {
             None
         };
+        // `>&` (GreatAnd) is `RedirectOp::DupOut` when its target is a numeric fd
+        // (`>&1`) or `-` (`>&-`), but redirects *both* stdout and stderr to a
+        // file when the target is a filename (`>&file`). We resolve that after
+        // parsing the target below.
+        let mut was_great_and = false;
         let op = match self.bump() {
             Some(Tok::Op(Op::Less)) => RedirectOp::Read,
             Some(Tok::Op(Op::Great)) => RedirectOp::Write,
             Some(Tok::Op(Op::GreatPipe)) => RedirectOp::Clobber,
             Some(Tok::Op(Op::DGreat)) => RedirectOp::Append,
-            Some(Tok::Op(Op::GreatAnd | Op::LessAnd)) => RedirectOp::DupOut,
+            Some(Tok::Op(Op::GreatAnd)) => {
+                was_great_and = true;
+                RedirectOp::DupOut
+            }
+            Some(Tok::Op(Op::LessAnd)) => RedirectOp::DupOut,
+            Some(Tok::Op(Op::AmpGreat)) => RedirectOp::WriteBoth,
+            Some(Tok::Op(Op::AmpDGreat)) => RedirectOp::AppendBoth,
             Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,
             Some(Tok::Op(Op::TLess)) => RedirectOp::HereStr,
             _ => return Err(ParseError("expected redirection operator".into())),
@@ -823,6 +838,12 @@ impl Parser {
             // `<<`/`<<-` operator.
             Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
             _ => return Err(ParseError("expected redirection target".into())),
+        };
+        // `>&file` (non-numeric target, no explicit fd) means "both fds to file".
+        let op = if was_great_and && explicit_fd.is_none() && !dup_target_is_fd(&target) {
+            RedirectOp::WriteBoth
+        } else {
+            op
         };
         Ok(Redirect { fd, op, target })
     }
@@ -1476,6 +1497,17 @@ fn is_valid_name(s: &str) -> bool {
         _ => return false,
     }
     it.all(is_name_char)
+}
+
+/// True when a `>&`/`<&` target denotes an fd duplication (a bare number or
+/// `-`) rather than a filename. Only a single unquoted literal qualifies, so
+/// `>&$var` or `>&"file"` are treated as filenames (redirect both).
+fn dup_target_is_fd(target: &Word) -> bool {
+    if let [WordPart::Literal(s)] = target.parts.as_slice() {
+        s == "-" || (!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+    } else {
+        false
+    }
 }
 
 /// Map a `[[ … ]]` unary operator string to its [`UnaryOp`].

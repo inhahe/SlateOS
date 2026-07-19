@@ -548,6 +548,11 @@ pub enum RedirectOp {
     Clobber,
     /// `>> file` — append.
     Append,
+    /// `&> file` / `>& file` (non-numeric target) — redirect both stdout and
+    /// stderr to the file, truncating/creating it.
+    WriteBoth,
+    /// `&>> file` — redirect both stdout and stderr to the file, appending.
+    AppendBoth,
     /// `< file` — read.
     Read,
     /// `n>&m` — duplicate an fd (target parsed as the target fd number).

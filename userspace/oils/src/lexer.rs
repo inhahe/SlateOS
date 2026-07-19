@@ -39,6 +39,10 @@ pub enum Op {
     GreatPipe,
     GreatAnd,
     LessAnd,
+    /// `&>` — redirect both stdout and stderr (truncate/create).
+    AmpGreat,
+    /// `&>>` — redirect both stdout and stderr (append).
+    AmpDGreat,
     /// `<<` — here-document.
     DLess,
     /// `<<-` — here-document with leading-tab stripping.
@@ -287,6 +291,15 @@ impl Lexer {
                     if self.peek() == Some('&') {
                         self.pos += 1;
                         out.push(Tok::Op(Op::AndIf));
+                    } else if self.peek() == Some('>') {
+                        // `&>file` / `&>>file`: redirect both stdout and stderr.
+                        self.pos += 1;
+                        if self.peek() == Some('>') {
+                            self.pos += 1;
+                            out.push(Tok::Op(Op::AmpDGreat));
+                        } else {
+                            out.push(Tok::Op(Op::AmpGreat));
+                        }
                     } else {
                         out.push(Tok::Op(Op::Amp));
                     }

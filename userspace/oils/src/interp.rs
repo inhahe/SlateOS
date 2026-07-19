@@ -1322,7 +1322,18 @@ impl Shell {
         // (`1>&2`) — the latter while the stderr target is still on the stack.
         if let Some(buf) = capture {
             if let Some((path, append)) = &plan.stdout {
-                match open_out(path, *append) {
+                // When stdout and stderr target the *same* file (`&>file`,
+                // `>file 2>&1`), stderr was already written to it via the pushed
+                // `StderrTarget::File` during the body; opening the stdout sink
+                // with truncation here would clobber it. Append instead so both
+                // streams survive (stderr-then-stdout order; interleaving is not
+                // preserved — the capture model buffers stdout to the end).
+                let same_file = plan
+                    .stderr
+                    .as_ref()
+                    .is_some_and(|(spath, _)| spath == path);
+                let append = *append || same_file;
+                match open_out(path, append) {
                     Ok(mut f) => {
                         if let Err(e) = f.write_all(&buf) {
                             self.errln(&format!("osh: {path}: {e}"));
@@ -3431,6 +3442,16 @@ impl Shell {
                         plan.stdin = None;
                         plan.stdin_data = Some(s.into_bytes());
                     }
+                }
+                RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
+                    // `&>file` / `&>>file` / `>&file` → both stdout and stderr to
+                    // the file (bash: equivalent to `>file 2>&1`). noclobber does
+                    // not apply to `&>` (bash treats it like `>|`).
+                    let target = self.expand_to_string(&r.target);
+                    let append = matches!(r.op, RedirectOp::AppendBoth);
+                    plan.stdout = Some((target.clone(), append));
+                    plan.stderr = Some((target, append));
+                    plan.stderr_to_stdout = false;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_to_string(&r.target);
@@ -12529,6 +12550,31 @@ mod tests {
         assert_eq!(
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
+        );
+    }
+
+    #[test]
+    fn amp_redirect_both_streams() {
+        // `&>file` sends both stdout and stderr to the file. A group with a
+        // normal echo and a `>&2` diagnostic both accumulate there.
+        assert_eq!(
+            run_exec_redirect("{ echo out; echo err >&2; } &> \"{FILE}\""),
+            "err\nout\n"
+        );
+        // `&>>file` appends rather than truncating.
+        assert_eq!(
+            run_exec_redirect("echo a &> \"{FILE}\"\necho b &>> \"{FILE}\""),
+            "a\nb\n"
+        );
+        // `>&file` (non-numeric target) is the same as `&>file`.
+        assert_eq!(
+            run_exec_redirect("{ echo x; echo y >&2; } >& \"{FILE}\""),
+            "y\nx\n"
+        );
+        // A numeric `>&N` stays an fd duplication, not a file redirect.
+        assert_eq!(
+            run_exec_redirect("exec > \"{FILE}\"\necho hi >&1"),
+            "hi\n"
         );
     }
 

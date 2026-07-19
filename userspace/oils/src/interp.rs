@@ -99,7 +99,7 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::parser::parse_with_aliases;
+use crate::parser::{parse, parse_with_aliases};
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -684,8 +684,38 @@ impl Shell {
     }
 
     /// Parse and execute shell source, returning the final exit status.
+    /// The effective default for a `shopt` option the user hasn't explicitly
+    /// toggled. Bash defaults every option this shell models to *off* except
+    /// `expand_aliases`, which is on in an interactive shell and off under
+    /// `-c`/script (non-interactive) — matching bash's alias-expansion rule.
+    fn shopt_default(&self, name: &str) -> bool {
+        match name {
+            "expand_aliases" => !self.command_mode && !self.script_mode,
+            _ => false,
+        }
+    }
+
+    /// Whether command-word aliases should be expanded when parsing new input.
+    /// Gated on `expand_aliases` (see [`Self::shopt_default`]) so a
+    /// non-interactive shell does not expand aliases unless the script opts in
+    /// with `shopt -s expand_aliases`, matching bash.
+    fn aliases_enabled(&self) -> bool {
+        self.shopt
+            .get("expand_aliases")
+            .copied()
+            .unwrap_or_else(|| self.shopt_default("expand_aliases"))
+    }
+
     pub fn run_source(&mut self, src: &str) -> i32 {
-        let prog = match parse_with_aliases(src, &self.aliases) {
+        // Expand command-word aliases only when `expand_aliases` is in effect;
+        // otherwise parse the raw tokens so a non-interactive shell leaves alias
+        // names untouched (bash parity).
+        let parsed = if self.aliases_enabled() {
+            parse_with_aliases(src, &self.aliases)
+        } else {
+            parse(src)
+        };
+        let prog = match parsed {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{}", format_parse_error(&e));
@@ -9012,6 +9042,7 @@ impl Shell {
             "cmdhist",
             "lithist",
             "autocd",
+            "expand_aliases",
         ];
         let mut set = false;
         let mut unset = false;
@@ -9061,7 +9092,7 @@ impl Shell {
                 // List all known options with their on/off state.
                 let mut listing = String::new();
                 for opt in KNOWN {
-                    let on = self.shopt.get(*opt).copied().unwrap_or(false);
+                    let on = self.shopt.get(*opt).copied().unwrap_or_else(|| self.shopt_default(opt));
                     listing.push_str(&format!("{opt:<15}\t{}\n", if on { "on" } else { "off" }));
                 }
                 if quiet {
@@ -9079,7 +9110,11 @@ impl Shell {
                     );
                     return 1;
                 }
-                let on = self.shopt.get(name.as_str()).copied().unwrap_or(false);
+                let on = self
+                    .shopt
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or_else(|| self.shopt_default(name));
                 if !on {
                     all_on = false;
                 }
@@ -13852,6 +13887,41 @@ mod tests {
         // `greet` as an argument is not alias-expanded.
         let (o, _) = run_with_aliases("alias greet='echo hello'", "echo greet");
         assert_eq!(o, "greet\n");
+    }
+
+    #[test]
+    fn expand_aliases_shopt_is_recognized() {
+        // `shopt -s/-u/-q expand_aliases` is a valid bash option name and must
+        // not error with "invalid shell option name" (regression).
+        assert_eq!(run("shopt -s expand_aliases; echo done"), ("done\n".into(), 0));
+        assert_eq!(run("shopt -u expand_aliases; echo done"), ("done\n".into(), 0));
+        // Toggling is observable via `shopt -q`.
+        assert_eq!(run("shopt -s expand_aliases; shopt -q expand_aliases; echo $?").0, "0\n");
+        assert_eq!(run("shopt -u expand_aliases; shopt -q expand_aliases; echo $?").0, "1\n");
+        // It appears in the bare `shopt` listing.
+        assert!(run("shopt").0.contains("expand_aliases"), "got: {:?}", run("shopt").0);
+    }
+
+    #[test]
+    fn aliases_gated_on_expand_aliases_in_noninteractive_mode() {
+        // In `-c`/script (non-interactive) mode `expand_aliases` defaults off, so
+        // an alias defined in a prior parse unit is NOT expanded unless the shell
+        // opts in — matching bash. A default (interactive-mode) shell keeps
+        // expanding, which is what `run_with_aliases` exercises elsewhere.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        sh.run_source("alias g='echo hi'");
+        let mut buf = Vec::new();
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&parse_with_aliases("g", &sh.aliases).expect("parse"), &mut out, &StdinSrc::Inherit);
+        }
+        // Even though the alias is in the table, run_source in command mode does
+        // not expand it; here we prove the gate itself is off by default.
+        assert!(!sh.aliases_enabled(), "expand_aliases should default off in command mode");
+        // Opting in flips the gate on.
+        sh.run_source("shopt -s expand_aliases");
+        assert!(sh.aliases_enabled(), "shopt -s expand_aliases should enable expansion");
     }
 
     #[test]

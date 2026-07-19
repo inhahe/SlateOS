@@ -20,6 +20,8 @@ impl core::fmt::Display for LexError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Pipe,
+    /// `|&` — pipe both stdout and stderr (shorthand for `2>&1 |`).
+    PipeAmp,
     AndIf,
     OrIf,
     Amp,
@@ -172,6 +174,7 @@ fn starts_command(prev: Option<&Tok>) -> bool {
         Some(Tok::Op(op)) => matches!(
             op,
             Op::Pipe
+                | Op::PipeAmp
                 | Op::AndIf
                 | Op::OrIf
                 | Op::Amp
@@ -368,6 +371,10 @@ impl Lexer {
                     if self.peek() == Some('|') {
                         self.pos += 1;
                         out.push(Tok::Op(Op::OrIf));
+                    } else if self.peek() == Some('&') {
+                        // `|&` — pipe both stdout and stderr (bash: `2>&1 |`).
+                        self.pos += 1;
+                        out.push(Tok::Op(Op::PipeAmp));
                     } else {
                         out.push(Tok::Op(Op::Pipe));
                     }

@@ -265,8 +265,26 @@ impl Parser {
             self.pos += 1;
         }
         let mut commands = vec![self.parse_command()?];
-        while self.at_op(Op::Pipe) {
+        loop {
+            // `cmd1 | cmd2` and `cmd1 |& cmd2`. The `|&` form is bash shorthand
+            // for `cmd1 2>&1 | cmd2`: the *left* command additionally dups its
+            // stderr onto stdout before the pipe carries both.
+            let amp = if self.at_op(Op::Pipe) {
+                false
+            } else if self.at_op(Op::PipeAmp) {
+                true
+            } else {
+                break;
+            };
             self.pos += 1;
+            if amp && let Some(prev) = commands.pop() {
+                let dup = Redirect {
+                    fd: 2,
+                    op: RedirectOp::DupOut,
+                    target: Word::literal("1"),
+                };
+                commands.push(attach_redirect(prev, dup));
+            }
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
@@ -1071,6 +1089,27 @@ fn is_declaration_command(words: &[Word]) -> bool {
         name.as_str(),
         "declare" | "typeset" | "local" | "export" | "readonly"
     )
+}
+
+/// Append a redirection to an already-parsed command. Simple commands carry
+/// their own redirect list; a `Command::Redirected` extends its list; every
+/// other (compound) form is wrapped. Used to lower the `|&` pipe operator's
+/// implicit `2>&1` onto the left-hand command.
+fn attach_redirect(cmd: Command, redir: Redirect) -> Command {
+    match cmd {
+        Command::Simple(mut sc) => {
+            sc.redirects.push(redir);
+            Command::Simple(sc)
+        }
+        Command::Redirected { inner, mut redirects } => {
+            redirects.push(redir);
+            Command::Redirected { inner, redirects }
+        }
+        other => Command::Redirected {
+            inner: Box::new(other),
+            redirects: vec![redir],
+        },
+    }
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).

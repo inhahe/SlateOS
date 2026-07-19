@@ -4421,7 +4421,12 @@ impl Shell {
                     let append = matches!(r.op, RedirectOp::AppendBoth);
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
+                    // Both fds now target the file: clear every competing dup so
+                    // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.stderr_to_stdout = false;
+                    plan.stdout_to_stderr = false;
+                    plan.stdout_to_fd = None;
+                    plan.stderr_to_fd = None;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_to_string(&r.target);
@@ -4438,7 +4443,12 @@ impl Shell {
                         return Err(format!("{target}: cannot overwrite existing file"));
                     }
                     match r.fd {
-                        2 => plan.stderr = Some((target, append)),
+                        2 => {
+                            plan.stderr = Some((target, append));
+                            // Later file redirect overrides any earlier stderr dup.
+                            plan.stderr_to_stdout = false;
+                            plan.stderr_to_fd = None;
+                        }
                         // fd ≥ 3 (`exec 3> file`): a user-space write descriptor,
                         // not stdout. Only `exec` consumes it; on any other
                         // command it is a documented no-op (previously this fell
@@ -4446,7 +4456,11 @@ impl Shell {
                         f if f >= 3 => plan
                             .extra_fds
                             .push((f, ExtraFdOp::OutputFile(target, append))),
-                        _ => plan.stdout = Some((target, append)),
+                        _ => {
+                            plan.stdout = Some((target, append));
+                            plan.stdout_to_stderr = false;
+                            plan.stdout_to_fd = None;
+                        }
                     }
                 }
                 RedirectOp::DupOut => {
@@ -4457,15 +4471,23 @@ impl Shell {
                     // terminal, or capture), not just to a file path.
                     let target = self.expand_to_string(&r.target);
                     if r.fd == 2 && target == "1" {
+                        // fd 2's destination is being (re)set: drop any earlier
+                        // stderr file/fd target so this dup wins (last-writer).
+                        plan.stderr_to_fd = None;
                         if plan.stdout.is_some() {
                             plan.stderr = plan.stdout.clone();
+                            plan.stderr_to_stdout = false;
                         } else {
+                            plan.stderr = None;
                             plan.stderr_to_stdout = true;
                         }
                     } else if r.fd == 1 && target == "2" {
+                        plan.stdout_to_fd = None;
                         if plan.stderr.is_some() {
                             plan.stdout = plan.stderr.clone();
+                            plan.stdout_to_stderr = false;
                         } else {
+                            plan.stdout = None;
                             plan.stdout_to_stderr = true;
                         }
                     } else if r.fd >= 3 && target == "-" {
@@ -4486,8 +4508,12 @@ impl Shell {
                         // `Shell::open_write_fds[N]` by write_bytes / run_external.
                         if r.fd == 2 {
                             plan.stderr_to_fd = Some(n);
+                            plan.stderr = None;
+                            plan.stderr_to_stdout = false;
                         } else {
                             plan.stdout_to_fd = Some(n);
+                            plan.stdout = None;
+                            plan.stdout_to_stderr = false;
                         }
                     }
                 }
@@ -16864,6 +16890,36 @@ mod tests {
         // Same merge when the outer sink is a plain capture (not a subshell).
         let (o, _) = run("{ echo a; echo b >&2; } 2>&1");
         assert_eq!(o, "a\nb\n");
+    }
+
+    #[test]
+    fn pipe_ampersand_pipes_stdout_and_stderr() {
+        // `cmd |& rhs` is bash shorthand for `cmd 2>&1 | rhs`: both streams reach
+        // the right-hand side. The RHS reads each line and re-emits it.
+        let (o, _) = run("{ echo o; echo e >&2; } |& while read l; do echo \"[$l]\"; done");
+        assert_eq!(o, "[o]\n[e]\n");
+    }
+
+    #[test]
+    fn pipe_ampersand_with_explicit_left_redirect() {
+        // The implicit `2>&1` is applied *after* the left command's own
+        // redirects, so a preceding `2>/dev/null` is overridden and stderr still
+        // reaches the pipe (bash semantics).
+        let (o, _) =
+            run("{ echo o; echo e >&2; } 2>/dev/null |& while read l; do echo \"<$l>\"; done");
+        assert_eq!(o, "<o>\n<e>\n");
+    }
+
+    #[test]
+    fn redirect_dup_last_writer_wins() {
+        // `2>/dev/null 2>&1` — the later `2>&1` re-points stderr onto stdout's
+        // sink, overriding the earlier file target (a common `|&`-adjacent idiom
+        // that the old order-free RedirPlan got wrong).
+        let (o, _) = run("x=$( { echo out; echo err >&2; } 2>/dev/null 2>&1 ); echo \"$x\"");
+        assert_eq!(o, "out\nerr\n");
+        // Reverse order: the later `2>/dev/null` wins, so only stdout is captured.
+        let (o2, _) = run("x=$( { echo out; echo err >&2; } 2>&1 2>/dev/null ); echo \"[$x]\"");
+        assert_eq!(o2, "[out]\n");
     }
 
     #[test]

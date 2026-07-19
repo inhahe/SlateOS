@@ -1517,6 +1517,42 @@ Still **missing** relative to bash:
 The remaining gaps affect only niche `set -x` cases; they are logged so a
 future probe recognising a `[[ ]]`/`$( )`-header trace DIFF knows it is this gap.
 
+### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — OPEN 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — the compound/group-command capture
+path that buffers stdout and redirected-stderr into *separate* in-memory
+buffers and concatenates them (stderr appended after stdout, or vice-versa)
+instead of writing both into a single ordered stream. Involves `resolve_redirects`
+/ `RedirPlan` and the group-body output capture.
+
+**Symptom:** when a command sends output to **both** stdout and stderr and both
+are redirected to the **same** file/sink in one shot — `cmd >f 2>&1` or the
+`cmd &>f` shorthand, and the compound form `{ echo o; echo e >&2; } >f 2>&1` —
+`osh` writes all the stderr content before all the stdout content (or the two
+blocks in a fixed order), rather than interleaving them in the order the writes
+actually happened. bash produces the natural write-order interleave. Example:
+
+```
+{ echo o; echo e >&2; } >f 2>&1; cat f
+# bash: o\ne     osh: e\no   (content correct, interleave order wrong)
+```
+
+**Scope / what is NOT affected:** the *content* is always correct — both streams
+reach the sink, nothing is dropped. The last-writer-wins fd-destination
+resolution (`2>/dev/null 2>&1`, `2>&1 2>/dev/null`, `2>&1 >/dev/null`, etc.) is
+correct as of the `|&` work. This bug is purely the *ordering* of interleaved
+lines when stdout and stderr share one destination. Pipes (`|&`) route through a
+single real pipe fd and are unaffected.
+
+**Proper fix:** when a plan's stdout and stderr resolve to the same underlying
+sink, write both through a *single* shared, order-preserving byte stream (one
+buffer / one fd) instead of two separate buffers concatenated at the end. This
+requires the group-command capture to detect the shared-sink case and merge the
+two logical streams into one ordered writer rather than tagging bytes by fd and
+reassembling. Deferred because it touches the capture/RedirPlan boundary broadly;
+logged so a future probe hitting an `>f 2>&1` interleave DIFF knows it is this
+gap, not a new regression.
+
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the

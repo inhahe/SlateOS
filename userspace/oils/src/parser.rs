@@ -1301,16 +1301,20 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 pattern: Box::new(word_verbatim_from_source(&pat)?),
             })
         }
-        // Case modification: `^`, `^^` (upper), `,`, `,,` (lower).
-        '^' | ',' => {
-            let upper = rest[0] == '^';
+        // Case modification: `^`/`^^` (upper), `,`/`,,` (lower), `~`/`~~` (toggle).
+        '^' | ',' | '~' => {
+            let mode = match rest[0] {
+                '^' => crate::ast::CaseMode::Upper,
+                ',' => crate::ast::CaseMode::Lower,
+                _ => crate::ast::CaseMode::Toggle,
+            };
             let all = rest.get(1) == Some(&rest[0]);
             let pat_start = if all { 2 } else { 1 };
             let pat: String = rest[pat_start..].iter().collect();
             Ok(WordPart::ParamCase {
                 name,
                 index: elem_index,
-                upper,
+                mode,
                 all,
                 pattern: Box::new(word_verbatim_from_source(&pat)?),
             })
@@ -1466,13 +1470,17 @@ fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
                 pattern: Box::new(word_verbatim_from_source(&pat)?),
             }))
         }
-        '^' | ',' => {
-            let upper = rest[0] == '^';
+        '^' | ',' | '~' => {
+            let mode = match rest[0] {
+                '^' => crate::ast::CaseMode::Upper,
+                ',' => crate::ast::CaseMode::Lower,
+                _ => crate::ast::CaseMode::Toggle,
+            };
             let all = rest.get(1) == Some(&rest[0]);
             let pat_start = if all { 2 } else { 1 };
             let pat: String = rest[pat_start..].iter().collect();
             Ok(Some(BulkOp::Case {
-                upper,
+                mode,
                 all,
                 pattern: Box::new(word_verbatim_from_source(&pat)?),
             }))

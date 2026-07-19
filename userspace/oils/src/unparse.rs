@@ -14,10 +14,23 @@
 //! see known-issues TD-OILS16/TD-OILS18.
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, Command, CondBinOp,
-    CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor, SimpleCommand,
-    UnaryOp, Word, WordPart,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, Command,
+    CondBinOp, CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
+    SimpleCommand, UnaryOp, Word, WordPart,
 };
+
+/// Deparse a `${…}` case-modification operator: `^`/`^^` (upper), `,`/`,,`
+/// (lower), `~`/`~~` (toggle); doubled when `all`.
+fn case_op_src(mode: CaseMode, all: bool) -> &'static str {
+    match (mode, all) {
+        (CaseMode::Upper, true) => "^^",
+        (CaseMode::Upper, false) => "^",
+        (CaseMode::Lower, true) => ",,",
+        (CaseMode::Lower, false) => ",",
+        (CaseMode::Toggle, true) => "~~",
+        (CaseMode::Toggle, false) => "~",
+    }
+}
 
 /// One indentation level (bash uses 4 spaces in `declare -f` output).
 fn ind(level: usize) -> String {
@@ -636,13 +649,8 @@ fn part_src(p: &WordPart) -> String {
                 word_src(replacement)
             )
         }
-        WordPart::ParamCase { name, index, upper, all, pattern } => {
-            let op = match (upper, all) {
-                (true, true) => "^^",
-                (true, false) => "^",
-                (false, true) => ",,",
-                (false, false) => ",",
-            };
+        WordPart::ParamCase { name, index, mode, all, pattern } => {
+            let op = case_op_src(*mode, *all);
             format!("${{{}{}{}}}", name_sub(name, index), op, word_src(pattern))
         }
         WordPart::Indirect(name) => format!("${{!{name}}}"),
@@ -717,14 +725,8 @@ fn part_src(p: &WordPart) -> String {
                     };
                     format!("{o}{}/{}", word_src(pattern), word_src(replacement))
                 }
-                BulkOp::Case { upper, all, pattern } => {
-                    let o = match (upper, all) {
-                        (true, true) => "^^",
-                        (true, false) => "^",
-                        (false, true) => ",,",
-                        (false, false) => ",",
-                    };
-                    format!("{o}{}", word_src(pattern))
+                BulkOp::Case { mode, all, pattern } => {
+                    format!("{}{}", case_op_src(*mode, *all), word_src(pattern))
                 }
                 BulkOp::Transform { op } => format!("@{op}"),
             };

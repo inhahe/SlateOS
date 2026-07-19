@@ -388,17 +388,17 @@ pub enum WordPart {
         replacement: Box<Word>,
     },
     /// `${name^pat}` / `${name^^pat}` (upper-case) / `${name,pat}` /
-    /// `${name,,pat}` (lower-case) — case modification. `all` is the doubled
-    /// operator (convert every character whose value matches `pattern`);
-    /// otherwise only the first character is considered. `pattern` selects
-    /// which characters convert (a glob matched against one character at a
-    /// time); an empty pattern matches any character.
+    /// `${name,,pat}` (lower-case) / `${name~pat}` / `${name~~pat}` (toggle) —
+    /// case modification. `all` is the doubled operator (convert every character
+    /// whose value matches `pattern`); otherwise only the first character is
+    /// considered. `pattern` selects which characters convert (a glob matched
+    /// against one character at a time); an empty pattern matches any character.
     ParamCase {
         name: String,
         /// Optional array subscript (`${a[i]^^}`).
         index: Option<Box<Word>>,
-        /// `true` for `^`/`^^` (upper); `false` for `,`/`,,` (lower).
-        upper: bool,
+        /// Which case transform to apply: `^`→Upper, `,`→Lower, `~`→Toggle.
+        mode: CaseMode,
         /// `true` for the doubled form (every matching character).
         all: bool,
         pattern: Box<Word>,
@@ -519,9 +519,9 @@ pub enum BulkOp {
         pattern: Box<Word>,
         replacement: Box<Word>,
     },
-    /// `${a[@]^pat}` / `^^` / `,` / `,,` — case modification per element.
+    /// `${a[@]^pat}` / `^^` / `,` / `,,` / `~` / `~~` — case mod per element.
     Case {
-        upper: bool,
+        mode: CaseMode,
         all: bool,
         pattern: Box<Word>,
     },
@@ -551,6 +551,18 @@ pub enum ParamOp {
     UseAlternate,
     /// `:?` error if unset or null.
     ErrorIfUnset,
+}
+
+/// Which case transform a `${name^}` / `${name,}` / `${name~}` operator applies
+/// to each matching character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseMode {
+    /// `^` / `^^` — force upper-case.
+    Upper,
+    /// `,` / `,,` — force lower-case.
+    Lower,
+    /// `~` / `~~` — toggle case (upper↔lower).
+    Toggle,
 }
 
 /// Where a `${name/pat/repl}` substitution is anchored.

@@ -2421,12 +2421,12 @@ impl Shell {
                 param_replace(value, &pat, &repl, *all, *anchor, extglob)
             }
             BulkOp::Case {
-                upper,
+                mode,
                 all,
                 pattern,
             } => {
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
-                param_case(value, &pat, *upper, *all, extglob)
+                param_case(value, &pat, *mode, *all, extglob)
             }
             BulkOp::Transform { op } => Self::transform_value(value, *op),
         }
@@ -4770,14 +4770,14 @@ impl Shell {
             WordPart::ParamCase {
                 name,
                 index,
-                upper,
+                mode,
                 all,
                 pattern,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                param_case(&value, &pat, *upper, *all, extglob)
+                param_case(&value, &pat, *mode, *all, extglob)
             }
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op)
@@ -10102,18 +10102,35 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglo
 /// character. `all` converts every matching character; otherwise only the
 /// first character of the value is considered (and only converted if it
 /// matches `pattern`).
-fn param_case(value: &str, pattern: &[char], upper: bool, all: bool, extglob: bool) -> String {
-    // An empty pattern matches every character (bash: `^^`/`,,` with no
-    // pattern uppercases/lowercases the whole value).
+fn param_case(
+    value: &str,
+    pattern: &[char],
+    mode: crate::ast::CaseMode,
+    all: bool,
+    extglob: bool,
+) -> String {
+    use crate::ast::CaseMode;
+    // An empty pattern matches every character (bash: `^^`/`,,`/`~~` with no
+    // pattern transforms the whole value).
     let matches_char = |ch: char| pattern.is_empty() || glob_match(pattern, &[ch], extglob);
     let convert = |ch: char| {
-        if upper {
-            // `char::to_uppercase`/`to_lowercase` can yield multiple chars
-            // (e.g. 'ß' → "SS"); bash uses towupper/towlower per rune, but the
-            // multi-char expansion is the closest correct Unicode behavior.
-            ch.to_uppercase().collect::<String>()
-        } else {
-            ch.to_lowercase().collect::<String>()
+        // `char::to_uppercase`/`to_lowercase` can yield multiple chars
+        // (e.g. 'ß' → "SS"); bash uses towupper/towlower per rune, but the
+        // multi-char expansion is the closest correct Unicode behavior.
+        match mode {
+            CaseMode::Upper => ch.to_uppercase().collect::<String>(),
+            CaseMode::Lower => ch.to_lowercase().collect::<String>(),
+            // Toggle: upper-case letters become lower-case and vice versa;
+            // characters that are neither are left unchanged.
+            CaseMode::Toggle => {
+                if ch.is_uppercase() {
+                    ch.to_lowercase().collect::<String>()
+                } else if ch.is_lowercase() {
+                    ch.to_uppercase().collect::<String>()
+                } else {
+                    ch.to_string()
+                }
+            }
         }
     };
     let mut out = String::with_capacity(value.len());
@@ -12701,6 +12718,15 @@ mod tests {
         assert_eq!(run("a=(foo bar); echo ${a[1]^^}").0, "BAR\n");
         // Empty/unset value yields empty.
         assert_eq!(run("echo [${nope^^}]").0, "[]\n");
+        // `~`/`~~` toggle case: `~` on the first char, `~~` on all matching.
+        assert_eq!(run("x=hello; echo ${x~}").0, "Hello\n");
+        assert_eq!(run("x=Hello; echo ${x~}").0, "hello\n");
+        assert_eq!(run("x=aBcDeF; echo ${x~~}").0, "AbCdEf\n");
+        assert_eq!(run("x=abcABC; echo ${x~~[a-c]}").0, "ABCABC\n");
+        // Non-letters are left unchanged by a toggle.
+        assert_eq!(run("x=123abc; echo ${x~~}").0, "123ABC\n");
+        // Toggle over a whole array (per element).
+        assert_eq!(run("a=(foo Bar BAZ); echo ${a[@]~~}").0, "FOO bAR baz\n");
     }
 
     #[test]

@@ -270,6 +270,11 @@ pub struct Shell {
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
+    /// Names of the functions currently executing, innermost last. Drives the
+    /// `FUNCNAME` array (bash: `FUNCNAME[0]` is the current function, then its
+    /// callers, then `main`). Non-empty exactly while inside a function body;
+    /// materialised into `arrays["FUNCNAME"]` by `refresh_funcname`.
+    fn_stack: Vec<String>,
     /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
@@ -365,6 +370,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: false,
             local_frames: Vec::new(),
+            fn_stack: Vec::new(),
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
@@ -1568,6 +1574,9 @@ impl Shell {
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
+            // A subshell inherits the enclosing function context, so `FUNCNAME`
+            // (and further nested calls) stay consistent.
+            fn_stack: self.fn_stack.clone(),
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
@@ -2573,6 +2582,9 @@ impl Shell {
         // Push a fresh local scope so `local` declarations inside the body are
         // restored on return.
         self.local_frames.push(Vec::new());
+        // Track the function name for `FUNCNAME` while the body runs.
+        self.fn_stack.push(name.to_string());
+        self.refresh_funcname();
         let flow = self.exec_program(&body, out, stdin);
         // The RETURN trap fires when the function returns, before its locals are
         // torn down (so the handler still sees the function's scope), matching
@@ -2586,6 +2598,9 @@ impl Shell {
                 self.restore_var(&name, snap);
             }
         }
+        // Pop this call from the `FUNCNAME` stack.
+        self.fn_stack.pop();
+        self.refresh_funcname();
 
         self.positional = saved_pos;
         for (k, old) in saved {
@@ -2602,6 +2617,25 @@ impl Shell {
             Flow::Return | Flow::Next => Flow::Next,
             other => other,
         }
+    }
+
+    /// Materialise the `FUNCNAME` array from the current call stack. Bash makes
+    /// `FUNCNAME[0]` the currently-executing function, then each caller, then
+    /// `main` at the bottom; the array is unset outside any function.
+    fn refresh_funcname(&mut self) {
+        if self.fn_stack.is_empty() {
+            self.arrays.remove("FUNCNAME");
+            return;
+        }
+        let mut map: BTreeMap<usize, String> = BTreeMap::new();
+        let mut idx = 0usize;
+        for name in self.fn_stack.iter().rev() {
+            map.insert(idx, name.clone());
+            idx += 1;
+        }
+        // The bottom frame is the top-level script context.
+        map.insert(idx, "main".to_string());
+        self.arrays.insert("FUNCNAME".to_string(), map);
     }
 
     /// Capture the complete current state of a variable name (scalar / indexed /
@@ -8964,6 +8998,24 @@ mod tests {
     fn local_array_is_scoped() {
         let src = "a=(g1 g2); f() { local a=(l1 l2); echo \"${a[@]}\"; }; f; echo \"${a[@]}\"";
         assert_eq!(run(src).0, "l1 l2\ng1 g2\n");
+    }
+
+    #[test]
+    fn funcname_reflects_call_stack() {
+        // `$FUNCNAME` (element 0) is the current function.
+        assert_eq!(run("f() { echo $FUNCNAME; }; f").0, "f\n");
+        // The whole array is current-function … callers … main.
+        assert_eq!(run("f() { echo \"${FUNCNAME[@]}\"; }; f").0, "f main\n");
+        assert_eq!(
+            run("g() { echo \"${FUNCNAME[@]}\"; }; f() { g; }; f").0,
+            "g f main\n"
+        );
+        // Count includes the `main` bottom frame.
+        assert_eq!(run("f() { echo ${#FUNCNAME[@]}; }; f").0, "2\n");
+        // Unset outside any function.
+        assert_eq!(run("echo [${FUNCNAME[@]}]").0, "[]\n");
+        // Restored after the function returns.
+        assert_eq!(run("f() { :; }; f; echo [$FUNCNAME]").0, "[]\n");
     }
 
     #[test]

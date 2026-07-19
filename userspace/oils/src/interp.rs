@@ -88,7 +88,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseTerm, Command,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
+    Command,
     CondBinOp,
     CondExpr,
     ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
@@ -1844,6 +1845,56 @@ impl Shell {
             .collect()
     }
 
+    /// Gather the elements of an array or the positional parameters and apply a
+    /// [`BulkOp`] to each (`${a[@]#pat}`, `${@/x/y}`, `${a[*]^^}`, …). For `@`/
+    /// `*` the list is the positional parameters (matching bash — unlike a
+    /// slice, `$0` is *not* included here).
+    fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<String> {
+        let elems: Vec<String> = if name == "@" || name == "*" {
+            self.positional.clone()
+        } else {
+            self.array_elements(name)
+        };
+        elems
+            .into_iter()
+            .map(|v| self.apply_bulk_op(op, &v))
+            .collect()
+    }
+
+    /// Apply a single [`BulkOp`] to one element value.
+    fn apply_bulk_op(&mut self, op: &BulkOp, value: &str) -> String {
+        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+        match op {
+            BulkOp::Trim {
+                suffix,
+                longest,
+                pattern,
+            } => {
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                param_trim(value, &pat, *suffix, *longest, extglob)
+            }
+            BulkOp::Replace {
+                all,
+                anchor,
+                pattern,
+                replacement,
+            } => {
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let repl = self.expand_to_string(replacement);
+                param_replace(value, &pat, &repl, *all, *anchor, extglob)
+            }
+            BulkOp::Case {
+                upper,
+                all,
+                pattern,
+            } => {
+                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                param_case(value, &pat, *upper, *all, extglob)
+            }
+            BulkOp::Transform { op } => Self::transform_value(value, *op),
+        }
+    }
+
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&self, name: &str) -> Vec<String> {
         if let Some(m) = self.assoc.get(name) {
@@ -1989,8 +2040,14 @@ impl Shell {
             return flags;
         }
         let value = self.param_elem_value(name, index).unwrap_or_default();
+        Self::transform_value(&value, op)
+    }
+
+    /// Apply a `@`-operator ([`op`]) to a concrete string value. Shared by the
+    /// scalar `${x@Q}` path and the bulk `${a[@]@Q}` path.
+    fn transform_value(value: &str, op: char) -> String {
         match op {
-            'Q' => shell_quote(&value),
+            'Q' => shell_quote(value),
             'U' => value.chars().flat_map(char::to_uppercase).collect(),
             'u' => {
                 let mut cs = value.chars();
@@ -2000,10 +2057,10 @@ impl Shell {
                 }
             }
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
-            'E' => ansi_c_unescape(&value),
+            'E' => ansi_c_unescape(value),
             // `P` (prompt) and `K`/`k` (assoc key/value) are not implemented;
             // return the value unchanged rather than erroring.
-            _ => value,
+            _ => value.to_string(),
         }
     }
 
@@ -2938,6 +2995,15 @@ impl Shell {
                                 length,
                             },
                         ] => Some(self.slice_elements(name, offset, length)),
+                        // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
+                        // after the element-wise transform.
+                        [
+                            WordPart::ArrayBulk {
+                                name,
+                                star: false,
+                                op,
+                            },
+                        ] => Some(self.bulk_elements(name, op)),
                         _ => None,
                     };
                     if let Some(items) = per_element {
@@ -3073,6 +3139,7 @@ impl Shell {
                 length,
                 ..
             } => self.slice_elements(name, offset, length).join(" "),
+            WordPart::ArrayBulk { name, op, .. } => self.bulk_elements(name, op).join(" "),
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
             WordPart::ArrayRef {
@@ -9388,9 +9455,10 @@ mod tests {
             run("declare -A m; m[k]=v; echo ${m[k]:-def} ${m[nope]:-def}").0,
             "v def\n"
         );
-        // Combining `[@]`/`[*]` with an operator is rejected at parse time.
+        // The default operators (`:-` etc.) still don't apply to `[@]`/`[*]`.
         assert!(parse("echo ${a[@]:-def}").is_err());
-        assert!(parse("echo ${a[*]#pat}").is_err());
+        // …but the element-wise (bulk) operators now do.
+        assert_eq!(run("a=(a.x b.x); echo ${a[*]#*.}").0, "x x\n");
     }
 
     #[test]
@@ -9988,6 +10056,56 @@ mod tests {
         // `${@:off:len}` slices positional parameters ($0 is index 0).
         assert_eq!(run("set -- p q r s; echo ${@:2:2}").0, "q r\n");
         assert_eq!(run("set -- p q r s; echo ${@:3}").0, "r s\n");
+    }
+
+    #[test]
+    fn bulk_array_transforms() {
+        // Suffix/prefix removal applied to every element.
+        assert_eq!(
+            run("a=(foo.txt bar.txt baz.txt); echo ${a[@]%.txt}").0,
+            "foo bar baz\n"
+        );
+        assert_eq!(
+            run("a=(x_1 x_2 x_3); echo ${a[@]#x_}").0,
+            "1 2 3\n"
+        );
+        // Substitution applied per element.
+        assert_eq!(
+            run("a=(a.b c.d e.f); echo ${a[@]/./_}").0,
+            "a_b c_d e_f\n"
+        );
+        // Global substitution per element.
+        assert_eq!(
+            run("a=(aa bb); echo ${a[@]//a/X}").0,
+            "XX bb\n"
+        );
+        // Case modification per element.
+        assert_eq!(
+            run("a=(foo bar); echo ${a[@]^^}").0,
+            "FOO BAR\n"
+        );
+        assert_eq!(
+            run("a=(Foo Bar); echo ${a[@]^}").0,
+            "Foo Bar\n"
+        );
+        // `@`-transform (`@Q`) quotes each element; quoted keeps per-element fields.
+        assert_eq!(
+            run("a=('a b' c); for x in \"${a[@]@Q}\"; do echo \"[$x]\"; done").0,
+            "['a b']\n[c]\n"
+        );
+        // Quoted bulk trim yields one field per element (spaces inside survive).
+        assert_eq!(
+            run("a=('a b.x' 'c d.x'); for e in \"${a[@]%.x}\"; do echo \"[$e]\"; done").0,
+            "[a b]\n[c d]\n"
+        );
+    }
+
+    #[test]
+    fn bulk_positional_transforms() {
+        // Element-wise transform over the positional parameters.
+        assert_eq!(run("set -- one.c two.c; echo ${@%.c}").0, "one two\n");
+        assert_eq!(run("set -- ab cd; echo ${@^^}").0, "AB CD\n");
+        assert_eq!(run("set -- a.b c.d; echo ${*/./-}").0, "a-b c-d\n");
     }
 
     #[test]

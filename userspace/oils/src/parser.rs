@@ -5,7 +5,8 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, CaseTerm,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
+    CaseTerm,
     Command,
     CondBinOp,
     CondExpr, ForArithClause, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp,
@@ -1145,7 +1146,16 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                     length,
                 });
             }
-            // `${a[@]:-x}` / `${a[*]#pat}` (bulk element transform) is unsupported.
+            // `${a[@]#pat}` / `${a[*]/x/y}` / `${a[@]^^}` / `${a[@]@Q}` — an
+            // element-wise transform applied to every element.
+            if let Some(op) = parse_bulk_op(&rest)? {
+                return Ok(WordPart::ArrayBulk {
+                    name,
+                    star: matches!(index, ArrayIndex::Star),
+                    op,
+                });
+            }
+            // `${a[@]:-x}` (default operators on `[@]`) is unsupported.
             return Err(ParseError(format!(
                 "unsupported parameter expansion '${{{raw}}}'"
             )));
@@ -1165,6 +1175,18 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             star: name == "*",
             offset,
             length,
+        });
+    }
+    // `${@#pat}` / `${*/x/y}` / `${@^^}` — element-wise transform over the
+    // positional parameters.
+    if (name == "@" || name == "*")
+        && !rest.is_empty()
+        && let Some(op) = parse_bulk_op(&rest)?
+    {
+        return Ok(WordPart::ArrayBulk {
+            name: name.clone(),
+            star: name == "*",
+            op,
         });
     }
     if rest.is_empty() {
@@ -1255,11 +1277,13 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
 }
 
 /// Parse the body of a `${name/…}` substitution (chars after the first `/`).
-fn parse_param_replace(
-    name: String,
-    index: Option<Box<Word>>,
+/// Parse the `[/|#|%]pat/repl` body of a substitution into its component pieces
+/// (`all`, anchor, pattern, replacement), shared by the scalar and bulk-array
+/// substitution parsers.
+#[allow(clippy::type_complexity)]
+fn parse_replace_pieces(
     body: &[char],
-) -> Result<WordPart, ParseError> {
+) -> Result<(bool, ReplaceAnchor, Box<Word>, Box<Word>), ParseError> {
     let mut i = 0;
     let mut all = false;
     let mut anchor = ReplaceAnchor::None;
@@ -1301,14 +1325,72 @@ fn parse_param_replace(
         }
         i += 1;
     }
+    Ok((
+        all,
+        anchor,
+        Box::new(word_from_source(&pattern)?),
+        Box::new(word_from_source(&replacement)?),
+    ))
+}
+
+fn parse_param_replace(
+    name: String,
+    index: Option<Box<Word>>,
+    body: &[char],
+) -> Result<WordPart, ParseError> {
+    let (all, anchor, pattern, replacement) = parse_replace_pieces(body)?;
     Ok(WordPart::ParamReplace {
         name,
         index,
         all,
         anchor,
-        pattern: Box::new(word_from_source(&pattern)?),
-        replacement: Box::new(word_from_source(&replacement)?),
+        pattern,
+        replacement,
     })
+}
+
+/// Parse the operator portion of a bulk array expansion (`${a[@]OP}`) into a
+/// [`BulkOp`], or `None` when `rest` is not a recognized element-wise operator
+/// (e.g. the `:-`/`:=` default operators, which do not apply to `[@]`).
+fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    match rest[0] {
+        '#' | '%' => {
+            let suffix = rest[0] == '%';
+            let longest = rest.get(1) == Some(&rest[0]);
+            let pat_start = if longest { 2 } else { 1 };
+            let pat: String = rest[pat_start..].iter().collect();
+            Ok(Some(BulkOp::Trim {
+                suffix,
+                longest,
+                pattern: Box::new(word_from_source(&pat)?),
+            }))
+        }
+        '^' | ',' => {
+            let upper = rest[0] == '^';
+            let all = rest.get(1) == Some(&rest[0]);
+            let pat_start = if all { 2 } else { 1 };
+            let pat: String = rest[pat_start..].iter().collect();
+            Ok(Some(BulkOp::Case {
+                upper,
+                all,
+                pattern: Box::new(word_from_source(&pat)?),
+            }))
+        }
+        '/' => {
+            let (all, anchor, pattern, replacement) = parse_replace_pieces(&rest[1..])?;
+            Ok(Some(BulkOp::Replace {
+                all,
+                anchor,
+                pattern,
+                replacement,
+            }))
+        }
+        '@' if rest.len() == 2 => Ok(Some(BulkOp::Transform { op: rest[1] })),
+        _ => Ok(None),
+    }
 }
 
 /// Build a single [`Word`] from arbitrary source text (used for the argument of

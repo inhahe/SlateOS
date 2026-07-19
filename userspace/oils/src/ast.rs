@@ -447,6 +447,43 @@ pub enum WordPart {
         offset: Box<Word>,
         length: Option<Box<Word>>,
     },
+    /// A pattern/case/substitution operator applied to *every* element of an
+    /// array (`${a[@]#pat}`, `${a[@]/x/y}`, `${a[@]^^}`, `${a[@]@Q}`) or to every
+    /// positional parameter (`${@#pat}`, …). The scalar equivalents live in
+    /// `ParamTrim`/`ParamReplace`/`ParamCase`/`ParamTransform`.
+    ArrayBulk {
+        /// The array name, or `@`/`*` for positional parameters.
+        name: String,
+        /// `true` for the `[*]` / `$*` form (join into one field when quoted).
+        star: bool,
+        op: BulkOp,
+    },
+}
+
+/// The operator carried by [`WordPart::ArrayBulk`], applied element-wise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BulkOp {
+    /// `${a[@]#pat}` / `##` / `%` / `%%` — prefix/suffix removal per element.
+    Trim {
+        suffix: bool,
+        longest: bool,
+        pattern: Box<Word>,
+    },
+    /// `${a[@]/pat/repl}` — pattern substitution per element.
+    Replace {
+        all: bool,
+        anchor: ReplaceAnchor,
+        pattern: Box<Word>,
+        replacement: Box<Word>,
+    },
+    /// `${a[@]^pat}` / `^^` / `,` / `,,` — case modification per element.
+    Case {
+        upper: bool,
+        all: bool,
+        pattern: Box<Word>,
+    },
+    /// `${a[@]@Q}` etc. — parameter transformation per element.
+    Transform { op: char },
 }
 
 /// An array subscript inside `${name[…]}`.

@@ -4074,15 +4074,44 @@ impl Shell {
     }
 
     fn tilde_expand(&self, s: &str) -> String {
-        if s == "~" {
-            return self.param_value("HOME").unwrap_or_else(|| "~".to_string());
+        let Some(after) = s.strip_prefix('~') else {
+            return s.to_string();
+        };
+        // The tilde-prefix runs from just after `~` to the first `/` (or end);
+        // the remainder (including any leading `/`) is appended verbatim.
+        let (prefix, rest) = match after.find('/') {
+            Some(i) => (&after[..i], &after[i..]),
+            None => (after, ""),
+        };
+        // Resolve the prefix to a directory. An unrecognised prefix (e.g. a
+        // `~user` we cannot resolve — no user database on this target) leaves the
+        // word untouched, matching bash's "no expansion if lookup fails" rule.
+        let dir: Option<String> = if prefix.is_empty() {
+            self.param_value("HOME")
+        } else if prefix == "+" {
+            self.param_value("PWD")
+                .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        } else if prefix == "-" {
+            self.param_value("OLDPWD")
+        } else if let Some(n) = parse_dirstack_index(prefix) {
+            // `~N` / `~+N` count from the left (0 = current dir); `~-N` from the
+            // right of the directory stack.
+            let full = self.dir_stack_full();
+            let len = full.len();
+            match n {
+                DirStackRef::FromLeft(k) => full.get(k).cloned(),
+                DirStackRef::FromRight(k) => len
+                    .checked_sub(1)
+                    .and_then(|last| last.checked_sub(k))
+                    .and_then(|i| full.get(i).cloned()),
+            }
+        } else {
+            None
+        };
+        match dir {
+            Some(d) => format!("{d}{rest}"),
+            None => s.to_string(),
         }
-        if let Some(rest) = s.strip_prefix("~/")
-            && let Some(home) = self.param_value("HOME")
-        {
-            return format!("{home}/{rest}");
-        }
-        s.to_string()
     }
 
     // ---- builtins -----------------------------------------------------------
@@ -8247,6 +8276,27 @@ fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
 
+/// A numeric tilde-prefix reference into the directory stack.
+enum DirStackRef {
+    /// `~N` / `~+N` — the Nth entry counting from the left (0 = current dir).
+    FromLeft(usize),
+    /// `~-N` — the Nth entry counting from the right of the stack.
+    FromRight(usize),
+}
+
+/// Parse the numeric part of a directory-stack tilde-prefix (`N`, `+N`, `-N`).
+/// Returns `None` for a non-numeric prefix (e.g. a username), which leaves the
+/// word unexpanded.
+fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
+    if let Some(digits) = prefix.strip_prefix('-') {
+        digits.parse::<usize>().ok().map(DirStackRef::FromRight)
+    } else if let Some(digits) = prefix.strip_prefix('+') {
+        digits.parse::<usize>().ok().map(DirStackRef::FromLeft)
+    } else {
+        prefix.parse::<usize>().ok().map(DirStackRef::FromLeft)
+    }
+}
+
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
@@ -10346,6 +10396,23 @@ mod tests {
         let (o, code) = run("help nosuchbuiltin");
         assert_eq!(o, "");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn tilde_expand_plus_minus_and_home() {
+        // ~ expands to $HOME; ~/path keeps the remainder.
+        assert_eq!(run("HOME=/home/me; echo ~").0, "/home/me\n");
+        assert_eq!(run("HOME=/home/me; echo ~/docs").0, "/home/me/docs\n");
+        // ~+ = $PWD, ~- = $OLDPWD, both with an optional trailing path.
+        assert_eq!(run("PWD=/a/b; echo ~+").0, "/a/b\n");
+        assert_eq!(run("PWD=/a/b; echo ~+/c").0, "/a/b/c\n");
+        assert_eq!(run("OLDPWD=/x/y; echo ~-").0, "/x/y\n");
+        assert_eq!(run("OLDPWD=/x/y; echo ~-/z").0, "/x/y/z\n");
+        // ~+0 is the current directory-stack top (a real path, not literal).
+        let out = run("echo ~+0").0;
+        assert!(!out.starts_with('~'), "got: {out:?}");
+        // An unresolvable ~user prefix is left untouched.
+        assert_eq!(run("echo ~nosuchuser42/bin").0, "~nosuchuser42/bin\n");
     }
 
     #[test]

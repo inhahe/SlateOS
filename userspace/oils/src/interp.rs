@@ -4106,8 +4106,9 @@ impl Shell {
                 name,
                 index,
                 op,
+                colon,
                 arg,
-            } => self.expand_param_op(name, index, *op, arg),
+            } => self.expand_param_op(name, index, *op, *colon, arg),
             WordPart::ParamTrim {
                 name,
                 index,
@@ -4189,20 +4190,29 @@ impl Shell {
         name: &str,
         index: &Option<Box<Word>>,
         op: ParamOp,
+        colon: bool,
         arg: &Word,
     ) -> String {
         let cur = self.param_elem_value(name, index);
-        let is_set_nonempty = cur.as_ref().is_some_and(|v| !v.is_empty());
+        // Bash: the colon forms (`:-`, `:=`, `:+`, `:?`) treat an empty value the
+        // same as unset ("active" only when set AND non-empty). The colon-less
+        // forms distinguish empty-but-set from genuinely unset ("active" whenever
+        // the parameter is set, even if empty).
+        let is_active = if colon {
+            cur.as_ref().is_some_and(|v| !v.is_empty())
+        } else {
+            cur.is_some()
+        };
         match op {
             ParamOp::UseDefault => {
-                if is_set_nonempty {
+                if is_active {
                     cur.unwrap_or_default()
                 } else {
                     self.expand_to_string(arg)
                 }
             }
             ParamOp::AssignDefault => {
-                if is_set_nonempty {
+                if is_active {
                     cur.unwrap_or_default()
                 } else {
                     let v = self.expand_to_string(arg);
@@ -4211,14 +4221,14 @@ impl Shell {
                 }
             }
             ParamOp::UseAlternate => {
-                if is_set_nonempty {
+                if is_active {
                     self.expand_to_string(arg)
                 } else {
                     String::new()
                 }
             }
             ParamOp::ErrorIfUnset => {
-                if is_set_nonempty {
+                if is_active {
                     cur.unwrap_or_default()
                 } else {
                     let msg = self.expand_to_string(arg);
@@ -10181,6 +10191,51 @@ mod tests {
     fn param_default() {
         let (o, _) = run("echo ${undefined:-fallback}");
         assert_eq!(o, "fallback\n");
+    }
+
+    #[test]
+    fn param_default_colon_vs_plain() {
+        // Colon form: empty-but-set uses the default.
+        let (o, _) = run("x=; echo [${x:-D}]");
+        assert_eq!(o, "[D]\n");
+        // Plain form: empty-but-set is "set", so no default is applied.
+        let (o, _) = run("x=; echo [${x-D}]");
+        assert_eq!(o, "[]\n");
+        // Both forms use the default when genuinely unset.
+        let (o, _) = run("unset x; echo [${x:-D}][${x-D}]");
+        assert_eq!(o, "[D][D]\n");
+        // Set and non-empty: neither form applies the default.
+        let (o, _) = run("x=v; echo [${x:-D}][${x-D}]");
+        assert_eq!(o, "[v][v]\n");
+    }
+
+    #[test]
+    fn param_alternate_colon_vs_plain() {
+        // Colon form (`:+`): active only when set AND non-empty.
+        let (o, _) = run("x=; echo [${x:+A}]");
+        assert_eq!(o, "[]\n");
+        // Plain form (`+`): active whenever set, even if empty.
+        let (o, _) = run("x=; echo [${x+A}]");
+        assert_eq!(o, "[A]\n");
+        // Unset: neither form is active.
+        let (o, _) = run("unset x; echo [${x:+A}][${x+A}]");
+        assert_eq!(o, "[][]\n");
+        // Set non-empty: both active.
+        let (o, _) = run("x=v; echo [${x:+A}][${x+A}]");
+        assert_eq!(o, "[A][A]\n");
+    }
+
+    #[test]
+    fn param_assign_default_plain() {
+        // Plain `=`: empty-but-set is left as-is (empty), not reassigned.
+        let (o, _) = run("x=; echo [${x=D}][$x]");
+        assert_eq!(o, "[][]\n");
+        // Unset: assigns the default.
+        let (o, _) = run("unset x; echo [${x=D}][$x]");
+        assert_eq!(o, "[D][D]\n");
+        // Colon `:=`: empty-but-set gets reassigned to the default.
+        let (o, _) = run("x=; echo [${x:=D}][$x]");
+        assert_eq!(o, "[D][D]\n");
     }
 
     #[test]

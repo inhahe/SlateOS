@@ -348,6 +348,10 @@ pub enum WordPart {
         /// `None` for a plain scalar/`${name:-word}`.
         index: Option<Box<Word>>,
         op: ParamOp,
+        /// `true` for the colon forms (`:-`/`:=`/`:+`/`:?`), which treat an empty
+        /// value the same as unset; `false` for the colon-less forms (`-`/`=`/
+        /// `+`/`?`), which act only when the parameter is genuinely *unset*.
+        colon: bool,
         arg: Box<Word>,
     },
     /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}` — remove

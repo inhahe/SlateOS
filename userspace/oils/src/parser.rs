@@ -1320,7 +1320,10 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         _ => {
             let mut chs = rest.iter();
             let mut c = *chs.next().unwrap_or(&'\0');
-            if c == ':' {
+            // A leading `:` selects the null-or-unset (colon) form; without it the
+            // operator acts only when the parameter is genuinely unset.
+            let colon = c == ':';
+            if colon {
                 c = *chs.next().unwrap_or(&'\0');
             }
             let arg_str: String = chs.collect();
@@ -1339,6 +1342,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 name,
                 index: elem_index,
                 op,
+                colon,
                 arg: Box::new(word_from_source(&arg_str)?),
             })
         }

@@ -557,14 +557,15 @@ fn part_src(p: &WordPart) -> String {
             s
         }
         WordPart::Param(name) => dollar_name(name),
-        WordPart::ParamOp { name, index, op, arg } => {
-            let opstr = match op {
-                ParamOp::UseDefault => ":-",
-                ParamOp::AssignDefault => ":=",
-                ParamOp::UseAlternate => ":+",
-                ParamOp::ErrorIfUnset => ":?",
+        WordPart::ParamOp { name, index, op, colon, arg } => {
+            let sym = match op {
+                ParamOp::UseDefault => "-",
+                ParamOp::AssignDefault => "=",
+                ParamOp::UseAlternate => "+",
+                ParamOp::ErrorIfUnset => "?",
             };
-            format!("${{{}{}{}}}", name_sub(name, index), opstr, word_src(arg))
+            let colon = if *colon { ":" } else { "" };
+            format!("${{{}{}{}{}}}", name_sub(name, index), colon, sym, word_src(arg))
         }
         WordPart::ParamTrim { name, index, suffix, longest, pattern } => {
             let op = match (suffix, longest) {

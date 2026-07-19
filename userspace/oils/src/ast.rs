@@ -538,6 +538,8 @@ pub struct Redirect {
 pub enum RedirectOp {
     /// `> file` — truncate/create.
     Write,
+    /// `>| file` — truncate/create, overriding `noclobber` (`set -C`).
+    Clobber,
     /// `>> file` — append.
     Append,
     /// `< file` — read.

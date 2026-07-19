@@ -268,6 +268,9 @@ pub struct Shell {
     /// `set -a` (allexport): automatically mark every subsequently-assigned
     /// variable for export. Consulted in `apply_assignment`.
     allexport: bool,
+    /// `set -C` (noclobber): a plain `>` refuses to truncate an existing regular
+    /// file; `>|` overrides. Consulted in `resolve_redirects`.
+    noclobber: bool,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -383,6 +386,7 @@ impl Shell {
             xtrace: false,
             noglob: false,
             allexport: false,
+            noclobber: false,
             errexit_suppress: 0,
             unbound_error: false,
             local_frames: Vec::new(),
@@ -1587,6 +1591,7 @@ impl Shell {
             xtrace: self.xtrace,
             noglob: self.noglob,
             allexport: self.allexport,
+            noclobber: self.noclobber,
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
@@ -3286,9 +3291,20 @@ impl Shell {
                         plan.stdin_data = Some(s.into_bytes());
                     }
                 }
-                RedirectOp::Write | RedirectOp::Append => {
+                RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_to_string(&r.target);
                     let append = matches!(r.op, RedirectOp::Append);
+                    // With `set -C` (noclobber), a plain `>` refuses to truncate an
+                    // existing regular file; `>|` (Clobber) and `>>` (Append)
+                    // always proceed. Matches bash's noclobber semantics.
+                    if self.noclobber
+                        && matches!(r.op, RedirectOp::Write)
+                        && std::path::Path::new(&target)
+                            .metadata()
+                            .is_ok_and(|m| m.is_file())
+                    {
+                        return Err(format!("{target}: cannot overwrite existing file"));
+                    }
                     match r.fd {
                         2 => plan.stderr = Some((target, append)),
                         _ => plan.stdout = Some((target, append)),
@@ -5799,6 +5815,7 @@ impl Shell {
             'x' => self.xtrace = enable,
             'f' => self.noglob = enable,
             'a' => self.allexport = enable,
+            'C' => self.noclobber = enable,
             _ => {}
         }
     }
@@ -5813,6 +5830,7 @@ impl Shell {
             "xtrace" => self.xtrace = enable,
             "noglob" => self.noglob = enable,
             "allexport" => self.allexport = enable,
+            "noclobber" => self.noclobber = enable,
             _ => {}
         }
     }
@@ -5824,7 +5842,15 @@ impl Shell {
     /// order, so the reported state is always truthful.
     fn format_option_list(&self, reinput: bool) -> String {
         // Alphabetical, matching bash's ordering of these names.
-        let opts = ["allexport", "errexit", "noglob", "nounset", "pipefail", "xtrace"];
+        let opts = [
+            "allexport",
+            "errexit",
+            "noclobber",
+            "noglob",
+            "nounset",
+            "pipefail",
+            "xtrace",
+        ];
         let mut s = String::new();
         for name in opts {
             let on = self.shell_option_enabled(name);
@@ -5850,6 +5876,7 @@ impl Shell {
             "xtrace" => self.xtrace,
             "noglob" => self.noglob,
             "allexport" => self.allexport,
+            "noclobber" => self.noclobber,
             _ => false,
         }
     }
@@ -11186,6 +11213,67 @@ mod tests {
         // `[ -o noglob ]` reflects the current option state.
         assert_eq!(run("set -f; [ -o noglob ]; echo $?").0, "0\n");
         assert_eq!(run("[ -o noglob ]; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn noclobber_blocks_overwrite() {
+        // `set -C` makes a plain `>` refuse to truncate an existing file.
+        let p = std::env::temp_dir().join("osh_noclobber_1.txt");
+        let _ = std::fs::remove_file(&p);
+        let ps = p.to_string_lossy().replace('\\', "/");
+        let src = format!("echo one > \"{ps}\"; set -C; echo two > \"{ps}\"; echo status=$?");
+        let (o, _) = run(&src);
+        assert!(o.contains("status=1"), "output: {o:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn clobber_override_bypasses_noclobber() {
+        // `>|` overrides noclobber and truncates the existing file.
+        let p = std::env::temp_dir().join("osh_noclobber_2.txt");
+        let _ = std::fs::remove_file(&p);
+        let ps = p.to_string_lossy().replace('\\', "/");
+        let src = format!("echo one > \"{ps}\"; set -C; echo two >| \"{ps}\"; echo status=$?");
+        let (o, _) = run(&src);
+        assert!(o.contains("status=0"), "output: {o:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn set_plus_c_re_enables_overwrite() {
+        // `set +C` clears noclobber, so `>` may truncate again.
+        let p = std::env::temp_dir().join("osh_noclobber_3.txt");
+        let _ = std::fs::remove_file(&p);
+        let ps = p.to_string_lossy().replace('\\', "/");
+        let src =
+            format!("echo one > \"{ps}\"; set -C; set +C; echo two > \"{ps}\"; echo status=$?");
+        let (o, _) = run(&src);
+        assert!(o.contains("status=0"), "output: {o:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn noclobber_allows_append() {
+        // `>>` is always permitted, even under noclobber.
+        let p = std::env::temp_dir().join("osh_noclobber_4.txt");
+        let _ = std::fs::remove_file(&p);
+        let ps = p.to_string_lossy().replace('\\', "/");
+        let src = format!("echo one > \"{ps}\"; set -C; echo two >> \"{ps}\"; echo status=$?");
+        let (o, _) = run(&src);
+        assert!(o.contains("status=0"), "output: {o:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn noclobber_in_option_list_and_test_operator() {
+        let (o, _) = run("set -o");
+        assert!(o.contains("noclobber"), "set -o list: {o:?}");
+        assert_eq!(run("set -C; [ -o noclobber ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -o noclobber ]; echo $?").0, "1\n");
     }
 
     #[test]

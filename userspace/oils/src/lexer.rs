@@ -35,6 +35,8 @@ pub enum Op {
     Less,
     Great,
     DGreat,
+    /// `>|` — truncate/create, overriding `noclobber`.
+    GreatPipe,
     GreatAnd,
     LessAnd,
     /// `<<` — here-document.
@@ -274,6 +276,10 @@ impl Lexer {
                         Some('&') => {
                             self.pos += 1;
                             out.push(Tok::Op(Op::GreatAnd));
+                        }
+                        Some('|') => {
+                            self.pos += 1;
+                            out.push(Tok::Op(Op::GreatPipe));
                         }
                         _ => out.push(Tok::Op(Op::Great)),
                     }

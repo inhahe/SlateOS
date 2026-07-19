@@ -253,6 +253,7 @@ impl Parser {
                 | Some(Tok::Op(
                     Op::Less
                         | Op::Great
+                        | Op::GreatPipe
                         | Op::DGreat
                         | Op::GreatAnd
                         | Op::LessAnd
@@ -733,6 +734,7 @@ impl Parser {
                 | Some(Tok::Op(
                     Op::Less
                     | Op::Great
+                    | Op::GreatPipe
                     | Op::DGreat
                     | Op::GreatAnd
                     | Op::LessAnd
@@ -763,6 +765,7 @@ impl Parser {
         let op = match self.bump() {
             Some(Tok::Op(Op::Less)) => RedirectOp::Read,
             Some(Tok::Op(Op::Great)) => RedirectOp::Write,
+            Some(Tok::Op(Op::GreatPipe)) => RedirectOp::Clobber,
             Some(Tok::Op(Op::DGreat)) => RedirectOp::Append,
             Some(Tok::Op(Op::GreatAnd | Op::LessAnd)) => RedirectOp::DupOut,
             Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,

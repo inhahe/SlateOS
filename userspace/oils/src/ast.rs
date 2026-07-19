@@ -59,6 +59,8 @@ pub enum Command {
     /// `for (( init; cond; update )); do body; done` — C-style arithmetic for
     /// loop. Each section holds the raw arithmetic text (empty = omitted).
     ForArith(ForArithClause),
+    /// `select name [in words]; do body; done` — interactive menu loop.
+    Select(SelectClause),
     /// `name() { body; }` — a function definition.
     Function(FunctionDef),
     /// `case word in pat) body ;; … esac`.
@@ -219,6 +221,18 @@ pub struct LoopClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForClause {
+    pub var: String,
+    /// The `in …` word list; `None` means iterate over `"$@"`.
+    pub words: Option<Vec<Word>>,
+    pub body: Program,
+}
+
+/// `select var [in words]; do body; done` — bash's interactive menu loop.
+/// Prints the numbered word list to stderr, reads a selection line from stdin
+/// (with the `PS3` prompt), sets `var` to the chosen word (empty on bad input),
+/// stores the raw line in `REPLY`, and runs the body until EOF or `break`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectClause {
     pub var: String,
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,

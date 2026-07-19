@@ -93,7 +93,7 @@ use crate::ast::{
     CondExpr,
     ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
     RedirectOp,
-    ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
+    ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::parser::parse;
 
@@ -668,6 +668,7 @@ impl Shell {
             Command::Loop(c) => self.exec_loop(c, out, stdin),
             Command::For(c) => self.exec_for(c, out, stdin),
             Command::ForArith(c) => self.exec_for_arith(c, out, stdin),
+            Command::Select(c) => self.exec_select(c, out, stdin),
             Command::Function(f) => {
                 self.funcs.insert(f.name.clone(), f.body.clone());
                 self.last_status = 0;
@@ -775,6 +776,87 @@ impl Shell {
         let mut body_status = 0;
         for item in items {
             self.vars.insert(c.var.clone(), item);
+            match self.exec_program(&c.body, out, stdin) {
+                Flow::Next => {}
+                Flow::Break(n) => {
+                    if n > 1 {
+                        return Flow::Break(n - 1);
+                    }
+                    break;
+                }
+                Flow::Continue(n) => {
+                    if n > 1 {
+                        return Flow::Continue(n - 1);
+                    }
+                }
+                other => return other,
+            }
+            body_status = self.last_status;
+        }
+        self.last_status = body_status;
+        Flow::Next
+    }
+
+    /// `select name [in words]; do body; done` — bash's interactive menu loop.
+    /// Prints the numbered word list (once, and again after a blank line) to
+    /// stderr, writes the `PS3` prompt (default `#? `), reads a line from stdin,
+    /// stores the raw line in `REPLY`, sets `name` to the chosen word (empty when
+    /// the input is not a valid item number), and runs the body — repeating until
+    /// EOF or `break`. The loop's exit status is the last body execution (0 if the
+    /// body never runs).
+    fn exec_select(&mut self, c: &SelectClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        let items: Vec<String> = match &c.words {
+            Some(words) => {
+                let mut v = Vec::new();
+                for w in words {
+                    for bw in crate::brace::expand_braces(w) {
+                        v.extend(self.expand_word(&bw, true));
+                    }
+                }
+                v
+            }
+            None => self.positional.clone(),
+        };
+        // An empty item list runs no body and exits with status 0.
+        if items.is_empty() {
+            self.last_status = 0;
+            return Flow::Next;
+        }
+        let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| "#? ".to_string());
+        let redir = RedirPlan::default();
+        let mut body_status = 0;
+        let mut show_menu = true;
+        loop {
+            if show_menu {
+                let mut menu = String::new();
+                for (i, it) in items.iter().enumerate() {
+                    // `i + 1` cannot overflow: item counts are bounded by memory.
+                    menu.push_str(&format!("{}) {it}\n", i + 1));
+                }
+                self.emit_stderr(menu.as_bytes());
+                show_menu = false;
+            }
+            self.emit_stderr(ps3.as_bytes());
+            let line = match self.read_line(stdin, &redir) {
+                Some(l) => l,
+                None => {
+                    // EOF: bash emits a newline and terminates the loop.
+                    self.emit_stderr(b"\n");
+                    break;
+                }
+            };
+            self.vars.insert("REPLY".to_string(), line.clone());
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                // A blank line reprints the menu without running the body.
+                show_menu = true;
+                continue;
+            }
+            let choice = match trimmed.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= items.len() => items[n - 1].clone(),
+                _ => String::new(),
+            };
+            self.vars.insert(c.var.clone(), choice);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -4998,6 +5080,32 @@ mod tests {
         // `;;&` resumes matching but no later arm matches.
         let (o, _) = run("case abc in a*) echo one ;;& z*) echo two ;; esac; echo done");
         assert_eq!(o, "one\ndone\n");
+    }
+
+    #[test]
+    fn select_picks_by_number() {
+        let (o, _) = run("select x in a b c; do echo \"picked $x\"; break; done <<< \"2\"");
+        assert_eq!(o, "picked b\n");
+    }
+
+    #[test]
+    fn select_invalid_gives_empty() {
+        let (o, _) = run("select x in a b; do echo \"got=$x\"; break; done <<< \"9\"");
+        assert_eq!(o, "got=\n");
+    }
+
+    #[test]
+    fn select_sets_reply() {
+        let (o, _) = run("select x in a b; do echo \"r=$REPLY x=$x\"; break; done <<< \"1\"");
+        assert_eq!(o, "r=1 x=a\n");
+    }
+
+    #[test]
+    fn select_eof_terminates() {
+        // The here-string provides one line; the next read hits EOF and ends
+        // the loop (no infinite spin, no `break` needed).
+        let (o, _) = run("select x in a b; do echo \"$x\"; done <<< \"1\"");
+        assert_eq!(o, "a\n");
     }
 
     #[test]

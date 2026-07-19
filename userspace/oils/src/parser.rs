@@ -10,7 +10,7 @@ use crate::ast::{
     CondBinOp,
     CondExpr, ForArithClause, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp,
     Pipeline, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SimpleCommand, UnaryOp, Word, WordPart,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::lexer::{Op, Seg, Tok, tokenize};
 
@@ -50,7 +50,7 @@ struct Parser {
 /// Reserved words that terminate a command list or introduce a compound.
 const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "{", "}",
-    "!", "case", "esac",
+    "!", "case", "esac", "select",
 ];
 
 impl Parser {
@@ -176,6 +176,7 @@ impl Parser {
                 "while" => self.parse_loop(false)?,
                 "until" => self.parse_loop(true)?,
                 "for" => self.parse_for()?,
+                "select" => self.parse_select()?,
                 "case" => self.parse_case()?,
                 "{" => self.parse_brace_group()?,
                 other => {
@@ -361,6 +362,43 @@ impl Parser {
         let body = self.parse_program(&["done"])?;
         self.expect_reserved("done")?;
         Ok(Command::For(ForClause { var, words, body }))
+    }
+
+    /// Parse `select name [in words]; do body; done`. Structurally identical to
+    /// the word-list `for` loop; the runtime difference is the interactive menu.
+    fn parse_select(&mut self) -> Result<Command, ParseError> {
+        self.expect_reserved("select")?;
+        let var = self
+            .bare_word_here()
+            .ok_or_else(|| ParseError("expected variable name after 'select'".into()))?;
+        if !is_valid_name(&var) {
+            return Err(ParseError(format!("invalid select variable '{var}'")));
+        }
+        self.pos += 1;
+        self.skip_newlines();
+        let words = if self.reserved_here().as_deref() == Some("in") {
+            self.pos += 1;
+            let mut ws = Vec::new();
+            while let Some(Tok::Word(segs)) = self.peek() {
+                if let [Seg::Lit(s)] = segs.as_slice()
+                    && RESERVED.contains(&s.as_str())
+                {
+                    break;
+                }
+                let segs = segs.clone();
+                self.pos += 1;
+                ws.push(self.word_from_segs(&segs)?);
+            }
+            self.skip_separators();
+            Some(ws)
+        } else {
+            self.skip_separators();
+            None
+        };
+        self.expect_reserved("do")?;
+        let body = self.parse_program(&["done"])?;
+        self.expect_reserved("done")?;
+        Ok(Command::Select(SelectClause { var, words, body }))
     }
 
     /// Parse the body of a C-style `for (( init; cond; update ))` loop, given

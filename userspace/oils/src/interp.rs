@@ -6341,7 +6341,8 @@ impl Shell {
         let mut buf = String::new();
         for (sig, action) in entries {
             let quoted = single_quote(action);
-            buf.push_str(&format!("trap -- {quoted} {sig}\n"));
+            let name = sigspec_display(sig);
+            buf.push_str(&format!("trap -- {quoted} {name}\n"));
         }
         self.write_bytes(out, redir, buf.as_bytes())
     }
@@ -10604,17 +10605,28 @@ fn normalize_sigspec(spec: &str) -> Option<String> {
 }
 
 /// Sort key placing `EXIT` first, then real signals by number, then the other
-/// pseudo signals — used to order `trap -p` output deterministically.
+/// pseudo signals in bash's order (`DEBUG`, `ERR`, `RETURN`) — used to order
+/// `trap -p` output deterministically.
 fn sigspec_order(spec: &str) -> u16 {
     match spec {
         "EXIT" => 0,
         "DEBUG" => 200,
-        "RETURN" => 201,
-        "ERR" => 202,
+        "ERR" => 201,
+        "RETURN" => 202,
         _ => SIGNALS
             .iter()
             .find(|(_, name)| *name == spec)
             .map_or(255, |(num, _)| u16::from(*num)),
+    }
+}
+
+/// Render a normalized trap spec as bash's `trap -p` display name: real signals
+/// carry a `SIG` prefix (`INT` → `SIGINT`), while the pseudo-signals
+/// (`EXIT`/`ERR`/`DEBUG`/`RETURN`) are shown bare.
+fn sigspec_display(spec: &str) -> String {
+    match spec {
+        "EXIT" | "ERR" | "DEBUG" | "RETURN" => spec.to_string(),
+        _ => format!("SIG{spec}"),
     }
 }
 
@@ -15616,20 +15628,47 @@ mod tests {
         assert!(o.contains("trap -- 'echo bye' EXIT"), "got {o:?}");
 
         // A signal name with/without SIG prefix, case-insensitive, normalizes.
+        // `trap -p` renders real signals with bash's `SIG` prefix.
         let (o, _) = run("trap 'x' sigint; trap -p int");
-        assert!(o.contains("trap -- 'x' INT"), "got {o:?}");
+        assert!(o.contains("trap -- 'x' SIGINT"), "got {o:?}");
 
         // `trap - SIG` resets (removes) the handler.
         let (o, _) = run("trap 'x' INT; trap - INT; trap -p");
         assert!(!o.contains("INT"), "reset should remove INT, got {o:?}");
 
-        // Ignore form ('') round-trips.
+        // Ignore form ('') round-trips (real signal → `SIG`-prefixed display).
         let (o, _) = run("trap '' TERM; trap -p TERM");
-        assert!(o.contains("trap -- '' TERM"), "got {o:?}");
+        assert!(o.contains("trap -- '' SIGTERM"), "got {o:?}");
 
         // An invalid spec is a status-1 error.
         let (_, st) = run("trap 'x' NOPE");
         assert_eq!(st, 1);
+    }
+
+    #[test]
+    fn trap_print_sig_prefix_and_order() {
+        // bash's `trap -p` prints real signals with a `SIG` prefix but the
+        // pseudo-signals (EXIT/ERR/DEBUG/RETURN) bare, ordered EXIT, then real
+        // signals by number, then DEBUG, ERR, RETURN.
+        let (o, _) = run(
+            "trap 'e' EXIT; trap 'h' HUP; trap 'i' INT; \
+             trap 'd' DEBUG; trap 'r' RETURN; trap 'x' ERR; trap -p",
+        );
+        // The DEBUG trap fires before each command, emitting stray `d` lines;
+        // keep only the `trap --` listing lines to check prefix and ordering.
+        let lines: Vec<&str> = o.lines().filter(|l| l.starts_with("trap --")).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "trap -- 'e' EXIT",
+                "trap -- 'h' SIGHUP",
+                "trap -- 'i' SIGINT",
+                "trap -- 'd' DEBUG",
+                "trap -- 'x' ERR",
+                "trap -- 'r' RETURN",
+            ],
+            "got {o:?}"
+        );
     }
 
     #[test]

@@ -1412,6 +1412,44 @@ same redirect-aware sink (`errln` for in-`run_builtin` builtins, `emit_cmd_stder
 for the `command`/`builtin` wrappers). Mechanical but must match bash's synopsis
 text byte-for-byte per builtin.
 
+### TD-OILS-SUBSHELL-TRAP-DISPLAY. `osh` subshells drop parent trap *strings*, so `trap -p` inside a subshell shows nothing (bash keeps the strings for display while resetting their firing disposition) — OPEN (narrow fidelity gap; needs a display-vs-disposition split) 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `clone_for_subshell` (the `traps`
+field: currently filters to keep only ignored `''` traps and drops the rest).
+
+**What:** in bash a subshell (a `(…)` group, a pipeline stage, or a command
+substitution) **displays** the parent's trap command strings via `trap -p`/bare
+`trap`, even though the trap's *firing disposition* is reset to default (so an
+actual signal runs the default action, not the handler). Measured (bash 5.2):
+
+```
+$ trap 'echo x' INT; (trap -p)
+trap -- 'echo x' SIGINT          # string shown in the subshell
+$ trap 'echo x' INT; trap -p | cat
+trap -- 'echo x' SIGINT          # shown across a pipeline stage too
+$ trap 'echo H' USR1; (kill -USR1 $BASHPID); …
+User defined signal 1            # default action ran — handler did NOT fire
+```
+
+osh keeps only ignored (`''`) traps in the subshell clone, so `trap -p | cat`
+prints an empty result where bash prints the inherited line. The *firing*
+semantics osh already models correctly: it never fires an inherited non-ignored
+trap in a subshell (and osh has no async signal delivery at all yet).
+
+**Impact:** low — visible only when a script inspects traps (`trap -p`/`trap`)
+from **inside** a subshell (pipeline stage, `( )`, or `$( )`). Handler firing is
+already correct.
+
+**Proper fix:** split "trap string for display" from "active disposition." Keep
+*all* parent trap strings in `clone_for_subshell` (so `trap -p` reflects them),
+but mark the non-ignored ones reset-in-subshell so they do not fire. For the
+synchronous pseudo-signals this must honour bash's inheritance rules —
+`DEBUG`/`RETURN` fire in a subshell only under `functrace` (`set -T`), `ERR`
+only under `errtrace` (`set -E`); by default they display but do not fire.
+Naively keeping the strings *without* that guard would wrongly fire
+`DEBUG`/`ERR`/`RETURN` handlers inside subshells, so the guard is required, which
+is why this is deferred rather than a one-line clone change.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

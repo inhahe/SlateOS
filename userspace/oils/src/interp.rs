@@ -1207,8 +1207,24 @@ impl Shell {
             return Flow::Exit(1);
         }
         // A `for` over an empty list runs no body and has exit status 0.
+        // `set -x` prints the (source-form) loop header before *each* iteration,
+        // matching bash. A `for name; do` with no explicit list traces as
+        // `for name in "$@"`.
+        let header = if self.xtrace {
+            let words = match &c.words {
+                Some(words) => words.iter().map(crate::unparse::word_src).collect::<Vec<_>>().join(" "),
+                None => "\"$@\"".to_string(),
+            };
+            Some(format!("for {} in {words}", c.var))
+        } else {
+            None
+        };
         let mut body_status = 0;
         for item in items {
+            if let Some(h) = &header {
+                let prefix = self.xtrace_prefix();
+                self.emit_stderr(format!("{prefix}{h}\n").as_bytes());
+            }
             self.vars.insert(c.var.clone(), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
@@ -1255,6 +1271,15 @@ impl Shell {
         if items.is_empty() {
             self.last_status = 0;
             return Flow::Next;
+        }
+        // `set -x` prints the (source-form) `select` header once, before the
+        // menu — bash does not re-emit it per iteration.
+        if self.xtrace {
+            let words = match &c.words {
+                Some(words) => words.iter().map(crate::unparse::word_src).collect::<Vec<_>>().join(" "),
+                None => "\"$@\"".to_string(),
+            };
+            self.xtrace_emit(&format!("select {} in {words}", c.var));
         }
         let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| "#? ".to_string());
         let redir = RedirPlan::default();
@@ -1357,12 +1382,23 @@ impl Shell {
     /// `update` runs after each iteration (including after `continue`). An
     /// arithmetic error in any section aborts the loop with status 1.
     fn exec_for_arith(&mut self, c: &ForArithClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // `set -x` traces each section as `(( expr ))`; bash substitutes an
+        // always-true `1` for an *empty* section (init/cond/update) and still
+        // prints it, so `for ((;;))` traces `(( 1 ))` for init and cond.
+        let trace_section = |s: &mut Self, raw: &str| {
+            if s.xtrace {
+                let expr = if raw.is_empty() { "1" } else { raw };
+                s.xtrace_emit(&format!("(( {expr} ))"));
+            }
+        };
         self.last_status = 0;
+        trace_section(self, &c.init);
         if !c.init.is_empty() && self.eval_arith_raw(&c.init).is_none() {
             self.last_status = 1;
             return Flow::Next;
         }
         loop {
+            trace_section(self, &c.cond);
             if !c.cond.is_empty() {
                 match self.eval_arith_raw(&c.cond) {
                     Some(0) => break,
@@ -1389,6 +1425,7 @@ impl Shell {
                 }
                 other => return other,
             }
+            trace_section(self, &c.update);
             if !c.update.is_empty() && self.eval_arith_raw(&c.update).is_none() {
                 self.last_status = 1;
                 return Flow::Next;
@@ -1398,6 +1435,11 @@ impl Shell {
     }
 
     fn exec_case(&mut self, c: &CaseClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // `set -x` prints `case WORD in` (WORD in source form, unexpanded) once
+        // before pattern matching, matching bash.
+        if self.xtrace {
+            self.xtrace_emit(&format!("case {} in", crate::unparse::word_src(&c.word)));
+        }
         let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
@@ -1718,6 +1760,9 @@ impl Shell {
 
     /// Execute a `(( … ))` arithmetic command: exit 0 if the value is non-zero.
     fn exec_arith(&mut self, raw: &str) -> Flow {
+        if self.xtrace {
+            self.xtrace_emit(&format!("(( {raw} ))"));
+        }
         let expanded = self.expand_arith_params(raw);
         match arith::eval(&expanded, self) {
             Ok(v) => self.last_status = i32::from(v == 0),
@@ -2796,6 +2841,14 @@ impl Shell {
     fn xtrace_prefix(&self) -> String {
         let ps4 = self.vars.get("PS4").map_or_else(|| "+ ".to_string(), Clone::clone);
         self.prompt_expand(&ps4)
+    }
+
+    /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr.
+    /// Callers gate on `self.xtrace` themselves so `text` need not be built when
+    /// tracing is off.
+    fn xtrace_emit(&mut self, text: &str) {
+        let prefix = self.xtrace_prefix();
+        self.emit_stderr(format!("{prefix}{text}\n").as_bytes());
     }
 
     /// `${var@P}` — expand `var`'s value as a prompt string, interpreting the
@@ -17432,6 +17485,43 @@ mod tests {
         assert_eq!(run("{ set -x; x=5 true; } 2>&1").0, "+ x=5\n+ true\n");
         // `PS4` overrides the trace prefix.
         assert_eq!(run("{ PS4='TRACE '; set -x; x=5; } 2>&1").0, "TRACE x=5\n");
+    }
+
+    #[test]
+    fn xtrace_traces_compound_headers() {
+        // `for` prints a source-form header before *each* iteration.
+        assert_eq!(
+            run("{ set -x; for i in a b; do :; done; } 2>&1").0,
+            "+ for i in a b\n+ :\n+ for i in a b\n+ :\n"
+        );
+        // `for name; do` (no explicit list) traces as `for name in \"$@\"`.
+        assert_eq!(
+            run("{ set -- p; set -x; for i; do :; done; } 2>&1").0,
+            "+ for i in \"$@\"\n+ :\n"
+        );
+        // C-style `for ((...))`: init once, cond before each test, update after
+        // each body; an empty section traces as always-true `(( 1 ))`.
+        assert_eq!(
+            run("{ set -x; for ((i=0;i<2;i++)); do :; done; } 2>&1").0,
+            "+ (( i=0 ))\n+ (( i<2 ))\n+ :\n+ (( i++ ))\n+ (( i<2 ))\n+ :\n+ (( i++ ))\n+ (( i<2 ))\n"
+        );
+        assert_eq!(
+            run("{ set -x; for ((;;)); do break; done; } 2>&1").0,
+            "+ (( 1 ))\n+ (( 1 ))\n+ break\n"
+        );
+        // `(( ))` command traces with its raw (whitespace-preserving) text.
+        assert_eq!(run("{ set -x; ((1+1)); } 2>&1").0, "+ (( 1+1 ))\n");
+        assert_eq!(run("{ set -x; (( 2 > 1 )); } 2>&1").0, "+ ((  2 > 1  ))\n");
+        // `while`/`until` have no header; their `(( ))` conditions self-trace.
+        assert_eq!(
+            run("{ i=0; set -x; while ((i<1)); do ((i++)); done; } 2>&1").0,
+            "+ (( i<1 ))\n+ (( i++ ))\n+ (( i<1 ))\n"
+        );
+        // `case` prints `case WORD in` (source form) before matching.
+        assert_eq!(
+            run("{ x=foo; set -x; case $x in f*) :;; esac; } 2>&1").0,
+            "+ case $x in\n+ :\n"
+        );
     }
 
     #[test]

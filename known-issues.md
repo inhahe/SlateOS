@@ -1465,27 +1465,47 @@ do **not** "fix" osh to emit 127. This joins the other known MSYS host-probe
 false positives (C-locale UTF-8 `$'\uXXXX'`, Windows path/OS-error text, `/tmp`
 path-root, signal-number table, BASH_VERSINFO/BASHPID).
 
-### TD-OILS-XTRACE. `set -x` tracing: no compound-command headers, no nested command-substitution trace, no `PS4` parameter expansion — PARTIAL 2026-07-19
+### TD-OILS-XTRACE. `set -x` tracing: no `[[ … ]]` conditional trace, no nested command-substitution trace, no `PS4` parameter expansion — PARTIAL 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — the `set -x` trace block in
 `exec_simple` (after the readonly-prefix guard), `apply_assignment` (bare-
-assignment tracing), `xtrace_prefix`, and `xtrace_quote`.
+assignment tracing), the compound-command exec sites (`exec_for`,
+`exec_for_arith`, `exec_case`, `exec_select`, `exec_arith`), `xtrace_prefix`,
+`xtrace_emit`, and `xtrace_quote`.
 
-**Status (2026-07-19):** simple-command and bare-assignment tracing now match
-bash byte-for-byte: plain scalars trace their *expanded* value (minimally
-single-quoted, empty shown unquoted), indexed-element/array assignments trace in
-*source* form, temporary prefix assignments (`FOO=bar cmd`) each trace on their
-own line before the command, command arguments are minimally quoted, and the
-`PS4` variable overrides the default `+ ` prefix (with prompt-style backslash
-escapes). Still **missing** relative to bash:
+**Status (2026-07-19, updated):** simple-command, bare-assignment, and most
+compound-command tracing now match bash byte-for-byte:
 
-- **Compound-command headers.** bash traces a `for`/`while`/`if`/`case`/`select`
-  header line (e.g. `+ for i in 1 2`) once per evaluation, plus the condition of
-  `[[ … ]]`/`(( … ))`. `osh` only traces the simple commands in the body, so
-  `set -x; for i in 1 2; do echo $i; done` omits the `+ for i in 1 2` lines.
-  Proper fix: emit a trace line at each compound-command dispatch site
-  (`exec_for`/`exec_loop`/`exec_if`/`exec_case`/`exec_select` and the `[[`/`((`
-  paths), reconstructing the header via the `unparse` module.
+- Plain scalars trace their *expanded* value (minimally single-quoted, empty
+  shown unquoted); indexed-element/array assignments trace in *source* form;
+  temporary prefix assignments (`FOO=bar cmd`) each trace on their own line;
+  command arguments are minimally quoted; `PS4` overrides the `+ ` prefix.
+- `for NAME in WORDS` prints a *source-form* header before **each** iteration
+  (`for i; do` → `for i in "$@"`).
+- C-style `for ((init;cond;update))` traces `(( init ))` once, `(( cond ))`
+  before each test, `(( update ))` after each body; an **empty** section is
+  traced as always-true `(( 1 ))` (so `for ((;;))` traces `(( 1 ))` for the
+  init and cond slots), matching bash.
+- `select NAME in WORDS` prints a source-form header once (bash does not
+  re-emit it per iteration).
+- `case WORD in` prints `case <source-word> in` (unexpanded) before matching.
+- `(( … ))` commands trace `(( <raw> ))` (raw text preserved, so interior
+  spacing like `((  2 > 1  ))` matches). This also covers `while`/`until`
+  arithmetic *conditions*, which self-trace via the `(( ))` command path (bash
+  emits no separate `while`/`until` header, and neither does `osh`).
+
+Still **missing** relative to bash:
+
+- **`[[ … ]]` conditional tracing.** bash traces `[[ ]]` with the operands
+  *expanded and re-quoted* (`[[ $v == "a b" ]]` → `+ [[ a b == \a\ \b ]]`),
+  inserts `-n` for a bare-word test (`[[ $v ]]` → `+ [[ -n a b ]]`), and splits
+  `&&`/`||` operands into **separate** short-circuit-ordered `[[ … ]]` trace
+  lines. Reproducing bash's exact expansion + pattern-requoting + per-operator
+  splitting is intricate and low-value, so `osh` currently emits nothing for a
+  `[[ … ]]` command under `set -x`. Deferred deliberately; proper fix is a
+  dedicated expanded-cond tracer mirroring `cond_eval`'s evaluation order.
+- **`if` header.** bash (like `osh`) emits no `if`/`then`/`else` header — the
+  guard and body commands self-trace. Already correct; noted for completeness.
 - **Nested command-substitution trace.** bash raises the PS4 indirection level
   and traces commands run inside `$(…)` with a doubled first char
   (`++ echo hi`). `osh` does not trace inside command substitution.
@@ -1494,8 +1514,8 @@ escapes). Still **missing** relative to bash:
   arithmetic, and command expansion on `PS4`, so `PS4='+ $LINENO '` is not
   expanded here.
 
-None of these affect the common `set -x` cases; they are logged so a future
-probe recognising a `for`/`$( )`-header trace DIFF knows it is this gap.
+The remaining gaps affect only niche `set -x` cases; they are logged so a
+future probe recognising a `[[ ]]`/`$( )`-header trace DIFF knows it is this gap.
 
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
 

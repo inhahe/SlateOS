@@ -5127,7 +5127,10 @@ impl Shell {
     fn expand_word_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
         let mut fields: Vec<Vec<EChar>> = Vec::new();
         let mut cur: Vec<EChar> = Vec::new();
-        let mut started = false;
+        // `open` == the current field `cur` holds/began real content and must be
+        // emitted at the end of the word. Field-splitting in the `other` arm may
+        // clear it after a delimiter so a trailing IFS run leaves no empty field.
+        let mut open = false;
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -5137,11 +5140,11 @@ impl Shell {
                         s.clone()
                     };
                     push_chars(&mut cur, &s, false);
-                    started = true;
+                    open = true;
                 }
                 WordPart::SingleQuoted(s) => {
                     push_chars(&mut cur, s, true);
-                    started = true;
+                    open = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
@@ -5207,34 +5210,79 @@ impl Shell {
                                 fields.push(std::mem::take(&mut cur));
                             }
                             push_chars(&mut cur, &el, true);
-                            started = true;
+                            open = true;
                         }
                     } else {
                         let s = self.expand_double_quoted(parts);
                         push_chars(&mut cur, &s, true);
-                        started = true;
+                        open = true;
                     }
                 }
                 other => {
                     let val = self.expand_dynamic(other);
+                    // Field-split the unquoted expansion against IFS while keeping
+                    // the *boundary* delimiters relative to adjacent literal/quoted
+                    // text. Only the characters produced by this expansion are split
+                    // candidates, so the scan integrates directly with the
+                    // in-progress field `cur` (splitting each expansion in
+                    // isolation would discard the leading/trailing information
+                    // needed to break against neighbouring parts): a
+                    // leading IFS-whitespace run with a preceding open field closes
+                    // that field, an all-whitespace value collapses to a single
+                    // break, a non-whitespace IFS char always delimits (yielding an
+                    // empty field when nothing precedes it), and interior IFS runs
+                    // split as usual. Empty expansions contribute nothing.
                     let ifs = self
                         .vars
                         .get("IFS")
                         .cloned()
                         .unwrap_or_else(|| " \t\n".to_string());
-                    let pieces = split_field_ifs(&val, &ifs);
-                    if !pieces.is_empty() {
-                        push_chars(&mut cur, &pieces[0], false);
-                        started = true;
-                        for extra in &pieces[1..] {
+                    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+                    let is_nonws = |c: char| !matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+                    let cv: Vec<char> = val.chars().collect();
+                    let n = cv.len();
+                    let mut i = 0;
+                    while i < n {
+                        let c = cv[i];
+                        if is_ws(c) {
+                            let had_open = open;
+                            while i < n && is_ws(cv[i]) {
+                                i += 1;
+                            }
+                            if had_open {
+                                // The whitespace run closes the preceding field; an
+                                // immediately following non-whitespace IFS char is
+                                // absorbed into the same delimiter (`ws* nonws ws*` is
+                                // one delimiter *between* fields).
+                                fields.push(std::mem::take(&mut cur));
+                                open = false;
+                                if i < n && is_nonws(cv[i]) {
+                                    i += 1;
+                                    while i < n && is_ws(cv[i]) {
+                                        i += 1;
+                                    }
+                                }
+                            }
+                            // With no preceding field, leading IFS whitespace is
+                            // simply trimmed; a following non-whitespace delimiter is
+                            // handled below as a standalone delimiter (empty field).
+                        } else if is_nonws(c) {
                             fields.push(std::mem::take(&mut cur));
-                            push_chars(&mut cur, extra, false);
+                            open = false;
+                            i += 1;
+                            while i < n && is_ws(cv[i]) {
+                                i += 1;
+                            }
+                        } else {
+                            cur.push(EChar { c, quoted: false });
+                            open = true;
+                            i += 1;
                         }
                     }
                 }
             }
         }
-        if started {
+        if open {
             fields.push(cur);
         }
         fields
@@ -12291,60 +12339,6 @@ fn quote_set_value(v: &str) -> String {
     v.to_string()
 }
 
-/// Split an expanded value into fields on `$ifs`, following POSIX word-splitting
-/// rules. IFS whitespace (space/tab/newline that appear in `ifs`) runs collapse
-/// and leading/trailing runs are trimmed; each IFS *non*-whitespace character is
-/// a single delimiter (with adjacent IFS whitespace absorbed), so adjacent
-/// non-whitespace delimiters produce empty fields (`IFS=:` on `"a::b"` ⇒
-/// `a`, ``, `b`). A trailing delimiter does not create a trailing empty field.
-/// An empty `ifs` disables splitting (the whole value is one field); an empty
-/// input yields no fields.
-fn split_field_ifs(s: &str, ifs: &str) -> Vec<String> {
-    if s.is_empty() {
-        return Vec::new();
-    }
-    if ifs.is_empty() {
-        return vec![s.to_string()];
-    }
-    let is_ws = |c: char| ifs.contains(c) && matches!(c, ' ' | '\t' | '\n');
-    let is_nonws = |c: char| ifs.contains(c) && !matches!(c, ' ' | '\t' | '\n');
-    let is_ifs = |c: char| ifs.contains(c);
-
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    let mut fields = Vec::new();
-    let mut i = 0;
-    // Leading IFS whitespace is ignored (but a leading non-whitespace delimiter
-    // still yields an empty first field).
-    while i < n && is_ws(chars[i]) {
-        i += 1;
-    }
-    while i < n {
-        // Collect one field up to the next IFS character.
-        let mut cur = String::new();
-        while i < n && !is_ifs(chars[i]) {
-            cur.push(chars[i]);
-            i += 1;
-        }
-        fields.push(cur);
-        if i >= n {
-            break;
-        }
-        // Consume one delimiter: an IFS-whitespace run, then at most one IFS
-        // non-whitespace char, then a trailing IFS-whitespace run.
-        while i < n && is_ws(chars[i]) {
-            i += 1;
-        }
-        if i < n && is_nonws(chars[i]) {
-            i += 1;
-            while i < n && is_ws(chars[i]) {
-                i += 1;
-            }
-        }
-        // A trailing delimiter (nothing follows) produces no empty field.
-    }
-    fields
-}
 
 /// A special shell parameter that is always considered "set" for `nounset`
 /// purposes (referencing it never yields an unbound-variable error).
@@ -14192,6 +14186,53 @@ mod tests {
         assert_eq!(
             run(r#"IFS=' :'; x="a : b"; for w in $x; do echo "<$w>"; done"#).0,
             "<a>\n<b>\n"
+        );
+    }
+
+    #[test]
+    fn unquoted_word_split_boundary_delims() {
+        // IFS whitespace at an expansion boundary must break against adjacent
+        // literal text (the classic bug: `[$x]` gluing `[` to the first field).
+        // Values here match real bash's field splitting exactly.
+        assert_eq!(
+            run(r#"x="  a b  "; printf "<%s>" [$x]; echo"#).0,
+            "<[><a><b><]>\n"
+        );
+        // Leading boundary whitespace splits `pre` from the first field.
+        assert_eq!(run(r#"x="  a  "; printf "<%s>" pre$x; echo"#).0, "<pre><a>\n");
+        // Trailing boundary whitespace splits the last field from `suf`.
+        assert_eq!(
+            run(r#"x="  a  "; printf "<%s>" ${x}suf; echo"#).0,
+            "<a><suf>\n"
+        );
+        // An all-whitespace expansion between two literals still forces a split.
+        assert_eq!(
+            run(r#"x="  "; printf "<%s>" pre${x}suf; echo"#).0,
+            "<pre><suf>\n"
+        );
+        // An empty (unset) expansion does NOT split — the literals glue.
+        assert_eq!(
+            run(r#"x=""; printf "<%s>" pre${x}suf; echo"#).0,
+            "<presuf>\n"
+        );
+        // Non-whitespace IFS boundary: a trailing delimiter splits against the
+        // following literal without producing a spurious empty field.
+        assert_eq!(
+            run(r#"IFS=:; x="a:"; printf "<%s>" ${x}suf; echo"#).0,
+            "<a><suf>\n"
+        );
+        // A bare non-whitespace delimiter after literal content closes that
+        // field (no empty field appears).
+        assert_eq!(
+            run(r#"IFS=:; x=":"; printf "<%s>" a$x; echo"#).0,
+            "<a>\n"
+        );
+        // Mixed IFS `ws* nonws ws*` between two literals collapses to a single
+        // delimiter (the non-whitespace char is absorbed into the whitespace
+        // run), so no empty field appears between `pre` and `suf`.
+        assert_eq!(
+            run(r#"IFS=" :"; x=" : "; printf "<%s>" pre${x}suf; echo"#).0,
+            "<pre><suf>\n"
         );
     }
 

@@ -2528,6 +2528,15 @@ impl Shell {
     // ---- simple command execution -------------------------------------------
 
     fn exec_simple(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // Record the command about to run for `$BASH_COMMAND` (the command
+        // currently executing, as seen by DEBUG/ERR traps and readable
+        // generally). Not updated while a trap handler runs, so the handler
+        // still sees the command that triggered it (bash). Uses the reconstructed
+        // *unexpanded* source text, matching bash.
+        if !self.in_trap {
+            self.vars
+                .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
+        }
         // The DEBUG trap runs before each simple command (guarded so a handler's
         // own commands don't recurse).
         if !self.in_trap && self.traps.contains_key("DEBUG") {
@@ -10095,6 +10104,18 @@ mod tests {
         assert_eq!(run("echo solo; echo $_").0, "solo\nsolo\n");
         // Updates across commands.
         assert_eq!(run(": one; : two; echo $_").0, "two\n");
+    }
+
+    #[test]
+    fn special_var_bash_command() {
+        // $BASH_COMMAND holds the *unexpanded* source of the running command.
+        assert_eq!(run("echo $BASH_COMMAND").0, "echo $BASH_COMMAND\n");
+        // Redirections and prefix assignments are part of the reconstructed text.
+        assert_eq!(run("x=1 echo $BASH_COMMAND").0, "x=1 echo $BASH_COMMAND\n");
+        // An ERR trap sees the command that failed. (Trap stdout is not captured
+        // by the harness, so capture BASH_COMMAND into a variable and read it
+        // back after the trap has run.)
+        assert_eq!(run("trap 'ERRCMD=$BASH_COMMAND' ERR\nfalse\necho \"$ERRCMD\"").0, "false\n");
     }
 
     #[test]

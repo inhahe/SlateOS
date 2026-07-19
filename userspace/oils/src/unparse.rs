@@ -380,7 +380,9 @@ fn command_inline(cmd: &Command) -> String {
     }
 }
 
-fn simple_src(sc: &SimpleCommand) -> String {
+/// Reconstruct the source text of a simple command (assignments, words,
+/// redirections) on one line — used for `$BASH_COMMAND` in DEBUG/ERR traps.
+pub fn simple_src(sc: &SimpleCommand) -> String {
     let mut parts: Vec<String> = Vec::new();
     for a in &sc.assignments {
         parts.push(assignment_src(a));

@@ -2824,6 +2824,12 @@ impl Shell {
                 let elems = self.array_elements(name);
                 if length {
                     elems.len().to_string()
+                } else if matches!(index, ArrayIndex::Star) {
+                    // `${arr[*]}` joins with the first character of `$IFS`
+                    // (space when unset, empty when IFS is empty) — bash. The
+                    // quoted `"${arr[*]}"` form reaches this scalar path, so the
+                    // separator is observable.
+                    elems.join(&self.star_sep())
                 } else {
                     elems.join(" ")
                 }
@@ -14399,6 +14405,19 @@ mod tests {
         assert_eq!(run(r#"set -- a b c; IFS=-; echo "$*""#).0, "a-b-c\n");
         // Empty IFS joins with no separator.
         assert_eq!(run(r#"set -- a b c; IFS=; echo "$*""#).0, "abc\n");
+    }
+
+    #[test]
+    fn array_star_joins_with_ifs() {
+        // `"${arr[*]}"` joins with the first character of `$IFS` (like `"$*"`),
+        // not always a space; previously osh hard-coded a space separator.
+        assert_eq!(run(r#"a=(1 2 3); echo "${a[*]}""#).0, "1 2 3\n");
+        assert_eq!(run(r#"a=(1 2 3); IFS=,; echo "${a[*]}""#).0, "1,2,3\n");
+        assert_eq!(run(r#"a=(x y z); IFS=-; echo "${a[*]}""#).0, "x-y-z\n");
+        // Empty IFS joins with no separator.
+        assert_eq!(run(r#"a=(x y z); IFS=; echo "${a[*]}""#).0, "xyz\n");
+        // Assigned to a scalar then read back.
+        assert_eq!(run(r#"a=(1 2 3); IFS=:; s="${a[*]}"; echo "$s""#).0, "1:2:3\n");
     }
 
     #[test]

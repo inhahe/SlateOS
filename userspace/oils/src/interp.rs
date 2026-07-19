@@ -1322,6 +1322,44 @@ impl Shell {
             }
         }
 
+        // ---- scoped extra fds (fd ≥ 3 redirects on the compound command) ----
+        // `{ …; } 3< file`, `while read -u 3; done 3< file`, `… 4> log`: install
+        // the descriptor into the shell's open-fd table for the duration of the
+        // body only, saving each touched fd's prior binding (taken by ownership
+        // out of the map) so it is restored — and the scoped fd removed — when
+        // the body finishes. This is what makes `read -u 3` inside the body read
+        // the file while fd 0 stays free.
+        let mut saved_fds: Vec<SavedFd> = Vec::new();
+        let mut already_saved: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for (fd, op) in &plan.extra_fds {
+            if already_saved.insert(*fd) {
+                let prev_r = self.open_fds.remove(fd);
+                let prev_w = self.open_write_fds.remove(fd);
+                saved_fds.push((*fd, prev_r, prev_w));
+            } else {
+                // A repeated fd: drop whatever the earlier op installed before
+                // applying this one (prior binding already saved).
+                self.open_fds.remove(fd);
+                self.open_write_fds.remove(fd);
+            }
+            match op {
+                ExtraFdOp::InputBytes(bytes) => {
+                    self.open_fds
+                        .insert(*fd, RefCell::new(io::Cursor::new(bytes.clone())));
+                }
+                ExtraFdOp::OutputFile(path, append) => match open_out(path, *append) {
+                    Ok(f) => {
+                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: {path}: {e}"));
+                        self.last_status = 1;
+                    }
+                },
+                ExtraFdOp::Close => {} // already removed above
+            }
+        }
+
         // Capture stdout when it is redirected to a file (`> f`) or routed to
         // stderr (`1>&2`); otherwise the body writes straight to `out`.
         let stdout_to_err = plan.stdout_to_stderr && plan.stdout.is_none();
@@ -1385,6 +1423,19 @@ impl Shell {
 
         if pushed_stderr {
             self.stderr_stack.pop();
+        }
+
+        // Restore the scoped extra fds: remove whatever the body left for each
+        // touched fd and reinstate its prior binding (if any).
+        for (fd, prev_r, prev_w) in saved_fds.into_iter().rev() {
+            self.open_fds.remove(&fd);
+            self.open_write_fds.remove(&fd);
+            if let Some(r) = prev_r {
+                self.open_fds.insert(fd, r);
+            }
+            if let Some(w) = prev_w {
+                self.open_write_fds.insert(fd, w);
+            }
         }
 
         // Fold captured stderr (`2>&1` into a captured stdout) into `out` after
@@ -7787,6 +7838,16 @@ struct RedirPlan {
     extra_fds: Vec<(i32, ExtraFdOp)>,
 }
 
+/// A saved binding of one non-standard descriptor while a compound command's
+/// scoped redirect (`{ …; } 3< file`) is in effect: `(fd, prior input cursor,
+/// prior write handle)`. Both prior slots are taken by ownership out of the
+/// shell's fd tables and reinstated when the body finishes.
+type SavedFd = (
+    i32,
+    Option<RefCell<io::Cursor<Vec<u8>>>>,
+    Option<std::sync::Arc<std::fs::File>>,
+);
+
 /// An operation on a non-standard file descriptor (fd ≥ 3), captured by
 /// [`Shell::resolve_redirects`] and applied to the shell's fd tables by `exec`.
 #[derive(Debug, Clone)]
@@ -13277,6 +13338,32 @@ mod tests {
         let (out, status) = run("echo hi >&5");
         assert_eq!(status, 1);
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn scoped_compound_input_fd_read_u() {
+        // `while read -u 3 …; done 3< file` reads the file via fd 3 while fd 0
+        // stays free; fd 3 is scoped to the loop and gone afterward.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_scoped_fd3_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, b"a\nb\nc\n").expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        // The loop prints each line; then fd 3 is closed, so a trailing
+        // `read -u 3` fails (scoped, diagnostic to real stderr) — its non-zero
+        // status is swallowed by the final `echo end`.
+        let src = format!(
+            "while read -u 3 x; do echo \"L:$x\"; done 3< \"{p}\"\nread -u 3 y; echo end"
+        );
+        let (out, status) = run(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert_eq!(out, "L:a\nL:b\nL:c\nend\n");
     }
 
     #[test]

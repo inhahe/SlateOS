@@ -430,7 +430,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds implemented; scoped per-command extra fds and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds implemented; builtin stderr-to-fd, `exec 3>&1`, and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -494,24 +494,32 @@ command exits 127). Status of the remaining aspects:
    (bash fd inheritance). This also fixed a latent bug: a per-command `N> file`
    (N ≥ 3) previously fell into the Write arm's `_ => plan.stdout` case and
    wrongly redirected fd 1; fd ≥ 3 output redirects now route to `extra_fds` (a
-   documented no-op on any command other than `exec`). **Still OPEN (scoped
-   out):** *builtin* stderr-to-write-fd (`echo … 2>&3` on a builtin — builtin
-   stderr goes through `emit_stderr`/the `stderr_stack`, which does not consult
-   `stderr_to_fd`; externals do); *scoped per-command* extra-fd redirects
-   (`while read -u 3; done 3< file`, where fd 3 lives only for the compound
-   command — `extra_fds` are only consumed by `exec`); and duplicating a write-fd
-   *onto* a standard fd (`exec 3>&1`).
-5. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+   documented no-op on any command other than `exec`).
+5. **Scoped per-command extra-fd redirects (`{ …; } 3< file`) — RESOLVED
+   2026-07-19.** A *compound* command carrying a fd ≥ 3 redirect
+   (`while read -u 3 line; do …; done 3< file`, `{ …; } 4> log`, `… 3<&-`) now
+   installs the descriptor into `open_fds`/`open_write_fds` for the body's
+   duration only: `exec_redirected` consumes `plan.extra_fds`, saving each
+   touched fd's prior binding (taken by ownership out of the map) and restoring
+   it — removing the scoped fd — after the body. So `read -u 3` inside the loop
+   reads the file while fd 0 stays free, and fd 3 is gone once the loop exits.
+   (A repeated fd in the same plan drops the earlier install before applying the
+   next; the *first* occurrence's prior binding is the one restored.)
+6. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Proper fix:** (2), (3), and (4, exec-managed write-fds) done (see above).
-(4, scoped part) thread `extra_fds`/`stdout_to_fd` through the per-command
-redirect path (not just `exec`) so fd ≥ 3 redirects scope to a single compound
-command, route builtin stderr through `stderr_to_fd`, and model `exec 3>&1`.
-(5) once the kernel exposes `execve`, replace the spawn+wait+exit with an
-actual in-place image replacement for `exec cmd`.
+**Still OPEN (smaller gaps):** *builtin* stderr-to-write-fd (`echo … 2>&3` on a
+*builtin* — builtin stderr goes through `emit_stderr`/the `stderr_stack`, which
+does not consult `stderr_to_fd`; externals do route it), and duplicating a
+write-fd *onto* a standard fd (`exec 3>&1`, making fd 3 alias the current
+stdout).
+
+**Proper fix:** (2), (3), (4), and (5) done (see above). Remaining: route
+builtin stderr through `stderr_to_fd`, and model `exec M>&N` where the *target*
+N is a standard fd (`exec 3>&1`). (6) once the kernel exposes `execve`, replace
+the spawn+wait+exit with an actual in-place image replacement for `exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)
 

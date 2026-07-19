@@ -551,6 +551,18 @@ impl Shell {
     fn seed_shell_vars(&mut self) {
         self.vars
             .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+        // Platform identity strings bash always defines at startup. We report
+        // SlateOS's own values (not the host build's), so scripts that branch on
+        // `$OSTYPE`/`$MACHTYPE` see the target platform. bash leaves these as
+        // ordinary (non-exported) shell variables and lets an inherited
+        // environment override them, which our seed-before-import order matches.
+        for (name, val) in [
+            ("HOSTTYPE", "x86_64"),
+            ("OSTYPE", "slateos"),
+            ("MACHTYPE", "x86_64-slateos"),
+        ] {
+            self.vars.insert(name.to_string(), val.to_string());
+        }
         // BASH_VERSINFO: (major, minor, patch, build, status, machtype). bash
         // marks it readonly; matching that guards scripts that probe the level.
         let versinfo = [
@@ -14138,6 +14150,16 @@ mod tests {
         assert_eq!(run("echo ${BASH_VERSINFO[0]}").0, "5\n");
         assert_eq!(run("echo ${#BASH_VERSINFO[@]}").0, "6\n");
         assert_eq!(run("echo ${BASH_VERSINFO[4]}").0, "release\n");
+    }
+
+    #[test]
+    fn special_var_platform_identity() {
+        // bash always defines these; we report SlateOS's own values.
+        assert_eq!(run("echo $HOSTTYPE").0, "x86_64\n");
+        assert_eq!(run("echo $OSTYPE").0, "slateos\n");
+        assert_eq!(run("echo $MACHTYPE").0, "x86_64-slateos\n");
+        // Ordinary shell variables: reassignable, unlike readonly BASH_VERSINFO.
+        assert_eq!(run("OSTYPE=custom; echo $OSTYPE").0, "custom\n");
     }
 
     #[test]

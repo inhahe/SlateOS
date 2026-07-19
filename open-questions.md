@@ -94,9 +94,52 @@ where seed vars would be inserted.
 
 ---
 
+## Q28 — What user identity should `osh` report via `$EUID`/`$UID` (and `$HOSTNAME`)?
+
+**Status:** OPEN (heads-up + genuinely blocks these vars; not currently set).
+
+**Question.** bash always defines readonly `$EUID` and `$UID` (numeric effective
+/real user id) and `$HOSTNAME`. Real scripts lean on them constantly — the
+canonical root check `if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`, and
+many installers gate on `$UID`. `osh` currently leaves all three unset, so those
+comparisons error on an empty operand. To set `$EUID`/`$UID` we must decide *what
+identity `osh` reports* — and there is no SlateOS `getuid`-equivalent wired into
+either the host or target build yet, so it can't just read a real credential.
+
+**Options.**
+- **(A) Report root (`EUID=UID=0`) as the default.**
+  - *Pro:* matches the reality that early SlateOS bring-up / init runs as the
+    system with full authority; root checks that *gate* privileged actions will
+    (correctly, for now) see root. *Con:* a "are you root? then it's safe to nuke
+    the system" script would proceed where a real multi-user system wouldn't; masks
+    the absence of a privilege model.
+- **(B) Report a fixed non-root user (e.g. `EUID=UID=1000`).**
+  - *Pro:* the safer default — privileged-action scripts refuse rather than run
+    with assumed root; models the eventual "shell runs in a user session" norm.
+    *Con:* bring-up utilities that legitimately need root would wrongly bail.
+- **(C) Leave unset until a real `getuid`/`geteuid` syscall exists (status quo),**
+  then wire them dynamically to the actual process credential.
+  - *Pro:* never lies about identity. *Con:* keeps breaking the very common
+    `$EUID`/`$UID` script idioms in the meantime.
+
+**Claude's recommendation / meanwhile.** Mild lean to **(A)** for the current
+single-user, pre-privilege-model bring-up state (the shell genuinely *is* the
+all-powerful system right now, and root-gated scripts should take their root
+path), switching to a real credential read once SlateOS exposes `getuid`. But
+this is a user-visible security-adjacent policy with a real footgun, so I've
+deferred rather than decided; all three vars stay unset for now. `$HOSTNAME`'s
+default (`localhost`/`slateos`) is a low-stakes naming choice that can ride along
+with whatever's decided here.
+
+**Where it bites.** `interp.rs` `param_value` (dynamic-var arm near
+`BASHPID`/`BASH_SUBSHELL`) and `seed_shell_vars`; tracked in `known-issues.md`
+TD-OILS-IDVARS.
+
+---
+
 Earlier deferred operator decisions (Q1–Q25) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q27 …`.
+full rationale. New decisions should be appended above this line as `## Q29 …`.
 
 ---
 

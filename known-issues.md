@@ -1315,6 +1315,43 @@ token is "{chars[pos..]}")` and Pattern B (base errors) as `{tok}: {msg} (error
 token is "{tok}")`. Match bash's operand-vs-operator "syntax error" distinction
 by inspecting the char at the failure position.
 
+### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the
+`param_value` dynamic-var match arm around the `BASHPID`/`BASH_SUBSHELL` cases).
+
+**Status (2026-07-19):** the static *platform-identity* trio bash always
+defines is now seeded — `HOSTTYPE=x86_64`, `OSTYPE=slateos`,
+`MACHTYPE=x86_64-slateos` (ordinary reassignable shell vars, SlateOS values not
+the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic. Still
+**missing** relative to bash:
+
+- **`EUID` / `UID`** (numeric effective/real user id, readonly in bash). Very
+  commonly read by scripts (`[ "$EUID" -ne 0 ]` root checks); leaving them unset
+  makes such arithmetic comparisons error on an empty operand. **Blocked on a
+  design decision:** what identity should osh report? There is no SlateOS
+  `getuid`-equivalent wired into the host or target build yet, and the *default*
+  identity of a shell during bring-up (root uid 0 vs a regular user) is a
+  user-visible policy call. Logged as an open question (`open-questions.md`).
+- **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
+  `std::process` doesn't expose it portably on the host and the SlateOS syscall
+  isn't wired. Deferred until a `getppid`-equivalent exists.
+- **`BASH`** (absolute path to the shell binary). Could be derived from
+  `argv[0]`/the resolved exe path; low value, deferred.
+- **`BASHOPTS`** (colon-joined list of enabled `shopt` names, readonly, dynamic).
+  Derivable from osh's `shopt` state, but osh models only a subset of bash's
+  shopt options, so the value would still diverge from bash's default set;
+  deferred as low-value partial fidelity. Would live as a computed `param_value`
+  case, mirroring `BASHPID`.
+- **`HOSTNAME`** — bash sets it from the host; osh's prompt helper already falls
+  back to `localhost`. Whether to seed a fixed default (`localhost`/`slateos`) is
+  a low-stakes naming choice bundled into the same open question as EUID/UID.
+
+**Proper fix:** once SlateOS credential/`getuid`/`getppid` syscalls exist, wire
+`EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly), seed `BASH` from
+the resolved executable path, and add a computed `BASHOPTS`. The identity
+*default* (for host runs and pre-login target state) needs the operator's call.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

@@ -2803,6 +2803,14 @@ impl Shell {
                     None => String::new(),
                 }
             }
+            'l' => {
+                // `@l` lowercases only the first character (mirror of `@u`).
+                let mut cs = value.chars();
+                match cs.next() {
+                    Some(f) => f.to_lowercase().chain(cs).collect(),
+                    None => String::new(),
+                }
+            }
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
             'E' => ansi_c_unescape(value),
             // `P` (prompt) is handled in `param_transform` (it needs shell
@@ -12176,6 +12184,9 @@ mod tests {
         assert_eq!(run("x=hello; echo \"${x@U}\"").0, "HELLO\n");
         assert_eq!(run("x=hello; echo \"${x@u}\"").0, "Hello\n");
         assert_eq!(run("x=HeLLo; echo \"${x@L}\"").0, "hello\n");
+        // @l lowercases only the first character (mirror of @u).
+        assert_eq!(run("x=HeLLo; echo \"${x@l}\"").0, "heLLo\n");
+        assert_eq!(run("x=HELLO; echo \"${x@l}\"").0, "hELLO\n");
         // A simple safe word needs no quoting under @Q.
         assert_eq!(run("x=word; echo \"${x@Q}\"").0, "word\n");
     }

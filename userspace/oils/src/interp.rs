@@ -1869,9 +1869,13 @@ impl Shell {
                         lhs == rhs
                     }
                 } else {
-                    let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+                    // bash matches the RHS of `==`/`!=` in `[[ ]]` "as if the
+                    // extglob shell option were enabled" (see the [[ ]] section
+                    // of the manual) — extended patterns like `+(f|o)`/`@(a|b)`
+                    // are always recognised here regardless of the `extglob`
+                    // setting, unlike `case`/glob (which gate on it at parse).
                     let pat: Vec<char> = rhs.chars().collect();
-                    glob_match_ci(&pat, &subject, ci, extglob)
+                    glob_match_ci(&pat, &subject, ci, true)
                 };
                 if matches!(op, CondBinOp::StrEq) {
                     matched
@@ -13117,6 +13121,41 @@ mod tests {
         assert_eq!(run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0, "y\n");
         // Sanity: without it, the literal comparison is case-sensitive.
         assert_eq!(run("[[ Hello == hello ]] && echo y || echo n").0, "n\n");
+    }
+
+    #[test]
+    fn dbracket_match_always_uses_extglob() {
+        // bash matches the RHS of `==`/`!=` in `[[ ]]` "as if extglob were
+        // enabled", regardless of the shopt setting — unlike `case`/glob, which
+        // gate on it. Extended patterns must match even with extglob OFF.
+        assert_eq!(
+            run("shopt -u extglob; [[ foo == +(f|o) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -u extglob; [[ foo == @(foo|bar) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        // `!(...)` negation and `*.@(...)` alternation, still with extglob off.
+        assert_eq!(
+            run("shopt -u extglob; [[ hello == !(foo) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -u extglob; [[ file.txt == *.@(txt|md) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        // The pattern really is a pattern, not a literal: `+(x)` doesn't match
+        // the literal string "+(x)".
+        assert_eq!(
+            run("shopt -u extglob; [[ '+(x)' == +(x) ]] && echo y || echo n").0,
+            "n\n"
+        );
+        // `!=` composes with the always-on extglob matching.
+        assert_eq!(
+            run("shopt -u extglob; [[ foo != +(f|o) ]] && echo y || echo n").0,
+            "n\n"
+        );
     }
 
     #[test]

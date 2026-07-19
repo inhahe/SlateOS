@@ -435,7 +435,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds implemented; builtin stderr-to-fd, `exec 3>&1`, and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects implemented; `exec 3>&1` and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -510,21 +510,40 @@ command exits 127). Status of the remaining aspects:
    reads the file while fd 0 stays free, and fd 3 is gone once the loop exits.
    (A repeated fd in the same plan drops the earlier install before applying the
    next; the *first* occurrence's prior binding is the one restored.)
-6. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+6. **Builtin stderr redirects (`echo … 2>&3`, `read … 2> file`, `… 2>&1` on a
+   *builtin*) — RESOLVED 2026-07-19.** A simple-command builtin now honors its
+   own fd-2 redirect: `run_builtin` pushes a scoped `StderrTarget` for the
+   builtin's duration based on the `RedirPlan` — `2> file`/`2>> file` →
+   `File`, `2>&N` (N ≥ 3) → the new `StderrTarget::WriteFd(Arc<File>)` (routed
+   to `open_write_fds[N]`), and `2>&1` (fd 1 not a file) → mirror fd 1's live
+   sink (`Buffer` for a captured stdout, `Pipe` for a pipeline stage, `Stdout`
+   for the real terminal). Both `emit_stderr` and `child_stdio_for_stderr` gained
+   a `WriteFd` arm. The `2>&1`-into-captured-stdout case folds the buffered
+   stderr into fd 1's sink after the builtin's stdout (line-level interleaving
+   not preserved, as elsewhere). The `exec` builtin is exempt from the scoped
+   push (it sets the *persistent* `exec_stderr` itself). One order-free caveat:
+   the rare `>&2 2>file` combination routes the `>&2` output to the file (the
+   `2>file >&2` ordering) rather than the pre-redirect stderr — our `RedirPlan`
+   does not track redirection order.
+7. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Still OPEN (smaller gaps):** *builtin* stderr-to-write-fd (`echo … 2>&3` on a
-*builtin* — builtin stderr goes through `emit_stderr`/the `stderr_stack`, which
-does not consult `stderr_to_fd`; externals do route it), and duplicating a
-write-fd *onto* a standard fd (`exec 3>&1`, making fd 3 alias the current
-stdout).
+**Still OPEN (smaller gaps):** duplicating a write-fd *onto* a standard fd
+(`exec 3>&1`, making fd 3 alias the current stdout — our `open_write_fds` only
+holds real `File` handles, so aliasing fd 3 to the shell's live stdout/stderr
+would need the table to become an enum `WriteSink { File, Stdout, Stderr }`).
+A related smaller gap: a *function* invocation's own stderr redirect
+(`myfunc 2> file`) is still ignored — `call_function` takes `_redir` unused; the
+same scoped-push mechanism now used for builtins could be applied there.
 
-**Proper fix:** (2), (3), (4), and (5) done (see above). Remaining: route
-builtin stderr through `stderr_to_fd`, and model `exec M>&N` where the *target*
-N is a standard fd (`exec 3>&1`). (6) once the kernel exposes `execve`, replace
-the spawn+wait+exit with an actual in-place image replacement for `exec cmd`.
+**Proper fix:** (2), (3), (4), (5), and (6) done (see above). Remaining: model
+`exec M>&N` where the *target* N is a standard fd (`exec 3>&1`) by widening the
+write-fd table to a `WriteSink` enum, and apply the scoped stderr push to
+`call_function` for `myfunc 2> file`. (7) once the kernel exposes `execve`,
+replace the spawn+wait+exit with an actual in-place image replacement for
+`exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)
 

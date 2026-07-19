@@ -166,6 +166,10 @@ enum StderrTarget {
     Buffer(Arc<Mutex<Vec<u8>>>),
     /// `2>&1` where stdout is the shell's real stdout — write to fd 1.
     Stdout,
+    /// `2>&N` (N ≥ 3) — write to a user-space write descriptor opened by
+    /// `exec N> file`. The shared `Arc<File>` is append-positioned so writes
+    /// land at the descriptor's current offset (matching a builtin `>&N`).
+    WriteFd(Arc<File>),
 }
 
 /// A saved snapshot of one variable's complete state (scalar, indexed array,
@@ -3481,6 +3485,18 @@ impl Shell {
                     cmd.stderr(Stdio::piped());
                     stderr_capture = Some(Arc::clone(b));
                 }
+                // An enclosing `2>&N` (N ≥ 3) scoped stderr: hand the child a
+                // clone of the user-space write descriptor.
+                Some(StderrTarget::WriteFd(f)) => match f.try_clone() {
+                    Ok(fc) => {
+                        cmd.stderr(Stdio::from(fc));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: stderr: {e}"));
+                        self.last_status = 1;
+                        return;
+                    }
+                },
                 // fd 2 follows fd 1: a persistent `exec > file` target if set,
                 // else inherit (fd 2 → terminal, same visual result at the
                 // shell's controlling terminal).
@@ -4477,6 +4493,54 @@ impl Shell {
             .map(|(k, v)| (k.clone(), self.vars.insert(k.clone(), v.clone())))
             .collect();
 
+        // Scoped stderr redirect: a simple-command builtin honors its own
+        // `2> file`/`2>> file`/`2>&1`/`2>&N` by pushing a StderrTarget for the
+        // builtin's duration, so diagnostics and `>&2` output land in the right
+        // sink (bash). Compound commands install their group-level stderr
+        // separately (`exec_redirected`); `exec` manages redirects itself (it
+        // sets the *persistent* `exec_stderr`), so it is exempt.
+        //
+        // NOTE: our `RedirPlan` is order-free, so the rare `>&2 2>file`
+        // combination routes `>&2` to the file (the `2>file >&2` ordering)
+        // rather than the pre-redirect stderr — see known-issues TD-OILS14.
+        let mut pushed_stderr = false;
+        let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
+        if name != "exec" {
+            if let Some((path, append)) = &redir.stderr {
+                if let Ok(f) = open_out(path, *append) {
+                    self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                    pushed_stderr = true;
+                }
+            } else if let Some(n) = redir.stderr_to_fd {
+                if let Some(f) = self.open_write_fds.get(&n) {
+                    self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(f)));
+                    pushed_stderr = true;
+                } else {
+                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                }
+            } else if redir.stderr_to_stdout {
+                // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
+                match out {
+                    Out::Capture(_) => {
+                        let buf = Arc::new(Mutex::new(Vec::new()));
+                        self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(&buf)));
+                        stderr_merge_buf = Some(buf);
+                        pushed_stderr = true;
+                    }
+                    Out::Pipe(w) => {
+                        if let Ok(wp) = w.try_clone() {
+                            self.stderr_stack.push(StderrTarget::Pipe(Arc::new(wp)));
+                            pushed_stderr = true;
+                        }
+                    }
+                    Out::Inherit => {
+                        self.stderr_stack.push(StderrTarget::Stdout);
+                        pushed_stderr = true;
+                    }
+                }
+            }
+        }
+
         let mut flow = Flow::Next;
         let args = &argv[1..];
         let status = match name {
@@ -4660,6 +4724,23 @@ impl Shell {
                 127
             }
         };
+
+        // Tear down the scoped stderr redirect and, for the `2>&1`-into-captured-
+        // stdout case, fold the buffered stderr into fd 1's sink after the
+        // builtin's own stdout (line-level interleaving is not preserved — see
+        // the module limitations).
+        if pushed_stderr {
+            self.stderr_stack.pop();
+        }
+        if let Some(buf) = stderr_merge_buf
+            && let Ok(g) = buf.lock()
+            && !g.is_empty()
+        {
+            let bytes = g.clone();
+            drop(g);
+            // A default plan writes straight to `out` (the fd 1 sink).
+            self.write_bytes(out, &RedirPlan::default(), &bytes);
+        }
 
         // Restore temporary assignments (builtins don't persist them, except
         // pure-assignment which never reaches here).
@@ -7702,6 +7783,9 @@ impl Shell {
                     g.extend_from_slice(bytes);
                 }
             }
+            Some(StderrTarget::WriteFd(f)) => {
+                let _ = (&**f).write_all(bytes);
+            }
         }
     }
 
@@ -7730,6 +7814,10 @@ impl Shell {
                 .try_clone()
                 .map(Stdio::from)
                 .map_err(|e| format!("pipe: {e}")),
+            Some(StderrTarget::WriteFd(f)) => f
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(|e| format!("stderr: {e}")),
         }
     }
 
@@ -13383,6 +13471,32 @@ mod tests {
         let (out, status) = run("echo hi >&5");
         assert_eq!(status, 1);
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn builtin_stderr_redirect_to_file() {
+        // A simple-command builtin honors its own `2> file`: the `read` bad-fd
+        // diagnostic lands in the file, not on the real stderr.
+        let contents = run_exec_redirect("read -u 88 v 2> \"{FILE}\"");
+        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+    }
+
+    #[test]
+    fn builtin_stderr_to_write_fd() {
+        // `2>&3` on a builtin routes its stderr to a user-space write descriptor
+        // opened by `exec 3> file` (TD-OILS14 builtin-stderr item).
+        let contents = run_exec_redirect(
+            "exec 3> \"{FILE}\"\nread -u 88 v 2>&3\nexec 3>&-",
+        );
+        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+    }
+
+    #[test]
+    fn builtin_stderr_to_stdout_capture() {
+        // `2>&1` on a builtin folds its stderr into the (captured) stdout sink,
+        // so a command substitution sees the diagnostic as stdout.
+        let (out, _) = run("v=$(read -u 88 x 2>&1); echo \"[$v]\"");
+        assert_eq!(out, "[osh: read: 88: bad file descriptor]\n");
     }
 
     #[test]

@@ -11136,6 +11136,100 @@ fn echo_expand_escapes(s: &str) -> (String, bool) {
     (out, false)
 }
 
+/// Which flavour of backslash-escape decoding [`decode_escape`] performs. The
+/// two differ in exactly two respects — octal syntax and `\c` — but otherwise
+/// share the named/hex/unicode escapes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscapeMode {
+    /// ANSI-C `$'…'` / `${v@E}` / the printf FORMAT string. Octal is `\nnn`
+    /// (1–3 octal digits; a leading `0` is just the first digit, so `\0101`
+    /// is `\010` followed by a literal `1`). `\c` is not special.
+    AnsiC,
+    /// printf `%b` / `echo -e`. Octal is `\0nnn` (a leading `0` is a *prefix*,
+    /// then 1–3 octal digits, so `\0101` is the single character `A`). `\c`
+    /// halts all further output.
+    EchoB,
+}
+
+/// Decode a single backslash escape. `chars` is positioned immediately after the
+/// `\`. The decoded text is appended to `out`. Returns `true` only when output
+/// should stop (an `EchoB`-mode `\c`).
+fn decode_escape(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    out: &mut String,
+    mode: EscapeMode,
+) -> bool {
+    let Some(c) = chars.next() else {
+        out.push('\\');
+        return false;
+    };
+    match c {
+        'n' => out.push('\n'),
+        't' => out.push('\t'),
+        'r' => out.push('\r'),
+        'a' => out.push('\u{07}'),
+        'b' => out.push('\u{08}'),
+        'e' | 'E' => out.push('\u{1b}'),
+        'f' => out.push('\u{0c}'),
+        'v' => out.push('\u{0b}'),
+        '\\' => out.push('\\'),
+        '\'' => out.push('\''),
+        '"' => out.push('"'),
+        // `%b`/`echo -e` `\c`: suppress the `\c` and everything after it.
+        'c' if mode == EscapeMode::EchoB => return true,
+        'x' => {
+            let mut hex = String::new();
+            while hex.len() < 2 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                hex.push(chars.next().unwrap_or('0'));
+            }
+            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                Some(ch) => out.push(ch),
+                None => {
+                    // No hex digits followed `\x`: emit it literally.
+                    out.push('\\');
+                    out.push('x');
+                }
+            }
+        }
+        'u' | 'U' => {
+            let max = if c == 'u' { 4 } else { 8 };
+            let mut hex = String::new();
+            while hex.len() < max && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                hex.push(chars.next().unwrap_or('0'));
+            }
+            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                Some(ch) => out.push(ch),
+                None => {
+                    out.push('\\');
+                    out.push(c);
+                }
+            }
+        }
+        '0'..='7' => {
+            let mut oct = String::new();
+            // In `EchoB` mode a leading `0` is a prefix rather than a digit.
+            if !(mode == EscapeMode::EchoB && c == '0') {
+                oct.push(c);
+            }
+            while oct.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
+                oct.push(chars.next().unwrap_or('0'));
+            }
+            if oct.is_empty() {
+                // A bare `\0` (EchoB) is a NUL byte.
+                out.push('\0');
+            } else if let Some(ch) = u32::from_str_radix(&oct, 8).ok().and_then(char::from_u32) {
+                out.push(ch);
+            }
+        }
+        other => {
+            out.push('\\');
+            out.push(other);
+        }
+    }
+    false
+}
+
+/// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion.
 fn ansi_c_unescape(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars().peekable();
@@ -11144,51 +11238,26 @@ fn ansi_c_unescape(s: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
-            Some('\'') => out.push('\''),
-            Some('"') => out.push('"'),
-            Some('a') => out.push('\u{07}'),
-            Some('b') => out.push('\u{08}'),
-            Some('e' | 'E') => out.push('\u{1b}'),
-            Some('f') => out.push('\u{0c}'),
-            Some('v') => out.push('\u{0b}'),
-            Some('x') => {
-                let mut hex = String::new();
-                while hex.len() < 2 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
-                    hex.push(chars.next().unwrap_or('0'));
-                }
-                if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                    if let Some(ch) = char::from_u32(n) {
-                        out.push(ch);
-                    }
-                } else {
-                    out.push('\\');
-                    out.push('x');
-                }
-            }
-            Some(d @ '0'..='7') => {
-                let mut oct = String::from(d);
-                while oct.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
-                    oct.push(chars.next().unwrap_or('0'));
-                }
-                if let Ok(n) = u32::from_str_radix(&oct, 8)
-                    && let Some(ch) = char::from_u32(n)
-                {
-                    out.push(ch);
-                }
-            }
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
+        decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
     }
     out
+}
+
+/// `printf %b` / `echo -e` backslash-escape expansion. The boolean is `true` if
+/// a `\c` was seen, meaning the caller must stop producing any further output.
+fn unescape_echo_b(s: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        if decode_escape(&mut chars, &mut out, EscapeMode::EchoB) {
+            return (out, true);
+        }
+    }
+    (out, false)
 }
 
 /// `${name:offset[:length]}` — a negative offset counts from the end; a negative
@@ -11812,61 +11881,61 @@ fn format_printf(fmt: &str, args: &[String], errors: &mut Vec<String>) -> String
     let mut arg_i = 0;
     loop {
         let start = arg_i;
-        out.push_str(&format_printf_once(fmt, args, &mut arg_i, errors));
-        if arg_i >= args.len() || arg_i == start {
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors);
+        out.push_str(&chunk);
+        // A `%b` argument containing `\c` halts all further output, format
+        // recycling included.
+        if stop || arg_i >= args.len() || arg_i == start {
             break;
         }
     }
     out
 }
 
+/// Render one pass over the format string. Returns the produced text and whether
+/// a `\c` (in a `%b` argument) requested that output stop.
 fn format_printf_once(
     fmt: &str,
     args: &[String],
     arg_i: &mut usize,
     errors: &mut Vec<String>,
-) -> String {
+) -> (String, bool) {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('a') => out.push('\x07'),
-                Some('b') => out.push('\x08'),
-                Some('f') => out.push('\x0c'),
-                Some('v') => out.push('\x0b'),
-                Some('\\') => out.push('\\'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
+            // FORMAT-string escapes use ANSI-C rules (octal `\nnn`, `\xHH`,
+            // `\uHHHH`, `\UHHHHHHHH`, and the named escapes).
+            '\\' => {
+                decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
+            }
+            '%' => {
+                if format_conversion(&mut chars, args, arg_i, &mut out, errors) {
+                    return (out, true);
                 }
-                None => out.push('\\'),
-            },
-            '%' => format_conversion(&mut chars, args, arg_i, &mut out, errors),
+            }
             other => out.push(other),
         }
     }
-    out
+    (out, false)
 }
 
 /// Parse and render a single `%…` printf conversion. `chars` is positioned just
 /// after the `%`. Supports flags (`-+ #0`), width and precision (numeric or `*`
 /// dynamic from an argument), and the conversions `% s d i u x X o c b q f e g E G`.
+/// Returns `true` when a `%b` argument's `\c` requested that output stop.
 fn format_conversion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     args: &[String],
     arg_i: &mut usize,
     out: &mut String,
     errors: &mut Vec<String>,
-) {
+) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&'%') {
         chars.next();
         out.push('%');
-        return;
+        return false;
     }
 
     // Collect flags.
@@ -12007,7 +12076,7 @@ fn format_conversion(
         } else {
             out.push_str(&rendered);
         }
-        return;
+        return false;
     }
 
     let Some(conv) = chars.next() else {
@@ -12018,7 +12087,7 @@ fn format_conversion(
             out.push('.');
             out.push_str(p);
         }
-        return;
+        return false;
     };
 
     let next_arg = |arg_i: &mut usize| -> String {
@@ -12031,6 +12100,8 @@ fn format_conversion(
     // zero-padding can insert zeros *between* the prefix and the body
     // (e.g. `%+05d` on 5 → `+0005`, `%#06x` on 255 → `0x00ff`).
     let mut num_prefix = String::new();
+    // Set when a `%b` argument's `\c` truncates output.
+    let mut stop = false;
     let rendered = match conv {
         's' => {
             let mut s = next_arg(arg_i);
@@ -12040,8 +12111,11 @@ fn format_conversion(
             s
         }
         'b' => {
-            // Interpret backslash escapes in the argument.
-            ansi_c_unescape(&next_arg(arg_i))
+            // Interpret `echo -e`-style backslash escapes in the argument; `\c`
+            // stops all further output.
+            let (s, st) = unescape_echo_b(&next_arg(arg_i));
+            stop = st;
+            s
         }
         'q' => printf_quote(&next_arg(arg_i)),
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
@@ -12157,7 +12231,7 @@ fn format_conversion(
             }
             s.push(other);
             out.push_str(&s);
-            return;
+            return false;
         }
     };
 
@@ -12189,6 +12263,7 @@ fn format_conversion(
         out.push_str(&num_prefix);
         out.push_str(&rendered);
     }
+    stop
 }
 
 /// Split a formatted numeric string into a sign prefix and its magnitude body,
@@ -14090,6 +14165,39 @@ mod tests {
         assert_eq!(run("v='a b'; echo \"${v@Q}\"").0, "'a b'\n");
         assert_eq!(run("printf '%b' 'a\\tb'").0, "a\tb");
         assert_eq!(run("printf '%c' xyz").0, "x");
+    }
+
+    #[test]
+    fn printf_format_string_escapes() {
+        // The FORMAT string decodes octal, hex, and unicode escapes (not just
+        // the named ones). Octal uses `\nnn` (a leading 0 is the first digit).
+        assert_eq!(run("printf '\\x41'").0, "A");
+        assert_eq!(run("printf '\\101'").0, "A");
+        assert_eq!(run("printf '\\u0041'").0, "A");
+        assert_eq!(run("printf '\\U00000041'").0, "A");
+        assert_eq!(run("printf '\\e'").0, "\u{1b}");
+        assert_eq!(run("printf '\\a'").0, "\u{07}");
+        // `\0101` → `\010` (octal 010 = 0x08) then a literal `1`.
+        assert_eq!(run("printf '\\0101'").0, "\u{08}1");
+        assert_eq!(run("printf '\\07'").0, "\u{07}");
+        assert_eq!(run("printf '\\0'").0, "\0");
+        // Escapes and conversions interleave.
+        assert_eq!(run("printf '%d\\n\\101' 5").0, "5\nA");
+    }
+
+    #[test]
+    fn printf_b_conversion_escapes() {
+        // `%b` uses `echo -e` octal rules: `\0nnn` (leading 0 is a prefix), so
+        // `\0101` is the single character `A`.
+        assert_eq!(run("printf '%b' '\\0101'").0, "A");
+        // `\nnn` without the leading 0 also works in `%b`.
+        assert_eq!(run("printf '%b' '\\101'").0, "A");
+        assert_eq!(run("printf '%b' '\\x41'").0, "A");
+        assert_eq!(run("printf '%b' '\\u0041'").0, "A");
+        assert_eq!(run("printf '%b' '\\07'").0, "\u{07}");
+        // `\c` stops all further output, including later literal text.
+        assert_eq!(run("printf 'A%bC' '\\c stop'").0, "A");
+        assert_eq!(run("printf '%b' 'x\\cy'").0, "x");
     }
 
     #[test]

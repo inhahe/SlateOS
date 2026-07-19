@@ -3619,7 +3619,7 @@ impl Shell {
                     break;
                 }
                 other => {
-                    self.errln(&format!("osh: command: {other}: invalid option"));
+                    self.emit_cmd_stderr(out, redir, &format!("osh: command: {other}: invalid option"));
                     self.last_status = 2;
                     return Flow::Next;
                 }
@@ -3661,7 +3661,7 @@ impl Shell {
             let sub = sub.clone();
             return self.run_builtin(&sub, &argv[1..], assigns, out, stdin, redir);
         }
-        self.errln(&format!("osh: builtin: {sub}: not a shell builtin"));
+        self.emit_cmd_stderr(out, redir, &format!("osh: builtin: {sub}: not a shell builtin"));
         self.last_status = 1;
         Flow::Next
     }
@@ -5914,7 +5914,7 @@ impl Shell {
                 0
             }
             _ => {
-                eprintln!("osh: {name}: not a builtin");
+                self.errln(&format!("osh: {name}: not a builtin"));
                 127
             }
         };
@@ -6042,7 +6042,7 @@ impl Shell {
                 0
             }
             Err(e) => {
-                eprintln!("osh: cd: {target}: {e}");
+                self.errln(&format!("osh: cd: {target}: {e}"));
                 1
             }
         }
@@ -7328,7 +7328,7 @@ impl Shell {
         let mut assign_var: Option<String> = None;
         if args.first().map(String::as_str) == Some("-v") {
             let Some(name) = args.get(1) else {
-                eprintln!("osh: printf: -v: option requires an argument");
+                self.errln("osh: printf: -v: option requires an argument");
                 return 2;
             };
             assign_var = Some(name.clone());
@@ -8478,14 +8478,14 @@ impl Shell {
         let optstring = match args.first() {
             Some(s) => s.clone(),
             None => {
-                eprintln!("osh: getopts: usage: getopts optstring name [arg ...]");
+                self.errln("osh: getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
         let name = match args.get(1) {
             Some(s) => s.clone(),
             None => {
-                eprintln!("osh: getopts: usage: getopts optstring name [arg ...]");
+                self.errln("osh: getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
@@ -8566,7 +8566,7 @@ impl Shell {
                 if silent {
                     self.vars.insert("OPTARG".to_string(), opt.to_string());
                 } else {
-                    eprintln!("osh: getopts: illegal option -- {opt}");
+                    self.errln(&format!("{}: illegal option -- {opt}", self.name));
                     self.vars.remove("OPTARG");
                 }
                 if arg_exhausted {
@@ -8599,7 +8599,7 @@ impl Shell {
                         self.vars.insert(name.clone(), ":".to_string());
                         self.vars.insert("OPTARG".to_string(), opt.to_string());
                     } else {
-                        eprintln!("osh: getopts: option requires an argument -- {opt}");
+                        self.errln(&format!("{}: option requires an argument -- {opt}", self.name));
                         self.vars.insert(name.clone(), "?".to_string());
                         self.vars.remove("OPTARG");
                     }
@@ -8891,7 +8891,7 @@ impl Shell {
                     origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
                 other if other.starts_with('-') && other.len() > 1 => {
-                    eprintln!("osh: mapfile: {other}: invalid option");
+                    self.errln(&format!("osh: mapfile: {other}: invalid option"));
                     return 2;
                 }
                 _ => array = a.clone(),
@@ -8935,7 +8935,7 @@ impl Shell {
 
     fn builtin_source(&mut self, args: &[String]) -> i32 {
         let Some(path) = args.first() else {
-            eprintln!("osh: source: filename argument required");
+            self.errln("osh: source: filename argument required");
             return 2;
         };
         match std::fs::read_to_string(path) {
@@ -8952,7 +8952,7 @@ impl Shell {
                 code
             }
             Err(e) => {
-                eprintln!("osh: source: {path}: {e}");
+                self.errln(&format!("osh: source: {path}: {e}"));
                 1
             }
         }
@@ -9354,7 +9354,7 @@ impl Shell {
             if a.last() == Some(&"]") {
                 a.pop();
             } else {
-                eprintln!("osh: [: missing ']'");
+                self.errln("osh: [: missing ']'");
                 return 2;
             }
         }
@@ -9370,7 +9370,7 @@ impl Shell {
         match eval_test(&a) {
             Ok(b) => i32::from(!b),
             Err(operand) => {
-                eprintln!("osh: {name}: {operand}: integer expression expected");
+                self.errln(&format!("osh: {name}: {operand}: integer expression expected"));
                 2
             }
         }
@@ -9584,15 +9584,20 @@ impl Shell {
         self.emit_stderr(&line);
     }
 
-    /// Write a command-level spawn diagnostic (e.g. `foo: command not found`) to
-    /// the sink fd 2 resolves to **for this command**, honouring its own
-    /// `2>file`/`2>/dev/null` (`redir.stderr`), `2>&1` (`redir.stderr_to_stdout`)
-    /// and `2>&N` (`redir.stderr_to_fd`) redirects before falling back to the
-    /// enclosing stderr sink. bash sends these messages to the command's
-    /// redirected stderr — not the shell's — so `nosuchcmd 2>/dev/null` is
-    /// silent. The external-command path applies fd 2 to the child via
-    /// `std::process::Command`, so when the spawn itself fails we must reproduce
-    /// that routing here rather than using the stderr-stack-only `errln`.
+    /// Write a command-level diagnostic (e.g. `foo: command not found`, or a
+    /// special-builtin usage error) to the sink fd 2 resolves to **for this
+    /// command**, honouring its own `2>file`/`2>/dev/null` (`redir.stderr`),
+    /// `2>&1` (`redir.stderr_to_stdout`) and `2>&N` (`redir.stderr_to_fd`)
+    /// redirects before falling back to the enclosing stderr sink. bash sends
+    /// these messages to the command's redirected stderr — not the shell's — so
+    /// `nosuchcmd 2>/dev/null` is silent.
+    ///
+    /// Use this (rather than the stderr-stack-only `errln`) wherever a command's
+    /// own `RedirPlan` has not been installed onto the `stderr_stack`: the
+    /// external-command path applies fd 2 to the child via `std::process::
+    /// Command` (so a spawn failure must reproduce that routing here), and the
+    /// `command`/`builtin` wrappers emit their own usage diagnostics before
+    /// delegating, without pushing a scoped stderr redirect.
     fn emit_cmd_stderr(&mut self, out: &mut Out, redir: &RedirPlan, msg: &str) {
         let mut bytes = msg.as_bytes().to_vec();
         bytes.push(b'\n');
@@ -13135,6 +13140,35 @@ mod tests {
         let (o2, s2) = run("no_such_cmd_xyz123 2>&1; echo done");
         assert_eq!(o2, "osh: no_such_cmd_xyz123: command not found\ndone\n");
         assert_eq!(s2, 0);
+    }
+
+    #[test]
+    fn getopts_error_uses_dollar_zero_prefix() {
+        // bash prefixes the getopts diagnostic with `$0` (the shell/script name),
+        // not a `getopts:` command label. In the test harness `$0` is "osh".
+        // `2>&1` routes the message into the stdout capture so we can inspect it.
+        let (o, _) = run("set -- -x; getopts ab o 2>&1; echo done");
+        assert_eq!(o, "osh: illegal option -- x\ndone\n");
+        // Missing option-argument diagnostic uses the same `$0` prefix.
+        let (o2, _) = run("set -- -a; getopts 'a:' o 2>&1; echo done");
+        assert_eq!(o2, "osh: option requires an argument -- a\ndone\n");
+    }
+
+    #[test]
+    fn builtin_diagnostics_honor_stderr_redirect() {
+        // A builtin's own diagnostic must follow the command's fd 2 (bash), so
+        // `2>&1` folds it into the stdout capture and it is silenced when it
+        // would otherwise reach the shell's real stderr.
+        // `cd` failure:
+        let (o, _) = run("cd /no_such_dir_xyz123 2>&1 | sed 's/^/E:/'; echo done");
+        assert!(o.contains("E:osh: cd: /no_such_dir_xyz123:"), "got: {o:?}");
+        assert!(o.ends_with("done\n"));
+        // `test`/`[` operand error:
+        let (o2, _) = run("[ 5 -eq x ] 2>&1; echo done");
+        assert_eq!(o2, "osh: [: x: integer expression expected\ndone\n");
+        // The `builtin` wrapper's own "not a shell builtin" diagnostic:
+        let (o3, _) = run("builtin no_such_builtin_xyz 2>&1; echo done");
+        assert_eq!(o3, "osh: builtin: no_such_builtin_xyz: not a shell builtin\ndone\n");
     }
 
     #[test]

@@ -1382,6 +1382,36 @@ the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic. Still
 the resolved executable path, and add a computed `BASHOPTS`. The identity
 *default* (for host runs and pre-login target state) needs the operator's call.
 
+### TD-OILS-BUILTIN-USAGE. `osh` builtins omit bash's second `NAME: usage: …` synopsis line on a usage error — OPEN (low priority, cosmetic stderr text) 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — the usage-error paths of
+`builtin_getopts`, `builtin_source`, `builtin_mapfile`, `exec_command_builtin`,
+`builtin_printf` (`-v`), etc. Each emits only the one-line diagnostic
+(`osh: NAME: <problem>`).
+
+**What:** on a usage/argument error bash prints **two** lines to stderr — the
+diagnostic *and* a synopsis, e.g.
+
+```
+bash: line 1: command: -Z: invalid option
+command: usage: command [-pVv] command [arg ...]
+```
+
+osh prints only the first line. The exit status and the primary diagnostic
+match; only the trailing `NAME: usage: …` synopsis line is missing. Affects
+`command`, `getopts`, `source`, `mapfile`, `printf`, and any other builtin with
+a bash usage synopsis.
+
+**Impact:** very low — cosmetic stderr text only; scripts key on exit status and
+`$?`, not the synopsis wording. Shows up only when diffing raw stderr against
+bash on an intentionally-malformed builtin invocation.
+
+**Proper fix:** give each builtin a canonical `usage:` synopsis string (matching
+bash's exact wording) and, on a usage error, emit it as a second line through the
+same redirect-aware sink (`errln` for in-`run_builtin` builtins, `emit_cmd_stderr`
+for the `command`/`builtin` wrappers). Mechanical but must match bash's synopsis
+text byte-for-byte per builtin.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

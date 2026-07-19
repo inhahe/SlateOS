@@ -5,7 +5,8 @@
 //! by the lexer).
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, Command,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseItem, CaseTerm,
+    Command,
     CondBinOp,
     CondExpr, ForArithClause, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp,
     Pipeline, Program,
@@ -427,14 +428,26 @@ impl Parser {
             }
             self.pos += 1;
             let body = self.parse_case_body()?;
-            items.push(CaseItem { patterns, body });
-            if self.at_op(Op::DSemi) {
+            // Determine the arm terminator: `;;` break, `;&` fall through,
+            // `;;&` continue matching. A `;;`-less arm before `esac` breaks.
+            let term = if self.at_op(Op::DSemiAmp) {
                 self.pos += 1;
                 self.skip_newlines();
-            } else {
-                // Only `esac` may legitimately follow a `;;`-less arm body.
+                CaseTerm::ContinueMatch
+            } else if self.at_op(Op::SemiAmp) {
+                self.pos += 1;
                 self.skip_newlines();
-            }
+                CaseTerm::FallThrough
+            } else if self.at_op(Op::DSemi) {
+                self.pos += 1;
+                self.skip_newlines();
+                CaseTerm::Break
+            } else {
+                // Only `esac` may legitimately follow a terminator-less arm body.
+                self.skip_newlines();
+                CaseTerm::Break
+            };
+            items.push(CaseItem { patterns, body, term });
         }
         self.expect_reserved("esac")?;
         Ok(Command::Case(CaseClause { word, items }))
@@ -447,6 +460,8 @@ impl Parser {
             self.skip_separators();
             if self.peek().is_none()
                 || self.at_op(Op::DSemi)
+                || self.at_op(Op::SemiAmp)
+                || self.at_op(Op::DSemiAmp)
                 || self.reserved_here().as_deref() == Some("esac")
             {
                 break;

@@ -88,7 +88,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, Command, CondBinOp,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, CaseClause, CaseTerm, Command,
+    CondBinOp,
     CondExpr,
     ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
     RedirectOp,
@@ -857,11 +858,48 @@ impl Shell {
     fn exec_case(&mut self, c: &CaseClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
         self.last_status = 0;
-        for item in &c.items {
-            for pat in &item.patterns {
+        let mut idx = 0;
+        while idx < c.items.len() {
+            let item = &c.items[idx];
+            let matched = item.patterns.iter().any(|pat| {
                 let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
-                if glob_match(&pattern, &subject) {
-                    return self.exec_program(&item.body, out, stdin);
+                glob_match(&pattern, &subject)
+            });
+            if !matched {
+                idx += 1;
+                continue;
+            }
+            // Run this arm's body, then honor its terminator. `;&` falls through
+            // to run the next arm's body unconditionally; `;;&` resumes pattern
+            // testing at the following arms; `;;` (Break) stops.
+            let flow = self.exec_program(&c.items[idx].body, out, stdin);
+            if !matches!(flow, Flow::Next) {
+                return flow;
+            }
+            match c.items[idx].term {
+                CaseTerm::Break => return Flow::Next,
+                CaseTerm::ContinueMatch => {
+                    idx += 1;
+                }
+                CaseTerm::FallThrough => {
+                    // Fall through: run subsequent arm bodies unconditionally
+                    // until one breaks or we run out of arms.
+                    idx += 1;
+                    while idx < c.items.len() {
+                        let flow = self.exec_program(&c.items[idx].body, out, stdin);
+                        if !matches!(flow, Flow::Next) {
+                            return flow;
+                        }
+                        match c.items[idx].term {
+                            CaseTerm::Break => return Flow::Next,
+                            CaseTerm::ContinueMatch => {
+                                // Resume pattern testing at the following arm.
+                                idx += 1;
+                                break;
+                            }
+                            CaseTerm::FallThrough => idx += 1,
+                        }
+                    }
                 }
             }
         }
@@ -4932,6 +4970,34 @@ mod tests {
     fn case_char_class() {
         let (o, _) = run("case 5 in [0-9]) echo digit;; *) echo no;; esac");
         assert_eq!(o, "digit\n");
+    }
+
+    #[test]
+    fn case_fallthrough_semi_amp() {
+        // `;&` runs the next arm's body unconditionally.
+        let (o, _) = run("case x in x) echo a ;& y) echo b ;; z) echo c ;; esac");
+        assert_eq!(o, "a\nb\n");
+    }
+
+    #[test]
+    fn case_fallthrough_stops_at_break() {
+        // Fall through a chain of `;&` until a `;;` breaks.
+        let (o, _) = run("case a in a) echo 1 ;& b) echo 2 ;& c) echo 3 ;; d) echo 4 ;; esac");
+        assert_eq!(o, "1\n2\n3\n");
+    }
+
+    #[test]
+    fn case_continue_match_dsemi_amp() {
+        // `;;&` resumes pattern testing; both matching arms run.
+        let (o, _) = run("case abc in a*) echo one ;;& *c) echo two ;; *) echo three ;; esac");
+        assert_eq!(o, "one\ntwo\n");
+    }
+
+    #[test]
+    fn case_continue_match_no_second() {
+        // `;;&` resumes matching but no later arm matches.
+        let (o, _) = run("case abc in a*) echo one ;;& z*) echo two ;; esac; echo done");
+        assert_eq!(o, "one\ndone\n");
     }
 
     #[test]

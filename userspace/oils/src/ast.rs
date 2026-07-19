@@ -250,12 +250,25 @@ pub struct CaseClause {
     pub items: Vec<CaseItem>,
 }
 
+/// How a `case` arm terminates, controlling control flow after its body runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerm {
+    /// `;;` — stop after this arm (the normal case).
+    Break,
+    /// `;&` — fall through and run the *next* arm's body unconditionally.
+    FallThrough,
+    /// `;;&` — resume pattern testing with the following arms.
+    ContinueMatch,
+}
+
 /// One `pat[|pat…]) body ;;` arm of a `case` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseItem {
     /// Alternative glob patterns (`|`-separated); a match on any runs the body.
     pub patterns: Vec<Word>,
     pub body: Program,
+    /// Terminator determining control flow after the body (bash `;;`/`;&`/`;;&`).
+    pub term: CaseTerm,
 }
 
 /// A word: a sequence of parts that concatenate after expansion.

@@ -26,6 +26,10 @@ pub enum Op {
     Semi,
     /// `;;` — terminates a `case` arm.
     DSemi,
+    /// `;&` — terminates a `case` arm and falls through to the next arm's body.
+    SemiAmp,
+    /// `;;&` — terminates a `case` arm and resumes pattern testing at the next.
+    DSemiAmp,
     LParen,
     RParen,
     Less,
@@ -210,7 +214,15 @@ impl Lexer {
                     self.pos += 1;
                     if self.peek() == Some(';') {
                         self.pos += 1;
-                        out.push(Tok::Op(Op::DSemi));
+                        if self.peek() == Some('&') {
+                            self.pos += 1;
+                            out.push(Tok::Op(Op::DSemiAmp)); // `;;&`
+                        } else {
+                            out.push(Tok::Op(Op::DSemi)); // `;;`
+                        }
+                    } else if self.peek() == Some('&') {
+                        self.pos += 1;
+                        out.push(Tok::Op(Op::SemiAmp)); // `;&`
                     } else {
                         out.push(Tok::Op(Op::Semi));
                     }

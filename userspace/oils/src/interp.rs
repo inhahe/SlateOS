@@ -7988,6 +7988,10 @@ impl Shell {
         let mut exact = false;
         // `-u N`: read from user-space fd N instead of the ambient input.
         let mut ufd: Option<i32> = None;
+        // `-p PROMPT`: displayed on stderr before reading, but *only* when the
+        // input is a terminal (bash). Captured here and emitted after the input
+        // source is resolved, so a piped/redirected/here-string read stays quiet.
+        let mut prompt: Option<String> = None;
         // Parse short options, honoring bash's cluster/attached-argument forms:
         // flags may be bundled (`-rs`) and an option-argument may be glued to its
         // letter (`-d:`, `-n5`, `-u3`) or supplied as the next token (`-d :`).
@@ -8016,11 +8020,7 @@ impl Shell {
                         };
                         match c {
                             'a' => array = val,
-                            'p' => {
-                                if let Some(prompt) = val {
-                                    self.emit_stderr(prompt.as_bytes());
-                                }
-                            }
+                            'p' => prompt = val,
                             // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
                             'd' => {
                                 delim = Some(val.and_then(|s| s.bytes().next()).unwrap_or(0));
@@ -8072,6 +8072,21 @@ impl Shell {
             Some(s) => (s, &ufd_plan),
             None => (stdin, redir),
         };
+
+        // `-p PROMPT`: bash writes it to stderr only when the input is an actual
+        // terminal — i.e. the ambient stdin (not a `-u fd` cursor, `< file`,
+        // here-doc/here-string, `exec < …` rebind, or an upstream pipeline), and
+        // that stdin is a tty. A piped/redirected read shows no prompt.
+        if let Some(p) = &prompt {
+            let input_is_tty = matches!(rd_stdin, StdinSrc::Inherit)
+                && self.exec_stdin.is_none()
+                && rd_redir.stdin.is_none()
+                && rd_redir.stdin_data.is_none()
+                && io::stdin().is_terminal();
+            if input_is_tty {
+                self.emit_stderr(p.as_bytes());
+            }
+        }
 
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
         // record reader; otherwise a plain newline-terminated line.
@@ -12010,6 +12025,28 @@ mod tests {
         assert_eq!(run("read -rn3 x <<< 'ab\\cd'; echo \"$x\"").0, "ab\\\n");
         // Separated form still works.
         assert_eq!(run("read -d ':' p <<< 'a:b'; echo \"$p\"").0, "a\n");
+    }
+
+    #[test]
+    fn read_prompt_suppressed_for_non_tty_input() {
+        // `-p PROMPT` is written to stderr *only* when the input is a real
+        // terminal. Under a pipeline, here-string, or redirect the read is
+        // silent. We fold stderr into stdout via a command substitution
+        // (`2>&1`) so that a wrongly-emitted prompt would show up in the
+        // captured text; the fix keeps it empty.
+        assert_eq!(
+            run("out=$(echo x | { read -p 'P: ' y; echo \"$y\"; } 2>&1); echo \"[$out]\"").0,
+            "[x]\n"
+        );
+        assert_eq!(
+            run("out=$({ read -p 'P: ' y; echo \"$y\"; } 2>&1 <<< 'hi'); echo \"[$out]\"").0,
+            "[hi]\n"
+        );
+        // The value is still read correctly regardless of the prompt.
+        assert_eq!(
+            run("printf 'a b\\n' | { read -p '> ' x z; echo \"$x-$z\"; }").0,
+            "a-b\n"
+        );
     }
 
     #[test]

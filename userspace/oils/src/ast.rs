@@ -133,6 +133,8 @@ pub enum UnaryOp {
     NonZeroLen,
     /// `-v` — the named shell variable (or array element) is set.
     VarSet,
+    /// `-o` — the named shell option is enabled.
+    OptionSet,
 }
 
 /// Binary comparison operators inside `[[ … ]]`.

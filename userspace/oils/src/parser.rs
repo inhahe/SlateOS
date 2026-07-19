@@ -1330,6 +1330,7 @@ fn unary_op_from(s: &str) -> Option<UnaryOp> {
         "-z" => UnaryOp::ZeroLen,
         "-n" => UnaryOp::NonZeroLen,
         "-v" => UnaryOp::VarSet,
+        "-o" => UnaryOp::OptionSet,
         _ => return None,
     })
 }

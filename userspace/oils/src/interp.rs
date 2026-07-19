@@ -1406,6 +1406,11 @@ impl Shell {
                 let name = self.expand_to_string(w);
                 self.var_is_set(&name)
             }
+            // `-o optname` tests whether the named shell option is enabled.
+            UnaryOp::OptionSet => {
+                let name = self.expand_to_string(w);
+                self.shell_option_enabled(&name)
+            }
             _ => {
                 let path = self.expand_to_string(w);
                 let meta = std::fs::metadata(&path);
@@ -1422,7 +1427,10 @@ impl Shell {
                     UnaryOp::Readable => meta.is_ok(),
                     UnaryOp::Writable => meta.map(|m| !m.permissions().readonly()).unwrap_or(false),
                     UnaryOp::Executable => meta.is_ok(),
-                    UnaryOp::ZeroLen | UnaryOp::NonZeroLen | UnaryOp::VarSet => unreachable!(),
+                    UnaryOp::ZeroLen
+                    | UnaryOp::NonZeroLen
+                    | UnaryOp::VarSet
+                    | UnaryOp::OptionSet => unreachable!(),
                 }
             }
         }
@@ -4585,6 +4593,19 @@ impl Shell {
         }
     }
 
+    /// Return whether the named `set -o` option is currently enabled. Used by the
+    /// `[ -o NAME ]` / `[[ -o NAME ]]` test operator. Unknown option names are
+    /// reported as disabled (matching bash, which returns false for them).
+    fn shell_option_enabled(&self, name: &str) -> bool {
+        match name {
+            "pipefail" => self.pipefail,
+            "errexit" => self.errexit,
+            "nounset" => self.nounset,
+            "xtrace" => self.xtrace,
+            _ => false,
+        }
+    }
+
     fn builtin_shift(&mut self, args: &[String]) -> i32 {
         let n = args.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
         if n <= self.positional.len() {
@@ -5148,6 +5169,10 @@ impl Shell {
         // `eval_test` helper cannot see — handle it here.
         if a.len() == 2 && a[0] == "-v" {
             return i32::from(!self.var_is_set(a[1]));
+        }
+        // `-o OPTNAME` likewise needs shell state (the option flags).
+        if a.len() == 2 && a[0] == "-o" {
+            return i32::from(!self.shell_option_enabled(a[1]));
         }
         i32::from(!eval_test(&a))
     }
@@ -9550,6 +9575,19 @@ mod tests {
     fn umask_invalid_mode() {
         assert_eq!(run("umask 8qq").1, 1);
         assert_eq!(run("umask u=z").1, 1);
+    }
+
+    #[test]
+    fn test_o_option_operator() {
+        // `[[ -o NAME ]]` and `[ -o NAME ]` report whether a `set -o` option is on.
+        assert_eq!(run("set -e; [[ -o errexit ]] && echo yes").0, "yes\n");
+        assert_eq!(run("[[ -o errexit ]] && echo yes || echo no").0, "no\n");
+        assert_eq!(run("set -o pipefail; [ -o pipefail ] && echo p").0, "p\n");
+        assert_eq!(run("set -u; [[ -o nounset ]] && echo u").0, "u\n");
+        // Turning an option back off is reflected.
+        assert_eq!(run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0, "off\n");
+        // Unknown option names are reported disabled (bash returns false).
+        assert_eq!(run("[[ -o bogus ]] && echo on || echo off").0, "off\n");
     }
 
     #[test]

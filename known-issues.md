@@ -794,7 +794,19 @@ concurrently with the enclosing command and stream. The lexer/parser/AST plumbin
 change. Also sweep the non-simple-command contexts (or move cleanup to a
 shell-level teardown) to avoid the temp-file leak.
 
-### TD-OILS23. `osh` unquoted word splitting ignores a custom `$IFS` (always splits on whitespace) — OPEN (medium fidelity gap)
+### TD-OILS23. `osh` unquoted word splitting ignores a custom `$IFS` (always splits on whitespace) — RESOLVED 2026-07-19
+
+**RESOLVED 2026-07-19.** Replaced the free function `split_ifs` (which split
+only on whitespace via `str::split_whitespace`) with `split_field_ifs(s, ifs)`
+implementing full POSIX word-splitting: IFS whitespace collapses/trims, each
+non-whitespace IFS char is a single delimiter with adjacent whitespace absorbed,
+adjacent non-whitespace delimiters produce empty fields, a trailing delimiter
+produces no trailing empty field, empty IFS disables splitting, and empty input
+yields no fields. The `other =>` arm of `expand_word_annotated` now reads `$IFS`
+from `self.vars` (default `" \t\n"`) and routes through it. Regression test:
+`unquoted_word_split_honors_ifs`. Now `IFS=:; x="a:b:c"; for w in $x` yields
+three fields; `a::c` yields `a`, ``, `c`; leading/trailing custom delimiters and
+mixed whitespace+non-whitespace IFS behave per bash.
 
 **Where:** `userspace/oils/src/interp.rs` — `split_ifs` (splits only on
 `char::is_whitespace` via `str::split_whitespace`) and its caller, the `other =>`

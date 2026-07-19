@@ -4008,7 +4008,12 @@ impl Shell {
                 }
                 other => {
                     let val = self.expand_dynamic(other);
-                    let pieces = split_ifs(&val);
+                    let ifs = self
+                        .vars
+                        .get("IFS")
+                        .cloned()
+                        .unwrap_or_else(|| " \t\n".to_string());
+                    let pieces = split_field_ifs(&val, &ifs);
                     if !pieces.is_empty() {
                         push_chars(&mut cur, &pieces[0], false);
                         started = true;
@@ -9363,9 +9368,59 @@ fn quote_declare_value(v: &str) -> String {
     out
 }
 
-/// Split a string on the default IFS (whitespace), dropping empty fields.
-fn split_ifs(s: &str) -> Vec<String> {
-    s.split_whitespace().map(str::to_string).collect()
+/// Split an expanded value into fields on `$ifs`, following POSIX word-splitting
+/// rules. IFS whitespace (space/tab/newline that appear in `ifs`) runs collapse
+/// and leading/trailing runs are trimmed; each IFS *non*-whitespace character is
+/// a single delimiter (with adjacent IFS whitespace absorbed), so adjacent
+/// non-whitespace delimiters produce empty fields (`IFS=:` on `"a::b"` ⇒
+/// `a`, ``, `b`). A trailing delimiter does not create a trailing empty field.
+/// An empty `ifs` disables splitting (the whole value is one field); an empty
+/// input yields no fields.
+fn split_field_ifs(s: &str, ifs: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    if ifs.is_empty() {
+        return vec![s.to_string()];
+    }
+    let is_ws = |c: char| ifs.contains(c) && matches!(c, ' ' | '\t' | '\n');
+    let is_nonws = |c: char| ifs.contains(c) && !matches!(c, ' ' | '\t' | '\n');
+    let is_ifs = |c: char| ifs.contains(c);
+
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut fields = Vec::new();
+    let mut i = 0;
+    // Leading IFS whitespace is ignored (but a leading non-whitespace delimiter
+    // still yields an empty first field).
+    while i < n && is_ws(chars[i]) {
+        i += 1;
+    }
+    while i < n {
+        // Collect one field up to the next IFS character.
+        let mut cur = String::new();
+        while i < n && !is_ifs(chars[i]) {
+            cur.push(chars[i]);
+            i += 1;
+        }
+        fields.push(cur);
+        if i >= n {
+            break;
+        }
+        // Consume one delimiter: an IFS-whitespace run, then at most one IFS
+        // non-whitespace char, then a trailing IFS-whitespace run.
+        while i < n && is_ws(chars[i]) {
+            i += 1;
+        }
+        if i < n && is_nonws(chars[i]) {
+            i += 1;
+            while i < n && is_ws(chars[i]) {
+                i += 1;
+            }
+        }
+        // A trailing delimiter (nothing follows) produces no empty field.
+    }
+    fields
 }
 
 /// A special shell parameter that is always considered "set" for `nounset`
@@ -10548,6 +10603,37 @@ mod tests {
     fn read_custom_ifs() {
         let (o, _) = run("IFS=: read a b c <<< '1:2:3'; echo \"$a-$b-$c\"");
         assert_eq!(o, "1-2-3\n");
+    }
+
+    #[test]
+    fn unquoted_word_split_honors_ifs() {
+        // Unquoted expansion splits on a custom IFS, not just whitespace.
+        assert_eq!(
+            run(r#"IFS=:; x="a:b:c"; for w in $x; do echo "<$w>"; done"#).0,
+            "<a>\n<b>\n<c>\n"
+        );
+        // Adjacent non-whitespace delimiters preserve an empty field.
+        assert_eq!(
+            run(r#"IFS=:; x="a::c"; for w in $x; do echo "<$w>"; done"#).0,
+            "<a>\n<>\n<c>\n"
+        );
+        // A leading non-whitespace delimiter yields a leading empty field; a
+        // trailing one does not add a trailing empty field.
+        assert_eq!(
+            run(r#"IFS=:; x=":a:"; for w in $x; do echo "<$w>"; done"#).0,
+            "<>\n<a>\n"
+        );
+        // IFS whitespace runs still collapse and trim.
+        assert_eq!(
+            run(r#"x="  a   b  "; for w in $x; do echo "<$w>"; done"#).0,
+            "<a>\n<b>\n"
+        );
+        // Mixed whitespace + non-whitespace IFS: whitespace around the delimiter
+        // is absorbed.
+        assert_eq!(
+            run(r#"IFS=' :'; x="a : b"; for w in $x; do echo "<$w>"; done"#).0,
+            "<a>\n<b>\n"
+        );
     }
 
     #[test]

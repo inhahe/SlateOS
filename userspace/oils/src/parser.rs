@@ -1053,7 +1053,12 @@ impl Parser {
             if name.is_empty() || !is_valid_name(name) || idx_src.is_empty() {
                 return Ok(None);
             }
-            (name, Some(word_from_source(idx_src)?))
+            // A subscript is parsed verbatim (no word-splitting/trimming): for an
+            // associative array the expanded text — leading/trailing whitespace
+            // included — is the literal key (bash: `h[ x ]=v` keys on ` x `). For
+            // an indexed array the arithmetic evaluator ignores the whitespace, so
+            // preserving it is harmless.
+            (name, Some(word_verbatim_from_source(idx_src)?))
         } else {
             if lhs.is_empty() || !is_valid_name(lhs) {
                 return Ok(None);
@@ -1156,7 +1161,10 @@ fn parse_array_elem(segs: &[Seg]) -> Result<ArrayElem, ParseError> {
         && first.starts_with('[')
         && let Some(close_eq) = first.find("]=")
     {
-        let index = word_from_source(&first[1..close_eq])?;
+        // Verbatim: an associative keyed element `[ x ]=v` keys on the literal
+        // ` x ` (bash preserves subscript whitespace); indexed elements
+        // arithmetic-evaluate, which ignores it.
+        let index = word_verbatim_from_source(&first[1..close_eq])?;
         let mut value_segs: Vec<Seg> = Vec::new();
         let after = &first[close_eq + 2..];
         if !after.is_empty() {
@@ -1304,7 +1312,10 @@ fn split_name_subscript(
             "@" => ArrayIndex::All,
             "*" => ArrayIndex::Star,
             "" => return Err(ParseError("empty array subscript '[]'".into())),
-            _ => ArrayIndex::Index(Box::new(word_from_source(&inner)?)),
+            // Verbatim so an associative read `${h[ x ]}` keys on the literal
+            // ` x ` (bash preserves subscript whitespace); indexed reads
+            // arithmetic-evaluate, which ignores the whitespace.
+            _ => ArrayIndex::Index(Box::new(word_verbatim_from_source(&inner)?)),
         };
         return Ok((name, Some(index), bytes[close + 1..].to_vec()));
     }

@@ -552,7 +552,7 @@ impl Lexer {
                         out.push(tok);
                     } else {
                         let assign_ok = assignment_acceptable(out.last());
-                        let segs = self.read_word_inner(assign_ok)?;
+                        let segs = self.read_word_inner(assign_ok, false)?;
                         self.emit_word(&mut out, segs);
                     }
                 }
@@ -611,7 +611,7 @@ impl Lexer {
                     }
                 }
                 _ => {
-                    let segs = self.read_word()?;
+                    let segs = self.read_array_elem_word()?;
                     if segs.is_empty() {
                         return Err(LexError(
                             "unexpected operator in array assignment".into(),
@@ -756,13 +756,23 @@ impl Lexer {
     }
 
     fn read_word(&mut self) -> Result<Vec<Seg>, LexError> {
-        self.read_word_inner(false)
+        self.read_word_inner(false, false)
+    }
+
+    /// Read one array-literal element word. Like [`Self::read_word`] but a
+    /// *leading* `[subscript]=value` element (`([ x ]=v)`) is kept as one word
+    /// even across unquoted whitespace inside the brackets, matching bash's
+    /// array-literal tokenization (`declare -A m=([ x ]=v)` keys on ` x `).
+    fn read_array_elem_word(&mut self) -> Result<Vec<Seg>, LexError> {
+        self.read_word_inner(false, true)
     }
 
     /// Read one word; when `assign_ok`, an array-subscript at the head of the
     /// word (`name[…]`) is consumed as part of the word even across unquoted
-    /// whitespace, matching bash's assignment-word tokenization.
-    fn read_word_inner(&mut self, assign_ok: bool) -> Result<Vec<Seg>, LexError> {
+    /// whitespace, matching bash's assignment-word tokenization. When
+    /// `array_elem`, a word that *begins* with `[` slurps its `[…]` subscript the
+    /// same way (for array-literal keyed elements, which have no name prefix).
+    fn read_word_inner(&mut self, assign_ok: bool, array_elem: bool) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
         // Bracket-nesting depth while consuming a leading `name[subscript]`
@@ -788,10 +798,9 @@ impl Lexer {
             // position (`assign_ok`), and only for the leading subscript (segs
             // still empty, `lit` a valid identifier).
             if sub_depth == 0
-                && assign_ok
                 && c == '['
                 && segs.is_empty()
-                && is_valid_name(&lit)
+                && ((assign_ok && is_valid_name(&lit)) || (array_elem && lit.is_empty()))
             {
                 lit.push('[');
                 self.pos += 1;
@@ -1512,6 +1521,32 @@ mod tests {
         // In *argument* position the subscript splits normally on the space.
         let toks = tokenize("echo h[a b]=v").unwrap();
         assert_eq!(toks.len(), 3, "argument-position subscript must split: {toks:?}");
+    }
+
+    #[test]
+    fn array_literal_keyed_element_keeps_spaces() {
+        // Inside an array literal, a keyed element `[ x ]=v` stays one element
+        // even with unquoted interior spaces (bash tokenises `([ x ]=v)` as a
+        // single subscript-value element). Regression for TD-OILS-ASSOC-KEY-TRIM.
+        let toks = tokenize("m=([ x ]=v [y z]=w)").unwrap();
+        assert_eq!(toks.len(), 1, "expected single ArrayAssign token, got {toks:?}");
+        match &toks[0] {
+            Tok::ArrayAssign { name, elems, .. } => {
+                assert_eq!(name, "m");
+                assert_eq!(elems.len(), 2, "expected two elements, got {elems:?}");
+                assert_eq!(elems[0].as_slice(), &[Seg::Lit("[ x ]=v".into())]);
+                assert_eq!(elems[1].as_slice(), &[Seg::Lit("[y z]=w".into())]);
+            }
+            other => panic!("expected ArrayAssign, got {other:?}"),
+        }
+        // A positional element that merely starts with `[` also stays one word.
+        let toks = tokenize("a=([a b])").unwrap();
+        match &toks[0] {
+            Tok::ArrayAssign { elems, .. } => {
+                assert_eq!(elems.len(), 1, "positional [a b] must be one element: {elems:?}");
+            }
+            other => panic!("expected ArrayAssign, got {other:?}"),
+        }
     }
 
     #[test]

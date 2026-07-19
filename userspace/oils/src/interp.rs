@@ -8926,7 +8926,7 @@ impl Shell {
             }
             let body = map
                 .iter()
-                .map(|(k, v)| format!("[{k}]={}", quote_declare_value(v)))
+                .map(|(k, v)| format!("[{}]={}", quote_declare_key(k), quote_declare_value(v)))
                 .collect::<Vec<_>>()
                 .join(" ");
             return Some(format!("{name}=({body} )"));
@@ -13184,6 +13184,52 @@ fn quote_declare_value(v: &str) -> String {
     out
 }
 
+/// ANSI-C (`$'…'`) quote a string, escaping control characters so it re-inputs
+/// as the same bytes. Shared by the `set` scalar listing and `declare -p`
+/// associative-key formatting (both use this form when a control char is
+/// present).
+fn ansi_c_quote(s: &str) -> String {
+    let mut out = String::from("$'");
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Quote an associative-array subscript for `declare -p` / `set` output the way
+/// bash does: a key with only "safe" characters is emitted raw (`[key]`); a key
+/// containing a control character uses ANSI-C `$'…'` quoting; otherwise a key
+/// holding a shell metacharacter is double-quoted like a value (`["a b"]`). This
+/// makes the printed subscript round-trip back to the same key on re-input.
+fn quote_declare_key(k: &str) -> String {
+    if k.is_empty() {
+        return String::from("\"\"");
+    }
+    if k.chars().any(char::is_control) {
+        return ansi_c_quote(k);
+    }
+    // Metacharacters that would break re-parsing of a bare `[subscript]`, so
+    // bash double-quotes the key. Observed from real `declare -p` output (note
+    // `#`, `~`, `@`, `.`, `,`, `/`, `:`, `=`, `+`, `%`, `-` do *not* force it).
+    const KEY_METAS: &[char] = &[
+        ' ', '\t', '"', '\\', '$', '`', '\'', '*', '!', '?', ';', '|', '&', '(', ')', '<', '>',
+        '{', '}', '^', '[', ']',
+    ];
+    if k.chars().any(|c| KEY_METAS.contains(&c)) {
+        return quote_declare_value(k);
+    }
+    k.to_string()
+}
+
 /// Quote a scalar value the way bash's bare `set` variable listing does — which
 /// differs from `declare -p` (that one always double-quotes). Here a value is
 /// rendered *raw* when it needs no quoting, ANSI-C `$'…'`-quoted when it holds a
@@ -13198,20 +13244,7 @@ fn quote_set_value(v: &str) -> String {
         return String::new();
     }
     if v.chars().any(char::is_control) {
-        let mut out = String::from("$'");
-        for c in v.chars() {
-            match c {
-                '\n' => out.push_str("\\n"),
-                '\t' => out.push_str("\\t"),
-                '\r' => out.push_str("\\r"),
-                '\\' => out.push_str("\\\\"),
-                '\'' => out.push_str("\\'"),
-                c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-                c => out.push(c),
-            }
-        }
-        out.push('\'');
-        return out;
+        return ansi_c_quote(v);
     }
     const METAS: &[char] = &[
         ' ', '\'', '"', '\\', '|', '&', ';', '(', ')', '<', '>', '!', '{', '}', '*', '[', '?',
@@ -18661,6 +18694,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // Argument position still word-splits: `echo h[a b]` prints two fields.
         assert_eq!(run("echo h[a b]").0, "h[a b]\n");
+    }
+
+    #[test]
+    fn assoc_key_preserves_surrounding_whitespace() {
+        // bash never trims an associative subscript: `h[ x ]=v` keys on the
+        // literal " x " (with surrounding spaces), on both the store and the read
+        // path. A no-space read `${h[x]}` therefore does NOT match. (Regression
+        // for TD-OILS-ASSOC-KEY-TRIM.)
+        assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${!h[@]}]\"").0, "[ x ]\n");
+        assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${h[ x ]}]\"").0, "[v]\n");
+        assert_eq!(run("declare -A h; h[ x ]=v; echo \"[${h[x]}]\"").0, "[]\n");
+        // Same for a keyed array-literal element `([ x ]=v)`.
+        assert_eq!(
+            run("declare -A m=([ x ]=v); echo \"[${!m[@]}]\"").0,
+            "[ x ]\n"
+        );
+        // Indexed subscripts still arithmetic-evaluate (whitespace ignored).
+        assert_eq!(run("declare -a a; a[ 1 + 2 ]=v; echo ${!a[@]}").0, "3\n");
+    }
+
+    #[test]
+    fn declare_p_quotes_assoc_keys_needing_it() {
+        // `declare -p` quotes an associative key when it holds a shell
+        // metacharacter (so the subscript round-trips), and leaves "safe" keys
+        // bare — matching bash.
+        assert_eq!(
+            run("declare -A m; m[x]=v; declare -p m").0,
+            "declare -A m=([x]=\"v\" )\n"
+        );
+        assert_eq!(
+            run("declare -A m; m[\"a b\"]=v; declare -p m").0,
+            "declare -A m=([\"a b\"]=\"v\" )\n"
+        );
+        // `-`/`@`/`#` do not force quoting.
+        assert_eq!(
+            run("declare -A m; m[\"a-b\"]=v; declare -p m").0,
+            "declare -A m=([a-b]=\"v\" )\n"
+        );
     }
 
     #[test]

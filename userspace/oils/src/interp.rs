@@ -267,6 +267,15 @@ pub struct Shell {
     /// from bash's shared-fd semantics, acceptable because our subshells already
     /// copy their stdin).
     exec_stdin: Option<RefCell<io::Cursor<Vec<u8>>>>,
+    /// User-space table of non-standard input descriptors (fd ≥ 3) opened by a
+    /// redirection-only `exec 3< file` / `exec 3<&-`. Each entry is the file's
+    /// bytes in a position-tracking cursor, so `read -u 3` consumes successive
+    /// records. Persistent across commands (like bash's `exec`-installed fds),
+    /// but only consulted by `read -u N`; general per-command redirects to fd ≥ 3
+    /// and *write* descriptors are not yet modelled. A subshell clone inherits a
+    /// snapshot of each fd's *remaining* bytes with an independent offset (same
+    /// approximation as [`Shell::exec_stdin`]).
+    open_fds: std::collections::HashMap<i32, RefCell<io::Cursor<Vec<u8>>>>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -416,6 +425,7 @@ impl Shell {
             exec_stdout: None,
             exec_stderr: None,
             exec_stdin: None,
+            open_fds: std::collections::HashMap::new(),
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -1650,6 +1660,19 @@ impl Shell {
                 copy.set_position(pos);
                 RefCell::new(copy)
             }),
+            // Snapshot each open input fd with its remaining bytes and an
+            // independent offset (same approximation as exec_stdin above).
+            open_fds: self
+                .open_fds
+                .iter()
+                .map(|(&fd, c)| {
+                    let cur = c.borrow();
+                    let pos = cur.position();
+                    let mut copy = io::Cursor::new(cur.get_ref().clone());
+                    copy.set_position(pos);
+                    (fd, RefCell::new(copy))
+                })
+                .collect(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -3474,6 +3497,17 @@ impl Shell {
                     if r.fd == 0 {
                         plan.stdin = Some(self.expand_to_string(&r.target));
                         plan.stdin_data = None;
+                    } else if r.fd >= 3 {
+                        // `exec 3< file`: slurp the file now so a missing/unreadable
+                        // path surfaces as an error at redirection time (bash also
+                        // reports it then), then hand the bytes to `exec`.
+                        let path = self.expand_to_string(&r.target);
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                plan.extra_fds.push((r.fd, ExtraFdOp::InputBytes(bytes)));
+                            }
+                            Err(e) => return Err(format!("{path}: {e}")),
+                        }
                     }
                 }
                 RedirectOp::HereDoc => {
@@ -3483,6 +3517,10 @@ impl Shell {
                         let body = self.expand_double_quoted(&r.target.parts);
                         plan.stdin = None;
                         plan.stdin_data = Some(body.into_bytes());
+                    } else if r.fd >= 3 {
+                        let body = self.expand_double_quoted(&r.target.parts);
+                        plan.extra_fds
+                            .push((r.fd, ExtraFdOp::InputBytes(body.into_bytes())));
                     }
                 }
                 RedirectOp::HereStr => {
@@ -3491,6 +3529,11 @@ impl Shell {
                         s.push('\n');
                         plan.stdin = None;
                         plan.stdin_data = Some(s.into_bytes());
+                    } else if r.fd >= 3 {
+                        let mut s = self.expand_to_string(&r.target);
+                        s.push('\n');
+                        plan.extra_fds
+                            .push((r.fd, ExtraFdOp::InputBytes(s.into_bytes())));
                     }
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
@@ -3541,6 +3584,9 @@ impl Shell {
                         } else {
                             plan.stdout_to_stderr = true;
                         }
+                    } else if r.fd >= 3 && target == "-" {
+                        // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
+                        plan.extra_fds.push((r.fd, ExtraFdOp::Close));
                     }
                 }
             }
@@ -4394,6 +4440,24 @@ impl Shell {
                     // `1>&2` with fd 2 not a file: fd 1 mirrors the fd 2 target.
                     if rc == 0 && redir.stdout_to_stderr {
                         self.exec_stdout = self.exec_stderr.clone();
+                    }
+                    // fd ≥ 3 input descriptors (`exec 3< file`, `exec 3<&-`):
+                    // install / remove entries in the persistent open-fd table so
+                    // `read -u N` can consume them.
+                    if rc == 0 {
+                        for (fd, op) in &redir.extra_fds {
+                            match op {
+                                ExtraFdOp::InputBytes(bytes) => {
+                                    self.open_fds.insert(
+                                        *fd,
+                                        RefCell::new(io::Cursor::new(bytes.clone())),
+                                    );
+                                }
+                                ExtraFdOp::Close => {
+                                    self.open_fds.remove(fd);
+                                }
+                            }
+                        }
                     }
                     rc
                 } else {
@@ -6859,8 +6923,9 @@ impl Shell {
     /// the named variables — the last variable receiving the raw remainder.
     /// Without `-r`, backslash acts as an escape (and prevents field splitting on
     /// the escaped character). With `-a`, all fields go into one indexed array.
-    /// `-d`/`-n`/`-N`/`-t`/`-u` are accepted (their argument consumed) but not
-    /// yet honored — see known-issues.
+    /// `-u N` reads from a descriptor opened by `exec N< file` (see
+    /// [`Shell::open_fds`]); `N` = 0 falls back to normal stdin. `-t` is accepted
+    /// (its argument consumed) but not yet honored — see known-issues.
     fn builtin_read(&mut self, args: &[String], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
         let mut raw = false;
         let mut array: Option<String> = None;
@@ -6871,6 +6936,8 @@ impl Shell {
         let mut delim: Option<u8> = None;
         let mut nchars: Option<usize> = None;
         let mut exact = false;
+        // `-u N`: read from user-space fd N instead of the ambient input.
+        let mut ufd: Option<i32> = None;
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
@@ -6901,24 +6968,51 @@ impl Shell {
                     nchars = args.get(i).and_then(|s| s.parse().ok());
                     exact = true;
                 }
-                // Accepted but not honored yet; consume the option-argument forms.
-                "-t" | "-u" => i += 1,
+                "-u" => {
+                    i += 1;
+                    ufd = args.get(i).and_then(|s| s.parse().ok());
+                }
+                // Accepted but not honored yet; consume the option-argument form.
+                "-t" => i += 1,
                 other if other.starts_with('-') && other.len() > 1 => {} // unknown flag
                 _ => names.push(a.clone()),
             }
             i += 1;
         }
 
+        // `-u N` (N ≥ 3): read from the user-space open-fd table's cursor
+        // instead of the ambient input, ignoring any `redir` stdin. Validate the
+        // fd up front (before borrowing) so a bad descriptor is a clean error.
+        if let Some(n) = ufd
+            && n >= 3
+            && !self.open_fds.contains_key(&n)
+        {
+            self.errln(&format!("osh: read: {n}: bad file descriptor"));
+            return 1;
+        }
+        // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N cursor is the
+        // authoritative source. The `StdinSrc::Cursor` borrows `open_fds`
+        // immutably; that borrow ends before the later `&mut self` stores (NLL).
+        let ufd_plan = RedirPlan::default();
+        let ufd_stdin = ufd
+            .filter(|&n| n >= 3)
+            .and_then(|n| self.open_fds.get(&n))
+            .map(StdinSrc::Cursor);
+        let (rd_stdin, rd_redir): (&StdinSrc, &RedirPlan) = match &ufd_stdin {
+            Some(s) => (s, &ufd_plan),
+            None => (stdin, redir),
+        };
+
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
         // record reader; otherwise a plain newline-terminated line.
         let (line, terminated) = if delim.is_some() || nchars.is_some() {
             let d = delim.unwrap_or(b'\n');
-            match self.read_record_input(stdin, redir, d, nchars, exact) {
+            match self.read_record_input(rd_stdin, rd_redir, d, nchars, exact) {
                 Some(rec) => rec,
                 None => return 1, // EOF with no data
             }
         } else {
-            match self.read_line(stdin, redir) {
+            match self.read_line(rd_stdin, rd_redir) {
                 Some(l) => (l, true),
                 None => return 1, // EOF
             }
@@ -7570,6 +7664,25 @@ struct RedirPlan {
     stderr_to_stdout: bool,
     /// `1>&2` — fd 1 follows fd 2 (stdout goes wherever stderr currently goes).
     stdout_to_stderr: bool,
+    /// Redirections to descriptors other than 0/1/2 (`3< file`, `4<&-`, …).
+    /// Only the `exec` builtin currently consumes these, installing them in the
+    /// shell's persistent [`Shell::open_fds`] table; on any other command they
+    /// are ignored (a documented limitation — scoped per-command extra fds are
+    /// not yet modelled). Only *input* descriptors are modelled here — write
+    /// descriptors (`exec 3> file`, `echo >&3`) need the output-routing
+    /// machinery and are deferred.
+    extra_fds: Vec<(i32, ExtraFdOp)>,
+}
+
+/// An operation on a non-standard *input* file descriptor (fd ≥ 3), captured by
+/// [`Shell::resolve_redirects`] and applied to [`Shell::open_fds`] by `exec`.
+#[derive(Debug, Clone)]
+enum ExtraFdOp {
+    /// Open fd N for reading from these bytes — the contents of a `< file`
+    /// redirect or a here-document / here-string body.
+    InputBytes(Vec<u8>),
+    /// Close fd N (`N<&-` / `N>&-`).
+    Close,
 }
 
 /// A single expanded character tagged with whether it came from a quoted
@@ -12989,6 +13102,37 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
         assert_eq!(out, "line1=line2\nline3\n");
+    }
+
+    #[test]
+    fn exec_named_fd_read_u() {
+        // `exec 3< file` opens a user-space descriptor; `read -u 3` consumes
+        // successive lines from it, independently of fd 0.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_exec_fd3_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, b"alpha\nbeta\ngamma\n").expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = format!(
+            "exec 3< \"{p}\"\nread -u 3 a\nread -u 3 b\necho \"$a-$b\"\nexec 3<&-"
+        );
+        let (out, status) = run(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert_eq!(out, "alpha-beta\n");
+    }
+
+    #[test]
+    fn read_u_bad_fd_errors() {
+        // `read -u 7` with no such open descriptor fails (status 1) without
+        // touching the named variables.
+        let (_out, status) = run("read -u 7 x; echo done");
+        assert_eq!(status, 0); // the `echo done` sets the final status
     }
 
     #[test]

@@ -232,7 +232,7 @@ count propagate as for other loops.
 `arith_assignment_array_elements`, `arith_c_style_for_loop`). All 165
 oils tests pass; clippy clean; slateos target builds.
 
-### TD-OILS6. `osh` `read` builtin: `-t`/`-u` options accepted but not honored — OPEN (low priority)
+### TD-OILS6. `osh` `read` builtin: `-t` not honored (`-u` now resolved) — OPEN (low priority)
 
 **Where:** `userspace/oils/src/interp.rs` (`builtin_read`).
 
@@ -247,14 +247,16 @@ ignoring the delimiter). `-d`/`-n`/`-N` use a byte-level `read_record`
 helper (UTF-8-aware character counting) dispatched over the same
 `StdinSrc`/`RedirPlan` sources as `read_line`, and set the exit status
 correctly (0 on delimiter/count reached, 1 on a short read at EOF).
-Still missing: `-t timeout` (timed read) and `-u fd` (read from a specific
-file descriptor). Their option-arguments are **parsed and consumed** (so
-they aren't mistaken for variable names) but otherwise ignored.
+**`-u fd` — RESOLVED 2026-07-19.** `read -u N` (N ≥ 3) now reads from a
+descriptor opened by `exec N< file` via the per-shell `open_fds` table (see
+TD-OILS14); `-u 0` falls back to normal stdin, and an unopened fd is a
+status-1 `read: N: bad file descriptor`. Still missing: `-t timeout` (timed
+read) — its option-argument is **parsed and consumed** (so it isn't mistaken
+for a variable name) but otherwise ignored.
 
-**Proper fix:** `-t`/`-u` need timer and fd-table support that the current
-model lacks (no async/tty timeout facility; no numbered-fd table beyond the
-stdin/stdout/stderr `RedirPlan`). Deferred as low priority — scripts rarely
-use these compared to `-r`/`-a`/`-n`/`-d`.
+**Proper fix:** `-t` needs a timer/tty-timeout facility the current model
+lacks (no async/tty timeout). Deferred as low priority — scripts rarely use a
+`read` timeout compared to `-r`/`-a`/`-n`/`-d`/`-u`.
 
 ### TD-OILS7. `osh` `readonly`: enforcement covers assignment/`unset`/`declare` but not the `read` builtin or temporary env prefixes — OPEN (low priority)
 
@@ -428,7 +430,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms implemented; a true in-place `execve` remains — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input fds implemented; write-fds and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -464,12 +466,33 @@ command exits 127). Status of the remaining aspects:
    remaining buffer via a pipe, so a subsequent `read` in the parent sees EOF
    rather than the bytes the child left unconsumed (a shared-fd offset would
    differ) — acceptable for the common `exec < f; read …` idiom.
-3. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+3. **Named input descriptors (`exec 3< file`, `read -u 3`) — RESOLVED
+   2026-07-19.** `exec 3< file` (and `exec 3<< EOF` / `3<<< str`) opens a
+   user-space input descriptor fd ≥ 3 in a per-shell
+   `open_fds: HashMap<i32, RefCell<Cursor<Vec<u8>>>>` (the file is slurped once
+   into a position-tracking cursor at redirection time, so a missing/unreadable
+   path is an error there); `exec 3<&-` removes the entry. `read -u N` (N ≥ 3)
+   then reads successive records from that cursor instead of the ambient input,
+   independently of fd 0; an unopened fd is a status-1
+   `read: N: bad file descriptor`. `resolve_redirects` captures fd ≥ 3 input
+   redirects into `RedirPlan.extra_fds` (`ExtraFdOp::InputBytes`/`Close`), which
+   only the `exec` builtin consumes. A subshell clone inherits an
+   independent-offset snapshot of each open fd (same approximation as
+   `exec_stdin`). **Still OPEN (scoped out of this slice):** *write* descriptors
+   (`exec 3> file`, `echo >&3`) — they need the output-routing/`Out` machinery,
+   not just a byte cursor — and *scoped per-command* extra-fd redirects
+   (`while read -u 3; done 3< file`, where fd 3 lives only for the compound
+   command) — the plan's `extra_fds` are ignored on any command other than
+   `exec`. General per-command fd ≥ 3 redirects therefore do nothing yet.
+4. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Proper fix:** (2) done (see above). (3) once the kernel exposes `execve`,
+**Proper fix:** (2) and (3, input-fd part) done (see above). (3, write/scoped
+part) model an `Out`-backed write descriptor table and thread `extra_fds`
+through the per-command redirect path (not just `exec`) so fd ≥ 3 redirects
+scope to a single compound command. (4) once the kernel exposes `execve`,
 replace the spawn+wait+exit with an actual in-place image replacement for
 `exec cmd`.
 

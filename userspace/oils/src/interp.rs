@@ -3989,6 +3989,8 @@ impl Shell {
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
+            "fg" => self.builtin_fg(args, out, redir),
+            "bg" => self.builtin_bg(args, out, redir),
             "times" => self.builtin_times(out, redir),
             "enable" => self.builtin_enable(args, out, redir),
             "alias" => self.builtin_alias(args, out, redir),
@@ -4759,6 +4761,85 @@ impl Shell {
             self.jobs.retain(|j| !target_ids.contains(&j.id));
         }
         0
+    }
+
+    /// `fg [jobspec]` — bring a background job into the foreground: print its
+    /// command line (as bash does) and block until it terminates, returning its
+    /// exit status. With no jobspec the current (most recently backgrounded) job
+    /// is used. Returns 1 when there is no such job.
+    ///
+    /// Note: we have no job-control terminal (no SIGTSTP/SIGCONT, no controlling
+    /// tty transfer — see known-issues TD-OILS13), so `fg` cannot resume a
+    /// *stopped* job; it simply waits for a still-running background job. This is
+    /// the meaningful subset of `fg` for a shell without terminal job control.
+    fn builtin_fg(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        self.poll_jobs();
+        // Skip a leading `--` separator; the first remaining operand is the spec.
+        let spec = args.iter().find(|a| a.as_str() != "--");
+        let idx = match spec {
+            Some(s) => match self.resolve_job_spec(s) {
+                Some(i) => i,
+                None => {
+                    self.emit_stderr(format!("osh: fg: {s}: no such job\n").as_bytes());
+                    return 1;
+                }
+            },
+            None => {
+                if self.jobs.is_empty() {
+                    self.emit_stderr(b"osh: fg: current: no such job\n");
+                    return 1;
+                }
+                self.jobs.len() - 1
+            }
+        };
+        // Echo the command line to stdout, matching bash's `fg` behavior.
+        let cmd = self.jobs[idx].cmd.clone();
+        let _ = self.write_bytes(out, redir, format!("{cmd}\n").as_bytes());
+        // Wait for the job to finish, then remove it from the table.
+        let job = &mut self.jobs[idx];
+        let status = if let Some(mut child) = job.child.take() {
+            child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
+        } else {
+            job.status.unwrap_or(0)
+        };
+        self.jobs.remove(idx);
+        status
+    }
+
+    /// `bg [jobspec ...]` — resume stopped jobs in the background. Because we
+    /// have no terminal job control (no SIGTSTP/SIGCONT — see known-issues
+    /// TD-OILS13), backgrounded jobs are already running; `bg` therefore reports
+    /// each targeted job in bash's `[id] cmd &` form and returns 0. With no
+    /// jobspec the current (most recently backgrounded) job is used. Returns 1
+    /// when a named/current job does not exist.
+    fn builtin_bg(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        self.poll_jobs();
+        let specs: Vec<&String> = args.iter().filter(|a| a.as_str() != "--").collect();
+        let idxs: Vec<usize> = if specs.is_empty() {
+            if self.jobs.is_empty() {
+                self.emit_stderr(b"osh: bg: current: no such job\n");
+                return 1;
+            }
+            vec![self.jobs.len() - 1]
+        } else {
+            let mut v = Vec::new();
+            for s in specs {
+                match self.resolve_job_spec(s) {
+                    Some(i) => v.push(i),
+                    None => {
+                        self.emit_stderr(format!("osh: bg: {s}: no such job\n").as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            v
+        };
+        let mut buf = String::new();
+        for &idx in &idxs {
+            let job = &self.jobs[idx];
+            buf.push_str(&format!("[{}] {} &\n", job.id, job.cmd));
+        }
+        self.write_bytes(out, redir, buf.as_bytes())
     }
 
     /// `times` — print the accumulated user and system CPU times for the shell
@@ -7716,8 +7797,8 @@ const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "wait", "disown", "times", "hash", "umask", "exec", "exit",
-    "return", "break", "continue", "enable", "alias", "unalias",
+    ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "times", "hash", "umask", "exec",
+    "exit", "return", "break", "continue", "enable", "alias", "unalias",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -11326,6 +11407,74 @@ mod tests {
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
         // `wait` cleans up any still-tracked job for a tidy teardown.
         sh.run_source("wait");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fg_echoes_command_and_waits_for_status() {
+        // `fg` (no spec) foregrounds the current job: it prints the command line
+        // and blocks until the job finishes, returning its exit status.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 7 &");
+        assert_eq!(sh.jobs.len(), 1);
+        let mut buf = Vec::new();
+        let status = {
+            let prog = parse("fg").expect("parse");
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            sh.last_status
+        };
+        assert_eq!(status, 7);
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("cmd /c exit 7"), "fg output: {s:?}");
+        assert!(sh.jobs.is_empty(), "fg should remove the job");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fg_by_job_spec_targets_named_job() {
+        // `fg %n` targets a specific job by its job number.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 3 &");
+        assert_eq!(sh.run_source("fg %1"), 3);
+        assert!(sh.jobs.is_empty());
+    }
+
+    #[test]
+    fn fg_no_jobs_errors() {
+        // With no jobs, `fg` reports an error and returns 1.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("fg"), 1);
+        // A non-existent job spec is also an error.
+        assert_eq!(sh.run_source("fg %9"), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bg_reports_job_in_bash_form() {
+        // `bg` reports the targeted job in `[id] cmd &` form and returns 0.
+        // (Jobs already run in the background here — bg is a reporting no-op.)
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 0 &");
+        let mut buf = Vec::new();
+        {
+            let prog = parse("bg").expect("parse");
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("[1]"), "bg output: {s:?}");
+        assert!(s.contains("cmd /c exit 0 &"), "bg output: {s:?}");
+        assert_eq!(sh.last_status, 0);
+        sh.run_source("wait");
+    }
+
+    #[test]
+    fn bg_no_jobs_errors() {
+        // With no jobs, `bg` reports an error and returns 1.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("bg"), 1);
+        assert_eq!(sh.run_source("bg %5"), 1);
     }
 
     #[cfg(windows)]

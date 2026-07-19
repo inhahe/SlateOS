@@ -397,30 +397,36 @@ correctly, since they canonicalize identically.
 file-ID equivalent) through the VFS/`stat` path, compare those instead of
 canonical paths. The `-nt`/`-ot` mtime comparisons are already exact.
 
-### TD-OILS13. `osh` job control is minimal: no `fg`/`bg`/`disown`, and only single external `&` commands are tracked — OPEN (partly gated on kernel job-control/signal support)
+### TD-OILS13. `osh` job control lacks terminal job control (no job *stop*/resume, no controlling-tty transfer), and only single external `&` commands background asynchronously — OPEN (gated on kernel job-control/signal support)
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_background`, `builtin_jobs`,
-`builtin_wait`, the `Job` struct and `Shell::jobs` table).
+`builtin_wait`, `builtin_fg`, `builtin_bg`, `builtin_disown`, the `Job` struct
+and `Shell::jobs` table).
 
-**What:** background-job tracking (`&` → job table, `jobs`, `wait`, `$!`) is
-implemented, but the job-control surface is incomplete:
+**What:** background-job tracking (`&` → job table, `jobs`, `wait`, `wait -n`,
+`$!`, `disown`, and now `fg`/`bg`) is implemented, but the parts that require a
+controlling terminal and job-control signals remain incomplete:
 1. **Only a single external simple command backgrounds asynchronously.** A
    compound background job (`{ …; } &`, `( … ) &`, a pipeline `a | b &`) still
    falls back to running *synchronously* (see `exec_background`'s fallback), so
    it is never entered into the job table. bash runs these asynchronously in a
    subshell.
-2. **No `fg`/`bg`/`disown`.** There is no controlling-terminal/process-group
-   machinery, so foregrounding, resuming a stopped job, or detaching a job are
-   not implemented. Jobs also cannot be *stopped* (Ctrl-Z / `SIGTSTP`), so the
-   "Stopped" state never occurs.
-3. **`wait -n` and `wait` on a completed-job exit-status cache** are not
-   implemented — `wait` blocks on the child directly and removes the job.
+2. **No job *stop*/resume and no controlling-tty transfer.** `fg`/`bg` are
+   implemented as far as is meaningful without terminal job control: `fg` prints
+   the job's command line and *waits* for it (it cannot resume a stopped job or
+   move the terminal foreground process group), and `bg` is a spec-resolving
+   *reporting* form (the job is already running in the background). There is no
+   process-group / controlling-terminal machinery, so jobs cannot be *stopped*
+   (Ctrl-Z / `SIGTSTP`) — the "Stopped" state never occurs — and `fg` cannot
+   grant a job the terminal.
 
 **Proper fix:** (1) route compound/pipeline `&` through a real async subshell
-thread that registers a job; (2) implement `fg`/`bg`/`disown` and job stop/cont
-once the kernel provides process groups + job-control signals (ties into
-TD-OILS11 async-signal delivery); (3) add `wait -n`. The current implementation
-is correct for the overwhelmingly common case (`cmd & … wait`), just narrow.
+thread that registers a job; (2) once the kernel provides process groups +
+job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
+`bg` to genuine stop/continue + terminal-foreground transfer and add the
+"Stopped" job state. The current implementation is correct for the
+overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
+just narrow.
 
 ### TD-OILS14. `osh` `exec` does not support redirection-only form or a true in-place `execve` — OPEN (partly gated on kernel `execve`)
 

@@ -289,6 +289,15 @@ pub struct Shell {
     /// share one OS offset). Per-command write redirects to fd ≥ 3 and duplicating
     /// a write-fd *onto* a standard fd (`exec 3>&1`) are not yet modelled.
     open_write_fds: std::collections::HashMap<i32, std::sync::Arc<std::fs::File>>,
+    /// Temp files backing *input* process substitutions `<(cmd)` created while
+    /// expanding the current command's words. Each holds `cmd`'s captured output;
+    /// the enclosing command reads it, then it is deleted once the command
+    /// finishes (drained by the `exec_simple` wrapper from the mark it recorded).
+    procsub_in_temps: Vec<String>,
+    /// Deferred *output* process substitutions `>(cmd)`: `(temp_path, body)`. The
+    /// enclosing command writes to `temp_path`; after it finishes, `body` runs
+    /// with the file's contents as its stdin, then the temp file is deleted.
+    procsub_out_jobs: Vec<(String, Program)>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -440,6 +449,8 @@ impl Shell {
             exec_stdin: None,
             open_fds: std::collections::HashMap::new(),
             open_write_fds: std::collections::HashMap::new(),
+            procsub_in_temps: Vec::new(),
+            procsub_out_jobs: Vec::new(),
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -1763,6 +1774,9 @@ impl Shell {
                 .iter()
                 .map(|(&fd, f)| (fd, std::sync::Arc::clone(f)))
                 .collect(),
+            // A subshell manages its own process-substitution lifetimes.
+            procsub_in_temps: Vec::new(),
+            procsub_out_jobs: Vec::new(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -2694,6 +2708,18 @@ impl Shell {
     // ---- simple command execution -------------------------------------------
 
     fn exec_simple(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // Process substitutions in this command's words create temp files (and,
+        // for `>(cmd)`, deferred bodies). Record the marks, run the command (and
+        // its whole body, for a function), then tear the substitutions down —
+        // running deferred `>(cmd)` bodies and deleting all temp files.
+        let in_mark = self.procsub_in_temps.len();
+        let out_mark = self.procsub_out_jobs.len();
+        let flow = self.exec_simple_inner(sc, out, stdin);
+        self.finish_procsubs(in_mark, out_mark);
+        flow
+    }
+
+    fn exec_simple_inner(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
         // Record the command about to run for `$BASH_COMMAND` (the command
         // currently executing, as seen by DEBUG/ERR traps and readable
         // generally). Not updated while a trap handler runs, so the handler
@@ -4142,6 +4168,7 @@ impl Shell {
             } => self.slice_elements(name, offset, length).join(" "),
             WordPart::ArrayBulk { name, op, .. } => self.bulk_elements(name, op).join(" "),
             WordPart::CommandSub(prog) => self.command_sub(prog),
+            WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
             WordPart::ArrayRef {
                 name,
@@ -4396,6 +4423,60 @@ impl Shell {
             s.pop();
         }
         s
+    }
+
+    /// Expand a process substitution `<(cmd)` / `>(cmd)` to a temp-file pathname.
+    ///
+    /// The host has no `/dev/fd` or named-pipe support, so this uses a temp-file
+    /// approximation (as several shells do on such systems): for the input form
+    /// `<(cmd)` the command runs *now*, its stdout captured into a temp file whose
+    /// path is substituted; for the output form `>(cmd)` an empty temp file is
+    /// created and the command is deferred (run after the enclosing command, with
+    /// the file's contents as its stdin). Both temp files are cleaned up when the
+    /// enclosing command finishes (see [`Shell::finish_procsubs`]). This is not
+    /// streaming — a `<(tail -f)`-style infinite producer would block here — which
+    /// is a documented limitation (see known-issues TD-OILS22).
+    fn proc_sub(&mut self, input: bool, body: &Program) -> String {
+        let path = unique_temp_path("osh_psub");
+        if input {
+            let mut buf = Vec::new();
+            {
+                let mut out = Out::Capture(&mut buf);
+                let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
+            }
+            if std::fs::write(&path, &buf).is_ok() {
+                self.procsub_in_temps.push(path.clone());
+            }
+        } else {
+            // Create the (empty) target so the enclosing command can open it.
+            let _ = std::fs::write(&path, b"");
+            self.procsub_out_jobs.push((path.clone(), body.clone()));
+        }
+        path
+    }
+
+    /// Tear down the process substitutions created since the recorded marks: run
+    /// each deferred *output* body with its temp file's contents as stdin, then
+    /// delete every output and input temp file. Called by the `exec_simple`
+    /// wrapper after the command (and its whole body, for functions) finishes.
+    fn finish_procsubs(&mut self, in_mark: usize, out_mark: usize) {
+        if self.procsub_out_jobs.len() > out_mark {
+            let jobs: Vec<(String, Program)> = self.procsub_out_jobs.split_off(out_mark);
+            for (path, body) in jobs {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    let cursor = RefCell::new(io::Cursor::new(bytes));
+                    let sin = StdinSrc::Cursor(&cursor);
+                    let mut out = Out::Inherit;
+                    let _ = self.exec_program(&body, &mut out, &sin);
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        if self.procsub_in_temps.len() > in_mark {
+            for path in self.procsub_in_temps.split_off(in_mark) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     /// Expand a word to a string and evaluate it as an arithmetic expression
@@ -9054,6 +9135,17 @@ fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
     }
 }
 
+/// A unique temp-file path under the system temp dir, using the process id plus
+/// a monotonic counter so concurrent expansions never collide. Used for process
+/// substitution (`<(cmd)`/`>(cmd)`); the caller creates and later removes it.
+fn unique_temp_path(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("{prefix}_{}_{n}.tmp", std::process::id()));
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
@@ -13583,6 +13675,41 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
         assert_eq!(out, "got:redirected-line\n");
+    }
+
+    #[test]
+    fn process_sub_input_redirect() {
+        // `read x < <(printf hello)`: the input process substitution runs printf,
+        // captures its output to a temp file, and the redirect feeds it to read.
+        let (out, status) = run("read x < <(printf 'hello\\n'); echo \"$x\"");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hello\n");
+    }
+
+    #[test]
+    fn process_sub_input_as_source_arg() {
+        // `. <(echo v=42)`: the substituted pathname is sourced, running the
+        // captured script text (a variable assignment) in the current shell.
+        let (out, _) = run(". <(echo 'v=42'); echo \"$v\"");
+        assert_eq!(out, "42\n");
+    }
+
+    #[test]
+    fn process_sub_two_inputs_distinct_files() {
+        // `diff`-style `cmd <(a) <(b)` gives two *distinct* substituted paths.
+        // Source both and confirm each captured its own command's output.
+        let (out, _) = run(". <(echo 'a=1'); . <(echo 'b=2'); echo \"$a$b\"");
+        assert_eq!(out, "12\n");
+    }
+
+    #[test]
+    fn process_sub_output_deferred() {
+        // `echo hello > >(read line; …)`: hello is written to the output process
+        // substitution's temp file; after the command, its body runs with that
+        // file as stdin, so `read line` sees "hello" and writes it to {FILE}.
+        let contents =
+            run_exec_redirect("echo hello > >(read line; echo \"$line\" > \"{FILE}\")");
+        assert_eq!(contents, "hello\n");
     }
 
     #[test]

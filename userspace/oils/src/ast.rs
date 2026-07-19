@@ -468,6 +468,16 @@ pub enum WordPart {
         star: bool,
         op: BulkOp,
     },
+    /// Process substitution `<(cmd)` (input) / `>(cmd)` (output). Expands to the
+    /// pathname of a file the shell connects to `cmd`: for `<(cmd)` the file holds
+    /// `cmd`'s output (read by the enclosing command); for `>(cmd)` the file's
+    /// contents are fed to `cmd`'s stdin after the enclosing command finishes.
+    ProcSub {
+        /// `true` for `<(cmd)` (the command's output is read); `false` for
+        /// `>(cmd)` (data written to the file is sent to the command).
+        input: bool,
+        body: Program,
+    },
 }
 
 /// The operator carried by [`WordPart::ArrayBulk`], applied element-wise.

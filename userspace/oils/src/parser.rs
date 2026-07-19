@@ -1045,6 +1045,10 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
         Seg::ParamBraced(raw) => parse_braced_param(raw)?,
         Seg::CmdSub(raw) => WordPart::CommandSub(parse(raw)?),
         Seg::Arith(raw) => WordPart::ArithSub(raw.clone()),
+        Seg::ProcSub(input, raw) => WordPart::ProcSub {
+            input: *input,
+            body: parse(raw)?,
+        },
     })
 }
 

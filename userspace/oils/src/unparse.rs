@@ -618,6 +618,9 @@ fn part_src(p: &WordPart) -> String {
             format!("${{!{prefix}{}}}", if *star { "*" } else { "@" })
         }
         WordPart::CommandSub(prog) => format!("$({})", program_inline(prog)),
+        WordPart::ProcSub { input, body } => {
+            format!("{}({})", if *input { '<' } else { '>' }, program_inline(body))
+        }
         WordPart::ArithSub(text) => format!("$(( {text} ))"),
         WordPart::Length(name) => format!("${{#{name}}}"),
         WordPart::ArrayRef { name, index, length } => {

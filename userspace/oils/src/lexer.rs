@@ -68,6 +68,9 @@ pub enum Seg {
     CmdSub(String),
     /// `$(( … ))` — raw arithmetic expression text.
     Arith(String),
+    /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
+    /// input form `<(…)`, and the `String` is the raw inner command source.
+    ProcSub(bool, String),
 }
 
 /// One token.
@@ -337,6 +340,14 @@ impl Lexer {
                     self.pos += 1;
                     out.push(Tok::Op(Op::RParen));
                 }
+                '<' | '>' if self.peek_at(1) == Some('(') => {
+                    // Process substitution `<(cmd)` / `>(cmd)`: a word (filename),
+                    // not a redirection operator. `read_word` consumes the whole
+                    // `<(…)`/`>(…)` group as a `Seg::ProcSub` (and allows adjacent
+                    // literals to concatenate).
+                    let segs = self.read_word()?;
+                    self.emit_word(&mut out, segs);
+                }
                 '<' => {
                     self.pos += 1;
                     match self.peek() {
@@ -599,6 +610,18 @@ impl Lexer {
                         continue;
                     }
                 }
+            }
+            // Process substitution `<(cmd)` / `>(cmd)` (outside an extglob group):
+            // read the balanced `(…)` body as one segment. Handled before the
+            // `<`/`>` word-break below so `diff <(a) <(b)` and concatenated forms
+            // like `pre<(cmd)` both work.
+            if ext_depth == 0 && matches!(c, '<' | '>') && self.peek_at(1) == Some('(') {
+                let input = c == '<';
+                self.pos += 2; // consume `<`/`>` and `(`
+                flush_lit(&mut segs, &mut lit);
+                let raw = self.read_balanced('(', ')')?;
+                segs.push(Seg::ProcSub(input, raw));
+                continue;
             }
             match c {
                 ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>' | '#' => break,

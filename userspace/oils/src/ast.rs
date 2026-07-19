@@ -42,6 +42,12 @@ pub enum AndOrOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
     pub negated: bool,
+    /// The `time` reserved word prefixed the pipeline: report elapsed timing on
+    /// stderr after it completes.
+    pub timed: bool,
+    /// `time -p` was used: POSIX-format output (three lines, seconds with two
+    /// decimals) instead of bash's default `real\tNmM.SSSs` form.
+    pub time_posix: bool,
     pub commands: Vec<Command>,
 }
 

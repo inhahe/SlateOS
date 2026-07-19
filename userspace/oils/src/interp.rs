@@ -431,6 +431,11 @@ impl Shell {
     }
 
     fn exec_pipeline(&mut self, pipe: &Pipeline, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        let start = if pipe.timed {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let (statuses, flow) = if pipe.commands.len() == 1 {
             let flow = self.exec_command(&pipe.commands[0], out, stdin);
             (vec![self.last_status], flow)
@@ -447,7 +452,34 @@ impl Shell {
         if pipe.negated {
             self.last_status = i32::from(self.last_status == 0);
         }
+        if let Some(start) = start {
+            let real = start.elapsed().as_secs_f64();
+            self.emit_stderr(Self::format_time_report(real, pipe.time_posix).as_bytes());
+        }
         flow
+    }
+
+    /// Render a `time`/`time -p` report. `real` is wall-clock seconds; user and
+    /// system CPU times are reported as zero because the host does not expose
+    /// per-child CPU accounting through `std::process` (see known-issues
+    /// TD-OILS10). The default (bash) form is `\nreal\tNmS.SSSs\n…`; the POSIX
+    /// `-p` form is `real S.SS\n…` with two decimals and no leading newline.
+    fn format_time_report(real: f64, posix: bool) -> String {
+        if posix {
+            format!("real {real:.2}\nuser {:.2}\nsys {:.2}\n", 0.0, 0.0)
+        } else {
+            let fmt = |s: f64| {
+                let mins = (s / 60.0).floor() as u64;
+                let secs = s - (mins as f64) * 60.0;
+                format!("{mins}m{secs:.3}s")
+            };
+            format!(
+                "\nreal\t{}\nuser\t{}\nsys\t{}\n",
+                fmt(real),
+                fmt(0.0),
+                fmt(0.0)
+            )
+        }
     }
 
     /// Store the per-stage exit codes in `${PIPESTATUS[@]}` and set `$?`.
@@ -7966,6 +7998,29 @@ mod tests {
 
         std::fs::remove_dir_all(&da).ok();
         std::fs::remove_dir_all(&db).ok();
+    }
+
+    #[test]
+    fn time_keyword_runs_pipeline() {
+        // `time` runs the pipeline transparently: stdout is unaffected (the
+        // report goes to stderr) and the pipeline's exit status is preserved.
+        assert_eq!(run("time echo hi").0, "hi\n");
+        assert_eq!(run("time false").1, 1);
+        assert_eq!(run("time -p true").1, 0);
+        // Timing a multi-stage pipeline still streams stdout normally.
+        assert_eq!(run("time echo hi | cat").0, "hi\n");
+    }
+
+    #[test]
+    fn time_report_formatting() {
+        // POSIX `-p` form: two decimals, space-separated, no leading newline.
+        let p = Shell::format_time_report(1.5, true);
+        assert_eq!(p, "real 1.50\nuser 0.00\nsys 0.00\n");
+        // Default (bash) form: leading newline, tab-separated, NmS.SSSs.
+        let d = Shell::format_time_report(62.25, false);
+        assert_eq!(d, "\nreal\t1m2.250s\nuser\t0m0.000s\nsys\t0m0.000s\n");
+        let z = Shell::format_time_report(0.0, false);
+        assert_eq!(z, "\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s\n");
     }
 
     #[test]

@@ -155,6 +155,26 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
+        // `time [-p]` is a reserved word only at the start of a pipeline; it is
+        // not in RESERVED (so it stays usable as a plain word elsewhere, e.g.
+        // in a `for … in` list). It precedes an optional `!` negation, and is
+        // only a keyword when a pipeline body follows it.
+        let mut timed = false;
+        let mut time_posix = false;
+        if self.bare_word_here().as_deref() == Some("time")
+            && self.starts_command(self.pos + 1)
+        {
+            timed = true;
+            self.pos += 1;
+            self.skip_newlines();
+            if self.bare_word_here().as_deref() == Some("-p")
+                && self.starts_command(self.pos + 1)
+            {
+                time_posix = true;
+                self.pos += 1;
+                self.skip_newlines();
+            }
+        }
         let mut negated = false;
         if self.reserved_here().as_deref() == Some("!") {
             negated = true;
@@ -166,7 +186,17 @@ impl Parser {
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(Pipeline { negated, commands })
+        Ok(Pipeline { negated, timed, time_posix, commands })
+    }
+
+    /// Whether the token at `idx` could begin a command (used to decide whether
+    /// a bare `time`/`-p` at pipeline start is the reserved word or an argv
+    /// word — e.g. bare `time` at end of input is just the external `time`).
+    fn starts_command(&self, idx: usize) -> bool {
+        matches!(
+            self.toks.get(idx),
+            Some(Tok::Word(_)) | Some(Tok::Op(Op::LParen))
+        )
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
@@ -1616,6 +1646,38 @@ mod tests {
     fn negated_pipeline() {
         let prog = parse("! false").unwrap();
         assert!(prog.items[0].list.first.negated);
+    }
+
+    #[test]
+    fn time_keyword_pipeline() {
+        let prog = parse("time echo hi").unwrap();
+        let p = &prog.items[0].list.first;
+        assert!(p.timed);
+        assert!(!p.time_posix);
+        // The `time` word is consumed, so the body is just `echo hi`.
+        let Command::Simple(sc) = &p.commands[0] else { panic!() };
+        assert_eq!(sc.words[0].parts.len(), 1);
+
+        let prog = parse("time -p sleep 0 | cat").unwrap();
+        let p = &prog.items[0].list.first;
+        assert!(p.timed);
+        assert!(p.time_posix);
+        assert_eq!(p.commands.len(), 2);
+
+        // `time` precedes `!` negation.
+        let prog = parse("time ! false").unwrap();
+        let p = &prog.items[0].list.first;
+        assert!(p.timed);
+        assert!(p.negated);
+
+        // A bare `time` with nothing after it is an ordinary command word.
+        let prog = parse("time").unwrap();
+        let p = &prog.items[0].list.first;
+        assert!(!p.timed);
+
+        // `time` inside a `for … in` list stays a plain word.
+        let prog = parse("for x in time now; do echo $x; done").unwrap();
+        assert!(!prog.items[0].list.first.timed);
     }
 
     #[test]

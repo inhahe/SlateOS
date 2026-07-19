@@ -325,6 +325,25 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
+### TD-OILS10. `osh` `time` keyword: user/sys CPU times are always reported as 0.00 — OPEN (low priority, gated on per-child CPU accounting)
+
+**Where:** `userspace/oils/src/interp.rs` (`Shell::format_time_report`, called
+from `exec_pipeline` when a pipeline is prefixed with `time`).
+
+**What:** the `time` reserved word (and `time -p`) reports **real** (wall-clock)
+time accurately via `std::time::Instant`, but the **user** and **system** CPU
+time fields are hard-coded to `0m0.000s` / `0.00`. `std::process::Command` on
+the host does not surface per-child `rusage`-style CPU accounting, and the
+in-process builtin/function stages have no separate CPU meter. bash reports the
+combined user/sys CPU consumed by the timed pipeline's children.
+
+**Proper fix:** on SlateOS, gather child CPU times from the process-exit
+accounting the kernel already tracks (wait/waitid returning cumulative
+user/sys ticks) and sum them across the pipeline's stages; for in-process
+stages, sample a per-thread CPU clock around the stage. Deferred: real time is
+the field scripts most commonly want, and it is exact; user/sys reported as
+zero is clearly documented and does not affect the pipeline's stdout/status.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

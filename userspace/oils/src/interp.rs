@@ -2569,7 +2569,12 @@ impl Shell {
         if op == 'A' {
             return self.transform_assign(name);
         }
-        let value = self.param_elem_value(name, index).unwrap_or_default();
+        // An unset variable yields the empty string for every transform (bash):
+        // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
+        // quoted (`${x@Q}` → `''`). Distinguish the two by the Option itself.
+        let Some(value) = self.param_elem_value(name, index) else {
+            return String::new();
+        };
         if op == 'P' {
             return self.prompt_expand(&value);
         }
@@ -9539,9 +9544,9 @@ fn initial_rng_seed() -> u32 {
 }
 
 /// Quote `s` so it can be reused verbatim as shell input (the `${v@Q}`
-/// transform). Simple safe words are returned unquoted; values with control
-/// characters use ANSI-C `$'…'` quoting; everything else is single-quoted with
-/// embedded single quotes escaped as `'\''`.
+/// transform). Values with control characters use ANSI-C `$'…'` quoting;
+/// every other non-empty value is single-quoted (with embedded single quotes
+/// escaped as `'\''`), and the empty string becomes `''`.
 /// The signals `trap`/`trap -l` know about, as `(number, name-without-SIG)`.
 /// Numbers follow the common Linux x86 layout. `EXIT` (0) and the pseudo
 /// signals `ERR`/`DEBUG`/`RETURN` are handled as specs but not listed here.
@@ -9680,12 +9685,9 @@ fn shell_quote(s: &str) -> String {
         out.push('\'');
         return out;
     }
-    let safe = s
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(c));
-    if safe {
-        return s.to_string();
-    }
+    // bash's `${v@Q}`/`${v@A}` single-quote every non-empty, control-free value
+    // — even a "plain" word like `hi` becomes `'hi'`. (`%q` printf uses a
+    // different, backslash-escaping quoter, `printf_quote`.)
     let mut out = String::from("'");
     for c in s.chars() {
         if c == '\'' {
@@ -12708,8 +12710,11 @@ mod tests {
         // @l lowercases only the first character (mirror of @u).
         assert_eq!(run("x=HeLLo; echo \"${x@l}\"").0, "heLLo\n");
         assert_eq!(run("x=HELLO; echo \"${x@l}\"").0, "hELLO\n");
-        // A simple safe word needs no quoting under @Q.
-        assert_eq!(run("x=word; echo \"${x@Q}\"").0, "word\n");
+        // bash single-quotes every set value under @Q, even a plain word.
+        assert_eq!(run("x=word; echo \"${x@Q}\"").0, "'word'\n");
+        // An unset variable yields empty; a set-but-empty one yields `''`.
+        assert_eq!(run("unset x; echo \"[${x@Q}]\"").0, "[]\n");
+        assert_eq!(run("x=; echo \"[${x@Q}]\"").0, "['']\n");
     }
 
     #[test]
@@ -13030,8 +13035,9 @@ mod tests {
 
     #[test]
     fn param_transform_assign() {
-        // `@A` on a plain scalar → short `name=value` (quoted only if needed).
-        assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x=hello\n");
+        // `@A` on a plain scalar → short `name='value'` (bash single-quotes
+        // every value, even a plain word).
+        assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x='hello'\n");
         assert_eq!(run("x='a b'; echo \"${x@A}\"").0, "x='a b'\n");
         // An attributed scalar renders as a full `declare` statement.
         assert_eq!(
@@ -15162,7 +15168,7 @@ mod tests {
         // `@`-transform (`@Q`) quotes each element; quoted keeps per-element fields.
         assert_eq!(
             run("a=('a b' c); for x in \"${a[@]@Q}\"; do echo \"[$x]\"; done").0,
-            "['a b']\n[c]\n"
+            "['a b']\n['c']\n"
         );
         // Quoted bulk trim yields one field per element (spaces inside survive).
         assert_eq!(

@@ -2923,9 +2923,15 @@ impl Shell {
             }
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
             'E' => ansi_c_unescape(value),
+            // `K`/`k` on a *scalar* or single array element behave like `@Q`:
+            // bash quotes the value (`${v@K}` on `v=abc` → `'abc'`). The
+            // key-aware array form (`${a[@]@K}`) is intercepted earlier in the
+            // bulk path (`bulk_keyvalue`); only the single-value case reaches
+            // here, so both letters just quote.
+            'K' | 'k' => shell_quote(value),
             // `P` (prompt) is handled in `param_transform` (it needs shell
-            // state); `K`/`k` (assoc key/value) go through the bulk path.
-            // Anything else: return the value unchanged rather than erroring.
+            // state). Anything else: return the value unchanged rather than
+            // erroring.
             _ => value.to_string(),
         }
     }
@@ -13859,6 +13865,12 @@ mod tests {
             run("a=('x 1' y); for w in \"${a[@]@k}\"; do echo \"[$w]\"; done").0,
             "[0]\n[x 1]\n[1]\n[y]\n"
         );
+        // On a *scalar* (or single array element) `@K`/`@k` quote like `@Q`.
+        assert_eq!(run("v=abc; echo ${v@K}").0, "'abc'\n");
+        assert_eq!(run("v=abc; echo ${v@k}").0, "'abc'\n");
+        assert_eq!(run("v='a b'; echo ${v@K}").0, "'a b'\n");
+        assert_eq!(run("v=; echo ${v@K}").0, "''\n");
+        assert_eq!(run("a=(x y z); echo ${a[1]@K}").0, "'y'\n");
     }
 
     #[test]

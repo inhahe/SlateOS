@@ -279,6 +279,9 @@ pub struct Shell {
     traps: HashMap<String, String>,
     /// Guards the `EXIT` trap so it fires at most once when the shell exits.
     exit_trap_done: bool,
+    /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
+    /// a handler's own commands from recursively re-triggering the same trap.
+    in_trap: bool,
 }
 
 impl Default for Shell {
@@ -325,6 +328,7 @@ impl Shell {
             dir_stack: Vec::new(),
             traps: HashMap::new(),
             exit_trap_done: false,
+            in_trap: false,
         }
     }
 
@@ -417,16 +421,19 @@ impl Shell {
                 ran_final = false;
             }
         }
-        // errexit: exit when the final command executed failed, unless we are in
-        // an exempt context (condition/negation) or the final pipeline is negated
-        // (whose status inversion already exempts it).
+        // errexit / ERR trap: both trigger when the final command executed failed
+        // and we are not in an exempt context (condition/negation) or a negated
+        // final pipeline (whose status inversion already exempts it).
         let final_pipe = ao.rest.last().map_or(&ao.first, |(_, p)| p);
-        if self.errexit
-            && self.errexit_suppress == 0
+        let failed_unexempt = self.errexit_suppress == 0
             && ran_final
             && !final_pipe.negated
-            && self.last_status != 0
-        {
+            && self.last_status != 0;
+        if failed_unexempt {
+            // The ERR trap fires regardless of whether `set -e` is on.
+            self.fire_trap("ERR");
+        }
+        if self.errexit && failed_unexempt {
             return Flow::Exit(self.last_status);
         }
         Flow::Next
@@ -1491,6 +1498,7 @@ impl Shell {
                 .collect(),
             // The EXIT trap only fires for the top-level shell in our model.
             exit_trap_done: true,
+            in_trap: false,
         }
     }
 
@@ -1951,6 +1959,11 @@ impl Shell {
     // ---- simple command execution -------------------------------------------
 
     fn exec_simple(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // The DEBUG trap runs before each simple command (guarded so a handler's
+        // own commands don't recurse).
+        if !self.in_trap && self.traps.contains_key("DEBUG") {
+            self.fire_trap("DEBUG");
+        }
         // Expand the command words into argv (with the current variable values,
         // before any prefix assignments take effect).
         let mut argv: Vec<String> = Vec::new();
@@ -2069,6 +2082,12 @@ impl Shell {
         // restored on return.
         self.local_frames.push(Vec::new());
         let flow = self.exec_program(&body, out, stdin);
+        // The RETURN trap fires when the function returns, before its locals are
+        // torn down (so the handler still sees the function's scope), matching
+        // bash.
+        if self.traps.contains_key("RETURN") {
+            self.fire_trap("RETURN");
+        }
         if let Some(frame) = self.local_frames.pop() {
             // Restore shadowed variables in reverse declaration order.
             for (name, snap) in frame.into_iter().rev() {
@@ -3621,6 +3640,28 @@ impl Shell {
             buf.push('\n');
         }
         self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
+    /// and we are not already inside a trap. The handler runs with the current
+    /// `$?` visible and does not clobber it (a handler that changes `$?` has it
+    /// restored afterwards, matching bash's "the trap does not alter the
+    /// command's status" behavior for these traps).
+    fn fire_trap(&mut self, name: &str) {
+        if self.in_trap {
+            return;
+        }
+        let Some(action) = self.traps.get(name).cloned() else {
+            return;
+        };
+        if action.is_empty() {
+            return;
+        }
+        self.in_trap = true;
+        let saved = self.last_status;
+        self.run_source(&action);
+        self.last_status = saved;
+        self.in_trap = false;
     }
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
@@ -8304,6 +8345,37 @@ mod tests {
         sh.vars.remove("TRAP_MARK");
         sh.run_exit_trap();
         assert!(!sh.vars.contains_key("TRAP_MARK"));
+    }
+
+    #[test]
+    fn trap_err_fires_on_failure() {
+        let mut sh = Shell::new();
+        sh.run_source("trap 'ERR_HIT=1' ERR\nfalse");
+        assert_eq!(sh.vars.get("ERR_HIT").map(String::as_str), Some("1"));
+
+        // ERR does not fire for a successful command...
+        let mut sh = Shell::new();
+        sh.run_source("trap 'ERR_HIT=1' ERR\ntrue");
+        assert!(!sh.vars.contains_key("ERR_HIT"));
+
+        // ...nor for a failure inside an `if` condition (exempt context).
+        let mut sh = Shell::new();
+        sh.run_source("trap 'ERR_HIT=1' ERR\nif false; then :; fi");
+        assert!(!sh.vars.contains_key("ERR_HIT"));
+    }
+
+    #[test]
+    fn trap_debug_fires_before_each_command() {
+        let mut sh = Shell::new();
+        sh.run_source("trap 'DBG=$((DBG+1))' DEBUG\n:\n:\n:");
+        assert_eq!(sh.vars.get("DBG").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn trap_return_fires_on_function_return() {
+        let mut sh = Shell::new();
+        sh.run_source("trap 'RET=1' RETURN\nf() { :; }\nf");
+        assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
     }
 
     #[test]

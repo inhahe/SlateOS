@@ -5736,7 +5736,7 @@ impl Shell {
             "dirs" => self.builtin_dirs(args, out, redir),
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
-            "export" => self.builtin_export(args),
+            "export" => self.builtin_export(args, out, redir),
             "declare" | "typeset" => {
                 let lead: String =
                     args.iter().take_while(|a| a.starts_with('-')).flat_map(|a| a.chars()).collect();
@@ -7435,8 +7435,50 @@ impl Shell {
         }
     }
 
-    fn builtin_export(&mut self, args: &[String]) -> i32 {
-        for a in args {
+    fn builtin_export(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
+        // attribute), `--` ends option processing. (`-f`, exporting functions,
+        // is not modelled.)
+        let mut print = false;
+        let mut unexport = false;
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if a.starts_with('-') && a.len() > 1 && !a.contains('=') {
+                for c in a[1..].chars() {
+                    match c {
+                        'p' => print = true,
+                        'n' => unexport = true,
+                        _ => {
+                            self.emit_stderr(
+                                format!("osh: export: -{c}: invalid option\n").as_bytes(),
+                            );
+                            self.emit_stderr(
+                                b"export: usage: export [-fn] [name[=value] ...] or export -p\n",
+                            );
+                            return 2;
+                        }
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let operands = &args[i..];
+        if operands.is_empty() {
+            // `-n` with no names is a no-op; `-p` or a bare `export` lists.
+            if unexport {
+                return 0;
+            }
+            return self.export_list(out, redir);
+        }
+        let _ = print; // `-p` with operands behaves like plain `export`.
+        for a in operands {
             if let Some(eq) = a.find('=') {
                 // Support the `NAME+=value` append form alongside `NAME=value`.
                 let (k, append, v) = if eq > 0 && a.as_bytes()[eq - 1] == b'+' {
@@ -7452,12 +7494,40 @@ impl Shell {
                     v
                 };
                 self.vars.insert(k.clone(), stored);
-                self.exported.insert(k);
+                if unexport {
+                    self.exported.remove(&k);
+                } else {
+                    self.exported.insert(k);
+                }
+            } else if unexport {
+                self.exported.remove(a);
             } else {
                 self.exported.insert(a.clone());
             }
         }
         0
+    }
+
+    /// List every exported variable in bash's `export -p` form, sorted by name:
+    /// a set variable prints as `declare -x NAME="value"` (with any other
+    /// attributes, e.g. `-rx` for readonly), and an exported-but-unset name
+    /// prints as the bare `declare -x NAME`.
+    fn export_list(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut names: Vec<String> = self.exported.iter().cloned().collect();
+        names.sort();
+        names.dedup();
+        let mut listing = String::new();
+        for name in &names {
+            if let Some(def) = self.format_declare_def(name) {
+                // `format_declare_def` already folds in the `x` (and any other)
+                // attribute flags for a set variable.
+                listing.push_str(&def);
+                listing.push('\n');
+            } else {
+                listing.push_str(&format!("declare -x {name}\n"));
+            }
+        }
+        self.write_bytes(out, redir, listing.as_bytes())
     }
 
     /// `declare`/`typeset`/`local`: create typed variables. Supports `-A`
@@ -7980,7 +8050,7 @@ impl Shell {
             .any(|a| a != "--" && !a.starts_with(['-', '+']));
         let status = match cmd {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
-            "export" if has_scalar_operand => self.builtin_export(&argv[1..]),
+            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
             "readonly" | "export" => 0,
             _ => self.builtin_declare(&argv[1..], is_local),
         };
@@ -16916,6 +16986,28 @@ mod tests {
         assert_eq!(s, 0);
         assert!(o.contains("declare -x"), "declare -p output: {o:?}");
         assert!(o.contains("foo"), "declare -p output: {o:?}");
+    }
+
+    #[test]
+    fn export_p_lists_exported_variables() {
+        // `export -p` (and bare `export`) list exported variables as
+        // `declare -x NAME="value"`, an exported-but-unset name as the bare
+        // `declare -x NAME`, and fold in other attributes (readonly → -rx).
+        let (o, s) = run("export FOO=bar; export BARE; export EMPTY=; export -p");
+        assert_eq!(s, 0);
+        assert!(o.contains("declare -x FOO=\"bar\"\n"), "got {o:?}");
+        assert!(o.contains("declare -x BARE\n"), "got {o:?}");
+        assert!(o.contains("declare -x EMPTY=\"\"\n"), "got {o:?}");
+        // Readonly + exported shows both flags.
+        let (o2, _) = run("declare -rx RO=locked; export -p");
+        assert!(o2.contains("declare -rx RO=\"locked\"\n"), "got {o2:?}");
+        // `-n` removes the export attribute (variable value is kept).
+        let (o3, _) = run("export FOO=bar; export -n FOO; export -p");
+        assert!(!o3.contains("declare -x FOO"), "got {o3:?}");
+        assert_eq!(run("export FOO=bar; export -n FOO; echo \"$FOO\"").0, "bar\n");
+        // Bare `export` (no flags/operands) lists too.
+        let (o4, _) = run("export ZZ=1; export");
+        assert!(o4.contains("declare -x ZZ=\"1\"\n"), "got {o4:?}");
     }
 
     #[test]

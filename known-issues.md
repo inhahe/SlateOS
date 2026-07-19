@@ -1265,6 +1265,31 @@ top-level item boundary, discarding the remaining items of the current parsed
 input unit before resuming. Also expand the offending assignment's value up-front
 (before storing) so an errored `x=$((1/0))` leaves `x` unset, matching bash.
 
+### TD-OILS-ENVNAME-IMPORT. `osh` imports environment variables whose names are **not valid shell identifiers** (e.g. Windows' `PROGRAMFILES(X86)`) as ordinary shell variables; bash keeps them in the child environment but hides them from the shell-variable namespace — OPEN (host-only artifact; needs a separate raw-env passthrough store) 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `import_environment` (~633) inserts
+every `std::env::vars()` pair into `self.vars` + `self.exported` without checking
+the name. Child-env construction (~986, ~3836, ~4191) then re-emits them.
+
+**What:** bash only turns an inherited env var into a *shell variable* when its
+name matches `[A-Za-z_][A-Za-z0-9_]*`; names with other characters (parentheses,
+dots, etc.) are retained in the process environment and passed through to
+children, but are invisible to `set` / `export -p` / `${name}`. osh currently
+lists them (they show up in `export -p` and `set`), which diverges from bash.
+Only observed on the Windows host, where the inherited environment contains
+`PROGRAMFILES(X86)` / `COMMONPROGRAMFILES(X86)`.
+
+**Why deferred:** the *correct* fix is to keep a separate raw-environment store
+(e.g. `raw_env: Vec<(OsString, OsString)>`) for invalid-name entries, merge it
+into the child environment at every spawn site, and never surface it as a shell
+variable — a small refactor touching `import_environment`, the three spawn-env
+loops, and `clone_for_subshell`. Simply dropping such names at import would match
+bash's *shell-variable* view but stop passing them to children, which could break
+host programs that rely on `PROGRAMFILES(X86)`. On SlateOS the inherited
+environment will use well-formed identifier names, so this is purely a host-test
+artifact; parked until it matters. Impact: low — cosmetic `set`/`export -p`
+listing noise during host comparison testing only.
+
 ### TD-OILS-PRINTF-TZ. `osh` renders `printf '%()T'` (and prompt `\d \t \T \@ \A`) in **UTC**, not local time; bash uses the system timezone — OPEN (infrastructure-blocked: no TZ facility, dependency-free crate) 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `format_strftime` (~11901) computes

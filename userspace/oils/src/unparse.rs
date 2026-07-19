@@ -730,6 +730,17 @@ fn part_src(p: &WordPart) -> String {
             };
             format!("${{{sub}{opstr}}}")
         }
+        WordPart::ArrayOp { name, star, op, colon, arg } => {
+            let sub = format!("{name}[{}]", if *star { "*" } else { "@" });
+            let o = match op {
+                ParamOp::UseDefault => "-",
+                ParamOp::AssignDefault => "=",
+                ParamOp::UseAlternate => "+",
+                ParamOp::ErrorIfUnset => "?",
+            };
+            let colon = if *colon { ":" } else { "" };
+            format!("${{{sub}{colon}{o}{}}}", word_src(arg))
+        }
     }
 }
 

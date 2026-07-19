@@ -4303,6 +4303,19 @@ impl Shell {
                                 op,
                             },
                         ] => Some(self.bulk_elements(name, op)),
+                        // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per
+                        // element when active; the operand word (as a single
+                        // field) otherwise. The `[*]` star form joins instead and
+                        // falls through to the scalar path below.
+                        [
+                            WordPart::ArrayOp {
+                                name,
+                                star: false,
+                                op,
+                                colon,
+                                arg,
+                            },
+                        ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
                         // `"${!ref}"` where ref resolves to `name[@]` yields one
                         // field per element (bash), like `"${name[@]}"`.
                         [WordPart::Indirect(refname)] => self.indirect_array_elems(refname),
@@ -4560,6 +4573,20 @@ impl Shell {
                 ..
             } => self.slice_elements(name, offset, length).join(" "),
             WordPart::ArrayBulk { name, op, .. } => self.bulk_elements(name, op).join(" "),
+            WordPart::ArrayOp {
+                name,
+                star,
+                op,
+                colon,
+                arg,
+            } => {
+                let fields = self.array_op_fields(name, *star, *op, *colon, arg);
+                if *star {
+                    fields.join(&self.star_sep())
+                } else {
+                    fields.join(" ")
+                }
+            }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
@@ -4636,6 +4663,89 @@ impl Shell {
                     // the (sub)shell before running the command (`Flow::Exit(1)`).
                     self.unbound_error = true;
                     String::new()
+                }
+            }
+        }
+    }
+
+    /// Evaluate a whole-array use/alternate/error operator
+    /// (`${a[@]:-word}` / `${a[*]:+word}` / `${a[@]:?msg}`) to its result fields.
+    /// Bash treats `[@]`/`[*]` like `$@`: when the array is "active" the elements
+    /// are the result (one field each); otherwise the operand `word` is used.
+    ///
+    /// "Active" for the colon forms means the array is non-null — it has at least
+    /// one non-empty element; for the colon-less forms it means the array is
+    /// merely *set* (exists with at least one element), matching bash's
+    /// unset-vs-null distinction.
+    fn array_op_fields(
+        &mut self,
+        name: &str,
+        star: bool,
+        op: ParamOp,
+        colon: bool,
+        arg: &Word,
+    ) -> Vec<String> {
+        let resolved = self.resolve_ref_name(name);
+        let elements = self.array_elements(name);
+        let exists = self.arrays.contains_key(&resolved)
+            || self.assoc.contains_key(&resolved)
+            || self.vars.contains_key(&resolved);
+        let is_active = if colon {
+            // Colon forms test for "null": bash joins the elements with the first
+            // `$IFS` char (as `${a[*]}` would) and treats an empty result as null.
+            // So `a=("")` is null (`""`), but `a=("" "")` is not (`" "`).
+            !elements.join(&self.star_sep()).is_empty()
+        } else {
+            // Colon-less forms test only for "unset": an array with at least one
+            // element is set; an empty/undefined array counts as unset.
+            exists && !elements.is_empty()
+        };
+        match op {
+            ParamOp::UseDefault => {
+                if is_active {
+                    elements
+                } else {
+                    vec![self.expand_to_string(arg)]
+                }
+            }
+            ParamOp::UseAlternate => {
+                if is_active {
+                    vec![self.expand_to_string(arg)]
+                } else {
+                    Vec::new()
+                }
+            }
+            ParamOp::AssignDefault => {
+                if is_active {
+                    // A non-null array is returned unchanged (no assignment
+                    // needed), exactly like `:-` on an active array.
+                    elements
+                } else {
+                    // Assigning the default would require writing to `a[@]`/`a[*]`,
+                    // which bash rejects as a "bad array subscript". Report the
+                    // same and abort the expansion.
+                    let sub = if star { "*" } else { "@" };
+                    self.emit_stderr(
+                        format!("osh: {name}[{sub}]: bad array subscript\n").as_bytes(),
+                    );
+                    self.unbound_error = true;
+                    Vec::new()
+                }
+            }
+            ParamOp::ErrorIfUnset => {
+                if is_active {
+                    elements
+                } else {
+                    let sub = if star { "*" } else { "@" };
+                    let msg = self.expand_to_string(arg);
+                    let text = if msg.is_empty() {
+                        "parameter null or not set"
+                    } else {
+                        &msg
+                    };
+                    self.emit_stderr(format!("osh: {name}[{sub}]: {text}\n").as_bytes());
+                    self.unbound_error = true;
+                    Vec::new()
                 }
             }
         }
@@ -14462,9 +14572,11 @@ mod tests {
             run("declare -A m; m[k]=v; echo ${m[k]:-def} ${m[nope]:-def}").0,
             "v def\n"
         );
-        // The default operators (`:-` etc.) still don't apply to `[@]`/`[*]`.
-        assert!(parse("echo ${a[@]:-def}").is_err());
-        // …but the element-wise (bulk) operators now do.
+        // The use/alternate/error operators on `[@]`/`[*]` treat the array like
+        // `$@` (see `array_use_alternate_error_operators` for full coverage).
+        assert_eq!(run("a=(); echo ${a[@]:-def}").0, "def\n");
+        assert_eq!(run("a=(p q); echo ${a[@]:-def}").0, "p q\n");
+        // …and the element-wise (bulk) operators.
         assert_eq!(run("a=(a.x b.x); echo ${a[*]#*.}").0, "x x\n");
     }
 
@@ -15422,6 +15534,44 @@ mod tests {
         );
         // Out-of-range slice yields nothing.
         assert_eq!(run("a=(x y); echo \"end[${a[@]:5}]\"").0, "end[]\n");
+    }
+
+    #[test]
+    fn array_use_alternate_error_operators() {
+        // `${a[@]:-word}` substitutes the default only when the array is null
+        // (no elements, or all elements empty so the `[*]`-join is empty).
+        assert_eq!(run("a=(); echo \"[${a[@]:-DEF}]\"").0, "[DEF]\n");
+        assert_eq!(run("a=(1 2); echo \"${a[@]:-DEF}\"").0, "1 2\n");
+        // A single empty element joins to "" → null → default used; two empty
+        // elements join to " " → non-null → the elements (a space) are used.
+        assert_eq!(run("a=(\"\"); echo \"[${a[@]:-DEF}]\"").0, "[DEF]\n");
+        assert_eq!(run("a=(\"\" \"\"); echo \"[${a[@]:-DEF}]\"").0, "[ ]\n");
+        // Quoted `[@]` keeps one field per element; the default splits when the
+        // whole expansion is unquoted-substituted.
+        assert_eq!(
+            run("a=(1 2); for w in \"${a[@]:-d}\"; do echo \"<$w>\"; done").0,
+            "<1>\n<2>\n"
+        );
+        assert_eq!(
+            run("a=(); for w in \"${a[@]:-d e}\"; do echo \"<$w>\"; done").0,
+            "<d e>\n"
+        );
+        // `[*]` joins with the first IFS char.
+        assert_eq!(run("a=(a b); IFS=:; echo \"${a[*]:-x}\"").0, "a:b\n");
+        // `:+` substitutes the alternate once when the array is non-null.
+        assert_eq!(run("a=(1 2 3); echo \"${a[@]:+X}\"").0, "X\n");
+        assert_eq!(run("a=(); echo \"end[${a[@]:+X}]\"").0, "end[]\n");
+        // `:?` on a null array aborts with the message; a non-null array passes.
+        assert_eq!(run("a=(1); echo \"${a[@]:?msg}\"").0, "1\n");
+        let (out, st) = run("a=(); echo \"${a[@]:?msg}\"; echo after");
+        assert_eq!(out, "");
+        assert_ne!(st, 0);
+        // `:=` returns a non-null array unchanged, but assigning to `a[@]` on a
+        // null array is a "bad array subscript" error (bash) — abort.
+        assert_eq!(run("a=(1 2); echo \"${a[@]:=x}\"").0, "1 2\n");
+        let (out2, st2) = run("a=(); echo \"${a[@]:=x}\"; echo after");
+        assert_eq!(out2, "");
+        assert_ne!(st2, 0);
     }
 
     #[test]

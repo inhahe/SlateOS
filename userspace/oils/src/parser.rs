@@ -1224,10 +1224,35 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                     op,
                 });
             }
-            // `${a[@]:-x}` (default operators on `[@]`) is unsupported.
-            return Err(ParseError(format!(
-                "unsupported parameter expansion '${{{raw}}}'"
-            )));
+            // `${a[@]:-x}` / `${a[*]:+x}` / `${a[@]:?msg}` — use/alternate/error
+            // operators on a whole-array reference. Bash treats `[@]`/`[*]` like
+            // `$@`: substitute the elements when active, else the operand word.
+            let star = matches!(index, ArrayIndex::Star);
+            let mut chs = rest.iter();
+            let mut c = *chs.next().unwrap_or(&'\0');
+            let colon = c == ':';
+            if colon {
+                c = *chs.next().unwrap_or(&'\0');
+            }
+            let arg_str: String = chs.collect();
+            let op = match c {
+                '-' => ParamOp::UseDefault,
+                '=' => ParamOp::AssignDefault,
+                '+' => ParamOp::UseAlternate,
+                '?' => ParamOp::ErrorIfUnset,
+                _ => {
+                    return Err(ParseError(format!(
+                        "unsupported parameter expansion '${{{raw}}}'"
+                    )));
+                }
+            };
+            return Ok(WordPart::ArrayOp {
+                name,
+                star,
+                op,
+                colon,
+                arg: Box::new(word_verbatim_from_source(&arg_str)?),
+            });
         }
     };
     // `${@:off:len}` / `${*:off:len}` — positional-parameter slice (same `:`

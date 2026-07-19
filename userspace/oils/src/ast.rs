@@ -472,6 +472,25 @@ pub enum WordPart {
         star: bool,
         op: BulkOp,
     },
+    /// `${a[@]:-word}` / `${a[*]:+word}` / `${a[@]:?msg}` — a use/alternate/error
+    /// operator applied to a whole-array reference (`[@]`/`[*]`). Bash treats the
+    /// array like `$@`: when the reference is "active" (the array is set /
+    /// non-null), the elements expand (one field each for `[@]`, joined by the
+    /// first `$IFS` char for `[*]`); otherwise the `:-`/`:?` word is substituted,
+    /// or the `:+` alternate is used. `${a[@]:=word}` is an error in bash
+    /// ("cannot assign in this way") and is reported as such.
+    ArrayOp {
+        /// The array name (never `@`/`*`, which have no `[…]` subscript — those
+        /// go through the scalar [`WordPart::ParamOp`] path).
+        name: String,
+        /// `true` for the `[*]` form (join with the first `$IFS` char when
+        /// quoted); `false` for `[@]` (one field per element).
+        star: bool,
+        op: ParamOp,
+        /// `true` for the colon forms (treat an all-empty array as null).
+        colon: bool,
+        arg: Box<Word>,
+    },
     /// Process substitution `<(cmd)` (input) / `>(cmd)` (output). Expands to the
     /// pathname of a file the shell connects to `cmd`: for `<(cmd)` the file holds
     /// `cmd`'s output (read by the enclosing command); for `>(cmd)` the file's

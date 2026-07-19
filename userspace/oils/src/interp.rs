@@ -12260,6 +12260,22 @@ mod tests {
     }
 
     #[test]
+    fn param_replace_preserves_literal_whitespace() {
+        // The pattern and replacement of `${var/pat/repl}` are single words —
+        // bash applies expansion and quote removal but neither word-splitting nor
+        // operator tokenization, so leading/trailing/embedded whitespace is
+        // literal (previously osh trimmed it via the word-splitting lexer).
+        assert_eq!(run("s=world; echo \"[${s/#/hello }]\"").0, "[hello world]\n");
+        assert_eq!(run("s=world; echo \"[${s/o/O }]\"").0, "[wO rld]\n");
+        assert_eq!(run("s=world; echo \"[${s/w/ X}]\"").0, "[ Xorld]\n");
+        // A literal space as the pattern.
+        assert_eq!(run("s='a b c'; echo \"[${s/ /_}]\"").0, "[a_b c]\n");
+        assert_eq!(run("s='a b c'; echo \"[${s// /_}]\"").0, "[a_b_c]\n");
+        // Expansion inside the replacement still applies.
+        assert_eq!(run("s=x; r='A B'; echo \"[${s/x/$r}]\"").0, "[A B]\n");
+    }
+
+    #[test]
     fn param_transform_assign() {
         // `@A` on a plain scalar → short `name=value` (quoted only if needed).
         assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x=hello\n");

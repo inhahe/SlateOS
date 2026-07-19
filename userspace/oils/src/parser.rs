@@ -1401,8 +1401,8 @@ fn parse_replace_pieces(
     Ok((
         all,
         anchor,
-        Box::new(word_from_source(&pattern)?),
-        Box::new(word_from_source(&replacement)?),
+        Box::new(word_verbatim_from_source(&pattern)?),
+        Box::new(word_verbatim_from_source(&replacement)?),
     ))
 }
 
@@ -1469,6 +1469,21 @@ fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
 /// Build a single [`Word`] from arbitrary source text (used for the argument of
 /// a parameter expansion). Words separated by blanks are joined with a literal
 /// space — a best-effort reconstruction adequate for `${x:-a b}`.
+/// Parse `s` as a single word preserving literal whitespace (no word-splitting
+/// or operator tokenization) — for the pattern and replacement of
+/// `${var/pat/repl}`, where bash applies only expansion and quote removal.
+fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError(e.0))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        parts.push(seg_to_part(seg)?);
+    }
+    Ok(Word { parts })
+}
+
 fn word_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());

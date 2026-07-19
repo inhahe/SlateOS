@@ -138,6 +138,26 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
     lx.run()
 }
 
+/// Lex `src` as a single word, preserving all literal characters verbatim
+/// (whitespace and shell operator characters stay literal) while still
+/// processing quotes and `$…`/backtick expansions. Used for the pattern and
+/// replacement of `${var/pat/repl}`, where bash neither word-splits nor
+/// operator-tokenizes the text — so `${s/ /_}` matches a literal space and
+/// `${s/#/hello }` keeps the trailing space in the replacement.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer {
+        chars: src.chars().collect(),
+        pos: 0,
+        pending_heredocs: Vec::new(),
+        cond_depth: 0,
+        regex_next: false,
+    };
+    lx.read_word_verbatim()
+}
+
 /// Reserved words after which a new simple command begins — so a following
 /// word is in "command position" and eligible for alias expansion.
 const CMD_INTRODUCERS: &[&str] = &[
@@ -519,6 +539,61 @@ impl Lexer {
         while let Some(c) = self.peek() {
             match c {
                 ' ' | '\t' | '\n' | '\r' => break,
+                '\'' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let s = self.read_single_quote()?;
+                    segs.push(Seg::Sq(s));
+                }
+                '"' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let inner = self.read_double_quote()?;
+                    segs.push(Seg::Dq(inner));
+                }
+                '`' => {
+                    flush_lit(&mut segs, &mut lit);
+                    self.pos += 1;
+                    let raw = self.read_backtick()?;
+                    segs.push(Seg::CmdSub(raw));
+                }
+                '\\' => {
+                    self.pos += 1;
+                    if let Some(next) = self.bump()
+                        && next != '\n'
+                    {
+                        lit.push(next);
+                    }
+                }
+                '$' => {
+                    if let Some(seg) = self.read_dollar()? {
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(seg);
+                    } else {
+                        lit.push('$');
+                    }
+                }
+                other => {
+                    lit.push(other);
+                    self.pos += 1;
+                }
+            }
+        }
+        flush_lit(&mut segs, &mut lit);
+        Ok(segs)
+    }
+
+    /// Read the entire remaining input as a single word, preserving *all*
+    /// literal characters verbatim — including whitespace and shell operator
+    /// characters — while still processing quotes and `$…`/backtick expansions.
+    /// Used for the pattern and replacement of `${var/pat/repl}`, where bash
+    /// applies expansion and quote removal but neither word-splitting nor
+    /// operator tokenization, so embedded/leading/trailing spaces are literal.
+    fn read_word_verbatim(&mut self) -> Result<Vec<Seg>, LexError> {
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut lit = String::new();
+        while let Some(c) = self.peek() {
+            match c {
                 '\'' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;

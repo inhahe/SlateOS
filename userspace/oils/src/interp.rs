@@ -1363,7 +1363,7 @@ impl Shell {
         let input_bytes: Option<Vec<u8>> = if let Some(data) = plan.stdin_data.clone() {
             Some(data)
         } else if let Some(path) = &plan.stdin {
-            match std::fs::read(path) {
+            match std::fs::read(map_device_path(path)) {
                 Ok(b) => Some(b),
                 Err(e) => {
                     self.errln(&format!("osh: {path}: {e}"));
@@ -3562,7 +3562,7 @@ impl Shell {
             cmd.stdin(Stdio::piped());
         } else {
             match &redir.stdin {
-                Some(path) => match std::fs::File::open(path) {
+                Some(path) => match std::fs::File::open(map_device_path(path)) {
                     Ok(f) => {
                         cmd.stdin(Stdio::from(f));
                     }
@@ -3953,7 +3953,7 @@ impl Shell {
                         // path surfaces as an error at redirection time (bash also
                         // reports it then), then hand the bytes to `exec`.
                         let path = self.expand_to_string(&r.target);
-                        match std::fs::read(&path) {
+                        match std::fs::read(map_device_path(&path)) {
                             Ok(bytes) => {
                                 plan.extra_fds.push((r.fd, ExtraFdOp::InputBytes(bytes)));
                             }
@@ -4005,7 +4005,7 @@ impl Shell {
                     // always proceed. Matches bash's noclobber semantics.
                     if self.noclobber
                         && matches!(r.op, RedirectOp::Write)
-                        && std::path::Path::new(&target)
+                        && std::path::Path::new(map_device_path(&target))
                             .metadata()
                             .is_ok_and(|m| m.is_file())
                     {
@@ -5174,7 +5174,7 @@ impl Shell {
                     if let Some(data) = &redir.stdin_data {
                         self.exec_stdin = Some(RefCell::new(io::Cursor::new(data.clone())));
                     } else if let Some(path) = &redir.stdin {
-                        match std::fs::read(path) {
+                        match std::fs::read(map_device_path(path)) {
                             Ok(bytes) => {
                                 self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                             }
@@ -9850,6 +9850,28 @@ fn unique_temp_path(prefix: &str) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Map well-known Unix pseudo-device paths to the host's equivalent.
+///
+/// On the Windows test host `/dev/null` has no native path: opening it for
+/// write would silently create a real file `\dev\null` at the drive root
+/// (polluting the filesystem and breaking later reads), and reading it would
+/// pick up that stray file instead of yielding EOF. Mapping it to `NUL` — the
+/// Windows null device — makes writes discard and reads return EOF, matching
+/// bash. On Unix and on SlateOS the OS provides `/dev/null` as a real device
+/// node, so the path is returned unchanged.
+#[cfg(windows)]
+fn map_device_path(path: &str) -> &str {
+    match path {
+        "/dev/null" => "NUL",
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn map_device_path(path: &str) -> &str {
+    path
+}
+
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
@@ -9858,7 +9880,7 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     } else {
         opts.truncate(true);
     }
-    opts.open(path)
+    opts.open(map_device_path(path))
 }
 
 fn read_one_line<R: BufRead>(r: &mut R) -> Option<String> {
@@ -13990,6 +14012,25 @@ mod tests {
         ));
         std::fs::remove_file(&path).ok();
         assert_eq!(o, "got:alpha\ngot:beta\ngot:gamma\n");
+    }
+
+    #[test]
+    fn dev_null_read_yields_eof() {
+        // Reading `/dev/null` must yield EOF (empty, rc=1), not the contents of
+        // a stray host file. On Windows this is mapped to the `NUL` device.
+        let (o, st) = run("read x < /dev/null; echo \"rc=$? x=[$x]\"");
+        assert_eq!(o, "rc=1 x=[]\n");
+        assert_eq!(st, 0);
+        assert_eq!(run("cat < /dev/null; echo done").0, "done\n");
+    }
+
+    #[test]
+    fn dev_null_write_discards() {
+        // Writing to `/dev/null` must discard output, not create a real file.
+        let (_, st) = run("echo junk > /dev/null");
+        assert_eq!(st, 0);
+        // A subsequent read of /dev/null still sees EOF (nothing was persisted).
+        assert_eq!(run("read x < /dev/null; echo \"[$x]\"").0, "[]\n");
     }
 
     #[test]

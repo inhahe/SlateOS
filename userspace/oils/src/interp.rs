@@ -969,13 +969,16 @@ impl Shell {
 
     fn exec_case(&mut self, c: &CaseClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
+        // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
+        // case-insensitive.
+        let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
         self.last_status = 0;
         let mut idx = 0;
         while idx < c.items.len() {
             let item = &c.items[idx];
             let matched = item.patterns.iter().any(|pat| {
                 let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
-                glob_match(&pattern, &subject)
+                glob_match_ci(&pattern, &subject, ci)
             });
             if !matched {
                 idx += 1;
@@ -1328,12 +1331,20 @@ impl Shell {
             CondBinOp::StrEq | CondBinOp::StrNe => {
                 let subject: Vec<char> = self.expand_to_string(l).chars().collect();
                 let rhs = self.expand_to_string(r);
+                // `shopt -s nocasematch` folds case for both the literal and the
+                // glob comparison.
+                let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
                 // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
                 let matched = if word_is_all_quoted(r) {
-                    subject.iter().collect::<String>() == rhs
+                    let lhs: String = subject.iter().collect();
+                    if ci {
+                        lhs.to_lowercase() == rhs.to_lowercase()
+                    } else {
+                        lhs == rhs
+                    }
                 } else {
                     let pat: Vec<char> = rhs.chars().collect();
-                    glob_match(&pat, &subject)
+                    glob_match_ci(&pat, &subject, ci)
                 };
                 if matches!(op, CondBinOp::StrEq) {
                     matched
@@ -4741,6 +4752,20 @@ fn word_is_all_quoted(w: &Word) -> bool {
             .all(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)))
 }
 
+/// Case-aware wrapper around [`glob_match`]. When `ci` is set (`shopt -s
+/// nocasematch`), both the pattern and the text are lowercased before matching
+/// — including character-class ranges (`[A-Z]` → `[a-z]`), which gives the
+/// case-folded semantics bash applies to `case`/`[[ == ]]`.
+fn glob_match_ci(pattern: &[char], text: &[char], ci: bool) -> bool {
+    if ci {
+        let p: Vec<char> = pattern.iter().flat_map(|c| c.to_lowercase()).collect();
+        let t: Vec<char> = text.iter().flat_map(|c| c.to_lowercase()).collect();
+        glob_match(&p, &t)
+    } else {
+        glob_match(pattern, text)
+    }
+}
+
 /// Match `text` against a shell glob `pattern` (`*`, `?`, `[...]`), anchored at
 /// both ends (as `case` patterns and `[[ … == … ]]` require). Uses iterative
 /// star-backtracking so it runs in linear space and near-linear time.
@@ -5900,6 +5925,25 @@ mod tests {
         assert_eq!(run("type echo").0, "echo is a shell builtin\n");
         assert_eq!(run("type while").0, "while is a shell keyword\n");
         assert_eq!(run("g() { :; }; type g").0, "g is a function\n");
+    }
+
+    #[test]
+    fn nocasematch_case_and_test() {
+        // Default: case is case-sensitive.
+        assert_eq!(
+            run("case ABC in abc) echo y;; *) echo n;; esac").0,
+            "n\n"
+        );
+        // With nocasematch, `case` folds case.
+        assert_eq!(
+            run("shopt -s nocasematch; case ABC in abc) echo y;; *) echo n;; esac").0,
+            "y\n"
+        );
+        // `[[ == ]]` glob and literal both fold case under nocasematch.
+        assert_eq!(run("shopt -s nocasematch; [[ Hello == h* ]] && echo y").0, "y\n");
+        assert_eq!(run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0, "y\n");
+        // Sanity: without it, the literal comparison is case-sensitive.
+        assert_eq!(run("[[ Hello == hello ]] && echo y || echo n").0, "n\n");
     }
 
     #[test]

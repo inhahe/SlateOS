@@ -539,6 +539,18 @@ impl Shell {
             self.vars.entry(k.clone()).or_insert(v);
             self.exported.insert(k);
         }
+        // bash increments $SHLVL for each nested shell invocation: an unset or
+        // non-numeric value becomes 1, otherwise the inherited level + 1. The
+        // result is exported so child shells continue the chain.
+        let next_lvl = self
+            .vars
+            .get("SHLVL")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        self.vars.insert("SHLVL".to_string(), next_lvl.to_string());
+        self.exported.insert("SHLVL".to_string());
         self.env_imported = true;
     }
 
@@ -12659,6 +12671,19 @@ mod tests {
         );
         // unset removes it — no fallback to the real process environment.
         assert_eq!(run_imported("unset PATH; echo \"[${PATH-gone}]\"").0, "[gone]\n");
+    }
+
+    #[test]
+    fn env_import_increments_shlvl() {
+        // bash increments $SHLVL per nested shell. import_environment does the
+        // same: the value is at least 1, exported, and a plain subshell keeps
+        // the same level (it is not a new shell invocation).
+        let (out, _) = run_imported("echo $SHLVL");
+        let lvl: i64 = out.trim().parse().expect("SHLVL numeric");
+        assert!(lvl >= 1, "SHLVL should be >= 1, got {lvl}");
+        // A `(...)` subshell does not re-increment.
+        let (out2, _) = run_imported("(echo $SHLVL)");
+        assert_eq!(out2.trim(), lvl.to_string());
     }
 
     #[test]

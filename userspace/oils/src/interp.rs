@@ -7664,10 +7664,16 @@ impl Shell {
                         text.push_str(description);
                         text.push('\n');
                     } else if short {
+                        // bash short form: "NAME: usage".
+                        text.push_str(name);
+                        text.push_str(": ");
                         text.push_str(usage);
                         text.push('\n');
                     } else {
-                        // bash long form: usage line, then indented description.
+                        // bash long form: "NAME: usage" line, then indented
+                        // description.
+                        text.push_str(name);
+                        text.push_str(": ");
                         text.push_str(usage);
                         text.push('\n');
                         text.push_str("    ");
@@ -15923,18 +15929,19 @@ mod tests {
 
     #[test]
     fn builtin_help() {
-        // `help NAME` prints the usage synopsis then an indented description.
+        // `help NAME` prints a "NAME: usage" line then an indented description
+        // (bash prefixes the synopsis with the builtin name and a colon).
         let out = run("help cd").0;
-        assert!(out.contains("cd [-L|-P] [dir]"), "got: {out:?}");
+        assert!(out.contains("cd: cd [-L|-P] [dir]"), "got: {out:?}");
         assert!(out.contains("    Change the shell working directory."), "got: {out:?}");
-        // `-s` prints only the synopsis, no description line.
+        // `-s` prints only the "NAME: usage" line, no description.
         let out = run("help -s pwd").0;
-        assert_eq!(out, "pwd [-L|-P]\n");
+        assert_eq!(out, "pwd: pwd [-L|-P]\n");
         // `-d` prints only the short description.
         assert_eq!(run("help -d true").0, "true - Return a successful (zero) exit status.\n");
         // A glob pattern matches multiple topics.
         let out = run("help -s 'tru*'").0;
-        assert_eq!(out, "true\n");
+        assert_eq!(out, "true: true\n");
         // No-arg lists every builtin synopsis (sorted); spot-check a couple.
         let out = run("help").0;
         assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");

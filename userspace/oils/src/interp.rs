@@ -5181,12 +5181,23 @@ impl Shell {
             let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
             let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
             let globstar = self.shopt.get("globstar").copied().unwrap_or(false);
+            // GLOBIGNORE: a `:`-separated list of patterns. When set to a
+            // non-empty value, bash (a) removes any glob-generated name that
+            // matches one of the patterns and (b) enables a dotglob-like effect
+            // so leading-`.` names are matched (`.` and `..` stay excluded). The
+            // patterns match the whole generated pathname with pathname-style
+            // semantics (`*`/`?`/`[]` do not cross `/`). See the bash manual.
+            let globignore_val = self.vars.get("GLOBIGNORE").filter(|v| !v.is_empty());
+            let globignore_active = globignore_val.is_some();
+            let globignore: Vec<GlobIgnorePat> = globignore_val
+                .map(|v| build_globignore(v, extglob))
+                .unwrap_or_default();
             let mut out = Vec::new();
             let mut failed = None;
             for f in fields {
                 glob_or_literal(
                     &f, &mut out, nullglob, failglob, dotglob, nocaseglob, extglob, globstar,
-                    &mut failed,
+                    globignore_active, &globignore, &mut failed,
                 );
             }
             // `failglob`: a pattern that matched nothing is a fatal expansion
@@ -10993,6 +11004,8 @@ fn glob_or_literal(
     nocaseglob: bool,
     extglob: bool,
     globstar: bool,
+    globignore_active: bool,
+    globignore: &[GlobIgnorePat],
     failed: &mut Option<String>,
 ) {
     let has_meta = field_has_glob_meta(field, extglob);
@@ -11001,7 +11014,18 @@ fn glob_or_literal(
         out.push(literal);
         return;
     }
-    let mut matches = glob_expand_field(field, dotglob, nocaseglob, extglob, globstar);
+    // A non-null GLOBIGNORE enables a dotglob-like effect for this expansion.
+    let effective_dotglob = dotglob || globignore_active;
+    let mut matches = glob_expand_field(field, effective_dotglob, nocaseglob, extglob, globstar);
+    if globignore_active {
+        // Drop names matching any GLOBIGNORE pattern, and always drop the `.`
+        // and `..` entries (bash ignores them whenever GLOBIGNORE is non-null,
+        // even for a leading-dot pattern like `.*`).
+        matches.retain(|m| {
+            let base = m.rsplit('/').next().unwrap_or(m.as_str());
+            base != "." && base != ".." && !globignore.iter().any(|p| p.matches_path(m))
+        });
+    }
     if matches.is_empty() {
         // `failglob` takes precedence over `nullglob`: an unmatched pattern is a
         // reported error that aborts the command (bash). Record the first
@@ -11018,6 +11042,51 @@ fn glob_or_literal(
         matches.sort();
         out.append(&mut matches);
     }
+}
+
+/// A single compiled `GLOBIGNORE` pattern, split into one glob token list per
+/// `/`-separated path component. Matching is pathname-style: a candidate matches
+/// iff it has the same number of components and each component matches the
+/// corresponding token list (so `*`/`?`/`[]` never cross a `/`, mirroring the
+/// per-component semantics of ordinary pathname expansion). This is how bash
+/// tests names against `GLOBIGNORE` — `*.log` ignores `c.log` but not `sub/e.log`.
+struct GlobIgnorePat {
+    comps: Vec<Vec<PatTok>>,
+}
+
+impl GlobIgnorePat {
+    /// Whether `path` matches this pattern with pathname-style semantics.
+    fn matches_path(&self, path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != self.comps.len() {
+            return false;
+        }
+        parts.iter().zip(&self.comps).all(|(seg, toks)| {
+            let chars: Vec<char> = seg.chars().collect();
+            match_glob_toks(toks, &chars)
+        })
+    }
+}
+
+/// Compile a `GLOBIGNORE` variable value (a `:`-separated list) into a set of
+/// [`GlobIgnorePat`]s. Empty entries (e.g. a leading/trailing/doubled `:`) are
+/// skipped. Each pattern's characters are treated as unquoted glob text.
+fn build_globignore(value: &str, extglob: bool) -> Vec<GlobIgnorePat> {
+    value
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(|pat| {
+            let comps = pat
+                .split('/')
+                .map(|comp| {
+                    let echars: Vec<EChar> =
+                        comp.chars().map(|c| EChar { c, quoted: false }).collect();
+                    compile_glob(&echars, extglob)
+                })
+                .collect();
+            GlobIgnorePat { comps }
+        })
+        .collect()
 }
 
 /// A compiled glob pattern token (for one path component).
@@ -16903,6 +16972,95 @@ mod tests {
         // An explicit leading `.` matches hidden files.
         let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn globignore_pattern_matching() {
+        // Pathname-style: `*` does not cross `/`.
+        let pats = build_globignore("*.log", false);
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].matches_path("c.log"));
+        assert!(!pats[0].matches_path("sub/e.log"));
+        assert!(!pats[0].matches_path("a.txt"));
+
+        // A `/`-bearing pattern matches component-for-component.
+        let pats = build_globignore("sub/*.log", false);
+        assert!(pats[0].matches_path("sub/e.log"));
+        assert!(!pats[0].matches_path("e.log"));
+        assert!(!pats[0].matches_path("sub/d.txt"));
+
+        // `:` separates multiple patterns; empty entries are skipped.
+        let pats = build_globignore("*.log::*.txt:", false);
+        assert_eq!(pats.len(), 2);
+        assert!(pats.iter().any(|p| p.matches_path("c.log")));
+        assert!(pats.iter().any(|p| p.matches_path("a.txt")));
+        assert!(!pats.iter().any(|p| p.matches_path("keep.md")));
+    }
+
+    #[test]
+    fn globignore_filesystem_filtering() {
+        let _cwd = cwd_guard();
+        let uniq = format!(
+            "osh_globignore_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::path::Path::new(&uniq);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+        let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+
+        // GLOBIGNORE=*.log active: drops c.log, and the dotglob effect surfaces
+        // .hidden (which `*` would normally skip).
+        let gi = build_globignore(&format!("{uniq}/*.log"), false);
+        let mut out = Vec::new();
+        let mut failed = None;
+        glob_or_literal(
+            &field_lit(&format!("{uniq}/*")),
+            &mut out,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &gi,
+            &mut failed,
+        );
+        let mut names: Vec<String> = out.iter().map(|p| basename(p)).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![".hidden".to_string(), "a.txt".to_string(), "b.txt".to_string()]
+        );
+
+        // With GLOBIGNORE active, a `.*` pattern still excludes `.` and `..`.
+        let mut out = Vec::new();
+        let mut failed = None;
+        glob_or_literal(
+            &field_lit(&format!("{uniq}/.*")),
+            &mut out,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &[],
+            &mut failed,
+        );
+        let names: Vec<String> = out.iter().map(|p| basename(p)).collect();
+        assert!(names.iter().all(|n| n != "." && n != ".."));
+        assert!(names.contains(&".hidden".to_string()));
 
         std::fs::remove_dir_all(dir).ok();
     }

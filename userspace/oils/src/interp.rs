@@ -376,10 +376,18 @@ pub struct Shell {
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
     errexit_suppress: u32,
-    /// Set by expansion when `nounset` is on and an unset variable is referenced;
-    /// the simple-command driver checks and aborts (`Flow::Exit(1)`) after
+    /// Set by expansion when a fatal word-expansion error occurs (a `nounset`
+    /// unset-variable reference, a `${var:?word}` on an unset/null parameter, or
+    /// a bad indirect/subscript expansion). Carries the **main-shell** exit
+    /// status the shell aborts with: bash uses **127** for nounset and
+    /// `${var:?}` errors, but **1** for bad indirect expansions and bad array
+    /// subscripts. That carried code is only honoured in the *main shell
+    /// environment* (`subshell_depth == 0`, which includes brace groups and
+    /// function bodies); inside any subshell / command substitution / pipeline
+    /// stage bash yields **1** for all of these — see [`Shell::fatal_abort_status`].
+    /// The simple-command driver checks the flag and aborts (`Flow::Exit`) after
     /// expanding its words.
-    unbound_error: bool,
+    unbound_error: Option<i32>,
     /// Set when an arithmetic evaluation error occurs while expanding a
     /// `$(( … ))` substitution in a word or assignment value. The simple-command
     /// driver checks and skips the command (status 1, `Flow::Next`) after
@@ -535,7 +543,7 @@ impl Shell {
             command_mode: false,
             script_mode: false,
             errexit_suppress: 0,
-            unbound_error: false,
+            unbound_error: None,
             arith_error: false,
             glob_error: None,
             local_frames: Vec::new(),
@@ -692,6 +700,23 @@ impl Shell {
                 code
             }
             _ => self.last_status,
+        }
+    }
+
+    /// Resolve the exit status of a fatal word-expansion abort (nounset,
+    /// `${var:?}`, bad indirect/subscript). The carried `code` is the status
+    /// bash uses in the *main shell environment* (127 for nounset/`:?`, 1 for
+    /// indirect/subscript). Inside any subshell, command substitution, or
+    /// pipeline stage (`subshell_depth > 0`) bash instead aborts that
+    /// environment with status **1** for all of these, without touching the
+    /// parent shell — so only honour the higher code at depth 0. Brace groups
+    /// and function bodies run at the caller's depth, so they correctly inherit
+    /// the main-shell status.
+    fn fatal_abort_status(&self, code: i32) -> i32 {
+        if self.subshell_depth == 0 {
+            code
+        } else {
+            1
         }
     }
 
@@ -2211,7 +2236,7 @@ impl Shell {
             script_mode: self.script_mode,
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
-            unbound_error: false,
+            unbound_error: None,
             arith_error: false,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
@@ -2856,7 +2881,8 @@ impl Shell {
             // Reuse the nounset fatal-expansion flag (checked by the simple-
             // command driver) so the following command never runs.
             self.emit_stderr(format!("osh: {refname}: invalid indirect expansion\n").as_bytes());
-            self.unbound_error = true;
+            // bash aborts a bad indirect expansion with status 1 (not 127).
+            self.unbound_error = Some(1);
             return String::new();
         };
         // The resolved name must be a valid parameter name. An empty or
@@ -2865,7 +2891,8 @@ impl Shell {
         // target such as `ptr=missing`, which quietly expands to empty).
         if !is_valid_indirect_target(&target) {
             self.emit_stderr(format!("osh: {target}: invalid variable name\n").as_bytes());
-            self.unbound_error = true;
+            // bash aborts an invalid indirect target with status 1 (not 127).
+            self.unbound_error = Some(1);
             return String::new();
         }
         // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
@@ -3379,11 +3406,13 @@ impl Shell {
         }
 
         // `set -u`: a reference to an unset variable during expansion aborts the
-        // shell (matching a non-interactive bash under nounset).
-        if self.unbound_error {
-            self.unbound_error = false;
-            self.last_status = 1;
-            return Flow::Exit(1);
+        // shell (matching a non-interactive bash under nounset). The abort status
+        // is carried by the flag (127 for nounset/`:?`, 1 for indirect/subscript)
+        // but only at the main shell; a subshell yields 1 (see fatal_abort_status).
+        if let Some(code) = self.unbound_error.take() {
+            let status = self.fatal_abort_status(code);
+            self.last_status = status;
+            return Flow::Exit(status);
         }
 
         // An arithmetic error while expanding a command word (`echo $((1/0))`)
@@ -3433,6 +3462,20 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Exit(1);
             }
+            // A fatal word-expansion error while expanding a *bare* assignment
+            // value — a `nounset` reference (`set -u; x=$UNSET`), a `${var:?}`,
+            // or a bad indirect/subscript expansion — aborts the shell (the
+            // diagnostic was already printed). Without this check the flag would
+            // only fire on the *next* command's word expansion, so a bare
+            // assignment as the final statement would wrongly exit 0. bash's
+            // abort status is carried by the flag (127 for nounset/`:?`, 1 for
+            // indirect/subscript).
+            if let Some(code) = self.unbound_error.take() {
+                self.arith_error = false;
+                let status = self.fatal_abort_status(code);
+                self.last_status = status;
+                return Flow::Exit(status);
+            }
             if !ok || self.arith_error {
                 // A readonly rejection or an arithmetic error in the value of a
                 // *bare* assignment command is fatal in a non-interactive shell:
@@ -3472,11 +3515,13 @@ impl Shell {
         // A fatal word-expansion error while expanding a prefix value — a
         // nounset reference under `set -u` or a bad indirect expansion
         // (`x=${!nonexist} cmd`) — likewise aborts the shell before running the
-        // command (the diagnostic was already printed at expansion time).
-        if self.unbound_error {
-            self.unbound_error = false;
-            self.last_status = 1;
-            return Flow::Exit(1);
+        // command (the diagnostic was already printed at expansion time). The
+        // carried status distinguishes nounset/`:?` (127) from indirect (1), and
+        // only applies at the main shell (a subshell yields 1).
+        if let Some(code) = self.unbound_error.take() {
+            let status = self.fatal_abort_status(code);
+            self.last_status = status;
+            return Flow::Exit(status);
         }
 
         // A `failglob` miss while expanding a prefix assignment value
@@ -5535,14 +5580,16 @@ impl Shell {
                             self.emit_stderr(
                                 format!("osh: {refname}: invalid indirect expansion\n").as_bytes(),
                             );
-                            self.unbound_error = true;
+                            // bash aborts a bad indirect expansion with status 1.
+                            self.unbound_error = Some(1);
                             return String::new();
                         }
                     }
                 };
                 if !is_valid_indirect_target(&tname) {
                     self.emit_stderr(format!("osh: {tname}: invalid variable name\n").as_bytes());
-                    self.unbound_error = true;
+                    // bash aborts an invalid indirect target with status 1.
+                    self.unbound_error = Some(1);
                     return String::new();
                 }
                 let renamed = rename_param_target(target, &tname);
@@ -5618,10 +5665,10 @@ impl Shell {
                     let disp = crate::unparse::name_sub(name, index);
                     self.emit_stderr(format!("osh: {disp}: {text}\n").as_bytes());
                     // bash: `${var:?word}` on an unset/null parameter writes the
-                    // message and, in a non-interactive shell, exits. Reuse the
-                    // nounset abort path so the simple-command driver terminates
-                    // the (sub)shell before running the command (`Flow::Exit(1)`).
-                    self.unbound_error = true;
+                    // message and, in a non-interactive shell, exits with status
+                    // 127. Reuse the nounset abort path so the simple-command
+                    // driver terminates the (sub)shell before running the command.
+                    self.unbound_error = Some(127);
                     String::new()
                 }
             }
@@ -5688,7 +5735,8 @@ impl Shell {
                     self.emit_stderr(
                         format!("osh: {name}[{sub}]: bad array subscript\n").as_bytes(),
                     );
-                    self.unbound_error = true;
+                    // bash aborts a bad array subscript with status 1 (not 127).
+                    self.unbound_error = Some(1);
                     Vec::new()
                 }
             }
@@ -5708,7 +5756,8 @@ impl Shell {
                         "parameter not set"
                     };
                     self.emit_stderr(format!("osh: {name}[{sub}]: {text}\n").as_bytes());
-                    self.unbound_error = true;
+                    // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
+                    self.unbound_error = Some(127);
                     Vec::new()
                 }
             }
@@ -5731,7 +5780,9 @@ impl Shell {
     /// are always considered set and never trigger it.
     fn note_unbound(&mut self, name: &str) {
         if self.nounset && !is_special_param(name) {
-            self.unbound_error = true;
+            // bash aborts a non-interactive shell with status 127 on a nounset
+            // unset-variable reference.
+            self.unbound_error = Some(127);
             self.emit_stderr(format!("osh: {name}: unbound variable\n").as_bytes());
         }
     }
@@ -13899,10 +13950,42 @@ mod tests {
         // A set, non-empty parameter is unaffected.
         let (o2, _) = run("y=set; echo \"${y:?msg}\"");
         assert_eq!(o2, "set\n");
-        // At top level the error aborts the whole run.
+        // At top level (main shell) the error aborts the whole run with 127,
+        // matching bash — whereas the subshell case above yields 1.
         let (o3, st3) = run("unset q; echo \"${q:?gone}\" 2>/dev/null; echo unreached");
         assert_eq!(o3, "");
-        assert_eq!(st3, 1);
+        assert_eq!(st3, 127);
+    }
+
+    #[test]
+    fn fatal_expansion_abort_status_by_context() {
+        // bash aborts a nounset / `${var:?}` error with 127 in the *main shell
+        // environment* (top level, brace groups, function bodies) but with 1
+        // inside a subshell / command substitution — and a subshell error does
+        // not abort the enclosing shell. Bad indirect / subscript expansions are
+        // always 1. These mirror bash 5.2, verified directly.
+
+        // Main shell (top level): nounset and `:?` both give 127.
+        assert_eq!(run("set -u; echo $undef; echo after").1, 127);
+        assert_eq!(run("unset q; echo ${q:?} 2>/dev/null; echo after").1, 127);
+        // Brace group is still the main shell environment -> 127.
+        assert_eq!(run("set -u; { echo $undef; }").1, 127);
+        // Function body runs in the main shell environment -> 127.
+        assert_eq!(run("f(){ echo $undef; }; set -u; f; echo after").1, 127);
+        // Bare and array assignments abort the main shell with 127 too.
+        assert_eq!(run("set -u; x=$undef").1, 127);
+        assert_eq!(run("set -u; a=($undef)").1, 127);
+
+        // A subshell aborts with 1 and does NOT abort the parent (which goes on
+        // to run `echo done` and exit 0).
+        assert_eq!(run("(set -u; echo $undef)").1, 1);
+        assert_eq!(run("(set -u; echo $undef); echo done").1, 0);
+        // Command substitution is a subshell: it fails with 1, parent survives.
+        assert_eq!(run("x=$(set -u; echo $undef); echo $?").0, "1\n");
+
+        // Bad indirect / subscript expansions are always 1, even at the main
+        // shell (no 127 remap).
+        assert_eq!(run("echo ${!badref}").1, 1);
     }
 
     #[test]
@@ -15172,9 +15255,10 @@ mod tests {
 
     #[test]
     fn set_nounset_aborts_on_unset() {
+        // A nounset reference at the main shell aborts with 127 (bash), not 1.
         let (o, s) = run("set -u; echo $undefined; echo after");
         assert_eq!(o, "");
-        assert_eq!(s, 1);
+        assert_eq!(s, 127);
         // A default/alternate operator suppresses the error.
         assert_eq!(run("set -u; echo ${undefined:-ok}").0, "ok\n");
         // Special parameters are always considered set.
@@ -15495,9 +15579,9 @@ mod tests {
     fn set_can_disable_options() {
         // `set +e` turns errexit back off.
         assert_eq!(run("set -e; set +e; false; echo after").0, "after\n");
-        // Long-form option names work too.
+        // Long-form option names work too; the nounset abort exits 127 (bash).
         let (_, s) = run("set -o nounset; echo $undefined; echo after");
-        assert_eq!(s, 1);
+        assert_eq!(s, 127);
     }
 
     #[test]

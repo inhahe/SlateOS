@@ -166,6 +166,16 @@ enum StderrTarget {
     Stdout,
 }
 
+/// A saved snapshot of one variable's complete state (scalar, indexed array,
+/// associative array, export flag), captured when `local` shadows the name
+/// inside a function so it can be restored when the function returns.
+struct VarSnapshot {
+    scalar: Option<String>,
+    indexed: Option<BTreeMap<usize, String>>,
+    assoc: Option<Vec<(String, String)>>,
+    exported: bool,
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
@@ -231,6 +241,10 @@ pub struct Shell {
     /// the simple-command driver checks and aborts (`Flow::Exit(1)`) after
     /// expanding its words.
     unbound_error: bool,
+    /// Stack of function-local variable scopes. Each frame records the variables
+    /// shadowed by `local` in that function call and their prior state, restored
+    /// on return. Non-empty exactly while executing a function body.
+    local_frames: Vec<Vec<(String, VarSnapshot)>>,
 }
 
 impl Default for Shell {
@@ -268,6 +282,7 @@ impl Shell {
             xtrace: false,
             errexit_suppress: 0,
             unbound_error: false,
+            local_frames: Vec::new(),
         }
     }
 
@@ -1223,6 +1238,9 @@ impl Shell {
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
+            // A subshell body is not itself a function frame; a `local` there is
+            // an error until it enters one of its own function calls.
+            local_frames: Vec::new(),
         }
     }
 
@@ -1710,7 +1728,16 @@ impl Shell {
             })
             .collect();
 
+        // Push a fresh local scope so `local` declarations inside the body are
+        // restored on return.
+        self.local_frames.push(Vec::new());
         let flow = self.exec_program(&body, out, stdin);
+        if let Some(frame) = self.local_frames.pop() {
+            // Restore shadowed variables in reverse declaration order.
+            for (name, snap) in frame.into_iter().rev() {
+                self.restore_var(&name, snap);
+            }
+        }
 
         self.positional = saved_pos;
         for (k, old) in saved {
@@ -1727,6 +1754,59 @@ impl Shell {
             Flow::Return | Flow::Next => Flow::Next,
             other => other,
         }
+    }
+
+    /// Capture the complete current state of a variable name (scalar / indexed /
+    /// associative / export flag), for later restoration by `local`.
+    fn snapshot_var(&self, name: &str) -> VarSnapshot {
+        VarSnapshot {
+            scalar: self.vars.get(name).cloned(),
+            indexed: self.arrays.get(name).cloned(),
+            assoc: self.assoc.get(name).cloned(),
+            exported: self.exported.contains(name),
+        }
+    }
+
+    /// Restore a variable to a previously captured [`VarSnapshot`], clearing any
+    /// current binding first so a name that was unset before becomes unset again.
+    fn restore_var(&mut self, name: &str, snap: VarSnapshot) {
+        self.vars.remove(name);
+        self.arrays.remove(name);
+        self.assoc.remove(name);
+        self.exported.remove(name);
+        if let Some(v) = snap.scalar {
+            self.vars.insert(name.to_string(), v);
+        }
+        if let Some(a) = snap.indexed {
+            self.arrays.insert(name.to_string(), a);
+        }
+        if let Some(a) = snap.assoc {
+            self.assoc.insert(name.to_string(), a);
+        }
+        if snap.exported {
+            self.exported.insert(name.to_string());
+        }
+    }
+
+    /// Mark `name` as function-local: snapshot its prior state into the current
+    /// local frame (once per name) and clear the current binding so the `local`
+    /// declaration starts fresh. Returns `false` if not inside a function.
+    fn declare_local(&mut self, name: &str) -> bool {
+        let Some(frame) = self.local_frames.last() else {
+            return false;
+        };
+        if !frame.iter().any(|(n, _)| n == name) {
+            let snap = self.snapshot_var(name);
+            // `last_mut` is guaranteed present (we just checked `last`).
+            if let Some(frame) = self.local_frames.last_mut() {
+                frame.push((name.to_string(), snap));
+            }
+        }
+        // Clear the current binding: a bare `local x` starts unset/empty.
+        self.vars.remove(name);
+        self.arrays.remove(name);
+        self.assoc.remove(name);
+        true
     }
 
     /// `command [-v|-V] [-p] name [args]` — run `name` bypassing shell
@@ -2694,7 +2774,8 @@ impl Shell {
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args),
-            "declare" | "typeset" | "local" => self.builtin_declare(args),
+            "declare" | "typeset" => self.builtin_declare(args, false),
+            "local" => self.builtin_declare(args, true),
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
@@ -2836,7 +2917,14 @@ impl Shell {
     /// `-x`/`-g`'s export effect via a following `export` is honoured elsewhere;
     /// here they are parsed and ignored. The combined form `declare -A m=(…)`
     /// is not supported (parse restriction) — use `declare -A m; m=([k]=v …)`.
-    fn builtin_declare(&mut self, args: &[String]) -> i32 {
+    /// `declare`/`typeset` (`is_local = false`) and `local` (`is_local = true`).
+    /// For `local`, each named variable is first shadowed in the current
+    /// function frame; using it outside a function is an error.
+    fn builtin_declare(&mut self, args: &[String], is_local: bool) -> i32 {
+        if is_local && self.local_frames.is_empty() {
+            self.emit_stderr(b"osh: local: can only be used in a function\n");
+            return 1;
+        }
         let mut assoc = false;
         let mut indexed = false;
         let mut export = false;
@@ -2868,6 +2956,10 @@ impl Shell {
             if name.is_empty() {
                 continue;
             }
+            // `local` shadows the name (snapshot + clear) before (re)binding it.
+            if is_local {
+                self.declare_local(name);
+            }
             if assoc {
                 self.assoc.entry(name.to_string()).or_default();
             } else if indexed {
@@ -2894,6 +2986,12 @@ impl Shell {
     /// each array literal is then marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
     fn exec_declare_with_arrays(&mut self, argv: &[String], decl_arrays: &[Assignment]) -> Flow {
+        let is_local = argv.first().map(String::as_str) == Some("local");
+        if is_local && self.local_frames.is_empty() {
+            self.emit_stderr(b"osh: local: can only be used in a function\n");
+            self.last_status = 1;
+            return Flow::Next;
+        }
         // Determine the array kind from the leading dashed flags.
         let mut assoc = false;
         let mut indexed = false;
@@ -2913,10 +3011,14 @@ impl Shell {
             }
         }
         // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`).
-        let status = self.builtin_declare(&argv[1..]);
+        let status = self.builtin_declare(&argv[1..], is_local);
         // Mark each array name's kind before applying, so `apply_assignment`
         // routes the literal to the associative or indexed store correctly.
         for a in decl_arrays {
+            // `local a=(…)` shadows the name in the current function frame first.
+            if is_local {
+                self.declare_local(&a.name);
+            }
             if assoc {
                 self.assoc.entry(a.name.clone()).or_default();
             } else if indexed {
@@ -4953,6 +5055,40 @@ mod tests {
         assert_eq!(run("set -u; echo $#").0, "0\n");
         // Set variables expand normally.
         assert_eq!(run("set -u; x=hi; echo $x").0, "hi\n");
+    }
+
+    #[test]
+    fn local_shadows_global() {
+        // A local variable does not leak out of the function.
+        assert_eq!(
+            run("x=outer; f() { local x=inner; echo $x; }; f; echo $x").0,
+            "inner\nouter\n"
+        );
+        // A previously-unset name is restored to unset after the function.
+        assert_eq!(
+            run("f() { local y=hi; echo $y; }; f; echo \"[${y-unset}]\"").0,
+            "hi\n[unset]\n"
+        );
+    }
+
+    #[test]
+    fn local_mutation_is_isolated() {
+        // Assignments to a local inside the function don't affect the global.
+        let src = "c=0; inc() { local c=$1; c=$((c+1)); echo $c; }; inc 5; echo $c";
+        assert_eq!(run(src).0, "6\n0\n");
+    }
+
+    #[test]
+    fn local_outside_function_errors() {
+        // `local` at top level is an error (non-zero status), not a crash.
+        let (_, s) = run("local x=1");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn local_array_is_scoped() {
+        let src = "a=(g1 g2); f() { local a=(l1 l2); echo \"${a[@]}\"; }; f; echo \"${a[@]}\"";
+        assert_eq!(run(src).0, "l1 l2\ng1 g2\n");
     }
 
     #[test]

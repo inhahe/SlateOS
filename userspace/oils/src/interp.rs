@@ -5748,7 +5748,20 @@ impl Shell {
                 } else if lead.contains('p') {
                     self.declare_print(args, out, redir)
                 } else {
-                    self.builtin_declare(args, false)
+                    // `declare -A` / `-a` / `-i` / `-x` / `-r` / `-n` / `-l` /
+                    // `-u` with NO name operands is a *listing* filtered by those
+                    // attributes (bash), not a declaration. With names, or with no
+                    // attribute flags at all, fall through to declare/assign.
+                    let start = Self::declare_flag_end(args);
+                    let has_names = args.get(start).is_some();
+                    let has_attr = args[..start].iter().any(|a| {
+                        a.chars().any(|c| matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u'))
+                    });
+                    if !has_names && has_attr {
+                        self.declare_list_filtered(args, out, redir)
+                    } else {
+                        self.builtin_declare(args, false)
+                    }
                 }
             }
             "local" => self.builtin_declare(args, true),
@@ -7506,6 +7519,72 @@ impl Shell {
         }
         let write_status = self.write_bytes(out, redir, listing.as_bytes());
         if status != 0 { status } else { write_status }
+    }
+
+    /// Index of the first non-flag operand in a `declare`/`typeset` argument
+    /// list — i.e. one past the leading `-x`/`+x` flag words (and a terminating
+    /// `--`). Mirrors the flag loop in [`Shell::builtin_declare`].
+    fn declare_flag_end(args: &[String]) -> usize {
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            if arg == "--" {
+                return i + 1;
+            }
+            match arg.strip_prefix(['-', '+']) {
+                Some(f) if !f.is_empty() => i += 1,
+                _ => return i,
+            }
+        }
+        i
+    }
+
+    /// `declare -A`/`-a`/`-i`/`-x`/`-r`/`-n`/`-l`/`-u` with no name operands:
+    /// list every variable that carries **at least one** of the requested
+    /// attributes (bash's union semantics — `declare -ir` lists integer *or*
+    /// readonly variables), sorted by name, in re-inputtable `declare -FLAGS
+    /// name="value"` form. Internal bash-only arrays (`BASH_ALIASES`, etc.) are
+    /// not modelled, so they simply don't appear.
+    fn declare_list_filtered(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let start = Self::declare_flag_end(args);
+        let mut want: Vec<char> = Vec::new();
+        for a in &args[..start] {
+            for c in a.chars() {
+                if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u') && !want.contains(&c) {
+                    want.push(c);
+                }
+            }
+        }
+        let has_attr = |sh: &Shell, name: &str| {
+            want.iter().any(|&c| match c {
+                'A' => sh.assoc.contains_key(name),
+                'a' => sh.arrays.contains_key(name),
+                'i' => sh.integer_attr.contains(name),
+                'x' => sh.exported.contains(name),
+                'r' => sh.readonly.contains(name),
+                'n' => sh.nameref_attr.contains(name),
+                'l' => sh.lower_attr.contains(name),
+                'u' => sh.upper_attr.contains(name),
+                _ => false,
+            })
+        };
+        let mut all: Vec<&String> = self
+            .vars
+            .keys()
+            .chain(self.arrays.keys())
+            .chain(self.assoc.keys())
+            .collect();
+        all.sort();
+        all.dedup();
+        let names: Vec<String> =
+            all.into_iter().filter(|n| has_attr(self, n)).cloned().collect();
+        let mut listing = String::new();
+        for name in &names {
+            if let Some(def) = self.format_declare_def(name) {
+                listing.push_str(&def);
+                listing.push('\n');
+            }
+        }
+        self.write_bytes(out, redir, listing.as_bytes())
     }
 
     fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -16684,6 +16763,29 @@ mod tests {
         assert_eq!(s, 0);
         assert!(o.contains("declare -f foo\n"), "declare -F output: {o:?}");
         assert!(o.contains("declare -f bar\n"), "declare -F output: {o:?}");
+    }
+
+    #[test]
+    fn declare_attr_filter_lists_matching_vars() {
+        // `declare -A` (no names) lists only associative arrays, in
+        // re-inputtable declare-prefix form, sorted by name.
+        let (o, s) = run("declare -A m=([x]=1); declare -A n=([y]=2); a=(1 2); declare -A");
+        assert_eq!(s, 0);
+        assert_eq!(o, "declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n");
+
+        // `declare -i` lists only integer-attributed variables.
+        let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");
+        assert_eq!(o2, "declare -i k=\"5\"\ndeclare -i k2=\"9\"\n");
+
+        // Union semantics: `declare -il` lists variables that are integer OR
+        // lowercase-attributed (bash), each shown with its full attribute set.
+        // (Avoids bash/osh internal readonly vars like BASH_VERSINFO that a
+        // `-ir` union would also match.)
+        let (o3, _) = run("declare -i ii=1; declare -l low=HELLO; plain=3; declare -il");
+        assert_eq!(o3, "declare -i ii=\"1\"\ndeclare -l low=\"hello\"\n");
+
+        // A declaration *with* a name operand still declares (not a listing).
+        assert_eq!(run("declare -A m=([k]=v); echo ${m[k]}").0, "v\n");
     }
 
     #[test]

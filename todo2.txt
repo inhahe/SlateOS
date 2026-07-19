@@ -1,7 +1,3 @@
-Has Claude been hand-porting oils when it could have used a tool for most of the work (the one mentioned in roadmap-detailed.md for chromium and such)?
+the crate is ~15k+ lines with 477 passing tests and is quite mature now. Most calendar time is rate-limit windows, not active work. If you ever want the faithful C++ cross-compile instead, the crate is isolated enough to swap once a C++/slateos toolchain exists (which Chromium/WINE will need anyway) — but that path is currently prerequisite-blocked.
 
-chrome's copying rtf to the clipboard is broken - random parts get left out (most of it), so chromium's might be too, something we might want to  fix
 
-have something that writes to a file have a 'file is done' finalizer command (which automatically gets called if the process quits?), which can be used by backup programs watching the  file to know when they can start backing it up.
-
-is .gitignore setup well enough that i can just push this git directly to github?

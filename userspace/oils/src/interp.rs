@@ -3797,6 +3797,12 @@ impl Shell {
         let mut raw = false;
         let mut array: Option<String> = None;
         let mut names: Vec<String> = Vec::new();
+        // `-d delim` (record delimiter; empty ⇒ NUL), `-n N` (stop after N
+        // characters or the delimiter), `-N N` (read exactly N characters,
+        // ignoring the delimiter). None ⇒ default line-oriented read.
+        let mut delim: Option<u8> = None;
+        let mut nchars: Option<usize> = None;
+        let mut exact = false;
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
@@ -3813,17 +3819,51 @@ impl Shell {
                         self.emit_stderr(prompt.as_bytes());
                     }
                 }
+                "-d" => {
+                    i += 1;
+                    // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
+                    delim = Some(args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0));
+                }
+                "-n" => {
+                    i += 1;
+                    nchars = args.get(i).and_then(|s| s.parse().ok());
+                }
+                "-N" => {
+                    i += 1;
+                    nchars = args.get(i).and_then(|s| s.parse().ok());
+                    exact = true;
+                }
                 // Accepted but not honored yet; consume the option-argument forms.
-                "-d" | "-n" | "-N" | "-t" | "-u" => i += 1,
+                "-t" | "-u" => i += 1,
                 other if other.starts_with('-') && other.len() > 1 => {} // unknown flag
                 _ => names.push(a.clone()),
             }
             i += 1;
         }
 
-        let line = match self.read_line(stdin, redir) {
-            Some(l) => l,
-            None => return 1, // EOF
+        // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
+        // record reader; otherwise a plain newline-terminated line.
+        let (line, terminated) = if delim.is_some() || nchars.is_some() {
+            let d = delim.unwrap_or(b'\n');
+            match self.read_record_input(stdin, redir, d, nchars, exact) {
+                Some(rec) => rec,
+                None => return 1, // EOF with no data
+            }
+        } else {
+            match self.read_line(stdin, redir) {
+                Some(l) => (l, true),
+                None => return 1, // EOF
+            }
+        };
+        // Exit status: for `-N`, success iff exactly N characters were read
+        // (a short read at EOF is status 1). For `-d`/`-n`, success iff the
+        // record was terminated (delimiter seen or the `-n` count reached); a
+        // missing delimiter at EOF is a partial read (status 1) but the value
+        // is still assigned. The default line path always reports success.
+        let eof_status = if exact {
+            i32::from(nchars.is_some_and(|n| line.chars().count() < n))
+        } else {
+            i32::from(!terminated)
         };
 
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
@@ -3835,14 +3875,14 @@ impl Shell {
             self.vars.remove(&arr);
             self.assoc.remove(&arr);
             self.arrays.insert(arr, map);
-            return 0;
+            return eof_status;
         }
 
         if names.is_empty() {
             // No names: assign the (optionally unescaped) whole line to REPLY.
             let reply = if raw { line } else { unescape_read_line(&line) };
             self.vars.insert("REPLY".to_string(), reply);
-            return 0;
+            return eof_status;
         }
 
         let fields = read_split(&line, &ifs, raw, Some(names.len()));
@@ -3850,7 +3890,7 @@ impl Shell {
             let val = fields.get(idx).cloned().unwrap_or_default();
             self.vars.insert(name.clone(), val);
         }
-        0
+        eof_status
     }
 
     /// Read the entire current input source (here-doc/here-string, `< file`
@@ -4166,6 +4206,41 @@ impl Shell {
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
                 read_one_line(&mut lock)
+            }
+        }
+    }
+
+    /// Read a single record for `read -d`/`-n`/`-N` from the current input
+    /// source. `delim` is the record terminator (consumed, not stored);
+    /// `nchars` caps the record at that many characters; `exact` (`-N`)
+    /// ignores `delim` and reads exactly `nchars` characters. Returns
+    /// `(text, terminated)` where `terminated` is true when a delimiter was
+    /// consumed (for `-N`, true when the full character count was read).
+    /// `None` signals immediate EOF with no data.
+    fn read_record_input(
+        &self,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+        delim: u8,
+        nchars: Option<usize>,
+        exact: bool,
+    ) -> Option<(String, bool)> {
+        if let Some(data) = &redir.stdin_data {
+            let mut r = io::BufReader::new(&data[..]);
+            return read_record(&mut r, delim, nchars, exact);
+        }
+        if let Some(path) = &redir.stdin {
+            let f = std::fs::File::open(path).ok()?;
+            let mut r = io::BufReader::new(f);
+            return read_record(&mut r, delim, nchars, exact);
+        }
+        match stdin {
+            StdinSrc::Cursor(c) => read_record(&mut *c.borrow_mut(), delim, nchars, exact),
+            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact),
+            StdinSrc::Inherit => {
+                let stdin = io::stdin();
+                let mut lock = stdin.lock();
+                read_record(&mut lock, delim, nchars, exact)
             }
         }
     }
@@ -4916,6 +4991,60 @@ fn read_one_line<R: BufRead>(r: &mut R) -> Option<String> {
     Some(line)
 }
 
+/// Read a record for `read -d`/`-n`/`-N`. Reads byte-by-byte so streaming
+/// pipes yield data as produced. `delim` terminates the record (consumed, not
+/// stored) unless `exact` is set. `nchars` caps the record at that many
+/// *characters* (UTF-8 aware: a byte begins a new character when it is not a
+/// `10xxxxxx` continuation byte). `exact` (`-N`) ignores `delim`. Returns
+/// `(text, terminated)`; `None` on immediate EOF with no bytes read.
+fn read_record<R: BufRead>(
+    r: &mut R,
+    delim: u8,
+    nchars: Option<usize>,
+    exact: bool,
+) -> Option<(String, bool)> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut chars = 0usize;
+    let mut hit_delim = false;
+    let mut any = false;
+    loop {
+        // Peek at the next byte without holding the borrow across `consume`.
+        let b = {
+            let buf = match r.fill_buf() {
+                Ok(b) if !b.is_empty() => b,
+                _ => break, // EOF or read error
+            };
+            buf[0]
+        };
+        let is_char_start = b & 0xC0 != 0x80;
+        // Stop once the character limit is reached, at the next char boundary.
+        if let Some(n) = nchars
+            && is_char_start
+            && chars >= n
+        {
+            hit_delim = true; // full requested count read
+            break;
+        }
+        // `-n` (not `-N`) also stops at the delimiter.
+        if !exact && b == delim {
+            r.consume(1);
+            hit_delim = true;
+            any = true;
+            break;
+        }
+        r.consume(1);
+        any = true;
+        bytes.push(b);
+        if is_char_start {
+            chars += 1;
+        }
+    }
+    if !any && bytes.is_empty() {
+        return None;
+    }
+    Some((String::from_utf8_lossy(&bytes).into_owned(), hit_delim))
+}
+
 /// Quote a value for a `declare`/`readonly -p` listing: wrap in double quotes
 /// and backslash-escape the characters that are special inside double quotes
 /// (`"`, `\`, `$`, and backtick), matching bash's re-inputtable output.
@@ -5565,6 +5694,31 @@ mod tests {
     fn read_custom_ifs() {
         let (o, _) = run("IFS=: read a b c <<< '1:2:3'; echo \"$a-$b-$c\"");
         assert_eq!(o, "1-2-3\n");
+    }
+
+    #[test]
+    fn read_nchars_limit() {
+        // `-n N` stops after N characters (here-string adds a trailing \n, so
+        // there are plenty of characters available).
+        assert_eq!(run("read -n 3 x <<< 'abcdef'; echo \"$x\"").0, "abc\n");
+        // Status 0 because the character count was reached.
+        assert_eq!(run("read -n 3 x <<< 'abcdef'; echo $?").0, "0\n");
+    }
+
+    #[test]
+    fn read_exact_nchars() {
+        // `-N N` reads exactly N characters, ignoring delimiters/spaces.
+        assert_eq!(run("read -N 5 x <<< 'a b c d'; echo \"[$x]\"").0, "[a b c]\n");
+        // A short read (fewer than N available) yields status 1.
+        assert_eq!(run("read -N 20 x <<< 'abc'; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn read_custom_delim() {
+        // `-d :` reads up to the first ':' delimiter.
+        assert_eq!(run("read -d : x <<< 'foo:bar'; echo \"$x\"").0, "foo\n");
+        // Delimiter found ⇒ status 0.
+        assert_eq!(run("read -d : x <<< 'foo:bar'; echo $?").0, "0\n");
     }
 
     #[test]

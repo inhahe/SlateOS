@@ -232,28 +232,29 @@ count propagate as for other loops.
 `arith_assignment_array_elements`, `arith_c_style_for_loop`). All 165
 oils tests pass; clippy clean; slateos target builds.
 
-### TD-OILS6. `osh` `read` builtin: `-d`/`-n`/`-N`/`-t`/`-u` options accepted but not honored — OPEN (low priority)
+### TD-OILS6. `osh` `read` builtin: `-t`/`-u` options accepted but not honored — OPEN (low priority)
 
 **Where:** `userspace/oils/src/interp.rs` (`builtin_read`).
 
 **What:** `read` now supports `-r` (raw/no-escape), `-a array` (split into
 an indexed array), `-p prompt` (prompt to stderr), `-s` (silent — no-op for
-non-tty input), and `$IFS`-aware field splitting (whitespace-vs-non-whitespace
-IFS, last variable gets the raw remainder, backslash escaping without `-r`).
-Still missing: `-d delim` (read until an alternate delimiter), `-n N`/`-N N`
-(read at most N characters, returning early), `-t timeout` (timed read), and
-`-u fd` (read from a specific file descriptor). These flags and their
-option-arguments are **parsed and consumed** (so they aren't mistaken for
-variable names), but their behavior is a plain line read.
+non-tty input), `$IFS`-aware field splitting (whitespace-vs-non-whitespace
+IFS, last variable gets the raw remainder, backslash escaping without `-r`),
+and — as of the latest change — `-d delim` (read up to an alternate
+delimiter; `-d ''` ⇒ NUL), `-n N` (stop after N characters *or* the
+delimiter, whichever comes first), and `-N N` (read exactly N characters,
+ignoring the delimiter). `-d`/`-n`/`-N` use a byte-level `read_record`
+helper (UTF-8-aware character counting) dispatched over the same
+`StdinSrc`/`RedirPlan` sources as `read_line`, and set the exit status
+correctly (0 on delimiter/count reached, 1 on a short read at EOF).
+Still missing: `-t timeout` (timed read) and `-u fd` (read from a specific
+file descriptor). Their option-arguments are **parsed and consumed** (so
+they aren't mistaken for variable names) but otherwise ignored.
 
-**Proper fix:** `-d`/`-n`/`-N` require reading from the input source at the
-byte level (until a custom delimiter or a fixed count) instead of via
-`read_line`'s whole-line `read_line`/`read_until('\n')`. That means a small
-`read_delimited(stdin, redir, delim, max)` helper that dispatches over the
-same `StdinSrc`/`RedirPlan` sources `read_line` handles and uses
-`BufRead::read_until` / a bounded byte read. `-t`/`-u` need timer and
-fd-table support that the current model lacks. Deferred as low priority —
-scripts rarely use these compared to `-r`/`-a`.
+**Proper fix:** `-t`/`-u` need timer and fd-table support that the current
+model lacks (no async/tty timeout facility; no numbered-fd table beyond the
+stdin/stdout/stderr `RedirPlan`). Deferred as low priority — scripts rarely
+use these compared to `-r`/`-a`/`-n`/`-d`.
 
 ### TD-OILS7. `osh` `readonly`: enforcement covers assignment/`unset`/`declare` but not the `read` builtin or temporary env prefixes — OPEN (low priority)
 

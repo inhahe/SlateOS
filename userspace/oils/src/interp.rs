@@ -2938,13 +2938,16 @@ impl Shell {
         }
 
         // An arithmetic error while expanding a command word (`echo $((1/0))`)
-        // discards the command with status 1, matching bash (which does not run
-        // the command with a fabricated value). Assignment-value/prefix arith
-        // errors are checked after their own expansion below.
+        // is fatal in a non-interactive shell: bash reports it and exits with
+        // status 1 without running the command (it does not fabricate a value),
+        // and never reaches a following command. Arithmetic *commands* (`(( ))`,
+        // `let`, `for ((`) are non-fatal, but they never set this flag — only the
+        // `$(( … ))`/`$[ … ]` expansion path (`arith_sub`) does. Prefix
+        // assignment-value arith errors are checked after their own expansion.
         if self.arith_error {
             self.arith_error = false;
             self.last_status = 1;
-            return Flow::Next;
+            return Flow::Exit(1);
         }
 
         // Pure assignment (no command word): persist the variables/arrays.
@@ -2964,10 +2967,15 @@ impl Shell {
                 }
             }
             if !ok || self.arith_error {
-                // A readonly rejection or an arithmetic error in a value makes
-                // the assignment fail with status 1.
+                // A readonly rejection or an arithmetic error in the value of a
+                // *bare* assignment command is fatal in a non-interactive shell:
+                // bash reports it and exits with status 1 (`readonly c=1; c=2;
+                // echo after` and `x=$((1/0)); echo after` never reach `after`).
+                // A temporary assignment *prefix* to a command is not fatal — that
+                // path is handled separately in the command-execution branch.
                 self.arith_error = false;
                 self.last_status = 1;
+                return Flow::Exit(1);
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
                 self.last_status = 0;
@@ -2994,11 +3002,13 @@ impl Shell {
         }
 
         // An arithmetic error while expanding a prefix assignment value
-        // (`x=$((1/0)) cmd`) discards the command with status 1 (bash).
+        // (`x=$((1/0)) cmd`) is fatal in a non-interactive shell: bash reports
+        // it and exits with status 1 without running the command (matching the
+        // bare-assignment and command-word cases above).
         if self.arith_error {
             self.arith_error = false;
             self.last_status = 1;
-            return Flow::Next;
+            return Flow::Exit(1);
         }
 
         // A readonly variable cannot be set even as a temporary command prefix
@@ -11189,15 +11199,18 @@ mod tests {
 
     #[test]
     fn arith_error_in_word_aborts_command() {
-        // Division by zero in a `$(( … ))` word discards the command (bash) —
-        // no bogus "0" is echoed — and the next command still runs with $? = 1.
-        let (o, _) = run("echo $((10/0)) 2>/dev/null; echo \"next=$?\"");
-        assert_eq!(o, "next=1\n");
-        // An arithmetic error in an assignment value fails the assignment.
-        let (o2, _) = run("x=$((1/0)) 2>/dev/null; echo \"st=$?\"");
-        assert_eq!(o2, "st=1\n");
-        // A `(( … ))` command reports its own error/status and does not leak the
-        // abort flag onto the following command.
+        // Division by zero in a `$(( … ))` word is fatal in a non-interactive
+        // shell (bash): the shell exits with status 1 without fabricating a "0",
+        // so the following command never runs.
+        let (o, st) = run("echo $((10/0)) 2>/dev/null; echo \"next=$?\"");
+        assert_eq!(o, "");
+        assert_eq!(st, 1);
+        // An arithmetic error in an assignment value is likewise fatal.
+        let (o2, st2) = run("x=$((1/0)) 2>/dev/null; echo \"st=$?\"");
+        assert_eq!(o2, "");
+        assert_eq!(st2, 1);
+        // A `(( … ))` command reports its own error/status and does NOT leak the
+        // abort flag onto the following command — it is not fatal.
         let (o3, _) = run("(( 1/0 )) 2>/dev/null; echo ok");
         assert_eq!(o3, "ok\n");
     }
@@ -11477,12 +11490,12 @@ mod tests {
         assert_eq!(run("declare -ai b=(1 2 3); b[1]=6+6; echo \"${b[@]}\"").0, "1 12 3\n");
         // `declare -ua` uppercases values stored into the array.
         assert_eq!(run("declare -ua u=(ab cd); u[0]=xy; echo \"${u[@]}\"").0, "XY CD\n");
-        // `declare -ra` makes the array readonly: a later assignment is rejected
-        // (nonzero status) and leaves the elements intact.
-        assert_eq!(
-            run("declare -ra r=(1 2); r[0]=9; echo status=$?; echo \"${r[@]}\"").0,
-            "status=1\n1 2\n"
-        );
+        // `declare -ra` makes the array readonly: a later element assignment is
+        // fatal in a non-interactive shell (bash) — the shell exits with status
+        // 1, so the following `echo` lines never run.
+        let (o, s) = run("declare -ra r=(1 2); r[0]=9; echo status=$?; echo \"${r[@]}\"");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
     }
 
     #[test]
@@ -12213,12 +12226,13 @@ mod tests {
 
     #[test]
     fn readonly_blocks_reassignment() {
-        // The value stays at the readonly binding; reassignment fails (status 1)
-        // and leaves the original intact.
+        // Reassigning a readonly variable is fatal in a non-interactive shell
+        // (bash): the shell exits with status 1 and the trailing `echo` never
+        // runs.
         let (o, s) = run("readonly x=1; x=2; echo $x");
-        assert_eq!(o, "1\n");
-        assert_eq!(s, 0); // the trailing `echo` succeeds
-        // The assignment itself reports failure.
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // The bare failing assignment alone also reports status 1.
         assert_eq!(run("readonly x=1; x=2").1, 1);
     }
 
@@ -12231,15 +12245,20 @@ mod tests {
 
     #[test]
     fn declare_r_marks_readonly() {
-        let (o, _) = run("declare -r y=const; y=other; echo $y");
-        assert_eq!(o, "const\n");
+        // Reassigning a `declare -r` readonly is fatal (bash): the shell exits
+        // with status 1 before the `echo` runs.
+        let (o, s) = run("declare -r y=const; y=other; echo $y");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
     }
 
     #[test]
     fn readonly_bare_name_then_assign_fails() {
-        // `readonly x` marks an existing/empty name; a later assignment fails.
-        let (o, _) = run("x=v; readonly x; x=w; echo $x");
-        assert_eq!(o, "v\n");
+        // `readonly x` marks an existing name; a later assignment is fatal in a
+        // non-interactive shell (bash): the shell exits before the `echo`.
+        let (o, s) = run("x=v; readonly x; x=w; echo $x");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
     }
 
     #[test]

@@ -177,6 +177,22 @@ struct VarSnapshot {
     exported: bool,
 }
 
+/// A background job started with `&`. Tracks the spawned child so `wait`/`jobs`
+/// can reap and report it. `child` becomes `None` once the process has been
+/// reaped (its final status is kept in `status`).
+struct Job {
+    /// Job number as shown by `jobs` and referenced by `%n`.
+    id: usize,
+    /// OS process id (also reported by `$!` at spawn time).
+    pid: u32,
+    /// The live child handle, or `None` after the process has been reaped.
+    child: Option<std::process::Child>,
+    /// The command line, for `jobs` display.
+    cmd: String,
+    /// Final exit status once the process has finished and been reaped.
+    status: Option<i32>,
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
@@ -282,6 +298,11 @@ pub struct Shell {
     /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
     /// a handler's own commands from recursively re-triggering the same trap.
     in_trap: bool,
+    /// Background jobs started with `&`, tracked so `jobs`/`wait` can report and
+    /// reap them. NOT inherited by subshell clones (a subshell has no jobs).
+    /// Each new job takes the lowest unused job number (bash semantics), so the
+    /// numbering restarts at 1 once the table drains.
+    jobs: Vec<Job>,
 }
 
 impl Default for Shell {
@@ -329,6 +350,7 @@ impl Shell {
             traps: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
+            jobs: Vec::new(),
         }
     }
 
@@ -1508,6 +1530,8 @@ impl Shell {
             // The EXIT trap only fires for the top-level shell in our model.
             exit_trap_done: true,
             in_trap: false,
+            // A subshell does not inherit the parent's job table.
+            jobs: Vec::new(),
         }
     }
 
@@ -2628,7 +2652,21 @@ impl Shell {
                 }
                 match cmd.spawn() {
                     Ok(child) => {
-                        self.last_bg_pid = Some(child.id());
+                        let pid = child.id();
+                        // Bash assigns the lowest job number not currently in
+                        // use, so numbering restarts at 1 once the table empties.
+                        let mut id = 1;
+                        while self.jobs.iter().any(|j| j.id == id) {
+                            id += 1;
+                        }
+                        self.jobs.push(Job {
+                            id,
+                            pid,
+                            child: Some(child),
+                            cmd: argv.join(" "),
+                            status: None,
+                        });
+                        self.last_bg_pid = Some(pid);
                         self.last_status = 0;
                         return;
                     }
@@ -3247,6 +3285,8 @@ impl Shell {
             "source" | "." => self.builtin_source(args),
             "type" => self.builtin_type(args, out, redir),
             "trap" => self.builtin_trap(args, out, redir),
+            "jobs" => self.builtin_jobs(args, out, redir),
+            "wait" => self.builtin_wait(args),
             "exit" => {
                 let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(self.last_status);
                 flow = Flow::Exit(code);
@@ -3649,6 +3689,111 @@ impl Shell {
             buf.push('\n');
         }
         self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// Poll every tracked background job without blocking, recording the exit
+    /// status of any that have finished (their child handle is dropped once
+    /// reaped). Called before `jobs`/`wait` so the reported state is current.
+    fn poll_jobs(&mut self) {
+        for job in &mut self.jobs {
+            if let Some(child) = job.child.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(es)) => {
+                        job.status = Some(es.code().unwrap_or(1));
+                        job.child = None;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // Treat an un-waitable child as finished with failure so
+                        // it does not linger in the table forever.
+                        job.status = Some(1);
+                        job.child = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `jobs [-l] [-p]` — list background jobs. `-l` adds the pid column; `-p`
+    /// prints pids only. Finished jobs are reported once and then removed from
+    /// the table (matching bash's notify-and-forget behavior).
+    fn builtin_jobs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        self.poll_jobs();
+        let mut long = false;
+        let mut pids_only = false;
+        for a in args {
+            match a.as_str() {
+                "-l" => long = true,
+                "-p" => pids_only = true,
+                _ => {}
+            }
+        }
+        let mut buf = String::new();
+        for job in &self.jobs {
+            if pids_only {
+                buf.push_str(&job.pid.to_string());
+                buf.push('\n');
+                continue;
+            }
+            let state = if job.status.is_some() { "Done" } else { "Running" };
+            if long {
+                buf.push_str(&format!("[{}]  {} {:<24}{}\n", job.id, job.pid, state, job.cmd));
+            } else {
+                buf.push_str(&format!("[{}]  {:<24}{}\n", job.id, state, job.cmd));
+            }
+        }
+        let status = self.write_bytes(out, redir, buf.as_bytes());
+        // Drop the jobs we just reported as Done.
+        self.jobs.retain(|j| j.status.is_none());
+        status
+    }
+
+    /// `wait [id|pid|%job ...]` — wait for background jobs to finish. With no
+    /// operands, wait for all jobs. Returns the exit status of the last waited
+    /// job (0 when there are no jobs to wait for). Each waited job is removed
+    /// from the table.
+    fn builtin_wait(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            // Wait for all jobs, blocking on each.
+            let mut last = 0;
+            for job in &mut self.jobs {
+                if let Some(mut child) = job.child.take() {
+                    last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+                    job.status = Some(last);
+                } else if let Some(s) = job.status {
+                    last = s;
+                }
+            }
+            self.jobs.clear();
+            return last;
+        }
+        let mut last = 0;
+        for spec in args {
+            // Resolve the operand to a job index: `%n` job spec, bare job id, or pid.
+            let idx = if let Some(rest) = spec.strip_prefix('%') {
+                rest.parse::<usize>().ok().and_then(|n| self.jobs.iter().position(|j| j.id == n))
+            } else if let Ok(n) = spec.parse::<u32>() {
+                self.jobs
+                    .iter()
+                    .position(|j| j.pid == n)
+                    .or_else(|| self.jobs.iter().position(|j| j.id as u32 == n))
+            } else {
+                None
+            };
+            let Some(idx) = idx else {
+                self.emit_stderr(format!("osh: wait: {spec}: no such job\n").as_bytes());
+                last = 127;
+                continue;
+            };
+            let job = &mut self.jobs[idx];
+            if let Some(mut child) = job.child.take() {
+                last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+            } else {
+                last = job.status.unwrap_or(0);
+            }
+            self.jobs.remove(idx);
+        }
+        last
     }
 
     /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
@@ -6037,6 +6182,8 @@ fn is_builtin(name: &str) -> bool {
             | "."
             | "type"
             | "trap"
+            | "jobs"
+            | "wait"
             | "exit"
             | "return"
             | "break"
@@ -9032,5 +9179,52 @@ mod tests {
         assert_eq!(sh.run_source("set -o pipefail; false | true"), 1);
         let (o, _) = run(r#"false | true; echo "${PIPESTATUS[@]}""#);
         assert_eq!(o, "1 0\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wait_reaps_background_job_status() {
+        // A `&` command is tracked as a job and sets `$!`; `wait` (no operand)
+        // blocks until it finishes and yields its exit status.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
+        assert!(sh.last_bg_pid.is_some());
+        assert_eq!(sh.jobs.len(), 1);
+        assert_eq!(sh.run_source("wait"), 7);
+        assert!(sh.jobs.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wait_by_pid_and_job_spec() {
+        // `wait PID` and `wait %n` both target a specific job.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 3 &");
+        let pid = sh.last_bg_pid.expect("bg pid");
+        assert_eq!(sh.run_source(&format!("wait {pid}")), 3);
+        assert!(sh.jobs.is_empty());
+
+        sh.run_source("cmd /c exit 4 &");
+        assert_eq!(sh.run_source("wait %1"), 4);
+        assert!(sh.jobs.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jobs_lists_background_job() {
+        // `jobs` reports the tracked job with its job number and command line.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 0 &");
+        let mut buf = Vec::new();
+        {
+            let prog = parse("jobs").expect("parse");
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("[1]"), "jobs output: {s:?}");
+        assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
+        // `wait` cleans up any still-tracked job for a tidy teardown.
+        sh.run_source("wait");
     }
 }

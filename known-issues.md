@@ -391,6 +391,31 @@ correctly, since they canonicalize identically.
 file-ID equivalent) through the VFS/`stat` path, compare those instead of
 canonical paths. The `-nt`/`-ot` mtime comparisons are already exact.
 
+### TD-OILS13. `osh` job control is minimal: no `fg`/`bg`/`disown`, and only single external `&` commands are tracked — OPEN (partly gated on kernel job-control/signal support)
+
+**Where:** `userspace/oils/src/interp.rs` (`exec_background`, `builtin_jobs`,
+`builtin_wait`, the `Job` struct and `Shell::jobs` table).
+
+**What:** background-job tracking (`&` → job table, `jobs`, `wait`, `$!`) is
+implemented, but the job-control surface is incomplete:
+1. **Only a single external simple command backgrounds asynchronously.** A
+   compound background job (`{ …; } &`, `( … ) &`, a pipeline `a | b &`) still
+   falls back to running *synchronously* (see `exec_background`'s fallback), so
+   it is never entered into the job table. bash runs these asynchronously in a
+   subshell.
+2. **No `fg`/`bg`/`disown`.** There is no controlling-terminal/process-group
+   machinery, so foregrounding, resuming a stopped job, or detaching a job are
+   not implemented. Jobs also cannot be *stopped* (Ctrl-Z / `SIGTSTP`), so the
+   "Stopped" state never occurs.
+3. **`wait -n` and `wait` on a completed-job exit-status cache** are not
+   implemented — `wait` blocks on the child directly and removes the job.
+
+**Proper fix:** (1) route compound/pipeline `&` through a real async subshell
+thread that registers a job; (2) implement `fg`/`bg`/`disown` and job stop/cont
+once the kernel provides process groups + job-control signals (ties into
+TD-OILS11 async-signal delivery); (3) add `wait -n`. The current implementation
+is correct for the overwhelmingly common case (`cmd & … wait`), just narrow.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

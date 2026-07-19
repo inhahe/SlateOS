@@ -176,6 +176,13 @@ struct VarSnapshot {
     indexed: Option<BTreeMap<usize, String>>,
     assoc: Option<Vec<(String, String)>>,
     exported: bool,
+    // Attribute flags, so `local -i`/`-l`/`-u`/`-n` scope to the function call
+    // and are restored on return (bash: attributes set on a local are local).
+    integer: bool,
+    lower: bool,
+    upper: bool,
+    nameref: bool,
+    readonly: bool,
 }
 
 /// A background job started with `&`. Tracks the spawned child so `wait`/`jobs`
@@ -2355,6 +2362,11 @@ impl Shell {
             indexed: self.arrays.get(name).cloned(),
             assoc: self.assoc.get(name).cloned(),
             exported: self.exported.contains(name),
+            integer: self.integer_attr.contains(name),
+            lower: self.lower_attr.contains(name),
+            upper: self.upper_attr.contains(name),
+            nameref: self.nameref_attr.contains(name),
+            readonly: self.readonly.contains(name),
         }
     }
 
@@ -2377,6 +2389,22 @@ impl Shell {
         if snap.exported {
             self.exported.insert(name.to_string());
         }
+        // Restore the attribute flags to their pre-`local` state so any
+        // `-i`/`-l`/`-u`/`-n`/`-r` set on the local does not leak out.
+        Self::restore_flag(&mut self.integer_attr, name, snap.integer);
+        Self::restore_flag(&mut self.lower_attr, name, snap.lower);
+        Self::restore_flag(&mut self.upper_attr, name, snap.upper);
+        Self::restore_flag(&mut self.nameref_attr, name, snap.nameref);
+        Self::restore_flag(&mut self.readonly, name, snap.readonly);
+    }
+
+    /// Set-or-clear `name`'s membership in an attribute set to match `present`.
+    fn restore_flag(set: &mut HashSet<String>, name: &str, present: bool) {
+        if present {
+            set.insert(name.to_string());
+        } else {
+            set.remove(name);
+        }
     }
 
     /// Mark `name` as function-local: snapshot its prior state into the current
@@ -2393,10 +2421,18 @@ impl Shell {
                 frame.push((name.to_string(), snap));
             }
         }
-        // Clear the current binding: a bare `local x` starts unset/empty.
+        // Clear the current binding: a bare `local x` starts unset/empty and
+        // without inherited attributes (bash: a local does not inherit a global's
+        // `-i`/`-l`/`-u`/`-n`). `readonly` is intentionally left intact so a
+        // readonly global is not silently shadowed. Any flags on the `local`
+        // declaration itself are re-applied by the caller afterwards.
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
+        self.integer_attr.remove(name);
+        self.lower_attr.remove(name);
+        self.upper_attr.remove(name);
+        self.nameref_attr.remove(name);
         true
     }
 
@@ -8492,6 +8528,34 @@ mod tests {
     fn local_array_is_scoped() {
         let src = "a=(g1 g2); f() { local a=(l1 l2); echo \"${a[@]}\"; }; f; echo \"${a[@]}\"";
         assert_eq!(run(src).0, "l1 l2\ng1 g2\n");
+    }
+
+    #[test]
+    fn local_integer_attr_does_not_leak() {
+        // A `local -i` inside a function must not leave the integer attribute
+        // set on the global after return: a later plain global assignment must
+        // store the string verbatim, not evaluate it arithmetically.
+        let src = "f() { local -i n; n=2+2; echo $n; }; f; n=3+4; echo $n";
+        assert_eq!(run(src).0, "4\n3+4\n");
+    }
+
+    #[test]
+    fn local_restores_shadowed_integer_attr() {
+        // A bare `local g` does NOT inherit the global's `-i` attribute (bash
+        // semantics), so `g=9+9` stores the string verbatim inside the
+        // function. But the global's `-i` must be RESTORED on return, so the
+        // later global `g=5+5` is evaluated arithmetically.
+        let src = "declare -i g=1; f() { local g; g=9+9; echo $g; }; f; g=5+5; echo $g";
+        assert_eq!(run(src).0, "9+9\n10\n");
+    }
+
+    #[test]
+    fn local_nameref_does_not_leak() {
+        // A `local -n` reference must not leave the nameref attribute set
+        // globally after the function returns.
+        let src = "target=orig; f() { local -n ref=target; ref=changed; }; f; \
+                   echo $target; ref=plainvalue; echo $ref; echo $target";
+        assert_eq!(run(src).0, "changed\nplainvalue\nchanged\n");
     }
 
     #[test]

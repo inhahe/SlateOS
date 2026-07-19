@@ -54,7 +54,7 @@ pub fn parse_with_aliases(
 
 fn parse_tokens(toks: Vec<Tok>) -> Result<Program, ParseError> {
     let mut p = Parser { toks, pos: 0, line: 1 };
-    let prog = p.parse_program(&[])?;
+    let prog = p.parse_program(&[], true)?;
     if p.pos != p.toks.len() {
         // Leftover tokens — typically an unmatched `)` or reserved word.
         return Err(ParseError(format!(
@@ -161,11 +161,18 @@ impl Parser {
     }
 
     /// Parse a command list until EOF or one of `stops` (reserved words) or a
-    /// closing `)`.
-    fn parse_program(&mut self, stops: &[&str]) -> Result<Program, ParseError> {
+    /// closing `)`. When `allow_empty` is false — every compound-command
+    /// condition/body, subshell, and brace group — an empty list is a syntax
+    /// error, matching bash (`if ; then`, `( )`, `while true; do done`). Only the
+    /// top-level program and command substitutions (`$( )`) pass `true`. A bare
+    /// separator (`;`/`&`) with no preceding command is likewise rejected
+    /// (`; echo`, `echo a ; ; echo b`) — blank *lines* between commands are fine.
+    fn parse_program(&mut self, stops: &[&str], allow_empty: bool) -> Result<Program, ParseError> {
         let mut items = Vec::new();
         loop {
-            self.skip_separators();
+            // Blank lines between commands are fine; a bare `;`/`&` is not — it
+            // denotes an empty command, which bash rejects.
+            self.skip_newlines();
             if self.peek().is_none() || self.at_op(Op::RParen) {
                 break;
             }
@@ -173,6 +180,12 @@ impl Parser {
                 && stops.contains(&w.as_str())
             {
                 break;
+            }
+            if self.at_op(Op::Semi) || self.at_op(Op::Amp) {
+                return Err(ParseError(format!(
+                    "syntax error near unexpected token '{}'",
+                    self.token_display()
+                )));
             }
             // Stamp the line on which this item begins (before parsing consumes
             // any interior newlines of a multi-line and-or list).
@@ -217,6 +230,19 @@ impl Parser {
                     )));
                 }
             }
+        }
+        if items.is_empty() && !allow_empty {
+            // A compound condition/body reduced to nothing (`if ; then`, `( )`,
+            // `then fi`). bash reports the token that follows (the stop keyword,
+            // `)`, or EOF).
+            return Err(ParseError(if self.peek().is_none() {
+                "syntax error: unexpected end of file".to_string()
+            } else {
+                format!(
+                    "syntax error near unexpected token '{}'",
+                    self.token_display()
+                )
+            }));
         }
         Ok(Program { items })
     }
@@ -405,7 +431,7 @@ impl Parser {
     fn parse_brace_group(&mut self) -> Result<Command, ParseError> {
         // Consume `{`.
         self.pos += 1;
-        let body = self.parse_program(&["}"])?;
+        let body = self.parse_program(&["}"], false)?;
         self.expect_reserved("}")?;
         Ok(Command::BraceGroup(body))
     }
@@ -413,7 +439,7 @@ impl Parser {
     fn parse_subshell(&mut self) -> Result<Command, ParseError> {
         // Consume `(`.
         self.pos += 1;
-        let body = self.parse_program(&[])?;
+        let body = self.parse_program(&[], false)?;
         if !self.at_op(Op::RParen) {
             return Err(ParseError("expected ')'".into()));
         }
@@ -423,20 +449,20 @@ impl Parser {
 
     fn parse_if(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("if")?;
-        let cond = self.parse_program(&["then"])?;
+        let cond = self.parse_program(&["then"], false)?;
         self.expect_reserved("then")?;
-        let body = self.parse_program(&["elif", "else", "fi"])?;
+        let body = self.parse_program(&["elif", "else", "fi"], false)?;
         let mut elifs = Vec::new();
         while self.reserved_here().as_deref() == Some("elif") {
             self.pos += 1;
-            let c = self.parse_program(&["then"])?;
+            let c = self.parse_program(&["then"], false)?;
             self.expect_reserved("then")?;
-            let b = self.parse_program(&["elif", "else", "fi"])?;
+            let b = self.parse_program(&["elif", "else", "fi"], false)?;
             elifs.push((c, b));
         }
         let else_body = if self.reserved_here().as_deref() == Some("else") {
             self.pos += 1;
-            Some(self.parse_program(&["fi"])?)
+            Some(self.parse_program(&["fi"], false)?)
         } else {
             None
         };
@@ -451,9 +477,9 @@ impl Parser {
 
     fn parse_loop(&mut self, until: bool) -> Result<Command, ParseError> {
         self.expect_reserved(if until { "until" } else { "while" })?;
-        let cond = self.parse_program(&["do"])?;
+        let cond = self.parse_program(&["do"], false)?;
         self.expect_reserved("do")?;
-        let body = self.parse_program(&["done"])?;
+        let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
         Ok(Command::Loop(LoopClause { until, cond, body }))
     }
@@ -496,7 +522,7 @@ impl Parser {
             None
         };
         self.expect_reserved("do")?;
-        let body = self.parse_program(&["done"])?;
+        let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
         Ok(Command::For(ForClause { var, words, body }))
     }
@@ -533,7 +559,7 @@ impl Parser {
             None
         };
         self.expect_reserved("do")?;
-        let body = self.parse_program(&["done"])?;
+        let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
         Ok(Command::Select(SelectClause { var, words, body }))
     }
@@ -555,7 +581,7 @@ impl Parser {
         // An optional separator (`;`/newline) may precede `do`.
         self.skip_separators();
         self.expect_reserved("do")?;
-        let body = self.parse_program(&["done"])?;
+        let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
         Ok(Command::ForArith(ForArithClause {
             init,
@@ -2083,6 +2109,41 @@ mod tests {
         assert!(parse("{ echo a; }; echo b").is_ok());
         assert!(parse("( echo a ); echo b").is_ok());
         assert!(parse("x=$(for i in 1 2; do echo $i; done)").is_ok());
+    }
+
+    #[test]
+    fn empty_compound_list_rejected() {
+        // A compound-command condition or body that reduces to nothing is a
+        // syntax error in bash; osh previously accepted these (and an empty
+        // `while` condition even looped forever).
+        assert!(parse("( )").is_err());
+        assert!(parse("{ }").is_err());
+        assert!(parse("if true; then fi").is_err());
+        assert!(parse("if ; then echo x; fi").is_err());
+        assert!(parse("while ; do echo x; done").is_err());
+        assert!(parse("while false; do done").is_err());
+        assert!(parse("until false; do done").is_err());
+        assert!(parse("for x in a; do done").is_err());
+        // But an empty *command substitution* / top-level program is fine, as is
+        // any non-empty compound body.
+        assert!(parse("echo $()").is_ok());
+        assert!(parse("echo $( )").is_ok());
+        assert!(parse("").is_ok());
+        assert!(parse("( : )").is_ok());
+        assert!(parse("{ :; }").is_ok());
+        assert!(parse("if true; then :; fi").is_ok());
+    }
+
+    #[test]
+    fn bare_separator_rejected() {
+        // A `;` or `&` with no preceding command denotes an empty command, which
+        // bash rejects — but blank lines between commands are fine.
+        assert!(parse("; echo hi").is_err());
+        assert!(parse("& echo hi").is_err());
+        assert!(parse("echo a ; ; echo b").is_err());
+        assert!(parse("echo a\n\n\necho b").is_ok());
+        assert!(parse("echo a ; echo b ;").is_ok());
+        assert!(parse("echo a; echo b").is_ok());
     }
 
     #[test]

@@ -4137,6 +4137,7 @@ impl Shell {
             "enable" => self.builtin_enable(args, out, redir),
             "alias" => self.builtin_alias(args, out, redir),
             "unalias" => self.builtin_unalias(args),
+            "help" => self.builtin_help(args, out, redir),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
@@ -5070,6 +5071,96 @@ impl Shell {
         let zero = "0m0.000s";
         let text = format!("{zero} {zero}\n{zero} {zero}\n");
         self.write_bytes(out, redir, text.as_bytes())
+    }
+
+    /// `help [-dms] [pattern ...]` — display information about shell builtins.
+    /// With no pattern, list every builtin's one-line synopsis. Each pattern is
+    /// matched against builtin names as a shell glob (a bare name is an exact
+    /// topic); `-s` prints only the usage synopsis, `-d` prints only the short
+    /// description, and the default prints both. A pattern matching nothing is a
+    /// status-1 error (`no help topics match`).
+    fn builtin_help(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut short = false; // -s: synopsis only
+        let mut desc_only = false; // -d: description only
+        let mut patterns: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                patterns.extend_from_slice(&args[i + 1..]);
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| matches!(c, 's' | 'd' | 'm'))
+            {
+                for c in flags.chars() {
+                    match c {
+                        's' => short = true,
+                        'd' => desc_only = true,
+                        // -m (man-page-like format) is accepted; we render the
+                        // same content as the default long form.
+                        'm' => {}
+                        _ => {}
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            patterns.push(a.clone());
+            i += 1;
+        }
+
+        // No pattern: list every builtin's synopsis (sorted).
+        if patterns.is_empty() {
+            let mut names: Vec<&str> = HELP_TABLE.iter().map(|(n, _, _)| *n).collect();
+            names.sort_unstable();
+            let mut text = String::new();
+            for n in names {
+                if let Some((_, usage, _)) = HELP_TABLE.iter().find(|(hn, _, _)| hn == &n) {
+                    text.push_str(usage);
+                    text.push('\n');
+                }
+            }
+            return self.write_bytes(out, redir, text.as_bytes());
+        }
+
+        // Each pattern: collect matching topics (glob against builtin names).
+        let mut status = 0;
+        let mut text = String::new();
+        for pat in &patterns {
+            let mut matched = false;
+            let pat_chars: Vec<char> = pat.chars().collect();
+            for (name, usage, description) in HELP_TABLE {
+                let name_chars: Vec<char> = name.chars().collect();
+                if *name == pat || glob_match(&pat_chars, &name_chars, false) {
+                    matched = true;
+                    if desc_only {
+                        text.push_str(name);
+                        text.push_str(" - ");
+                        text.push_str(description);
+                        text.push('\n');
+                    } else if short {
+                        text.push_str(usage);
+                        text.push('\n');
+                    } else {
+                        // bash long form: usage line, then indented description.
+                        text.push_str(usage);
+                        text.push('\n');
+                        text.push_str("    ");
+                        text.push_str(description);
+                        text.push('\n');
+                    }
+                }
+            }
+            if !matched {
+                self.emit_stderr(format!("osh: help: no help topics match `{pat}'\n").as_bytes());
+                status = 1;
+            }
+        }
+        if !text.is_empty() {
+            self.write_bytes(out, redir, text.as_bytes());
+        }
+        status
     }
 
     /// True when `name` is a builtin that has not been disabled via `enable -n`.
@@ -8066,13 +8157,69 @@ fn param_replace(
 
 /// Every builtin command name the shell recognizes. Kept as a single source of
 /// truth so `is_builtin` and `enable -a` (which lists all builtins) never drift.
+/// One-line help entries for the `help` builtin: (name, usage synopsis, short
+/// description). Keep in sync with `BUILTIN_NAMES` / the dispatch table.
+const HELP_TABLE: &[(&str, &str, &str)] = &[
+    (":", ": [arguments]", "Null command; expand arguments and return success."),
+    ("true", "true", "Return a successful (zero) exit status."),
+    ("false", "false", "Return an unsuccessful (non-zero) exit status."),
+    ("cd", "cd [-L|-P] [dir]", "Change the shell working directory."),
+    ("pwd", "pwd [-L|-P]", "Print the name of the current working directory."),
+    ("pushd", "pushd [dir | +N | -N]", "Add a directory to the directory stack."),
+    ("popd", "popd [+N | -N]", "Remove a directory from the directory stack."),
+    ("dirs", "dirs [-clpv] [+N | -N]", "Display the directory stack."),
+    ("echo", "echo [-neE] [arg ...]", "Write arguments to standard output."),
+    ("printf", "printf [-v var] format [arguments]", "Format and print arguments."),
+    ("export", "export [-p] [name[=value] ...]", "Set export attribute for shell variables."),
+    ("declare", "declare [-aAfFgilnprtux] [name[=value] ...]", "Declare variables and give them attributes."),
+    ("typeset", "typeset [-aAfFgilnprtux] [name[=value] ...]", "Declare variables (synonym for declare)."),
+    ("local", "local [-aAilnrux] name[=value] ...", "Define local variables in a function."),
+    ("readonly", "readonly [-aApf] [name[=value] ...]", "Mark shell variables as unchangeable."),
+    ("shopt", "shopt [-psuq] [optname ...]", "Set and unset shell options."),
+    ("unset", "unset [-fv] name ...", "Unset values and attributes of variables and functions."),
+    ("set", "set [-abefuxCo] [--] [arg ...]", "Set or unset shell options and positional parameters."),
+    ("shift", "shift [n]", "Shift positional parameters."),
+    ("getopts", "getopts optstring name [arg ...]", "Parse option arguments."),
+    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [array]", "Read lines into an indexed array variable."),
+    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [array]", "Read lines into an array (synonym for mapfile)."),
+    ("command", "command [-pVv] name [arg ...]", "Execute a command bypassing shell functions."),
+    ("builtin", "builtin [shell-builtin [arg ...]]", "Execute a shell builtin."),
+    ("read", "read [-raspd delim] [-nN count] [name ...]", "Read a line from standard input and split it."),
+    ("test", "test [expr]", "Evaluate a conditional expression."),
+    ("[", "[ expr ]", "Evaluate a conditional expression (test)."),
+    ("let", "let arg [arg ...]", "Evaluate arithmetic expressions."),
+    ("eval", "eval [arg ...]", "Execute arguments as a shell command."),
+    ("source", "source filename [arguments]", "Execute commands from a file in the current shell."),
+    (".", ". filename [arguments]", "Execute commands from a file (synonym for source)."),
+    ("type", "type [-afptP] name ...", "Display information about command type."),
+    ("trap", "trap [-lp] [[action] signal_spec ...]", "Trap signals and other events."),
+    ("jobs", "jobs [-lp] [jobspec ...]", "Display status of jobs."),
+    ("wait", "wait [-n] [-p var] [id ...]", "Wait for jobs to complete and report status."),
+    ("disown", "disown [-h] [-ar] [jobspec ...]", "Remove jobs from the current shell."),
+    ("fg", "fg [jobspec]", "Move a job to the foreground."),
+    ("bg", "bg [jobspec ...]", "Move jobs to the background."),
+    ("caller", "caller [expr]", "Return the context of the current subroutine call."),
+    ("times", "times", "Display process times."),
+    ("hash", "hash [-lr] [-p path] [-dt] [name ...]", "Remember or display program locations."),
+    ("umask", "umask [-Sp] [mode]", "Display or set the file mode creation mask."),
+    ("exec", "exec [command [arguments]]", "Replace the shell with the given command."),
+    ("exit", "exit [n]", "Exit the shell."),
+    ("return", "return [n]", "Return from a shell function."),
+    ("break", "break [n]", "Exit for, while, until, or select loops."),
+    ("continue", "continue [n]", "Resume for, while, until, or select loops."),
+    ("enable", "enable [-a] [-n] [name ...]", "Enable and disable shell builtins."),
+    ("alias", "alias [-p] [name[=value] ...]", "Define or display aliases."),
+    ("unalias", "unalias [-a] name [name ...]", "Remove each name from the list of aliases."),
+    ("help", "help [-dms] [pattern ...]", "Display information about builtin commands."),
+];
+
 const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
     "exec",
-    "exit", "return", "break", "continue", "enable", "alias", "unalias",
+    "exit", "return", "break", "continue", "enable", "alias", "unalias", "help",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -10154,6 +10301,30 @@ mod tests {
         assert_eq!(run("set -xu; echo $-").0, "huxB\n");
         // Disabling drops the flag again.
         assert_eq!(run("set -e; set +e; echo $-").0, "hB\n");
+    }
+
+    #[test]
+    fn builtin_help() {
+        // `help NAME` prints the usage synopsis then an indented description.
+        let out = run("help cd").0;
+        assert!(out.contains("cd [-L|-P] [dir]"), "got: {out:?}");
+        assert!(out.contains("    Change the shell working directory."), "got: {out:?}");
+        // `-s` prints only the synopsis, no description line.
+        let out = run("help -s pwd").0;
+        assert_eq!(out, "pwd [-L|-P]\n");
+        // `-d` prints only the short description.
+        assert_eq!(run("help -d true").0, "true - Return a successful (zero) exit status.\n");
+        // A glob pattern matches multiple topics.
+        let out = run("help -s 'tru*'").0;
+        assert_eq!(out, "true\n");
+        // No-arg lists every builtin synopsis (sorted); spot-check a couple.
+        let out = run("help").0;
+        assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");
+        assert!(out.contains("help [-dms] [pattern ...]"), "got: {out:?}");
+        // Unknown topic is a status-1 error with no stdout.
+        let (o, code) = run("help nosuchbuiltin");
+        assert_eq!(o, "");
+        assert_eq!(code, 1);
     }
 
     #[test]

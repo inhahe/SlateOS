@@ -36,8 +36,10 @@ fn ind(level: usize) -> String {
 pub fn unparse_function(name: &str, body: &Program) -> String {
     let mut s = String::new();
     s.push_str(name);
-    s.push_str(" () \n{\n");
-    let inner = program_block(body, 1);
+    // bash prints the opening brace on its own line with a trailing space
+    // (`{ \n`), matching `declare -f` / `type` output byte-for-byte.
+    s.push_str(" () \n{ \n");
+    let inner = program_block(body, 1, false);
     if inner.is_empty() {
         // An empty body still needs a no-op so it re-parses.
         s.push_str(&ind(1));
@@ -54,12 +56,26 @@ pub fn unparse_function(name: &str, body: &Program) -> String {
 }
 
 /// Render a whole program as an indented block: one item per line at `level`.
+///
+/// `terminate_last` controls the trailing separator on the final statement, to
+/// match bash's `declare -f` deparser: a compound *clause* body (`then`/`else`/
+/// `do`) terminates every statement — including the last — with `;`, whereas a
+/// group body (`{ … }`, a subshell, the function body itself, and `case`
+/// clauses) leaves the last statement unterminated. Non-final statements always
+/// take a `;` separator (a backgrounded statement's ` &` is its own separator).
 #[must_use]
-pub fn program_block(prog: &Program, level: usize) -> String {
+pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> String {
     let mut out = String::new();
-    for item in &prog.items {
+    let n = prog.items.len();
+    for (i, item) in prog.items.iter().enumerate() {
         out.push_str(&ind(level));
         out.push_str(&item_stmt(item, level));
+        let is_last = i + 1 == n;
+        // `&` already terminates a backgrounded statement; otherwise separate
+        // with `;`, and terminate the last one only in clause-body context.
+        if !item.background && (!is_last || terminate_last) {
+            out.push(';');
+        }
         out.push('\n');
     }
     out
@@ -154,33 +170,37 @@ fn command_block(cmd: &Command, level: usize) -> String {
             let mut s = String::from("if ");
             s.push_str(&program_inline(&c.cond));
             s.push_str("; then\n");
-            s.push_str(&program_block(&c.body, level + 1));
+            s.push_str(&program_block(&c.body, level + 1, true));
             for (econd, ebody) in &c.elifs {
                 s.push_str(&ind(level));
                 s.push_str("elif ");
                 s.push_str(&program_inline(econd));
                 s.push_str("; then\n");
-                s.push_str(&program_block(ebody, level + 1));
+                s.push_str(&program_block(ebody, level + 1, true));
             }
             if let Some(eb) = &c.else_body {
                 s.push_str(&ind(level));
                 s.push_str("else\n");
-                s.push_str(&program_block(eb, level + 1));
+                s.push_str(&program_block(eb, level + 1, true));
             }
             s.push_str(&ind(level));
             s.push_str("fi");
             s
         }
         Command::Loop(c) => {
+            // `while`/`until` keep `do` on the same line as the condition
+            // (`while COND; do`), unlike `for`/`select` (see below).
             let mut s = String::from(if c.until { "until " } else { "while " });
             s.push_str(&program_inline(&c.cond));
             s.push_str("; do\n");
-            s.push_str(&program_block(&c.body, level + 1));
+            s.push_str(&program_block(&c.body, level + 1, true));
             s.push_str(&ind(level));
             s.push_str("done");
             s
         }
         Command::For(c) => {
+            // bash's deparser puts `do` on its own line for `for` (the word list
+            // is terminated with `;`, then `do` at the loop's indent level).
             let mut s = format!("for {}", c.var);
             if let Some(words) = &c.words {
                 s.push_str(" in");
@@ -189,15 +209,21 @@ fn command_block(cmd: &Command, level: usize) -> String {
                     s.push_str(&word_src(w));
                 }
             }
-            s.push_str("; do\n");
-            s.push_str(&program_block(&c.body, level + 1));
+            s.push_str(";\n");
+            s.push_str(&ind(level));
+            s.push_str("do\n");
+            s.push_str(&program_block(&c.body, level + 1, true));
             s.push_str(&ind(level));
             s.push_str("done");
             s
         }
         Command::ForArith(c) => {
-            let mut s = format!("for (( {}; {}; {} )); do\n", c.init, c.cond, c.update);
-            s.push_str(&program_block(&c.body, level + 1));
+            // `for ((init; cond; upd))` with no inner-paren padding and `do` on
+            // its own line, matching bash.
+            let mut s = format!("for (({}; {}; {}))\n", c.init, c.cond, c.update);
+            s.push_str(&ind(level));
+            s.push_str("do\n");
+            s.push_str(&program_block(&c.body, level + 1, true));
             s.push_str(&ind(level));
             s.push_str("done");
             s
@@ -211,8 +237,10 @@ fn command_block(cmd: &Command, level: usize) -> String {
                     s.push_str(&word_src(w));
                 }
             }
-            s.push_str("; do\n");
-            s.push_str(&program_block(&c.body, level + 1));
+            s.push_str(";\n");
+            s.push_str(&ind(level));
+            s.push_str("do\n");
+            s.push_str(&program_block(&c.body, level + 1, true));
             s.push_str(&ind(level));
             s.push_str("done");
             s
@@ -220,20 +248,22 @@ fn command_block(cmd: &Command, level: usize) -> String {
         Command::Function(f) => {
             let mut s = format!("{} () \n", f.name);
             s.push_str(&ind(level));
-            s.push_str("{\n");
-            s.push_str(&program_block(&f.body, level + 1));
+            s.push_str("{ \n");
+            s.push_str(&program_block(&f.body, level + 1, false));
             s.push_str(&ind(level));
             s.push('}');
             s
         }
         Command::Case(c) => {
-            let mut s = format!("case {} in\n", word_src(&c.word));
+            // bash prints `case WORD in ` with a trailing space before the
+            // newline.
+            let mut s = format!("case {} in \n", word_src(&c.word));
             for item in &c.items {
                 let pats: Vec<String> = item.patterns.iter().map(word_src).collect();
                 s.push_str(&ind(level + 1));
                 s.push_str(&pats.join("|"));
                 s.push_str(")\n");
-                s.push_str(&program_block(&item.body, level + 2));
+                s.push_str(&program_block(&item.body, level + 2, false));
                 s.push_str(&ind(level + 1));
                 s.push_str(match item.term {
                     crate::ast::CaseTerm::Break => ";;",
@@ -247,15 +277,16 @@ fn command_block(cmd: &Command, level: usize) -> String {
             s
         }
         Command::BraceGroup(prog) => {
-            let mut s = String::from("{\n");
-            s.push_str(&program_block(prog, level + 1));
+            // bash prints the opening brace with a trailing space (`{ `).
+            let mut s = String::from("{ \n");
+            s.push_str(&program_block(prog, level + 1, false));
             s.push_str(&ind(level));
             s.push('}');
             s
         }
         Command::Subshell(prog) => {
             let mut s = String::from("(\n");
-            s.push_str(&program_block(prog, level + 1));
+            s.push_str(&program_block(prog, level + 1, false));
             s.push_str(&ind(level));
             s.push(')');
             s
@@ -744,7 +775,8 @@ mod tests {
     #[test]
     fn simple_command_body() {
         let d = dump_fn("f() { echo hello world; }", "f");
-        assert!(d.starts_with("f () \n{\n"), "dump: {d:?}");
+        // bash prints the opening brace with a trailing space: `{ \n`.
+        assert!(d.starts_with("f () \n{ \n"), "dump: {d:?}");
         assert!(d.contains("echo hello world"), "dump: {d:?}");
         assert!(d.ends_with("}\n"), "dump: {d:?}");
     }
@@ -762,7 +794,10 @@ mod tests {
     #[test]
     fn for_and_pipeline_body() {
         let d = dump_fn("g() { for x in 1 2 3; do echo $x | cat; done; }", "g");
-        assert!(d.contains("for x in 1 2 3; do"), "dump: {d:?}");
+        // bash puts `do` on its own line for `for` loops (the word list is
+        // terminated with `;`, then `do` at the loop indent).
+        assert!(d.contains("for x in 1 2 3;\n"), "dump: {d:?}");
+        assert!(d.contains("\n    do\n"), "dump: {d:?}");
         assert!(d.contains("echo $x | cat"), "dump: {d:?}");
         assert_roundtrip("g() { for x in 1 2 3; do echo $x | cat; done; }", "g");
     }
@@ -770,6 +805,34 @@ mod tests {
     #[test]
     fn case_body_roundtrips() {
         assert_roundtrip("h() { case $1 in a) echo A ;; b|c) echo BC ;; *) echo other ;; esac; }", "h");
+    }
+
+    #[test]
+    fn declare_f_matches_bash_layout() {
+        // Byte-for-byte parity with bash's `declare -f` deparser for the common
+        // constructs: opening `{ ` with trailing space, every statement `;`-
+        // terminated except the final one before `}`, `do` on its own line for
+        // `for`, and `case WORD in ` with a trailing space.
+        assert_eq!(
+            dump_fn("f() { echo a; echo b; }", "f"),
+            "f () \n{ \n    echo a;\n    echo b\n}\n"
+        );
+        assert_eq!(
+            dump_fn("f() { if true; then echo a; else echo b; fi; }", "f"),
+            "f () \n{ \n    if true; then\n        echo a;\n    else\n        echo b;\n    fi\n}\n"
+        );
+        assert_eq!(
+            dump_fn("f() { while false; do echo c; done; }", "f"),
+            "f () \n{ \n    while false; do\n        echo c;\n    done\n}\n"
+        );
+        assert_eq!(
+            dump_fn("f() { for i in 1 2; do echo $i; done; }", "f"),
+            "f () \n{ \n    for i in 1 2;\n    do\n        echo $i;\n    done\n}\n"
+        );
+        assert_eq!(
+            dump_fn("f() { case $x in a) echo 1;; esac; }", "f"),
+            "f () \n{ \n    case $x in \n        a)\n            echo 1\n        ;;\n    esac\n}\n"
+        );
     }
 
     #[test]

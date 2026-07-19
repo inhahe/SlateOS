@@ -12127,7 +12127,7 @@ mod tests {
         assert_eq!(run("type echo").0, "echo is a shell builtin\n");
         assert_eq!(run("type while").0, "while is a shell keyword\n");
         // `type g` now prints the reconstructed function body after the header.
-        assert_eq!(run("g() { :; }; type g").0, "g is a function\ng () \n{\n    :\n}\n");
+        assert_eq!(run("g() { :; }; type g").0, "g is a function\ng () \n{ \n    :\n}\n");
     }
 
     #[test]

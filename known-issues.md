@@ -40,6 +40,43 @@ when invoked via `-c`, and have the fatal-expansion handlers return
 `Flow::Exit(127)` when `c_mode` is set (both the `unbound_error` and the
 command-word/prefix `arith_error` branches). Add a test covering both modes.
 
+### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19
+
+**Where:** `userspace/oils/src/unparse.rs` `command_block` (`If` elif branch,
+`Subshell`, `Function` nested case) and `item_stmt`/`program_block`
+(background items).
+
+**What:** After the 2026-07-19 byte-fidelity pass, osh's `declare -f`/`type`
+output is byte-identical to bash for the common constructs (simple lists,
+`if/then/else`, `while`/`until`, `for … in`, `for ((;;))`, `case`, `select`,
+nested brace groups). Four bash deparser idiosyncrasies remain unmatched;
+all four still emit **valid, re-parsable bash** with equivalent semantics —
+only the exact whitespace/keyword layout differs:
+
+1. **`elif` → nested `else if`.** bash rewrites `if a; then …; elif c; then
+   …; fi` into `else\n if c; then …; fi` (deeper indentation, extra `fi`).
+   osh prints a literal `elif …; then` clause.
+2. **Subshell layout.** bash prints `( echo a;\n echo b );` (first statement
+   glued to the `(`, continuation dedented). osh uses a clean indented block
+   (`(\n    echo a;\n    echo b\n)`).
+3. **Backgrounded statement in a list.** bash keeps `sleep 1 & echo b` on one
+   line (`&` as an inline connector). osh puts each `Item` on its own line, so
+   `sleep 1 &` and `echo b` split across two lines.
+4. **`function` keyword on nested definitions.** bash prints a function
+   defined *inside* another function as `function nested () ` (with the
+   `function` keyword); top-level defs use `nested () `. osh always omits
+   `function`.
+
+**Why deferred:** these are rare constructs (subshell/background/nested-fn in
+a function body) or a purely cosmetic restructuring (elif), and osh's output
+round-trips correctly. Matching bash exactly means replicating quirks with
+little practical benefit.
+
+**Proper fix (if pursued):** (1) render elif chains as nested `else { if … }`
+with incremented indent and a matching `fi` per level; (2) special-case the
+subshell/background inline layouts; (3) thread a "nested function" flag so
+inner `Function` defs prepend `function `.
+
 ### TD-OILS-ASSOC-KEY-TRIM. `osh` trims leading/trailing whitespace from an unquoted associative-array subscript key — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` associative assignment/read

@@ -1668,7 +1668,7 @@ stderr. Ultimately this is another symptom of the collapsed-`RedirPlan`
 order-loss; the long-term proper fix is an ordered fd-op executor shared by
 all command kinds.
 
-### TD-OILS-ARRAY-EMPTY-ASSIGNED. `declare -p` / `@A` can't distinguish a never-assigned empty array from an assigned-empty one — MINOR 2026-07-19
+### TD-OILS-ARRAY-EMPTY-ASSIGNED. `declare -p` / `@A` can't distinguish a never-assigned empty array from an assigned-empty one — RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `format_var_assignment` (~8792) and
 the array/assoc state (`Shell::arrays`, `Shell::assoc`). Surfaces in `declare -p`,
@@ -1703,6 +1703,22 @@ was reverted: it fixed the `e=()` case but regressed the far more common
 associative), set it at each value-assignment site, honour it in
 `format_var_assignment` (empty + assigned → `name=()`, empty + not-assigned →
 bare `name`), clone it in `clone_for_subshell`, and remove on `unset`.
+
+**RESOLVED (2026-07-19):** implemented as `Shell::array_valued: HashSet<String>`,
+mirroring the `integer_attr` lifecycle. Set at every value-assignment site
+(the `AssignRhs::Array` indexed + assoc literals — including empty `a=()`; the
+indexed element-assign and `a+=` element-0 paths; `assoc_set`; `read -a`;
+`mapfile`/`readarray`), **not** on a bare `declare -a`/`-A`. Cloned into
+subshells, snapshot/restored by `local` (added `array_valued` to `VarSnapshot`),
+and removed on `unset` (whole variable). `format_var_assignment` now emits
+`name=()` for an empty-but-valued array/assoc and the bare `name` otherwise.
+Fixed the related `read -a arr < /dev/null` bug in the same change: `read -a`
+now resets the target array to empty up front (bash semantics), so an EOF with
+no data leaves a defined empty array and a pre-existing array is replaced rather
+than merged. Tests: `declare_p_empty_array_distinguishes_assigned_from_declared`,
+`read_a_creates_empty_array_on_eof`. Verified against MSYS bash across
+element-assign-then-unset, `+=`, `local -a`, `mapfile`, and pre-existing-array
+cases. 548 tests pass; clippy + slateos builds clean.
 
 ### TD-OILS-PRINTF-ERRORDER. `printf` emits all invalid-number errors before its stdout, not interleaved — MINOR 2026-07-19
 

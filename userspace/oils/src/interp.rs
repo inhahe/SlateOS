@@ -196,6 +196,7 @@ struct VarSnapshot {
     upper: bool,
     nameref: bool,
     readonly: bool,
+    array_valued: bool,
 }
 
 /// A background job started with `&`. Tracks the spawned child so `wait`/`jobs`
@@ -465,6 +466,16 @@ pub struct Shell {
     /// are transparently redirected to that target (following chains, with a
     /// depth guard against cycles). Inherited by subshell clones.
     nameref_attr: HashSet<String>,
+    /// Array names (indexed or associative) that have been *assigned a value*
+    /// at least once — via a literal (`a=(…)`, including the empty `a=()`), an
+    /// element assignment (`a[i]=v`), an append, or a value-carrying `declare`.
+    /// This distinguishes an assigned-but-empty array (bash `declare -p` shows
+    /// `declare -a a=()`) from one merely *declared* with `declare -a a` and
+    /// never given a value (shown as the bare `declare -a a`). Once set it
+    /// stays set until the whole variable is unset — emptying every element
+    /// (`unset 'a[0]'`) does not clear it, matching bash's has-a-value flag.
+    /// Inherited by subshell clones and scoped by `local`.
+    array_valued: HashSet<String>,
     /// The directory stack below the current directory, managed by
     /// `pushd`/`popd`/`dirs`. Element 0 is the directory `popd` would return to;
     /// the *current* directory (the process cwd) is conceptually the top of the
@@ -583,6 +594,7 @@ impl Shell {
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
+            array_valued: HashSet::new(),
             lower_attr: HashSet::new(),
             upper_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
@@ -2376,6 +2388,7 @@ impl Shell {
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
+            array_valued: self.array_valued.clone(),
             lower_attr: self.lower_attr.clone(),
             upper_attr: self.upper_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
@@ -2612,6 +2625,10 @@ impl Shell {
                         } else {
                             None
                         };
+                        // An element assignment gives the array a value (bash's
+                        // has-a-value flag): even after every element is later
+                        // unset, `declare -p` shows `=()`, not the bare form.
+                        self.array_valued.insert(a.name.clone());
                         let arr = self.arrays.entry(a.name.clone()).or_default();
                         match int_val {
                             Some(n) => {
@@ -2648,8 +2665,11 @@ impl Shell {
                             .unwrap_or(0);
                         let sum = base.wrapping_add(self.eval_int_assign(&val));
                         self.vars.insert(a.name.clone(), sum.to_string());
-                    } else if let Some(arr) = self.arrays.get_mut(&a.name) {
-                        arr.entry(0).or_default().push_str(&val);
+                    } else if self.arrays.contains_key(&a.name) {
+                        self.array_valued.insert(a.name.clone());
+                        if let Some(arr) = self.arrays.get_mut(&a.name) {
+                            arr.entry(0).or_default().push_str(&val);
+                        }
                     } else {
                         let cur = self.vars.get(&a.name).cloned().unwrap_or_default();
                         self.vars.insert(a.name.clone(), cur + &val);
@@ -2663,6 +2683,8 @@ impl Shell {
             }
             AssignRhs::Array(items) if is_assoc => {
                 // Associative literal: `m=([k]=v …)` (m already `declare -A`).
+                // The literal (even the empty `m=()`) gives the array a value.
+                self.array_valued.insert(a.name.clone());
                 if !a.append {
                     self.assoc.insert(a.name.clone(), Vec::new());
                 }
@@ -2687,7 +2709,9 @@ impl Shell {
                 // Indexed literal: positional elements append at the running
                 // index; `[i]=v` elements place at an explicit index. Stored
                 // sparsely (a BTreeMap), so gaps between explicit indices are
-                // absent rather than filled with empty strings.
+                // absent rather than filled with empty strings. The literal
+                // (even the empty `a=()`) gives the array a value.
+                self.array_valued.insert(a.name.clone());
                 let mut elems: BTreeMap<usize, String> = if a.append {
                     self.arrays.get(&a.name).cloned().unwrap_or_default()
                 } else {
@@ -2730,6 +2754,9 @@ impl Shell {
 
     /// Set an associative-array element, creating the array if needed.
     fn assoc_set(&mut self, name: &str, key: String, val: String, append: bool) {
+        // Any element write gives the array a value (bash's has-a-value flag),
+        // so an emptied assoc still shows `=()` under `declare -p`.
+        self.array_valued.insert(name.to_string());
         let map = self.assoc.entry(name.to_string()).or_default();
         if let Some(slot) = map.iter_mut().find(|(k, _)| *k == key) {
             if append {
@@ -4085,6 +4112,7 @@ impl Shell {
             upper: self.upper_attr.contains(name),
             nameref: self.nameref_attr.contains(name),
             readonly: self.readonly.contains(name),
+            array_valued: self.array_valued.contains(name),
         }
     }
 
@@ -4114,6 +4142,7 @@ impl Shell {
         Self::restore_flag(&mut self.upper_attr, name, snap.upper);
         Self::restore_flag(&mut self.nameref_attr, name, snap.nameref);
         Self::restore_flag(&mut self.readonly, name, snap.readonly);
+        Self::restore_flag(&mut self.array_valued, name, snap.array_valued);
     }
 
     /// Set-or-clear `name`'s membership in an attribute set to match `present`.
@@ -4151,6 +4180,7 @@ impl Shell {
         self.lower_attr.remove(name);
         self.upper_attr.remove(name);
         self.nameref_attr.remove(name);
+        self.array_valued.remove(name);
         true
     }
 
@@ -8937,14 +8967,18 @@ impl Shell {
     /// Shared by `declare -p` and the bare `set` variable listing.
     fn format_var_assignment(&self, name: &str) -> Option<String> {
         if let Some(map) = self.assoc.get(name) {
-            // An empty associative array prints as the bare name (`declare -A m`)
-            // — but see TD-OILS-ARRAY-EMPTY-ASSIGNED: bash actually distinguishes
-            // a never-assigned `declare -A m` (bare) from an assigned-empty
-            // `m=()` (`m=()`), which osh's model cannot yet tell apart. A
-            // non-empty associative array prints with a trailing space before the
-            // closing paren (`([k]="v" )`).
+            // bash distinguishes a never-assigned `declare -A m` (printed as the
+            // bare name) from an assigned-but-empty `m=()` (printed `m=()`).
+            // `array_valued` records whether the name has ever been given a
+            // value; an empty map without that flag is a bare declaration. A
+            // non-empty associative array prints with a trailing space before
+            // the closing paren (`([k]="v" )`).
             if map.is_empty() {
-                return Some(name.to_string());
+                return Some(if self.array_valued.contains(name) {
+                    format!("{name}=()")
+                } else {
+                    name.to_string()
+                });
             }
             let body = map
                 .iter()
@@ -8954,10 +8988,15 @@ impl Shell {
             return Some(format!("{name}=({body} )"));
         }
         if let Some(arr) = self.arrays.get(name) {
-            // An empty indexed array likewise prints as the bare name
-            // (`declare -a e`) — see TD-OILS-ARRAY-EMPTY-ASSIGNED.
+            // As with associative arrays, an assigned-but-empty indexed array
+            // (`a=()`) prints as `a=()` while a never-assigned `declare -a a`
+            // prints as the bare name.
             if arr.is_empty() {
-                return Some(name.to_string());
+                return Some(if self.array_valued.contains(name) {
+                    format!("{name}=()")
+                } else {
+                    name.to_string()
+                });
             }
             let body = arr
                 .iter()
@@ -9726,6 +9765,7 @@ impl Shell {
             self.lower_attr.remove(a);
             self.upper_attr.remove(a);
             self.nameref_attr.remove(a);
+            self.array_valued.remove(a);
         }
         0
     }
@@ -10213,6 +10253,21 @@ impl Shell {
             return i32::from(!self.input_available_now(rd_stdin, rd_redir));
         }
 
+        // `read -a array` resets the target array to empty up front (bash), so
+        // even an EOF with no data leaves a defined, empty array (`declare -p`
+        // shows `=()`), and a pre-existing array is replaced rather than merged
+        // into. A readonly target rejects the read before any reset.
+        if let Some(arr) = &array {
+            if self.readonly.contains(arr) {
+                self.emit_stderr(format!("osh: {arr}: readonly variable\n").as_bytes());
+                return 1;
+            }
+            self.vars.remove(arr);
+            self.assoc.remove(arr);
+            self.array_valued.insert(arr.clone());
+            self.arrays.insert(arr.clone(), BTreeMap::new());
+        }
+
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
         // record reader; otherwise a plain newline-terminated line.
         let (line, terminated) = if delim.is_some() || nchars.is_some() {
@@ -10243,12 +10298,8 @@ impl Shell {
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
 
         if let Some(arr) = array {
-            // A readonly array target rejects the whole read (status 1, no
-            // mutation), matching bash's `read -a`.
-            if self.readonly.contains(&arr) {
-                self.emit_stderr(format!("osh: {arr}: readonly variable\n").as_bytes());
-                return 1;
-            }
+            // The target was already reset to empty (and readonly-checked) up
+            // front; here we fill it with the split record.
             // `-N` assigns the raw record without IFS splitting: a single
             // element holding exactly the characters read (bash).
             let map: BTreeMap<usize, String> = if exact {
@@ -10259,6 +10310,7 @@ impl Shell {
             };
             self.vars.remove(&arr);
             self.assoc.remove(&arr);
+            self.array_valued.insert(arr.clone());
             self.arrays.insert(arr, map);
             return eof_status;
         }
@@ -10404,6 +10456,7 @@ impl Shell {
         }
         self.vars.remove(&array);
         self.assoc.remove(&array);
+        self.array_valued.insert(array.clone());
         self.arrays.insert(array, elems);
         0
     }
@@ -18801,6 +18854,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -A b=([k]=v); b=scalar; echo \"${b[0]}-${b[k]}\"").0,
             "scalar-v\n"
+        );
+    }
+
+    #[test]
+    fn declare_p_empty_array_distinguishes_assigned_from_declared() {
+        // bash distinguishes an assigned-but-empty array (`a=()` → `=()`) from
+        // one merely declared with `declare -a a` and never given a value
+        // (bare `declare -a a`). osh tracks a per-name has-a-value flag.
+        assert_eq!(run("a=(); declare -p a").0, "declare -a a=()\n");
+        assert_eq!(run("declare -A m=(); declare -p m").0, "declare -A m=()\n");
+        assert_eq!(run("declare -a a; declare -p a").0, "declare -a a\n");
+        assert_eq!(run("declare -A m; declare -p m").0, "declare -A m\n");
+        // An element assignment gives the array a value even after every
+        // element is unset — the flag is sticky until the whole var is unset.
+        assert_eq!(
+            run("declare -a a; a[3]=x; unset 'a[3]'; declare -p a").0,
+            "declare -a a=()\n"
+        );
+        assert_eq!(
+            run("declare -A m; m[k]=v; unset 'm[k]'; declare -p m").0,
+            "declare -A m=()\n"
+        );
+        // `+=` on an empty array is still an assignment.
+        assert_eq!(run("a=(); a+=(); declare -p a").0, "declare -a a=()\n");
+        // Combined attribute + empty literal.
+        assert_eq!(run("declare -ai a=(); declare -p a").0, "declare -ai a=()\n");
+        // Unsetting the whole variable clears the flag.
+        assert_eq!(
+            run("a=(); unset a; declare -a a; declare -p a").0,
+            "declare -a a\n"
+        );
+    }
+
+    #[test]
+    fn read_a_creates_empty_array_on_eof() {
+        // bash's `read -a arr` resets the target to empty up front, so even an
+        // EOF with no data leaves a defined, empty array (and a pre-existing
+        // array is replaced, not merged).
+        assert_eq!(
+            run("read -a arr < /dev/null; echo rc=$?; declare -p arr").0,
+            "rc=1\ndeclare -a arr=()\n"
+        );
+        assert_eq!(
+            run("arr=(old); read -a arr < /dev/null; declare -p arr").0,
+            "declare -a arr=()\n"
+        );
+        assert_eq!(
+            run("read -a arr <<< 'x y'; declare -p arr").0,
+            "declare -a arr=([0]=\"x\" [1]=\"y\")\n"
         );
     }
 

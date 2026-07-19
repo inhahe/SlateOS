@@ -276,6 +276,15 @@ pub struct Shell {
     /// snapshot of each fd's *remaining* bytes with an independent offset (same
     /// approximation as [`Shell::exec_stdin`]).
     open_fds: std::collections::HashMap<i32, RefCell<io::Cursor<Vec<u8>>>>,
+    /// User-space table of non-standard *write* descriptors (fd ≥ 3) opened by a
+    /// redirection-only `exec 3> file` / `exec 3>> file`. Each entry is a shared
+    /// [`std::fs::File`] handle; `echo … >&3` (builtins) and `cmd >&3`
+    /// (externals) route their stdout to it via `RedirPlan::stdout_to_fd`, and
+    /// `exec 3>&-` removes it. Persistent across commands. A subshell clone
+    /// shares the same `Arc<File>` (bash: a subshell inherits the fd, so writes
+    /// share one OS offset). Per-command write redirects to fd ≥ 3 and duplicating
+    /// a write-fd *onto* a standard fd (`exec 3>&1`) are not yet modelled.
+    open_write_fds: std::collections::HashMap<i32, std::sync::Arc<std::fs::File>>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -426,6 +435,7 @@ impl Shell {
             exec_stderr: None,
             exec_stdin: None,
             open_fds: std::collections::HashMap::new(),
+            open_write_fds: std::collections::HashMap::new(),
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -1672,6 +1682,13 @@ impl Shell {
                     copy.set_position(pos);
                     (fd, RefCell::new(copy))
                 })
+                .collect(),
+            // Write descriptors share the same file handle (bash: a subshell
+            // inherits the fd, so writes go to one OS offset).
+            open_write_fds: self
+                .open_write_fds
+                .iter()
+                .map(|(&fd, f)| (fd, std::sync::Arc::clone(f)))
                 .collect(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
@@ -3209,7 +3226,8 @@ impl Shell {
         }
 
         // stdout
-        let capturing = matches!(out, Out::Capture(_)) && redir.stdout.is_none();
+        let capturing =
+            matches!(out, Out::Capture(_)) && redir.stdout.is_none() && redir.stdout_to_fd.is_none();
         match &redir.stdout {
             Some((path, append)) => match open_out(path, *append) {
                 Ok(f) => {
@@ -3221,6 +3239,21 @@ impl Shell {
                     return;
                 }
             },
+            None if redir.stdout_to_fd.is_some() => {
+                // `cmd >&N` (N ≥ 3): the child's fd 1 is a user-space write
+                // descriptor opened by `exec N> file`.
+                let n = redir.stdout_to_fd.unwrap_or(0);
+                match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
+                    Some(Ok(f)) => {
+                        cmd.stdout(Stdio::from(f));
+                    }
+                    _ => {
+                        self.errln(&format!("osh: {n}: Bad file descriptor"));
+                        self.last_status = 1;
+                        return;
+                    }
+                }
+            }
             None => {
                 if redir.stdout_to_stderr {
                     // `1>&2` and fd 2 is not a file: send fd 1 to the current
@@ -3281,7 +3314,19 @@ impl Shell {
         // For `2>&1` with a captured stdout, fd 2 is appended to the same
         // capture buffer as fd 1.
         let mut stderr_to_stdout_capture = false;
-        if let Some((path, append)) = &redir.stderr {
+        if let Some(n) = redir.stderr_to_fd {
+            // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd.
+            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
+                Some(Ok(f)) => {
+                    cmd.stderr(Stdio::from(f));
+                }
+                _ => {
+                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.last_status = 1;
+                    return;
+                }
+            }
+        } else if let Some((path, append)) = &redir.stderr {
             match open_out(path, *append) {
                 Ok(f) => {
                     cmd.stderr(Stdio::from(f));
@@ -3562,6 +3607,13 @@ impl Shell {
                     }
                     match r.fd {
                         2 => plan.stderr = Some((target, append)),
+                        // fd ≥ 3 (`exec 3> file`): a user-space write descriptor,
+                        // not stdout. Only `exec` consumes it; on any other
+                        // command it is a documented no-op (previously this fell
+                        // into the stdout arm and wrongly redirected fd 1).
+                        f if f >= 3 => plan
+                            .extra_fds
+                            .push((f, ExtraFdOp::OutputFile(target, append))),
                         _ => plan.stdout = Some((target, append)),
                     }
                 }
@@ -3587,6 +3639,17 @@ impl Shell {
                     } else if r.fd >= 3 && target == "-" {
                         // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
                         plan.extra_fds.push((r.fd, ExtraFdOp::Close));
+                    } else if let Ok(n) = target.parse::<i32>()
+                        && n >= 3
+                    {
+                        // `M>&N` with N ≥ 3: duplicate fd M onto a user-space
+                        // write descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
+                        // `Shell::open_write_fds[N]` by write_bytes / run_external.
+                        if r.fd == 2 {
+                            plan.stderr_to_fd = Some(n);
+                        } else {
+                            plan.stdout_to_fd = Some(n);
+                        }
                     }
                 }
             }
@@ -4452,9 +4515,26 @@ impl Shell {
                                         *fd,
                                         RefCell::new(io::Cursor::new(bytes.clone())),
                                     );
+                                    // A descriptor is input xor output; drop any
+                                    // prior write binding for the same number.
+                                    self.open_write_fds.remove(fd);
+                                }
+                                ExtraFdOp::OutputFile(path, append) => {
+                                    match open_out(path, *append) {
+                                        Ok(f) => {
+                                            self.open_write_fds
+                                                .insert(*fd, std::sync::Arc::new(f));
+                                            self.open_fds.remove(fd);
+                                        }
+                                        Err(e) => {
+                                            self.errln(&format!("osh: {path}: {e}"));
+                                            rc = 1;
+                                        }
+                                    }
                                 }
                                 ExtraFdOp::Close => {
                                     self.open_fds.remove(fd);
+                                    self.open_write_fds.remove(fd);
                                 }
                             }
                         }
@@ -7385,6 +7465,12 @@ impl Shell {
     }
 
     fn write_bytes(&mut self, out: &mut Out, redir: &RedirPlan, bytes: &[u8]) -> i32 {
+        // `echo msg >&3` on the builtin: fd 1 is a user-space write descriptor.
+        if let Some(n) = redir.stdout_to_fd
+            && redir.stdout.is_none()
+        {
+            return self.write_to_fd(n, bytes);
+        }
         // `1>&2` on the builtin (e.g. `echo msg >&2`): the builtin's stdout is
         // the current stderr sink, not the ambient stdout.
         if redir.stdout_to_stderr && redir.stdout.is_none() {
@@ -7446,6 +7532,28 @@ impl Shell {
                         Err(_) => 1,
                     }
                 }
+            }
+        }
+    }
+
+    /// Write bytes to a user-space write descriptor (`>&N`, N ≥ 3) opened by
+    /// `exec N> file`. A `try_clone` of the shared handle is used so the write
+    /// goes to the descriptor's current OS offset. An unopened fd is a status-1
+    /// `N: bad file descriptor` (bash).
+    fn write_to_fd(&mut self, fd: i32, bytes: &[u8]) -> i32 {
+        match self.open_write_fds.get(&fd) {
+            Some(f) => match f.try_clone() {
+                Ok(mut fc) => {
+                    if fc.write_all(bytes).is_err() {
+                        return 1;
+                    }
+                    0
+                }
+                Err(_) => 1,
+            },
+            None => {
+                self.errln(&format!("osh: {fd}: Bad file descriptor"));
+                1
             }
         }
     }
@@ -7664,23 +7772,31 @@ struct RedirPlan {
     stderr_to_stdout: bool,
     /// `1>&2` — fd 1 follows fd 2 (stdout goes wherever stderr currently goes).
     stdout_to_stderr: bool,
-    /// Redirections to descriptors other than 0/1/2 (`3< file`, `4<&-`, …).
-    /// Only the `exec` builtin currently consumes these, installing them in the
-    /// shell's persistent [`Shell::open_fds`] table; on any other command they
-    /// are ignored (a documented limitation — scoped per-command extra fds are
-    /// not yet modelled). Only *input* descriptors are modelled here — write
-    /// descriptors (`exec 3> file`, `echo >&3`) need the output-routing
-    /// machinery and are deferred.
+    /// `1>&N` / `>&N` with N ≥ 3 — fd 1 is duplicated onto a user-space *write*
+    /// descriptor previously opened by `exec N> file` (see
+    /// [`Shell::open_write_fds`]). A builtin's stdout / an external child's fd 1
+    /// is routed to that descriptor's file. `None` = no such dup.
+    stdout_to_fd: Option<i32>,
+    /// `2>&N` with N ≥ 3 — fd 2 duplicated onto a user-space write descriptor.
+    stderr_to_fd: Option<i32>,
+    /// Redirections to descriptors other than 0/1/2 (`3< file`, `4> log`,
+    /// `4<&-`, …). Only the `exec` builtin currently consumes these, installing
+    /// them in the shell's persistent [`Shell::open_fds`] / [`Shell::open_write_fds`]
+    /// tables; on any other command they are ignored (a documented limitation —
+    /// scoped per-command extra fds are not yet modelled).
     extra_fds: Vec<(i32, ExtraFdOp)>,
 }
 
-/// An operation on a non-standard *input* file descriptor (fd ≥ 3), captured by
-/// [`Shell::resolve_redirects`] and applied to [`Shell::open_fds`] by `exec`.
+/// An operation on a non-standard file descriptor (fd ≥ 3), captured by
+/// [`Shell::resolve_redirects`] and applied to the shell's fd tables by `exec`.
 #[derive(Debug, Clone)]
 enum ExtraFdOp {
     /// Open fd N for reading from these bytes — the contents of a `< file`
     /// redirect or a here-document / here-string body.
     InputBytes(Vec<u8>),
+    /// Open fd N for writing to `path` (`N> file` / `N>> file`); the `bool` is
+    /// the append flag.
+    OutputFile(String, bool),
     /// Close fd N (`N<&-` / `N>&-`).
     Close,
 }
@@ -13133,6 +13249,45 @@ mod tests {
         // touching the named variables.
         let (_out, status) = run("read -u 7 x; echo done");
         assert_eq!(status, 0); // the `echo done` sets the final status
+    }
+
+    #[test]
+    fn exec_named_write_fd() {
+        // `exec 3> file` opens a user-space write descriptor; `echo … >&3`
+        // routes builtin stdout there, and successive writes accumulate.
+        assert_eq!(
+            run_exec_redirect(
+                "exec 3> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"
+            ),
+            "hi\nbye\n"
+        );
+        // `exec 3>> file` appends rather than truncating.
+        assert_eq!(
+            run_exec_redirect(
+                "echo first > \"{FILE}\"\nexec 3>> \"{FILE}\"\necho second >&3\nexec 3>&-"
+            ),
+            "first\nsecond\n"
+        );
+    }
+
+    #[test]
+    fn write_fd_bad_descriptor_errors() {
+        // `>&5` with no open write descriptor is a status-1 error and does not
+        // reach the ambient stdout.
+        let (out, status) = run("echo hi >&5");
+        assert_eq!(status, 1);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn extra_write_fd_does_not_corrupt_stdout() {
+        // A per-command `3> file` (not via exec) is a no-op for fd 3 and must
+        // NOT redirect stdout (regression: fd ≥ 3 formerly fell into the stdout
+        // arm, which would have swallowed "hi"). Since the redirect is ignored
+        // no file is created; stdout still receives "hi".
+        let (out, status) = run("echo hi 3>osh_ignored_extra_fd.txt");
+        assert_eq!(status, 0);
+        assert_eq!(out, "hi\n");
     }
 
     #[test]

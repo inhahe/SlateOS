@@ -430,7 +430,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input fds implemented; write-fds and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds implemented; scoped per-command extra fds and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -478,23 +478,40 @@ command exits 127). Status of the remaining aspects:
    redirects into `RedirPlan.extra_fds` (`ExtraFdOp::InputBytes`/`Close`), which
    only the `exec` builtin consumes. A subshell clone inherits an
    independent-offset snapshot of each open fd (same approximation as
-   `exec_stdin`). **Still OPEN (scoped out of this slice):** *write* descriptors
-   (`exec 3> file`, `echo >&3`) — they need the output-routing/`Out` machinery,
-   not just a byte cursor — and *scoped per-command* extra-fd redirects
+   `exec_stdin`).
+4. **Named write descriptors (`exec 3> file`, `echo >&3`) — RESOLVED
+   2026-07-19.** `exec 3> file`/`3>> file` opens a user-space write descriptor
+   fd ≥ 3 in a per-shell `open_write_fds: HashMap<i32, Arc<File>>` (the file
+   opened once — truncated for `>`, append for `>>` — and the handle kept so
+   successive writes accumulate on one OS offset); `exec 3>&-` removes it.
+   `resolve_redirects` captures `N> file` (N ≥ 3) into
+   `ExtraFdOp::OutputFile(path, append)` (consumed by `exec`) and `M>&N` (N ≥ 3)
+   into `RedirPlan.stdout_to_fd`/`stderr_to_fd`. Output is routed there: a
+   builtin's `echo … >&3` via a `write_to_fd` helper in `write_bytes`, and an
+   external `cmd >&3`/`cmd 2>&3` by building the child's `Stdio` from a
+   `try_clone` of the shared handle in `run_external`. An unopened write fd is a
+   status-1 `N: Bad file descriptor`. A subshell shares the same `Arc<File>`
+   (bash fd inheritance). This also fixed a latent bug: a per-command `N> file`
+   (N ≥ 3) previously fell into the Write arm's `_ => plan.stdout` case and
+   wrongly redirected fd 1; fd ≥ 3 output redirects now route to `extra_fds` (a
+   documented no-op on any command other than `exec`). **Still OPEN (scoped
+   out):** *builtin* stderr-to-write-fd (`echo … 2>&3` on a builtin — builtin
+   stderr goes through `emit_stderr`/the `stderr_stack`, which does not consult
+   `stderr_to_fd`; externals do); *scoped per-command* extra-fd redirects
    (`while read -u 3; done 3< file`, where fd 3 lives only for the compound
-   command) — the plan's `extra_fds` are ignored on any command other than
-   `exec`. General per-command fd ≥ 3 redirects therefore do nothing yet.
-4. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+   command — `extra_fds` are only consumed by `exec`); and duplicating a write-fd
+   *onto* a standard fd (`exec 3>&1`).
+5. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Proper fix:** (2) and (3, input-fd part) done (see above). (3, write/scoped
-part) model an `Out`-backed write descriptor table and thread `extra_fds`
-through the per-command redirect path (not just `exec`) so fd ≥ 3 redirects
-scope to a single compound command. (4) once the kernel exposes `execve`,
-replace the spawn+wait+exit with an actual in-place image replacement for
-`exec cmd`.
+**Proper fix:** (2), (3), and (4, exec-managed write-fds) done (see above).
+(4, scoped part) thread `extra_fds`/`stdout_to_fd` through the per-command
+redirect path (not just `exec`) so fd ≥ 3 redirects scope to a single compound
+command, route builtin stderr through `stderr_to_fd`, and model `exec 3>&1`.
+(5) once the kernel exposes `execve`, replace the spawn+wait+exit with an
+actual in-place image replacement for `exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)
 

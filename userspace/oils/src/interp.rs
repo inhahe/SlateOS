@@ -4102,10 +4102,10 @@ impl Shell {
             Ok(c) => c,
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
-                    self.errln(&format!("osh: {}: command not found", argv[0]));
+                    self.emit_cmd_stderr(out, redir, &format!("osh: {}: command not found", argv[0]));
                     self.last_status = 127;
                 } else {
-                    self.errln(&format!("osh: {}: {e}", argv[0]));
+                    self.emit_cmd_stderr(out, redir, &format!("osh: {}: {e}", argv[0]));
                     self.last_status = 126;
                 }
                 return;
@@ -9584,6 +9584,56 @@ impl Shell {
         self.emit_stderr(&line);
     }
 
+    /// Write a command-level spawn diagnostic (e.g. `foo: command not found`) to
+    /// the sink fd 2 resolves to **for this command**, honouring its own
+    /// `2>file`/`2>/dev/null` (`redir.stderr`), `2>&1` (`redir.stderr_to_stdout`)
+    /// and `2>&N` (`redir.stderr_to_fd`) redirects before falling back to the
+    /// enclosing stderr sink. bash sends these messages to the command's
+    /// redirected stderr — not the shell's — so `nosuchcmd 2>/dev/null` is
+    /// silent. The external-command path applies fd 2 to the child via
+    /// `std::process::Command`, so when the spawn itself fails we must reproduce
+    /// that routing here rather than using the stderr-stack-only `errln`.
+    fn emit_cmd_stderr(&mut self, out: &mut Out, redir: &RedirPlan, msg: &str) {
+        let mut bytes = msg.as_bytes().to_vec();
+        bytes.push(b'\n');
+        if let Some((path, append)) = &redir.stderr {
+            if let Ok(mut f) = open_out(path, *append) {
+                let _ = f.write_all(&bytes);
+                return;
+            }
+            // On open failure, fall through to the enclosing sink.
+        } else if let Some(n) = redir.stderr_to_fd {
+            let _ = self.write_to_fd(n, &bytes);
+            return;
+        } else if redir.stderr_to_stdout {
+            // fd 2 follows fd 1: route to this command's stdout destination.
+            match out {
+                Out::Capture(buf) => {
+                    buf.extend_from_slice(&bytes);
+                    return;
+                }
+                Out::Pipe(w) => {
+                    let _ = (&*w).write_all(&bytes);
+                    return;
+                }
+                Out::Inherit => {
+                    if let Some(f) = &self.exec_stdout
+                        && let Ok(mut fc) = f.try_clone()
+                    {
+                        let _ = fc.write_all(&bytes);
+                        return;
+                    }
+                    let o = io::stdout();
+                    let mut lock = o.lock();
+                    let _ = lock.write_all(&bytes);
+                    let _ = lock.flush();
+                    return;
+                }
+            }
+        }
+        self.emit_stderr(&bytes);
+    }
+
     /// Build a child-process [`Stdio`] that writes to the current stderr sink.
     /// Used for `1>&2` (`stdout_to_stderr`) on an external command. The
     /// buffer-capture sink can't back a live child fd, so it (and the real-fd-1
@@ -13069,6 +13119,22 @@ mod tests {
         // does not exist is a spawn error, not a "command not found" lookup).
         let src = "command_not_found_handle() { echo caught; }; ./no_such_cmd_xyz123; echo $?";
         assert_eq!(run(src).0, "127\n");
+    }
+
+    #[test]
+    fn command_not_found_honors_stderr_redirect() {
+        // The "command not found" diagnostic must follow the command's own fd 2,
+        // not the shell's real stderr (bash: a redirected `2>` on the missing
+        // command captures/silences the message). Without a redirect the message
+        // goes to the shell's real stderr, so the stdout capture holds only the
+        // trailing `done`.
+        let (o, _) = run("no_such_cmd_xyz123; echo done");
+        assert_eq!(o, "done\n");
+        // `2>&1` routes fd 2 into fd 1: the diagnostic now lands in the stdout
+        // capture, matching bash.
+        let (o2, s2) = run("no_such_cmd_xyz123 2>&1; echo done");
+        assert_eq!(o2, "osh: no_such_cmd_xyz123: command not found\ndone\n");
+        assert_eq!(s2, 0);
     }
 
     #[test]

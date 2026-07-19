@@ -4507,6 +4507,18 @@ impl Shell {
     }
 
     fn command_sub(&mut self, prog: &Program) -> String {
+        // bash fast path: a command substitution whose body is solely an input
+        // redirection — `$(< file)` — reads and substitutes the file's contents
+        // (equivalent to, but faster than, `$(cat file)`). Detect a single
+        // simple command with no assignments, no words, and a fd-0 read redirect,
+        // then slurp the file directly.
+        if let Some(path) = self.comsub_read_file(prog) {
+            let mut s = String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()).into_owned();
+            while s.ends_with('\n') {
+                s.pop();
+            }
+            return s;
+        }
         let mut buf = Vec::new();
         {
             let mut out = Out::Capture(&mut buf);
@@ -4518,6 +4530,35 @@ impl Shell {
             s.pop();
         }
         s
+    }
+
+    /// If `prog` is exactly a null command with an input redirection
+    /// (`$(< file)`), return the expanded filename to read; otherwise `None`.
+    fn comsub_read_file(&mut self, prog: &Program) -> Option<String> {
+        if prog.items.len() != 1 {
+            return None;
+        }
+        let item = &prog.items[0];
+        if item.background || !item.list.rest.is_empty() {
+            return None;
+        }
+        let pipe = &item.list.first;
+        if pipe.negated || pipe.commands.len() != 1 {
+            return None;
+        }
+        let Command::Simple(sc) = &pipe.commands[0] else {
+            return None;
+        };
+        if !sc.assignments.is_empty() || !sc.words.is_empty() || !sc.decl_arrays.is_empty() {
+            return None;
+        }
+        // Use the last fd-0 read redirect (bash opens them in order; the last wins).
+        let target = sc
+            .redirects
+            .iter()
+            .rev()
+            .find(|r| r.op == RedirectOp::Read && r.fd == 0)?;
+        Some(self.expand_to_string(&target.target))
     }
 
     /// Expand a process substitution `<(cmd)` / `>(cmd)` to a temp-file pathname.
@@ -10417,6 +10458,26 @@ mod tests {
     fn command_substitution() {
         let (o, _) = run("echo [$(echo inner)]");
         assert_eq!(o, "[inner]\n");
+    }
+
+    #[test]
+    fn command_sub_read_file() {
+        // `$(< file)` reads the file's contents (bash fast path), stripping the
+        // trailing newline like any command substitution.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("osh_readf_{}_{}.txt", std::process::id(), nanos));
+        let p = path.to_string_lossy().replace('\\', "/");
+        std::fs::write(&path, b"hello world\nsecond line\n").expect("write");
+        let (o, st) = run(&format!("x=$(< {p}); echo \"[$x]\""));
+        assert_eq!(st, 0);
+        assert_eq!(o, "[hello world\nsecond line]\n");
+        // Also works with the `< file` form embedded directly in a comsub arg.
+        let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
+        assert_eq!(o2, "<hello world\nsecond line>\n");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

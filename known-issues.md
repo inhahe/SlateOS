@@ -1656,7 +1656,7 @@ a follow-up). ~40 emission sites + ~15 test assertions to update — see
 `open-questions.md` (flagged for the operator because it reformats *every* error
 message the shell prints, a pervasive user-visible output change).
 
-### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — FIXED 2026-07-19 (one narrow subcase remains)
+### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — FIXED 2026-07-19 (all subcases resolved; the capture+subshell+`2>&1` subcase was later fixed by the compound fd-dup routing work)
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_with_redirects` (the
 compound/group-command redirect+capture path).
@@ -1683,19 +1683,14 @@ fd 1's pre-override sink into a concrete handle. Regression tests:
 `stderr_then_stdout_redirect_order_keeps_stderr_on_prior_sink`, and the updated
 `amp_redirect_both_streams`.
 
-**Remaining narrow subcase (still open):** command-substitution *capture* of a
-`2>&1` **subshell** — `x=$( ( echo o; echo e >&2 ) 2>&1 )` — still loses the
-subshell's stderr (it goes to the real terminal, so `x` gets only `o`). The
-non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )` works (folds correctly).
-Root cause: the capture case routes fd 2 into an in-memory `StderrTarget::Buffer`
-(`Arc<Mutex<Vec<u8>>>`), but a subshell clone resets `stderr_stack` and there is
-no `Arc<File>` to hand it via the `exec_stderr` override mechanism (the sink is a
-buffer, not a file). Fixing it properly needs either a cloned-into-subshell
-"ambient stderr buffer" field or making command-substitution capture use a real
-OS pipe/temp handle that can be shared like the file case. Niche (requires
-capture + subshell + `2>&1` together); the pre-existing module-doc note about the
-`2>&1`-into-captured-stdout limitation already covers the interleave caveat for
-the non-subshell capture form.
+**Formerly-remaining subcase (now RESOLVED 2026-07-19):** command-substitution
+*capture* of a `2>&1` **subshell** — `x=$( ( echo o; echo e >&2 ) 2>&1 )` — used
+to lose the subshell's stderr (it went to the real terminal, so `x` got only
+`o`). This was fixed as a side effect of the compound fd-dup routing work
+(`AliasStd`/`stdout_to_fd`/`stderr_to_fd` handling in `exec_with_redirects`):
+verified `x=$( ( echo o; echo e >&2 ) 2>&1 )` now yields `o\ne` matching bash,
+as does the non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )`. No open
+subcases remain for this item.
 
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
 

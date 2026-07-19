@@ -2974,7 +2974,14 @@ impl Shell {
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args),
-            "declare" | "typeset" => self.builtin_declare(args, false),
+            "declare" | "typeset" => {
+                // `declare -p [names]` prints definitions instead of declaring.
+                if args.iter().take_while(|a| a.starts_with('-')).any(|a| a.contains('p')) {
+                    self.declare_print(args, out, redir)
+                } else {
+                    self.builtin_declare(args, false)
+                }
+            }
             "local" => self.builtin_declare(args, true),
             "readonly" => self.builtin_readonly(args, out, redir),
             "unset" => self.builtin_unset(args),
@@ -3122,6 +3129,83 @@ impl Shell {
     /// `declare`/`typeset` (`is_local = false`) and `local` (`is_local = true`).
     /// For `local`, each named variable is first shadowed in the current
     /// function frame; using it outside a function is an error.
+    /// `declare -p [names]` — print variable definitions in a re-inputtable
+    /// form. With names, print each named variable (error + status 1 for any
+    /// that is unset); with none, print every set variable sorted by name.
+    fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Names are the non-flag operands after the leading dashed flags.
+        let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
+        let mut listing = String::new();
+        let mut status = 0;
+        if names.is_empty() {
+            let mut all: Vec<&String> = self
+                .vars
+                .keys()
+                .chain(self.arrays.keys())
+                .chain(self.assoc.keys())
+                .collect();
+            all.sort();
+            all.dedup();
+            for name in all {
+                if let Some(def) = self.format_declare_def(name) {
+                    listing.push_str(&def);
+                    listing.push('\n');
+                }
+            }
+        } else {
+            for name in names {
+                if let Some(def) = self.format_declare_def(name) {
+                    listing.push_str(&def);
+                    listing.push('\n');
+                } else {
+                    self.emit_stderr(format!("osh: declare: {name}: not found\n").as_bytes());
+                    status = 1;
+                }
+            }
+        }
+        let w = self.write_bytes(out, redir, listing.as_bytes());
+        if w != 0 { w } else { status }
+    }
+
+    /// Format one variable's `declare` definition, or `None` if it is unset.
+    /// Attribute flags (`-r` readonly, `-x` exported, `-a`/`-A` array kind) are
+    /// combined into a single flag group, e.g. `declare -rx name="v"`.
+    fn format_declare_def(&self, name: &str) -> Option<String> {
+        let readonly = self.readonly.contains(name);
+        let exported = self.exported.contains(name);
+        // Build the trailing attribute letters shared by all kinds.
+        let attr = |kind: &str| -> String {
+            let mut s = String::from(kind);
+            if readonly {
+                s.push('r');
+            }
+            if exported {
+                s.push('x');
+            }
+            if s.is_empty() { "--".to_string() } else { format!("-{s}") }
+        };
+        if let Some(map) = self.assoc.get(name) {
+            let body = map
+                .iter()
+                .map(|(k, v)| format!("[{k}]={}", quote_declare_value(v)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!("declare {} {name}=({body})", attr("A")));
+        }
+        if let Some(arr) = self.arrays.get(name) {
+            let body = arr
+                .iter()
+                .map(|(i, v)| format!("[{i}]={}", quote_declare_value(v)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!("declare {} {name}=({body})", attr("a")));
+        }
+        if let Some(v) = self.vars.get(name) {
+            return Some(format!("declare {} {name}={}", attr(""), quote_declare_value(v)));
+        }
+        None
+    }
+
     fn builtin_declare(&mut self, args: &[String], is_local: bool) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(b"osh: local: can only be used in a function\n");
@@ -4710,6 +4794,22 @@ fn read_one_line<R: BufRead>(r: &mut R) -> Option<String> {
     Some(line)
 }
 
+/// Quote a value for a `declare`/`readonly -p` listing: wrap in double quotes
+/// and backslash-escape the characters that are special inside double quotes
+/// (`"`, `\`, `$`, and backtick), matching bash's re-inputtable output.
+fn quote_declare_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for c in v.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// Split a string on the default IFS (whitespace), dropping empty fields.
 fn split_ifs(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_string).collect()
@@ -5667,6 +5767,34 @@ mod tests {
     fn readonly_print_lists_vars() {
         let (o, _) = run("readonly a=1; readonly b=2; readonly -p");
         assert_eq!(o, "readonly a=1\nreadonly b=2\n");
+    }
+
+    #[test]
+    fn declare_p_scalar() {
+        assert_eq!(run("x=5; declare -p x").0, "declare -- x=\"5\"\n");
+        // Readonly / exported attributes show in the flag group.
+        assert_eq!(run("readonly x=5; declare -p x").0, "declare -r x=\"5\"\n");
+        assert_eq!(run("export x=5; declare -p x").0, "declare -x x=\"5\"\n");
+    }
+
+    #[test]
+    fn declare_p_arrays() {
+        assert_eq!(run("a=(x y); declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"y\")\n");
+        assert_eq!(
+            run("declare -A m; m[k]=v; declare -p m").0,
+            "declare -A m=([k]=\"v\")\n"
+        );
+    }
+
+    #[test]
+    fn declare_p_missing_is_error() {
+        assert_eq!(run("declare -p nope").1, 1);
+    }
+
+    #[test]
+    fn declare_p_quotes_specials() {
+        // A value with a double quote and `$` is backslash-escaped.
+        assert_eq!(run("x='a\"b$c'; declare -p x").0, "declare -- x=\"a\\\"b\\$c\"\n");
     }
 
     #[test]

@@ -232,6 +232,29 @@ count propagate as for other loops.
 `arith_assignment_array_elements`, `arith_c_style_for_loop`). All 165
 oils tests pass; clippy clean; slateos target builds.
 
+### TD-OILS6. `osh` `read` builtin: `-d`/`-n`/`-N`/`-t`/`-u` options accepted but not honored — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` (`builtin_read`).
+
+**What:** `read` now supports `-r` (raw/no-escape), `-a array` (split into
+an indexed array), `-p prompt` (prompt to stderr), `-s` (silent — no-op for
+non-tty input), and `$IFS`-aware field splitting (whitespace-vs-non-whitespace
+IFS, last variable gets the raw remainder, backslash escaping without `-r`).
+Still missing: `-d delim` (read until an alternate delimiter), `-n N`/`-N N`
+(read at most N characters, returning early), `-t timeout` (timed read), and
+`-u fd` (read from a specific file descriptor). These flags and their
+option-arguments are **parsed and consumed** (so they aren't mistaken for
+variable names), but their behavior is a plain line read.
+
+**Proper fix:** `-d`/`-n`/`-N` require reading from the input source at the
+byte level (until a custom delimiter or a fixed count) instead of via
+`read_line`'s whole-line `read_line`/`read_until('\n')`. That means a small
+`read_delimited(stdin, redir, delim, max)` helper that dispatches over the
+same `StdinSrc`/`RedirPlan` sources `read_line` handles and uses
+`BufRead::read_until` / a bounded byte read. `-t`/`-u` need timer and
+fd-table support that the current model lacks. Deferred as low priority —
+scripts rarely use these compared to `-r`/`-a`.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

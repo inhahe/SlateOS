@@ -3295,25 +3295,70 @@ impl Shell {
         }
     }
 
+    /// The `read [-r] [-a array] [-p prompt] [-s] name...` builtin. Reads one
+    /// line from the current input, then splits it on `$IFS` (honoring the
+    /// whitespace-vs-non-whitespace IFS distinction) and assigns the fields to
+    /// the named variables — the last variable receiving the raw remainder.
+    /// Without `-r`, backslash acts as an escape (and prevents field splitting on
+    /// the escaped character). With `-a`, all fields go into one indexed array.
+    /// `-d`/`-n`/`-N`/`-t`/`-u` are accepted (their argument consumed) but not
+    /// yet honored — see known-issues.
     fn builtin_read(&mut self, args: &[String], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
+        let mut raw = false;
+        let mut array: Option<String> = None;
+        let mut names: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            match a.as_str() {
+                "-r" => raw = true,
+                "-s" => {} // silent (no terminal echo) — no-op for non-tty input.
+                "-a" => {
+                    i += 1;
+                    array = args.get(i).cloned();
+                }
+                "-p" => {
+                    i += 1;
+                    if let Some(prompt) = args.get(i) {
+                        self.emit_stderr(prompt.as_bytes());
+                    }
+                }
+                // Accepted but not honored yet; consume the option-argument forms.
+                "-d" | "-n" | "-N" | "-t" | "-u" => i += 1,
+                other if other.starts_with('-') && other.len() > 1 => {} // unknown flag
+                _ => names.push(a.clone()),
+            }
+            i += 1;
+        }
+
         let line = match self.read_line(stdin, redir) {
             Some(l) => l,
             None => return 1, // EOF
         };
-        let names: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-        if names.is_empty() {
-            self.vars.insert("REPLY".to_string(), line);
+
+        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
+
+        if let Some(arr) = array {
+            let fields = read_split(&line, &ifs, raw, None);
+            let map: BTreeMap<usize, String> =
+                fields.into_iter().enumerate().collect();
+            self.vars.remove(&arr);
+            self.assoc.remove(&arr);
+            self.arrays.insert(arr, map);
             return 0;
         }
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        for (i, name) in names.iter().enumerate() {
-            let val = if i + 1 == names.len() {
-                // Last variable gets the remaining fields joined.
-                fields[i.min(fields.len())..].join(" ")
-            } else {
-                fields.get(i).map_or(String::new(), |s| (*s).to_string())
-            };
-            self.vars.insert((*name).clone(), val);
+
+        if names.is_empty() {
+            // No names: assign the (optionally unescaped) whole line to REPLY.
+            let reply = if raw { line } else { unescape_read_line(&line) };
+            self.vars.insert("REPLY".to_string(), reply);
+            return 0;
+        }
+
+        let fields = read_split(&line, &ifs, raw, Some(names.len()));
+        for (idx, name) in names.iter().enumerate() {
+            let val = fields.get(idx).cloned().unwrap_or_default();
+            self.vars.insert(name.clone(), val);
         }
         0
     }
@@ -4373,6 +4418,97 @@ fn is_special_param(name: &str) -> bool {
     matches!(name, "@" | "*" | "#" | "?" | "$" | "!" | "0" | "-" | "_")
 }
 
+/// Remove `read`'s backslash escapes from a whole line (non-`-r` mode): a
+/// backslash makes the following character literal.
+fn unescape_read_line(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            out.push(chars[i + 1]);
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Split a line the way the `read` builtin does: on `$IFS`, distinguishing
+/// IFS-whitespace (space/tab/newline — runs collapse, and leading/trailing are
+/// trimmed) from non-whitespace IFS characters (each a single delimiter). When
+/// `limit` is `Some(n)`, at most `n` fields are produced and the last captures
+/// the raw remainder (trailing IFS-whitespace stripped) — matching bash's
+/// assignment of the rest of the line to the final variable. Without `raw`, a
+/// backslash escapes the next character (so it neither delimits nor is dropped
+/// from the field boundary logic).
+fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<String> {
+    // Empty IFS disables splitting entirely: the whole line is one field.
+    if ifs.is_empty() {
+        let whole = if raw { line.to_string() } else { unescape_read_line(line) };
+        return vec![whole];
+    }
+    let ws: Vec<char> = ifs.chars().filter(|c| matches!(c, ' ' | '\t' | '\n')).collect();
+    let other: Vec<char> = ifs.chars().filter(|c| !matches!(c, ' ' | '\t' | '\n')).collect();
+    let is_ws = |c: char| ws.contains(&c);
+    let is_other = |c: char| other.contains(&c);
+
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut fields: Vec<String> = Vec::new();
+    let mut i = 0;
+    // Trim leading IFS whitespace.
+    while i < n && is_ws(chars[i]) {
+        i += 1;
+    }
+    while i < n {
+        // Last allowed field: take the raw remainder (trailing IFS-ws trimmed).
+        if let Some(lim) = limit
+            && fields.len() + 1 == lim
+        {
+            let mut end = n;
+            while end > i && is_ws(chars[end - 1]) {
+                end -= 1;
+            }
+            let seg: String = chars[i..end].iter().collect();
+            fields.push(if raw { seg } else { unescape_read_line(&seg) });
+            return fields;
+        }
+        // Accumulate one field up to the next delimiter.
+        let mut field = String::new();
+        while i < n {
+            let c = chars[i];
+            if !raw && c == '\\' && i + 1 < n {
+                field.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if is_ws(c) {
+                // Consume the whole run of IFS whitespace.
+                while i < n && is_ws(chars[i]) {
+                    i += 1;
+                }
+                break;
+            }
+            if is_other(c) {
+                i += 1;
+                break;
+            }
+            field.push(c);
+            i += 1;
+        }
+        fields.push(field);
+    }
+    if let Some(lim) = limit {
+        while fields.len() < lim {
+            fields.push(String::new());
+        }
+    }
+    fields
+}
+
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
 fn format_printf(fmt: &str, args: &[String]) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
@@ -4802,6 +4938,33 @@ mod tests {
     fn here_string_read() {
         let (o, _) = run("read x <<< hello; echo got $x");
         assert_eq!(o, "got hello\n");
+    }
+
+    #[test]
+    fn read_last_var_keeps_internal_spacing() {
+        // The final variable receives the raw remainder (internal runs of IFS
+        // whitespace preserved), unlike a naive re-join.
+        let (o, _) = run("read a b <<< '1   2   3'; echo \"[$a][$b]\"");
+        assert_eq!(o, "[1][2   3]\n");
+    }
+
+    #[test]
+    fn read_into_array() {
+        let (o, _) = run("read -a arr <<< 'x y z'; echo \"${#arr[@]}:${arr[1]}\"");
+        assert_eq!(o, "3:y\n");
+    }
+
+    #[test]
+    fn read_raw_vs_escape() {
+        // Without -r, a backslash escapes the next char; with -r it is literal.
+        assert_eq!(run("read x <<< 'a\\tb'; echo \"$x\"").0, "atb\n");
+        assert_eq!(run("read -r x <<< 'a\\tb'; echo \"$x\"").0, "a\\tb\n");
+    }
+
+    #[test]
+    fn read_custom_ifs() {
+        let (o, _) = run("IFS=: read a b c <<< '1:2:3'; echo \"$a-$b-$c\"");
+        assert_eq!(o, "1-2-3\n");
     }
 
     #[test]

@@ -228,6 +228,12 @@ pub struct Shell {
     positional: Vec<String>,
     name: String,
     last_status: i32,
+    /// Monotonic count of command substitutions performed. Used to detect
+    /// whether a pure assignment's value contained a `$(...)`/backtick — bash
+    /// sets the assignment's exit status from the last command substitution, or
+    /// 0 when there was none (so `x=$?` still reads the prior status, but the
+    /// assignment itself resets `$?` to 0).
+    comsub_count: u64,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -438,6 +444,7 @@ impl Shell {
             positional: Vec::new(),
             name: "osh".to_string(),
             last_status: 0,
+            comsub_count: 0,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -1731,6 +1738,7 @@ impl Shell {
             positional: self.positional.clone(),
             name: self.name.clone(),
             last_status: self.last_status,
+            comsub_count: self.comsub_count,
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -2858,13 +2866,27 @@ impl Shell {
         // Pure assignment (no command word): persist the variables/arrays.
         // A readonly-variable rejection makes the whole command fail (status 1).
         if argv.is_empty() {
+            // The exit status of a pure assignment is that of the last command
+            // substitution performed while expanding its values (bash), or 0 if
+            // there was none — so `x=$(false); echo $?` reports 1 while
+            // `false; x=1; echo $?` reports 0. `$?` read inside the value still
+            // sees the prior status (expansion happens before the reset below).
+            // A readonly-variable rejection fails the whole command (status 1).
+            let comsub_before = self.comsub_count;
             let mut ok = true;
             for a in &sc.assignments {
                 if !self.apply_assignment(a) {
                     ok = false;
                 }
             }
-            self.last_status = i32::from(!ok);
+            if !ok {
+                self.last_status = 1;
+            } else if self.comsub_count == comsub_before {
+                // No command substitution ran; a plain assignment resets $? to 0.
+                self.last_status = 0;
+            }
+            // Otherwise `command_sub` already left the last substitution's status
+            // in `self.last_status`.
             return Flow::Next;
         }
 
@@ -4537,6 +4559,9 @@ impl Shell {
     }
 
     fn command_sub(&mut self, prog: &Program) -> String {
+        // Count every command substitution so callers (e.g. pure assignments)
+        // can tell whether a `$(...)` ran while expanding a value.
+        self.comsub_count = self.comsub_count.wrapping_add(1);
         // bash fast path: a command substitution whose body is solely an input
         // redirection — `$(< file)` — reads and substitutes the file's contents
         // (equivalent to, but faster than, `$(cat file)`). Detect a single
@@ -4549,11 +4574,17 @@ impl Shell {
             }
             return s;
         }
+        // Command substitution runs in its own subshell (bash semantics): a
+        // clone of the shell state so variable/cwd/function mutations made
+        // inside `$(...)` do not leak into the parent. Only the captured stdout
+        // and the exit status ($?) propagate back.
         let mut buf = Vec::new();
+        let mut sub = self.clone_for_subshell();
         {
             let mut out = Out::Capture(&mut buf);
-            let _ = self.exec_program(prog, &mut out, &StdinSrc::Inherit);
+            let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
         }
+        self.last_status = sub.last_status;
         let mut s = String::from_utf8_lossy(&buf).into_owned();
         // Strip trailing newlines, as command substitution does.
         while s.ends_with('\n') {
@@ -10839,6 +10870,23 @@ mod tests {
         let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
         assert_eq!(o2, "<hello world\nsecond line>\n");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn command_sub_runs_in_isolated_subshell() {
+        // Variable assignments inside `$(...)` must not leak into the parent
+        // shell (command substitution runs in a subshell, like bash).
+        let (o, _) = run("count=0; r=$(count=5; echo $count); echo \"$r $count\"");
+        assert_eq!(o, "5 0\n");
+        // The command substitution still sees the parent's variables.
+        let (o2, _) = run("x=hi; r=$(echo $x); echo $r");
+        assert_eq!(o2, "hi\n");
+        // Exit status of the command substitution propagates to $?.
+        let (o3, _) = run("r=$(false); echo $?");
+        assert_eq!(o3, "1\n");
+        // A function defined inside `$(...)` does not persist afterwards.
+        let (o4, _) = run("r=$(f(){ echo in; }; f); type -t f 2>/dev/null; echo \"[$r]\"");
+        assert_eq!(o4, "[in]\n");
     }
 
     #[test]

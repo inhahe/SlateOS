@@ -12276,6 +12276,27 @@ mod tests {
     }
 
     #[test]
+    fn param_ops_preserve_literal_whitespace() {
+        // The pattern of `#`/`%` trims and `^`/`,` case ops, and the argument of
+        // the `:-`/`:=`/`:+`/`:?` default ops, are single words with literal
+        // whitespace — bash applies expansion and quote removal but not
+        // word-splitting (previously osh trimmed embedded/leading/trailing
+        // spaces via the word-splitting lexer, corrupting the pattern).
+        // Trim with a trailing-space suffix pattern.
+        assert_eq!(run("s='hello '; echo \"[${s% }]\"").0, "[hello]\n");
+        // Longest-suffix trim with a space in the pattern: `${f%% *}` strips
+        // from the first space onward. osh used to collapse ` *` → `*`.
+        assert_eq!(run("f='my dog runs'; echo \"[${f%% *}]\"").0, "[my]\n");
+        // Prefix trim where the pattern itself contains a space.
+        assert_eq!(run("s='foo bar'; echo \"[${s#foo }]\"").0, "[bar]\n");
+        // Default value preserves embedded and leading spaces when quoted.
+        assert_eq!(run("echo \"[${x:-a  b}]\"").0, "[a  b]\n");
+        assert_eq!(run("echo \"[${x:-  lead}]\"").0, "[  lead]\n");
+        // Trailing space in an alternate value.
+        assert_eq!(run("x=set; echo \"[${x:+hi }]\"").0, "[hi ]\n");
+    }
+
+    #[test]
     fn param_transform_assign() {
         // `@A` on a plain scalar → short `name=value` (quoted only if needed).
         assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x=hello\n");

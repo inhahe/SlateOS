@@ -1273,7 +1273,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 index: elem_index,
                 suffix,
                 longest,
-                pattern: Box::new(word_from_source(&pat)?),
+                pattern: Box::new(word_verbatim_from_source(&pat)?),
             })
         }
         // Case modification: `^`, `^^` (upper), `,`, `,,` (lower).
@@ -1287,7 +1287,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 index: elem_index,
                 upper,
                 all,
-                pattern: Box::new(word_from_source(&pat)?),
+                pattern: Box::new(word_verbatim_from_source(&pat)?),
             })
         }
         // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
@@ -1343,7 +1343,7 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 index: elem_index,
                 op,
                 colon,
-                arg: Box::new(word_from_source(&arg_str)?),
+                arg: Box::new(word_verbatim_from_source(&arg_str)?),
             })
         }
     }
@@ -1438,7 +1438,7 @@ fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
             Ok(Some(BulkOp::Trim {
                 suffix,
                 longest,
-                pattern: Box::new(word_from_source(&pat)?),
+                pattern: Box::new(word_verbatim_from_source(&pat)?),
             }))
         }
         '^' | ',' => {
@@ -1449,7 +1449,7 @@ fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
             Ok(Some(BulkOp::Case {
                 upper,
                 all,
-                pattern: Box::new(word_from_source(&pat)?),
+                pattern: Box::new(word_verbatim_from_source(&pat)?),
             }))
         }
         '/' => {

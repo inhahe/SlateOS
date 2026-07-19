@@ -10052,9 +10052,22 @@ impl Shell {
         let mut word_seen = false;
 
         let mut i = 0;
+        let mut opts_done = false;
         while i < args.len() {
             let a = args[i].as_str();
+            // After `--`, every remaining argument is a non-option; the first
+            // becomes the word to complete (even if it begins with `-`, e.g.
+            // `compgen -W '-a -b' -- -a`). bash consumes exactly one word.
+            if opts_done {
+                if !word_seen {
+                    word = args[i].clone();
+                    word_seen = true;
+                }
+                i += 1;
+                continue;
+            }
             match a {
+                "--" => opts_done = true,
                 // Options taking a following argument.
                 "-W" | "-A" | "-P" | "-S" | "-X" | "-F" | "-C" | "-o" | "-G" => {
                     i += 1;
@@ -16115,6 +16128,17 @@ mod tests {
             "a.txt\nc.txt\n"
         );
         assert_eq!(run("compgen -W 'a b c' -X '!b'").0, "b\n");
+    }
+
+    #[test]
+    fn compgen_double_dash_ends_options() {
+        // `--` terminates options; the following argument is the word to
+        // complete — even when it begins with `-`. Regression: previously `--`
+        // itself was consumed as the word, so nothing prefix-matched.
+        assert_eq!(run("compgen -W 'apple apricot banana' -- ap").0, "apple\napricot\n");
+        assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
+        // `--` with no following word offers every candidate.
+        assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
     }
 
     #[test]

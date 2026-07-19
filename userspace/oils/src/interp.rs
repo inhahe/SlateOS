@@ -246,6 +246,10 @@ pub struct Shell {
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
+    /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
+    /// readonly variable is an error; the shell reports it and leaves the value
+    /// unchanged. Copied into subshell clones so the attribute is inherited.
+    readonly: HashSet<String>,
 }
 
 impl Default for Shell {
@@ -284,6 +288,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: false,
             local_frames: Vec::new(),
+            readonly: HashSet::new(),
         }
     }
 
@@ -1361,6 +1366,7 @@ impl Shell {
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
+            readonly: self.readonly.clone(),
         }
     }
 
@@ -1368,7 +1374,14 @@ impl Shell {
 
     /// Apply a standalone assignment to shell state, handling scalars, indexed
     /// elements (`name[i]=v`), whole arrays (`name=(a b c)`), and append (`+=`).
-    fn apply_assignment(&mut self, a: &Assignment) {
+    /// Apply a variable/array assignment. Returns `false` (and reports) if the
+    /// target is readonly, leaving the existing value intact; `true` otherwise.
+    fn apply_assignment(&mut self, a: &Assignment) -> bool {
+        // A readonly variable cannot be reassigned; report and leave it intact.
+        if self.readonly.contains(&a.name) {
+            self.emit_stderr(format!("osh: {}: readonly variable\n", a.name).as_bytes());
+            return false;
+        }
         let is_assoc = self.assoc.contains_key(&a.name);
         match &a.value {
             AssignRhs::Scalar(w) => {
@@ -1381,12 +1394,12 @@ impl Shell {
                         if let Ok(seed) = val.trim().parse::<u32>() {
                             self.rng.set(seed);
                         }
-                        return;
+                        return true;
                     }
                     if a.name == "SECONDS" {
                         self.seconds_base = val.trim().parse::<u64>().unwrap_or(0);
                         self.seconds_anchor = std::time::Instant::now();
-                        return;
+                        return true;
                     }
                 }
                 if let Some(idx_word) = &a.index {
@@ -1403,7 +1416,7 @@ impl Shell {
                         let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             eprintln!("osh: {}: bad array subscript", a.name);
-                            return;
+                            return true;
                         };
                         if a.append {
                             arr.entry(idx).or_default().push_str(&val);
@@ -1479,6 +1492,7 @@ impl Shell {
                 self.arrays.insert(a.name.clone(), elems);
             }
         }
+        true
     }
 
     /// Set an associative-array element, creating the array if needed.
@@ -1758,11 +1772,15 @@ impl Shell {
         }
 
         // Pure assignment (no command word): persist the variables/arrays.
+        // A readonly-variable rejection makes the whole command fail (status 1).
         if argv.is_empty() {
+            let mut ok = true;
             for a in &sc.assignments {
-                self.apply_assignment(a);
+                if !self.apply_assignment(a) {
+                    ok = false;
+                }
             }
-            self.last_status = 0;
+            self.last_status = i32::from(!ok);
             return Flow::Next;
         }
 
@@ -2896,6 +2914,7 @@ impl Shell {
             "export" => self.builtin_export(args),
             "declare" | "typeset" => self.builtin_declare(args, false),
             "local" => self.builtin_declare(args, true),
+            "readonly" => self.builtin_readonly(args, out, redir),
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args),
             "shift" => self.builtin_shift(args),
@@ -3048,6 +3067,7 @@ impl Shell {
         let mut assoc = false;
         let mut indexed = false;
         let mut export = false;
+        let mut readonly = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
@@ -3060,7 +3080,8 @@ impl Shell {
                         'A' => assoc = true,
                         'a' => indexed = true,
                         'x' => export = true,
-                        _ => {} // -r/-i/-g/-l/-u/-n/-p: accepted, no effect here.
+                        'r' => readonly = true,
+                        _ => {} // -i/-g/-l/-u/-n/-p: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -3068,12 +3089,19 @@ impl Shell {
                 break;
             }
         }
+        let mut status = 0;
         for name_val in &args[i..] {
             let (name, value) = match name_val.find('=') {
                 Some(eq) => (&name_val[..eq], Some(name_val[eq + 1..].to_string())),
                 None => (name_val.as_str(), None),
             };
             if name.is_empty() {
+                continue;
+            }
+            // Reassigning a value to an existing readonly variable is an error.
+            if value.is_some() && self.readonly.contains(name) {
+                self.emit_stderr(format!("osh: {name}: readonly variable\n").as_bytes());
+                status = 1;
                 continue;
             }
             // `local` shadows the name (snapshot + clear) before (re)binding it.
@@ -3096,8 +3124,13 @@ impl Shell {
             if export {
                 self.exported.insert(name.to_string());
             }
+            // Mark readonly *after* the (initial) value is bound so the value is
+            // accepted; subsequent assignments then hit the guard above.
+            if readonly {
+                self.readonly.insert(name.to_string());
+            }
         }
-        0
+        status
     }
 
     /// Handle the combined `declare -A m=([k]=v)` / `declare -a a=(x y)` form,
@@ -3152,8 +3185,88 @@ impl Shell {
         Flow::Next
     }
 
+    /// The `readonly [-p] [-a] [-A] name[=value] …` builtin. Marks each named
+    /// variable read-only (assigning an initial value first), so later
+    /// assignments and `unset` are rejected. With no name operands (or `-p`),
+    /// prints the current readonly variables in a re-inputtable form.
+    fn builtin_readonly(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Strip leading flags; only `-a`/`-A` (array kinds) affect storage.
+        let mut names: Vec<&String> = Vec::new();
+        let mut assoc = false;
+        let mut indexed = false;
+        let mut print_only = false;
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = arg.strip_prefix('-')
+                && !flags.is_empty()
+            {
+                for c in flags.chars() {
+                    match c {
+                        'A' => assoc = true,
+                        'a' => indexed = true,
+                        'p' => print_only = true,
+                        _ => {} // -f/-g: accepted, no effect here.
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        names.extend(&args[i..]);
+        if names.is_empty() || print_only {
+            let mut ro: Vec<&String> = self.readonly.iter().collect();
+            ro.sort();
+            let mut listing = String::new();
+            for name in ro {
+                match self.vars.get(name) {
+                    Some(v) => listing.push_str(&format!("readonly {name}={v}\n")),
+                    None => listing.push_str(&format!("readonly {name}\n")),
+                }
+            }
+            return self.write_bytes(out, redir, listing.as_bytes());
+        }
+        let mut status = 0;
+        for name_val in names {
+            let (name, value) = match name_val.find('=') {
+                Some(eq) => (&name_val[..eq], Some(name_val[eq + 1..].to_string())),
+                None => (name_val.as_str(), None),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if value.is_some() && self.readonly.contains(name) {
+                self.emit_stderr(format!("osh: {name}: readonly variable\n").as_bytes());
+                status = 1;
+                continue;
+            }
+            if assoc {
+                self.assoc.entry(name.to_string()).or_default();
+            } else if indexed {
+                self.arrays.entry(name.to_string()).or_default();
+            }
+            if let Some(v) = value
+                && !assoc
+                && !indexed
+            {
+                self.vars.insert(name.to_string(), v);
+            }
+            self.readonly.insert(name.to_string());
+        }
+        status
+    }
+
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
         for a in args {
+            // A readonly variable cannot be unset.
+            if self.readonly.contains(a) {
+                self.emit_stderr(format!("osh: {a}: cannot unset: readonly variable\n").as_bytes());
+                return 1;
+            }
             // `unset name[i]` removes a single element; `unset name` removes the
             // whole variable/array/function.
             if let Some(open) = a.find('[')
@@ -4482,6 +4595,7 @@ fn is_builtin(name: &str) -> bool {
             | "declare"
             | "typeset"
             | "local"
+            | "readonly"
             | "unset"
             | "set"
             | "shift"
@@ -5426,6 +5540,43 @@ mod tests {
     fn local_array_is_scoped() {
         let src = "a=(g1 g2); f() { local a=(l1 l2); echo \"${a[@]}\"; }; f; echo \"${a[@]}\"";
         assert_eq!(run(src).0, "l1 l2\ng1 g2\n");
+    }
+
+    #[test]
+    fn readonly_blocks_reassignment() {
+        // The value stays at the readonly binding; reassignment fails (status 1)
+        // and leaves the original intact.
+        let (o, s) = run("readonly x=1; x=2; echo $x");
+        assert_eq!(o, "1\n");
+        assert_eq!(s, 0); // the trailing `echo` succeeds
+        // The assignment itself reports failure.
+        assert_eq!(run("readonly x=1; x=2").1, 1);
+    }
+
+    #[test]
+    fn readonly_blocks_unset() {
+        let (o, _) = run("readonly x=hi; unset x; echo $x");
+        assert_eq!(o, "hi\n");
+        assert_eq!(run("readonly x=hi; unset x").1, 1);
+    }
+
+    #[test]
+    fn declare_r_marks_readonly() {
+        let (o, _) = run("declare -r y=const; y=other; echo $y");
+        assert_eq!(o, "const\n");
+    }
+
+    #[test]
+    fn readonly_bare_name_then_assign_fails() {
+        // `readonly x` marks an existing/empty name; a later assignment fails.
+        let (o, _) = run("x=v; readonly x; x=w; echo $x");
+        assert_eq!(o, "v\n");
+    }
+
+    #[test]
+    fn readonly_print_lists_vars() {
+        let (o, _) = run("readonly a=1; readonly b=2; readonly -p");
+        assert_eq!(o, "readonly a=1\nreadonly b=2\n");
     }
 
     #[test]

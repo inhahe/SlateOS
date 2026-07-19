@@ -255,6 +255,28 @@ same `StdinSrc`/`RedirPlan` sources `read_line` handles and uses
 fd-table support that the current model lacks. Deferred as low priority —
 scripts rarely use these compared to `-r`/`-a`.
 
+### TD-OILS7. `osh` `readonly`: enforcement covers assignment/`unset`/`declare` but not the `read` builtin or temporary env prefixes — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` (`builtin_read`, and the
+env-prefix path in `exec_simple` around the temporary `self.vars.insert`
+for `FOO=bar cmd`).
+
+**What:** `readonly name[=val]` / `declare -r` mark a variable read-only,
+and reassigning it (`x=2`), unsetting it (`unset x`), or re-declaring a
+value (`declare x=…`) is now rejected with status 1 via the `readonly`
+`HashSet` guard in `apply_assignment`, `builtin_unset`, and
+`builtin_declare`/`builtin_readonly`. Two lower-frequency write paths are
+**not** yet guarded: (1) `read x` into a readonly `x` overwrites it; (2) a
+temporary environment prefix `x=1 cmd` where `x` is readonly is not
+rejected. Bash rejects both.
+
+**Proper fix:** route those two `self.vars.insert` sites through a shared
+`set_scalar_checked(name, val) -> bool` helper that consults
+`self.readonly` (emitting the `readonly variable` diagnostic and returning
+false), and have `builtin_read` count a rejected target as a read failure
+(non-zero status, no assignment). Deferred as low priority — protecting a
+constant from `x=…`/`unset` is the common case and is covered.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

@@ -416,6 +416,29 @@ once the kernel provides process groups + job-control signals (ties into
 TD-OILS11 async-signal delivery); (3) add `wait -n`. The current implementation
 is correct for the overwhelmingly common case (`cmd & … wait`), just narrow.
 
+### TD-OILS14. `osh` `exec` does not support redirection-only form or a true in-place `execve` — OPEN (partly gated on kernel `execve`)
+
+**Where:** `userspace/oils/src/interp.rs` (`run_builtin`, the `"exec"` arm).
+
+**What:** the `exec` builtin is implemented for the command-replacement case
+(`exec cmd args` runs `cmd` then exits the shell with its status; a missing
+command exits 127), but two aspects are incomplete:
+1. **Redirection-only `exec` is a no-op.** `exec > file` / `exec 2>> log` /
+   `exec 3< in` in bash permanently rebind the *shell's own* file descriptors so
+   all subsequent commands inherit them. Our shell writes through an `Out`
+   abstraction rather than a persistent fd table, so there is nothing to rebind;
+   `exec` with no command word currently just returns success and the
+   redirections are dropped.
+2. **Not a true `execve`.** `exec cmd` spawns `cmd` as a child, waits, and exits
+   with its status — observationally the shell does not continue, but the pid is
+   not preserved and signals are not transparently forwarded the way a real
+   in-place `execve` would provide.
+
+**Proper fix:** (1) give `Shell` a real fd table (or an `Out`/stdin stack that
+`exec` can push onto persistently) so redirection-only `exec` rebinds it; (2)
+once the kernel exposes `execve`, replace the spawn+wait+exit with an actual
+in-place image replacement for `exec cmd`.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

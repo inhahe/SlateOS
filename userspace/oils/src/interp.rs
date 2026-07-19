@@ -3287,6 +3287,24 @@ impl Shell {
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
+            "exec" => {
+                if args.is_empty() {
+                    // `exec` with no command applies its redirections to the
+                    // shell persistently; we don't yet support rebinding the
+                    // shell's own fds (documented, TD-OILS14). Treat as success.
+                    0
+                } else {
+                    // Replace the shell with the command: run it with the current
+                    // environment/redirections, then exit with its status. A true
+                    // in-place `execve` that preserves the pid awaits kernel
+                    // support; observationally the shell does not continue past
+                    // `exec` (a following command never runs).
+                    self.run_external(args, assigns, out, stdin, redir);
+                    let code = self.last_status;
+                    flow = Flow::Exit(code);
+                    code
+                }
+            }
             "exit" => {
                 let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(self.last_status);
                 flow = Flow::Exit(code);
@@ -6184,6 +6202,7 @@ fn is_builtin(name: &str) -> bool {
             | "trap"
             | "jobs"
             | "wait"
+            | "exec"
             | "exit"
             | "return"
             | "break"
@@ -9226,5 +9245,33 @@ mod tests {
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
         // `wait` cleans up any still-tracked job for a tidy teardown.
         sh.run_source("wait");
+    }
+
+    #[test]
+    fn exec_no_command_is_noop() {
+        // `exec` with no command word is a no-op that keeps running the script.
+        let (o, s) = run("exec\necho hi");
+        assert_eq!(o, "hi\n");
+        assert_eq!(s, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exec_replaces_shell_and_stops() {
+        // `exec cmd` runs the command and the shell does not continue past it.
+        let mut sh = Shell::new();
+        let st = sh.run_source("exec cmd /c exit 5\nAFTER=1");
+        assert_eq!(st, 5);
+        assert!(!sh.vars.contains_key("AFTER"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exec_missing_command_exits_127() {
+        // A failed `exec` of a missing command exits the shell with 127.
+        let mut sh = Shell::new();
+        let st = sh.run_source("exec no_such_command_xyz_123\nAFTER=1");
+        assert_eq!(st, 127);
+        assert!(!sh.vars.contains_key("AFTER"));
     }
 }

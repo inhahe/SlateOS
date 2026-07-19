@@ -7346,44 +7346,64 @@ impl Shell {
         let mut exact = false;
         // `-u N`: read from user-space fd N instead of the ambient input.
         let mut ufd: Option<i32> = None;
+        // Parse short options, honoring bash's cluster/attached-argument forms:
+        // flags may be bundled (`-rs`) and an option-argument may be glued to its
+        // letter (`-d:`, `-n5`, `-u3`) or supplied as the next token (`-d :`).
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            match a.as_str() {
-                "-r" => raw = true,
-                "-s" => {} // silent (no terminal echo) — no-op for non-tty input.
-                "-a" => {
-                    i += 1;
-                    array = args.get(i).cloned();
-                }
-                "-p" => {
-                    i += 1;
-                    if let Some(prompt) = args.get(i) {
-                        self.emit_stderr(prompt.as_bytes());
+            if a == "--" {
+                i += 1;
+                names.extend(args[i..].iter().cloned());
+                break;
+            }
+            if a.len() > 1 && a.starts_with('-') {
+                let chars: Vec<char> = a.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    let c = chars[j];
+                    // Options that take an argument: the argument is the rest of
+                    // this token after the letter, or (if none) the next token.
+                    if matches!(c, 'a' | 'p' | 'd' | 'n' | 'N' | 'u' | 't' | 'i') {
+                        let rest: String = chars[j + 1..].iter().collect();
+                        let val = if rest.is_empty() {
+                            i += 1;
+                            args.get(i).cloned()
+                        } else {
+                            Some(rest)
+                        };
+                        match c {
+                            'a' => array = val,
+                            'p' => {
+                                if let Some(prompt) = val {
+                                    self.emit_stderr(prompt.as_bytes());
+                                }
+                            }
+                            // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
+                            'd' => {
+                                delim = Some(val.and_then(|s| s.bytes().next()).unwrap_or(0));
+                            }
+                            'n' => nchars = val.and_then(|s| s.parse().ok()),
+                            'N' => {
+                                nchars = val.and_then(|s| s.parse().ok());
+                                exact = true;
+                            }
+                            'u' => ufd = val.and_then(|s| s.parse().ok()),
+                            // `-t`/`-i` accepted but not honored yet.
+                            _ => {}
+                        }
+                        break; // remainder of this token was consumed as the argument
                     }
+                    match c {
+                        'r' => raw = true,
+                        // silent / readline-edit: no-op for non-tty input.
+                        's' | 'e' => {}
+                        _ => {} // unknown flag — ignored
+                    }
+                    j += 1;
                 }
-                "-d" => {
-                    i += 1;
-                    // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
-                    delim = Some(args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0));
-                }
-                "-n" => {
-                    i += 1;
-                    nchars = args.get(i).and_then(|s| s.parse().ok());
-                }
-                "-N" => {
-                    i += 1;
-                    nchars = args.get(i).and_then(|s| s.parse().ok());
-                    exact = true;
-                }
-                "-u" => {
-                    i += 1;
-                    ufd = args.get(i).and_then(|s| s.parse().ok());
-                }
-                // Accepted but not honored yet; consume the option-argument form.
-                "-t" => i += 1,
-                other if other.starts_with('-') && other.len() > 1 => {} // unknown flag
-                _ => names.push(a.clone()),
+            } else {
+                names.push(a.clone());
             }
             i += 1;
         }
@@ -10489,6 +10509,21 @@ mod tests {
         assert_eq!(run("read -n 3 x <<< 'abcdef'; echo \"$x\"").0, "abc\n");
         // Status 0 because the character count was reached.
         assert_eq!(run("read -n 3 x <<< 'abcdef'; echo $?").0, "0\n");
+    }
+
+    #[test]
+    fn read_attached_and_clustered_options() {
+        // Attached option-argument: `-d:` glues the delimiter to the flag.
+        assert_eq!(
+            run("{ read -d: x; read -d: y; } <<< 'a:b:c'; echo \"$x-$y\"").0,
+            "a-b\n"
+        );
+        // Attached numeric argument: `-n3`.
+        assert_eq!(run("read -n3 x <<< 'abcdef'; echo \"$x\"").0, "abc\n");
+        // Clustered flags with a trailing attached argument: `-rn3`.
+        assert_eq!(run("read -rn3 x <<< 'ab\\cd'; echo \"$x\"").0, "ab\\\n");
+        // Separated form still works.
+        assert_eq!(run("read -d ':' p <<< 'a:b'; echo \"$p\"").0, "a\n");
     }
 
     #[test]

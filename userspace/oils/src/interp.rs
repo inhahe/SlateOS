@@ -9065,7 +9065,13 @@ impl Shell {
         if a.len() == 2 && a[0] == "-o" {
             return i32::from(!self.shell_option_enabled(a[1]));
         }
-        i32::from(!eval_test(&a))
+        match eval_test(&a) {
+            Ok(b) => i32::from(!b),
+            Err(operand) => {
+                eprintln!("osh: {name}: {operand}: integer expression expected");
+                2
+            }
+        }
     }
 
     // ---- output helpers -----------------------------------------------------
@@ -11706,18 +11712,21 @@ fn normalize_exp(s: &str) -> String {
     }
 }
 
-/// Evaluate a `test`/`[` expression. Returns the boolean result (true = success).
-fn eval_test(a: &[&str]) -> bool {
+/// Evaluate a `test`/`[` expression. Returns `Ok(true)`/`Ok(false)` for the
+/// boolean result, or `Err(operand)` when an arithmetic comparison was given a
+/// non-integer operand (the caller reports `integer expression expected` and
+/// exits 2, as bash does).
+fn eval_test(a: &[&str]) -> Result<bool, String> {
     match a.len() {
-        0 => false,
-        1 => !a[0].is_empty(),
+        0 => Ok(false),
+        1 => Ok(!a[0].is_empty()),
         2 => {
             // Unary operator.
             let (op, x) = (a[0], a[1]);
             if op == "!" {
-                return x.is_empty();
+                return Ok(x.is_empty());
             }
-            eval_unary(op, x)
+            Ok(eval_unary(op, x))
         }
         3 => {
             let (l, op, r) = (a[0], a[1], a[2]);
@@ -11729,17 +11738,17 @@ fn eval_test(a: &[&str]) -> bool {
                 return eval_binary(l, op, r);
             }
             if l == "!" {
-                return !eval_test(&a[1..]);
+                return Ok(!eval_test(&a[1..])?);
             }
             if l == "(" && r == ")" {
-                return !op.is_empty();
+                return Ok(!op.is_empty());
             }
             eval_binary(l, op, r)
         }
         _ => {
             // Handle a leading `!`; otherwise fall back to the first 3 args.
             if a[0] == "!" {
-                !eval_test(&a[1..])
+                Ok(!eval_test(&a[1..])?)
             } else {
                 eval_binary(a[0], a[1], a[2])
             }
@@ -11874,17 +11883,30 @@ fn is_test_binary_op(op: &str) -> bool {
     )
 }
 
-fn eval_binary(l: &str, op: &str, r: &str) -> bool {
+/// Parse an operand as a decimal integer for a `test`/`[` arithmetic
+/// comparison (`-eq`, `-lt`, …). bash accepts optional surrounding whitespace
+/// and a leading sign, but *only* base 10 — `0x10` is rejected here (unlike
+/// `[[ … ]]`, which evaluates a full arithmetic expression). On failure the
+/// operand is returned verbatim so the caller can report `integer expression
+/// expected`, matching bash's diagnostic (and exit status 2).
+fn test_parse_int(s: &str) -> Result<i64, String> {
+    s.trim().parse::<i64>().map_err(|_| s.to_string())
+}
+
+/// Evaluate a `test`/`[` binary primary. Returns `Err(operand)` when an
+/// arithmetic comparison is given a non-integer operand (bash prints
+/// `integer expression expected` and exits 2 in that case).
+fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
     match op {
-        "=" | "==" => l == r,
-        "!=" => l != r,
-        "<" => l < r,
-        ">" => l > r,
+        "=" | "==" => Ok(l == r),
+        "!=" => Ok(l != r),
+        "<" => Ok(l < r),
+        ">" => Ok(l > r),
         "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
-            let (Ok(a), Ok(b)) = (l.parse::<i64>(), r.parse::<i64>()) else {
-                return false;
-            };
-            match op {
+            // bash checks the left operand first, then the right.
+            let a = test_parse_int(l)?;
+            let b = test_parse_int(r)?;
+            Ok(match op {
                 "-eq" => a == b,
                 "-ne" => a != b,
                 "-lt" => a < b,
@@ -11892,10 +11914,10 @@ fn eval_binary(l: &str, op: &str, r: &str) -> bool {
                 "-gt" => a > b,
                 "-ge" => a >= b,
                 _ => false,
-            }
+            })
         }
-        "-nt" | "-ot" | "-ef" => file_cmp(op, l, r),
-        _ => false,
+        "-nt" | "-ot" | "-ef" => Ok(file_cmp(op, l, r)),
+        _ => Ok(false),
     }
 }
 
@@ -12249,6 +12271,24 @@ mod tests {
         assert_eq!(s, 0);
         let (_, s2) = run("[ 1 -gt 2 ]");
         assert_eq!(s2, 1);
+    }
+
+    #[test]
+    fn test_builtin_integer_expression_error() {
+        // A non-integer operand to an arithmetic comparison is an *error*
+        // (exit 2), not a false result (exit 1) — matching bash. Base-10 only:
+        // `0x10` is rejected here even though `[[ … ]]` would evaluate it.
+        assert_eq!(run("[ 12 -eq 12.0 ]").1, 2);
+        assert_eq!(run("[ 12.0 -eq 12 ]").1, 2);
+        assert_eq!(run("[ 12 -eq abc ]").1, 2);
+        assert_eq!(run("[ \"\" -eq 5 ]").1, 2);
+        assert_eq!(run("[ 0x10 -eq 16 ]").1, 2);
+        assert_eq!(run("test 12 -eq 12.0").1, 2);
+        // Surrounding whitespace and a leading sign are still valid integers.
+        assert_eq!(run("[ \" 5\" -eq 5 ]").1, 0);
+        assert_eq!(run("[ +5 -eq 5 ]").1, 0);
+        assert_eq!(run("[ -5 -lt 0 ]").1, 0);
+        assert_eq!(run("[ 007 -eq 7 ]").1, 0);
     }
 
     #[test]

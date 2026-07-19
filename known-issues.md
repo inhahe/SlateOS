@@ -544,7 +544,13 @@ for a variable name) but otherwise ignored.
 
 **Proper fix:** `-t` needs a timer/tty-timeout facility the current model
 lacks (no async/tty timeout). Deferred as low priority — scripts rarely use a
-`read` timeout compared to `-r`/`-a`/`-n`/`-d`/`-u`.
+`read` timeout compared to `-r`/`-a`/`-n`/`-d`/`-u`. Note the special
+`-t 0` case is *separable* and needs no timer: it must return 0 iff input is
+available on the source without reading anything (bash), so `read -t 0 x <
+/dev/null` → status 0 (EOF counts as "available") where osh currently reads to
+EOF and returns 1. Implementing just `-t 0` only requires a non-consuming
+"is there data / is the source at a readable state" probe over the
+`StdinSrc`/`RedirPlan` sources.
 
 ### TD-OILS7. `osh` `readonly`: enforcement across assignment/`unset`/`declare`, the `read` builtin, and temporary env prefixes — RESOLVED
 

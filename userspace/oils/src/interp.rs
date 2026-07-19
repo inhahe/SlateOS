@@ -880,6 +880,9 @@ impl Shell {
                     };
                     let mut o = Out::Pipe(writer);
                     sub.exec_command(cmd, &mut o, &stdin);
+                    // A pipeline stage runs in its own subshell: fire its EXIT
+                    // trap (if it set one) before the stage's state is dropped.
+                    sub.run_exit_trap_out(&mut o, &stdin);
                     // `o` drops here, closing the write end → EOF downstream.
                     sub.last_status
                 });
@@ -895,6 +898,8 @@ impl Shell {
                 None => StdinSrc::Inherit,
             };
             sub.exec_command(&cmds[last], out, &stdin);
+            // The last stage is a subshell too: fire its own EXIT trap.
+            sub.run_exit_trap_out(out, &stdin);
             statuses[last] = sub.last_status;
             // Close this stage's read end NOW (before joining) so an upstream
             // producer that outlives the consumer sees EOF/EPIPE and stops —
@@ -1075,6 +1080,10 @@ impl Shell {
                 // A subshell gets a clone of the state; mutations don't escape.
                 let mut sub = self.clone_for_subshell();
                 let flow = sub.exec_program(p, out, stdin);
+                // Fire the subshell's own EXIT trap (if it set one) before its
+                // state is discarded — matching bash, which runs an EXIT trap for
+                // every exiting shell environment, not only the top level.
+                sub.run_exit_trap_out(out, stdin);
                 self.last_status = sub.last_status;
                 // Propagate an explicit exit from the subshell as a status only.
                 match flow {
@@ -2017,8 +2026,12 @@ impl Shell {
                 .filter(|(_, v)| v.is_empty())
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            // The EXIT trap only fires for the top-level shell in our model.
-            exit_trap_done: true,
+            // A subshell fires its *own* EXIT trap when it exits (bash). The
+            // parent's EXIT trap was filtered out above (only ignored `''` traps
+            // are inherited), so this only fires a trap the subshell installs
+            // itself; the caller invokes `run_exit_trap_out` at the subshell
+            // boundary. `false` here means "not yet fired".
+            exit_trap_done: false,
             in_trap: false,
             // A subshell does not inherit the parent's job table.
             jobs: Vec::new(),
@@ -5346,6 +5359,9 @@ impl Shell {
         {
             let mut out = Out::Capture(&mut buf);
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
+            // A command substitution is a subshell: fire its own EXIT trap into
+            // the same capture so its output is included in the result (bash).
+            sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
         self.last_status = sub.last_status;
         let mut s = String::from_utf8_lossy(&buf).into_owned();
@@ -7270,6 +7286,21 @@ impl Shell {
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
     /// Called by the binary driver at each true-exit point.
     pub fn run_exit_trap(&mut self) {
+        let mut out = Out::Inherit;
+        self.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
+    }
+
+    /// Fire the EXIT trap (at most once), writing its output to `out`.
+    ///
+    /// bash fires an EXIT trap for **every** shell environment as it exits — not
+    /// just the top-level shell, but also each subshell (`( … )`, a pipeline
+    /// stage, and a command substitution `$( … )`) that *sets its own* EXIT trap.
+    /// A subshell does not re-fire the parent's inherited EXIT trap (that one is
+    /// reset to default in the subshell, per [`Shell::clone_for_subshell`]); only
+    /// a trap installed inside the subshell fires on the subshell's exit. Routing
+    /// through `out` is what lets `x=$( trap 'echo t' EXIT; … )` capture the
+    /// trap's output into the substitution result, matching bash.
+    fn run_exit_trap_out(&mut self, out: &mut Out, stdin: &StdinSrc) {
         if self.exit_trap_done {
             return;
         }
@@ -7281,7 +7312,14 @@ impl Shell {
             // fires; preserve it across the handler (a handler that itself runs
             // `exit N` is a rare case we do not special-case).
             let saved = self.last_status;
-            self.run_source(&action);
+            match parse_with_aliases(&action, &self.aliases) {
+                Ok(prog) => {
+                    let _ = self.exec_program(&prog, out, stdin);
+                }
+                Err(e) => {
+                    eprintln!("osh: syntax error: {e}");
+                }
+            }
             self.last_status = saved;
         }
     }
@@ -15728,6 +15766,47 @@ mod tests {
         sh.vars.remove("TRAP_MARK");
         sh.run_exit_trap();
         assert!(!sh.vars.contains_key("TRAP_MARK"));
+    }
+
+    #[test]
+    fn subshell_exit_trap_fires() {
+        // A subshell that installs its own EXIT trap fires it when the subshell
+        // exits — for `( … )`, a command substitution, and a pipeline stage —
+        // while the parent's inherited EXIT trap is *not* re-fired in a subshell.
+        // Output is folded into stdout with `2>&1`-free echoes so `run` captures.
+        let (o, _) = run("( trap 'echo sub' EXIT; echo insub ); echo out");
+        assert_eq!(o, "insub\nsub\nout\n");
+
+        // An explicit `exit N` inside the subshell still fires the trap, and the
+        // subshell's status ($?) is the exit code, not the trap's.
+        let (o2, _) = run("( trap 'echo sub' EXIT; exit 3 ); echo \"out=$?\"");
+        assert_eq!(o2, "sub\nout=3\n");
+
+        // The parent EXIT trap is reset (not fired) inside a subshell that does
+        // not set its own — only the parent's fires, once, at real exit.
+        let mut sh = Shell::new();
+        let mut buf = Vec::new();
+        {
+            let mut out = Out::Capture(&mut buf);
+            let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out").expect("parse");
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        assert_eq!(String::from_utf8_lossy(&buf), "in\nout\n");
+        // The parent's EXIT trap only fires now, at the real shell exit.
+        let mut buf2 = Vec::new();
+        {
+            let mut out = Out::Capture(&mut buf2);
+            sh.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
+        }
+        assert_eq!(String::from_utf8_lossy(&buf2), "P\n");
+
+        // A command substitution captures its own EXIT-trap output in the result.
+        let (o3, _) = run("x=$( trap 'echo t' EXIT; echo body ); echo \"[$x]\"");
+        assert_eq!(o3, "[body\nt]\n");
+
+        // A pipeline-stage subshell fires its own EXIT trap.
+        let (o4, _) = run("false | ( trap 'echo PS' EXIT; cat >/dev/null ); echo done");
+        assert_eq!(o4, "PS\ndone\n");
     }
 
     #[test]

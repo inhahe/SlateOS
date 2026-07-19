@@ -19844,13 +19844,20 @@ mod tests {
 
     #[test]
     fn extra_write_fd_does_not_corrupt_stdout() {
-        // A per-command `3> file` (not via exec) is a no-op for fd 3 and must
-        // NOT redirect stdout (regression: fd ≥ 3 formerly fell into the stdout
-        // arm, which would have swallowed "hi"). Since the redirect is ignored
-        // no file is created; stdout still receives "hi".
-        let (out, status) = run("echo hi 3>osh_ignored_extra_fd.txt");
+        // A per-command `3> file` (fd ≥ 3, not via exec) must NOT redirect
+        // stdout (regression: fd ≥ 3 formerly fell into the stdout arm, which
+        // would have swallowed "hi"). The command word never writes to fd 3, so
+        // stdout still receives "hi". Bash *does* open (create) the file for the
+        // command's duration even though nothing is written to it, and osh now
+        // matches that (the fd is materialised via `install_extra_fds`).
+        let path = uniq_path("extrafd");
+        let (out, status) = run(&format!("echo hi 3>{path}"));
+        let created = std::path::Path::new(&path).exists();
+        std::fs::remove_file(&path).ok();
         assert_eq!(status, 0);
         assert_eq!(out, "hi\n");
+        // Bash parity: opening fd 3 creates the file even with no writes to it.
+        assert!(created, "3>{path} should create the file (bash parity)");
     }
 
     #[test]

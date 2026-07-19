@@ -6260,7 +6260,21 @@ impl Shell {
         };
         let text = format_printf(fmt, &args[i + 1..]);
         if let Some(name) = assign_var {
-            self.vars.insert(name, text);
+            // `-v` may target an array element: `printf -v 'arr[2]' …`.
+            let (base, index) = match (name.find('['), name.strip_suffix(']')) {
+                (Some(open), Some(inner)) => (
+                    name[..open].to_string(),
+                    Some(Box::new(Word::literal(&inner[open + 1..]))),
+                ),
+                _ => (name.clone(), None),
+            };
+            // A readonly target is rejected (status 1), leaving it intact.
+            let resolved = self.resolve_ref_name(&base);
+            if self.readonly.contains(&resolved) {
+                self.emit_stderr(format!("osh: {base}: readonly variable\n").as_bytes());
+                return 1;
+            }
+            self.assign_elem(&base, &index, text);
             0
         } else {
             self.write_bytes(out, redir, text.as_bytes())
@@ -10852,6 +10866,21 @@ mod tests {
         assert_eq!(run("printf -v out '%s-%s' a b; echo \"$out\"").0, "a-b\n");
         // -v suppresses stdout output.
         assert_eq!(run("printf -v x 'hi'").0, "");
+        // -v can target an array element.
+        assert_eq!(
+            run("printf -v 'arr[2]' '%d' 99; echo \"${arr[2]}\"").0,
+            "99\n"
+        );
+        // -v into an associative-array key.
+        assert_eq!(
+            run("declare -A m; printf -v 'm[k]' '%s!' hi; echo \"${m[k]}\"").0,
+            "hi!\n"
+        );
+        // A readonly target is rejected and left intact.
+        assert_eq!(
+            run("readonly r=orig; printf -v r '%s' new 2>/dev/null; echo \"$r\"").0,
+            "orig\n"
+        );
     }
 
     #[test]

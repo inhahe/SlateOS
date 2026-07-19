@@ -9746,6 +9746,11 @@ impl Shell {
         let mut exact = false;
         // `-u N`: read from user-space fd N instead of the ambient input.
         let mut ufd: Option<i32> = None;
+        // `-t N`: read timeout. Only the special `-t 0` (non-consuming
+        // availability poll) is honored — see the `input_available_now` check
+        // below. A positive timeout is accepted but not enforced (script input
+        // from files/here-strings is always immediately available anyway).
+        let mut timeout: Option<f64> = None;
         // `-p PROMPT`: displayed on stderr before reading, but *only* when the
         // input is a terminal (bash). Captured here and emitted after the input
         // source is resolved, so a piped/redirected/here-string read stays quiet.
@@ -9789,7 +9794,8 @@ impl Shell {
                                 exact = true;
                             }
                             'u' => ufd = val.and_then(|s| s.parse().ok()),
-                            // `-t`/`-i` accepted but not honored yet.
+                            't' => timeout = val.and_then(|s| s.parse().ok()),
+                            // `-i` accepted but not honored yet.
                             _ => {}
                         }
                         break; // remainder of this token was consumed as the argument
@@ -9844,6 +9850,14 @@ impl Shell {
             if input_is_tty {
                 self.emit_stderr(p.as_bytes());
             }
+        }
+
+        // `-t 0`: return immediately WITHOUT reading, reporting only whether a
+        // read would proceed without blocking (bash: exit 0 if input is
+        // available or the source is at EOF, non-zero if a read would block).
+        // No variables are assigned.
+        if timeout == Some(0.0) {
+            return i32::from(!self.input_available_now(rd_stdin, rd_redir));
         }
 
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
@@ -10794,6 +10808,39 @@ impl Shell {
             self.exec_stdin.as_ref()
         } else {
             self.open_fds.get(&n)
+        }
+    }
+
+    /// Non-consuming availability check for `read -t 0`: does a read from this
+    /// source proceed without blocking? Bash's `read -t 0` returns success (0)
+    /// when input is available or the source is at EOF, and failure (non-zero)
+    /// only when a read would actually block.
+    ///
+    /// Seekable/buffered sources — here-strings/here-docs, file redirects, an
+    /// fd cursor (`<&N` / `-u N`), and a persistent `exec <` cursor — are always
+    /// "ready" (bash returns 0 even for an empty file or at EOF). A live
+    /// upstream pipe is ready only when it already holds buffered bytes; an
+    /// interactive terminal with no pending keystroke is treated as would-block.
+    ///
+    /// Known limitation: a pipe sitting exactly at EOF (writer closed, buffer
+    /// drained) reports would-block here, where bash reports ready — a precise
+    /// answer needs a non-blocking peek/`select` on the pipe fd. Likewise an
+    /// interactive tty with a keystroke already queued is reported as
+    /// would-block. Both are rare and documented rather than mis-consuming input.
+    fn input_available_now(&self, stdin: &StdinSrc, redir: &RedirPlan) -> bool {
+        if redir.stdin_data.is_some() || redir.stdin.is_some() || redir.stdin_from_fd.is_some() {
+            return true;
+        }
+        match stdin {
+            StdinSrc::Cursor(_) => true,
+            StdinSrc::Inherit => self.exec_stdin.is_some() || stdin_readable_now(),
+            StdinSrc::Pipe(r) => {
+                let g = r.borrow();
+                // Bytes already pulled into the BufReader are unconditionally
+                // ready; otherwise probe the underlying OS pipe (data queued or
+                // writer-closed EOF ⇒ ready; empty live pipe ⇒ would block).
+                !g.buffer().is_empty() || pipe_reader_readable_now(g.get_ref())
+            }
         }
     }
 
@@ -12519,6 +12566,99 @@ fn pipe_writer_to_file(w: &io::PipeWriter) -> io::Result<std::fs::File> {
     Ok(std::fs::File::from(
         std::os::windows::io::OwnedHandle::from(cloned),
     ))
+}
+
+/// Non-blocking readability probe for a Windows OS handle, used by `read -t 0`.
+/// Returns true when a read would proceed immediately (data queued, or the
+/// source is at EOF), false when it would block. Distinguishes the handle type:
+/// a disk file never blocks; a pipe is queried with `PeekNamedPipe` (a
+/// writer-closed pipe reports `ERROR_BROKEN_PIPE` ⇒ EOF ⇒ ready); a character
+/// device (console / `NUL`) uses a zero-timeout wait (an idle console blocks; a
+/// non-waitable device like `NUL` reads as immediate EOF ⇒ ready).
+#[cfg(windows)]
+fn handle_readable_now(handle: std::os::windows::io::RawHandle) -> bool {
+    use core::ffi::c_void;
+    const FILE_TYPE_DISK: u32 = 1;
+    const FILE_TYPE_CHAR: u32 = 2;
+    const FILE_TYPE_PIPE: u32 = 3;
+    const ERROR_BROKEN_PIPE: u32 = 109;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    // SAFETY: these are the standard kernel32 signatures; all pointers we pass
+    // are either null or point to a local `u32` valid for the call's duration.
+    unsafe extern "system" {
+        fn GetFileType(h_file: *mut c_void) -> u32;
+        fn PeekNamedPipe(
+            h_named_pipe: *mut c_void,
+            lp_buffer: *mut c_void,
+            n_buffer_size: u32,
+            lp_bytes_read: *mut u32,
+            lp_total_bytes_avail: *mut u32,
+            lp_bytes_left_this_message: *mut u32,
+        ) -> i32;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn GetLastError() -> u32;
+    }
+    let h = handle.cast::<c_void>();
+    // SAFETY: `handle` is a live OS handle borrowed from a pipe reader or the
+    // process stdin. Each call only queries the handle (no mutation, no
+    // ownership transfer), and `avail` is a valid local for the pipe query.
+    unsafe {
+        match GetFileType(h) {
+            FILE_TYPE_DISK => true,
+            FILE_TYPE_PIPE => {
+                let mut avail: u32 = 0;
+                let ok = PeekNamedPipe(
+                    h,
+                    core::ptr::null_mut(),
+                    0,
+                    core::ptr::null_mut(),
+                    &raw mut avail,
+                    core::ptr::null_mut(),
+                );
+                if ok != 0 {
+                    avail > 0
+                } else {
+                    GetLastError() == ERROR_BROKEN_PIPE
+                }
+            }
+            // WAIT_OBJECT_0 (input queued) and WAIT_FAILED (non-waitable, e.g.
+            // NUL) ⇒ ready; only an idle console (WAIT_TIMEOUT) would block.
+            FILE_TYPE_CHAR => WaitForSingleObject(h, 0) != WAIT_TIMEOUT,
+            _ => true,
+        }
+    }
+}
+
+/// `read -t 0`: is the process's inherited stdin readable without blocking?
+#[cfg(windows)]
+fn stdin_readable_now() -> bool {
+    use std::os::windows::io::AsRawHandle;
+    handle_readable_now(io::stdin().as_raw_handle())
+}
+
+/// `read -t 0`: does the upstream pipeline pipe hold data (or sit at EOF)?
+#[cfg(windows)]
+fn pipe_reader_readable_now(r: &io::PipeReader) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    handle_readable_now(r.as_raw_handle())
+}
+
+/// Fallback readability probe for non-Windows targets (including SlateOS).
+/// A non-tty inherited stdin (file, `/dev/null`, an already-drained pipe) is
+/// treated as ready; an interactive terminal as would-block. A precise answer
+/// for a live OS pipe/tty needs a `poll(2)`-style query, which is not yet wired
+/// for these targets — see TD-OILS-READ-T0-POLL in `known-issues.md`.
+#[cfg(not(windows))]
+fn stdin_readable_now() -> bool {
+    !io::stdin().is_terminal()
+}
+
+/// Fallback: without a `poll(2)` peek, only bytes already buffered by the caller
+/// count as ready for an upstream pipe (a bare OS-pipe query is not yet wired
+/// for non-Windows targets — see TD-OILS-READ-T0-POLL).
+#[cfg(not(windows))]
+fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
+    false
 }
 
 /// Read one newline-terminated line, returning `(text, terminated)` where
@@ -18033,6 +18173,24 @@ mod tests {
         assert_eq!(run("r=$(echo hi 4>&1 2>&4); echo \"[$r]\""), ("[hi]\n".into(), 0));
         // External command (`env echo`): the child inherits the resolved fds.
         assert_eq!(run("r=$(env echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
+    }
+
+    #[test]
+    fn read_dash_t_zero_polls_without_consuming() {
+        // `read -t 0` is a non-consuming availability poll: it assigns nothing
+        // and exits 0 when a read would proceed without blocking (bash returns 0
+        // for a seekable/ready source — including an empty file or EOF — and
+        // non-zero only when a read would block). Regression for `-t` previously
+        // being parsed-and-ignored, which turned `-t 0` into a real blocking
+        // read that also consumed a line.
+        // A here-string source is always ready:
+        assert_eq!(run("read -t 0 <<< \"x\"; echo $?"), ("0\n".into(), 0));
+        // An empty here-string is still ready (bash: 0):
+        assert_eq!(run("read -t 0 <<< \"\"; echo $?"), ("0\n".into(), 0));
+        // /dev/null (immediate EOF) counts as ready:
+        assert_eq!(run("read -t 0 </dev/null; echo $?"), ("0\n".into(), 0));
+        // It must NOT consume: a following `read` still sees the first line.
+        assert_eq!(run("{ read -t 0; read x; echo \"[$x]\"; } <<< \"keep\""), ("[keep]\n".into(), 0));
     }
 
     #[test]

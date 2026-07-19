@@ -2469,6 +2469,10 @@ impl Shell {
                 .entry(name.to_string())
                 .or_default()
                 .insert(0, val);
+        } else if self.assoc.contains_key(name) {
+            // A subscript-less `name=value` on an existing associative array
+            // targets key "0" (bash: `declare -A b; b=a` yields `b[0]=a`).
+            self.assoc_set(name, "0".to_string(), val, false);
         } else {
             self.vars.insert(name.to_string(), val);
         }
@@ -2622,8 +2626,21 @@ impl Shell {
                         }
                     }
                 } else if a.append {
-                    // `name+=val` — append to the scalar (or to element 0 of an array).
-                    if is_int {
+                    // `name+=val` — append to the scalar, to element 0 of an
+                    // indexed array, or to key "0" of an associative array
+                    // (bash treats a subscript-less array assignment as index 0).
+                    if self.assoc.contains_key(&a.name) {
+                        if is_int {
+                            let base = self
+                                .assoc_element(&a.name, "0")
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                            let sum = base.wrapping_add(self.eval_int_assign(&val));
+                            self.assoc_set(&a.name, "0".to_string(), sum.to_string(), false);
+                        } else {
+                            self.assoc_set(&a.name, "0".to_string(), val, true);
+                        }
+                    } else if is_int {
                         let base = self
                             .vars
                             .get(&a.name)
@@ -2849,6 +2866,11 @@ impl Shell {
         let positional = name == "@" || name == "*";
         if op == 'A' {
             if positional {
+                // With no positional parameters, bash yields nothing (`${@@A}`
+                // is empty) rather than a bare `set -- `.
+                if self.positional.is_empty() {
+                    return Vec::new();
+                }
                 let body = self
                     .positional
                     .iter()
@@ -18732,6 +18754,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -A m; m[\"a-b\"]=v; declare -p m").0,
             "declare -A m=([a-b]=\"v\" )\n"
         );
+    }
+
+    #[test]
+    fn assoc_scalar_assignment_targets_key_zero() {
+        // A subscript-less `name=value` on an existing associative array assigns
+        // to key "0" (bash: `declare -A b; b=a` yields `b[0]=a`). Same for the
+        // `+=` append and the `-i` integer forms, and it coexists with other keys.
+        assert_eq!(run("declare -A b; b=a; echo \"[${b[0]}]\"").0, "[a]\n");
+        assert_eq!(run("declare -A b; b=x; b+=y; echo \"[${b[0]}]\"").0, "[xy]\n");
+        assert_eq!(run("declare -A b; b+=y; echo \"[${b[0]}]\"").0, "[y]\n");
+        assert_eq!(run("declare -Ai b; b=5; b+=3; echo \"[${b[0]}]\"").0, "[8]\n");
+        assert_eq!(
+            run("declare -A b=([k]=v); b=scalar; echo \"${b[0]}-${b[k]}\"").0,
+            "scalar-v\n"
+        );
+    }
+
+    #[test]
+    fn bulk_attr_transform_empty_positional_is_empty() {
+        // `${@@A}` / `${*@A}` with no positional parameters yields nothing (not a
+        // bare `set -- `), matching bash.
+        assert_eq!(run("set -- ; echo \"[${@@A}]\"").0, "[]\n");
+        assert_eq!(run("set -- ; echo \"[${*@A}]\"").0, "[]\n");
+        // With params it still produces the re-inputtable `set --` form.
+        assert_eq!(run("set -- x y; echo \"${@@A}\"").0, "set -- 'x' 'y'\n");
     }
 
     #[test]

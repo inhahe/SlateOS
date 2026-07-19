@@ -1222,7 +1222,9 @@ impl Shell {
         // lets `.` be any char. `regex_pattern_from_rhs` escapes the metacharacters
         // of quoted segments and passes unquoted ones through untouched.
         let pattern = self.regex_pattern_from_rhs(r);
-        let re = match crate::ere::Regex::new(&pattern) {
+        // `shopt -s nocasematch` also makes `=~` case-insensitive.
+        let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+        let re = match crate::ere::Regex::new_flags(&pattern, ci) {
             Ok(re) => re,
             Err(e) => {
                 self.errln(&format!("osh: [[: =~: invalid regex: {}", e.0));
@@ -5973,6 +5975,21 @@ mod tests {
         assert_eq!(run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0, "y\n");
         // Sanity: without it, the literal comparison is case-sensitive.
         assert_eq!(run("[[ Hello == hello ]] && echo y || echo n").0, "n\n");
+    }
+
+    #[test]
+    fn nocasematch_regex() {
+        // `=~` is case-sensitive by default, case-insensitive under nocasematch.
+        assert_eq!(run("[[ Hello =~ ^hello$ ]] && echo y || echo n").0, "n\n");
+        assert_eq!(
+            run("shopt -s nocasematch; [[ Hello =~ ^hello$ ]] && echo y || echo n").0,
+            "y\n"
+        );
+        // Character-class ranges fold too.
+        assert_eq!(
+            run("shopt -s nocasematch; [[ ABC =~ ^[a-z]+$ ]] && echo y || echo n").0,
+            "y\n"
+        );
     }
 
     #[test]

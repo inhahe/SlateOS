@@ -71,9 +71,25 @@ struct ClassData {
 }
 
 impl ClassData {
-    fn matches(&self, c: char) -> bool {
-        let hit = self.ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi)
-            || self.posix.iter().any(|p| p.matches(c));
+    /// Whether `c` is in the class's *positive* set (before applying negation).
+    fn hit_positive(&self, c: char) -> bool {
+        self.ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi)
+            || self.posix.iter().any(|p| p.matches(c))
+    }
+
+    /// Case-aware match. When `ci` is set, the positive set is tested against
+    /// the char and its case-folded variants *before* negation is applied, so a
+    /// negated class like `[^a-z]` correctly excludes `A` under `nocasematch`.
+    fn matches_ci(&self, c: char, ci: bool) -> bool {
+        let mut hit = self.hit_positive(c);
+        if ci && !hit {
+            for alt in c.to_lowercase().chain(c.to_uppercase()) {
+                if alt != c && self.hit_positive(alt) {
+                    hit = true;
+                    break;
+                }
+            }
+        }
         hit ^ self.negated
     }
 }
@@ -530,9 +546,30 @@ impl Compiler {
 // ---- Compiled regex + Pike VM ----------------------------------------------
 
 /// A compiled ERE. Compile once with [`Regex::new`], then match repeatedly.
+/// Compare an optional input char against a literal `Char` instruction,
+/// folding case when `ci` is set. Case folding tries both the upper- and
+/// lower-case mappings so any Unicode letter pair (not just ASCII) is handled.
+fn char_eq(input: Option<char>, lit: char, ci: bool) -> bool {
+    match input {
+        Some(ch) if ch == lit => true,
+        Some(ch) if ci => ch.eq_ignore_ascii_case(&lit) || char_fold_eq(ch, lit),
+        _ => false,
+    }
+}
+
+/// Unicode-aware case-fold equality: two chars are equal if their lowercase (or
+/// uppercase) mappings match. Covers non-ASCII letters that
+/// `eq_ignore_ascii_case` misses.
+fn char_fold_eq(a: char, b: char) -> bool {
+    a.to_lowercase().eq(b.to_lowercase()) || a.to_uppercase().eq(b.to_uppercase())
+}
+
 pub struct Regex {
     prog: Vec<Inst>,
     ngroups: usize,
+    /// Case-insensitive matching (`shopt -s nocasematch`). When set, `Char`
+    /// and `Class` instructions match without regard to letter case.
+    ci: bool,
 }
 
 /// Per-step NFA thread frontier with a `seen` set for `O(1)` dedupe, so each
@@ -571,6 +608,14 @@ impl Regex {
     /// Returns [`EreError`] on a syntax error (unbalanced `(`/`[`, invalid
     /// `{m,n}`, unknown `[:class:]`, trailing `\`, …).
     pub fn new(pattern: &str) -> Result<Regex, EreError> {
+        Self::new_flags(pattern, false)
+    }
+
+    /// Compile an ERE pattern with optional case-insensitive matching.
+    ///
+    /// # Errors
+    /// Returns [`EreError`] on a syntax error, as [`Regex::new`].
+    pub fn new_flags(pattern: &str, ci: bool) -> Result<Regex, EreError> {
         let mut parser = EParser {
             chars: pattern.chars().collect(),
             pos: 0,
@@ -599,6 +644,7 @@ impl Regex {
         Ok(Regex {
             prog: c.prog,
             ngroups,
+            ci,
         })
     }
 
@@ -654,7 +700,7 @@ impl Regex {
             while i < clist.threads.len() {
                 let pc = clist.threads[i].pc;
                 match &self.prog[pc] {
-                    Inst::Char(ch) if c == Some(*ch) => {
+                    Inst::Char(ch) if char_eq(c, *ch, self.ci) => {
                         let mut caps = clist.threads[i].caps.clone();
                         self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
                     }
@@ -662,7 +708,7 @@ impl Regex {
                         let mut caps = clist.threads[i].caps.clone();
                         self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
                     }
-                    Inst::Class(d) if c.is_some_and(|ch| d.matches(ch)) => {
+                    Inst::Class(d) if c.is_some_and(|ch| d.matches_ci(ch, self.ci)) => {
                         let mut caps = clist.threads[i].caps.clone();
                         self.add_thread(&mut nlist, pc + 1, sp + 1, &mut caps, input);
                     }
@@ -739,6 +785,24 @@ mod tests {
 
     fn m(pat: &str, s: &str) -> bool {
         Regex::new(pat).unwrap().is_match(s)
+    }
+
+    fn mi(pat: &str, s: &str) -> bool {
+        Regex::new_flags(pat, true).unwrap().is_match(s)
+    }
+
+    #[test]
+    fn case_insensitive() {
+        // Literals fold case only under the ci flag.
+        assert!(!m("^hello$", "HELLO"));
+        assert!(mi("^hello$", "HELLO"));
+        assert!(mi("^HeLLo$", "hello"));
+        // Character-class ranges fold too.
+        assert!(!m("^[a-z]+$", "Hello"));
+        assert!(mi("^[a-z]+$", "Hello"));
+        assert!(mi("^[A-Z]+$", "hello"));
+        // Negated classes respect folding: `[^a-z]` should NOT match 'A' when ci.
+        assert!(!mi("^[^a-z]+$", "ABC"));
     }
 
     #[test]

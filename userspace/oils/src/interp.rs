@@ -248,6 +248,10 @@ pub struct Shell {
     /// 0 when there was none (so `x=$?` still reads the prior status, but the
     /// assignment itself resets `$?` to 0).
     comsub_count: u64,
+    /// `$BASH_SUBSHELL` — the subshell nesting depth. 0 at the top level; each
+    /// `( … )` group, command substitution, pipeline stage, or other subshell
+    /// increments it for its clone (bash).
+    subshell_depth: u32,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -479,6 +483,7 @@ impl Shell {
             name: "osh".to_string(),
             last_status: 0,
             comsub_count: 0,
+            subshell_depth: 0,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -1884,6 +1889,8 @@ impl Shell {
             name: self.name.clone(),
             last_status: self.last_status,
             comsub_count: self.comsub_count,
+            // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
+            subshell_depth: self.subshell_depth.saturating_add(1),
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -5131,6 +5138,7 @@ impl Shell {
             "0" => Some(self.name.clone()),
             "-" => Some(self.option_flags()),
             "BASHPID" => Some(self.pid.to_string()),
+            "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
             "LINENO" => Some(self.current_line.to_string()),
             "RANDOM" => Some(self.next_random().to_string()),
             "SECONDS" => Some(
@@ -10426,6 +10434,27 @@ fn echo_expand_escapes(s: &str) -> (String, bool) {
                     out.push(c);
                 }
             }
+            esc @ ('u' | 'U') => {
+                // `\uHHHH` (up to 4 hex digits) / `\UHHHHHHHH` (up to 8) — a
+                // Unicode code point, emitted as UTF-8 (osh is a UTF-8 system,
+                // matching the `$'…'` ANSI-C decoder). A missing hex digit
+                // leaves the literal `\u`/`\U`.
+                let max = if esc == 'u' { 4 } else { 8 };
+                i += 1;
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < max && i < chars.len() && chars[i].is_ascii_hexdigit() {
+                    val = val.wrapping_mul(16).wrapping_add(chars[i].to_digit(16).unwrap_or(0));
+                    i += 1;
+                    n += 1;
+                }
+                if n == 0 {
+                    out.push('\\');
+                    out.push(esc);
+                } else if let Some(c) = char::from_u32(val) {
+                    out.push(c);
+                }
+            }
             other => {
                 // Unrecognized escape: keep the backslash and the character.
                 out.push('\\');
@@ -12143,6 +12172,12 @@ mod tests {
         // `\xHH` hex; `\0nnn` octal (needs the leading 0, else literal).
         assert_eq!(run("echo -e '\\x41\\0101'").0, "AA\n");
         assert_eq!(run("echo -e '\\101'").0, "\\101\n");
+        // `\uHHHH` / `\UHHHHHHHH` Unicode code points, emitted as UTF-8
+        // (matching osh's `$'…'` decoder). A missing hex digit stays literal.
+        assert_eq!(run("echo -ne '\\u00e9'").0, "\u{e9}");
+        assert_eq!(run("echo -ne '\\U0001F600'").0, "\u{1F600}");
+        assert_eq!(run("echo -ne '\\u41'").0, "A");
+        assert_eq!(run("echo -ne '\\uZ'").0, "\\uZ");
     }
 
     #[test]
@@ -14206,6 +14241,16 @@ mod tests {
     fn nested_subshell_still_works() {
         // `( ( … ) )` with an inner space is nested subshells, not arithmetic.
         assert_eq!(run("( ( echo hi ) )").0, "hi\n");
+    }
+
+    #[test]
+    fn bash_subshell_depth() {
+        // `$BASH_SUBSHELL` is 0 at top level and increments in each subshell.
+        assert_eq!(run("echo $BASH_SUBSHELL").0, "0\n");
+        assert_eq!(run("( echo $BASH_SUBSHELL )").0, "1\n");
+        assert_eq!(run("( ( echo $BASH_SUBSHELL ) )").0, "2\n");
+        // A command substitution is also a subshell.
+        assert_eq!(run("echo $(echo $BASH_SUBSHELL)").0, "1\n");
     }
 
     #[test]

@@ -6661,7 +6661,15 @@ impl Shell {
         let Some(fmt) = args.get(i) else {
             return 0;
         };
-        let text = format_printf(fmt, &args[i + 1..]);
+        // Collect per-argument "invalid number" diagnostics (bash writes each to
+        // stderr and makes printf exit non-zero, but still emits the output with
+        // the best-effort numeric value).
+        let mut errors: Vec<String> = Vec::new();
+        let text = format_printf(fmt, &args[i + 1..], &mut errors);
+        for e in &errors {
+            self.emit_stderr(format!("osh: printf: {e}\n").as_bytes());
+        }
+        let num_status = i32::from(!errors.is_empty());
         if let Some(name) = assign_var {
             // `-v` may target an array element: `printf -v 'arr[2]' …`.
             let (base, index) = match (name.find('['), name.strip_suffix(']')) {
@@ -6678,9 +6686,11 @@ impl Shell {
                 return 1;
             }
             self.assign_elem(&base, &index, text);
-            0
+            num_status
         } else {
-            self.write_bytes(out, redir, text.as_bytes())
+            let write_status = self.write_bytes(out, redir, text.as_bytes());
+            // A write error dominates; otherwise report the numeric-parse status.
+            if write_status != 0 { write_status } else { num_status }
         }
     }
 
@@ -10049,7 +10059,7 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 }
 
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
-fn format_printf(fmt: &str, args: &[String]) -> String {
+fn format_printf(fmt: &str, args: &[String], errors: &mut Vec<String>) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -10057,7 +10067,7 @@ fn format_printf(fmt: &str, args: &[String]) -> String {
     let mut arg_i = 0;
     loop {
         let start = arg_i;
-        out.push_str(&format_printf_once(fmt, args, &mut arg_i));
+        out.push_str(&format_printf_once(fmt, args, &mut arg_i, errors));
         if arg_i >= args.len() || arg_i == start {
             break;
         }
@@ -10065,7 +10075,12 @@ fn format_printf(fmt: &str, args: &[String]) -> String {
     out
 }
 
-fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
+fn format_printf_once(
+    fmt: &str,
+    args: &[String],
+    arg_i: &mut usize,
+    errors: &mut Vec<String>,
+) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
@@ -10085,7 +10100,7 @@ fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
                 }
                 None => out.push('\\'),
             },
-            '%' => format_conversion(&mut chars, args, arg_i, &mut out),
+            '%' => format_conversion(&mut chars, args, arg_i, &mut out, errors),
             other => out.push(other),
         }
     }
@@ -10100,6 +10115,7 @@ fn format_conversion(
     args: &[String],
     arg_i: &mut usize,
     out: &mut String,
+    errors: &mut Vec<String>,
 ) {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&'%') {
@@ -10281,14 +10297,30 @@ fn format_conversion(
         'q' => printf_quote(&next_arg(arg_i)),
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
         'd' | 'i' => {
-            let n = parse_printf_int(&next_arg(arg_i));
+            let raw = next_arg(arg_i);
+            let (n, err) = parse_printf_int_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
             let (p, b) = split_sign(n.to_string(), plus, space);
             num_prefix = p;
             b
         }
-        'u' => parse_printf_int(&next_arg(arg_i)).cast_unsigned().to_string(),
+        'u' => {
+            let raw = next_arg(arg_i);
+            let (n, err) = parse_printf_int_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
+            n.cast_unsigned().to_string()
+        }
         'x' => {
-            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            let raw = next_arg(arg_i);
+            let (n, err) = parse_printf_int_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
+            let v = n.cast_unsigned();
             // `#` prefixes nonzero hex with `0x` (bash/C: zero gets no prefix).
             if hash && v != 0 {
                 num_prefix.push_str("0x");
@@ -10296,14 +10328,24 @@ fn format_conversion(
             format!("{v:x}")
         }
         'X' => {
-            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            let raw = next_arg(arg_i);
+            let (n, err) = parse_printf_int_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
+            let v = n.cast_unsigned();
             if hash && v != 0 {
                 num_prefix.push_str("0X");
             }
             format!("{v:X}")
         }
         'o' => {
-            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            let raw = next_arg(arg_i);
+            let (n, err) = parse_printf_int_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
+            let v = n.cast_unsigned();
             let s = format!("{v:o}");
             // `#` forces a leading `0` on octal (a bare `0` is left as-is).
             if hash && !s.starts_with('0') {
@@ -10312,13 +10354,21 @@ fn format_conversion(
             s
         }
         'f' | 'F' => {
-            let f = parse_printf_float(&next_arg(arg_i));
+            let raw = next_arg(arg_i);
+            let (f, err) = parse_printf_float_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
             let (p, b) = split_sign(format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
             num_prefix = p;
             b
         }
         'e' | 'E' => {
-            let f = parse_printf_float(&next_arg(arg_i));
+            let raw = next_arg(arg_i);
+            let (f, err) = parse_printf_float_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
             let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
             let s = normalize_exp(&s);
             let s = if conv == 'E' { s.to_uppercase() } else { s };
@@ -10327,7 +10377,11 @@ fn format_conversion(
             b
         }
         'g' | 'G' => {
-            let f = parse_printf_float(&next_arg(arg_i));
+            let raw = next_arg(arg_i);
+            let (f, err) = parse_printf_float_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
             let s = format!("{f}");
             let s = if conv == 'G' { s.to_uppercase() } else { s };
             let (p, b) = split_sign(s, plus, space);
@@ -10567,21 +10621,79 @@ struct StrftimeCtx {
 }
 
 fn parse_printf_int(s: &str) -> i64 {
-    let t = s.trim();
-    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
-        return rest.chars().next().map_or(0, |c| i64::from(u32::from(c)));
-    }
-    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        return i64::from_str_radix(hex, 16).unwrap_or(0);
-    }
-    if let Some(hex) = t.strip_prefix("-0x").or_else(|| t.strip_prefix("-0X")) {
-        return i64::from_str_radix(hex, 16).map(|n| -n).unwrap_or(0);
-    }
-    t.parse::<i64>().unwrap_or(0)
+    parse_printf_int_checked(s).0
 }
 
-fn parse_printf_float(s: &str) -> f64 {
-    s.trim().parse::<f64>().unwrap_or(0.0)
+/// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
+/// report whether it was fully valid. Leading whitespace and an optional sign
+/// are skipped; a `0x`/`0X` prefix selects hex, a leading `0` selects octal,
+/// otherwise decimal. The value is the leading run of valid digits (bash uses
+/// that partial value even when it warns). The returned `Option` is `None` when
+/// the whole argument was consumed, or `Some(kind)` — the bash diagnostic tail
+/// (`"invalid number"` / `"invalid octal number"` / `"invalid hex number"`) —
+/// when trailing junk (including trailing whitespace) or a bad digit remains.
+fn parse_printf_int_checked(s: &str) -> (i64, Option<&'static str>) {
+    // strtoimax skips *leading* whitespace but treats trailing whitespace as
+    // junk, so trim only the front. An empty/blank argument is a valid 0.
+    let t = s.trim_start();
+    if t.is_empty() {
+        return (0, None);
+    }
+    // `'c` / `"c` yields the numeric code of the first character (always valid).
+    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
+        return (rest.chars().next().map_or(0, |c| i64::from(u32::from(c))), None);
+    }
+    let (neg, body) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let (radix, digits, kind) = if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
+    {
+        (16u32, h, "invalid hex number")
+    } else if body.len() > 1 && body.starts_with('0') {
+        (8u32, &body[1..], "invalid octal number")
+    } else {
+        (10u32, body, "invalid number")
+    };
+    // Consume the leading run of digits valid for the radix. These are ASCII,
+    // so the char count equals the byte length of the consumed prefix.
+    let valid_len = digits.chars().take_while(|c| c.is_digit(radix)).count();
+    let consumed = &digits[..valid_len];
+    let remaining = &digits[valid_len..];
+    let magnitude = i64::from_str_radix(consumed, radix).unwrap_or(0);
+    let value = if neg { magnitude.wrapping_neg() } else { magnitude };
+    let err = if consumed.is_empty() || !remaining.is_empty() {
+        Some(kind)
+    } else {
+        None
+    };
+    (value, err)
+}
+
+/// Parse a floating-point `printf` argument with C/bash `strtod` semantics and
+/// report validity. Like [`parse_printf_int_checked`], leading whitespace is
+/// skipped and the value is the longest parseable leading prefix; the `Option`
+/// is `Some("invalid number")` when trailing junk remains.
+fn parse_printf_float_checked(s: &str) -> (f64, Option<&'static str>) {
+    let t = s.trim_start();
+    if t.is_empty() {
+        return (0.0, None);
+    }
+    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
+        return (rest.chars().next().map_or(0.0, |c| f64::from(u32::from(c))), None);
+    }
+    if let Ok(v) = t.parse::<f64>() {
+        return (v, None);
+    }
+    // Fall back to the longest leading prefix that parses (strtod partial value).
+    let mut best = 0.0;
+    for (i, c) in t.char_indices() {
+        let end = i.saturating_add(c.len_utf8());
+        if let Ok(v) = t[..end].parse::<f64>() {
+            best = v;
+        }
+    }
+    (best, Some("invalid number"))
 }
 
 /// Rust formats exponents as `1.5e2`; C/bash use `1.5e+02`. Normalize to the
@@ -11774,6 +11886,26 @@ mod tests {
         assert_eq!(run("printf '%u' 5").0, "5");
         // Hex input to %d.
         assert_eq!(run("printf '%d' 0xff").0, "255");
+    }
+
+    #[test]
+    fn printf_invalid_number_diagnostics() {
+        // A non-numeric arg warns to stderr and makes printf fail, but the
+        // best-effort value (0, or the leading numeric prefix) is still emitted.
+        assert_eq!(run("printf '%d\\n' abc"), ("0\n".to_string(), 1));
+        // Leading digits are used as the value (strtoimax semantics).
+        assert_eq!(run("printf '%d\\n' 12x"), ("12\n".to_string(), 1));
+        // A leading `0` selects octal; `010` is 8, `08` is invalid → 0.
+        assert_eq!(run("printf '%d\\n' 010"), ("8\n".to_string(), 0));
+        assert_eq!(run("printf '%d\\n' 08"), ("0\n".to_string(), 1));
+        // Bad hex digits are invalid.
+        assert_eq!(run("printf '%d\\n' 0xzz"), ("0\n".to_string(), 1));
+        // Valid numbers do not warn.
+        assert_eq!(run("printf '%d\\n' 9"), ("9\n".to_string(), 0));
+        assert_eq!(run("printf '%d\\n' ''"), ("0\n".to_string(), 0));
+        // Floats: leading numeric prefix, invalid trailing junk.
+        assert_eq!(run("printf '%.1f\\n' 3.5x"), ("3.5\n".to_string(), 1));
+        assert_eq!(run("printf '%.1f\\n' xyz"), ("0.0\n".to_string(), 1));
     }
 
     #[test]

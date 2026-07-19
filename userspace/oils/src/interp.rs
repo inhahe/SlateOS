@@ -2026,8 +2026,9 @@ impl Shell {
 
     /// `${name@op}` parameter transformation. Supports `Q` (quote so the value
     /// can be reused as shell input), `U`/`u`/`L` (upper-all/upper-first/
-    /// lower-all), `E` (expand ANSI-C backslash escapes), and `a` (attribute
-    /// flags — `a` for indexed array, `A` for associative, else empty).
+    /// lower-all), `E` (expand ANSI-C backslash escapes), `a` (attribute
+    /// flags — `a` for indexed array, `A` for associative, else empty), and `A`
+    /// (a re-inputtable assignment/`declare` statement recreating the variable).
     fn param_transform(&mut self, name: &str, index: &Option<Box<Word>>, op: char) -> String {
         // The `a` (attributes) transform reports type even for an unset scalar.
         if op == 'a' {
@@ -2039,8 +2040,34 @@ impl Shell {
             }
             return flags;
         }
+        // `@A` recreates an assignment/`declare` statement for the variable.
+        if op == 'A' {
+            return self.transform_assign(name);
+        }
         let value = self.param_elem_value(name, index).unwrap_or_default();
         Self::transform_value(&value, op)
+    }
+
+    /// `${name@A}` — a re-inputtable assignment/`declare` statement that would
+    /// recreate `name` with its current value and attributes. A plain scalar
+    /// with no attributes renders as `name=<shell-quoted value>` (bash's short
+    /// form); arrays, associative arrays, and any attributed variable render as
+    /// a full `declare` command. An unset variable yields the empty string.
+    fn transform_assign(&self, name: &str) -> String {
+        let attributed = self.readonly.contains(name)
+            || self.exported.contains(name)
+            || self.integer_attr.contains(name)
+            || self.lower_attr.contains(name)
+            || self.upper_attr.contains(name);
+        // Plain scalar, no attributes → `name='value'` (short form, single-quote
+        // style via shell_quote), matching bash.
+        if !attributed && !self.assoc.contains_key(name) && !self.arrays.contains_key(name) {
+            return match self.vars.get(name) {
+                Some(v) => format!("{name}={}", shell_quote(v)),
+                None => String::new(),
+            };
+        }
+        self.format_declare_def(name).unwrap_or_default()
     }
 
     /// Apply a `@`-operator ([`op`]) to a concrete string value. Shared by the
@@ -8526,6 +8553,29 @@ mod tests {
     fn param_ops_still_work() {
         assert_eq!(run("echo ${u:-default}").0, "default\n");
         assert_eq!(run("x=set; echo ${x:+yes}").0, "yes\n");
+    }
+
+    #[test]
+    fn param_transform_assign() {
+        // `@A` on a plain scalar → short `name=value` (quoted only if needed).
+        assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x=hello\n");
+        assert_eq!(run("x='a b'; echo \"${x@A}\"").0, "x='a b'\n");
+        // An attributed scalar renders as a full `declare` statement.
+        assert_eq!(
+            run("declare -i n=5; echo \"${n@A}\"").0,
+            "declare -i n=\"5\"\n"
+        );
+        // Arrays and associative arrays render as `declare` too.
+        assert_eq!(
+            run("a=(x y); echo \"${a@A}\"").0,
+            "declare -a a=([0]=\"x\" [1]=\"y\")\n"
+        );
+        assert_eq!(
+            run("declare -A m; m[k]=v; echo \"${m@A}\"").0,
+            "declare -A m=([k]=\"v\")\n"
+        );
+        // An unset variable yields the empty string.
+        assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");
     }
 
     #[test]

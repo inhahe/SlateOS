@@ -3892,8 +3892,14 @@ impl Shell {
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args),
             "declare" | "typeset" => {
-                // `declare -p [names]` prints definitions instead of declaring.
-                if args.iter().take_while(|a| a.starts_with('-')).any(|a| a.contains('p')) {
+                let lead: String =
+                    args.iter().take_while(|a| a.starts_with('-')).flat_map(|a| a.chars()).collect();
+                // `declare -F`/`-f` operate on functions (name listing);
+                // `declare -p [names]` prints variable definitions; otherwise
+                // declare/assign variables.
+                if lead.contains('F') || lead.contains('f') {
+                    self.declare_functions(args, lead.contains('F'), out, redir)
+                } else if lead.contains('p') {
                     self.declare_print(args, out, redir)
                 } else {
                     self.builtin_declare(args, false)
@@ -5081,6 +5087,48 @@ impl Shell {
     /// `declare -p [names]` — print variable definitions in a re-inputtable
     /// form. With names, print each named variable (error + status 1 for any
     /// that is unset); with none, print every set variable sorted by name.
+    /// `declare -F` / `declare -f` — operate on functions. With no names,
+    /// `-F` lists every function as `declare -f NAME` (sorted). With names,
+    /// `-F` prints each name that is a function (bare `NAME`), returning status
+    /// 1 if any name is not a function. `-f` shares the existence semantics
+    /// (status 0 iff every name is a function) so idioms like
+    /// `declare -f fn >/dev/null` work; printing the function *body* awaits an
+    /// AST source pretty-printer (see known-issues TD-OILS18).
+    fn declare_functions(
+        &mut self,
+        args: &[String],
+        name_only: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> i32 {
+        let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
+        if names.is_empty() {
+            let mut all: Vec<&String> = self.funcs.keys().collect();
+            all.sort();
+            let mut listing = String::new();
+            for name in all {
+                listing.push_str(&format!("declare -f {name}\n"));
+            }
+            return self.write_bytes(out, redir, listing.as_bytes());
+        }
+        let mut listing = String::new();
+        let mut status = 0;
+        for name in names {
+            if self.funcs.contains_key(name) {
+                if name_only {
+                    listing.push_str(name);
+                    listing.push('\n');
+                }
+                // `-f` body printing deferred (TD-OILS18): existence status is
+                // still reported correctly below.
+            } else {
+                status = 1;
+            }
+        }
+        let write_status = self.write_bytes(out, redir, listing.as_bytes());
+        if status != 0 { status } else { write_status }
+    }
+
     fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Names are the non-flag operands after the leading dashed flags.
         let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
@@ -11050,6 +11098,36 @@ mod tests {
         // `type -t` likewise stops reporting it as a builtin.
         assert_eq!(run("type -t times").0, "builtin\n");
         assert_eq!(run("enable -n times; type -t times").1, 1);
+    }
+
+    #[test]
+    fn declare_big_f_lists_functions() {
+        let (o, s) = run("foo() { echo hi; }; bar() { :; }; declare -F");
+        assert_eq!(s, 0);
+        assert!(o.contains("declare -f foo\n"), "declare -F output: {o:?}");
+        assert!(o.contains("declare -f bar\n"), "declare -F output: {o:?}");
+    }
+
+    #[test]
+    fn declare_big_f_named_prints_name() {
+        let (o, s) = run("foo() { :; }; declare -F foo");
+        assert_eq!(s, 0);
+        assert_eq!(o, "foo\n");
+    }
+
+    #[test]
+    fn declare_big_f_unknown_status_1() {
+        let (o, s) = run("declare -F nofunc");
+        assert_eq!(s, 1);
+        assert_eq!(o, "");
+    }
+
+    #[test]
+    fn declare_small_f_existence_status() {
+        // `declare -f fn` returns 0 for an existing function (body not printed
+        // yet, TD-OILS18) and 1 otherwise.
+        assert_eq!(run("foo() { :; }; declare -f foo").1, 0);
+        assert_eq!(run("declare -f nofunc").1, 1);
     }
 
     #[test]

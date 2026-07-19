@@ -518,6 +518,29 @@ entry is retained for history; nameref behavior now matches bash for the
 scalar, array-element, indirect-name, and `local`-scoping cases exercised by the
 `nameref_*` and `param_indirect_expansion` tests.
 
+### TD-OILS18. `osh` `declare -f` / `type funcname`: function *body* is not printed (only name/existence) — OPEN (needs AST source pretty-printer; shared with TD-OILS16)
+
+**Where:** `userspace/oils/src/interp.rs` (`declare_functions`; also the `type`
+builtin's function branch and `set`'s no-args listing — TD-OILS16).
+
+**What:** `declare -F` fully lists/tests function names (bare `declare -F` →
+`declare -f NAME` per function; `declare -F name` → `name`, status 1 if absent).
+`declare -f name` reports the correct **existence status** (0 iff the name is a
+function) so idioms like `declare -f fn >/dev/null` work, but it does **not**
+print the function body. Likewise `type funcname` reports "is a function" but
+does not print the body, and bare `set`/`declare -f` (no name) do not emit
+bodies. All of these need a faithful `FunctionDef`-AST → shell-source
+pretty-printer, which does not exist yet (the AST carries no source spans, so
+the text must be reconstructed from the parsed tree).
+
+**Proper fix:** write an AST-to-source pretty-printer for `Program`/`Command`/
+`Word`/redirections, verified by a round-trip property test
+(`parse(print(f)) == f`, since the AST derives `PartialEq`). Then use it in
+`declare -f`, `type funcname`, and bare `set`'s function listing (closing
+TD-OILS16 too). Deferred because it is a sizeable standalone subsystem; the
+name-listing/existing-status behavior covers the common scripting idioms in the
+meantime.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

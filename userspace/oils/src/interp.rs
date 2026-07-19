@@ -1850,6 +1850,11 @@ impl Shell {
     /// `*` the list is the positional parameters (matching bash — unlike a
     /// slice, `$0` is *not* included here).
     fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<String> {
+        // `@k` / `@K` are key-aware: they interleave subscripts and values
+        // rather than transforming each value in place.
+        if let BulkOp::Transform { op: k @ ('k' | 'K') } = op {
+            return self.bulk_keyvalue(name, *k == 'K');
+        }
         let elems: Vec<String> = if name == "@" || name == "*" {
             self.positional.clone()
         } else {
@@ -1859,6 +1864,35 @@ impl Shell {
             .into_iter()
             .map(|v| self.apply_bulk_op(op, &v))
             .collect()
+    }
+
+    /// `${a[@]@k}` / `${a[@]@K}` — expand an array (or the positional params) as
+    /// interleaved subscript/value pairs. `@k` yields each key and value as a
+    /// *separate* word (`0 x 1 y`); `@K` yields a single field holding the pairs
+    /// with each value double-quoted (`0 "x" 1 "y"`), matching bash's
+    /// re-inputtable form.
+    fn bulk_keyvalue(&mut self, name: &str, quoted: bool) -> Vec<String> {
+        let (keys, values): (Vec<String>, Vec<String>) = if name == "@" || name == "*" {
+            let vals = self.positional.clone();
+            let keys = (1..=vals.len()).map(|i| i.to_string()).collect();
+            (keys, vals)
+        } else {
+            (self.array_keys(name), self.array_elements(name))
+        };
+        if quoted {
+            let body = keys
+                .iter()
+                .zip(&values)
+                .map(|(k, v)| format!("{k} {}", quote_declare_value(v)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            vec![body]
+        } else {
+            keys.into_iter()
+                .zip(values)
+                .flat_map(|(k, v)| [k, v])
+                .collect()
+        }
     }
 
     /// Apply a single [`BulkOp`] to one element value.
@@ -8576,6 +8610,26 @@ mod tests {
         );
         // An unset variable yields the empty string.
         assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn param_transform_keyvalue() {
+        // `@k` interleaves subscripts and values as separate words.
+        assert_eq!(run("a=(x y z); echo ${a[@]@k}").0, "0 x 1 y 2 z\n");
+        // `@K` yields one field: subscripts with double-quoted values.
+        assert_eq!(run("a=(x y); echo \"${a[@]@K}\"").0, "0 \"x\" 1 \"y\"\n");
+        // Associative arrays interleave string keys.
+        assert_eq!(
+            run("declare -A m; m[a]=1; m[b]=2; echo ${m[@]@k}").0,
+            "a 1 b 2\n"
+        );
+        // Positional parameters key from 1.
+        assert_eq!(run("set -- p q; echo ${@@k}").0, "1 p 2 q\n");
+        // `@k` keeps each word separate even when quoted.
+        assert_eq!(
+            run("a=('x 1' y); for w in \"${a[@]@k}\"; do echo \"[$w]\"; done").0,
+            "[0]\n[x 1]\n[1]\n[y]\n"
+        );
     }
 
     #[test]

@@ -303,6 +303,12 @@ pub struct Shell {
     /// Each new job takes the lowest unused job number (bash semantics), so the
     /// numbering restarts at 1 once the table drains.
     jobs: Vec<Job>,
+    /// The file-creation mask (`umask`). The low 9 bits (owner/group/other rwx)
+    /// are the bits *cleared* from a newly created file's permissions. Consulted
+    /// when a redirection creates a file (applied via the file mode on unix-family
+    /// targets; the Windows host has no mode concept — see known-issues TD-OILS15).
+    /// Inherited by subshell clones and children (the process umask).
+    umask_val: u32,
 }
 
 impl Default for Shell {
@@ -351,6 +357,7 @@ impl Shell {
             exit_trap_done: false,
             in_trap: false,
             jobs: Vec::new(),
+            umask_val: 0o022,
         }
     }
 
@@ -1532,6 +1539,8 @@ impl Shell {
             in_trap: false,
             // A subshell does not inherit the parent's job table.
             jobs: Vec::new(),
+            // The umask is a process attribute, inherited by subshells.
+            umask_val: self.umask_val,
         }
     }
 
@@ -3287,6 +3296,7 @@ impl Shell {
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
+            "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
                 if args.is_empty() {
                     // `exec` with no command applies its redirections to the
@@ -3859,6 +3869,64 @@ impl Shell {
             self.jobs.remove(idx);
         }
         last
+    }
+
+    /// `umask [-S] [-p] [mode]` — get or set the file-creation mask. With no
+    /// mode operand it prints the current mask (octal `0NNN`, or symbolic with
+    /// `-S`); `-p` prefixes the output with a re-inputtable `umask ` command.
+    /// A mode operand sets the mask from an octal number or a symbolic
+    /// permission list (`u=rwx,g=rx,o=`).
+    fn builtin_umask(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut symbolic = false;
+        let mut reusable = false;
+        let mut mode: Option<&str> = None;
+        for a in args {
+            match a.as_str() {
+                "-S" => symbolic = true,
+                "-p" => reusable = true,
+                s => mode = Some(s),
+            }
+        }
+
+        if let Some(m) = mode {
+            // Set the mask from an octal number or a symbolic clause list.
+            let new = if m.bytes().all(|b| b.is_ascii_digit()) {
+                match u32::from_str_radix(m, 8) {
+                    Ok(v) => v & 0o777,
+                    Err(_) => {
+                        self.emit_stderr(format!("osh: umask: {m}: invalid octal number\n").as_bytes());
+                        return 1;
+                    }
+                }
+            } else {
+                match parse_symbolic_umask(self.umask_val, m) {
+                    Some(v) => v,
+                    None => {
+                        self.emit_stderr(format!("osh: umask: {m}: invalid symbolic mode\n").as_bytes());
+                        return 1;
+                    }
+                }
+            };
+            self.umask_val = new;
+            return 0;
+        }
+
+        // No mode operand: print the current mask.
+        let body = if symbolic {
+            symbolic_umask_string(self.umask_val)
+        } else {
+            format!("{:04o}", self.umask_val)
+        };
+        let line = if reusable {
+            if symbolic {
+                format!("umask -S {body}\n")
+            } else {
+                format!("umask {body}\n")
+            }
+        } else {
+            format!("{body}\n")
+        };
+        self.write_bytes(out, redir, line.as_bytes())
     }
 
     /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
@@ -6249,6 +6317,7 @@ fn is_builtin(name: &str) -> bool {
             | "trap"
             | "jobs"
             | "wait"
+            | "umask"
             | "exec"
             | "exit"
             | "return"
@@ -6974,6 +7043,85 @@ fn eval_test(a: &[&str]) -> bool {
             }
         }
     }
+}
+
+/// Render the symbolic form of a umask value (bash `umask -S`): the string
+/// describes the permissions that *remain* (the complement of the mask), e.g.
+/// mask `0022` → `u=rwx,g=rx,o=rx`.
+fn symbolic_umask_string(mask: u32) -> String {
+    let allowed = !mask & 0o777;
+    let mut parts = Vec::with_capacity(3);
+    for (who, shift) in [('u', 6), ('g', 3), ('o', 0)] {
+        let bits = (allowed >> shift) & 0o7;
+        let mut perms = String::new();
+        if bits & 0o4 != 0 {
+            perms.push('r');
+        }
+        if bits & 0o2 != 0 {
+            perms.push('w');
+        }
+        if bits & 0o1 != 0 {
+            perms.push('x');
+        }
+        parts.push(format!("{who}={perms}"));
+    }
+    parts.join(",")
+}
+
+/// Parse a symbolic umask clause list (`u=rwx,g=rx,o=` / `a+r` / `go-w`) against
+/// the current mask, returning the new mask value. The symbolic notation
+/// operates on the *permission* set (the complement of the mask); the result is
+/// re-complemented back into mask bits. Returns `None` on a malformed clause.
+fn parse_symbolic_umask(current: u32, spec: &str) -> Option<u32> {
+    // Work in "allowed permission" space, then invert back to a mask at the end.
+    let mut allowed = !current & 0o777;
+    for clause in spec.split(',') {
+        if clause.is_empty() {
+            continue;
+        }
+        let mut chars = clause.chars().peekable();
+        // `who` set: any of u/g/o/a; empty defaults to `a` (all).
+        let mut who_mask = 0u32; // bit per who: u=0o700, g=0o070, o=0o007
+        while let Some(&c) = chars.peek() {
+            match c {
+                'u' => who_mask |= 0o700,
+                'g' => who_mask |= 0o070,
+                'o' => who_mask |= 0o007,
+                'a' => who_mask |= 0o777,
+                _ => break,
+            }
+            chars.next();
+        }
+        if who_mask == 0 {
+            who_mask = 0o777;
+        }
+        let op = chars.next()?;
+        if !matches!(op, '+' | '-' | '=') {
+            return None;
+        }
+        // Permission letters → a 3-bit value replicated into every selected who.
+        let mut pbits = 0u32;
+        for c in chars {
+            match c {
+                'r' => pbits |= 0o4,
+                'w' => pbits |= 0o2,
+                'x' => pbits |= 0o1,
+                _ => return None,
+            }
+        }
+        let full = (pbits * 0o111) & who_mask; // spread rwx into u/g/o, then select
+        match op {
+            '+' => allowed |= full,
+            '-' => allowed &= !full,
+            '=' => {
+                // Clear the selected who's bits, then set the new ones.
+                allowed &= !who_mask;
+                allowed |= full;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Some(!allowed & 0o777)
 }
 
 /// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
@@ -9367,6 +9515,41 @@ mod tests {
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
         // `wait` cleans up any still-tracked job for a tidy teardown.
         sh.run_source("wait");
+    }
+
+    #[test]
+    fn umask_octal_get_set() {
+        assert_eq!(run("umask").0, "0022\n");
+        assert_eq!(run("umask 077; umask").0, "0077\n");
+        assert_eq!(run("umask 0027; umask").0, "0027\n");
+    }
+
+    #[test]
+    fn umask_symbolic_output() {
+        assert_eq!(run("umask -S").0, "u=rwx,g=rx,o=rx\n");
+        assert_eq!(run("umask 077; umask -S").0, "u=rwx,g=,o=\n");
+    }
+
+    #[test]
+    fn umask_symbolic_set() {
+        // allowed u=rwx,g=rx,o= → 0750 → mask 0027.
+        assert_eq!(run("umask u=rwx,g=rx,o=; umask").0, "0027\n");
+        // `a=` clears all permission bits → mask 0777.
+        assert_eq!(run("umask a=; umask").0, "0777\n");
+        // From default 0022 (allowed 0755), `go-r` → allowed 0711 → mask 0066.
+        assert_eq!(run("umask go-r; umask").0, "0066\n");
+    }
+
+    #[test]
+    fn umask_reusable_form() {
+        assert_eq!(run("umask -p").0, "umask 0022\n");
+        assert_eq!(run("umask -p -S").0, "umask -S u=rwx,g=rx,o=rx\n");
+    }
+
+    #[test]
+    fn umask_invalid_mode() {
+        assert_eq!(run("umask 8qq").1, 1);
+        assert_eq!(run("umask u=z").1, 1);
     }
 
     #[test]

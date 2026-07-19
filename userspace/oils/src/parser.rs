@@ -1164,7 +1164,7 @@ fn parse_slice_bounds(rest: &[char]) -> Result<(Box<Word>, Option<Box<Word>>), P
     Ok((Box::new(word_from_source(&off_str)?), length))
 }
 
-fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
+pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix('#') {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.

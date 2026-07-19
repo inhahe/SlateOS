@@ -5576,16 +5576,40 @@ impl Shell {
                     i += 1;
                 }
                 Some('{') => {
+                    // `${…}` — a full parameter expansion (length `${#x}`, array
+                    // subscript `${a[i]}`, operators `${x:-y}`, indirection
+                    // `${!x}`, transforms `${x@Q}`, …). Scan the balanced brace
+                    // group (so nested `${…}` inside a default value survive),
+                    // then run it through the real parameter-expansion parser and
+                    // expander rather than the limited `param_value`, which only
+                    // knows bare names. This is what makes `$(( ${#a[@]} ))` and
+                    // `$(( ${x:-3} ))` evaluate like bash.
                     i += 2;
-                    let mut n = String::new();
-                    while i < chars.len() && chars[i] != '}' {
-                        n.push(chars[i]);
+                    let start = i;
+                    let mut depth = 0usize;
+                    while i < chars.len() {
+                        match chars[i] {
+                            '{' => depth += 1,
+                            '}' if depth == 0 => break,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
                         i += 1;
                     }
+                    let inner: String = chars[start..i].iter().collect();
                     if i < chars.len() {
-                        i += 1; // consume '}'
+                        i += 1; // consume the closing '}'
                     }
-                    let val = self.param_value(&n).unwrap_or_default();
+                    let val = match crate::parser::parse_braced_param(&inner) {
+                        Ok(part) => {
+                            let word = Word { parts: vec![part] };
+                            self.expand_to_string(&word)
+                        }
+                        // Fall back to the bare-name lookup for anything the
+                        // param parser rejects (keeps prior behaviour for the
+                        // simple cases it can't reach).
+                        Err(_) => self.param_value(&inner).unwrap_or_default(),
+                    };
                     let val = val.trim();
                     out.push_str(if val.is_empty() { "0" } else { val });
                 }
@@ -13051,6 +13075,25 @@ mod tests {
         let fib = "fib() { local n=$1; if ((n<2)); then echo $n; \
                    else echo $(( $(fib $((n-1))) + $(fib $((n-2))) )); fi; }; fib 7";
         assert_eq!(run(fib).0, "13\n");
+    }
+
+    #[test]
+    fn arithmetic_with_braced_param_expansion() {
+        // A `${…}` inside `$(( ))` is a full parameter expansion, not just a
+        // bare-name lookup: length (`${#x}`, `${#a[@]}`), operators (`${x:-N}`),
+        // and subscripts must all evaluate. (Regression: these previously
+        // yielded 0 because only bare names were handled.)
+        assert_eq!(run("x=5; echo $(( ${#x} ))").0, "1\n");
+        assert_eq!(run("x=hello; echo $(( ${#x} * 2 ))").0, "10\n");
+        assert_eq!(run("a=(x y z); echo $(( ${#a[@]} ))").0, "3\n");
+        assert_eq!(run("a=(x y z); echo $(( ${#a[@]} + 1 ))").0, "4\n");
+        assert_eq!(run("echo $(( ${#BASH_VERSINFO[@]} ))").0, "6\n");
+        // Operator forms and nested braces.
+        assert_eq!(run("echo $(( ${x:-3} + 1 ))").0, "4\n");
+        assert_eq!(run("x=10; echo $(( ${x:-3} + 1 ))").0, "11\n");
+        assert_eq!(run("a=(5 6 7); echo $(( a[1] + ${a[2]} ))").0, "13\n");
+        // Unset length is 0.
+        assert_eq!(run("echo $(( ${#nonexist} ))").0, "0\n");
     }
 
     #[test]

@@ -2364,12 +2364,19 @@ impl Shell {
         if target.is_empty() {
             return String::new();
         }
-        // The referent may name an array element: `ref=a[0]`, `ref=m[key]`.
+        // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
+        // or a whole-array reference `ref=a[@]` / `ref=a[*]`.
         if let Some(open) = target.find('[')
             && let Some(inner) = target.strip_suffix(']')
         {
             let name = &target[..open];
             let sub = &inner[open + 1..];
+            // `${!ref}` where ref resolves to `name[@]`/`name[*]` expands like
+            // `${name[@]}`/`${name[*]}` (bash). In this scalar (unjoined) path we
+            // join with a space, matching `expand_array_ref`'s `[@]`/`[*]` join.
+            if sub == "@" || sub == "*" {
+                return self.array_elements(name).join(" ");
+            }
             if self.assoc.contains_key(name) {
                 return self.assoc_element(name, sub).unwrap_or_default();
             }
@@ -2377,6 +2384,28 @@ impl Shell {
             return self.array_element(name, idx).unwrap_or_default();
         }
         self.param_value(&target).unwrap_or_default()
+    }
+
+    /// If `${!ref}` names a whole-array reference (`ref=a[@]` / `ref=a[*]`),
+    /// return the array's element list (used by the quoted `"${!ref}"` field-
+    /// preserving path). Returns `None` for scalar/element/name-list referents.
+    fn indirect_array_elems(&mut self, refname: &str) -> Option<Vec<String>> {
+        if self.nameref_attr.contains(refname) {
+            return None;
+        }
+        let target = self.param_value(refname)?;
+        if target.is_empty() {
+            return None;
+        }
+        let open = target.find('[')?;
+        let inner = target.strip_suffix(']')?;
+        let name = &target[..open];
+        let sub = &inner[open + 1..];
+        if sub == "@" || sub == "*" {
+            Some(self.array_elements(name))
+        } else {
+            None
+        }
     }
 
     /// `${name@op}` parameter transformation. Supports `Q` (quote so the value
@@ -3928,6 +3957,9 @@ impl Shell {
                                 op,
                             },
                         ] => Some(self.bulk_elements(name, op)),
+                        // `"${!ref}"` where ref resolves to `name[@]` yields one
+                        // field per element (bash), like `"${name[@]}"`.
+                        [WordPart::Indirect(refname)] => self.indirect_array_elems(refname),
                         _ => None,
                     };
                     if let Some(items) = per_element {
@@ -10675,6 +10707,14 @@ mod tests {
         assert_eq!(
             run("target=hi; declare -n ref=target; echo ${!ref} $ref").0,
             "target hi\n"
+        );
+        // Referent naming a whole array `a[@]`/`a[*]` expands like `${a[@]}`.
+        assert_eq!(run("a=(1 2 3); ref='a[@]'; echo ${!ref}").0, "1 2 3\n");
+        assert_eq!(run("a=(1 2 3); ref='a[*]'; echo ${!ref}").0, "1 2 3\n");
+        // Quoted `"${!ref}"` preserves one field per element.
+        assert_eq!(
+            run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
+            "<a b>\n<c>\n"
         );
     }
 

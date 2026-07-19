@@ -307,6 +307,10 @@ pub struct Shell {
     /// the *current* directory (the process cwd) is conceptually the top of the
     /// stack and is not stored here. Cloned into subshells.
     dir_stack: Vec<String>,
+    /// Builtins disabled via `enable -n NAME`. A name present here is treated as
+    /// *not* a builtin during command resolution, so a same-named external is
+    /// run instead. Cloned into subshells (bash inherits the enable state).
+    disabled_builtins: HashSet<String>,
     /// Signal/pseudo-signal traps set by the `trap` builtin, keyed by the
     /// normalized spec (`EXIT`, `ERR`, `INT`, …). The value is the action
     /// command string; an empty string means "ignore". Currently only the
@@ -382,6 +386,7 @@ impl Shell {
             upper_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
             dir_stack: Vec::new(),
+            disabled_builtins: HashSet::new(),
             traps: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
@@ -1588,6 +1593,7 @@ impl Shell {
             upper_attr: self.upper_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
             dir_stack: self.dir_stack.clone(),
+            disabled_builtins: self.disabled_builtins.clone(),
             // A subshell resets non-ignored traps to their default disposition
             // (bash). Ignored ('') traps are inherited; keep only those.
             traps: self
@@ -2550,8 +2556,9 @@ impl Shell {
             return self.call_function(&name, &argv[1..], &assigns, out, stdin, &redir);
         }
 
-        // Builtin?
-        if is_builtin(&name) {
+        // Builtin? (unless disabled via `enable -n`, in which case fall through
+        // to the same-named external.)
+        if self.builtin_enabled(&name) {
             return self.run_builtin(&name, &argv, &assigns, out, stdin, &redir);
         }
 
@@ -2763,8 +2770,9 @@ impl Shell {
         if terse || verbose {
             return self.command_describe(target, verbose, out, redir);
         }
-        // Run `target` bypassing functions.
-        if is_builtin(target) {
+        // Run `target` bypassing functions. A disabled builtin (via `enable -n`)
+        // runs the same-named external instead.
+        if self.builtin_enabled(target) {
             return self.run_builtin(target, rest, assigns, out, stdin, redir);
         }
         self.run_external(rest, assigns, out, stdin, redir);
@@ -2810,7 +2818,7 @@ impl Shell {
             };
             let _ = self.write_line(out, redir, &line);
             self.last_status = 0;
-        } else if is_builtin(target) {
+        } else if self.builtin_enabled(target) {
             let line = if verbose {
                 format!("{target} is a shell builtin")
             } else {
@@ -3192,7 +3200,7 @@ impl Shell {
             for w in &sc.words {
                 argv.extend(self.expand_word(w, true));
             }
-            if !argv.is_empty() && !self.funcs.contains_key(&argv[0]) && !is_builtin(&argv[0]) {
+            if !argv.is_empty() && !self.funcs.contains_key(&argv[0]) && !self.builtin_enabled(&argv[0]) {
                 let mut cmd = PCommand::new(&argv[0]);
                 cmd.args(&argv[1..]);
                 for (k, v) in &self.vars {
@@ -3913,6 +3921,7 @@ impl Shell {
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
             "times" => self.builtin_times(out, redir),
+            "enable" => self.builtin_enable(args, out, redir),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
@@ -4691,6 +4700,85 @@ impl Shell {
         let zero = "0m0.000s";
         let text = format!("{zero} {zero}\n{zero} {zero}\n");
         self.write_bytes(out, redir, text.as_bytes())
+    }
+
+    /// True when `name` is a builtin that has not been disabled via `enable -n`.
+    /// Command resolution consults this (rather than the bare `is_builtin`) so a
+    /// disabled builtin falls through to a same-named external.
+    fn builtin_enabled(&self, name: &str) -> bool {
+        is_builtin(name) && !self.disabled_builtins.contains(name)
+    }
+
+    /// `enable [-a] [-n] [name ...]` — enable or disable shell builtins. With
+    /// `name`s and no `-n`, re-enable them; with `-n`, disable them (so a
+    /// same-named external runs instead). With no `name`s: `-a` lists every
+    /// builtin with its state, `-n` lists only the disabled ones, and bare
+    /// `enable` lists the enabled ones — all in re-inputtable `enable NAME` /
+    /// `enable -n NAME` form. An unknown name is a status-1 error.
+    fn builtin_enable(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut disable = false;
+        let mut list_all = false;
+        let mut names: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                names.extend_from_slice(&args[i + 1..]);
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| matches!(c, 'n' | 'a'))
+            {
+                for c in flags.chars() {
+                    match c {
+                        'n' => disable = true,
+                        'a' => list_all = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            names.extend_from_slice(&args[i..]);
+            break;
+        }
+
+        if names.is_empty() {
+            // Listing mode. Sort for deterministic output.
+            let mut all: Vec<&str> = BUILTIN_NAMES.to_vec();
+            all.sort_unstable();
+            let mut buf = String::new();
+            for name in all {
+                let off = self.disabled_builtins.contains(name);
+                if list_all {
+                    if off {
+                        buf.push_str(&format!("enable -n {name}\n"));
+                    } else {
+                        buf.push_str(&format!("enable {name}\n"));
+                    }
+                } else if disable && off {
+                    buf.push_str(&format!("enable -n {name}\n"));
+                } else if !disable && !off {
+                    buf.push_str(&format!("enable {name}\n"));
+                }
+            }
+            return self.write_bytes(out, redir, buf.as_bytes());
+        }
+
+        let mut status = 0;
+        for name in &names {
+            if !is_builtin(name) {
+                self.emit_stderr(format!("osh: enable: {name}: not a shell builtin\n").as_bytes());
+                status = 1;
+                continue;
+            }
+            if disable {
+                self.disabled_builtins.insert(name.clone());
+            } else {
+                self.disabled_builtins.remove(name);
+            }
+        }
+        status
     }
 
     /// `hash [-lr] [-p pathname] [-dt] [name ...]` — manage the remembered
@@ -6141,7 +6229,7 @@ impl Shell {
         for name in names {
             let is_kw = KEYWORDS.contains(&name.as_str());
             let is_fn = !skip_func && self.funcs.contains_key(name);
-            let is_bi = is_builtin(name);
+            let is_bi = self.builtin_enabled(name);
             // `-P` forces a filesystem search even when the name is a builtin,
             // function, or keyword.
             // Search the filesystem when any flag needs paths, or (for default
@@ -7402,53 +7490,18 @@ fn param_replace(
     }
 }
 
+/// Every builtin command name the shell recognizes. Kept as a single source of
+/// truth so `is_builtin` and `enable -a` (which lists all builtins) never drift.
+const BUILTIN_NAMES: &[&str] = &[
+    ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
+    "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
+    "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
+    ".", "type", "trap", "jobs", "wait", "disown", "times", "hash", "umask", "exec", "exit",
+    "return", "break", "continue", "enable",
+];
+
 fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        ":" | "true"
-            | "false"
-            | "cd"
-            | "pwd"
-            | "pushd"
-            | "popd"
-            | "dirs"
-            | "echo"
-            | "printf"
-            | "export"
-            | "declare"
-            | "typeset"
-            | "local"
-            | "readonly"
-            | "shopt"
-            | "unset"
-            | "set"
-            | "shift"
-            | "getopts"
-            | "mapfile"
-            | "readarray"
-            | "command"
-            | "builtin"
-            | "read"
-            | "test"
-            | "["
-            | "let"
-            | "eval"
-            | "source"
-            | "."
-            | "type"
-            | "trap"
-            | "jobs"
-            | "wait"
-            | "disown"
-            | "times"
-            | "hash"
-            | "umask"
-            | "exec"
-            | "exit"
-            | "return"
-            | "break"
-            | "continue"
-    )
+    BUILTIN_NAMES.contains(&name)
 }
 
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
@@ -10957,6 +11010,46 @@ mod tests {
     fn disown_bad_spec_errors() {
         let mut sh = Shell::new();
         assert_eq!(sh.run_source("disown %9"), 1);
+    }
+
+    #[test]
+    fn enable_lists_builtins() {
+        // Bare `enable` lists enabled builtins in re-inputtable form.
+        let (o, s) = run("enable");
+        assert_eq!(s, 0);
+        assert!(o.contains("enable echo\n"), "enable output: {o:?}");
+        assert!(o.contains("enable times\n"), "enable output: {o:?}");
+    }
+
+    #[test]
+    fn enable_n_disables_and_lists() {
+        // `enable -n NAME` disables; `enable -n` then lists the disabled ones.
+        let (o, s) = run("enable -n cd; enable -n");
+        assert_eq!(s, 0);
+        assert!(o.contains("enable -n cd\n"), "disabled list: {o:?}");
+    }
+
+    #[test]
+    fn enable_reenable_removes_from_disabled() {
+        let (o, _) = run("enable -n cd; enable cd; enable -n");
+        assert!(!o.contains("enable -n cd\n"), "cd should be re-enabled: {o:?}");
+    }
+
+    #[test]
+    fn enable_unknown_name_errors() {
+        assert_eq!(run("enable nosuchbuiltin").1, 1);
+    }
+
+    #[test]
+    fn enable_n_bypasses_builtin_resolution() {
+        // `command -v times` finds the builtin (status 0); once `times` is
+        // disabled it is no longer a builtin, so with no external of that name
+        // resolution fails (status 1) — proving `enable -n` bypasses the builtin.
+        assert_eq!(run("command -v times").1, 0);
+        assert_eq!(run("enable -n times; command -v times").1, 1);
+        // `type -t` likewise stops reporting it as a builtin.
+        assert_eq!(run("type -t times").0, "builtin\n");
+        assert_eq!(run("enable -n times; type -t times").1, 1);
     }
 
     #[test]

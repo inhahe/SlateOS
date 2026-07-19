@@ -4433,51 +4433,228 @@ impl Shell {
 
     // ---- redirection resolution ---------------------------------------------
 
+    /// Allocate the lowest free descriptor ≥ 10 for a `{name}>file` varfd
+    /// redirect. Bash reserves 10+ for these auto-allocated fds so they never
+    /// collide with user `exec 3>…` descriptors. `reserved` holds fds already
+    /// handed out earlier in the *same* redirection list (multiple varfds in
+    /// one command each get a distinct number).
+    fn alloc_varfd(&self, reserved: &[i32]) -> i32 {
+        let mut n = 10;
+        while self.open_fds.contains_key(&n)
+            || self.open_write_fds.contains_key(&n)
+            || reserved.contains(&n)
+        {
+            n += 1;
+        }
+        n
+    }
+
+    /// Resolve a redirect's effective fd, honouring `{name}>…` varfd syntax.
+    ///
+    /// For an *open* form (`{name}>file`, `{name}<file`, `{name}>&N`, …) bash
+    /// allocates the lowest free descriptor ≥ 10, stores its number in the
+    /// shell variable `name`, and binds it. For the *close* form
+    /// (`{name}>&-` / `{name}<&-`) bash does **not** allocate: `name`'s current
+    /// value names the descriptor to close, and the variable is left unchanged.
+    /// `Err` on assignment to a readonly variable, or a close form whose
+    /// variable is unset / non-numeric. For a plain redirect this returns
+    /// `r.fd`.
+    fn redir_effective_fd(&mut self, r: &Redirect, reserved: &mut Vec<i32>) -> Result<i32, String> {
+        match &r.varfd {
+            Some(name) => {
+                if redir_is_close(r) {
+                    // `{v}>&-`: operate on the fd currently held in `$v`.
+                    return match self.vars.get(name).and_then(|s| s.parse::<i32>().ok()) {
+                        Some(n) => Ok(n),
+                        None => Err(format!("{name}: ambiguous redirect")),
+                    };
+                }
+                // Pre-check readonly so `set_scalar_checked` (which reports its
+                // own error) can't double-print with the caller's report.
+                let target = self.resolve_ref_name(name);
+                if self.readonly.contains(&target) {
+                    return Err(format!("{target}: readonly variable"));
+                }
+                let n = self.alloc_varfd(reserved);
+                reserved.push(n);
+                let ok = self.set_scalar_checked(name, n.to_string());
+                debug_assert!(ok, "readonly pre-checked");
+                Ok(n)
+            }
+            None => Ok(r.fd),
+        }
+    }
+
+    /// Apply a single redirect to the shell's *persistent* fd table (the same
+    /// bindings `exec >file` uses), returning `Err(msg)` on failure. Shared by
+    /// [`Self::apply_exec_redirects`] and the persistent varfd path in
+    /// [`Self::resolve_redirects`]. `fd` is the already-resolved descriptor
+    /// (varfd-allocated or literal).
+    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32) -> Result<(), String> {
+        match r.op {
+            RedirectOp::Read => {
+                let path = self.expand_to_string(&r.target);
+                let bytes = std::fs::read(map_device_path(&path))
+                    .map_err(|e| format!("{path}: {e}"))?;
+                if fd == 0 {
+                    self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                } else if fd >= 3 {
+                    self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                    self.open_write_fds.remove(&fd);
+                }
+            }
+            RedirectOp::HereDoc | RedirectOp::HereStr => {
+                let bytes = if matches!(r.op, RedirectOp::HereDoc) {
+                    self.expand_double_quoted(&r.target.parts).into_bytes()
+                } else {
+                    let mut s = self.expand_to_string(&r.target);
+                    s.push('\n');
+                    s.into_bytes()
+                };
+                if fd == 0 {
+                    self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                } else if fd >= 3 {
+                    self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                    self.open_write_fds.remove(&fd);
+                }
+            }
+            RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
+                let target = self.expand_to_string(&r.target);
+                let append = matches!(r.op, RedirectOp::AppendBoth);
+                let f = open_out(&target, append).map_err(|e| format!("{target}: {e}"))?;
+                // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
+                let a = std::sync::Arc::new(f);
+                self.exec_stdout = Some(a.clone());
+                self.exec_stderr = Some(a);
+            }
+            RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
+                let target = self.expand_to_string(&r.target);
+                let append = matches!(r.op, RedirectOp::Append);
+                if self.noclobber
+                    && matches!(r.op, RedirectOp::Write)
+                    && std::path::Path::new(map_device_path(&target))
+                        .metadata()
+                        .is_ok_and(|m| m.is_file())
+                {
+                    return Err(format!("{target}: cannot overwrite existing file"));
+                }
+                let f = open_out(&target, append).map_err(|e| format!("{target}: {e}"))?;
+                let a = std::sync::Arc::new(f);
+                match fd {
+                    0 | 1 => self.exec_stdout = Some(a),
+                    2 => self.exec_stderr = Some(a),
+                    _ => {
+                        self.open_write_fds.insert(fd, a);
+                        self.open_fds.remove(&fd);
+                    }
+                }
+            }
+            RedirectOp::DupOut => {
+                let target = self.expand_to_string(&r.target);
+                if target == "-" {
+                    // `N>&-` / `N<&-`: close the descriptor.
+                    match fd {
+                        1 => self.exec_stdout = None,
+                        2 => self.exec_stderr = None,
+                        _ => {
+                            self.open_write_fds.remove(&fd);
+                            self.open_fds.remove(&fd);
+                        }
+                    }
+                } else if let Ok(n) = target.parse::<i32>() {
+                    // `M>&N`: fd M becomes a dup of fd N's *current* sink.
+                    let src = self
+                        .exec_dup_source(n)
+                        .map_err(|bad| format!("{bad}: Bad file descriptor"))?;
+                    match fd {
+                        1 => self.exec_stdout = src,
+                        2 => self.exec_stderr = src,
+                        _ => {
+                            // A user-space write fd needs a concrete handle:
+                            // reuse the source handle, or (when the source is a
+                            // std fd still on the terminal) dup the terminal.
+                            let handle = match src {
+                                Some(h) => h,
+                                None => std::sync::Arc::new(
+                                    dup_std_handle(n == 1)
+                                        .map_err(|e| format!("{fd}: {e}"))?,
+                                ),
+                            };
+                            self.open_write_fds.insert(fd, handle);
+                            self.open_fds.remove(&fd);
+                        }
+                    }
+                } else if fd == 1 {
+                    // `1>&$f` (non-numeric expansion): both streams to the file.
+                    let f = open_out(&target, false).map_err(|e| format!("{target}: {e}"))?;
+                    let a = std::sync::Arc::new(f);
+                    self.exec_stdout = Some(a.clone());
+                    self.exec_stderr = Some(a);
+                } else {
+                    return Err(format!("{target}: ambiguous redirect"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, String> {
         let mut plan = RedirPlan::default();
+        let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
+            let fd = self.redir_effective_fd(r, &mut reserved)?;
+            // A `{name}>file`-style varfd redirect (open form) binds a *new*
+            // descriptor ≥ 10 that persists after the command — exactly like
+            // `exec {name}>file` — so it is applied to the persistent fd table
+            // here and left out of the transient `RedirPlan`. The close form
+            // (`{name}>&-`) instead reuses `$name`'s current fd and is scoped
+            // like a numeric `N>&-`, so it flows through the plan below.
+            if r.varfd.is_some() && !redir_is_close(r) {
+                self.apply_persistent_redirect(r, fd)?;
+                continue;
+            }
             match r.op {
                 RedirectOp::Read => {
-                    if r.fd == 0 {
+                    if fd == 0 {
                         plan.stdin = Some(self.expand_to_string(&r.target));
                         plan.stdin_data = None;
-                    } else if r.fd >= 3 {
+                    } else if fd >= 3 {
                         // `exec 3< file`: slurp the file now so a missing/unreadable
                         // path surfaces as an error at redirection time (bash also
                         // reports it then), then hand the bytes to `exec`.
                         let path = self.expand_to_string(&r.target);
                         match std::fs::read(map_device_path(&path)) {
                             Ok(bytes) => {
-                                plan.extra_fds.push((r.fd, ExtraFdOp::InputBytes(bytes)));
+                                plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
                             }
                             Err(e) => return Err(format!("{path}: {e}")),
                         }
                     }
                 }
                 RedirectOp::HereDoc => {
-                    if r.fd == 0 {
+                    if fd == 0 {
                         // Here-doc bodies expand like a double-quoted context:
                         // no tilde expansion, no field splitting, no globbing.
                         let body = self.expand_double_quoted(&r.target.parts);
                         plan.stdin = None;
                         plan.stdin_data = Some(body.into_bytes());
-                    } else if r.fd >= 3 {
+                    } else if fd >= 3 {
                         let body = self.expand_double_quoted(&r.target.parts);
                         plan.extra_fds
-                            .push((r.fd, ExtraFdOp::InputBytes(body.into_bytes())));
+                            .push((fd, ExtraFdOp::InputBytes(body.into_bytes())));
                     }
                 }
                 RedirectOp::HereStr => {
-                    if r.fd == 0 {
+                    if fd == 0 {
                         let mut s = self.expand_to_string(&r.target);
                         s.push('\n');
                         plan.stdin = None;
                         plan.stdin_data = Some(s.into_bytes());
-                    } else if r.fd >= 3 {
+                    } else if fd >= 3 {
                         let mut s = self.expand_to_string(&r.target);
                         s.push('\n');
                         plan.extra_fds
-                            .push((r.fd, ExtraFdOp::InputBytes(s.into_bytes())));
+                            .push((fd, ExtraFdOp::InputBytes(s.into_bytes())));
                     }
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
@@ -4509,7 +4686,7 @@ impl Shell {
                     {
                         return Err(format!("{target}: cannot overwrite existing file"));
                     }
-                    match r.fd {
+                    match fd {
                         2 => {
                             plan.stderr = Some((target, append));
                             // Later file redirect overrides any earlier stderr dup.
@@ -4537,7 +4714,25 @@ impl Shell {
                     // routes fd 2→fd 1 (or fd 1→fd 2) to the live sink (pipe,
                     // terminal, or capture), not just to a file path.
                     let target = self.expand_to_string(&r.target);
-                    if r.fd == 2 && target == "1" {
+                    // `M>&word` / `M<&word`: after expansion, a dup target must
+                    // be a descriptor number or `-` (close). A non-numeric
+                    // expansion on fd 1 (`>&$f`, `1>&$f`, `1>&file`) means "both
+                    // stdout and stderr to that file", exactly like `>&file`
+                    // (which the parser already rewrote to `WriteBoth` for the
+                    // no-explicit-fd literal form). On any other fd a non-numeric
+                    // target is an ambiguous redirect, as bash reports.
+                    if target != "-" && target.parse::<i32>().is_err() {
+                        if fd == 1 {
+                            plan.stdout = Some((target.clone(), false));
+                            plan.stderr = Some((target, false));
+                            plan.stderr_to_stdout = false;
+                            plan.stdout_to_stderr = false;
+                            plan.stdout_to_fd = None;
+                            plan.stderr_to_fd = None;
+                        } else {
+                            return Err(format!("{target}: ambiguous redirect"));
+                        }
+                    } else if fd == 2 && target == "1" {
                         // fd 2's destination is being (re)set: drop any earlier
                         // stderr file/fd target so this dup wins (last-writer).
                         plan.stderr_to_fd = None;
@@ -4548,7 +4743,7 @@ impl Shell {
                             plan.stderr = None;
                             plan.stderr_to_stdout = true;
                         }
-                    } else if r.fd == 1 && target == "2" {
+                    } else if fd == 1 && target == "2" {
                         plan.stdout_to_fd = None;
                         if plan.stderr.is_some() {
                             plan.stdout = plan.stderr.clone();
@@ -4557,23 +4752,23 @@ impl Shell {
                             plan.stdout = None;
                             plan.stdout_to_stderr = true;
                         }
-                    } else if r.fd >= 3 && target == "-" {
+                    } else if fd >= 3 && target == "-" {
                         // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
-                        plan.extra_fds.push((r.fd, ExtraFdOp::Close));
-                    } else if r.fd >= 3 && (target == "1" || target == "2") {
+                        plan.extra_fds.push((fd, ExtraFdOp::Close));
+                    } else if fd >= 3 && (target == "1" || target == "2") {
                         // `exec 3>&1` / `exec 3>&2`: alias a user-space write
                         // descriptor to a standard fd. Consumed only by `exec`
                         // (and the scoped compound-command path), which snapshots
                         // fd 1 / fd 2's current sink into `open_write_fds[fd]`.
                         let n = if target == "1" { 1 } else { 2 };
-                        plan.extra_fds.push((r.fd, ExtraFdOp::AliasStd(n)));
+                        plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
                     } else if let Ok(n) = target.parse::<i32>()
                         && n >= 3
                     {
                         // `M>&N` with N ≥ 3: duplicate fd M onto a user-space
                         // write descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
                         // `Shell::open_write_fds[N]` by write_bytes / run_external.
-                        if r.fd == 2 {
+                        if fd == 2 {
                             plan.stderr_to_fd = Some(n);
                             plan.stderr = None;
                             plan.stderr_to_stdout = false;
@@ -4602,137 +4797,22 @@ impl Shell {
     /// semantics. Returns the resulting status (1 if any redirect failed).
     fn apply_exec_redirects(&mut self, redirs: &[Redirect]) -> i32 {
         let mut rc = 0;
+        let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            match r.op {
-                RedirectOp::Read => {
-                    let path = self.expand_to_string(&r.target);
-                    match std::fs::read(map_device_path(&path)) {
-                        Ok(bytes) => {
-                            if r.fd == 0 {
-                                self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
-                            } else if r.fd >= 3 {
-                                self.open_fds
-                                    .insert(r.fd, RefCell::new(io::Cursor::new(bytes)));
-                                self.open_write_fds.remove(&r.fd);
-                            }
-                        }
-                        Err(e) => {
-                            self.errln(&format!("osh: {path}: {e}"));
-                            rc = 1;
-                        }
-                    }
+            // Resolve `{name}>…` varfd redirects: allocate a free fd ≥ 10 and
+            // store its number in the named variable (or, for `{name}>&-`, read
+            // it back). A readonly target aborts this redirect (like bash).
+            let fd = match self.redir_effective_fd(r, &mut reserved) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.errln(&format!("osh: {e}"));
+                    rc = 1;
+                    continue;
                 }
-                RedirectOp::HereDoc | RedirectOp::HereStr => {
-                    let bytes = if matches!(r.op, RedirectOp::HereDoc) {
-                        self.expand_double_quoted(&r.target.parts).into_bytes()
-                    } else {
-                        let mut s = self.expand_to_string(&r.target);
-                        s.push('\n');
-                        s.into_bytes()
-                    };
-                    if r.fd == 0 {
-                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
-                    } else if r.fd >= 3 {
-                        self.open_fds
-                            .insert(r.fd, RefCell::new(io::Cursor::new(bytes)));
-                        self.open_write_fds.remove(&r.fd);
-                    }
-                }
-                RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
-                    let target = self.expand_to_string(&r.target);
-                    let append = matches!(r.op, RedirectOp::AppendBoth);
-                    match open_out(&target, append) {
-                        Ok(f) => {
-                            // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one
-                            // handle (a single OS offset).
-                            let a = std::sync::Arc::new(f);
-                            self.exec_stdout = Some(a.clone());
-                            self.exec_stderr = Some(a);
-                        }
-                        Err(e) => {
-                            self.errln(&format!("osh: {target}: {e}"));
-                            rc = 1;
-                        }
-                    }
-                }
-                RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
-                    let target = self.expand_to_string(&r.target);
-                    let append = matches!(r.op, RedirectOp::Append);
-                    if self.noclobber
-                        && matches!(r.op, RedirectOp::Write)
-                        && std::path::Path::new(map_device_path(&target))
-                            .metadata()
-                            .is_ok_and(|m| m.is_file())
-                    {
-                        self.errln(&format!("osh: {target}: cannot overwrite existing file"));
-                        rc = 1;
-                        continue;
-                    }
-                    match open_out(&target, append) {
-                        Ok(f) => {
-                            let a = std::sync::Arc::new(f);
-                            match r.fd {
-                                0 | 1 => self.exec_stdout = Some(a),
-                                2 => self.exec_stderr = Some(a),
-                                _ => {
-                                    self.open_write_fds.insert(r.fd, a);
-                                    self.open_fds.remove(&r.fd);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.errln(&format!("osh: {target}: {e}"));
-                            rc = 1;
-                        }
-                    }
-                }
-                RedirectOp::DupOut => {
-                    let target = self.expand_to_string(&r.target);
-                    if target == "-" {
-                        // `N>&-` / `N<&-`: close the descriptor.
-                        match r.fd {
-                            1 => self.exec_stdout = None,
-                            2 => self.exec_stderr = None,
-                            _ => {
-                                self.open_write_fds.remove(&r.fd);
-                                self.open_fds.remove(&r.fd);
-                            }
-                        }
-                    } else if let Ok(n) = target.parse::<i32>() {
-                        // `M>&N`: fd M becomes a dup of fd N's *current* sink.
-                        match self.exec_dup_source(n) {
-                            Ok(src) => match r.fd {
-                                1 => self.exec_stdout = src,
-                                2 => self.exec_stderr = src,
-                                _ => {
-                                    // A user-space write fd needs a concrete
-                                    // handle: reuse the source handle, or (when
-                                    // the source is a std fd still on the
-                                    // terminal) dup the terminal.
-                                    let handle = match src {
-                                        Some(h) => Some(h),
-                                        None => match dup_std_handle(n == 1) {
-                                            Ok(f) => Some(std::sync::Arc::new(f)),
-                                            Err(e) => {
-                                                self.errln(&format!("osh: {}: {e}", r.fd));
-                                                rc = 1;
-                                                None
-                                            }
-                                        },
-                                    };
-                                    if let Some(h) = handle {
-                                        self.open_write_fds.insert(r.fd, h);
-                                        self.open_fds.remove(&r.fd);
-                                    }
-                                }
-                            },
-                            Err(bad) => {
-                                self.errln(&format!("osh: {bad}: Bad file descriptor"));
-                                rc = 1;
-                            }
-                        }
-                    }
-                }
+            };
+            if let Err(e) = self.apply_persistent_redirect(r, fd) {
+                self.errln(&format!("osh: {e}"));
+                rc = 1;
             }
         }
         rc
@@ -11736,6 +11816,15 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     opts.open(map_device_path(path))
 }
 
+/// Is this redirect a descriptor *close* (`N>&-` / `N<&-`)? For a varfd
+/// redirect (`{v}>&-`) this is the one form that reuses `$v`'s current value
+/// rather than allocating a new descriptor, so it must be distinguished from
+/// the open forms (`{v}>file`, `{v}>&N`, …) which bind a fresh persistent fd.
+fn redir_is_close(r: &Redirect) -> bool {
+    matches!(r.op, RedirectOp::DupOut)
+        && matches!(r.target.parts.as_slice(), [WordPart::Literal(s)] if s == "-")
+}
+
 /// Duplicate the process's real standard stdout (`is_stdout`) or stderr into an
 /// owned [`File`]. Used to snapshot fd 1 / fd 2's *terminal* sink for
 /// `exec 3>&1` / `exec 3>&2` when that fd is not currently redirected to a file.
@@ -18077,6 +18166,75 @@ mod tests {
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
         );
+    }
+
+    #[test]
+    fn varfd_exec_allocates_and_persists() {
+        // `exec {v}>file` allocates the lowest free fd ≥ 10, stores it in `v`,
+        // and rebinds it persistently. `echo … >&$v` then writes to the file
+        // through that descriptor.
+        assert_eq!(
+            run_exec_redirect("exec {v}>\"{FILE}\"\necho \"v=$v\" >&$v\necho hi >&$v"),
+            "v=10\nhi\n"
+        );
+    }
+
+    #[test]
+    fn varfd_exec_variable_value() {
+        // The auto-allocated descriptor number starts at 10 and is exported into
+        // the named shell variable, readable after the redirect.
+        let (o, s) = run("exec {v}>/dev/null; echo \"[$v]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[10]\n");
+    }
+
+    #[test]
+    fn varfd_multiple_distinct_fds() {
+        // Two `{name}>…` redirects in the same command get distinct descriptors
+        // (10 and 11); neither collides with the other.
+        let (o, s) = run("exec {a}>/dev/null {b}>/dev/null; echo \"$a $b\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "10 11\n");
+    }
+
+    #[test]
+    fn varfd_compound_command() {
+        // `{ … } {w}>file`: a compound command can carry a varfd redirect; the
+        // body's `>&$w` writes reach the file and `$w` survives afterward.
+        assert_eq!(
+            run_exec_redirect("{ echo body >&$w; } {w}>\"{FILE}\"\necho \"w=$w\" >&$w"),
+            "body\nw=10\n"
+        );
+    }
+
+    #[test]
+    fn dup_target_from_variable_is_a_dup_not_a_file() {
+        // `>&$v` where `$v` expands to a descriptor number must duplicate that
+        // descriptor, not create a file literally named after the number.
+        // (Regression: the parser used to classify any non-literal `>&` target
+        // as "both to file".)
+        assert_eq!(
+            run_exec_redirect("exec 3>\"{FILE}\"\nv=3\necho hi >&$v"),
+            "hi\n"
+        );
+    }
+
+    #[test]
+    fn dup_target_nonnumeric_variable_on_fd1_is_both_to_file() {
+        // `>&$f` with a non-numeric expansion on fd 1 means "both streams to the
+        // file", matching bash's `>&file` behaviour.
+        assert_eq!(
+            run_exec_redirect("f=\"{FILE}\"\necho hi >&$f\necho oops >&2"),
+            "hi\n"
+        );
+    }
+
+    #[test]
+    fn dup_target_nonnumeric_variable_on_fd2_is_ambiguous() {
+        // On any fd other than 1 a non-numeric dup target is an ambiguous
+        // redirect (an error), not a file.
+        let (_o, s) = run("f=out.txt; echo hi 2>&$f");
+        assert_eq!(s, 1);
     }
 
     #[test]

@@ -579,10 +579,15 @@ pub enum ReplaceAnchor {
 /// A single redirection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redirect {
-    /// The fd being redirected (defaults filled in by the parser).
+    /// The fd being redirected (defaults filled in by the parser). Ignored when
+    /// [`Redirect::varfd`] is set — the fd is then allocated at runtime.
     pub fd: i32,
     pub op: RedirectOp,
     pub target: Word,
+    /// A varfd prefix `{name}` (`{fd}>file`): the executor allocates a free fd
+    /// ≥ 10, applies the redirect to it, and stores the number in shell variable
+    /// `name`. `None` for an ordinary numeric/default fd redirect.
+    pub varfd: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,6 +14,62 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-INPUT-FD-DUP. `osh` `<&N` / `<&$v` input-fd dup on a simple command mis-routes (and hangs `read <&3`) — 2026-07-19
+
+**Where:** `userspace/oils/src/parser.rs` `parse_redirect` (the `LessAnd`
+arm maps to `RedirectOp::DupOut`, and the default-fd computation
+`explicit_fd.unwrap_or(match op { Read|HereDoc|HereStr => 0, _ => 1 })`
+gives an input dup the *output* default of fd 1); and
+`userspace/oils/src/interp.rs` `resolve_redirects` `DupOut` arm plus
+`RedirPlan` (there is no "stdin is a dup of fd N" field — `stdin` is a
+path and `stdin_data` is bytes, neither can express an input-fd dup).
+
+**What:** `[n]<&word` (input duplication) is broken on a *simple*
+command. `read a <&3` hangs: `<&3` parses as `DupOut` with the default
+fd 1, so `resolve_redirects` sets `stdout_to_fd = Some(3)` (an output
+dup) and leaves stdin on the terminal, so `read` blocks forever. `<&$v`
+(e.g. `exec {r}<file; read a <&$r`) hits the same path. Reproduce:
+`printf 'L1\n' > in.txt; osh -c 'exec 3<in.txt; read a <&3; echo "$a"'`
+→ hangs; bash prints `L1`. (`read -u 3` and `read -u $r` *do* work — the
+`-u` path reads `open_fds` directly, bypassing the redirect resolver.)
+
+**Related — same root cause (dup direction is lost in the AST):** because
+both `<&` (LessAnd) and `>&` (GreatAnd) collapse to `RedirectOp::DupOut`
+with no direction bit, `unparse.rs` re-renders every input dup as an
+output dup — `type`/`declare -f` on a function containing `cat <&3`
+prints `cat >&3` (bash prints `cat 0<&3`). Preserving the dup direction
+(step 1 below) fixes the unparse too; the deparser should then render an
+input dup as `[n]<&M` and show the explicit source fd like bash.
+
+**Why deferred:** the proper fix is a self-contained but non-trivial
+feature (input-fd duplication for non-exec commands), independent of the
+varfd work that surfaced it. It needs: (1) parser/AST — preserve dup
+direction (e.g. a `DupIn` op or an `input: bool` on the dup) and give
+`LessAnd` a default fd of 0 (track a `was_less_and` like
+`was_great_and`); (2)
+`RedirPlan` — add a `stdin_from_fd: Option<i32>` field; (3)
+`resolve_redirects` `DupOut` arm — when `fd == 0`, set
+`plan.stdin_from_fd = Some(n)` instead of `stdout_to_fd`; (4) the
+simple-command stdin setup — when `stdin_from_fd` is set, feed the
+command's stdin from `open_fds[n]` (a persistent input fd, e.g. one
+opened by `exec {r}<file`). Add tests for `read <&3`, `cat <&3`, and the
+varfd `read <&$r` roundtrip. Until then, `read -u N` is the working
+substitute.
+
+### TD-OILS-VARFD-RO-MSG. `osh` readonly-varfd redirect emits one error line; bash emits two — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` `redir_effective_fd` (returns
+`Err("{target}: readonly variable")` when the varfd target is readonly).
+
+**What:** `readonly v=abc; echo x {v}>f` — bash prints *two* diagnostics
+(`v: readonly variable` **and** `v: cannot assign fd to variable`), osh
+prints only the first. Functionally identical: both set exit status 1,
+run nothing, and leave `$v` unchanged. Purely cosmetic, and the error
+*prefix* already differs anyway (`osh:` vs `bash: line N:`, tracked as
+the pervasive errline gap). Proper fix if pursued: emit the second
+`{target}: cannot assign fd to variable` line after the readonly
+message. Very low value.
+
 ### TD-OILS-CMODE-EXIT. `osh -c` fatal-expansion exit status is 1, not bash's `-c`-only 127 — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` fatal-expansion paths (the

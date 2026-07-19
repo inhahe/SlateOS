@@ -282,6 +282,7 @@ impl Parser {
                     fd: 2,
                     op: RedirectOp::DupOut,
                     target: Word::literal("1"),
+                    varfd: None,
                 };
                 commands.push(attach_redirect(prev, dup));
             }
@@ -351,6 +352,7 @@ impl Parser {
         matches!(
             self.peek(),
             Some(Tok::Io(_))
+                | Some(Tok::VarFd(_))
                 | Some(Tok::Op(
                     Op::Less
                         | Op::Great
@@ -839,6 +841,7 @@ impl Parser {
                     }
                 }
                 Some(Tok::Io(_))
+                | Some(Tok::VarFd(_))
                 | Some(Tok::Op(
                     Op::Less
                     | Op::Great
@@ -865,6 +868,15 @@ impl Parser {
     }
 
     fn parse_redirect(&mut self) -> Result<Redirect, ParseError> {
+        // A varfd prefix `{name}` (`{fd}>file`) takes the place of a numeric fd:
+        // the executor allocates a free fd ≥ 10 at runtime and binds `name` to it.
+        let varfd = if let Some(Tok::VarFd(name)) = self.peek() {
+            let name = name.clone();
+            self.pos += 1;
+            Some(name)
+        } else {
+            None
+        };
         let explicit_fd = if let Some(Tok::Io(n)) = self.peek() {
             let n = *n;
             self.pos += 1;
@@ -904,13 +916,28 @@ impl Parser {
             Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
             _ => return Err(ParseError("expected redirection target".into())),
         };
-        // `>&file` (non-numeric target, no explicit fd) means "both fds to file".
-        let op = if was_great_and && explicit_fd.is_none() && !dup_target_is_fd(&target) {
+        // `>&file` (non-numeric *literal* target, no explicit/var fd) means
+        // "both fds to file". A `{v}>&…` form keeps its dup semantics (varfd is
+        // not "both"). When the target contains expansions (`>&$v`) we cannot
+        // classify it at parse time — it must be resolved at runtime: a numeric
+        // expansion is a dup, a non-numeric one is an ambiguous redirect (or
+        // "both to file" for the `1>&` corner). So keep it as `DupOut` and let
+        // `resolve_redirects` decide.
+        let target_is_literal = target
+            .parts
+            .iter()
+            .all(|p| matches!(p, WordPart::Literal(_)));
+        let op = if was_great_and
+            && explicit_fd.is_none()
+            && varfd.is_none()
+            && target_is_literal
+            && !dup_target_is_fd(&target)
+        {
             RedirectOp::WriteBoth
         } else {
             op
         };
-        Ok(Redirect { fd, op, target })
+        Ok(Redirect { fd, op, target, varfd })
     }
 
     fn expect_reserved(&mut self, w: &str) -> Result<(), ParseError> {

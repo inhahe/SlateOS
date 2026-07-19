@@ -81,6 +81,11 @@ pub enum Tok {
     Word(Vec<Seg>),
     /// An IO number: digits immediately preceding a redirection operator.
     Io(i32),
+    /// A varfd prefix `{name}` immediately preceding a redirection operator
+    /// (`{fd}>file`, `{fd}<file`, `exec {fd}>&-`). bash allocates a free fd
+    /// ≥ 10 for the redirect and assigns its number to the shell variable
+    /// `name`; a closing `{fd}>&-` reads the fd number back from `name`.
+    VarFd(String),
     Op(Op),
     Newline,
     /// A here-document body, captured after its introducing line. Emitted
@@ -328,6 +333,36 @@ impl Lexer {
         c
     }
 
+    /// If the cursor sits on a varfd redirect prefix `{name}` immediately
+    /// followed by a redirection operator (`{fd}>`, `{fd}<`), return the name
+    /// and the index just past the closing `}`. Returns `None` otherwise, so a
+    /// brace group (`{ …; }`) or brace expansion (`{a,b}`) falls through to the
+    /// normal word/reserved-word path. The `{` at `self.pos` is assumed.
+    fn varfd_prefix(&self) -> Option<(String, usize)> {
+        debug_assert_eq!(self.chars.get(self.pos), Some(&'{'));
+        let mut i = self.pos + 1;
+        // First name char must be a name-start (letter or `_`).
+        match self.chars.get(i) {
+            Some(&c) if is_name_start(c) => i += 1,
+            _ => return None,
+        }
+        while matches!(self.chars.get(i), Some(&c) if is_name_char(c)) {
+            i += 1;
+        }
+        if self.chars.get(i) != Some(&'}') {
+            return None;
+        }
+        let close = i;
+        i += 1;
+        // The `}` must be immediately followed by a redirection operator for
+        // this to be a varfd prefix rather than an ordinary `{word}` token.
+        if !matches!(self.chars.get(i), Some('<' | '>')) {
+            return None;
+        }
+        let name: String = self.chars[self.pos + 1..close].iter().collect();
+        Some((name, close + 1))
+    }
+
     fn run(&mut self) -> Result<Vec<Tok>, LexError> {
         let mut out = Vec::new();
         loop {
@@ -475,6 +510,17 @@ impl Lexer {
                             out.push(Tok::Op(Op::GreatPipe));
                         }
                         _ => out.push(Tok::Op(Op::Great)),
+                    }
+                }
+                '{' if self.varfd_prefix().is_some() => {
+                    // `{name}>file` / `{name}<file`: a varfd redirect prefix. The
+                    // guard confirmed `{` + a valid name + `}` is immediately
+                    // followed by a redirection operator (no spaces), which never
+                    // collides with a brace group (`{ …; }` has a space) or brace
+                    // expansion (`{a,b}` is not followed by `<`/`>`).
+                    if let Some((name, end)) = self.varfd_prefix() {
+                        self.pos = end;
+                        out.push(Tok::VarFd(name));
                     }
                 }
                 '0'..='9' => {

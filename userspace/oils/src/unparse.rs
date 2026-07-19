@@ -476,6 +476,25 @@ pub(crate) fn assignment_src(a: &Assignment) -> String {
 }
 
 fn redirect_src(r: &Redirect) -> String {
+    // A varfd prefix `{name}` replaces the numeric fd on the operators that
+    // accept one (`{fd}>`, `{fd}>>`, `{fd}<`, `{fd}>&…`).
+    if let Some(name) = &r.varfd {
+        let op = match r.op {
+            RedirectOp::Write => ">",
+            RedirectOp::Clobber => ">|",
+            RedirectOp::Append => ">>",
+            RedirectOp::Read => "<",
+            RedirectOp::DupOut => ">&",
+            // `{name}` never pairs with here-docs / `&>`; fall back to the plain
+            // form for those (unreachable in practice).
+            _ => return redirect_src_plain(r),
+        };
+        return format!("{{{name}}}{op}{}", word_src(&r.target));
+    }
+    redirect_src_plain(r)
+}
+
+fn redirect_src_plain(r: &Redirect) -> String {
     match r.op {
         RedirectOp::Write => fd_prefixed(r.fd, 1, ">", &word_src(&r.target)),
         RedirectOp::Clobber => fd_prefixed(r.fd, 1, ">|", &word_src(&r.target)),

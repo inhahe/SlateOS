@@ -4391,14 +4391,17 @@ impl Shell {
                     cur.unwrap_or_default()
                 } else {
                     let msg = self.expand_to_string(arg);
-                    eprintln!(
-                        "osh: {name}: {}",
-                        if msg.is_empty() {
-                            "parameter null or not set"
-                        } else {
-                            &msg
-                        }
-                    );
+                    let text = if msg.is_empty() {
+                        "parameter null or not set"
+                    } else {
+                        &msg
+                    };
+                    self.emit_stderr(format!("osh: {name}: {text}\n").as_bytes());
+                    // bash: `${var:?word}` on an unset/null parameter writes the
+                    // message and, in a non-interactive shell, exits. Reuse the
+                    // nounset abort path so the simple-command driver terminates
+                    // the (sub)shell before running the command (`Flow::Exit(1)`).
+                    self.unbound_error = true;
                     String::new()
                 }
             }
@@ -10909,6 +10912,21 @@ mod tests {
         let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
         assert_eq!(o2, "<hello world\nsecond line>\n");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn error_if_unset_aborts_shell() {
+        // `${var:?msg}` on an unset parameter writes the message and aborts the
+        // (sub)shell before the command runs — the `echo` never executes.
+        let (o, _) = run("unset zz; (echo \"${zz:?is unset}\") 2>/dev/null; echo \"after=$?\"");
+        assert_eq!(o, "after=1\n");
+        // A set, non-empty parameter is unaffected.
+        let (o2, _) = run("y=set; echo \"${y:?msg}\"");
+        assert_eq!(o2, "set\n");
+        // At top level the error aborts the whole run.
+        let (o3, st3) = run("unset q; echo \"${q:?gone}\" 2>/dev/null; echo unreached");
+        assert_eq!(o3, "");
+        assert_eq!(st3, 1);
     }
 
     #[test]

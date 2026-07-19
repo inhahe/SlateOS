@@ -4384,10 +4384,67 @@ impl Shell {
     /// operands, wait for all jobs. Returns the exit status of the last waited
     /// job (0 when there are no jobs to wait for). Each waited job is removed
     /// from the table.
+    /// Resolve a `wait`/`jobs` operand (`%n` job spec, bare job id, or pid) to
+    /// an index into `self.jobs`.
+    fn resolve_job_spec(&self, spec: &str) -> Option<usize> {
+        if let Some(rest) = spec.strip_prefix('%') {
+            rest.parse::<usize>().ok().and_then(|n| self.jobs.iter().position(|j| j.id == n))
+        } else if let Ok(n) = spec.parse::<u32>() {
+            self.jobs
+                .iter()
+                .position(|j| j.pid == n)
+                .or_else(|| self.jobs.iter().position(|j| j.id as u32 == n))
+        } else {
+            None
+        }
+    }
+
     fn builtin_wait(&mut self, args: &[String]) -> i32 {
-        if args.is_empty() {
+        // Parse flags: `-n` (return as soon as the next job completes) and
+        // `-p VAR` (store the pid of the job whose status is returned in VAR).
+        let mut wait_any = false;
+        let mut pid_var: Option<String> = None;
+        let mut operands: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                operands.extend_from_slice(&args[i + 1..]);
+                break;
+            }
+            if a == "-n" {
+                wait_any = true;
+                i += 1;
+                continue;
+            }
+            if a == "-p" {
+                let Some(v) = args.get(i + 1) else {
+                    self.emit_stderr(b"osh: wait: -p: option requires an argument\n");
+                    return 2;
+                };
+                pid_var = Some(v.clone());
+                i += 2;
+                continue;
+            }
+            if let Some(rest) = a.strip_prefix("-p")
+                && !rest.is_empty()
+            {
+                pid_var = Some(rest.to_string());
+                i += 1;
+                continue;
+            }
+            // First non-flag token: the rest are operands.
+            operands.extend_from_slice(&args[i..]);
+            break;
+        }
+
+        if wait_any {
+            return self.wait_next(&operands, pid_var.as_deref());
+        }
+
+        if operands.is_empty() {
             // Wait for all jobs, blocking on each.
             let mut last = 0;
+            let mut last_pid = None;
             for job in &mut self.jobs {
                 if let Some(mut child) = job.child.take() {
                     last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
@@ -4395,28 +4452,22 @@ impl Shell {
                 } else if let Some(s) = job.status {
                     last = s;
                 }
+                last_pid = Some(job.pid);
             }
             self.jobs.clear();
+            if let (Some(var), Some(pid)) = (pid_var, last_pid) {
+                self.vars.insert(var, pid.to_string());
+            }
             return last;
         }
         let mut last = 0;
-        for spec in args {
-            // Resolve the operand to a job index: `%n` job spec, bare job id, or pid.
-            let idx = if let Some(rest) = spec.strip_prefix('%') {
-                rest.parse::<usize>().ok().and_then(|n| self.jobs.iter().position(|j| j.id == n))
-            } else if let Ok(n) = spec.parse::<u32>() {
-                self.jobs
-                    .iter()
-                    .position(|j| j.pid == n)
-                    .or_else(|| self.jobs.iter().position(|j| j.id as u32 == n))
-            } else {
-                None
-            };
-            let Some(idx) = idx else {
+        for spec in &operands {
+            let Some(idx) = self.resolve_job_spec(spec) else {
                 self.emit_stderr(format!("osh: wait: {spec}: no such job\n").as_bytes());
                 last = 127;
                 continue;
             };
+            let pid = self.jobs[idx].pid;
             let job = &mut self.jobs[idx];
             if let Some(mut child) = job.child.take() {
                 last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
@@ -4424,8 +4475,67 @@ impl Shell {
                 last = job.status.unwrap_or(0);
             }
             self.jobs.remove(idx);
+            if let Some(var) = &pid_var {
+                self.vars.insert(var.clone(), pid.to_string());
+            }
         }
         last
+    }
+
+    /// `wait -n [ids…]` — block until the *next* job in the candidate set (the
+    /// named ids, or all jobs when none are named) terminates, then return its
+    /// status and forget it. Returns 127 when there are no candidate jobs.
+    fn wait_next(&mut self, operands: &[String], pid_var: Option<&str>) -> i32 {
+        // Build the candidate index set.
+        let candidates: Vec<usize> = if operands.is_empty() {
+            (0..self.jobs.len()).collect()
+        } else {
+            let mut v = Vec::new();
+            for spec in operands {
+                match self.resolve_job_spec(spec) {
+                    Some(idx) => v.push(idx),
+                    None => {
+                        self.emit_stderr(format!("osh: wait: {spec}: no such job\n").as_bytes());
+                    }
+                }
+            }
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        if candidates.is_empty() {
+            return 127;
+        }
+        // Poll the candidates until one reports termination. A job already
+        // reaped (child == None, status set) completes immediately.
+        loop {
+            for &idx in &candidates {
+                let Some(job) = self.jobs.get_mut(idx) else {
+                    continue;
+                };
+                let done = match &mut job.child {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(st)) => Some(st.code().unwrap_or(1)),
+                        Ok(None) => None,
+                        Err(_) => Some(1),
+                    },
+                    None => Some(job.status.unwrap_or(0)),
+                };
+                if let Some(status) = done {
+                    let pid = job.pid;
+                    self.jobs.remove(idx);
+                    if let Some(var) = pid_var {
+                        self.vars.insert(var.to_string(), pid.to_string());
+                    }
+                    return status;
+                }
+            }
+            // No candidate ready yet — yield briefly before re-polling. This is
+            // a deliberate short poll of live child processes (not a retry of a
+            // failing command); OS-level wait-any across std Child handles is
+            // not available, so a bounded poll is the correct approach.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// `hash [-lr] [-p pathname] [-dt] [name ...]` — manage the remembered
@@ -10531,6 +10641,28 @@ mod tests {
         sh.run_source("cmd /c exit 4 &");
         assert_eq!(sh.run_source("wait %1"), 4);
         assert!(sh.jobs.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wait_n_returns_next_completed() {
+        // `wait -n` returns as soon as one job finishes; a second `wait -n`
+        // reaps the other. `-p VAR` records the returned job's pid.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 5 &");
+        sh.run_source("cmd /c exit 6 &");
+        assert_eq!(sh.jobs.len(), 2);
+        let first = sh.run_source("wait -n -p done_pid");
+        assert!(first == 5 || first == 6, "unexpected status {first}");
+        assert_eq!(sh.jobs.len(), 1);
+        // The pid variable was set to a plausible pid.
+        assert!(sh.vars.get("done_pid").is_some_and(|p| p.parse::<u32>().is_ok()));
+        let second = sh.run_source("wait -n");
+        assert!(second == 5 || second == 6);
+        assert_ne!(first, second);
+        assert!(sh.jobs.is_empty());
+        // `wait -n` with no jobs left returns 127.
+        assert_eq!(sh.run_source("wait -n"), 127);
     }
 
     #[cfg(windows)]

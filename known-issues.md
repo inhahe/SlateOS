@@ -428,11 +428,12 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: output redirection-only form implemented; input redirect and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms implemented; a true in-place `execve` remains — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
-persistent targets; `Shell.exec_stdout`/`exec_stderr` fields; `write_bytes`
-`Out::Inherit`, `emit_stderr`, and `run_external` consult them).
+persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
+`write_bytes` `Out::Inherit`, `emit_stderr`, `run_external`, `read_line`,
+`read_record_input`, and `read_all_bytes` consult them).
 
 **What:** the `exec` builtin is implemented for the command-replacement case
 (`exec cmd args` runs `cmd` then exits the shell with its status; a missing
@@ -448,21 +449,29 @@ command exits 127). Status of the remaining aspects:
    clones inherit the redirect (bash: a subshell inherits the fd table). Note
    the same left-to-right ordering simplification the rest of the shell has for
    `2>&1 > f` vs `> f 2>&1` applies here (the dup follows fd 1's *final* sink).
-2. **Input redirection-only `exec < file` — still OPEN.** Persistent *input*
-   rebinding is not modelled: `read`/external stdin flows through the `StdinSrc`
-   parameter threaded down the call tree rather than a shell field, so there is
-   no single place to install a persistent fd-0 source. Rare compared to output
-   redirection.
+2. **Input redirection-only `exec < file` — RESOLVED 2026-07-19.** `exec < file`
+   (and `exec << EOF`) reads the source fully into a per-shell
+   `exec_stdin: Option<RefCell<Cursor<Vec<u8>>>>` at exec time; every base fd-0
+   read consults it: the `read` builtin (`read_line`/`read_record_input`),
+   `read_all_bytes` (used by `mapfile`/`$(<file)`-style reads), and an external
+   command inheriting fd 0 (`run_external`'s `StdinSrc::Inherit`+no-redir arm,
+   which feeds the child the cursor's remaining bytes). Successive `read`s
+   therefore consume successive lines. A subshell clone inherits a *snapshot* of
+   the remaining bytes with an independent cursor (reads in the subshell don't
+   advance the parent's offset — a minor deviation from bash's shared-fd
+   semantics, consistent with how our subshells already copy their stdin). One
+   approximation: an external that inherits fd 0 is handed the cursor's whole
+   remaining buffer via a pipe, so a subsequent `read` in the parent sees EOF
+   rather than the bytes the child left unconsumed (a shared-fd offset would
+   differ) — acceptable for the common `exec < f; read …` idiom.
 3. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Proper fix:** (2) give `Shell` a persistent `exec_stdin: Option<...>` source
-(analogous to `exec_stdout`) consulted wherever `StdinSrc::Inherit` is the base
-input (the `read` builtins and `run_external`'s stdin `None`/`Inherit` arm);
-(3) once the kernel exposes `execve`, replace the spawn+wait+exit with an actual
-in-place image replacement for `exec cmd`.
+**Proper fix:** (2) done (see above). (3) once the kernel exposes `execve`,
+replace the spawn+wait+exit with an actual in-place image replacement for
+`exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)
 

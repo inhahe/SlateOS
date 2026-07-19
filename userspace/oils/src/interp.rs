@@ -255,6 +255,18 @@ pub struct Shell {
     /// shell's real stderr. Consulted by [`Shell::emit_stderr`] and external
     /// children as the base fd-2 sink beneath any `stderr_stack` entry.
     exec_stderr: Option<(String, bool)>,
+    /// Persistent stdin source set by a redirection-only `exec < file` (or an
+    /// `exec << EOF` here-doc): the file's bytes are read once into a
+    /// position-tracking cursor so successive ambient `read` calls (and an
+    /// external command inheriting fd 0) consume successive input. `None` = the
+    /// shell's real stdin. Consulted wherever [`StdinSrc::Inherit`] is the base
+    /// input ([`Shell::read_line`], [`Shell::read_record_input`],
+    /// [`Shell::read_all_bytes`], and [`Shell::run_external`]). A subshell clone
+    /// inherits a snapshot of the *remaining* bytes (independent offset — reads
+    /// in the subshell do not advance the parent's cursor; a minor deviation
+    /// from bash's shared-fd semantics, acceptable because our subshells already
+    /// copy their stdin).
+    exec_stdin: Option<RefCell<io::Cursor<Vec<u8>>>>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -403,6 +415,7 @@ impl Shell {
             stderr_stack: Vec::new(),
             exec_stdout: None,
             exec_stderr: None,
+            exec_stdin: None,
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -1628,6 +1641,15 @@ impl Shell {
             // `exec > file` / `exec 2> file` redirection.
             exec_stdout: self.exec_stdout.clone(),
             exec_stderr: self.exec_stderr.clone(),
+            // The subshell inherits a snapshot of the remaining stdin bytes with
+            // an independent cursor (see the field doc).
+            exec_stdin: self.exec_stdin.as_ref().map(|c| {
+                let cur = c.borrow();
+                let pos = cur.position();
+                let mut copy = io::Cursor::new(cur.get_ref().clone());
+                copy.set_position(pos);
+                RefCell::new(copy)
+            }),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -3121,7 +3143,18 @@ impl Shell {
                 },
                 None => match stdin {
                     StdinSrc::Inherit => {
-                        cmd.stdin(Stdio::inherit());
+                        // A persistent `exec < file` feeds the child fd 0 the
+                        // cursor's remaining bytes (advancing it, so a later
+                        // `read` continues after what the child consumed via the
+                        // pipe buffer — a close approximation of a shared fd).
+                        if let Some(cur) = &self.exec_stdin {
+                            let mut rest = Vec::new();
+                            let _ = cur.borrow_mut().read_to_end(&mut rest);
+                            input_bytes = Some(rest);
+                            cmd.stdin(Stdio::piped());
+                        } else {
+                            cmd.stdin(Stdio::inherit());
+                        }
                     }
                     StdinSrc::Cursor(c) => {
                         // Feed the external the cursor's remaining bytes (from the
@@ -4314,9 +4347,25 @@ impl Shell {
                 if args.is_empty() {
                     // Redirection-only `exec`: rebind the shell's own fds for
                     // every subsequent command. We model fd 1 / fd 2 file
-                    // targets (`exec > log 2>&1` etc). A persistent *input*
-                    // redirect (`exec < file`) is not yet supported (TD-OILS14).
+                    // targets (`exec > log 2>&1` etc) and fd 0 input redirects
+                    // (`exec < file`, `exec << EOF`).
                     let mut rc = 0;
+                    // fd 0 (`< file` / here-doc): read the source fully into a
+                    // position-tracking cursor so subsequent `read`s / externals
+                    // consume successive input.
+                    if let Some(data) = &redir.stdin_data {
+                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(data.clone())));
+                    } else if let Some(path) = &redir.stdin {
+                        match std::fs::read(path) {
+                            Ok(bytes) => {
+                                self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: {path}: {e}"));
+                                rc = 1;
+                            }
+                        }
+                    }
                     // fd 1 (`> file` / `>> file`): truncate once (for `>`), then
                     // store as append so later commands accumulate into the file.
                     if let Some((path, append)) = &redir.stdout {
@@ -6931,7 +6980,11 @@ impl Shell {
                 let _ = r.borrow_mut().read_to_end(&mut buf);
             }
             StdinSrc::Inherit => {
-                let _ = io::stdin().lock().read_to_end(&mut buf);
+                if let Some(cur) = &self.exec_stdin {
+                    let _ = cur.borrow_mut().read_to_end(&mut buf);
+                } else {
+                    let _ = io::stdin().lock().read_to_end(&mut buf);
+                }
             }
         }
         buf
@@ -7408,6 +7461,10 @@ impl Shell {
                 read_one_line(&mut *r.borrow_mut())
             }
             StdinSrc::Inherit => {
+                // A persistent `exec < file` rebinds the shell's ambient fd 0.
+                if let Some(cur) = &self.exec_stdin {
+                    return read_one_line(&mut *cur.borrow_mut());
+                }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
                 read_one_line(&mut lock)
@@ -7443,6 +7500,9 @@ impl Shell {
             StdinSrc::Cursor(c) => read_record(&mut *c.borrow_mut(), delim, nchars, exact),
             StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact),
             StdinSrc::Inherit => {
+                if let Some(cur) = &self.exec_stdin {
+                    return read_record(&mut *cur.borrow_mut(), delim, nchars, exact);
+                }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
                 read_record(&mut lock, delim, nchars, exact)
@@ -12906,6 +12966,29 @@ mod tests {
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
         );
+    }
+
+    #[test]
+    fn exec_input_redirect_persistent() {
+        // `exec < file` rebinds fd 0 for every following command: successive
+        // `read`s consume successive lines from the file.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_exec_in_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, b"line1\nline2\nline3\n").expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = format!(
+            "exec < \"{p}\"\nread a\nread b\necho \"$a=$b\"\nread rest\necho \"$rest\""
+        );
+        let (out, status) = run(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert_eq!(out, "line1=line2\nline3\n");
     }
 
     #[test]

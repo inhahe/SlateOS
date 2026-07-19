@@ -117,6 +117,30 @@ impl Parser {
         None
     }
 
+    /// A short human-readable name for the current token, for syntax-error
+    /// messages (mirrors bash's `near unexpected token '…'`).
+    fn token_display(&self) -> String {
+        match self.peek() {
+            None => "end of input".to_string(),
+            Some(Tok::Newline) => "newline".to_string(),
+            Some(Tok::Op(op)) => match op {
+                Op::DSemi => ";;",
+                Op::SemiAmp => ";&",
+                Op::DSemiAmp => ";;&",
+                Op::LParen => "(",
+                Op::RParen => ")",
+                Op::Pipe => "|",
+                Op::Amp => "&",
+                Op::Semi => ";",
+                Op::AndIf => "&&",
+                Op::OrIf => "||",
+                _ => "redirection",
+            }
+            .to_string(),
+            _ => self.bare_word_here().unwrap_or_else(|| "word".to_string()),
+        }
+    }
+
     fn skip_newlines(&mut self) {
         while matches!(self.peek(), Some(Tok::Newline)) {
             self.pos += 1;
@@ -155,21 +179,44 @@ impl Parser {
             let line = self.line;
             let list = self.parse_and_or()?;
             let mut background = false;
+            let mut had_sep = false;
             match self.peek() {
                 Some(Tok::Op(Op::Amp)) => {
                     background = true;
+                    had_sep = true;
                     self.pos += 1;
                 }
                 Some(Tok::Newline) => {
+                    had_sep = true;
                     self.pos += 1;
                     self.line += 1;
                 }
                 Some(Tok::Op(Op::Semi)) => {
+                    had_sep = true;
                     self.pos += 1;
                 }
                 _ => {}
             }
             items.push(Item { list, background, line });
+            // Without a separator (`;`, `&`, newline), the only valid follower is
+            // a terminator for this context: end of input, a closing `)`, or a
+            // stop keyword (`done`, `fi`, `esac`, `}`, …). Anything else — a bare
+            // word or a stray reserved word/operator — means two commands abut
+            // with no separator, which bash rejects as a syntax error (and which
+            // osh previously mis-ran as a second command).
+            if !had_sep {
+                let at_terminator = self.peek().is_none()
+                    || self.at_op(Op::RParen)
+                    || self
+                        .reserved_here()
+                        .is_some_and(|w| stops.contains(&w.as_str()));
+                if !at_terminator {
+                    return Err(ParseError(format!(
+                        "syntax error near unexpected token '{}'",
+                        self.token_display()
+                    )));
+                }
+            }
         }
         Ok(Program { items })
     }
@@ -1897,6 +1944,29 @@ mod tests {
     fn array_literal_after_plain_command_rejected() {
         // Only declaration builtins may take an array-literal operand.
         assert!(parse("foo m=(a b)").is_err());
+    }
+
+    #[test]
+    fn stray_word_after_compound_command_rejected() {
+        // A compound command cannot be followed by a bare word without a
+        // separator; bash rejects this and osh previously mis-ran the trailing
+        // word(s) as a second command.
+        assert!(parse("for i in 1 2; do echo $i; done extra").is_err());
+        assert!(parse("while false; do :; done foo bar").is_err());
+        assert!(parse("if true; then echo hi; fi extra").is_err());
+        assert!(parse("{ echo a; } extra").is_err());
+        assert!(parse("case x in x) :; esac extra").is_err());
+        assert!(parse("( echo a ) extra").is_err());
+        // A stray `;;` outside a case arm is likewise an error.
+        assert!(parse("echo a ;;").is_err());
+        // But legitimate followers (separators, redirects, pipes, `&&`, a
+        // closing `)`/keyword) must still parse.
+        assert!(parse("for i in 1; do echo $i; done > /dev/null").is_ok());
+        assert!(parse("for i in 1; do echo $i; done | cat").is_ok());
+        assert!(parse("while false; do :; done && echo ok").is_ok());
+        assert!(parse("{ echo a; }; echo b").is_ok());
+        assert!(parse("( echo a ); echo b").is_ok());
+        assert!(parse("x=$(for i in 1 2; do echo $i; done)").is_ok());
     }
 
     #[test]

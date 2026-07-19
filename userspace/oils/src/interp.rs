@@ -2891,20 +2891,28 @@ impl Shell {
     /// form); arrays, associative arrays, and any attributed variable render as
     /// a full `declare` command. An unset variable yields the empty string.
     fn transform_assign(&self, name: &str) -> String {
+        // Arrays and associative arrays render as a full `declare` with
+        // double-quoted elements, identical to `declare -p` output.
+        if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
+            return self.format_declare_def(name).unwrap_or_default();
+        }
+        let Some(v) = self.vars.get(name) else {
+            return String::new();
+        };
         let attributed = self.readonly.contains(name)
             || self.exported.contains(name)
             || self.integer_attr.contains(name)
             || self.lower_attr.contains(name)
-            || self.upper_attr.contains(name);
-        // Plain scalar, no attributes → `name='value'` (short form, single-quote
-        // style via shell_quote), matching bash.
-        if !attributed && !self.assoc.contains_key(name) && !self.arrays.contains_key(name) {
-            return match self.vars.get(name) {
-                Some(v) => format!("{name}={}", shell_quote(v)),
-                None => String::new(),
-            };
+            || self.upper_attr.contains(name)
+            || self.nameref_attr.contains(name);
+        // Both the plain (`name='value'`) and attributed (`declare -r name='value'`)
+        // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
+        // here, unlike `declare -p`, which double-quotes.
+        if attributed {
+            format!("declare {} {name}={}", self.declare_attr_flags(name, ""), shell_quote(v))
+        } else {
+            format!("{name}={}", shell_quote(v))
         }
-        self.format_declare_def(name).unwrap_or_default()
     }
 
     /// Apply a `@`-operator ([`op`]) to a concrete string value. Shared by the
@@ -7361,50 +7369,47 @@ impl Shell {
     /// Format one variable's `declare` definition, or `None` if it is unset.
     /// Attribute flags (`-r` readonly, `-x` exported, `-a`/`-A` array kind) are
     /// combined into a single flag group, e.g. `declare -rx name="v"`.
+    /// Build the `declare` attribute-flag string for `name` (e.g. `-ir`, `-A`,
+    /// `--` when there are none). `kind` seeds the collection-type letter
+    /// (`"A"`/`"a"` for assoc/indexed arrays, `""` for a scalar).
+    fn declare_attr_flags(&self, name: &str, kind: &str) -> String {
+        let mut s = String::from(kind);
+        if self.nameref_attr.contains(name) {
+            s.push('n');
+        }
+        if self.integer_attr.contains(name) {
+            s.push('i');
+        }
+        if self.lower_attr.contains(name) {
+            s.push('l');
+        }
+        if self.upper_attr.contains(name) {
+            s.push('u');
+        }
+        if self.readonly.contains(name) {
+            s.push('r');
+        }
+        if self.exported.contains(name) {
+            s.push('x');
+        }
+        if s.is_empty() { "--".to_string() } else { format!("-{s}") }
+    }
+
     fn format_declare_def(&self, name: &str) -> Option<String> {
-        let readonly = self.readonly.contains(name);
-        let exported = self.exported.contains(name);
-        let integer = self.integer_attr.contains(name);
-        let lower = self.lower_attr.contains(name);
-        let upper = self.upper_attr.contains(name);
-        let nameref = self.nameref_attr.contains(name);
-        // Build the trailing attribute letters shared by all kinds.
-        let attr = |kind: &str| -> String {
-            let mut s = String::from(kind);
-            if nameref {
-                s.push('n');
-            }
-            if integer {
-                s.push('i');
-            }
-            if lower {
-                s.push('l');
-            }
-            if upper {
-                s.push('u');
-            }
-            if readonly {
-                s.push('r');
-            }
-            if exported {
-                s.push('x');
-            }
-            if s.is_empty() { "--".to_string() } else { format!("-{s}") }
-        };
         if self.assoc.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", attr("A")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "A")));
         }
         if self.arrays.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", attr("a")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "a")));
         }
         if self.vars.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", attr("")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "")));
         }
         None
     }
@@ -11707,7 +11712,10 @@ fn parse_printf_int_checked(s: &str) -> (i64, Option<&'static str>) {
     let (radix, digits, kind) = if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
     {
         (16u32, h, "invalid hex number")
-    } else if body.len() > 1 && body.starts_with('0') {
+    } else if body.len() > 1 && body.starts_with('0') && body.as_bytes()[1].is_ascii_digit() {
+        // Octal only when a digit follows the `0` (`08`, `019`); a `0` followed
+        // by a letter (`0b101`) is decimal-with-junk, so bash reports the
+        // generic "invalid number", not "invalid octal number".
         (8u32, &body[1..], "invalid octal number")
     } else {
         (10u32, body, "invalid number")
@@ -14074,10 +14082,20 @@ mod tests {
         // every value, even a plain word).
         assert_eq!(run("x=hello; echo \"${x@A}\"").0, "x='hello'\n");
         assert_eq!(run("x='a b'; echo \"${x@A}\"").0, "x='a b'\n");
-        // An attributed scalar renders as a full `declare` statement.
+        // An attributed scalar renders as a full `declare` statement whose
+        // value is single-quoted (bash's `@A` uses single quotes even for the
+        // attributed form, unlike `declare -p`'s double quotes).
         assert_eq!(
             run("declare -i n=5; echo \"${n@A}\"").0,
-            "declare -i n=\"5\"\n"
+            "declare -i n='5'\n"
+        );
+        assert_eq!(
+            run("declare -r x=5; echo \"${x@A}\"").0,
+            "declare -r x='5'\n"
+        );
+        assert_eq!(
+            run("declare -x x='a b'; echo \"${x@A}\"").0,
+            "declare -x x='a b'\n"
         );
         // Arrays and associative arrays render as `declare` too.
         assert_eq!(

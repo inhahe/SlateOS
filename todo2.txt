@@ -1,3 +1,5 @@
+Has Claude been hand-porting oils when it could have used a tool for most of the work (the one mentioned in roadmap-detailed.md for chromium and such)?
+
 chrome's copying rtf to the clipboard is broken - random parts get left out (most of it), so chromium's might be too, something we might want to  fix
 
 have something that writes to a file have a 'file is done' finalizer command (which automatically gets called if the process quits?), which can be used by backup programs watching the  file to know when they can start backing it up.

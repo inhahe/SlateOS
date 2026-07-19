@@ -192,7 +192,11 @@ fn plain_decimal(t: &str) -> Option<i64> {
 /// Parse an arithmetic expression into an AST (no evaluation, no mutation).
 fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
     let mut p = AParser {
-        chars: expr.chars().collect(),
+        // bash deletes double quotes from an arithmetic expression before
+        // evaluating it: `$(( "3" + "4" ))` → 7 and `$(( 1"2"3 ))` → 123 (the
+        // quotes are removed, not treated as whitespace, so adjacent digits
+        // fuse). Single quotes stay literal (and thus an error, as in bash).
+        chars: expr.chars().filter(|&c| c != '"').collect(),
         pos: 0,
         vars,
     };
@@ -924,6 +928,20 @@ mod tests {
         // bash: `$(( ))` and, after expansion, `$(( $unset ))` → 0.
         assert_eq!(ev(""), 0);
         assert_eq!(ev("   "), 0);
+    }
+
+    #[test]
+    fn double_quotes_are_stripped() {
+        // bash deletes double quotes from an arithmetic expression before
+        // evaluating: quoted operands and even quotes mid-number are removed.
+        assert_eq!(ev(r#""3" + "4""#), 7);
+        assert_eq!(ev(r#"2 + "3 * 4""#), 14);
+        assert_eq!(ev(r#""3"4"#), 34);
+        assert_eq!(ev(r#"1"2"3"#), 123);
+        assert_eq!(ev(r#"""+5"#), 5);
+        // Adjacent quoted numbers with no operator are still a syntax error
+        // (the quotes vanish but leave `3 4`).
+        assert!(eval(r#""3" "4""#, &mut Map::default()).is_err());
     }
 
     #[test]

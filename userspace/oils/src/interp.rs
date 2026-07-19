@@ -309,6 +309,11 @@ pub struct Shell {
     /// targets; the Windows host has no mode concept — see known-issues TD-OILS15).
     /// Inherited by subshell clones and children (the process umask).
     umask_val: u32,
+    /// Remembered full pathnames for commands looked up via `$PATH`, keyed by the
+    /// command name (`hash` builtin). Value is `(resolved path, hit count)`. bash
+    /// caches every PATH search here and consults it before re-searching; the
+    /// table is inherited by subshell clones. See `resolve_external`.
+    cmd_hash: std::collections::HashMap<String, (std::path::PathBuf, u64)>,
 }
 
 impl Default for Shell {
@@ -358,6 +363,7 @@ impl Shell {
             in_trap: false,
             jobs: Vec::new(),
             umask_val: 0o022,
+            cmd_hash: std::collections::HashMap::new(),
         }
     }
 
@@ -1549,6 +1555,8 @@ impl Shell {
             jobs: Vec::new(),
             // The umask is a process attribute, inherited by subshells.
             umask_val: self.umask_val,
+            // The command hash table is inherited by subshells (bash).
+            cmd_hash: self.cmd_hash.clone(),
         }
     }
 
@@ -2355,6 +2363,25 @@ impl Shell {
         None
     }
 
+    /// Resolve an external command name to a full path for execution, consulting
+    /// and populating the `hash` cache. A name containing a slash is used as-is
+    /// (never hashed). For a bare name: a cached entry is reused (and its hit
+    /// count bumped); otherwise a `$PATH` search runs and a hit is remembered.
+    /// Returns `None` when the name cannot be resolved — the caller then falls
+    /// back to letting the OS attempt the spawn (preserving prior behavior).
+    fn resolve_external(&mut self, name: &str) -> Option<std::path::PathBuf> {
+        if name.contains('/') || name.contains('\\') {
+            return self.find_in_path(name);
+        }
+        if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
+            *hits += 1;
+            return Some(path.clone());
+        }
+        let path = self.find_in_path(name)?;
+        self.cmd_hash.insert(name.to_string(), (path.clone(), 1));
+        Some(path)
+    }
+
     /// Like `find_in_path`, but returns *every* matching executable across all
     /// `$PATH` directories in order (used by `type -a`). Duplicate paths are
     /// suppressed while preserving first-seen order.
@@ -2398,7 +2425,12 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) {
-        let mut cmd = PCommand::new(&argv[0]);
+        // Resolve via the shell's `$PATH` (and the `hash` cache) when possible;
+        // fall back to the bare name so the OS can still try to locate it.
+        let mut cmd = match self.resolve_external(&argv[0]) {
+            Some(path) => PCommand::new(path),
+            None => PCommand::new(&argv[0]),
+        };
         cmd.args(&argv[1..]);
 
         // Environment: exported shell vars + this command's temp assignments.
@@ -3304,6 +3336,7 @@ impl Shell {
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
+            "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
                 if args.is_empty() {
@@ -3877,6 +3910,136 @@ impl Shell {
             self.jobs.remove(idx);
         }
         last
+    }
+
+    /// `hash [-lr] [-p pathname] [-dt] [name ...]` — manage the remembered
+    /// command-path table. No operand prints the table; `-r` forgets all; `-d`
+    /// forgets the named commands; `-t` prints the remembered path of each name;
+    /// `-p pathname name` remembers `name` at `pathname` without a search; `-l`
+    /// lists entries in re-inputtable form. Bare `name`s force a fresh `$PATH`
+    /// search and remember the result. Unknown/unfound names are a status-1 error.
+    fn builtin_hash(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut clear = false;
+        let mut delete = false;
+        let mut print_path = false;
+        let mut list = false;
+        let mut pathname: Option<String> = None;
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if arg == "-p" {
+                pathname = args.get(i + 1).cloned();
+                if pathname.is_none() {
+                    self.emit_stderr(b"osh: hash: -p: option requires an argument\n");
+                    return 2;
+                }
+                i += 2;
+                continue;
+            }
+            if let Some(flags) = arg.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| matches!(c, 'r' | 'd' | 't' | 'l'))
+            {
+                for c in flags.chars() {
+                    match c {
+                        'r' => clear = true,
+                        'd' => delete = true,
+                        't' => print_path = true,
+                        'l' => list = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        let names = &args[i..];
+
+        if clear {
+            self.cmd_hash.clear();
+            return 0;
+        }
+        if let Some(p) = pathname {
+            // `-p pathname name`: remember without searching.
+            let Some(name) = names.first() else {
+                return 0;
+            };
+            self.cmd_hash
+                .insert(name.clone(), (std::path::PathBuf::from(p), 0));
+            return 0;
+        }
+        if list {
+            let mut entries: Vec<(&String, &(std::path::PathBuf, u64))> =
+                self.cmd_hash.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let mut s = String::new();
+            for (name, (path, _)) in entries {
+                s.push_str(&format!("builtin hash -p {} {name}\n", path.to_string_lossy()));
+            }
+            return self.write_bytes(out, redir, s.as_bytes());
+        }
+        if delete {
+            let mut status = 0;
+            for name in names {
+                if self.cmd_hash.remove(name).is_none() {
+                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    status = 1;
+                }
+            }
+            return status;
+        }
+        if print_path {
+            let mut s = String::new();
+            let mut status = 0;
+            let multiple = names.len() > 1;
+            for name in names {
+                if let Some((path, _)) = self.cmd_hash.get(name) {
+                    if multiple {
+                        s.push_str(&format!("{name}\t{}\n", path.to_string_lossy()));
+                    } else {
+                        s.push_str(&format!("{}\n", path.to_string_lossy()));
+                    }
+                } else {
+                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    status = 1;
+                }
+            }
+            let w = self.write_bytes(out, redir, s.as_bytes());
+            return if w != 0 { w } else { status };
+        }
+        if names.is_empty() {
+            // Print the table (nothing when empty, matching bash).
+            if self.cmd_hash.is_empty() {
+                return 0;
+            }
+            let mut entries: Vec<(&String, &(std::path::PathBuf, u64))> =
+                self.cmd_hash.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let mut s = String::from("hits\tcommand\n");
+            for (_, (path, hits)) in entries {
+                s.push_str(&format!("{hits:>4}\t{}\n", path.to_string_lossy()));
+            }
+            return self.write_bytes(out, redir, s.as_bytes());
+        }
+        // Bare names: forget any old entry and force a fresh `$PATH` search.
+        let mut status = 0;
+        for name in names {
+            self.cmd_hash.remove(name);
+            match self.find_in_path(name) {
+                Some(path) => {
+                    self.cmd_hash.insert(name.clone(), (path, 0));
+                }
+                None => {
+                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    status = 1;
+                }
+            }
+        }
+        status
     }
 
     /// `umask [-S] [-p] [mode]` — get or set the file-creation mask. With no
@@ -6408,6 +6571,7 @@ fn is_builtin(name: &str) -> bool {
             | "trap"
             | "jobs"
             | "wait"
+            | "hash"
             | "umask"
             | "exec"
             | "exit"
@@ -9654,6 +9818,47 @@ mod tests {
         assert_eq!(run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0, "off\n");
         // Unknown option names are reported disabled (bash returns false).
         assert_eq!(run("[[ -o bogus ]] && echo on || echo off").0, "off\n");
+    }
+
+    #[test]
+    fn hash_p_remembers_and_prints() {
+        // `-p PATH NAME` remembers without a search; `-t` prints it back.
+        assert_eq!(run("hash -p /bin/foo foo; hash -t foo").0, "/bin/foo\n");
+        // Multiple `-t` names are prefixed with the name.
+        let (o, _) = run("hash -p /a x; hash -p /b y; hash -t x y");
+        assert_eq!(o, "x\t/a\ny\t/b\n");
+    }
+
+    #[test]
+    fn hash_lists_and_clears() {
+        // Bare `hash` prints the table (paths, sorted); `-l` is re-inputtable.
+        let (o, _) = run("hash -p /bin/a a; hash -p /bin/b b; hash");
+        assert!(o.starts_with("hits\tcommand\n"), "got {o:?}");
+        assert!(o.contains("/bin/a"), "got {o:?}");
+        assert!(o.contains("/bin/b"), "got {o:?}");
+        assert_eq!(
+            run("hash -p /bin/a a; hash -l").0,
+            "builtin hash -p /bin/a a\n"
+        );
+        // `-r` forgets everything; `-t` then fails.
+        assert_eq!(run("hash -p /x foo; hash -r; hash -t foo").1, 1);
+        // Empty table prints nothing.
+        assert_eq!(run("hash").0, "");
+    }
+
+    #[test]
+    fn hash_delete_and_missing() {
+        assert_eq!(run("hash -p /a x; hash -d x; hash -t x").1, 1);
+        assert_eq!(run("hash -d nope").1, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hash_caches_executed_external() {
+        // Running an external caches its resolved path; `hash -t` finds it.
+        let (o, s) = run("cmd /c exit 0\nhash -t cmd");
+        assert_eq!(s, 0, "hash -t cmd should succeed; out {o:?}");
+        assert!(o.to_lowercase().contains("cmd"), "got {o:?}");
     }
 
     #[test]

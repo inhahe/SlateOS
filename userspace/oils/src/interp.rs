@@ -291,6 +291,10 @@ pub struct Shell {
     /// callers, then `main`). Non-empty exactly while inside a function body;
     /// materialised into `arrays["FUNCNAME"]` by `refresh_funcname`.
     fn_stack: Vec<String>,
+    /// The source line of each call site in `fn_stack`, innermost last:
+    /// `call_line_stack[k]` is the line where `fn_stack[k]` was invoked. Drives
+    /// `BASH_LINENO` and the `caller` builtin. Kept in lockstep with `fn_stack`.
+    call_line_stack: Vec<u32>,
     /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
@@ -400,6 +404,7 @@ impl Shell {
             unbound_error: false,
             local_frames: Vec::new(),
             fn_stack: Vec::new(),
+            call_line_stack: Vec::new(),
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
@@ -1613,6 +1618,7 @@ impl Shell {
             // A subshell inherits the enclosing function context, so `FUNCNAME`
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),
+            call_line_stack: self.call_line_stack.clone(),
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
@@ -2646,8 +2652,10 @@ impl Shell {
         // Push a fresh local scope so `local` declarations inside the body are
         // restored on return.
         self.local_frames.push(Vec::new());
-        // Track the function name for `FUNCNAME` while the body runs.
+        // Track the function name for `FUNCNAME` while the body runs, plus the
+        // line at the call site (the item currently executing) for `BASH_LINENO`.
         self.fn_stack.push(name.to_string());
+        self.call_line_stack.push(self.current_line);
         self.refresh_funcname();
         let flow = self.exec_program(&body, out, stdin);
         // The RETURN trap fires when the function returns, before its locals are
@@ -2664,6 +2672,7 @@ impl Shell {
         }
         // Pop this call from the `FUNCNAME` stack.
         self.fn_stack.pop();
+        self.call_line_stack.pop();
         self.refresh_funcname();
 
         self.positional = saved_pos;
@@ -2683,23 +2692,45 @@ impl Shell {
         }
     }
 
-    /// Materialise the `FUNCNAME` array from the current call stack. Bash makes
-    /// `FUNCNAME[0]` the currently-executing function, then each caller, then
-    /// `main` at the bottom; the array is unset outside any function.
+    /// Materialise the `FUNCNAME`, `BASH_LINENO`, and `BASH_SOURCE` arrays from
+    /// the current call stack. Bash makes `FUNCNAME[0]` the currently-executing
+    /// function, then each caller, then `main` at the bottom; the arrays are
+    /// unset outside any function. `BASH_LINENO[i]` is the line where
+    /// `FUNCNAME[i]` was called (the bottom `main` entry is 0), and
+    /// `BASH_SOURCE[i]` is the source file where `FUNCNAME[i]` is defined —
+    /// here always `$0`, since per-function definition source is not tracked
+    /// (see known-issues TD-OILS21).
     fn refresh_funcname(&mut self) {
         if self.fn_stack.is_empty() {
             self.arrays.remove("FUNCNAME");
+            self.arrays.remove("BASH_LINENO");
+            self.arrays.remove("BASH_SOURCE");
             return;
         }
-        let mut map: BTreeMap<usize, String> = BTreeMap::new();
+        let mut names: BTreeMap<usize, String> = BTreeMap::new();
+        let mut linenos: BTreeMap<usize, String> = BTreeMap::new();
+        let mut sources: BTreeMap<usize, String> = BTreeMap::new();
         let mut idx = 0usize;
-        for name in self.fn_stack.iter().rev() {
-            map.insert(idx, name.clone());
+        // Walk both stacks from innermost (last) to outermost (first).
+        for (name, line) in self
+            .fn_stack
+            .iter()
+            .rev()
+            .zip(self.call_line_stack.iter().rev())
+        {
+            names.insert(idx, name.clone());
+            linenos.insert(idx, line.to_string());
+            sources.insert(idx, self.name.clone());
             idx += 1;
         }
-        // The bottom frame is the top-level script context.
-        map.insert(idx, "main".to_string());
-        self.arrays.insert("FUNCNAME".to_string(), map);
+        // The bottom frame is the top-level script context: name `main`, a call
+        // line of 0 (bash), and the script source file.
+        names.insert(idx, "main".to_string());
+        linenos.insert(idx, "0".to_string());
+        sources.insert(idx, self.name.clone());
+        self.arrays.insert("FUNCNAME".to_string(), names);
+        self.arrays.insert("BASH_LINENO".to_string(), linenos);
+        self.arrays.insert("BASH_SOURCE".to_string(), sources);
     }
 
     /// Capture the complete current state of a variable name (scalar / indexed /
@@ -3998,6 +4029,7 @@ impl Shell {
             "disown" => self.builtin_disown(args),
             "fg" => self.builtin_fg(args, out, redir),
             "bg" => self.builtin_bg(args, out, redir),
+            "caller" => self.builtin_caller(args, out, redir),
             "times" => self.builtin_times(out, redir),
             "enable" => self.builtin_enable(args, out, redir),
             "alias" => self.builtin_alias(args, out, redir),
@@ -4847,6 +4879,51 @@ impl Shell {
             buf.push_str(&format!("[{}] {} &\n", job.id, job.cmd));
         }
         self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// `caller [expr]` — report the context of an active subroutine call.
+    /// Without `expr`, prints "LINE SOURCE" for the current function's call
+    /// site. With a non-negative `expr`, prints "LINE FUNCNAME SOURCE" for that
+    /// frame in the call stack (0 = the current function). Returns 1 when not
+    /// executing a function or `expr` is out of range / non-numeric, matching
+    /// bash. The stack mirrors the `FUNCNAME`/`BASH_LINENO`/`BASH_SOURCE`
+    /// arrays: frame `i` names `fn_stack[len-1-i]`, called at
+    /// `call_line_stack[len-1-i]`, in source `$0`.
+    fn builtin_caller(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let depth = self.fn_stack.len();
+        // Not inside any function → no call context.
+        if depth == 0 {
+            self.emit_stderr(b"osh: caller: no such frame\n");
+            return 1;
+        }
+        let spec = args.iter().find(|a| a.as_str() != "--");
+        match spec {
+            None => {
+                // Bare `caller`: line + source of the current call site.
+                let line = self.call_line_stack[depth - 1];
+                let src = self.name.clone();
+                self.write_bytes(out, redir, format!("{line} {src}\n").as_bytes())
+            }
+            Some(expr) => {
+                let Ok(n) = expr.parse::<usize>() else {
+                    self.emit_stderr(
+                        format!("osh: caller: {expr}: invalid number\n").as_bytes(),
+                    );
+                    return 1;
+                };
+                if n >= depth {
+                    // Out of range for the active call stack.
+                    return 1;
+                }
+                // Frame n: FUNCNAME[n] = fn_stack[depth-1-n], called at
+                // call_line_stack[depth-1-n].
+                let k = depth - 1 - n;
+                let line = self.call_line_stack[k];
+                let func = self.fn_stack[k].clone();
+                let src = self.name.clone();
+                self.write_bytes(out, redir, format!("{line} {func} {src}\n").as_bytes())
+            }
+        }
     }
 
     /// `times` — print the accumulated user and system CPU times for the shell
@@ -7829,7 +7906,8 @@ const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "times", "hash", "umask", "exec",
+    ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
+    "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias",
 ];
 
@@ -9608,6 +9686,37 @@ mod tests {
         assert_eq!(run("echo [${FUNCNAME[@]}]").0, "[]\n");
         // Restored after the function returns.
         assert_eq!(run("f() { :; }; f; echo [$FUNCNAME]").0, "[]\n");
+    }
+
+    #[test]
+    fn bash_lineno_and_source_arrays() {
+        // BASH_SOURCE[0] is the script name ($0 = "osh" in the harness).
+        assert_eq!(run("f() { echo ${BASH_SOURCE[0]}; }; f").0, "osh\n");
+        // BASH_LINENO[0] is the line where the current function was called.
+        assert_eq!(run("f() { echo ${BASH_LINENO[0]}; }\nf").0, "2\n");
+        // Nested: BASH_LINENO tracks each call site.
+        let src = "g() { echo \"${BASH_LINENO[@]}\"; }\nf() { g; }\nf";
+        // g called on line 2 (inside f), f called on line 3, then main => 0.
+        assert_eq!(run(src).0, "2 3 0\n");
+        // Parallel arrays are all unset outside any function.
+        assert_eq!(run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0, "[][]\n");
+    }
+
+    #[test]
+    fn caller_builtin() {
+        // Bare `caller` prints "LINE SOURCE" of the current call site.
+        assert_eq!(run("f() { caller; }\nf").0, "2 osh\n");
+        // `caller 0` adds the function name: "LINE FUNCNAME SOURCE".
+        assert_eq!(run("f() { caller 0; }\nf").0, "2 f osh\n");
+        // `caller 1` walks one frame up the stack.
+        let src = "g() { caller 1; }\nf() { g; }\nf";
+        assert_eq!(run(src).0, "3 f osh\n");
+        // Out of range → status 1, no output.
+        let (o, c) = run("f() { caller 5; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 1);
+        // Outside any function → status 1.
+        assert_eq!(run("caller").1, 1);
     }
 
     #[test]

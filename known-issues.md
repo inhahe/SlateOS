@@ -617,6 +617,34 @@ stream (a lexer-wide change) and the current approximation is correct for the
 overwhelming majority of real scripts; the discrepancy only appears after
 embedded multi-line quotes/substitutions/here-docs.
 
+### TD-OILS21. `BASH_SOURCE`/`caller` always report `$0` — per-function definition source is not tracked — OPEN (minor fidelity gap)
+
+**Where:** `userspace/oils/src/interp.rs` (`Shell.refresh_funcname` builds
+`BASH_SOURCE` from `self.name` for every frame; `Shell.builtin_caller` uses
+`self.name` for the source column), `Shell.funcs` (a name→body map with no
+definition-site metadata).
+
+**What:** `FUNCNAME`, `BASH_LINENO`, and `BASH_SOURCE` are implemented as
+parallel call-stack arrays, and `caller`/`caller N` print the call-site line,
+function name, and source file. `BASH_LINENO` is exact (the line at each call
+site, captured into `call_line_stack` when the function is invoked — subject to
+the same multi-line-newline caveat as `$LINENO`, TD-OILS20). However
+`BASH_SOURCE` reports `$0` (the top-level script name) for *every* frame,
+because the interpreter stores only a function's body (`funcs: name → Program`)
+with no record of which file it was defined in. In bash, a function defined in a
+file pulled in via `source`/`.` reports that file as its `BASH_SOURCE` entry;
+ours would still report the outer `$0`. This only matters for scripts that
+`source` a library of functions and then introspect `BASH_SOURCE`/`caller` to
+locate the defining file (e.g. stack-trace/error-reporting frameworks).
+
+**Proper fix:** record the defining source file alongside each function body
+(e.g. `funcs: name → (Program, source_name)`), set it from the current `$0`/
+`source` target at definition time, and have `refresh_funcname`/`caller` read
+the per-function value instead of `self.name`. Deferred because it requires
+threading a definition-site source through the `source`/`.` execution path and
+the function-definition AST handling; the current single-source behavior is
+correct for the common case where all functions live in the script itself.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

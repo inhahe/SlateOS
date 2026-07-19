@@ -2555,8 +2555,25 @@ impl Shell {
         }
         // Expand the command words into argv (with the current variable values,
         // before any prefix assignments take effect).
+        //
+        // If the command word is a declaration builtin (`export`, `declare`,
+        // `typeset`, `local`, `readonly`), its `NAME=value` operands are
+        // assignments: bash expands them in *assignment context* (tilde-
+        // expanded after `:`/at value start, and neither word-split nor
+        // glob-expanded). We detect the declaration builtin syntactically from
+        // the first word (matching bash) and route each assignment-form operand
+        // through `expand_decl_assignment`.
+        let is_decl = sc
+            .words
+            .first()
+            .and_then(word_as_plain_literal)
+            .is_some_and(is_declaration_builtin);
         let mut argv: Vec<String> = Vec::new();
-        for w in &sc.words {
+        for (wi, w) in sc.words.iter().enumerate() {
+            if is_decl && wi > 0 && is_assignment_word(w) {
+                argv.push(self.expand_decl_assignment(w));
+                continue;
+            }
             // Brace expansion runs first (textually, before parameter/other
             // expansion), turning one word into one or more words.
             for bw in crate::brace::expand_braces(w) {
@@ -3702,6 +3719,65 @@ impl Shell {
             }
         }
         cur
+    }
+
+    /// Expand an assignment-form word (`NAME=value`, `NAME+=value`, or
+    /// `NAME[idx]=value`) as passed to a declaration builtin (`export`,
+    /// `declare`/`typeset`, `local`, `readonly`). The `NAME=`/`NAME+=` prefix is
+    /// emitted literally; the value part is expanded in *assignment context* —
+    /// no word splitting, no pathname (glob) expansion, and tilde-expanded after
+    /// an unquoted `:` or at the start of the value, exactly like a bare
+    /// `NAME=value` assignment (bash treats declaration-builtin operands as
+    /// assignments). Returns the single resulting argv string.
+    fn expand_decl_assignment(&mut self, word: &Word) -> String {
+        let mut out = String::new();
+        let mut at_tilde_pos = true;
+        for (idx, part) in word.parts.iter().enumerate() {
+            match part {
+                WordPart::Literal(s) => {
+                    // On the first part, split off the `NAME=`/`NAME+=` prefix
+                    // (including any `[subscript]`) and emit it verbatim; the
+                    // value begins right after the `=`.
+                    let value_str: &str = if idx == 0 {
+                        match s.find('=') {
+                            Some(eq) => {
+                                out.push_str(&s[..=eq]);
+                                &s[eq + 1..]
+                            }
+                            // No `=` in the first literal (value came from a later
+                            // part, e.g. `X=$y`): treat the whole literal as value.
+                            None => s.as_str(),
+                        }
+                    } else {
+                        s.as_str()
+                    };
+                    for (i, seg) in value_str.split(':').enumerate() {
+                        if i > 0 {
+                            out.push(':');
+                        }
+                        if i > 0 || at_tilde_pos {
+                            out.push_str(&self.tilde_expand(seg));
+                        } else {
+                            out.push_str(seg);
+                        }
+                    }
+                    at_tilde_pos = value_str.ends_with(':');
+                }
+                WordPart::SingleQuoted(t) => {
+                    out.push_str(t);
+                    at_tilde_pos = false;
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    out.push_str(&self.expand_double_quoted(parts));
+                    at_tilde_pos = false;
+                }
+                other => {
+                    out.push_str(&self.expand_dynamic(other));
+                    at_tilde_pos = false;
+                }
+            }
+        }
+        out
     }
 
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> String {
@@ -5941,9 +6017,21 @@ impl Shell {
         let make_local = is_local || (!global && !self.local_frames.is_empty());
         let mut status = 0;
         for name_val in &args[i..] {
-            let (name, value) = match name_val.find('=') {
-                Some(eq) => (&name_val[..eq], Some(name_val[eq + 1..].to_string())),
-                None => (name_val.as_str(), None),
+            // Split `NAME=value` / `NAME+=value`; the `+=` form appends to (or
+            // numerically adds, under `-i`) the variable's current value.
+            let (name, append, value) = match name_val.find('=') {
+                Some(eq) => {
+                    if eq > 0 && name_val.as_bytes()[eq - 1] == b'+' {
+                        (
+                            &name_val[..eq - 1],
+                            true,
+                            Some(name_val[eq + 1..].to_string()),
+                        )
+                    } else {
+                        (&name_val[..eq], false, Some(name_val[eq + 1..].to_string()))
+                    }
+                }
+                None => (name_val.as_str(), false, None),
             };
             if name.is_empty() {
                 continue;
@@ -6006,12 +6094,32 @@ impl Shell {
                     // ignore the value (bash would treat str as element/key).
                 } else if self.integer_attr.contains(name) {
                     // Integer attribute: the initializer is an arithmetic
-                    // expression, evaluated and stored as its decimal value.
+                    // expression, evaluated and stored as its decimal value. With
+                    // `+=`, the result is added to the current numeric value.
                     let n = self.eval_arith_raw(&v).unwrap_or(0);
+                    let n = if append {
+                        let cur = self
+                            .vars
+                            .get(name)
+                            .and_then(|s| s.trim().parse::<i64>().ok())
+                            .unwrap_or(0);
+                        cur.wrapping_add(n)
+                    } else {
+                        n
+                    };
                     self.vars.insert(name.to_string(), n.to_string());
                 } else {
-                    // Case attribute (`-l`/`-u`), if any, folds the value.
-                    self.vars.insert(name.to_string(), self.fold_case_attr(name, v));
+                    // Case attribute (`-l`/`-u`), if any, folds the value. With
+                    // `+=`, the (folded) value is appended to the current string.
+                    let folded = self.fold_case_attr(name, v);
+                    let stored = if append {
+                        let mut cur = self.vars.get(name).cloned().unwrap_or_default();
+                        cur.push_str(&folded);
+                        cur
+                    } else {
+                        folded
+                    };
+                    self.vars.insert(name.to_string(), stored);
                 }
             }
             if export {
@@ -8320,6 +8428,53 @@ fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
 
+/// The declaration builtins whose `name=value` operands bash treats as
+/// assignments (assignment-context expansion: tilde-expanded, no splitting/glob).
+fn is_declaration_builtin(name: &str) -> bool {
+    matches!(name, "export" | "declare" | "typeset" | "local" | "readonly")
+}
+
+/// If a word is a single unquoted literal, return it (used to recognise a
+/// declaration-builtin command word syntactically, as bash does).
+fn word_as_plain_literal(word: &Word) -> Option<&str> {
+    match word.parts.as_slice() {
+        [WordPart::Literal(s)] => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Does a word have the syntactic form of an assignment (`NAME=…`,
+/// `NAME+=…`, or `NAME[subscript]=…`)? Used to route declaration-builtin
+/// operands through assignment-context expansion.
+fn is_assignment_word(word: &Word) -> bool {
+    let Some(WordPart::Literal(s)) = word.parts.first() else {
+        return false;
+    };
+    let bytes = s.as_bytes();
+    let Some(&c0) = bytes.first() else {
+        return false;
+    };
+    if !(c0.is_ascii_alphabetic() || c0 == b'_') {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    // Optional array subscript `[...]`.
+    if i < bytes.len() && bytes[i] == b'[' {
+        match s[i..].find(']') {
+            Some(close) => i += close + 1,
+            None => return false,
+        }
+    }
+    // Optional `+` for the append form `NAME+=`.
+    if i < bytes.len() && bytes[i] == b'+' {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b'='
+}
+
 /// A numeric tilde-prefix reference into the directory stack.
 enum DirStackRef {
     /// `~N` / `~+N` — the Nth entry counting from the left (0 = current dir).
@@ -10454,6 +10609,40 @@ mod tests {
         assert_eq!(run("HOME=/h; x=~/a:'~/b'; echo \"$x\"").0, "/h/a:~/b\n");
         // ~+ / ~- work in assignment position too.
         assert_eq!(run("PWD=/p; x=~+/sub; echo \"$x\"").0, "/p/sub\n");
+    }
+
+    #[test]
+    fn tilde_expand_in_declaration_builtin() {
+        // export/declare/typeset/readonly operands are assignments: the RHS
+        // tilde-expands after `:`/at value start, just like a bare NAME=value.
+        assert_eq!(run("HOME=/h; export X=~/foo; echo \"$X\"").0, "/h/foo\n");
+        assert_eq!(
+            run("HOME=/h; declare Y=~/a:~/b; echo \"$Y\"").0,
+            "/h/a:/h/b\n"
+        );
+        assert_eq!(
+            run("HOME=/h; Z=/pre; typeset Z=$Z:~/bin; echo \"$Z\"").0,
+            "/pre:/h/bin\n"
+        );
+        assert_eq!(run("HOME=/h; readonly R=~/r; echo \"$R\"").0, "/h/r\n");
+        // A quoted tilde stays literal even for a declaration builtin.
+        assert_eq!(run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0, "/h/a:~/b\n");
+        // The append form NAME+=value expands its RHS too.
+        assert_eq!(
+            run("HOME=/h; A=/pre; declare A+=:~/bin; echo \"$A\"").0,
+            "/pre:/h/bin\n"
+        );
+        // `local` inside a function gets assignment-context expansion.
+        assert_eq!(
+            run("HOME=/h; f() { local L=~/lib; echo \"$L\"; }; f").0,
+            "/h/lib\n"
+        );
+        // The RHS is not word-split even when it contains spaces (assignment
+        // context), unlike an ordinary command word.
+        assert_eq!(
+            run("HOME=/h; v='a b'; export S=$v; echo \"$S\"").0,
+            "a b\n"
+        );
     }
 
     #[test]

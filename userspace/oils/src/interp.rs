@@ -972,13 +972,14 @@ impl Shell {
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
         self.last_status = 0;
         let mut idx = 0;
         while idx < c.items.len() {
             let item = &c.items[idx];
             let matched = item.patterns.iter().any(|pat| {
                 let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
-                glob_match_ci(&pattern, &subject, ci)
+                glob_match_ci(&pattern, &subject, ci, extglob)
             });
             if !matched {
                 idx += 1;
@@ -1345,8 +1346,9 @@ impl Shell {
                         lhs == rhs
                     }
                 } else {
+                    let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                     let pat: Vec<char> = rhs.chars().collect();
-                    glob_match_ci(&pat, &subject, ci)
+                    glob_match_ci(&pat, &subject, ci, extglob)
                 };
                 if matches!(op, CondBinOp::StrEq) {
                     matched
@@ -2538,9 +2540,10 @@ impl Shell {
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
             let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
             let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
+            let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
             let mut out = Vec::new();
             for f in fields {
-                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob);
+                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob, extglob);
             }
             return out;
         }
@@ -2704,7 +2707,8 @@ impl Shell {
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
-                param_trim(&value, &pat, *suffix, *longest)
+                let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+                param_trim(&value, &pat, *suffix, *longest, extglob)
             }
             WordPart::ParamSubstr {
                 name,
@@ -2728,7 +2732,8 @@ impl Shell {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
                 let repl = self.expand_to_string(replacement);
-                param_replace(&value, &pat, &repl, *all, *anchor)
+                let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+                param_replace(&value, &pat, &repl, *all, *anchor, extglob)
             }
             WordPart::ParamCase {
                 name,
@@ -2739,7 +2744,8 @@ impl Shell {
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
-                param_case(&value, &pat, *upper, *all)
+                let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+                param_case(&value, &pat, *upper, *all, extglob)
             }
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op)
@@ -4506,22 +4512,36 @@ fn push_chars(buf: &mut Vec<EChar>, s: &str, quoted: bool) {
 /// literal field, if it has no unquoted metacharacter or matches nothing) into
 /// `out`. This implements bash's default (no-`nullglob`) behavior: an
 /// unmatched pattern is left as the literal word.
+/// Whether an annotated field contains an unquoted glob metacharacter (`*`,
+/// `?`, `[`), or — when `extglob` is set — an unquoted `X(` extended-pattern
+/// operator (`X ∈ ?*+@!`). A field with no metacharacter is a literal word.
+fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
+    field.iter().enumerate().any(|(i, e)| {
+        if e.quoted {
+            return false;
+        }
+        matches!(e.c, '*' | '?' | '[')
+            || (extglob
+                && matches!(e.c, '?' | '*' | '+' | '@' | '!')
+                && matches!(field.get(i + 1), Some(n) if !n.quoted && n.c == '('))
+    })
+}
+
 fn glob_or_literal(
     field: &[EChar],
     out: &mut Vec<String>,
     nullglob: bool,
     dotglob: bool,
     nocaseglob: bool,
+    extglob: bool,
 ) {
-    let has_meta = field
-        .iter()
-        .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
+    let has_meta = field_has_glob_meta(field, extglob);
     let literal: String = field.iter().map(|e| e.c).collect();
     if !has_meta {
         out.push(literal);
         return;
     }
-    let mut matches = glob_expand_field(field, dotglob, nocaseglob);
+    let mut matches = glob_expand_field(field, dotglob, nocaseglob, extglob);
     if matches.is_empty() {
         // Default (no `nullglob`): an unmatched pattern is left as the literal
         // word. With `nullglob` on, the word is removed entirely (produces no
@@ -4545,6 +4565,24 @@ enum PatTok {
     Lit(char),
     /// `[...]` character class.
     Class { negate: bool, items: Vec<ClassItem> },
+    /// An `extglob` group: `?(list)`, `*(list)`, `+(list)`, `@(list)`, or
+    /// `!(list)`, where each alternative is itself a compiled sub-pattern.
+    Group { kind: ExtKind, alts: Vec<Vec<PatTok>> },
+}
+
+/// The five `extglob` operators (bash / ksh extended pattern matching).
+#[derive(Clone, Copy)]
+enum ExtKind {
+    /// `?(list)` — zero or one occurrence of any alternative.
+    Optional,
+    /// `*(list)` — zero or more occurrences.
+    Star,
+    /// `+(list)` — one or more occurrences.
+    Plus,
+    /// `@(list)` — exactly one occurrence.
+    Once,
+    /// `!(list)` — anything except a string matched by an alternative.
+    Not,
 }
 
 enum ClassItem {
@@ -4553,8 +4591,9 @@ enum ClassItem {
 }
 
 /// Compile one annotated path component into glob tokens. Quoted characters are
-/// always literal; unquoted `* ? [` are special.
-fn compile_glob(comp: &[EChar]) -> Vec<PatTok> {
+/// always literal; unquoted `* ? [` are special. When `extglob` is set, an
+/// unquoted `?(`, `*(`, `+(`, `@(`, or `!(` begins an extended-pattern group.
+fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
     let mut toks = Vec::new();
     let mut i = 0;
     while i < comp.len() {
@@ -4562,6 +4601,16 @@ fn compile_glob(comp: &[EChar]) -> Vec<PatTok> {
         if e.quoted {
             toks.push(PatTok::Lit(e.c));
             i += 1;
+            continue;
+        }
+        // extglob: `X(` where X ∈ ?*+@! and the paren is unquoted.
+        if extglob
+            && matches!(e.c, '?' | '*' | '+' | '@' | '!')
+            && matches!(comp.get(i + 1), Some(n) if !n.quoted && n.c == '(')
+            && let Some((tok, next)) = compile_ext_group(comp, i, extglob)
+        {
+            toks.push(tok);
+            i = next;
             continue;
         }
         match e.c {
@@ -4589,6 +4638,55 @@ fn compile_glob(comp: &[EChar]) -> Vec<PatTok> {
         }
     }
     toks
+}
+
+/// Compile an `extglob` group beginning at `comp[start]` (the operator char,
+/// with `comp[start + 1] == '('`). Alternatives are separated by top-level
+/// unquoted `|`; nested parens are tracked so inner groups stay intact. Returns
+/// the compiled [`PatTok::Group`] and the index just past the closing `)`, or
+/// `None` if the group is unterminated (caller then treats the operator char
+/// literally).
+fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(PatTok, usize)> {
+    let kind = match comp[start].c {
+        '?' => ExtKind::Optional,
+        '*' => ExtKind::Star,
+        '+' => ExtKind::Plus,
+        '@' => ExtKind::Once,
+        '!' => ExtKind::Not,
+        _ => return None,
+    };
+    let mut i = start + 2; // past the operator char and '('
+    let mut depth = 1usize;
+    let mut alts: Vec<Vec<EChar>> = Vec::new();
+    let mut cur: Vec<EChar> = Vec::new();
+    while i < comp.len() {
+        let e = comp[i];
+        if e.quoted {
+            cur.push(e);
+        } else {
+            match e.c {
+                '(' => {
+                    depth += 1;
+                    cur.push(e);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        alts.push(cur);
+                        let compiled = alts.iter().map(|a| compile_glob(a, extglob)).collect();
+                        return Some((PatTok::Group { kind, alts: compiled }, i + 1));
+                    }
+                    cur.push(e);
+                }
+                '|' if depth == 1 => {
+                    alts.push(std::mem::take(&mut cur));
+                }
+                _ => cur.push(e),
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Compile a `[...]` class starting at `comp[start] == '['`. Returns the token
@@ -4619,39 +4717,66 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
     None
 }
 
-/// Match a compiled glob against a filename (anchored, star-backtracking).
+/// Match a compiled glob against a filename, anchored at both ends. Recursive so
+/// that `extglob` groups (`?()`/`*()`/`+()`/`@()`/`!()`) — which need
+/// backtracking over alternatives and repetitions — are handled uniformly with
+/// `*`. Patterns and names are short (one path component / one field), so the
+/// worst-case backtracking cost is not a concern in practice.
 fn match_glob_toks(toks: &[PatTok], name: &[char]) -> bool {
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    while ti < name.len() {
-        if matches!(toks.get(pi), Some(PatTok::Star)) {
-            star = Some((pi, ti));
-            pi += 1;
-            continue;
+    let Some((first, rest)) = toks.split_first() else {
+        return name.is_empty();
+    };
+    match first {
+        PatTok::Star => (0..=name.len()).any(|k| match_glob_toks(rest, &name[k..])),
+        PatTok::Any => !name.is_empty() && match_glob_toks(rest, &name[1..]),
+        PatTok::Lit(c) => name.first() == Some(c) && match_glob_toks(rest, &name[1..]),
+        PatTok::Class { negate, items } => {
+            !name.is_empty()
+                && (class_matches(items, name[0]) ^ *negate)
+                && match_glob_toks(rest, &name[1..])
         }
-        let matched = match toks.get(pi) {
-            Some(PatTok::Any) => true,
-            Some(PatTok::Lit(c)) => *c == name[ti],
-            Some(PatTok::Class { negate, items }) => {
-                class_matches(items, name[ti]) ^ *negate
-            }
-            _ => false,
-        };
-        if matched {
-            pi += 1;
-            ti += 1;
-        } else if let Some((sp, st)) = star {
-            pi = sp + 1;
-            ti = st + 1;
-            star = Some((sp, st + 1));
-        } else {
-            return false;
+        PatTok::Group { kind, alts } => match_ext_group(*kind, alts, rest, name),
+    }
+}
+
+/// Match an `extglob` group followed by `rest` against `name`.
+fn match_ext_group(kind: ExtKind, alts: &[Vec<PatTok>], rest: &[PatTok], name: &[char]) -> bool {
+    // Whether any alternative matches the whole slice `sub`.
+    let any_alt = |sub: &[char]| alts.iter().any(|a| match_glob_toks(a, sub));
+    match kind {
+        // Exactly one occurrence: some prefix matches an alternative, rest matches the tail.
+        ExtKind::Once => {
+            (0..=name.len()).any(|k| any_alt(&name[..k]) && match_glob_toks(rest, &name[k..]))
+        }
+        // Zero or one occurrence.
+        ExtKind::Optional => {
+            match_glob_toks(rest, name)
+                || (1..=name.len())
+                    .any(|k| any_alt(&name[..k]) && match_glob_toks(rest, &name[k..]))
+        }
+        // Zero or more occurrences.
+        ExtKind::Star => match_star_group(alts, rest, name),
+        // One or more occurrences: one alternative, then zero or more.
+        ExtKind::Plus => (1..=name.len())
+            .any(|k| any_alt(&name[..k]) && match_star_group(alts, rest, &name[k..])),
+        // Negation: some split where the prefix is *not* matched by any
+        // alternative and the rest matches the tail.
+        ExtKind::Not => {
+            (0..=name.len()).any(|k| !any_alt(&name[..k]) && match_glob_toks(rest, &name[k..]))
         }
     }
-    while matches!(toks.get(pi), Some(PatTok::Star)) {
-        pi += 1;
+}
+
+/// Match zero or more repetitions of any alternative, then `rest`. Each
+/// repetition consumes at least one character (`k >= 1`), guaranteeing progress.
+fn match_star_group(alts: &[Vec<PatTok>], rest: &[PatTok], name: &[char]) -> bool {
+    if match_glob_toks(rest, name) {
+        return true;
     }
-    pi == toks.len()
+    (1..=name.len()).any(|k| {
+        alts.iter().any(|a| match_glob_toks(a, &name[..k]))
+            && match_star_group(alts, rest, &name[k..])
+    })
 }
 
 fn class_matches(items: &[ClassItem], ch: char) -> bool {
@@ -4669,7 +4794,7 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 
 /// Expand an annotated field containing at least one unquoted metacharacter
 /// against the filesystem, returning the matching paths (unsorted).
-fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool) -> Vec<String> {
+fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool, extglob: bool) -> Vec<String> {
     let absolute = field.first().is_some_and(|e| e.c == '/');
     // Split into non-empty components on '/'.
     let mut comps: Vec<Vec<EChar>> = Vec::new();
@@ -4691,15 +4816,13 @@ fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool) -> Vec<St
     }
     let mut cands: Vec<String> = vec![if absolute { "/".to_string() } else { String::new() }];
     for comp in &comps {
-        let has_meta = comp
-            .iter()
-            .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
+        let has_meta = field_has_glob_meta(comp, extglob);
         let comp_literal: String = comp.iter().map(|e| e.c).collect();
         let mut next: Vec<String> = Vec::new();
         for base in &cands {
             if has_meta {
                 let dir = if base.is_empty() { "." } else { base.as_str() };
-                let toks = compile_glob(comp);
+                let toks = compile_glob(comp, extglob);
                 // With `nocaseglob`, match against an ASCII-lowercased copy of
                 // both the pattern and each filename (token structure is kept
                 // 1:1 by using ASCII folding). The original filename is still
@@ -4712,7 +4835,7 @@ fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool) -> Vec<St
                             quoted: e.quoted,
                         })
                         .collect();
-                    compile_glob(&low)
+                    compile_glob(&low, extglob)
                 });
                 // A leading `.` in a filename is only matched when the pattern
                 // itself begins with a literal dot, or when `dotglob` is set.
@@ -4783,110 +4906,40 @@ fn word_is_all_quoted(w: &Word) -> bool {
             .all(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)))
 }
 
-/// Case-aware wrapper around [`glob_match`]. When `ci` is set (`shopt -s
-/// nocasematch`), both the pattern and the text are lowercased before matching
-/// — including character-class ranges (`[A-Z]` → `[a-z]`), which gives the
-/// case-folded semantics bash applies to `case`/`[[ == ]]`.
-fn glob_match_ci(pattern: &[char], text: &[char], ci: bool) -> bool {
+/// Case-aware glob match. When `ci` is set (`shopt -s nocasematch`), both the
+/// pattern and the text are lowercased before matching — including
+/// character-class ranges (`[A-Z]` → `[a-z]`), which gives the case-folded
+/// semantics bash applies to `case`/`[[ == ]]`. `extglob` enables the extended
+/// pattern operators.
+fn glob_match_ci(pattern: &[char], text: &[char], ci: bool, extglob: bool) -> bool {
     if ci {
         let p: Vec<char> = pattern.iter().flat_map(|c| c.to_lowercase()).collect();
         let t: Vec<char> = text.iter().flat_map(|c| c.to_lowercase()).collect();
-        glob_match(&p, &t)
+        glob_match(&p, &t, extglob)
     } else {
-        glob_match(pattern, text)
+        glob_match(pattern, text, extglob)
     }
 }
 
-/// Match `text` against a shell glob `pattern` (`*`, `?`, `[...]`), anchored at
-/// both ends (as `case` patterns and `[[ … == … ]]` require). Uses iterative
-/// star-backtracking so it runs in linear space and near-linear time.
-fn glob_match(pattern: &[char], text: &[char]) -> bool {
-    let (mut pi, mut ti) = (0usize, 0usize);
-    // Last '*' position in the pattern and the text index it was matched at, so
-    // we can backtrack and let the star consume one more character.
-    let mut star: Option<(usize, usize)> = None;
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == '*' {
-            star = Some((pi, ti));
-            pi += 1;
-            continue;
-        }
-        let m = if pi < pattern.len() {
-            glob_match_one(pattern, pi, text[ti])
-        } else {
-            None
-        };
-        match m {
-            Some((true, next)) => {
-                pi = next;
-                ti += 1;
-            }
-            _ => {
-                if let Some((sp, st)) = star {
-                    pi = sp + 1;
-                    ti = st + 1;
-                    star = Some((sp, st + 1));
-                } else {
-                    return false;
-                }
-            }
-        }
-    }
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-    pi == pattern.len()
-}
-
-/// Match a single non-`*` pattern element at `pi` against `ch`. Returns
-/// `(matched, index-after-the-element)`, or `None` if the pattern is exhausted.
-fn glob_match_one(pattern: &[char], pi: usize, ch: char) -> Option<(bool, usize)> {
-    match pattern.get(pi)? {
-        '?' => Some((true, pi + 1)),
-        '[' => Some(glob_match_class(pattern, pi, ch)),
-        c => Some((*c == ch, pi + 1)),
-    }
-}
-
-/// Match a `[...]` character class starting at `pattern[pi] == '['`. Supports
-/// ranges (`a-z`) and a leading `!`/`^` negation. An unterminated class is
-/// treated as a literal `[`.
-fn glob_match_class(pattern: &[char], pi: usize, ch: char) -> (bool, usize) {
-    let mut i = pi + 1;
-    let mut negate = false;
-    if matches!(pattern.get(i), Some('!' | '^')) {
-        negate = true;
-        i += 1;
-    }
-    let mut matched = false;
-    let mut first = true;
-    while i < pattern.len() {
-        let c = pattern[i];
-        if c == ']' && !first {
-            return (matched ^ negate, i + 1);
-        }
-        first = false;
-        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
-            if pattern[i] <= ch && ch <= pattern[i + 2] {
-                matched = true;
-            }
-            i += 3;
-        } else {
-            if c == ch {
-                matched = true;
-            }
-            i += 1;
-        }
-    }
-    // Unterminated: treat the '[' literally.
-    (ch == '[', pi + 1)
+/// Match `text` against a shell glob `pattern` (`*`, `?`, `[...]`, and — when
+/// `extglob` is set — `?()`/`*()`/`+()`/`@()`/`!()`), anchored at both ends (as
+/// `case` patterns and `[[ … == … ]]` require). The pattern chars are treated as
+/// unquoted (quoting is resolved before this point) and compiled to the same
+/// [`PatTok`] engine used for pathname expansion.
+fn glob_match(pattern: &[char], text: &[char], extglob: bool) -> bool {
+    let comp: Vec<EChar> = pattern
+        .iter()
+        .map(|&c| EChar { c, quoted: false })
+        .collect();
+    let toks = compile_glob(&comp, extglob);
+    match_glob_toks(&toks, text)
 }
 
 /// Longest match of `pattern` starting at `text[start]`; returns the end index
 /// (exclusive) of the match, or `None`. Used by `${…/…/…}` substitution.
-fn glob_match_at(pattern: &[char], text: &[char], start: usize) -> Option<usize> {
+fn glob_match_at(pattern: &[char], text: &[char], start: usize, extglob: bool) -> Option<usize> {
     for j in (start..=text.len()).rev() {
-        if glob_match(pattern, &text[start..j]) {
+        if glob_match(pattern, &text[start..j], extglob) {
             return Some(j);
         }
     }
@@ -4894,7 +4947,7 @@ fn glob_match_at(pattern: &[char], text: &[char], start: usize) -> Option<usize>
 }
 
 /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`.
-fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> String {
+fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglob: bool) -> String {
     let v: Vec<char> = value.chars().collect();
     if suffix {
         // Remove a matching suffix `v[k..]`, keeping `v[..k]`. Shortest match =
@@ -4905,7 +4958,7 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> Str
             (0..=v.len()).rev().collect()
         };
         for k in range {
-            if glob_match(pattern, &v[k..]) {
+            if glob_match(pattern, &v[k..], extglob) {
                 return v[..k].iter().collect();
             }
         }
@@ -4918,7 +4971,7 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> Str
             (0..=v.len()).collect()
         };
         for k in range {
-            if glob_match(pattern, &v[..k]) {
+            if glob_match(pattern, &v[..k], extglob) {
                 return v[k..].iter().collect();
             }
         }
@@ -4932,10 +4985,10 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool) -> Str
 /// character. `all` converts every matching character; otherwise only the
 /// first character of the value is considered (and only converted if it
 /// matches `pattern`).
-fn param_case(value: &str, pattern: &[char], upper: bool, all: bool) -> String {
+fn param_case(value: &str, pattern: &[char], upper: bool, all: bool, extglob: bool) -> String {
     // An empty pattern matches every character (bash: `^^`/`,,` with no
     // pattern uppercases/lowercases the whole value).
-    let matches_char = |ch: char| pattern.is_empty() || glob_match(pattern, &[ch]);
+    let matches_char = |ch: char| pattern.is_empty() || glob_match(pattern, &[ch], extglob);
     let convert = |ch: char| {
         if upper {
             // `char::to_uppercase`/`to_lowercase` can yield multiple chars
@@ -5107,11 +5160,12 @@ fn param_replace(
     replacement: &str,
     all: bool,
     anchor: ReplaceAnchor,
+    extglob: bool,
 ) -> String {
     let v: Vec<char> = value.chars().collect();
     match anchor {
         ReplaceAnchor::Start => {
-            if let Some(end) = glob_match_at(pattern, &v, 0) {
+            if let Some(end) = glob_match_at(pattern, &v, 0, extglob) {
                 let mut s = replacement.to_string();
                 s.extend(v[end..].iter());
                 return s;
@@ -5120,7 +5174,7 @@ fn param_replace(
         }
         ReplaceAnchor::End => {
             for i in 0..=v.len() {
-                if glob_match(pattern, &v[i..]) {
+                if glob_match(pattern, &v[i..], extglob) {
                     let mut s: String = v[..i].iter().collect();
                     s.push_str(replacement);
                     return s;
@@ -5135,7 +5189,7 @@ fn param_replace(
             while i < v.len() {
                 let can_replace = !done || all;
                 if can_replace
-                    && let Some(end) = glob_match_at(pattern, &v, i)
+                    && let Some(end) = glob_match_at(pattern, &v, i, extglob)
                     && end > i
                 {
                     result.push_str(replacement);
@@ -5993,6 +6047,85 @@ mod tests {
     }
 
     #[test]
+    fn extglob_in_test_and_case() {
+        // Without extglob, `@(...)` is not special: the `@` and `(` are literal,
+        // so `abc` does not match the pattern `@(a|b)c` textually.
+        assert_eq!(run("[[ abc == @(a|b)c ]] && echo y || echo n").0, "n\n");
+        // @(a|b) — exactly one alternative.
+        assert_eq!(
+            run("shopt -s extglob; [[ ac == @(a|b)c ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ xc == @(a|b)c ]] && echo y || echo n").0,
+            "n\n"
+        );
+        // ?(...) zero or one.
+        assert_eq!(
+            run("shopt -s extglob; [[ color == colo?(u)r ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ colour == colo?(u)r ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ colouur == colo?(u)r ]] && echo y || echo n").0,
+            "n\n"
+        );
+        // *(...) zero or more, +(...) one or more.
+        assert_eq!(
+            run("shopt -s extglob; [[ aaa == +(a) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ '' == +(a) ]] && echo y || echo n").0,
+            "n\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ '' == *(a) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ ababab == *(ab) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        // !(...) negation.
+        assert_eq!(
+            run("shopt -s extglob; [[ foo == !(bar) ]] && echo y || echo n").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("shopt -s extglob; [[ bar == !(bar) ]] && echo y || echo n").0,
+            "n\n"
+        );
+        // In `case`.
+        assert_eq!(
+            run("shopt -s extglob; case abc in @(a|x)bc) echo m;; *) echo no;; esac").0,
+            "m\n"
+        );
+    }
+
+    #[test]
+    fn extglob_in_param_and_glob() {
+        // Parameter-trim with an extglob pattern.
+        assert_eq!(
+            run("shopt -s extglob; v=foobar; echo ${v##+(o|f)}").0,
+            "bar\n"
+        );
+        // Replacement using an extglob alternation.
+        assert_eq!(
+            run("shopt -s extglob; v=cat; echo ${v/@(c|d)/b}").0,
+            "bat\n"
+        );
+        // Nested extglob groups.
+        assert_eq!(
+            run("shopt -s extglob; [[ abab == *(@(a|b)) ]] && echo y || echo n").0,
+            "y\n"
+        );
+    }
+
+    #[test]
     fn here_doc_read_and_expand() {
         let (o, _) = run("name=world\nread line <<EOF\nhi $name\nEOF\necho $line");
         assert_eq!(o, "hi world\n");
@@ -6456,7 +6589,13 @@ mod tests {
 
     #[test]
     fn glob_match_basics() {
-        let g = |p: &str, t: &str| glob_match(&p.chars().collect::<Vec<_>>(), &t.chars().collect::<Vec<_>>());
+        let g = |p: &str, t: &str| {
+            glob_match(
+                &p.chars().collect::<Vec<_>>(),
+                &t.chars().collect::<Vec<_>>(),
+                false,
+            )
+        };
         assert!(g("*", "anything"));
         assert!(g("h?llo", "hello"));
         assert!(g("a*c", "abbbc"));
@@ -6761,7 +6900,10 @@ mod tests {
     #[test]
     fn glob_toks_match() {
         let f = |p: &str, n: &str| {
-            match_glob_toks(&compile_glob(&field_lit(p)), &n.chars().collect::<Vec<_>>())
+            match_glob_toks(
+                &compile_glob(&field_lit(p), false),
+                &n.chars().collect::<Vec<_>>(),
+            )
         };
         assert!(f("*.txt", "a.txt"));
         assert!(!f("*.txt", "a.log"));
@@ -6777,7 +6919,7 @@ mod tests {
         // A quoted `*` is a literal star, never a pattern.
         let mut field = field_lit("");
         field.push(EChar { c: '*', quoted: true });
-        let toks = compile_glob(&field);
+        let toks = compile_glob(&field, false);
         assert!(match_glob_toks(&toks, &['*']));
         assert!(!match_glob_toks(&toks, &['a']));
     }
@@ -6803,7 +6945,7 @@ mod tests {
         let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false)
+        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false, false)
             .iter()
             .map(|p| basename(p))
             .collect();
@@ -6811,12 +6953,12 @@ mod tests {
         assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false);
+        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false, false);
         assert!(all.iter().all(|p| !p.ends_with(".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false);
+        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
@@ -6840,10 +6982,10 @@ mod tests {
 
         // Case-sensitive: lowercase pattern misses the uppercase-extension file.
         let field = field_lit(&format!("{uniq}/*.txt"));
-        let cs = glob_expand_field(&field, false, false);
+        let cs = glob_expand_field(&field, false, false, false);
         assert!(cs.is_empty());
         // With nocaseglob, `*.txt` matches `Notes.TXT`.
-        let ci = glob_expand_field(&field, false, true);
+        let ci = glob_expand_field(&field, false, true, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with("Notes.TXT"));
 
@@ -6902,9 +7044,9 @@ mod tests {
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field(&field, false, false);
+        let plain = glob_expand_field(&field, false, false, false);
         assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
-        let with_dot = glob_expand_field(&field, true, false);
+        let with_dot = glob_expand_field(&field, true, false, false);
         assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
         assert!(with_dot.iter().all(|p| {
             let b = p.rsplit('/').next().unwrap_or(p);

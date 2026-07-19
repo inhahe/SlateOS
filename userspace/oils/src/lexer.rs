@@ -457,7 +457,51 @@ impl Lexer {
     fn read_word(&mut self) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
+        // Depth of nested `extglob` groups. Inside a group the pattern
+        // metacharacters `(`, `)`, `|`, whitespace, etc. are literal word content
+        // rather than word/operator delimiters, so the whole `@(a|b c)` stays one
+        // word token. The extglob decision is deferred to match time (compile_glob
+        // only treats these specially when `shopt -s extglob` is set); without
+        // extglob the group is matched literally. Parameter expansion and quoting
+        // inside the group are still processed normally. NOTE: because parsing is
+        // independent of runtime `shopt`, `!(cmd)` written with no space is now a
+        // pattern word, not a negated subshell — use `! (cmd)` for the latter.
+        let mut ext_depth = 0usize;
         while let Some(c) = self.peek() {
+            // Opener: `X(` where X ∈ ?*+@! (unquoted). Begins/nests a group.
+            if matches!(c, '?' | '*' | '+' | '@' | '!') && self.peek_at(1) == Some('(') {
+                lit.push(c);
+                lit.push('(');
+                self.pos += 2;
+                ext_depth += 1;
+                continue;
+            }
+            if ext_depth > 0 {
+                match c {
+                    '(' => {
+                        lit.push('(');
+                        ext_depth += 1;
+                        self.pos += 1;
+                        continue;
+                    }
+                    ')' => {
+                        lit.push(')');
+                        ext_depth -= 1;
+                        self.pos += 1;
+                        continue;
+                    }
+                    // Quotes, expansion and escapes still get their normal
+                    // processing (fall through to the outer match below).
+                    '\'' | '"' | '`' | '\\' | '$' => {}
+                    // Everything else — including `|`, whitespace, `<`, `>`, `&`,
+                    // `;`, `#` — is literal pattern content inside the group.
+                    other => {
+                        lit.push(other);
+                        self.pos += 1;
+                        continue;
+                    }
+                }
+            }
             match c {
                 ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>' | '#' => break,
                 '\'' => {

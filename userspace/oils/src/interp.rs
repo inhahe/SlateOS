@@ -1731,7 +1731,7 @@ impl Shell {
         let is_assoc = self.assoc.contains_key(&a.name);
         match &a.value {
             AssignRhs::Scalar(w) => {
-                let val = self.expand_to_string(w);
+                let val = self.expand_assignment_value(w);
                 // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
                 // elapsed-seconds counter. Both are dynamic and not stored in
                 // `vars` (reads go through `param_value`'s special arms).
@@ -3658,6 +3658,50 @@ impl Shell {
     fn expand_to_string(&mut self, word: &Word) -> String {
         let fields = self.expand_word(word, false);
         fields.join("")
+    }
+
+    /// Expand an assignment RHS to a single string. Like `expand_to_string`, but
+    /// tilde expansion additionally applies to a tilde-prefix that immediately
+    /// follows an unquoted `:` (bash's assignment-context rule, so that
+    /// `PATH=~/a:~/b` and `x=$PATH:~/bin` expand every `~`). Only unquoted
+    /// literal text is scanned for colon-delimited tilde positions; a `:`
+    /// produced by a parameter/command expansion does not create one.
+    fn expand_assignment_value(&mut self, word: &Word) -> String {
+        let mut cur = String::new();
+        // The very start of the value is a tilde position.
+        let mut at_tilde_pos = true;
+        for part in &word.parts {
+            match part {
+                WordPart::Literal(s) => {
+                    for (i, seg) in s.split(':').enumerate() {
+                        if i > 0 {
+                            cur.push(':');
+                        }
+                        // The first segment inherits the running tilde position;
+                        // every later segment follows a literal `:`, so it is one.
+                        if i > 0 || at_tilde_pos {
+                            cur.push_str(&self.tilde_expand(seg));
+                        } else {
+                            cur.push_str(seg);
+                        }
+                    }
+                    at_tilde_pos = s.ends_with(':');
+                }
+                WordPart::SingleQuoted(t) => {
+                    cur.push_str(t);
+                    at_tilde_pos = false;
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    cur.push_str(&self.expand_double_quoted(parts));
+                    at_tilde_pos = false;
+                }
+                other => {
+                    cur.push_str(&self.expand_dynamic(other));
+                    at_tilde_pos = false;
+                }
+            }
+        }
+        cur
     }
 
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> String {
@@ -10396,6 +10440,20 @@ mod tests {
         let (o, code) = run("help nosuchbuiltin");
         assert_eq!(o, "");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn tilde_expand_in_assignment() {
+        // A bare assignment tilde-expands after each unquoted `:` (bash's
+        // assignment-context rule), not just at the start of the value.
+        assert_eq!(run("HOME=/h; x=~/a:~/b; echo \"$x\"").0, "/h/a:/h/b\n");
+        // A tilde inside a preceding parameter expansion is preserved, while a
+        // literal tilde following a literal `:` is expanded.
+        assert_eq!(run("HOME=/h; p=/one; x=$p:~/bin; echo \"$x\"").0, "/one:/h/bin\n");
+        // A quoted tilde is NOT expanded.
+        assert_eq!(run("HOME=/h; x=~/a:'~/b'; echo \"$x\"").0, "/h/a:~/b\n");
+        // ~+ / ~- work in assignment position too.
+        assert_eq!(run("PWD=/p; x=~+/sub; echo \"$x\"").0, "/p/sub\n");
     }
 
     #[test]

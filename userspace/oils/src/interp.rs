@@ -3986,6 +3986,10 @@ impl Shell {
                         // `"${!ref}"` where ref resolves to `name[@]` yields one
                         // field per element (bash), like `"${name[@]}"`.
                         [WordPart::Indirect(refname)] => self.indirect_array_elems(refname),
+                        // `"$@"` expands to one field per positional parameter,
+                        // preserving embedded whitespace (`"$*"` joins instead and
+                        // is handled by the scalar fallback below).
+                        [WordPart::Param(p)] if p == "@" => Some(self.positional.clone()),
                         _ => None,
                     };
                     if let Some(items) = per_element {
@@ -4153,6 +4157,11 @@ impl Shell {
                     String::new()
                 }
             },
+            // `${#@}` / `${#*}` are the *count* of positional parameters, not the
+            // length of their joined string.
+            WordPart::Length(name) if name == "@" || name == "*" => {
+                self.positional.len().to_string()
+            }
             WordPart::Length(name) => match self.param_value(name) {
                 Some(v) => v.chars().count().to_string(),
                 None => {
@@ -4430,6 +4439,16 @@ impl Shell {
         s
     }
 
+    /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
+    /// first character of `$IFS`. An unset `IFS` joins with a space; an empty
+    /// `IFS` joins with nothing (bash).
+    fn star_sep(&self) -> String {
+        match self.vars.get("IFS") {
+            None => " ".to_string(),
+            Some(ifs) => ifs.chars().next().map_or(String::new(), |c| c.to_string()),
+        }
+    }
+
     fn param_value(&self, name: &str) -> Option<String> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
@@ -4440,7 +4459,10 @@ impl Shell {
             "#" => Some(self.positional.len().to_string()),
             "$" => Some(self.pid.to_string()),
             "!" => self.last_bg_pid.map(|p| p.to_string()),
-            "@" | "*" => Some(self.positional.join(" ")),
+            // `$@` in a single-string context joins with a space; `$*` joins
+            // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
+            "@" => Some(self.positional.join(" ")),
+            "*" => Some(self.positional.join(&self.star_sep())),
             "0" => Some(self.name.clone()),
             "-" => Some(self.option_flags()),
             "BASHPID" => Some(self.pid.to_string()),
@@ -13542,6 +13564,36 @@ mod tests {
         // `${@:off:len}` slices positional parameters ($0 is index 0).
         assert_eq!(run("set -- p q r s; echo ${@:2:2}").0, "q r\n");
         assert_eq!(run("set -- p q r s; echo ${@:3}").0, "r s\n");
+    }
+
+    #[test]
+    fn quoted_at_preserves_fields() {
+        // `"$@"` yields one field per positional parameter, preserving spaces.
+        assert_eq!(
+            run(r#"set -- "a b" c d; for x in "$@"; do echo "<$x>"; done"#).0,
+            "<a b>\n<c>\n<d>\n"
+        );
+        // `"$*"` joins into a single field (default IFS ⇒ space separator).
+        assert_eq!(
+            run(r#"set -- "a b" c d; for x in "$*"; do echo "<$x>"; done"#).0,
+            "<a b c d>\n"
+        );
+    }
+
+    #[test]
+    fn star_joins_with_ifs() {
+        // `"$*"` joins with the first character of IFS.
+        assert_eq!(run(r#"set -- a b c; IFS=-; echo "$*""#).0, "a-b-c\n");
+        // Empty IFS joins with no separator.
+        assert_eq!(run(r#"set -- a b c; IFS=; echo "$*""#).0, "abc\n");
+    }
+
+    #[test]
+    fn count_of_positional_params() {
+        // `${#@}` and `${#*}` are the count of positional parameters, not the
+        // length of their joined string.
+        assert_eq!(run("set -- p q r; echo ${#@} ${#*}").0, "3 3\n");
+        assert_eq!(run("set -- one two; echo ${#@}").0, "2\n");
     }
 
     #[test]

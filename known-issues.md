@@ -794,6 +794,29 @@ concurrently with the enclosing command and stream. The lexer/parser/AST plumbin
 change. Also sweep the non-simple-command contexts (or move cleanup to a
 shell-level teardown) to avoid the temp-file leak.
 
+### TD-OILS23. `osh` unquoted word splitting ignores a custom `$IFS` (always splits on whitespace) — OPEN (medium fidelity gap)
+
+**Where:** `userspace/oils/src/interp.rs` — `split_ifs` (splits only on
+`char::is_whitespace` via `str::split_whitespace`) and its caller, the `other =>`
+arm of `expand_word_annotated`.
+
+**What:** an unquoted expansion is field-split on the *default* whitespace IFS
+regardless of the current `$IFS`. So `IFS=:; x="a:b:c"; for w in $x; do …` yields
+a single field `a:b:c` (bash: three fields `a`, `b`, `c`), and `IFS=,; set -- a,b;
+echo $1` likewise does not split on `,`. The quoted joins now honor IFS correctly
+(`"$*"` joins with `$IFS[0]` — see `star_sep`), and the `read` builtin already
+splits on the live `$IFS` (`read_split`, which distinguishes whitespace vs
+non-whitespace IFS runs) — only the *word-splitting* pass after parameter/command/
+arithmetic expansion is stuck on whitespace.
+
+**Proper fix:** replace `split_ifs` (and the `other =>` split in
+`expand_word_annotated`) with an IFS-aware splitter modelled on `read_split`:
+read `$IFS` from `self.vars` (unset ⇒ `" \t\n"`, empty ⇒ no splitting), collapse
+runs of IFS-whitespace, and treat each non-whitespace IFS character as a single
+delimiter (with the usual "adjacent whitespace+delimiter counts once" rule). Route
+the annotated-expansion unquoted arm through it. This needs `&self` access to read
+IFS, so `split_ifs` must become a method (it is currently a free function).
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

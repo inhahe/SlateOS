@@ -57,6 +57,7 @@ fn run(args: &[String]) -> i32 {
             match std::fs::read_to_string(path) {
                 Ok(src) => {
                     sh.set_name(path.to_string());
+                    sh.set_script_mode();
                     sh.set_positional(args.get(2..).map(<[String]>::to_vec).unwrap_or_default());
                     sh.run_source(&src)
                 }

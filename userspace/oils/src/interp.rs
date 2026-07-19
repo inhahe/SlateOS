@@ -362,6 +362,12 @@ pub struct Shell {
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
     command_mode: bool,
+    /// The shell is executing a **script file** (`osh SCRIPT`), as opposed to
+    /// `-c` or the interactive REPL. Bash includes a bottom `main` pseudo-frame
+    /// in `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` only for script (and sourced)
+    /// execution; `-c` and interactive shells omit it. Set once at startup by
+    /// the binary. See `refresh_funcname`.
+    script_mode: bool,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -510,6 +516,7 @@ impl Shell {
             allexport: false,
             noclobber: false,
             command_mode: false,
+            script_mode: false,
             errexit_suppress: 0,
             unbound_error: false,
             arith_error: false,
@@ -580,6 +587,13 @@ impl Shell {
     /// (bash behaviour). Called once by the binary before running the command.
     pub fn set_command_mode(&mut self) {
         self.command_mode = true;
+    }
+
+    /// Mark the shell as executing a script *file* (`osh SCRIPT`). Enables the
+    /// bottom `main` pseudo-frame in the call-stack arrays (see
+    /// `refresh_funcname`). Called once by the binary before running the script.
+    pub fn set_script_mode(&mut self) {
+        self.script_mode = true;
     }
 
     /// Set a shell variable.
@@ -1949,6 +1963,7 @@ impl Shell {
             allexport: self.allexport,
             noclobber: self.noclobber,
             command_mode: self.command_mode,
+            script_mode: self.script_mode,
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
@@ -3363,12 +3378,12 @@ impl Shell {
 
     /// Materialise the `FUNCNAME`, `BASH_LINENO`, and `BASH_SOURCE` arrays from
     /// the current call stack. Bash makes `FUNCNAME[0]` the currently-executing
-    /// function, then each caller, then `main` at the bottom; the arrays are
-    /// unset outside any function. `BASH_LINENO[i]` is the line where
-    /// `FUNCNAME[i]` was called (the bottom `main` entry is 0), and
-    /// `BASH_SOURCE[i]` is the source file where `FUNCNAME[i]` is defined —
-    /// here always `$0`, since per-function definition source is not tracked
-    /// (see known-issues TD-OILS21).
+    /// function, then each caller outward; the arrays are unset outside any
+    /// function and contain exactly one entry per real call frame (no bottom
+    /// `main` pseudo-entry). `BASH_LINENO[i]` is the line where `FUNCNAME[i]`
+    /// was called, and `BASH_SOURCE[i]` is the source file where `FUNCNAME[i]`
+    /// is defined — here always `$0`, since per-function definition source is
+    /// not tracked (see known-issues TD-OILS21).
     fn refresh_funcname(&mut self) {
         if self.fn_stack.is_empty() {
             self.arrays.remove("FUNCNAME");
@@ -3392,11 +3407,16 @@ impl Shell {
             sources.insert(idx, self.name.clone());
             idx += 1;
         }
-        // The bottom frame is the top-level script context: name `main`, a call
-        // line of 0 (bash), and the script source file.
-        names.insert(idx, "main".to_string());
-        linenos.insert(idx, "0".to_string());
-        sources.insert(idx, self.name.clone());
+        // Bash appends a bottom `main` pseudo-frame (call line 0, source = `$0`)
+        // ONLY when executing a script file (or a sourced file). For `-c` and
+        // interactive shells there is no top-level script frame, so FUNCNAME is
+        // exactly the active function frames (inside `f` at top level → `(f)`,
+        // length 1). Matching bash exactly requires this mode distinction.
+        if self.script_mode {
+            names.insert(idx, "main".to_string());
+            linenos.insert(idx, "0".to_string());
+            sources.insert(idx, self.name.clone());
+        }
         self.arrays.insert("FUNCNAME".to_string(), names);
         self.arrays.insert("BASH_LINENO".to_string(), linenos);
         self.arrays.insert("BASH_SOURCE".to_string(), sources);
@@ -13679,18 +13699,43 @@ mod tests {
     fn funcname_reflects_call_stack() {
         // `$FUNCNAME` (element 0) is the current function.
         assert_eq!(run("f() { echo $FUNCNAME; }; f").0, "f\n");
-        // The whole array is current-function … callers … main.
-        assert_eq!(run("f() { echo \"${FUNCNAME[@]}\"; }; f").0, "f main\n");
+        // The whole array is current-function … callers (no bottom `main`).
+        assert_eq!(run("f() { echo \"${FUNCNAME[@]}\"; }; f").0, "f\n");
         assert_eq!(
             run("g() { echo \"${FUNCNAME[@]}\"; }; f() { g; }; f").0,
-            "g f main\n"
+            "g f\n"
         );
-        // Count includes the `main` bottom frame.
-        assert_eq!(run("f() { echo ${#FUNCNAME[@]}; }; f").0, "2\n");
+        // Count is exactly the number of active call frames (no `main`).
+        assert_eq!(run("f() { echo ${#FUNCNAME[@]}; }; f").0, "1\n");
         // Unset outside any function.
         assert_eq!(run("echo [${FUNCNAME[@]}]").0, "[]\n");
         // Restored after the function returns.
         assert_eq!(run("f() { :; }; f; echo [$FUNCNAME]").0, "[]\n");
+    }
+
+    #[test]
+    fn funcname_script_mode_has_main_frame() {
+        // In script-file mode (bash `osh SCRIPT`), the call-stack arrays gain a
+        // bottom `main` pseudo-frame; `-c`/interactive (the plain harness) do not.
+        let script_run = |src: &str| {
+            let mut sh = Shell::new();
+            sh.set_script_mode();
+            let mut buf = Vec::new();
+            let mut out = Out::Capture(&mut buf);
+            let prog = parse(src).expect("parse");
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            String::from_utf8(buf).unwrap()
+        };
+        // Inside `f` at top level: FUNCNAME is `(f main)`, length 2.
+        assert_eq!(
+            script_run("f() { echo \"${#FUNCNAME[@]}:[${FUNCNAME[*]}]\"; }; f"),
+            "2:[f main]\n"
+        );
+        // Nested: `g f main`, and BASH_LINENO ends in 0 (the main call line).
+        assert_eq!(
+            script_run("g() { echo \"${FUNCNAME[*]}|${BASH_LINENO[*]}\"; }\nf() { g; }\nf"),
+            "g f main|2 3 0\n"
+        );
     }
 
     #[test]
@@ -13699,10 +13744,11 @@ mod tests {
         assert_eq!(run("f() { echo ${BASH_SOURCE[0]}; }; f").0, "osh\n");
         // BASH_LINENO[0] is the line where the current function was called.
         assert_eq!(run("f() { echo ${BASH_LINENO[0]}; }\nf").0, "2\n");
-        // Nested: BASH_LINENO tracks each call site.
+        // Nested: BASH_LINENO tracks each call site. The harness runs like
+        // `-c` (not a script file), so there is no bottom `main` frame.
         let src = "g() { echo \"${BASH_LINENO[@]}\"; }\nf() { g; }\nf";
-        // g called on line 2 (inside f), f called on line 3, then main => 0.
-        assert_eq!(run(src).0, "2 3 0\n");
+        // g called on line 2 (inside f), f called on line 3.
+        assert_eq!(run(src).0, "2 3\n");
         // Parallel arrays are all unset outside any function.
         assert_eq!(run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0, "[][]\n");
     }

@@ -9084,6 +9084,32 @@ fn single_quote(s: &str) -> String {
     out
 }
 
+/// Quote `s` the way bash's `printf %q` does: an empty string becomes `''`, a
+/// string with control characters uses the ANSI-C `$'…'` form, and otherwise
+/// each shell-special character is backslash-escaped (bash uses backslash
+/// escaping for `%q`, unlike `${v@Q}`/`shell_quote` which single-quote). The
+/// result re-parses to the original word.
+fn printf_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().any(char::is_control) {
+        // Reuse the ANSI-C form (matches bash, which emits `$'…'` here too).
+        return shell_quote(s);
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        // Backslash-escape anything outside the "safe" reusable set.
+        if c.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(c) {
+            out.push(c);
+        } else {
+            out.push('\\');
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -9867,7 +9893,7 @@ fn format_conversion(
             // Interpret backslash escapes in the argument.
             ansi_c_unescape(&next_arg(arg_i))
         }
-        'q' => shell_quote(&next_arg(arg_i)),
+        'q' => printf_quote(&next_arg(arg_i)),
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
         'd' | 'i' => {
             let n = parse_printf_int(&next_arg(arg_i));
@@ -11258,7 +11284,15 @@ mod tests {
 
     #[test]
     fn printf_q_b_and_c_conversions() {
-        assert_eq!(run("printf '%q' 'a b'").0, "'a b'");
+        // bash's %q backslash-escapes shell-special chars (unlike @Q, which
+        // single-quotes).
+        assert_eq!(run("printf '%q' 'a b'").0, "a\\ b");
+        assert_eq!(run("printf '%q' \"it's\"").0, "it\\'s");
+        assert_eq!(run("printf '%q' ''").0, "''");
+        assert_eq!(run("printf '%q' plain").0, "plain");
+        assert_eq!(run("printf '%q' 'a$b`c'").0, "a\\$b\\`c");
+        // @Q still uses single-quote style.
+        assert_eq!(run("v='a b'; echo \"${v@Q}\"").0, "'a b'\n");
         assert_eq!(run("printf '%b' 'a\\tb'").0, "a\tb");
         assert_eq!(run("printf '%c' xyz").0, "x");
     }

@@ -49,6 +49,84 @@ it warrants a dedicated, carefully-tested effort rather than being
 bolted on mid-sweep. `coproc` is comparatively rare in real scripts, so
 this is lower priority than user-visible expansion/redirect correctness.
 
+**Design spike (2026-07-19) — feasibility CONFIRMED, exact semantics +
+recommended minimal-surface implementation, so the eventual effort is a
+clean execution rather than another investigation.** (A parser/AST/unparser
+prototype was written and then *reverted* — the executor's fd-model surgery
+is entangled enough that a half-implementation that parses but errors at
+runtime would be a band-aid; better to land it whole. Findings below.)
+
+- **`std::io::pipe()` works on this toolchain** (nightly-x86_64-pc-windows-gnu,
+  edition 2024) and is cross-platform, so it compiles for the slateos (unix)
+  target too. No FFI needed. Verified with a standalone `rustc` build:
+  `let (r, w) = std::io::pipe()?;` round-trips bytes. `PipeReader`/`PipeWriter`
+  both impl `try_clone()`.
+- **Exact bash grammar (probed against MSYS bash):**
+  - `coproc simple_command` → array name defaults to `COPROC`; an explicit
+    NAME is **not** accepted before a simple command (`coproc myname cat`
+    runs `myname cat` as a command — "myname: command not found").
+  - `coproc NAME compound_command` → explicit NAME (only recognised when a
+    valid identifier is immediately followed by a compound-command starter:
+    `{ ( (( [[ if while until for select case`).
+  - `coproc compound_command` → name `COPROC`.
+  - Sets `NAME[0]` = fd to **read** the coproc's stdout, `NAME[1]` = fd to
+    **write** the coproc's stdin, plus scalar `NAME_PID`. bash uses high fd
+    numbers (e.g. 63/60); osh can use the lowest free ≥ 10.
+  - Two simultaneous coprocs: bash warns ("still exists") but allows one at a
+    time cleanly; multi-coproc is a known bash weakness — match the single
+    active coproc case first.
+- **Executor reuse pattern already in the tree:** the pipeline executor
+  (`exec_pipeline`, interp.rs ~952) already runs a `clone_for_subshell()`
+  (which is `Send`) inside `std::thread::scope`, driving the body with
+  `Out::Pipe(PipeWriter)` and `StdinSrc::Pipe(RefCell<BufReader<PipeReader>>)`.
+  coproc differs in that it must be **detached** (runs in the background while
+  the parent continues), so it needs `std::thread::spawn` (not scoped) with an
+  **owned** `body.clone()` and an **owned** `clone_for_subshell()` (both are
+  `'static`; `Shell` has no lifetime param). Store the `JoinHandle` in a new
+  `Shell` field (e.g. `coproc_jobs: Vec<…>`) so it can be joined at shell exit.
+  Give the thread `child_stdin_r`/`child_stdout_w`; keep `parent_stdin_w`/
+  `parent_stdout_r` in the parent.
+- **RECOMMENDED minimal-surface fd design (avoids the invasive `open_fds`
+  enum):**
+  - *Write end* (`NAME[1]`): convert the parent-side `PipeWriter` to a
+    `std::fs::File` (via `OwnedHandle`/`OwnedFd` — `File: From<OwnedFd>` and
+    `PipeWriter: Into<OwnedFd>`, cfg-split for windows/unix) and store it as
+    `Arc<File>` in the **existing** `open_write_fds`. Then `echo >&"${NAME[1]}"`
+    and `cmd >&N` work with **zero** changes to the write machinery, because
+    `>&N` already resolves `open_write_fds` and the whole write path is
+    `Arc<File>`-typed (`stdout_file`, `StderrTarget::WriteFd`, external stdio).
+  - *Read end* (`NAME[0]`): the read path is Cursor/byte-clone based
+    throughout (`StdinSrc::Cursor(&RefCell<Cursor>)`, `clone_input_fd` clones
+    bytes, subshell clones snapshot remaining bytes) — a live pipe cannot be
+    pre-buffered. Put live read ends in a **dedicated** table
+    `coproc_read_fds: HashMap<i32, Arc<File>>` (convert `PipeReader`→`File`),
+    consulted only at the canonical read-resolution points, and add a
+    `StdinSrc::Live(RefCell<BufReader<File>>)` variant (handled identically to
+    `StdinSrc::Pipe`, since `File: Read`). Read-resolution points to touch:
+    (a) `read -u N` (interp.rs ~10015-10029, currently reads `open_fds`);
+    (b) the `M<&N` input-dup in `apply_persistent_redirect` `RedirectOp::DupIn`
+    (~4905) and `clone_input_fd` (~4939); (c) the transient per-command
+    `<&N` input-dup path in the `RedirPlan` (`ExtraFdOp`, ~5100-5170 / 6759);
+    (d) external commands inheriting `fd 0 <&N` in `run_external` stdio wiring.
+    Extend `alloc_varfd`/fd allocation (~4749) to also skip `coproc_read_fds`
+    numbers so the three tables never collide, and have `clone_for_subshell`
+    `try_clone` the shared `Arc<File>` (bash: a subshell inherits the coproc
+    fd — a shared OS handle, so `try_clone` is the correct semantics, unlike
+    the byte-snapshot used for buffered fds).
+  - This keeps the 15 buffer-only `open_fds` sites untouched; only the ~4 live
+    read-resolution points + the executor + one `StdinSrc` variant + the write
+    conversion change. A separate live table is a legitimate model (live OS
+    streams are a genuinely different object than replay buffers), not scatter.
+- **`NAME_PID`:** the body runs as a *thread*, not an OS process, so there is
+  no real child pid — assign a synthetic monotonic pid (same limitation osh
+  already has for backgrounded shell bodies via `last_bg_pid`). `wait`/`kill`
+  on a coproc pid is therefore best-effort.
+- **Lifecycle:** join the coproc thread and drop both parent-side `File`
+  endpoints on shell exit, on `unset NAME`, and (bash) when a second coproc
+  replaces the first. Closing `parent_stdin_w` (via `exec {NAME[1]}>&-` or
+  drop) delivers EOF to the coproc's stdin; the coproc's thread finishing
+  drops `child_stdout_w`, delivering EOF to the parent's `NAME[0]` reader.
+
 ### TD-OILS-VARFD-RO-MSG. `osh` readonly-varfd redirect emits one error line; bash emits two — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` `redir_effective_fd` (returns

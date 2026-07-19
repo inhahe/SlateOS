@@ -817,7 +817,11 @@ impl Lexer {
                 continue;
             }
             match c {
-                ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>' | '#' => break,
+                // `#` is NOT a terminator here: a comment only begins when `#`
+                // is at the *start* of a word, which the main token loop catches
+                // before `read_word` is ever entered. Mid-word (`abc#def`,
+                // `n=16#ff`) the `#` is a literal character, matching bash/POSIX.
+                ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>' => break,
                 '\'' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;

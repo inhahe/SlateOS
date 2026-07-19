@@ -13437,6 +13437,22 @@ mod tests {
     }
 
     #[test]
+    fn hash_mid_word_is_literal() {
+        // `#` only begins a comment at the *start* of a word; mid-word it is a
+        // literal character (bash/POSIX), so `abc#def` is one word.
+        assert_eq!(run("echo abc#def").0, "abc#def\n");
+        assert_eq!(run("echo a#b#c").0, "a#b#c\n");
+        assert_eq!(run("echo end#").0, "end#\n");
+        // A `#` at word start (preceded by blanks) is still a comment.
+        assert_eq!(run("echo abc #def").0, "abc\n");
+        // The base-N arithmetic form survives as an assignment value.
+        assert_eq!(run("n=16#ff; echo [$n]").0, "[16#ff]\n");
+        assert_eq!(run("declare -i n=16#ff; echo $n").0, "255\n");
+        // A whole-line comment still works.
+        assert_eq!(run("echo a; #comment\necho b").0, "a\nb\n");
+    }
+
+    #[test]
     fn readonly_array_element_cannot_unset() {
         // An element of a readonly array cannot be unset (bash reports the base
         // name), and the array is left intact.

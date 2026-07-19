@@ -1601,7 +1601,18 @@ impl Shell {
         let target = self.resolve_ref_name(&a.name);
         if target != a.name {
             let mut a2 = a.clone();
-            a2.name = target;
+            // A nameref may point at an array element (`declare -n ref=arr[0]`):
+            // convert `ref=v` into `arr[0]=v`. Only when `ref` carries no
+            // explicit subscript of its own (`ref[i]=v` is a different beast).
+            if a.index.is_none()
+                && let Some(open) = target.find('[')
+                && let Some(inner) = target.strip_suffix(']')
+            {
+                a2.name = target[..open].to_string();
+                a2.index = Some(Word::literal(&inner[open + 1..]));
+            } else {
+                a2.name = target;
+            }
             return self.apply_assignment(&a2);
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
@@ -3624,7 +3635,31 @@ impl Shell {
         cur
     }
 
+    /// If `name` is a nameref whose target is an array element (`arr[0]` /
+    /// `m[key]`), return the referenced element's value. `None` when `name` is
+    /// not such a nameref (the caller then falls through to normal resolution).
+    fn nameref_elem_value(&self, name: &str) -> Option<String> {
+        if !self.nameref_attr.contains(name) {
+            return None;
+        }
+        let target = self.resolve_ref_name(name);
+        let open = target.find('[')?;
+        let inner = target.strip_suffix(']')?;
+        let base = &target[..open];
+        let sub = &inner[open + 1..];
+        if self.assoc.contains_key(base) {
+            return self.assoc_element(base, sub);
+        }
+        // A literal integer subscript (the common `arr[0]` case). Non-numeric
+        // subscripts on an indexed array fall back to index 0, as bash does.
+        let idx = sub.parse::<i64>().unwrap_or(0);
+        self.array_element(base, idx)
+    }
+
     fn param_value(&self, name: &str) -> Option<String> {
+        if let Some(v) = self.nameref_elem_value(name) {
+            return Some(v);
+        }
         let name = &self.resolve_ref_name(name);
         match name.as_str() {
             "?" => Some(self.last_status.to_string()),
@@ -8488,6 +8523,20 @@ mod tests {
         assert_eq!(
             run("target=hi; declare -n ref=target; echo ${!ref} $ref").0,
             "target hi\n"
+        );
+    }
+
+    #[test]
+    fn nameref_to_array_element() {
+        // A nameref may point at an array element: read and write route to it.
+        assert_eq!(
+            run("a=(x y z); declare -n ref=a[1]; echo $ref; ref=Y; echo \"${a[@]}\"").0,
+            "y\nx Y z\n"
+        );
+        // Associative-array element target (string key).
+        assert_eq!(
+            run("declare -A m; m[k]=v; declare -n r=m[k]; echo $r; r=w; echo ${m[k]}").0,
+            "v\nw\n"
         );
     }
 

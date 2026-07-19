@@ -2484,8 +2484,9 @@ impl Shell {
                     } else {
                         // `name[i]=val` — indexed element assignment. A negative
                         // index counts back from `highest_index + 1` (bash:
-                        // `a[-1]=v` overwrites the last element).
-                        let raw = self.eval_arith_word(idx_word);
+                        // `a[-1]=v` overwrites the last element). A malformed
+                        // arithmetic subscript is fatal (see `eval_arith_index`).
+                        let raw = self.eval_arith_index(idx_word);
                         let bound = self
                             .arrays
                             .get(&a.name)
@@ -2594,7 +2595,7 @@ impl Shell {
                             }
                         }
                         ArrayElem::Keyed { index, value } => {
-                            let idx = self.eval_arith_word(index);
+                            let idx = self.eval_arith_index(index);
                             let val = self.expand_to_string(value);
                             let val = self.apply_elem_attrs(&a.name, val);
                             if let Ok(idx) = usize::try_from(idx) {
@@ -2678,11 +2679,11 @@ impl Shell {
             self.array_elements(name)
         };
         let n = elems.len() as i64;
-        let off = self.eval_arith_word(offset);
+        let off = self.eval_arith_index(offset);
         let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
         let end = match length {
             Some(l) => {
-                let l = self.eval_arith_word(l);
+                let l = self.eval_arith_index(l);
                 if l < 0 { (n + l).max(start) } else { (start + l).min(n) }
             }
             None => n,
@@ -2854,7 +2855,7 @@ impl Shell {
                     let key = self.expand_to_string(w);
                     self.assoc_element(name, &key)
                 } else {
-                    let idx = self.eval_arith_word(w);
+                    let idx = self.eval_arith_index(w);
                     self.array_element(name, idx)
                 }
             }
@@ -2875,7 +2876,7 @@ impl Shell {
                     let key = self.expand_to_string(w);
                     self.assoc_set(name, key, value, false);
                 } else {
-                    let idx = self.eval_arith_word(w);
+                    let idx = self.eval_arith_index(w);
                     let arr = self.arrays.entry(name.to_string()).or_default();
                     let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
                     if let Some(real) = Self::resolve_index(idx, bound) {
@@ -2934,7 +2935,9 @@ impl Shell {
             if self.assoc.contains_key(name) {
                 return self.assoc_element(name, sub).unwrap_or_default();
             }
-            let idx = self.eval_arith_raw(sub).unwrap_or(0);
+            // A malformed arithmetic subscript in an indirect array reference is
+            // fatal, like a direct `${a[3 x]}` (see `eval_int_assign`).
+            let idx = self.eval_int_assign(sub);
             return self.array_element(name, idx).unwrap_or_default();
         }
         self.param_value(&target).unwrap_or_default()
@@ -3355,7 +3358,7 @@ impl Shell {
                     let key = self.expand_to_string(w);
                     self.assoc_element(name, &key)
                 } else {
-                    let idx = self.eval_arith_word(w);
+                    let idx = self.eval_arith_index(w);
                     self.array_element(name, idx)
                 };
                 if length {
@@ -5525,8 +5528,9 @@ impl Shell {
                 length,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
-                let off = self.eval_arith_word(offset);
-                let len = length.as_ref().map(|l| self.eval_arith_word(l));
+                // `${x:off:len}` — a malformed offset/length is fatal (bash).
+                let off = self.eval_arith_index(offset);
+                let len = length.as_ref().map(|l| self.eval_arith_index(l));
                 param_substr(&value, off, len)
             }
             WordPart::ParamReplace {
@@ -6123,6 +6127,32 @@ impl Shell {
         arith::eval(s, self).unwrap_or(0)
     }
 
+    /// Like [`eval_arith_word`], but an arithmetic *evaluation error* is **fatal**
+    /// — the bash behavior for an arithmetic subscript on an indexed array
+    /// (`${a[3 x]}`, `a[1/0]=v`) and for substring offset/length arithmetic
+    /// (`${x:1 z}`, `${x:2:1 z}`). The diagnostic is printed (honoring an active
+    /// stderr redirect) and `arith_error` is set, which the simple-command driver
+    /// / bare-assignment path turns into a `Flow::Exit(1)` (status 1 at the main
+    /// shell, or in a subshell without aborting the parent). A bare-identifier
+    /// subscript (`${a[abc]}`) is a normal arithmetic variable reference resolving
+    /// to 0, not an error. Non-fatal numeric-comparison contexts (`[[ a -eq b ]]`)
+    /// deliberately keep using the tolerant `eval_arith_word`, matching bash.
+    fn eval_arith_index(&mut self, w: &Word) -> i64 {
+        let s = self.expand_to_string(w);
+        let s = s.trim();
+        if s.is_empty() {
+            return 0;
+        }
+        match arith::eval(s, self) {
+            Ok(v) => v,
+            Err(e) => {
+                self.errln(&format!("osh: arithmetic: {e}"));
+                self.arith_error = true;
+                0
+            }
+        }
+    }
+
     fn arith_sub(&mut self, expr: &str) -> String {
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
@@ -6130,7 +6160,9 @@ impl Shell {
         match arith::eval(&expanded, self) {
             Ok(v) => v.to_string(),
             Err(e) => {
-                eprintln!("osh: arithmetic: {e}");
+                // Route through `errln` so an active `2>`/`2>&1` redirect on the
+                // command silences the diagnostic, matching bash.
+                self.errln(&format!("osh: arithmetic: {e}"));
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
@@ -14052,6 +14084,32 @@ mod tests {
         // `let` / `(( ))` remain non-fatal (the following command still runs).
         assert_eq!(run("let \"3 apples\" 2>/dev/null; echo after").0, "after\n");
         assert_eq!(run("(( 3 apples )) 2>/dev/null; echo after").0, "after\n");
+    }
+
+    #[test]
+    fn subscript_and_substring_arith_error_is_fatal() {
+        // Arithmetic errors that occur while *expanding a word* — an array
+        // subscript, a substring/slice offset or length — are fatal in bash
+        // (status 1, the shell aborts) at the main-shell level, but only fail
+        // the subshell (status 1, parent survives) inside `( )`/`$( )`. This is
+        // distinct from `[[ x -eq y ]]` / `[ x -eq y ]`, whose arithmetic
+        // comparisons are non-fatal.
+
+        // Array subscript read with a bad arithmetic expression -> fatal.
+        assert_eq!(run("a=(1 2 3); echo ${a[3 x]}; echo after"), (String::new(), 1));
+        // Substring offset with a bad arithmetic expression -> fatal.
+        assert_eq!(run("x=abcdef; echo ${x:1 z}; echo after"), (String::new(), 1));
+        // Substring length with a bad arithmetic expression -> fatal.
+        assert_eq!(run("x=abcdef; echo ${x:1:2 z}; echo after"), (String::new(), 1));
+
+        // In a subshell the abort is status 1 and does NOT abort the parent.
+        assert_eq!(run("a=(1 2 3); (echo ${a[3 x]}); echo done").1, 0);
+        assert_eq!(run("x=$(a=(1 2 3); echo ${a[3 x]}); echo $?").0, "1\n");
+
+        // `[[ … -eq … ]]` / `[ … -eq … ]` arithmetic errors are NOT fatal: the
+        // conditional reports non-zero but the following command still runs.
+        assert_eq!(run("[[ \"3 x\" -eq 5 ]] 2>/dev/null; echo after").0, "after\n");
+        assert_eq!(run("[ \"3 x\" -eq 5 ] 2>/dev/null; echo after").0, "after\n");
     }
 
     #[test]

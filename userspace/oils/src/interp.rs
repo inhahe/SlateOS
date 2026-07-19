@@ -6448,13 +6448,41 @@ impl Shell {
     }
 
     fn builtin_echo(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Leading option words made up solely of the letters `neE` are flags
+        // (bash: `-n` no newline, `-e` interpret backslash escapes, `-E` disable
+        // that; they may be clustered, e.g. `-ne`). Parsing stops at the first
+        // word that is not such a flag.
         let mut newline = true;
+        let mut interpret = false;
         let mut start = 0;
-        if args.first().map(String::as_str) == Some("-n") {
-            newline = false;
-            start = 1;
+        while let Some(a) = args.get(start) {
+            if a.len() >= 2
+                && a.starts_with('-')
+                && a[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
+            {
+                for c in a[1..].chars() {
+                    match c {
+                        'n' => newline = false,
+                        'e' => interpret = true,
+                        'E' => interpret = false,
+                        _ => {}
+                    }
+                }
+                start += 1;
+            } else {
+                break;
+            }
         }
-        let mut line = args[start..].join(" ");
+        let joined = args[start..].join(" ");
+        let mut line = if interpret {
+            let (text, suppress) = echo_expand_escapes(&joined);
+            if suppress {
+                newline = false;
+            }
+            text
+        } else {
+            joined
+        };
         if newline {
             line.push('\n');
         }
@@ -9246,6 +9274,103 @@ fn shell_quote(s: &str) -> String {
 /// Expand ANSI-C backslash escapes in `s` (the `${v@E}` transform): the common
 /// `\n \t \r \\ \' \" \a \b \e \f \v` escapes, plus `\xHH` and `\0nnn`/`\nnn`
 /// numeric escapes. An unrecognized escape keeps its backslash.
+/// Interpret `echo -e` backslash escapes. Returns the processed text and a
+/// flag that is `true` when a `\c` escape was seen (which stops output and
+/// suppresses the trailing newline). Recognizes `\a \b \e \E \f \n \r \t \v
+/// \\`, `\0nnn` (octal, up to three digits), `\xHH` (hex, up to two digits),
+/// and `\c`. An unrecognized escape keeps its backslash (bash behavior).
+fn echo_expand_escapes(s: &str) -> (String, bool) {
+    let mut out = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\\' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        i += 1; // consume '\'
+        match chars[i] {
+            'a' => {
+                out.push('\u{07}');
+                i += 1;
+            }
+            'b' => {
+                out.push('\u{08}');
+                i += 1;
+            }
+            'e' | 'E' => {
+                out.push('\u{1b}');
+                i += 1;
+            }
+            'f' => {
+                out.push('\u{0c}');
+                i += 1;
+            }
+            'n' => {
+                out.push('\n');
+                i += 1;
+            }
+            'r' => {
+                out.push('\r');
+                i += 1;
+            }
+            't' => {
+                out.push('\t');
+                i += 1;
+            }
+            'v' => {
+                out.push('\u{0b}');
+                i += 1;
+            }
+            '\\' => {
+                out.push('\\');
+                i += 1;
+            }
+            'c' => return (out, true),
+            '0' => {
+                // `\0nnn` — up to three octal digits after the 0.
+                i += 1;
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < 3 && i < chars.len() && chars[i].is_digit(8) {
+                    val = val.wrapping_mul(8).wrapping_add(chars[i].to_digit(8).unwrap_or(0));
+                    i += 1;
+                    n += 1;
+                }
+                if let Some(c) = char::from_u32(val) {
+                    out.push(c);
+                }
+            }
+            'x' => {
+                // `\xHH` — up to two hex digits.
+                i += 1;
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < 2 && i < chars.len() && chars[i].is_ascii_hexdigit() {
+                    val = val.wrapping_mul(16).wrapping_add(chars[i].to_digit(16).unwrap_or(0));
+                    i += 1;
+                    n += 1;
+                }
+                if n == 0 {
+                    // No hex digit followed: keep the literal `\x`.
+                    out.push('\\');
+                    out.push('x');
+                } else if let Some(c) = char::from_u32(val) {
+                    out.push(c);
+                }
+            }
+            other => {
+                // Unrecognized escape: keep the backslash and the character.
+                out.push('\\');
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    (out, false)
+}
+
 fn ansi_c_unescape(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars().peekable();
@@ -10658,6 +10783,22 @@ mod tests {
     fn arithmetic() {
         let (o, _) = run("echo $((6 * 7))");
         assert_eq!(o, "42\n");
+    }
+
+    #[test]
+    fn echo_e_interprets_escapes() {
+        // `-e` interprets backslash escapes; `-E`/default do not.
+        assert_eq!(run("echo -e 'a\\nb'").0, "a\nb\n");
+        assert_eq!(run("echo -e 'a\\tb'").0, "a\tb\n");
+        assert_eq!(run("echo 'a\\nb'").0, "a\\nb\n");
+        assert_eq!(run("echo -E 'a\\nb'").0, "a\\nb\n");
+        // Clustered flags: `-ne` = no newline + interpret.
+        assert_eq!(run("echo -ne 'x\\ty'").0, "x\ty");
+        // `\c` stops output and suppresses the trailing newline.
+        assert_eq!(run("echo -e 'keep\\cdrop'").0, "keep");
+        // `\xHH` hex; `\0nnn` octal (needs the leading 0, else literal).
+        assert_eq!(run("echo -e '\\x41\\0101'").0, "AA\n");
+        assert_eq!(run("echo -e '\\101'").0, "\\101\n");
     }
 
     #[test]

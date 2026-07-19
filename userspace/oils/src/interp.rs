@@ -2119,6 +2119,41 @@ impl Shell {
         None
     }
 
+    /// Like `find_in_path`, but returns *every* matching executable across all
+    /// `$PATH` directories in order (used by `type -a`). Duplicate paths are
+    /// suppressed while preserving first-seen order.
+    fn find_all_in_path(&self, name: &str) -> Vec<std::path::PathBuf> {
+        use std::path::Path;
+        let mut out: Vec<std::path::PathBuf> = Vec::new();
+        if name.contains('/') || name.contains('\\') {
+            let p = Path::new(name);
+            if p.is_file() {
+                out.push(p.to_path_buf());
+            }
+            return out;
+        }
+        let Some(path) = self
+            .param_value("PATH")
+            .or_else(|| std::env::var("PATH").ok())
+        else {
+            return out;
+        };
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(name);
+            if cand.is_file() && !out.contains(&cand) {
+                out.push(cand.clone());
+            }
+            #[cfg(windows)]
+            for ext in ["exe", "cmd", "bat"] {
+                let c = cand.with_extension(ext);
+                if c.is_file() && !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
     fn run_external(
         &mut self,
         argv: &[String],
@@ -4020,17 +4055,147 @@ impl Shell {
     }
 
     fn builtin_type(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let mut status = 0;
-        for a in args {
-            let desc = if self.funcs.contains_key(a) {
-                format!("{a} is a function")
-            } else if is_builtin(a) {
-                format!("{a} is a shell builtin")
+        // Shell keywords recognized by `type` (reserved words that introduce or
+        // punctuate compound commands).
+        const KEYWORDS: &[&str] = &[
+            "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do",
+            "done", "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
+        ];
+
+        // Parse flags: -t (type word), -p (path if file), -P (force PATH search),
+        // -a (all locations), -f (skip function lookup). Flags may be clustered.
+        let mut mode_t = false;
+        let mut mode_p = false;
+        let mut mode_pp = false;
+        let mut mode_a = false;
+        let mut skip_func = false;
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| "tpPaf".contains(c))
+            {
+                for c in flags.chars() {
+                    match c {
+                        't' => mode_t = true,
+                        'p' => mode_p = true,
+                        'P' => mode_pp = true,
+                        'a' => mode_a = true,
+                        'f' => skip_func = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
             } else {
-                status = 1;
-                format!("{a}: not found")
+                break;
+            }
+        }
+        let names: Vec<&String> = args[i..].iter().collect();
+
+        let mut status = 0;
+        for name in names {
+            let is_kw = KEYWORDS.contains(&name.as_str());
+            let is_fn = !skip_func && self.funcs.contains_key(name);
+            let is_bi = is_builtin(name);
+            // `-P` forces a filesystem search even when the name is a builtin,
+            // function, or keyword.
+            // Search the filesystem when any flag needs paths, or (for default
+            // output) only when the name isn't already a keyword/function/builtin.
+            let need_files =
+                mode_pp || mode_p || mode_a || mode_t || (!is_kw && !is_fn && !is_bi);
+            let files = if need_files {
+                self.find_all_in_path(name)
+            } else {
+                Vec::new()
             };
-            let _ = self.write_line(out, redir, &desc);
+            let found = is_kw || is_fn || is_bi || !files.is_empty();
+            if !found {
+                if !mode_t && !mode_p && !mode_pp {
+                    self.errln(&format!("osh: type: {name}: not found"));
+                }
+                status = 1;
+                continue;
+            }
+
+            if mode_pp {
+                // Force PATH search; print only file paths.
+                if files.is_empty() {
+                    status = 1;
+                } else if mode_a {
+                    for f in &files {
+                        let _ = self.write_line(out, redir, &f.to_string_lossy());
+                    }
+                } else {
+                    let _ = self.write_line(out, redir, &files[0].to_string_lossy());
+                }
+                continue;
+            }
+
+            if mode_t {
+                // Single type word (highest precedence): keyword > function >
+                // builtin > file.
+                let word = if is_kw {
+                    "keyword"
+                } else if is_fn {
+                    "function"
+                } else if is_bi {
+                    "builtin"
+                } else {
+                    "file"
+                };
+                let _ = self.write_line(out, redir, word);
+                continue;
+            }
+
+            if mode_p {
+                // Print the path only when the name would resolve to a file
+                // (i.e. it is not a keyword/function/builtin). With -a, print
+                // all file paths.
+                if is_kw || is_fn || is_bi {
+                    // Nothing to print, but the name is found ⇒ status stays 0.
+                } else if mode_a {
+                    for f in &files {
+                        let _ = self.write_line(out, redir, &f.to_string_lossy());
+                    }
+                } else if let Some(f) = files.first() {
+                    let _ = self.write_line(out, redir, &f.to_string_lossy());
+                }
+                continue;
+            }
+
+            // Default (verbose) output. Without -a, print the highest-precedence
+            // location only; with -a, print every location in precedence order.
+            if mode_a {
+                if is_kw {
+                    let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
+                }
+                if is_fn {
+                    let _ = self.write_line(out, redir, &format!("{name} is a function"));
+                }
+                if is_bi {
+                    let _ = self.write_line(out, redir, &format!("{name} is a shell builtin"));
+                }
+                for f in &files {
+                    let _ =
+                        self.write_line(out, redir, &format!("{name} is {}", f.to_string_lossy()));
+                }
+            } else {
+                let desc = if is_kw {
+                    format!("{name} is a shell keyword")
+                } else if is_fn {
+                    format!("{name} is a function")
+                } else if is_bi {
+                    format!("{name} is a shell builtin")
+                } else {
+                    format!("{name} is {}", files[0].to_string_lossy())
+                };
+                let _ = self.write_line(out, redir, &desc);
+            }
         }
         status
     }
@@ -5719,6 +5884,22 @@ mod tests {
         assert_eq!(run("read -d : x <<< 'foo:bar'; echo \"$x\"").0, "foo\n");
         // Delimiter found ⇒ status 0.
         assert_eq!(run("read -d : x <<< 'foo:bar'; echo $?").0, "0\n");
+    }
+
+    #[test]
+    fn type_word_classification() {
+        assert_eq!(run("type -t echo").0, "builtin\n");
+        assert_eq!(run("type -t if").0, "keyword\n");
+        assert_eq!(run("f() { :; }; type -t f").0, "function\n");
+        // Unknown name: -t prints nothing and reports status 1.
+        assert_eq!(run("type -t osh_no_such_cmd_xyz; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn type_default_descriptions() {
+        assert_eq!(run("type echo").0, "echo is a shell builtin\n");
+        assert_eq!(run("type while").0, "while is a shell keyword\n");
+        assert_eq!(run("g() { :; }; type g").0, "g is a function\n");
     }
 
     #[test]

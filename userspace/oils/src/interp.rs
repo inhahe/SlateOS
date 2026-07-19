@@ -6284,8 +6284,8 @@ fn format_printf_once(fmt: &str, args: &[String], arg_i: &mut usize) -> String {
 }
 
 /// Parse and render a single `%…` printf conversion. `chars` is positioned just
-/// after the `%`. Supports flags (`-+ #0`), width and precision (numeric only),
-/// and the conversions `% s d i u x X o c b q f e g E G`.
+/// after the `%`. Supports flags (`-+ #0`), width and precision (numeric or `*`
+/// dynamic from an argument), and the conversions `% s d i u x X o c b q f e g E G`.
 fn format_conversion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     args: &[String],
@@ -6313,30 +6313,57 @@ fn format_conversion(
         spec.push(c);
         chars.next();
     }
-    // Width.
+    // Width. A `*` takes the width from the next argument (bash: a negative
+    // dynamic width means left-justify with the absolute magnitude).
     let mut width = String::new();
-    while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() {
-            width.push(c);
-            chars.next();
-        } else {
-            break;
-        }
-    }
-    // Precision.
-    let mut prec: Option<String> = None;
-    if chars.peek() == Some(&'.') {
+    let mut star_left = false;
+    if chars.peek() == Some(&'*') {
         chars.next();
-        let mut p = String::new();
+        let raw = args.get(*arg_i).cloned().unwrap_or_default();
+        *arg_i += 1;
+        let n = parse_printf_int(&raw);
+        if n < 0 {
+            star_left = true;
+        }
+        width = n.unsigned_abs().to_string();
+    } else {
         while let Some(&c) = chars.peek() {
             if c.is_ascii_digit() {
-                p.push(c);
+                width.push(c);
                 chars.next();
             } else {
                 break;
             }
         }
-        prec = Some(p);
+    }
+    if star_left {
+        left = true;
+    }
+    // Precision. A `*` takes the precision from the next argument; a negative
+    // dynamic precision is treated as if no precision were given (bash/C).
+    let mut prec: Option<String> = None;
+    if chars.peek() == Some(&'.') {
+        chars.next();
+        if chars.peek() == Some(&'*') {
+            chars.next();
+            let raw = args.get(*arg_i).cloned().unwrap_or_default();
+            *arg_i += 1;
+            let n = parse_printf_int(&raw);
+            if n >= 0 {
+                prec = Some(n.to_string());
+            }
+        } else {
+            let mut p = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() {
+                    p.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            prec = Some(p);
+        }
     }
 
     let width_n: usize = width.parse().unwrap_or(0);
@@ -7401,6 +7428,20 @@ mod tests {
         assert_eq!(run("printf '%-5d|' 42").0, "42   |");
         assert_eq!(run("printf '%05d' 42").0, "00042");
         assert_eq!(run("printf '%.2s' abcd").0, "ab");
+    }
+
+    #[test]
+    fn printf_dynamic_width_and_precision() {
+        // `*` takes the field width from the next argument.
+        assert_eq!(run("printf '%*d' 5 42").0, "   42");
+        // `.*` takes the precision from the next argument.
+        assert_eq!(run("printf '%.*f' 2 3.14159").0, "3.14");
+        // Both dynamic in one conversion.
+        assert_eq!(run("printf '%*.*f' 8 2 3.14159").0, "    3.14");
+        // A negative dynamic width left-justifies with the absolute magnitude.
+        assert_eq!(run("printf '%*d|' -5 42").0, "42   |");
+        // `.*` on a string precision truncates.
+        assert_eq!(run("printf '%.*s' 2 abcd").0, "ab");
     }
 
     #[test]

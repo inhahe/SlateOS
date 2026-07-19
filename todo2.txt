@@ -1,8 +1,1 @@
-make sure you write about the new test harness in claude.md or something
-
-^ pending
-
-maybe you should create a program that can run a test in the background but with a timeout in the case of a hang or orphan (and/or constantly poll to see if the process is still running and return with a message if not)
-
-^ doing
-
+chrome's copying rtf to the clipboard is broken - random parts get left out (most of it), so chromium's might be too, something we might want to  fix

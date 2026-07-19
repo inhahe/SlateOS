@@ -5326,20 +5326,27 @@ impl Shell {
             all.sort();
             let mut listing = String::new();
             for name in all {
-                listing.push_str(&format!("declare -f {name}\n"));
+                if name_only {
+                    // `declare -F` — list each function as a `declare -f NAME` line.
+                    listing.push_str(&format!("declare -f {name}\n"));
+                } else if let Some(body) = self.funcs.get(name) {
+                    // `declare -f` — print every function's reconstructed source.
+                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                }
             }
             return self.write_bytes(out, redir, listing.as_bytes());
         }
         let mut listing = String::new();
         let mut status = 0;
         for name in names {
-            if self.funcs.contains_key(name) {
+            if let Some(body) = self.funcs.get(name) {
                 if name_only {
                     listing.push_str(name);
                     listing.push('\n');
+                } else {
+                    // `declare -f NAME` prints the function's reconstructed source.
+                    listing.push_str(&crate::unparse::unparse_function(name, body));
                 }
-                // `-f` body printing deferred (TD-OILS18): existence status is
-                // still reported correctly below.
             } else {
                 status = 1;
             }
@@ -5944,8 +5951,8 @@ impl Shell {
 
     fn builtin_set(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Bare `set` (no operands) lists every shell variable in sorted,
-        // re-inputtable `name=value` form (bash prints functions too; those are
-        // not yet included — see known-issues TD-OILS16).
+        // re-inputtable `name=value` form, followed by every function definition
+        // (matching bash, which prints functions after the variables).
         if args.is_empty() {
             let mut all: Vec<&String> = self
                 .vars
@@ -5960,6 +5967,13 @@ impl Shell {
                 if let Some(def) = self.format_var_assignment(name) {
                     listing.push_str(&def);
                     listing.push('\n');
+                }
+            }
+            let mut fns: Vec<&String> = self.funcs.keys().collect();
+            fns.sort();
+            for name in fns {
+                if let Some(body) = self.funcs.get(name) {
+                    listing.push_str(&crate::unparse::unparse_function(name, body));
                 }
             }
             return self.write_bytes(out, redir, listing.as_bytes());
@@ -6613,6 +6627,10 @@ impl Shell {
                 }
                 if is_fn {
                     let _ = self.write_line(out, redir, &format!("{name} is a function"));
+                    if let Some(body) = self.funcs.get(name) {
+                        let src = crate::unparse::unparse_function(name, body);
+                        let _ = self.write_bytes(out, redir, src.as_bytes());
+                    }
                 }
                 if is_bi {
                     let _ = self.write_line(out, redir, &format!("{name} is a shell builtin"));
@@ -6622,19 +6640,26 @@ impl Shell {
                         self.write_line(out, redir, &format!("{name} is {}", f.to_string_lossy()));
                 }
             } else {
-                let desc = if is_kw {
-                    format!("{name} is a shell keyword")
+                if is_kw {
+                    let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
                 } else if is_fn {
-                    format!("{name} is a function")
+                    // bash prints the "is a function" line followed by the
+                    // reconstructed function source.
+                    let _ = self.write_line(out, redir, &format!("{name} is a function"));
+                    if let Some(body) = self.funcs.get(name) {
+                        let src = crate::unparse::unparse_function(name, body);
+                        let _ = self.write_bytes(out, redir, src.as_bytes());
+                    }
                 } else if is_bi {
-                    format!("{name} is a shell builtin")
+                    let _ = self.write_line(out, redir, &format!("{name} is a shell builtin"));
                 } else if let Some((p, _)) = self.cmd_hash.get(name.as_str()) {
                     // A previously-run command is remembered in the hash table.
-                    format!("{name} is hashed ({})", p.to_string_lossy())
+                    let _ = self
+                        .write_line(out, redir, &format!("{name} is hashed ({})", p.to_string_lossy()));
                 } else {
-                    format!("{name} is {}", files[0].to_string_lossy())
-                };
-                let _ = self.write_line(out, redir, &desc);
+                    let _ =
+                        self.write_line(out, redir, &format!("{name} is {}", files[0].to_string_lossy()));
+                }
             }
         }
         status
@@ -9101,7 +9126,8 @@ mod tests {
     fn type_default_descriptions() {
         assert_eq!(run("type echo").0, "echo is a shell builtin\n");
         assert_eq!(run("type while").0, "while is a shell keyword\n");
-        assert_eq!(run("g() { :; }; type g").0, "g is a function\n");
+        // `type g` now prints the reconstructed function body after the header.
+        assert_eq!(run("g() { :; }; type g").0, "g is a function\ng () \n{\n    :\n}\n");
     }
 
     #[test]
@@ -11583,10 +11609,37 @@ mod tests {
 
     #[test]
     fn declare_small_f_existence_status() {
-        // `declare -f fn` returns 0 for an existing function (body not printed
-        // yet, TD-OILS18) and 1 otherwise.
+        // `declare -f fn` returns 0 for an existing function and 1 otherwise.
         assert_eq!(run("foo() { :; }; declare -f foo").1, 0);
         assert_eq!(run("declare -f nofunc").1, 1);
+    }
+
+    #[test]
+    fn declare_small_f_prints_body() {
+        // `declare -f fn` reconstructs the function's source.
+        let (o, s) = run("foo() { echo hi; }; declare -f foo");
+        assert_eq!(s, 0);
+        assert!(o.contains("foo () "), "declare -f output: {o:?}");
+        assert!(o.contains("echo hi"), "declare -f output: {o:?}");
+        // The dump re-parses and runs to the same effect.
+        let (o2, _) = run("foo() { echo hi; }; eval \"$(declare -f foo)\"; foo");
+        assert_eq!(o2, "hi\n");
+    }
+
+    #[test]
+    fn type_function_prints_body() {
+        // `type fn` prints the "is a function" line then the reconstructed source.
+        let (o, _) = run("foo() { echo hi; }; type foo");
+        assert!(o.contains("foo is a function"), "type output: {o:?}");
+        assert!(o.contains("echo hi"), "type output: {o:?}");
+    }
+
+    #[test]
+    fn bare_set_lists_functions() {
+        // Bare `set` prints functions after the variables.
+        let (o, _) = run("foo() { echo hi; }; set");
+        assert!(o.contains("foo () "), "set output: {o:?}");
+        assert!(o.contains("echo hi"), "set output: {o:?}");
     }
 
     #[test]

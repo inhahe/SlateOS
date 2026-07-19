@@ -470,20 +470,23 @@ process-level umask, ideally), (a) subtract `umask_val` from the mode when
 commands. On a `cfg(unix)` build this can already be wired via
 `std::os::unix::fs::OpenOptionsExt::mode(0o666 & !umask)`.
 
-### TD-OILS16. `osh` bare `set` lists variables but not function definitions — OPEN (minor fidelity gap)
+### TD-OILS16. `osh` bare `set` lists variables but not function definitions — RESOLVED 2026-07-19
 
-**Where:** `userspace/oils/src/interp.rs` (`builtin_set`, no-args branch).
+**Where:** `userspace/oils/src/interp.rs` (`builtin_set`, no-args branch);
+`userspace/oils/src/unparse.rs` (the AST source pretty-printer).
 
 **What:** bare `set` (no operands) lists every shell variable in sorted,
 re-inputtable `name=value` / `name=([i]="v" …)` form. Bash additionally prints
 each defined shell function's full source after the variables (e.g.
-`foo () { … }`). Our listing omits functions.
+`foo () { … }`). Our listing omitted functions.
 
-**Proper fix:** after the variable listing, iterate `self.funcs` in sorted order
-and emit each function body. This needs a faithful AST-to-source pretty-printer
-for `FunctionDef` bodies (which we do not yet have — `declare -f`/`type` render
-functions only loosely). When that pretty-printer exists, reuse it here and in
-`declare -f`. Low priority: `set`'s variable listing is the common use.
+**Resolution:** implemented a faithful AST-to-source pretty-printer,
+`unparse.rs` (`unparse_function`, `program_block`, `word_src`, …), that
+reconstructs re-parseable shell source from a `Program`/`FunctionDef` (round-trip
+tested: dump → re-parse → dump is stable). `builtin_set` now iterates
+`self.funcs` in sorted order after the variables and appends each function's
+reconstructed source via `unparse_function`. Shared with TD-OILS18 (`declare -f`)
+and the `type NAME` function branch. Regression test: `bare_set_lists_functions`.
 
 ### TD-OILS17. `osh` namerefs (`declare -n`): all originally-listed edge cases now match bash — RESOLVED 2026-07-18
 
@@ -524,28 +527,31 @@ entry is retained for history; nameref behavior now matches bash for the
 scalar, array-element, indirect-name, and `local`-scoping cases exercised by the
 `nameref_*` and `param_indirect_expansion` tests.
 
-### TD-OILS18. `osh` `declare -f` / `type funcname`: function *body* is not printed (only name/existence) — OPEN (needs AST source pretty-printer; shared with TD-OILS16)
+### TD-OILS18. `osh` `declare -f` / `type funcname`: function *body* is now printed — RESOLVED 2026-07-19
 
-**Where:** `userspace/oils/src/interp.rs` (`declare_functions`; also the `type`
-builtin's function branch and `set`'s no-args listing — TD-OILS16).
+**Where:** `userspace/oils/src/interp.rs` (`declare_functions`, the `type`
+builtin's function branch, and `builtin_set`'s no-args listing — TD-OILS16);
+`userspace/oils/src/unparse.rs` (the pretty-printer).
 
-**What:** `declare -F` fully lists/tests function names (bare `declare -F` →
-`declare -f NAME` per function; `declare -F name` → `name`, status 1 if absent).
-`declare -f name` reports the correct **existence status** (0 iff the name is a
-function) so idioms like `declare -f fn >/dev/null` work, but it does **not**
-print the function body. Likewise `type funcname` reports "is a function" but
-does not print the body, and bare `set`/`declare -f` (no name) do not emit
-bodies. All of these need a faithful `FunctionDef`-AST → shell-source
-pretty-printer, which does not exist yet (the AST carries no source spans, so
-the text must be reconstructed from the parsed tree).
+**What:** `declare -F` fully lists/tests function names, and `declare -f name`
+reports the correct existence status, but neither `declare -f` nor
+`type funcname` printed the function *body* — they needed a faithful
+`FunctionDef`-AST → shell-source pretty-printer, which the AST could not do
+directly (it carries no source spans, so the text must be reconstructed from the
+parsed tree).
 
-**Proper fix:** write an AST-to-source pretty-printer for `Program`/`Command`/
-`Word`/redirections, verified by a round-trip property test
-(`parse(print(f)) == f`, since the AST derives `PartialEq`). Then use it in
-`declare -f`, `type funcname`, and bare `set`'s function listing (closing
-TD-OILS16 too). Deferred because it is a sizeable standalone subsystem; the
-name-listing/existing-status behavior covers the common scripting idioms in the
-meantime.
+**Resolution:** added `unparse.rs`, an AST-to-source pretty-printer covering
+`Program`/`Command` (all compound forms), `Word`/`WordPart` (every parameter-
+expansion variant, command/arith substitution, arrays/slices/bulk ops),
+assignments, redirections, and `[[ … ]]`/`(( … ))` — verified by a round-trip
+stability property test (`parse(print(f))` re-prints identically; the AST derives
+`PartialEq`). It is now used by: bare `declare -f` and `declare -f NAME` (print
+each function's reconstructed source), `type NAME` (prints the "is a function"
+line then the source), and bare `set` (lists functions after variables, closing
+TD-OILS16). One deliberate simplification: here-documents are re-emitted as
+here-strings (`<<< …`) — same bytes to stdin, re-parseable. Regression tests:
+`declare_small_f_prints_body`, `type_function_prints_body`,
+`bare_set_lists_functions`, and the `unparse::tests` round-trip suite.
 
 ### TD-OILS19. `osh` alias expansion applies across `run_source` calls (input reads), not within a single parsed unit — OPEN (minor fidelity gap; interactive/REPL use unaffected)
 

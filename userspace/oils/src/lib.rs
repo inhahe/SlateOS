@@ -24,6 +24,7 @@ pub mod ere;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod unparse;
 
 pub use interp::Shell;
 pub use parser::parse;

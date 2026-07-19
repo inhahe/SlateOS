@@ -447,7 +447,7 @@ pub fn simple_src(sc: &SimpleCommand) -> String {
     s
 }
 
-fn assignment_src(a: &Assignment) -> String {
+pub(crate) fn assignment_src(a: &Assignment) -> String {
     let mut s = a.name.clone();
     if let Some(idx) = &a.index {
         s.push('[');

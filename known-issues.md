@@ -1437,6 +1437,38 @@ do **not** "fix" osh to emit 127. This joins the other known MSYS host-probe
 false positives (C-locale UTF-8 `$'\uXXXX'`, Windows path/OS-error text, `/tmp`
 path-root, signal-number table, BASH_VERSINFO/BASHPID).
 
+### TD-OILS-XTRACE. `set -x` tracing: no compound-command headers, no nested command-substitution trace, no `PS4` parameter expansion — PARTIAL 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — the `set -x` trace block in
+`exec_simple` (after the readonly-prefix guard), `apply_assignment` (bare-
+assignment tracing), `xtrace_prefix`, and `xtrace_quote`.
+
+**Status (2026-07-19):** simple-command and bare-assignment tracing now match
+bash byte-for-byte: plain scalars trace their *expanded* value (minimally
+single-quoted, empty shown unquoted), indexed-element/array assignments trace in
+*source* form, temporary prefix assignments (`FOO=bar cmd`) each trace on their
+own line before the command, command arguments are minimally quoted, and the
+`PS4` variable overrides the default `+ ` prefix (with prompt-style backslash
+escapes). Still **missing** relative to bash:
+
+- **Compound-command headers.** bash traces a `for`/`while`/`if`/`case`/`select`
+  header line (e.g. `+ for i in 1 2`) once per evaluation, plus the condition of
+  `[[ … ]]`/`(( … ))`. `osh` only traces the simple commands in the body, so
+  `set -x; for i in 1 2; do echo $i; done` omits the `+ for i in 1 2` lines.
+  Proper fix: emit a trace line at each compound-command dispatch site
+  (`exec_for`/`exec_loop`/`exec_if`/`exec_case`/`exec_select` and the `[[`/`((`
+  paths), reconstructing the header via the `unparse` module.
+- **Nested command-substitution trace.** bash raises the PS4 indirection level
+  and traces commands run inside `$(…)` with a doubled first char
+  (`++ echo hi`). `osh` does not trace inside command substitution.
+- **`PS4` parameter/arithmetic expansion.** `xtrace_prefix` runs `PS4` through
+  `prompt_expand` (backslash escapes only). bash also performs parameter,
+  arithmetic, and command expansion on `PS4`, so `PS4='+ $LINENO '` is not
+  expanded here.
+
+None of these affect the common `set -x` cases; they are logged so a future
+probe recognising a `for`/`$( )`-header trace DIFF knows it is this gap.
+
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the

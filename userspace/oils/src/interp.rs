@@ -2143,7 +2143,12 @@ impl Shell {
         }
     }
 
-    fn apply_assignment(&mut self, a: &Assignment) -> bool {
+    /// Apply a variable assignment. `trace` is true only for a *bare* assignment
+    /// command (`x=5`), which `set -x` echoes: an indexed-element or array
+    /// assignment is traced here in source form (bash does not expand it for the
+    /// trace), while a plain scalar's trace is emitted at the store site below so
+    /// the RHS is expanded exactly once.
+    fn apply_assignment(&mut self, a: &Assignment, trace: bool) -> bool {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
@@ -2162,7 +2167,16 @@ impl Shell {
             } else {
                 a2.name = target;
             }
-            return self.apply_assignment(&a2);
+            return self.apply_assignment(&a2, trace);
+        }
+        // `set -x`: a plain scalar assignment is traced with its *expanded* value
+        // (emitted at the scalar store below); everything else (indexed element,
+        // array literal) is traced now in source form.
+        let trace_scalar =
+            trace && self.xtrace && a.index.is_none() && matches!(a.value, AssignRhs::Scalar(_));
+        if trace && self.xtrace && !trace_scalar {
+            let prefix = self.xtrace_prefix();
+            self.emit_stderr(format!("{prefix}{}\n", crate::unparse::assignment_src(a)).as_bytes());
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
@@ -2178,6 +2192,15 @@ impl Shell {
         match &a.value {
             AssignRhs::Scalar(w) => {
                 let val = self.expand_assignment_value(w);
+                // `set -x` trace for a plain scalar (`x=…`/`x+=…`): the expanded
+                // RHS, minimally quoted, emitted once here so no re-expansion.
+                if trace_scalar {
+                    let prefix = self.xtrace_prefix();
+                    let op = if a.append { "+=" } else { "=" };
+                    self.emit_stderr(
+                        format!("{prefix}{}{op}{}\n", a.name, xtrace_quote(&val)).as_bytes(),
+                    );
+                }
                 // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
                 // elapsed-seconds counter. Both are dynamic and not stored in
                 // `vars` (reads go through `param_value`'s special arms).
@@ -2763,6 +2786,18 @@ impl Shell {
         Self::transform_value(&value, op)
     }
 
+    /// The `set -x` trace-line prefix. bash uses `PS4` (default `+ `), with
+    /// prompt-style backslash escapes expanded; its first character is repeated
+    /// once per level of expansion indirection (we only trace at the top level,
+    /// so it appears once). An unset `PS4` yields the default `+ `; an
+    /// explicitly empty `PS4` yields no prefix. Parameter/arithmetic expansion
+    /// inside `PS4` (e.g. `PS4='+ $LINENO '`) is not modelled — see
+    /// known-issues TD-OILS-XTRACE.
+    fn xtrace_prefix(&self) -> String {
+        let ps4 = self.vars.get("PS4").map_or_else(|| "+ ".to_string(), Clone::clone);
+        self.prompt_expand(&ps4)
+    }
+
     /// `${var@P}` — expand `var`'s value as a prompt string, interpreting the
     /// bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`, `\D{fmt}`,
     /// …). Backslash escapes not recognised keep the backslash and following
@@ -3194,7 +3229,7 @@ impl Shell {
             let comsub_before = self.comsub_count;
             let mut ok = true;
             for a in &sc.assignments {
-                if !self.apply_assignment(a) {
+                if !self.apply_assignment(a, true) {
                     ok = false;
                 }
             }
@@ -3223,15 +3258,6 @@ impl Shell {
             // Otherwise `command_sub` already left the last substitution's status
             // in `self.last_status`.
             return Flow::Next;
-        }
-
-        // `set -x`: trace the command (prefixed with PS4's default `+ `) to
-        // stderr before running it.
-        if self.xtrace {
-            let mut line = String::from("+ ");
-            line.push_str(&argv.join(" "));
-            line.push('\n');
-            self.emit_stderr(line.as_bytes());
         }
 
         // Command present: build scalar env prefixes (`FOO=bar cmd`). Array and
@@ -3279,6 +3305,25 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
+        }
+
+        // `set -x`: trace the command before running it. bash emits each temporary
+        // prefix assignment (`FOO=bar cmd`) on its own line first, then the
+        // command with each argument minimally quoted, all behind the PS4 prefix.
+        if self.xtrace {
+            let prefix = self.xtrace_prefix();
+            for (k, v) in &assigns {
+                self.emit_stderr(format!("{prefix}{k}={}\n", xtrace_quote(v)).as_bytes());
+            }
+            let mut line = prefix;
+            for (i, a) in argv.iter().enumerate() {
+                if i > 0 {
+                    line.push(' ');
+                }
+                line.push_str(&xtrace_quote(a));
+            }
+            line.push('\n');
+            self.emit_stderr(line.as_bytes());
         }
 
         // A redirection-only `exec` (`exec > file`, `exec 3>&1 1>&2 2>&3`,
@@ -8191,7 +8236,9 @@ impl Shell {
             }
             // Default (no flag): an array literal makes an indexed array — which
             // `apply_assignment` already does for a name absent from `assoc`.
-            self.apply_assignment(a);
+            // `trace = false`: the `declare`/`local` command itself is traced via
+            // the command path, so the inner assignment must not trace again.
+            self.apply_assignment(a, false);
             // `readonly` is applied *after* the value is bound (a readonly guard
             // in `apply_assignment` would otherwise reject the initializer).
             if readonly {
@@ -11227,6 +11274,30 @@ fn decode_escape(
         }
     }
     false
+}
+
+/// Minimal shell-quoting as used by `set -x` traces: a value made only of
+/// "safe" characters (including the empty string) is emitted verbatim; anything
+/// else is wrapped in single quotes, with embedded single quotes rendered as
+/// `'\''`. This matches bash's xtrace output (`x=5`, `x='a b'`, `x=` for empty)
+/// — distinct from `@Q`/`shell_quote` (which always quotes) and `%q` (which
+/// backslash-escapes).
+fn xtrace_quote(s: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if s.chars().all(safe) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion.
@@ -17337,6 +17408,30 @@ mod tests {
         assert!(o.contains("status=0"), "output: {o:?}");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "two\n");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn xtrace_traces_assignments_and_commands() {
+        // A plain scalar traces its expanded value, minimally single-quoted.
+        assert_eq!(run("{ set -x; x=5; } 2>&1").0, "+ x=5\n");
+        assert_eq!(run("{ y=hi; set -x; x=\"$y z\"; } 2>&1").0, "+ x='hi z'\n");
+        // An empty value is shown unquoted (bash: `+ x=`).
+        assert_eq!(run("{ set -x; x=; } 2>&1").0, "+ x=\n");
+        // Append keeps the `+=` operator with the RHS value.
+        assert_eq!(run("{ x=1; set -x; x+=2; } 2>&1").0, "+ x+=2\n");
+        // Array and indexed-element assignments trace in source form (bash does
+        // not expand them for the trace).
+        assert_eq!(run("{ set -x; a=(1 2 3); } 2>&1").0, "+ a=(1 2 3)\n");
+        assert_eq!(run("{ declare -a x; set -x; x[1+1]=v; } 2>&1").0, "+ x[1+1]=v\n");
+        // Command arguments are minimally quoted behind the default `+ ` prefix.
+        // (`true` is used so the trace is the only output — the harness buffers
+        // stdout and the redirected stderr separately, so mixing them would make
+        // ordering harness-dependent.)
+        assert_eq!(run("{ set -x; true 'a b' c; } 2>&1").0, "+ true 'a b' c\n");
+        // A temporary prefix assignment traces on its own line first.
+        assert_eq!(run("{ set -x; x=5 true; } 2>&1").0, "+ x=5\n+ true\n");
+        // `PS4` overrides the trace prefix.
+        assert_eq!(run("{ PS4='TRACE '; set -x; x=5; } 2>&1").0, "TRACE x=5\n");
     }
 
     #[test]

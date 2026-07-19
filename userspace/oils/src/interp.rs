@@ -5378,6 +5378,9 @@ impl Shell {
         // Nameref attribute: `-n` sets it, `+n` removes it.
         let mut nameref = false;
         let mut unset_nameref = false;
+        // `-g`: force global scope even inside a function (bash: `declare`
+        // inside a function otherwise creates a *local*, like `local`).
+        let mut global = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
@@ -5411,7 +5414,8 @@ impl Shell {
                                 unset_nameref = true;
                             }
                         }
-                        _ => {} // -g/-p: accepted, no effect here.
+                        'g' => global = enable,
+                        _ => {} // -p: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -5419,6 +5423,11 @@ impl Shell {
                 break;
             }
         }
+        // Inside a function, `declare` (and `typeset`) create locals by default,
+        // exactly like `local`; `declare -g` opts back out to global scope. The
+        // `local` builtin is always local. Outside a function everything is
+        // global regardless.
+        let make_local = is_local || (!global && !self.local_frames.is_empty());
         let mut status = 0;
         for name_val in &args[i..] {
             let (name, value) = match name_val.find('=') {
@@ -5434,8 +5443,9 @@ impl Shell {
                 status = 1;
                 continue;
             }
-            // `local` shadows the name (snapshot + clear) before (re)binding it.
-            if is_local {
+            // Shadow the name (snapshot + clear) before (re)binding it when this
+            // declaration is function-local.
+            if make_local {
                 self.declare_local(name);
             }
             if assoc {
@@ -5517,9 +5527,11 @@ impl Shell {
             self.last_status = 1;
             return Flow::Next;
         }
-        // Determine the array kind from the leading dashed flags.
+        // Determine the array kind (and whether `-g` forces global) from the
+        // leading dashed flags.
         let mut assoc = false;
         let mut indexed = false;
+        let mut global = false;
         for arg in &argv[1..] {
             let Some(flags) = arg.strip_prefix('-') else {
                 break; // first non-flag operand — flags are done
@@ -5531,17 +5543,22 @@ impl Shell {
                 match c {
                     'A' => assoc = true,
                     'a' => indexed = true,
+                    'g' => global = true,
                     _ => {}
                 }
             }
         }
+        // As with scalar `declare`, an array declaration inside a function is
+        // local by default unless `-g` was given.
+        let make_local = is_local || (!global && !self.local_frames.is_empty());
         // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`).
         let status = self.builtin_declare(&argv[1..], is_local);
         // Mark each array name's kind before applying, so `apply_assignment`
         // routes the literal to the associative or indexed store correctly.
         for a in decl_arrays {
-            // `local a=(…)` shadows the name in the current function frame first.
-            if is_local {
+            // A function-local array declaration shadows the name in the current
+            // frame first.
+            if make_local {
                 self.declare_local(&a.name);
             }
             if assoc {
@@ -9434,6 +9451,42 @@ mod tests {
         assert_eq!(run("echo [${FUNCNAME[@]}]").0, "[]\n");
         // Restored after the function returns.
         assert_eq!(run("f() { :; }; f; echo [$FUNCNAME]").0, "[]\n");
+    }
+
+    #[test]
+    fn declare_in_function_is_local_by_default() {
+        // Bash: `declare x=…` inside a function creates a *local*, so the global
+        // is untouched after the function returns.
+        let src = "x=outer; f() { declare x=inner; echo $x; }; f; echo $x";
+        assert_eq!(run(src).0, "inner\nouter\n");
+    }
+
+    #[test]
+    fn declare_g_forces_global_from_function() {
+        // `declare -g` opts back out to global scope even inside a function.
+        let src = "x=outer; f() { declare -g x=global; }; f; echo $x";
+        assert_eq!(run(src).0, "global\n");
+    }
+
+    #[test]
+    fn declare_g_array_forces_global_from_function() {
+        // The array one-liner honors `-g` too.
+        let src = "f() { declare -g -a a=(1 2 3); }; f; echo \"${a[@]}\"";
+        assert_eq!(run(src).0, "1 2 3\n");
+    }
+
+    #[test]
+    fn declare_array_in_function_is_local_by_default() {
+        // Without `-g`, an array declaration inside a function is local.
+        let src = "a=(g1 g2); f() { declare -a a=(l1 l2); echo \"${a[@]}\"; }; f; \
+                   echo \"${a[@]}\"";
+        assert_eq!(run(src).0, "l1 l2\ng1 g2\n");
+    }
+
+    #[test]
+    fn declare_g_outside_function_is_plain_global() {
+        // `-g` at global scope is a harmless no-op.
+        assert_eq!(run("declare -g x=5; echo $x").0, "5\n");
     }
 
     #[test]

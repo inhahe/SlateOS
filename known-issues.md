@@ -458,6 +458,21 @@ process-level umask, ideally), (a) subtract `umask_val` from the mode when
 commands. On a `cfg(unix)` build this can already be wired via
 `std::os::unix::fs::OpenOptionsExt::mode(0o666 & !umask)`.
 
+### TD-OILS16. `osh` bare `set` lists variables but not function definitions — OPEN (minor fidelity gap)
+
+**Where:** `userspace/oils/src/interp.rs` (`builtin_set`, no-args branch).
+
+**What:** bare `set` (no operands) lists every shell variable in sorted,
+re-inputtable `name=value` / `name=([i]="v" …)` form. Bash additionally prints
+each defined shell function's full source after the variables (e.g.
+`foo () { … }`). Our listing omits functions.
+
+**Proper fix:** after the variable listing, iterate `self.funcs` in sorted order
+and emit each function body. This needs a faithful AST-to-source pretty-printer
+for `FunctionDef` bodies (which we do not yet have — `declare -f`/`type` render
+functions only loosely). When that pretty-printer exists, reuse it here and in
+`declare -f`. Low priority: `set`'s variable listing is the common use.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

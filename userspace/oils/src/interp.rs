@@ -4113,13 +4113,35 @@ impl Shell {
             }
             if s.is_empty() { "--".to_string() } else { format!("-{s}") }
         };
+        if self.assoc.contains_key(name) {
+            return self
+                .format_var_assignment(name)
+                .map(|body| format!("declare {} {body}", attr("A")));
+        }
+        if self.arrays.contains_key(name) {
+            return self
+                .format_var_assignment(name)
+                .map(|body| format!("declare {} {body}", attr("a")));
+        }
+        if self.vars.contains_key(name) {
+            return self
+                .format_var_assignment(name)
+                .map(|body| format!("declare {} {body}", attr("")));
+        }
+        None
+    }
+
+    /// Format a variable as a re-inputtable `name=value` / `name=([i]="v" …)`
+    /// assignment (no `declare` prefix or attribute flags), or `None` if unset.
+    /// Shared by `declare -p` and the bare `set` variable listing.
+    fn format_var_assignment(&self, name: &str) -> Option<String> {
         if let Some(map) = self.assoc.get(name) {
             let body = map
                 .iter()
                 .map(|(k, v)| format!("[{k}]={}", quote_declare_value(v)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            return Some(format!("declare {} {name}=({body})", attr("A")));
+            return Some(format!("{name}=({body})"));
         }
         if let Some(arr) = self.arrays.get(name) {
             let body = arr
@@ -4127,10 +4149,10 @@ impl Shell {
                 .map(|(i, v)| format!("[{i}]={}", quote_declare_value(v)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            return Some(format!("declare {} {name}=({body})", attr("a")));
+            return Some(format!("{name}=({body})"));
         }
         if let Some(v) = self.vars.get(name) {
-            return Some(format!("declare {} {name}={}", attr(""), quote_declare_value(v)));
+            return Some(format!("{name}={}", quote_declare_value(v)));
         }
         None
     }
@@ -4529,6 +4551,27 @@ impl Shell {
     }
 
     fn builtin_set(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Bare `set` (no operands) lists every shell variable in sorted,
+        // re-inputtable `name=value` form (bash prints functions too; those are
+        // not yet included — see known-issues TD-OILS16).
+        if args.is_empty() {
+            let mut all: Vec<&String> = self
+                .vars
+                .keys()
+                .chain(self.arrays.keys())
+                .chain(self.assoc.keys())
+                .collect();
+            all.sort();
+            all.dedup();
+            let mut listing = String::new();
+            for name in all {
+                if let Some(def) = self.format_var_assignment(name) {
+                    listing.push_str(&def);
+                    listing.push('\n');
+                }
+            }
+            return self.write_bytes(out, redir, listing.as_bytes());
+        }
         // Handle option flags (`-e`/`-u`/`-x`/… as clusters, `-o name`) and, on
         // the first non-option operand, reset the positional parameters. `--`
         // ends option processing; a bare `-`/`+` is ignored.
@@ -9611,6 +9654,20 @@ mod tests {
         assert_eq!(run("set -x; set +x; [[ -o xtrace ]] && echo x || echo off").0, "off\n");
         // Unknown option names are reported disabled (bash returns false).
         assert_eq!(run("[[ -o bogus ]] && echo on || echo off").0, "off\n");
+    }
+
+    #[test]
+    fn set_no_args_lists_variables() {
+        // Bare `set` lists shell variables in sorted, re-inputtable form.
+        let (o, s) = run("zebra=1; apple=2; arr=(x y); set");
+        assert_eq!(s, 0);
+        assert!(o.contains("apple=\"2\"\n"), "got {o:?}");
+        assert!(o.contains("zebra=\"1\"\n"), "got {o:?}");
+        assert!(o.contains("arr=([0]=\"x\" [1]=\"y\")\n"), "got {o:?}");
+        // Sorted: apple must appear before zebra.
+        let ai = o.find("apple=").expect("apple");
+        let zi = o.find("zebra=").expect("zebra");
+        assert!(ai < zi, "expected sorted output, got {o:?}");
     }
 
     #[test]

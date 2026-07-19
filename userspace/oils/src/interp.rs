@@ -4049,7 +4049,16 @@ impl Shell {
         // stdin — a here-doc/here-string body takes precedence, then a file
         // redirect, then the inherited pipeline input.
         let mut input_bytes: Option<Vec<u8>> = None;
-        if let Some(data) = &redir.stdin_data {
+        if let Some(n) = redir.stdin_from_fd {
+            // `cmd <&N`: feed the child the source cursor's remaining bytes,
+            // advancing it (a close approximation of a shared-offset dup).
+            let mut rest = Vec::new();
+            if let Some(cur) = self.input_fd_cursor(n) {
+                let _ = cur.borrow_mut().read_to_end(&mut rest);
+            }
+            input_bytes = Some(rest);
+            cmd.stdin(Stdio::piped());
+        } else if let Some(data) = &redir.stdin_data {
             input_bytes = Some(data.clone());
             cmd.stdin(Stdio::piped());
         } else {
@@ -4594,8 +4603,58 @@ impl Shell {
                     return Err(format!("{target}: ambiguous redirect"));
                 }
             }
+            RedirectOp::DupIn => {
+                let target = self.expand_to_string(&r.target);
+                if target == "-" {
+                    // `N<&-`: close the input descriptor.
+                    if fd == 0 {
+                        self.exec_stdin = None;
+                    } else {
+                        self.open_fds.remove(&fd);
+                        self.open_write_fds.remove(&fd);
+                    }
+                } else if let Ok(n) = target.parse::<i32>() {
+                    // `M<&N`: fd M becomes a dup of input fd N's *current* source.
+                    // Our fd sources are byte cursors, so a dup is modelled by
+                    // cloning the source cursor (data + offset) — an independent
+                    // offset, the same approximation used when cloning
+                    // `exec_stdin` into subshells.
+                    let cloned = self.clone_input_fd(n)?;
+                    if fd == 0 {
+                        self.exec_stdin = Some(cloned);
+                    } else {
+                        self.open_fds.insert(fd, cloned);
+                        self.open_write_fds.remove(&fd);
+                    }
+                } else {
+                    return Err(format!("{target}: ambiguous redirect"));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Clone input fd `n`'s current byte cursor for an input dup (`M<&N`). fd 0
+    /// resolves to `exec_stdin` (falling back to an empty stream), fds ≥ 3 to
+    /// the `open_fds` table. An unbound descriptor is a "Bad file descriptor".
+    fn clone_input_fd(&self, n: i32) -> Result<RefCell<io::Cursor<Vec<u8>>>, String> {
+        let cur = if n == 0 {
+            self.exec_stdin.as_ref()
+        } else {
+            self.open_fds.get(&n)
+        };
+        match cur {
+            Some(c) => {
+                let borrowed = c.borrow();
+                let mut clone = io::Cursor::new(borrowed.get_ref().clone());
+                clone.set_position(borrowed.position());
+                Ok(RefCell::new(clone))
+            }
+            // fd 0 with no bound stdin: treat as an empty input stream so a dup
+            // of it does not error (bash's stdin would be the terminal).
+            None if n == 0 => Ok(RefCell::new(io::Cursor::new(Vec::new()))),
+            None => Err(format!("{n}: Bad file descriptor")),
+        }
     }
 
     fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, String> {
@@ -4777,6 +4836,40 @@ impl Shell {
                             plan.stdout = None;
                             plan.stdout_to_stderr = false;
                         }
+                    }
+                }
+                RedirectOp::DupIn => {
+                    // `M<&N` — duplicate an *input* descriptor. `read <&3`,
+                    // `cat <&$r`. The dup shares the source cursor's offset (see
+                    // `stdin_from_fd`), matching bash. A `<&-` closes; a
+                    // non-numeric expansion is an ambiguous redirect.
+                    let target = self.expand_to_string(&r.target);
+                    if target == "-" {
+                        if fd >= 3 {
+                            // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
+                            plan.extra_fds.push((fd, ExtraFdOp::Close));
+                        }
+                        // `0<&-` (close stdin) on a non-exec command is a rare
+                        // corner not modelled here (documented limitation).
+                    } else if let Ok(n) = target.parse::<i32>() {
+                        if fd == 0 && n >= 3 {
+                            // fd 0 reads from input descriptor N's shared cursor.
+                            // An unbound source fd fails the whole redirect (bash:
+                            // "N: Bad file descriptor"), rather than silent EOF.
+                            if !self.open_fds.contains_key(&n) {
+                                return Err(format!("{n}: Bad file descriptor"));
+                            }
+                            plan.stdin_from_fd = Some(n);
+                            plan.stdin = None;
+                            plan.stdin_data = None;
+                        }
+                        // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the
+                        // ambient stdin — a dup of fd 0 onto itself is a no-op, so
+                        // the command reads from the inherited pipe/terminal/cursor
+                        // unchanged. `exec 5<&3` (fd ≥ 3 input alias) is only
+                        // meaningful for `exec`, which walks the raw redirects.
+                    } else {
+                        return Err(format!("{target}: ambiguous redirect"));
                     }
                 }
             }
@@ -9411,6 +9504,13 @@ impl Shell {
     /// redirect, pipeline cursor/pipe, or inherited stdin) to end-of-input.
     fn read_all_bytes(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Vec<u8> {
         use io::Read;
+        if let Some(n) = redir.stdin_from_fd {
+            let mut buf = Vec::new();
+            if let Some(c) = self.input_fd_cursor(n) {
+                let _ = c.borrow_mut().read_to_end(&mut buf);
+            }
+            return buf;
+        }
         if let Some(data) = &redir.stdin_data {
             return data.clone();
         }
@@ -10245,7 +10345,24 @@ impl Shell {
         }
     }
 
+    /// Resolve the byte cursor backing an input descriptor for a `<&N` dup:
+    /// `exec_stdin` for fd 0, the `open_fds` table for fd ≥ 3. `None` when the
+    /// descriptor is not bound (read yields immediate EOF, as bash does for a
+    /// closed source).
+    fn input_fd_cursor(&self, n: i32) -> Option<&RefCell<io::Cursor<Vec<u8>>>> {
+        if n == 0 {
+            self.exec_stdin.as_ref()
+        } else {
+            self.open_fds.get(&n)
+        }
+    }
+
     fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(String, bool)> {
+        if let Some(n) = redir.stdin_from_fd {
+            // `read <&N`: read from and advance descriptor N's shared cursor.
+            let c = self.input_fd_cursor(n)?;
+            return read_one_line(&mut *c.borrow_mut());
+        }
         if let Some(data) = &redir.stdin_data {
             // Here-doc/here-string: read the first line. (Multi-line `read`
             // loops over here-docs require compound-command redirects, which are
@@ -10297,6 +10414,10 @@ impl Shell {
         nchars: Option<usize>,
         exact: bool,
     ) -> Option<(String, bool)> {
+        if let Some(n) = redir.stdin_from_fd {
+            let c = self.input_fd_cursor(n)?;
+            return read_record(&mut *c.borrow_mut(), delim, nchars, exact);
+        }
         if let Some(data) = &redir.stdin_data {
             let mut r = io::BufReader::new(&data[..]);
             return read_record(&mut r, delim, nchars, exact);
@@ -10372,6 +10493,11 @@ struct RedirPlan {
     /// In-memory stdin bytes from a here-document / here-string (takes
     /// precedence over `stdin` and the inherited pipeline input).
     stdin_data: Option<Vec<u8>>,
+    /// `<&N` — fd 0 is duplicated from input descriptor N (`read <&3`,
+    /// `cat <&$r`). The command reads from — and advances — the shared cursor
+    /// in [`Shell::open_fds`] (or [`Shell::exec_stdin`] for N == 0), matching
+    /// bash's shared-offset dup. Takes precedence over `stdin` / `stdin_data`.
+    stdin_from_fd: Option<i32>,
     stdout: Option<(String, bool)>,
     stderr: Option<(String, bool)>,
     /// `2>&1` — fd 2 follows fd 1 (stderr goes wherever stdout currently goes).
@@ -10405,6 +10531,7 @@ impl RedirPlan {
     fn needs_scope(&self) -> bool {
         self.stdin.is_some()
             || self.stdin_data.is_some()
+            || self.stdin_from_fd.is_some()
             || self.stdout.is_some()
             || self.stderr.is_some()
             || self.stderr_to_stdout
@@ -11821,7 +11948,7 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
 /// rather than allocating a new descriptor, so it must be distinguished from
 /// the open forms (`{v}>file`, `{v}>&N`, …) which bind a fresh persistent fd.
 fn redir_is_close(r: &Redirect) -> bool {
-    matches!(r.op, RedirectOp::DupOut)
+    matches!(r.op, RedirectOp::DupOut | RedirectOp::DupIn)
         && matches!(r.target.parts.as_slice(), [WordPart::Literal(s)] if s == "-")
 }
 
@@ -18235,6 +18362,72 @@ mod tests {
         // redirect (an error), not a file.
         let (_o, s) = run("f=out.txt; echo hi 2>&$f");
         assert_eq!(s, 1);
+    }
+
+    /// Write `input` to a temp file, substitute its path for `{FILE}` in
+    /// `src_tmpl`, run the script capturing stdout, and return `(stdout, status)`.
+    /// Used by the input-fd-dup (`<&N`) tests.
+    fn run_input_redirect(input: &str, src_tmpl: &str) -> (String, i32) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_in_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, input).expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = src_tmpl.replace("{FILE}", &p);
+        let mut sh = Shell::new();
+        let mut buf = Vec::new();
+        let prog = parse(&src).expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        let _ = std::fs::remove_file(&path);
+        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn input_dup_reads_and_shares_offset() {
+        // `read a <&3; read b <&3`: the input dup shares fd 3's offset, so the
+        // two reads yield successive lines (regression: `<&3` used to be routed
+        // as an *output* dup, mis-handling — and hanging — the input case).
+        let (o, s) =
+            run_input_redirect("L1\nL2\nL3\n", "exec 3<\"{FILE}\"\nread a <&3\nread b <&3\necho \"$a-$b\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "L1-L2\n");
+    }
+
+    #[test]
+    fn input_dup_from_varfd_roundtrip() {
+        // `exec {r}<file; read <&$r`: a varfd-allocated input descriptor can be
+        // duplicated onto fd 0 for a plain `read`.
+        let (o, s) = run_input_redirect(
+            "first\nsecond\n",
+            "exec {r}<\"{FILE}\"\nread a <&$r\nread b <&$r\necho \"$a|$b|r=$r\"",
+        );
+        assert_eq!(s, 0);
+        assert_eq!(o, "first|second|r=10\n");
+    }
+
+    #[test]
+    fn input_dup_unbound_fd_is_bad_descriptor() {
+        // `read <&9` with fd 9 unbound fails the redirect (status 1), matching
+        // bash's "Bad file descriptor" rather than silently reading EOF.
+        let (_o, s) = run("read x <&9");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn input_dup_of_fd0_is_noop() {
+        // `<&0` duplicates fd 0 onto itself — a no-op that leaves the ambient
+        // stdin (here a here-string) intact.
+        let (o, s) = run_input_redirect("payload\n", "read x <\"{FILE}\" <&0; echo \"[$x]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[payload]\n");
     }
 
     #[test]

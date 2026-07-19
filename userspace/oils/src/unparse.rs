@@ -485,6 +485,7 @@ fn redirect_src(r: &Redirect) -> String {
             RedirectOp::Append => ">>",
             RedirectOp::Read => "<",
             RedirectOp::DupOut => ">&",
+            RedirectOp::DupIn => "<&",
             // `{name}` never pairs with here-docs / `&>`; fall back to the plain
             // form for those (unreachable in practice).
             _ => return redirect_src_plain(r),
@@ -503,6 +504,9 @@ fn redirect_src_plain(r: &Redirect) -> String {
         RedirectOp::AppendBoth => format!("&>>{}", word_src(&r.target)),
         RedirectOp::Read => fd_prefixed(r.fd, 0, "<", &word_src(&r.target)),
         RedirectOp::DupOut => fd_prefixed(r.fd, 1, ">&", &word_src(&r.target)),
+        // bash always renders an input dup with its explicit source fd
+        // (`0<&3`, never `<&3`), so pass a default that never elides it.
+        RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", &word_src(&r.target)),
         // Here-docs are re-emitted as here-strings (same bytes to stdin); a
         // here-string is likewise `<<<`. See the module docs / TD-OILS16.
         RedirectOp::HereDoc | RedirectOp::HereStr => {
@@ -879,6 +883,17 @@ mod tests {
         assert!(d.contains("local n=5"), "dump: {d:?}");
         assert!(d.contains(">out.txt"), "dump: {d:?}");
         assert!(d.contains("2>&1"), "dump: {d:?}");
+    }
+
+    #[test]
+    fn input_dup_renders_with_explicit_source_fd() {
+        // `<&N` (input dup) must render with its direction preserved and the
+        // explicit fd `0` shown (`0<&3`), matching bash — not as an output dup
+        // `>&3`. Regression: `<&`/`>&` used to collapse to one op.
+        let d = dump_fn("r() { read x <&3; cat <&4; }", "r");
+        assert!(d.contains("read x 0<&3"), "dump: {d:?}");
+        assert!(d.contains("cat 0<&4"), "dump: {d:?}");
+        assert!(!d.contains(">&3"), "input dup rendered as output dup: {d:?}");
     }
 
     #[test]

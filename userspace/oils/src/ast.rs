@@ -605,8 +605,13 @@ pub enum RedirectOp {
     AppendBoth,
     /// `< file` — read.
     Read,
-    /// `n>&m` — duplicate an fd (target parsed as the target fd number).
+    /// `n>&m` — duplicate an output fd (target parsed as the target fd number).
     DupOut,
+    /// `n<&m` — duplicate an input fd (target parsed as the source fd number).
+    /// Distinct from `DupOut` so the redirection direction (input vs output) is
+    /// preserved through the AST — `<&` defaults to fd 0, `>&` to fd 1, and the
+    /// executor routes an input dup to the command's stdin rather than stdout.
+    DupIn,
     /// `<< delim` (or `<<-`) — here-document. The redirect's `target` word holds
     /// the already expansion-lowered body content; a quoted delimiter yields a
     /// single literal part (no expansion).

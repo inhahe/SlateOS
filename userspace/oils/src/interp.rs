@@ -199,6 +199,10 @@ struct Job {
     cmd: String,
     /// Final exit status once the process has finished and been reaped.
     status: Option<i32>,
+    /// Set by `disown -h`: the job stays in the table but is marked so it
+    /// would not receive SIGHUP when the shell exits. (We have no SIGHUP
+    /// delivery yet, so this is advisory bookkeeping matching bash semantics.)
+    no_hup: bool,
 }
 
 /// The shell interpreter and its mutable session state.
@@ -3211,6 +3215,7 @@ impl Shell {
                             child: Some(child),
                             cmd: argv.join(" "),
                             status: None,
+                            no_hup: false,
                         });
                         self.last_bg_pid = Some(pid);
                         self.last_status = 0;
@@ -3906,6 +3911,7 @@ impl Shell {
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
+            "disown" => self.builtin_disown(args),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
@@ -4590,6 +4596,88 @@ impl Shell {
             // not available, so a bounded poll is the correct approach.
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// `disown [-h] [-ar] [jobspec ...]` — remove jobs from the shell's job
+    /// table (so they are no longer tracked by `jobs`/`wait`). With `-h` the
+    /// jobs are kept but marked so they would not receive SIGHUP on shell exit.
+    /// `-a` selects all jobs, `-r` only running (not-yet-finished) jobs. With no
+    /// jobspec and neither `-a` nor `-r`, the current (most recently backgrounded)
+    /// job is used.
+    fn builtin_disown(&mut self, args: &[String]) -> i32 {
+        self.poll_jobs();
+        let mut mark_hup = false;
+        let mut all = false;
+        let mut running_only = false;
+        let mut specs: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                specs.extend_from_slice(&args[i + 1..]);
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| matches!(c, 'h' | 'a' | 'r'))
+            {
+                for c in flags.chars() {
+                    match c {
+                        'h' => mark_hup = true,
+                        'a' => all = true,
+                        'r' => running_only = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            specs.extend_from_slice(&args[i..]);
+            break;
+        }
+
+        // Resolve the set of target job ids.
+        let mut target_ids: Vec<usize> = Vec::new();
+        if !specs.is_empty() {
+            for spec in &specs {
+                match self.resolve_job_spec(spec) {
+                    Some(idx) => target_ids.push(self.jobs[idx].id),
+                    None => {
+                        self.emit_stderr(format!("osh: disown: {spec}: no such job\n").as_bytes());
+                        return 1;
+                    }
+                }
+            }
+        } else if all {
+            target_ids = self.jobs.iter().map(|j| j.id).collect();
+        } else if running_only {
+            target_ids = self.jobs.iter().filter(|j| j.status.is_none()).map(|j| j.id).collect();
+        } else {
+            // No spec: operate on the current (last) job.
+            match self.jobs.last() {
+                Some(j) => target_ids.push(j.id),
+                None => {
+                    self.emit_stderr(b"osh: disown: current: no such job\n");
+                    return 1;
+                }
+            }
+        }
+
+        if running_only {
+            target_ids.retain(|id| {
+                self.jobs.iter().find(|j| j.id == *id).is_some_and(|j| j.status.is_none())
+            });
+        }
+
+        if mark_hup {
+            for id in &target_ids {
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == *id) {
+                    j.no_hup = true;
+                }
+            }
+        } else {
+            self.jobs.retain(|j| !target_ids.contains(&j.id));
+        }
+        0
     }
 
     /// `hash [-lr] [-p pathname] [-dt] [name ...]` — manage the remembered
@@ -7338,6 +7426,7 @@ fn is_builtin(name: &str) -> bool {
             | "trap"
             | "jobs"
             | "wait"
+            | "disown"
             | "hash"
             | "umask"
             | "exec"
@@ -10812,6 +10901,48 @@ mod tests {
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
         // `wait` cleans up any still-tracked job for a tidy teardown.
         sh.run_source("wait");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disown_removes_job_from_table() {
+        // `disown %1` drops the job so `jobs` no longer reports it.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 0 &");
+        assert_eq!(sh.jobs.len(), 1);
+        assert_eq!(sh.run_source("disown %1"), 0);
+        assert!(sh.jobs.is_empty(), "job should be removed after disown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disown_all_and_running_flags() {
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 0 &");
+        sh.run_source("cmd /c exit 0 &");
+        assert_eq!(sh.jobs.len(), 2);
+        // `disown -a` clears every tracked job.
+        assert_eq!(sh.run_source("disown -a"), 0);
+        assert!(sh.jobs.is_empty(), "disown -a should clear all jobs");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disown_h_marks_without_removing() {
+        // `disown -h` keeps the job but flags it no-SIGHUP.
+        let mut sh = Shell::new();
+        sh.run_source("cmd /c exit 0 &");
+        assert_eq!(sh.run_source("disown -h %1"), 0);
+        assert_eq!(sh.jobs.len(), 1, "disown -h keeps the job in the table");
+        assert!(sh.jobs[0].no_hup, "disown -h sets no_hup");
+        sh.run_source("wait");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disown_bad_spec_errors() {
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("disown %9"), 1);
     }
 
     #[test]

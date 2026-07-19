@@ -3900,6 +3900,32 @@ impl Shell {
         self.array_element(base, idx)
     }
 
+    /// Build the value of `$-`: the currently-enabled single-letter shell
+    /// option flags. We report the flags for the options we actually model,
+    /// plus `h` (hashall) and `B` (brace expansion) which are always on here.
+    /// `-o`-only options without a letter (e.g. `pipefail`) are not included,
+    /// matching bash. Order follows bash's fixed flag-table ordering.
+    fn option_flags(&self) -> String {
+        let mut s = String::new();
+        // (letter, enabled) in bash's canonical relative order.
+        let flags: [(char, bool); 8] = [
+            ('a', self.allexport),
+            ('e', self.errexit),
+            ('f', self.noglob),
+            ('h', true),
+            ('u', self.nounset),
+            ('x', self.xtrace),
+            ('B', true),
+            ('C', self.noclobber),
+        ];
+        for (c, on) in flags {
+            if on {
+                s.push(c);
+            }
+        }
+        s
+    }
+
     fn param_value(&self, name: &str) -> Option<String> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
@@ -3912,7 +3938,7 @@ impl Shell {
             "!" => self.last_bg_pid.map(|p| p.to_string()),
             "@" | "*" => Some(self.positional.join(" ")),
             "0" => Some(self.name.clone()),
-            "-" => Some(String::new()),
+            "-" => Some(self.option_flags()),
             "BASHPID" => Some(self.pid.to_string()),
             "LINENO" => Some(self.current_line.to_string()),
             "RANDOM" => Some(self.next_random().to_string()),
@@ -10116,6 +10142,18 @@ mod tests {
         // by the harness, so capture BASH_COMMAND into a variable and read it
         // back after the trap has run.)
         assert_eq!(run("trap 'ERRCMD=$BASH_COMMAND' ERR\nfalse\necho \"$ERRCMD\"").0, "false\n");
+    }
+
+    #[test]
+    fn special_var_dash_flags() {
+        // $- reports enabled single-letter option flags; h and B are always on.
+        assert_eq!(run("echo $-").0, "hB\n");
+        // set -e adds 'e' in the fixed flag order (a e f h u x B C).
+        assert_eq!(run("set -e; echo $-").0, "ehB\n");
+        // Multiple flags appear in canonical order, not the order set.
+        assert_eq!(run("set -xu; echo $-").0, "huxB\n");
+        // Disabling drops the flag again.
+        assert_eq!(run("set -e; set +e; echo $-").0, "hB\n");
     }
 
     #[test]

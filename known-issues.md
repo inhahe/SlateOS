@@ -1265,6 +1265,32 @@ top-level item boundary, discarding the remaining items of the current parsed
 input unit before resuming. Also expand the offending assignment's value up-front
 (before storing) so an errored `x=$((1/0))` leaves `x` unset, matching bash.
 
+### TD-OILS-PRINTF-TZ. `osh` renders `printf '%()T'` (and prompt `\d \t \T \@ \A`) in **UTC**, not local time; bash uses the system timezone — OPEN (infrastructure-blocked: no TZ facility, dependency-free crate) 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `format_strftime` (~11901) computes
+`days`/`hour`/`minute` straight from the raw epoch with no timezone offset, and
+has no `%z`/`%Z` handling (an unrecognised `%z` is emitted literally). Callers:
+`printf '%(FMT)T'` (~11650) and the prompt time escapes `\d \t \T \@ \A`
+(~2759–2794). "Now" comes from `SystemTime::now()` (UTC epoch).
+
+**What:** bash formats `%()T` with the local timezone (via libc `localtime`),
+so on a UTC-5 machine `printf '%(%Y-%m-%d %H:%M:%S %z)T\n' 0` prints
+`1969-12-31 19:00:00 -0500`; osh prints `1970-01-01 00:00:00 %z`. `%z`/`%Z` are
+also unsupported. The date/time *math* is correct — only the zone offset (and
+the two zone specifiers) are missing.
+
+**Why deferred (infrastructure-blocked):** oils is intentionally
+**dependency-free** (Cargo.toml has zero deps — required for the clean
+`x86_64-slateos` build), so pulling in `chrono`/`time` for local-offset support
+is off the table. Rust `std` cannot obtain the local UTC offset soundly
+(`localtime_r` is unsound across threads and not exposed). The correct fix needs
+SlateOS to expose the machine's UTC offset (from its RTC/settings service) and
+osh to query it; on the host build it would read the OS offset. Honouring only a
+`TZ=±HH:MM`/`TZ=UTC0` env var would be a partial band-aid that still misses
+bash's default (system-localtime) case, so it's parked until a real time/zone
+facility exists. Impact: low — affects only wall-clock *display* in `%()T` and
+the time-bearing prompt escapes.
+
 ### TD-OILS-ARITH-ERRTEXT. `osh` arithmetic error *messages* don't match bash's `<expr> : <msg> (error token is "<tok>")` format — OPEN (low priority, cosmetic stderr text; needs AST source-span annotation) — 2026-07-19
 
 **Where:** `userspace/oils/src/arith.rs` — every `Err(ArithError(...))` site

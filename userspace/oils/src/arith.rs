@@ -494,6 +494,12 @@ impl AParser<'_> {
                 self.pos += 1;
             }
             let hex: String = self.chars[hstart..self.pos].iter().collect();
+            // bash accepts a bare `0x`/`0X` with no following hex digits as 0
+            // (e.g. `$((0x))` → 0, `$((1 + 0x))` → 1). Only a genuinely malformed
+            // digit run reaches `from_str_radix`, so match bash's leniency here.
+            if hex.is_empty() {
+                return Ok(0);
+            }
             return i64::from_str_radix(&hex, 16)
                 .map_err(|_| ArithError(format!("bad hex literal '0x{hex}'")));
         }
@@ -991,6 +997,14 @@ mod tests {
         assert_eq!(ev("64#A"), 36);
         // Combined with arithmetic.
         assert_eq!(ev("2#101 * 16#a"), 50);
+        // Hexadecimal.
+        assert_eq!(ev("0x1f"), 31);
+        assert_eq!(ev("0XFF"), 255);
+        // bash accepts a bare `0x`/`0X` (no hex digits) as 0.
+        assert_eq!(ev("0x"), 0);
+        assert_eq!(ev("0X"), 0);
+        assert_eq!(ev("1 + 0x"), 1);
+        assert_eq!(ev("0x1 + 0x"), 1);
         // Errors.
         assert!(eval("2#12", &mut Map::default()).is_err()); // '2' not valid in base 2
         assert!(eval("1#0", &mut Map::default()).is_err()); // base < 2

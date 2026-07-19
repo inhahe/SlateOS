@@ -281,6 +281,11 @@ pub struct Shell {
     /// Names with the uppercase attribute (`declare -u`). Assigned values are
     /// converted to uppercase before storing. Inherited by subshell clones.
     upper_attr: HashSet<String>,
+    /// Names with the nameref attribute (`declare -n`/`local -n`). The variable's
+    /// *value* is the name of another variable; reads and writes of the nameref
+    /// are transparently redirected to that target (following chains, with a
+    /// depth guard against cycles). Inherited by subshell clones.
+    nameref_attr: HashSet<String>,
     /// The directory stack below the current directory, managed by
     /// `pushd`/`popd`/`dirs`. Element 0 is the directory `popd` would return to;
     /// the *current* directory (the process cwd) is conceptually the top of the
@@ -358,6 +363,7 @@ impl Shell {
             integer_attr: HashSet::new(),
             lower_attr: HashSet::new(),
             upper_attr: HashSet::new(),
+            nameref_attr: HashSet::new(),
             dir_stack: Vec::new(),
             traps: HashMap::new(),
             exit_trap_done: false,
@@ -1540,6 +1546,7 @@ impl Shell {
             integer_attr: self.integer_attr.clone(),
             lower_attr: self.lower_attr.clone(),
             upper_attr: self.upper_attr.clone(),
+            nameref_attr: self.nameref_attr.clone(),
             dir_stack: self.dir_stack.clone(),
             // A subshell resets non-ignored traps to their default disposition
             // (bash). Ignored ('') traps are inherited; keep only those.
@@ -1581,6 +1588,15 @@ impl Shell {
     }
 
     fn apply_assignment(&mut self, a: &Assignment) -> bool {
+        // A nameref (`declare -n ref=target`) redirects the assignment to its
+        // target: rewrite the name and re-run. `resolve_ref_name` follows the
+        // whole chain, so the rewritten name is not itself a nameref (no loop).
+        let target = self.resolve_ref_name(&a.name);
+        if target != a.name {
+            let mut a2 = a.clone();
+            a2.name = target;
+            return self.apply_assignment(&a2);
+        }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
             self.emit_stderr(format!("osh: {}: readonly variable\n", a.name).as_bytes());
@@ -1796,6 +1812,7 @@ impl Shell {
 
     /// All values of `name`, treating a plain scalar as a one-element array.
     fn array_elements(&self, name: &str) -> Vec<String> {
+        let name = &self.resolve_ref_name(name);
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(_, v)| v.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
@@ -1931,6 +1948,7 @@ impl Shell {
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&self, name: &str) -> Vec<String> {
+        let name = &self.resolve_ref_name(name);
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(k, _)| k.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
@@ -1993,6 +2011,7 @@ impl Shell {
     /// arrays, else an arithmetic index for indexed arrays. Returns `None` when
     /// the parameter/element is unset.
     fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<String> {
+        let name = &self.resolve_ref_name(name);
         match index {
             None => self.param_value(name),
             Some(w) => {
@@ -2011,6 +2030,7 @@ impl Shell {
     /// subscript. Used by `${name[i]:=default}` (assign-default). Out-of-range
     /// negative indices are ignored (matching bash's "bad subscript" no-op here).
     fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) {
+        let name = &self.resolve_ref_name(name);
         match index {
             None => {
                 self.vars.insert(name.to_string(), value);
@@ -2143,6 +2163,7 @@ impl Shell {
     }
 
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
+        let name = &self.resolve_ref_name(name);
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
                 let elems = self.array_elements(name);
@@ -3327,8 +3348,30 @@ impl Shell {
     }
 
     /// Resolve a parameter's value; `None` means unset.
+    /// Resolve a variable name through any nameref chain (`declare -n`),
+    /// returning the final target name. A nameref's value is the name it points
+    /// to; following stops at the first non-nameref name (or an unset/empty
+    /// target), and a depth guard prevents an infinite loop on a cycle. Only the
+    /// bare-name portion is followed — a target that names an array element
+    /// (`ref=arr[0]`) is returned as-is for the caller's subscript logic.
+    fn resolve_ref_name(&self, name: &str) -> String {
+        let mut cur = name.to_string();
+        // A short bound: real nameref chains are tiny; this only guards cycles.
+        for _ in 0..64 {
+            if !self.nameref_attr.contains(&cur) {
+                return cur;
+            }
+            match self.vars.get(&cur) {
+                Some(target) if !target.is_empty() && target != &cur => cur = target.clone(),
+                _ => return cur,
+            }
+        }
+        cur
+    }
+
     fn param_value(&self, name: &str) -> Option<String> {
-        match name {
+        let name = &self.resolve_ref_name(name);
+        match name.as_str() {
             "?" => Some(self.last_status.to_string()),
             "#" => Some(self.positional.len().to_string()),
             "$" => Some(self.pid.to_string()),
@@ -4439,9 +4482,13 @@ impl Shell {
         let integer = self.integer_attr.contains(name);
         let lower = self.lower_attr.contains(name);
         let upper = self.upper_attr.contains(name);
+        let nameref = self.nameref_attr.contains(name);
         // Build the trailing attribute letters shared by all kinds.
         let attr = |kind: &str| -> String {
             let mut s = String::from(kind);
+            if nameref {
+                s.push('n');
+            }
             if integer {
                 s.push('i');
             }
@@ -4519,6 +4566,9 @@ impl Shell {
         // (`-l`/`-u` are mutually exclusive; `+l`/`+u` clear). `None` = untouched,
         // `Some(0)` = clear, `Some(1)` = lowercase, `Some(2)` = uppercase.
         let mut case_dir: Option<u8> = None;
+        // Nameref attribute: `-n` sets it, `+n` removes it.
+        let mut nameref = false;
+        let mut unset_nameref = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
@@ -4545,7 +4595,14 @@ impl Shell {
                         }
                         'l' => case_dir = Some(if enable { 1 } else { 0 }),
                         'u' => case_dir = Some(if enable { 2 } else { 0 }),
-                        _ => {} // -g/-n/-p: accepted, no effect here.
+                        'n' => {
+                            if enable {
+                                nameref = true;
+                            } else {
+                                unset_nameref = true;
+                            }
+                        }
+                        _ => {} // -g/-p: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -4585,6 +4642,11 @@ impl Shell {
             } else if unset_integer {
                 self.integer_attr.remove(name);
             }
+            if nameref {
+                self.nameref_attr.insert(name.to_string());
+            } else if unset_nameref {
+                self.nameref_attr.remove(name);
+            }
             match case_dir {
                 Some(1) => {
                     // `-l`: lowercase (mutually exclusive with uppercase).
@@ -4604,7 +4666,12 @@ impl Shell {
                 None => {}
             }
             if let Some(v) = value {
-                if assoc || indexed {
+                if self.nameref_attr.contains(name) {
+                    // `declare -n ref=target` — store the target *name* literally
+                    // (no case-fold, and bypassing the assignment redirect so the
+                    // nameref itself is bound, not its eventual target).
+                    self.vars.insert(name.to_string(), v);
+                } else if assoc || indexed {
                     // `declare -A m=str` / `-a a=str` — scalar init unsupported;
                     // ignore the value (bash would treat str as element/key).
                 } else if self.integer_attr.contains(name) {
@@ -4863,6 +4930,8 @@ impl Shell {
         // otherwise it is unset as a function (bash: variables take precedence).
         let mut funcs_only = false;
         let mut vars_only = false;
+        // `-n`: unset the nameref itself, not the variable it points to.
+        let mut nameref_only = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
             if a == "--" {
@@ -4871,12 +4940,13 @@ impl Shell {
             }
             if let Some(flags) = a.strip_prefix('-')
                 && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 'v' | 'f'))
+                && flags.chars().all(|c| matches!(c, 'v' | 'f' | 'n'))
             {
                 for c in flags.chars() {
                     match c {
                         'f' => funcs_only = true,
                         'v' => vars_only = true,
+                        'n' => nameref_only = true,
                         _ => {}
                     }
                 }
@@ -4890,6 +4960,15 @@ impl Shell {
                 self.funcs.remove(a);
                 continue;
             }
+            // `unset -n ref` removes the nameref binding itself.
+            if nameref_only {
+                self.nameref_attr.remove(a);
+                self.vars.remove(a);
+                continue;
+            }
+            // Without `-n`, unsetting a nameref unsets the variable it points to
+            // (bash semantics); resolve the target name first.
+            let a = &self.resolve_ref_name(a);
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.emit_stderr(format!("osh: {a}: cannot unset: readonly variable\n").as_bytes());
@@ -4931,6 +5010,7 @@ impl Shell {
             self.integer_attr.remove(a);
             self.lower_attr.remove(a);
             self.upper_attr.remove(a);
+            self.nameref_attr.remove(a);
         }
         0
     }
@@ -8610,6 +8690,71 @@ mod tests {
         );
         // An unset variable yields the empty string.
         assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn nameref_scalar_read_write() {
+        // Reading a nameref returns the target's value.
+        assert_eq!(run("target=hi; declare -n ref=target; echo $ref").0, "hi\n");
+        // Writing through a nameref updates the target.
+        assert_eq!(
+            run("target=old; declare -n ref=target; ref=new; echo $target").0,
+            "new\n"
+        );
+        // Retargeting: create the target lazily through the nameref.
+        assert_eq!(
+            run("declare -n ref=t; ref=made; echo $t").0,
+            "made\n"
+        );
+    }
+
+    #[test]
+    fn nameref_array_access() {
+        // A nameref to an array reads/writes its elements.
+        assert_eq!(
+            run("a=(x y z); declare -n r=a; echo ${r[1]}").0,
+            "y\n"
+        );
+        assert_eq!(
+            run("a=(x y z); declare -n r=a; echo \"${r[@]}\"").0,
+            "x y z\n"
+        );
+        assert_eq!(
+            run("a=(x y z); declare -n r=a; echo ${#r[@]}").0,
+            "3\n"
+        );
+        // Writing an element through the nameref hits the target array.
+        assert_eq!(
+            run("a=(x y z); declare -n r=a; r[1]=Y; echo \"${a[@]}\"").0,
+            "x Y z\n"
+        );
+    }
+
+    #[test]
+    fn nameref_in_function() {
+        // The canonical "pass an array by reference to a function" pattern.
+        let src = "fill() { declare -n out=$1; out=(1 2 3); }; \
+                   fill data; echo \"${data[@]}\"";
+        assert_eq!(run(src).0, "1 2 3\n");
+    }
+
+    #[test]
+    fn nameref_unset_and_declare_p() {
+        // `unset -n` drops the nameref; the target survives.
+        assert_eq!(
+            run("t=keep; declare -n r=t; unset -n r; echo \"[${r}][$t]\"").0,
+            "[][keep]\n"
+        );
+        // Plain `unset` through a nameref removes the target.
+        assert_eq!(
+            run("t=gone; declare -n r=t; unset r; echo \"[$t]\"; echo done").0,
+            "[]\ndone\n"
+        );
+        // `declare -p` shows the `-n` attribute.
+        assert_eq!(
+            run("t=v; declare -n r=t; declare -p r").0,
+            "declare -n r=\"t\"\n"
+        );
     }
 
     #[test]

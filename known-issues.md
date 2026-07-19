@@ -473,6 +473,33 @@ for `FunctionDef` bodies (which we do not yet have — `declare -f`/`type` rende
 functions only loosely). When that pretty-printer exists, reuse it here and in
 `declare -f`. Low priority: `set`'s variable listing is the common use.
 
+### TD-OILS17. `osh` namerefs (`declare -n`): a few edge cases deviate from bash — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` (`resolve_ref_name` and the read/write
+chokepoints: `param_value`, `param_elem_value`, `assign_elem`, `array_elements`,
+`array_keys`, `expand_array_ref`, `apply_assignment`).
+
+**What:** `declare -n ref=target` / `local -n` namerefs are implemented — reads
+and writes of the nameref (scalar and array element, `${ref[@]}`, `${#ref[@]}`,
+the pass-array-by-reference-to-a-function pattern) transparently redirect to the
+target, chains are followed with a cycle guard, `declare -p` shows `-n`, and
+`unset -n`/`unset` behave per bash. Remaining deviations:
+1. **`${!ref}` on a nameref** returns the target's *value* (ordinary indirect
+   expansion), whereas bash returns the target *name*. We keep the generic
+   indirect-expansion behavior.
+2. **Namerefs to an array element** (`declare -n ref=arr[0]`) are stored verbatim;
+   `resolve_ref_name` returns `arr[0]` and the caller's subscript logic does not
+   further interpret it, so `$ref` does not resolve to that element.
+3. **`local -n` scoping** uses the same global attribute set as the other
+   `local` attributes (`-i`/`-l`/`-u`), which are not yet per-frame — so a
+   `local -n` nameref attribute is not popped on function return. Consistent
+   with the existing attribute-scoping limitation, not nameref-specific.
+
+**Proper fix:** (1)/(2) special-case namerefs in `expand_indirect` and parse a
+trailing subscript in `resolve_ref_name`; (3) move `integer_attr`/`lower_attr`/
+`upper_attr`/`nameref_attr` into the per-call local frame snapshot so all
+attributes scope correctly.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

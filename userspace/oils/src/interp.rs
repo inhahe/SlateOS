@@ -2574,6 +2574,15 @@ impl Shell {
 
         let name = argv[0].clone();
 
+        // `$_` tracks the last argument of the most recent simple command, to be
+        // read by the *next* command (bash). argv is fully expanded now — and
+        // any `$_` inside it already read the previous value — so update it here
+        // for the following command. (The startup form, where `$_` is the shell/
+        // script pathname, is not modelled.)
+        if let Some(last) = argv.last() {
+            self.vars.insert("_".to_string(), last.clone());
+        }
+
         // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
         // to the command as `decl_arrays`; apply them with the declared kind.
         if !sc.decl_arrays.is_empty() && matches!(name.as_str(), "declare" | "typeset" | "local") {
@@ -9955,6 +9964,17 @@ mod tests {
         assert_eq!(run("# comment\necho $LINENO").0, "2\n");
         // Semicolon-separated commands on one line share a line number.
         assert_eq!(run("echo $LINENO; echo $LINENO").0, "1\n1\n");
+    }
+
+    #[test]
+    fn special_var_underscore() {
+        // `$_` is the last argument of the previous simple command.
+        assert_eq!(run("echo hello world; echo $_").0, "hello world\nworld\n");
+        assert_eq!(run("true a b c; echo $_").0, "c\n");
+        // A single-word command leaves `$_` as that word (the command name).
+        assert_eq!(run("echo solo; echo $_").0, "solo\nsolo\n");
+        // Updates across commands.
+        assert_eq!(run(": one; : two; echo $_").0, "two\n");
     }
 
     #[test]

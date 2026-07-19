@@ -9345,10 +9345,30 @@ impl Shell {
                 }
                 s if s.starts_with('-') || s.starts_with('+') => {
                     let enable = s.starts_with('-');
+                    // A short-option cluster may embed `o` (long-option
+                    // selector), e.g. `set -eo pipefail`. Each `o` consumes the
+                    // next *word* as its option name (bash reads successive words
+                    // for successive `o`s: `set -oo a b` sets both `a` and `b`),
+                    // while the remaining cluster letters stay ordinary flags. An
+                    // `o` with no following word lists the options like `set -o`.
+                    let mut extra_words = 0usize;
                     for c in s[1..].chars() {
-                        self.set_short_option(c, enable);
+                        if c == 'o' {
+                            match args.get(i + 1 + extra_words) {
+                                Some(opt) => {
+                                    self.set_named_option(opt, enable);
+                                    extra_words += 1;
+                                }
+                                None => {
+                                    let text = self.format_option_list(!enable);
+                                    return self.write_bytes(out, redir, text.as_bytes());
+                                }
+                            }
+                        } else {
+                            self.set_short_option(c, enable);
+                        }
                     }
-                    i += 1;
+                    i += 1 + extra_words;
                 }
                 _ => {
                     self.positional = args[i..].to_vec();
@@ -17974,6 +17994,34 @@ mod tests {
         assert_eq!(sh.run_source("set -o pipefail; false | true"), 1);
         let (o, _) = run(r#"false | true; echo "${PIPESTATUS[@]}""#);
         assert_eq!(o, "1 0\n");
+    }
+
+    #[test]
+    fn set_cluster_consumes_o_long_option() {
+        // `set -eo pipefail` must enable BOTH errexit (`-e`) and pipefail (the
+        // `-o` selector consuming the following word `pipefail`). Regression:
+        // osh previously treated the clustered `o` as an ignored flag and left
+        // `pipefail` to become a positional, so pipefail stayed off.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit"), 0);
+        // The `o` may appear anywhere in the cluster; remaining letters stay
+        // flags, and successive `o`s consume successive following words.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit"), 0);
+        let mut sh = Shell::new();
+        assert_eq!(
+            sh.run_source("set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace"),
+            0
+        );
+        // Words left after the consumed option name become positionals.
+        assert_eq!(run(r#"set -eo pipefail extra; echo "$1""#).0, "extra\n");
+        // `+eo` disables both.
+        let mut sh = Shell::new();
+        sh.run_source("set -e -o pipefail");
+        sh.run_source("set +eo pipefail");
+        assert_eq!(sh.run_source("shopt -oq pipefail || shopt -oq errexit"), 1);
+        // The end-to-end effect: errexit fires on a pipefail-surfaced failure.
+        assert_eq!(run("set -eo pipefail; false | true; echo reached"), (String::new(), 1));
     }
 
     #[cfg(windows)]

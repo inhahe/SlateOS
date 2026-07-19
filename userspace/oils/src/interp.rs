@@ -1846,6 +1846,18 @@ impl Shell {
         }
     }
 
+    /// Transform an array-element value by the array name's value attributes:
+    /// under `-i` the element is evaluated as an arithmetic expression, else
+    /// under `-l`/`-u` its case is folded. Mirrors the scalar assignment path so
+    /// `declare -ia a=(1+1)` stores `2` and `declare -ua u=(ab)` stores `AB`.
+    fn apply_elem_attrs(&mut self, name: &str, val: String) -> String {
+        if self.integer_attr.contains(name) {
+            self.eval_arith_raw(&val).unwrap_or(0).to_string()
+        } else {
+            self.fold_case_attr(name, val)
+        }
+    }
+
     /// Store a plain scalar value into a variable, honoring the readonly guard,
     /// nameref redirection, the case attributes, and `set -a` export. Returns
     /// `false` (with the `readonly variable` diagnostic already emitted) when the
@@ -1862,8 +1874,23 @@ impl Shell {
             self.exported.insert(target.clone());
         }
         let val = self.fold_case_attr(&target, val);
-        self.vars.insert(target, val);
+        self.set_scalar_store(&target, val);
         true
+    }
+
+    /// Store a scalar value under `name`, honoring bash's rule that a plain
+    /// scalar assignment to an existing *indexed* array updates element 0 (so
+    /// `a=(1 2 3); a=x` leaves `${a[@]}` == `x 2 3` and `$a` == `x`). For a
+    /// non-array name (or an associative array) it stores an ordinary scalar.
+    fn set_scalar_store(&mut self, name: &str, val: String) {
+        if self.arrays.contains_key(name) {
+            self.arrays
+                .entry(name.to_string())
+                .or_default()
+                .insert(0, val);
+        } else {
+            self.vars.insert(name.to_string(), val);
+        }
     }
 
     fn apply_assignment(&mut self, a: &Assignment) -> bool {
@@ -2008,9 +2035,9 @@ impl Shell {
                     }
                 } else if is_int {
                     let n = self.eval_arith_raw(&val).unwrap_or(0);
-                    self.vars.insert(a.name.clone(), n.to_string());
+                    self.set_scalar_store(&a.name, n.to_string());
                 } else {
-                    self.vars.insert(a.name.clone(), val);
+                    self.set_scalar_store(&a.name, val);
                 }
             }
             AssignRhs::Array(items) if is_assoc => {
@@ -2023,6 +2050,7 @@ impl Shell {
                         ArrayElem::Keyed { index, value } => {
                             let key = self.expand_to_string(index);
                             let val = self.expand_to_string(value);
+                            let val = self.apply_elem_attrs(&a.name, val);
                             self.assoc_set(&a.name, key, val, false);
                         }
                         ArrayElem::Positional(_) => {
@@ -2050,6 +2078,7 @@ impl Shell {
                     match e {
                         ArrayElem::Positional(w) => {
                             for v in self.expand_word(w, true) {
+                                let v = self.apply_elem_attrs(&a.name, v);
                                 elems.insert(next, v);
                                 next = next.saturating_add(1);
                             }
@@ -2057,6 +2086,7 @@ impl Shell {
                         ArrayElem::Keyed { index, value } => {
                             let idx = self.eval_arith_word(index);
                             let val = self.expand_to_string(value);
+                            let val = self.apply_elem_attrs(&a.name, val);
                             if let Ok(idx) = usize::try_from(idx) {
                                 elems.insert(idx, val);
                                 next = idx.saturating_add(1);
@@ -6773,23 +6803,42 @@ impl Shell {
             self.last_status = 1;
             return Flow::Next;
         }
-        // Determine the array kind (and whether `-g` forces global) from the
-        // leading dashed flags.
+        // Determine the array kind, the value attributes (integer/case/readonly/
+        // export/nameref), and whether `-g` forces global, from the leading
+        // dashed flags. The attributes must be applied to the *array names* here
+        // (they are in `decl_arrays`, not `argv`, so `builtin_declare` below only
+        // sees them for scalar operands).
         let mut assoc = false;
         let mut indexed = false;
         let mut global = false;
+        let mut integer = false;
+        let mut unset_integer = false;
+        let mut case_dir: Option<u8> = None;
+        let mut readonly = false;
+        let mut export = false;
+        let mut nameref = false;
+        let mut unset_nameref = false;
         for arg in &argv[1..] {
-            let Some(flags) = arg.strip_prefix('-') else {
+            let enable = arg.starts_with('-');
+            let Some(flags) = arg.strip_prefix(['-', '+']) else {
                 break; // first non-flag operand — flags are done
             };
-            if flags == "-" {
+            if arg == "--" {
                 break; // `--` ends option parsing
             }
             for c in flags.chars() {
                 match c {
                     'A' => assoc = true,
                     'a' => indexed = true,
-                    'g' => global = true,
+                    'g' => global = enable,
+                    'i' if enable => integer = true,
+                    'i' => unset_integer = true,
+                    'l' => case_dir = Some(if enable { 1 } else { 0 }),
+                    'u' => case_dir = Some(if enable { 2 } else { 0 }),
+                    'r' if enable => readonly = true,
+                    'x' if enable => export = true,
+                    'n' if enable => nameref = true,
+                    'n' => unset_nameref = true,
                     _ => {}
                 }
             }
@@ -6799,8 +6848,9 @@ impl Shell {
         let make_local = is_local || (!global && !self.local_frames.is_empty());
         // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`).
         let status = self.builtin_declare(&argv[1..], is_local);
-        // Mark each array name's kind before applying, so `apply_assignment`
-        // routes the literal to the associative or indexed store correctly.
+        // Mark each array name's kind + attributes before applying the literal,
+        // so `apply_assignment` routes to the right store and (for `-i`)
+        // evaluates the values arithmetically.
         for a in decl_arrays {
             // A function-local array declaration shadows the name in the current
             // frame first.
@@ -6812,9 +6862,44 @@ impl Shell {
             } else if indexed {
                 self.arrays.entry(a.name.clone()).or_default();
             }
+            // Apply the value attributes to the array name (mirrors the scalar
+            // path in `builtin_declare`).
+            if integer {
+                self.integer_attr.insert(a.name.clone());
+            } else if unset_integer {
+                self.integer_attr.remove(&a.name);
+            }
+            match case_dir {
+                Some(1) => {
+                    self.lower_attr.insert(a.name.clone());
+                    self.upper_attr.remove(&a.name);
+                }
+                Some(2) => {
+                    self.upper_attr.insert(a.name.clone());
+                    self.lower_attr.remove(&a.name);
+                }
+                Some(_) => {
+                    self.lower_attr.remove(&a.name);
+                    self.upper_attr.remove(&a.name);
+                }
+                None => {}
+            }
+            if nameref {
+                self.nameref_attr.insert(a.name.clone());
+            } else if unset_nameref {
+                self.nameref_attr.remove(&a.name);
+            }
+            if export {
+                self.exported.insert(a.name.clone());
+            }
             // Default (no flag): an array literal makes an indexed array — which
             // `apply_assignment` already does for a name absent from `assoc`.
             self.apply_assignment(a);
+            // `readonly` is applied *after* the value is bound (a readonly guard
+            // in `apply_assignment` would otherwise reject the initializer).
+            if readonly {
+                self.readonly.insert(a.name.clone());
+            }
         }
         self.last_status = status;
         Flow::Next
@@ -10719,6 +10804,31 @@ mod tests {
         assert_eq!(run("read -rn3 x <<< 'ab\\cd'; echo \"$x\"").0, "ab\\\n");
         // Separated form still works.
         assert_eq!(run("read -d ':' p <<< 'a:b'; echo \"$p\"").0, "a\n");
+    }
+
+    #[test]
+    fn scalar_assign_to_array_updates_element_zero() {
+        // bash: a plain scalar assignment (or `read`) to an existing indexed
+        // array updates element 0, leaving the other elements intact.
+        assert_eq!(run("a=(1 2 3); a=x; echo \"$a ${a[@]}\"").0, "x x 2 3\n");
+        assert_eq!(run("a=(1 2 3); read a <<< 'q'; echo \"$a ${a[@]}\"").0, "q q 2 3\n");
+        // Integer attribute still evaluates the RHS and lands in element 0.
+        assert_eq!(run("declare -ia a=(1 2 3); a=4+5; echo \"$a ${a[@]}\"").0, "9 9 2 3\n");
+    }
+
+    #[test]
+    fn declare_array_literal_applies_value_attributes() {
+        // `declare -ia`/`-ai` sets the integer attribute on the array, so later
+        // element assignments evaluate arithmetically.
+        assert_eq!(run("declare -ai b=(1 2 3); b[1]=6+6; echo \"${b[@]}\"").0, "1 12 3\n");
+        // `declare -ua` uppercases values stored into the array.
+        assert_eq!(run("declare -ua u=(ab cd); u[0]=xy; echo \"${u[@]}\"").0, "XY CD\n");
+        // `declare -ra` makes the array readonly: a later assignment is rejected
+        // (nonzero status) and leaves the elements intact.
+        assert_eq!(
+            run("declare -ra r=(1 2); r[0]=9; echo status=$?; echo \"${r[@]}\"").0,
+            "status=1\n1 2\n"
+        );
     }
 
     #[test]

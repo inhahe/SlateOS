@@ -14,6 +14,32 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-CMODE-EXIT. `osh -c` fatal-expansion exit status is 1, not bash's `-c`-only 127 — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` fatal-expansion paths (the
+`unbound_error`/`arith_error` handlers returning `Flow::Exit(1)` around
+exec_simple, ~2946/2960) and `main.rs` `run` (no mode flag distinguishes
+`-c` from script execution — both call `sh.run_source`).
+
+**What:** bash exits with **127** when a fatal parameter-expansion error
+(`${var:?msg}`, `set -u` on an unbound variable) aborts a `bash -c STRING`
+invocation, but exits with **1** for the same error in a *script file*
+(`bash script.sh`). Reproduce: `bash -c 'echo "${var:?msg}"'; echo $?` → 127;
+`printf 'echo "${var:?msg}"\n' | bash /dev/stdin; echo $?` → 1. osh returns
+**1** in both modes — which matches bash's script behavior (the common
+execution path) but not the `-c`-only 127 quirk.
+
+**Why deferred:** matching 127 requires threading a "`-c` mode" flag from
+`main.rs` down through the fatal-expansion exit path solely to reproduce a
+bash idiosyncrasy (127 usually means "command not found") that varies by
+bash version and only manifests in `-c` mode. Low value; osh's consistent 1
+is defensible and script-mode-correct.
+
+**Proper fix (if pursued):** add a `Shell::c_mode: bool` set by `main.rs`
+when invoked via `-c`, and have the fatal-expansion handlers return
+`Flow::Exit(127)` when `c_mode` is set (both the `unbound_error` and the
+command-word/prefix `arith_error` branches). Add a test covering both modes.
+
 ### TD-OILS-INDIRECT-MOD. `osh` rejects indirect expansion combined with a modifier (`${!ptr:-def}`, `${!ptr#pat}`, …) — 2026-07-19
 
 **Where:** `userspace/oils/src/parser.rs` (parameter-expansion parser) and

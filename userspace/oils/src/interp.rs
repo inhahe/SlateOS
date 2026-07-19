@@ -2145,10 +2145,15 @@ impl Shell {
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
-                            for v in self.expand_word(w, true) {
-                                let v = self.apply_elem_attrs(&a.name, v);
-                                elems.insert(next, v);
-                                next = next.saturating_add(1);
+                            // Brace expansion runs first (textually), so
+                            // `a=({1..3})` and `a=(x{a,b})` expand like command
+                            // words before parameter/other expansion.
+                            for bw in crate::brace::expand_braces(w) {
+                                for v in self.expand_word(&bw, true) {
+                                    let v = self.apply_elem_attrs(&a.name, v);
+                                    elems.insert(next, v);
+                                    next = next.saturating_add(1);
+                                }
                             }
                         }
                         ArrayElem::Keyed { index, value } => {
@@ -12411,6 +12416,15 @@ mod tests {
     fn brace_expansion_with_param() {
         // A parameter reference inside an alternative expands after braces.
         assert_eq!(run("v=Z; echo {$v,b}").0, "Z b\n");
+    }
+
+    #[test]
+    fn brace_expansion_in_array_literal() {
+        // Brace expansion runs on array-literal positional elements, just like
+        // command words: `a=({1..3})` yields three elements, not one literal.
+        assert_eq!(run("a=({1..3}); echo \"${a[@]}\" ${#a[@]}").0, "1 2 3 3\n");
+        assert_eq!(run("a=(x{1..3}y); echo \"${a[@]}\"").0, "x1y x2y x3y\n");
+        assert_eq!(run("a=(a{b,c}d); echo \"${a[@]}\"").0, "abd acd\n");
     }
 
     #[test]

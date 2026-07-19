@@ -435,6 +435,18 @@ pub enum WordPart {
         index: Option<Box<Word>>,
         op: char,
     },
+    /// `${name[@]:off:len}` / `${name[*]:off:len}` — array slice, and the
+    /// positional-parameter forms `${@:off:len}` / `${*:off:len}`. Selects a
+    /// contiguous run of elements (by position, 0-based) rather than a substring.
+    ArraySlice {
+        /// The array name, or `@`/`*` for positional parameters.
+        name: String,
+        /// `true` for the `[*]` / `$*` form (join into one field when quoted);
+        /// `false` for `[@]` / `$@` (one field per element).
+        star: bool,
+        offset: Box<Word>,
+        length: Option<Box<Word>>,
+    },
 }
 
 /// An array subscript inside `${name[…]}`.

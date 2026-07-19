@@ -1026,6 +1026,22 @@ fn split_name_subscript(
     Ok((name, None, bytes[i..].to_vec()))
 }
 
+/// Parse the `offset[:length]` portion of a substring/slice expansion (the
+/// text after the leading `:`). The offset and each length are parsed as
+/// arithmetic words. Splits on the *first* unescaped `:` only.
+fn parse_slice_bounds(rest: &[char]) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
+    let body: String = rest.iter().collect();
+    let (off_str, len_str) = match body.find(':') {
+        Some(idx) => (body[..idx].to_string(), Some(body[idx + 1..].to_string())),
+        None => (body, None),
+    };
+    let length = match len_str {
+        Some(s) => Some(Box::new(word_from_source(&s)?)),
+        None => None,
+    };
+    Ok((Box::new(word_from_source(&off_str)?), length))
+}
+
 fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix('#') {
         if after_hash.is_empty() {
@@ -1118,12 +1134,39 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                     length: false,
                 });
             }
+            // `${a[@]:off:len}` / `${a[*]:off:len}` — array slice (a `:` not
+            // followed by a `-=+?` operator char).
+            if rest[0] == ':' && !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) {
+                let (offset, length) = parse_slice_bounds(&rest[1..])?;
+                return Ok(WordPart::ArraySlice {
+                    name,
+                    star: matches!(index, ArrayIndex::Star),
+                    offset,
+                    length,
+                });
+            }
             // `${a[@]:-x}` / `${a[*]#pat}` (bulk element transform) is unsupported.
             return Err(ParseError(format!(
                 "unsupported parameter expansion '${{{raw}}}'"
             )));
         }
     };
+    // `${@:off:len}` / `${*:off:len}` — positional-parameter slice (same `:`
+    // rule as the array form; distinguished from string substring because the
+    // parameter names the whole positional list).
+    if (name == "@" || name == "*")
+        && !rest.is_empty()
+        && rest[0] == ':'
+        && !matches!(rest.get(1), Some('-' | '=' | '+' | '?'))
+    {
+        let (offset, length) = parse_slice_bounds(&rest[1..])?;
+        return Ok(WordPart::ArraySlice {
+            name: name.clone(),
+            star: name == "*",
+            offset,
+            length,
+        });
+    }
     if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
@@ -1174,19 +1217,11 @@ fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) => {
-            let body: String = rest[1..].iter().collect();
-            let (off_str, len_str) = match body.find(':') {
-                Some(idx) => (body[..idx].to_string(), Some(body[idx + 1..].to_string())),
-                None => (body, None),
-            };
-            let length = match len_str {
-                Some(s) => Some(Box::new(word_from_source(&s)?)),
-                None => None,
-            };
+            let (offset, length) = parse_slice_bounds(&rest[1..])?;
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
-                offset: Box::new(word_from_source(&off_str)?),
+                offset,
                 length,
             })
         }

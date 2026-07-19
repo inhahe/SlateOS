@@ -1806,6 +1806,44 @@ impl Shell {
         }
     }
 
+    /// Compute an array/positional slice (`${a[@]:off:len}`, `${@:off:len}`).
+    /// Elements are gathered by position (0-based over the set values; for `@`/
+    /// `*` the list is `$0` followed by the positional parameters, matching
+    /// bash). A negative offset counts from the end; a negative length stops
+    /// that many elements before the end; an absent length runs to the end.
+    fn slice_elements(
+        &mut self,
+        name: &str,
+        offset: &Word,
+        length: &Option<Box<Word>>,
+    ) -> Vec<String> {
+        let elems: Vec<String> = if name == "@" || name == "*" {
+            let mut v = vec![self.param_value("0").unwrap_or_default()];
+            v.extend(self.positional.iter().cloned());
+            v
+        } else {
+            self.array_elements(name)
+        };
+        let n = elems.len() as i64;
+        let off = self.eval_arith_word(offset);
+        let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+        let end = match length {
+            Some(l) => {
+                let l = self.eval_arith_word(l);
+                if l < 0 { (n + l).max(start) } else { (start + l).min(n) }
+            }
+            None => n,
+        };
+        if start >= end {
+            return Vec::new();
+        }
+        elems
+            .into_iter()
+            .skip(start as usize)
+            .take((end - start) as usize)
+            .collect()
+    }
+
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&self, name: &str) -> Vec<String> {
         if let Some(m) = self.assoc.get(name) {
@@ -2889,6 +2927,17 @@ impl Shell {
                         [WordPart::VarNames { prefix, star: false }] => {
                             Some(self.var_names_with_prefix(prefix))
                         }
+                        // `"${a[@]:off:len}"` / `"${@:off:len}"` — one field per
+                        // sliced element (the `[*]`/`$*` star form joins instead,
+                        // handled by the scalar fallback below).
+                        [
+                            WordPart::ArraySlice {
+                                name,
+                                star: false,
+                                offset,
+                                length,
+                            },
+                        ] => Some(self.slice_elements(name, offset, length)),
                         _ => None,
                     };
                     if let Some(items) = per_element {
@@ -3018,6 +3067,12 @@ impl Shell {
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op)
             }
+            WordPart::ArraySlice {
+                name,
+                offset,
+                length,
+                ..
+            } => self.slice_elements(name, offset, length).join(" "),
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ArithSub(expr) => self.arith_sub(expr),
             WordPart::ArrayRef {
@@ -9909,6 +9964,30 @@ mod tests {
         let (o, s) = run("cmd /c exit 0\nhash -t cmd");
         assert_eq!(s, 0, "hash -t cmd should succeed; out {o:?}");
         assert!(o.to_lowercase().contains("cmd"), "got {o:?}");
+    }
+
+    #[test]
+    fn array_slice_expansion() {
+        // `${a[@]:off:len}` selects a run of elements by position.
+        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:2}").0, "one two\n");
+        assert_eq!(run("a=(zero one two three four); echo ${a[@]:2}").0, "two three four\n");
+        // Negative offset counts from the end; negative length trims from the end.
+        assert_eq!(run("a=(zero one two three four); echo \"${a[@]: -2}\"").0, "three four\n");
+        assert_eq!(run("a=(zero one two three four); echo ${a[@]:1:-1}").0, "one two three\n");
+        // Quoted slice preserves one field per element (spaces inside survive).
+        assert_eq!(
+            run("a=('a b' 'c d' e); for x in \"${a[@]:0:2}\"; do echo \"[$x]\"; done").0,
+            "[a b]\n[c d]\n"
+        );
+        // Out-of-range slice yields nothing.
+        assert_eq!(run("a=(x y); echo \"end[${a[@]:5}]\"").0, "end[]\n");
+    }
+
+    #[test]
+    fn positional_slice_expansion() {
+        // `${@:off:len}` slices positional parameters ($0 is index 0).
+        assert_eq!(run("set -- p q r s; echo ${@:2:2}").0, "q r\n");
+        assert_eq!(run("set -- p q r s; echo ${@:3}").0, "r s\n");
     }
 
     #[test]

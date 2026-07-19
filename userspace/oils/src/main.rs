@@ -27,7 +27,7 @@ fn main() {
 fn run(args: &[String]) -> i32 {
     let mut sh = Shell::new();
 
-    match args.get(1).map(String::as_str) {
+    let code = match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{VERSION}");
             0
@@ -66,7 +66,11 @@ fn run(args: &[String]) -> i32 {
             2
         }
         None => repl(&mut sh),
-    }
+    };
+    // Fire the EXIT trap (if any) once, on true shell exit. It preserves the
+    // pending exit status, so `code` remains the shell's final status.
+    sh.run_exit_trap();
+    code
 }
 
 /// Interactive read-eval-print loop.

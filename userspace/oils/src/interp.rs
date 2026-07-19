@@ -269,6 +269,16 @@ pub struct Shell {
     /// the *current* directory (the process cwd) is conceptually the top of the
     /// stack and is not stored here. Cloned into subshells.
     dir_stack: Vec<String>,
+    /// Signal/pseudo-signal traps set by the `trap` builtin, keyed by the
+    /// normalized spec (`EXIT`, `ERR`, `INT`, …). The value is the action
+    /// command string; an empty string means "ignore". Currently only the
+    /// `EXIT` trap is actually fired (on top-level shell exit); other specs are
+    /// stored/printed faithfully but async delivery awaits kernel signal
+    /// support (see known-issues TD-OILS11). NOT cloned into subshells (bash
+    /// resets non-ignored traps to their default in a subshell).
+    traps: HashMap<String, String>,
+    /// Guards the `EXIT` trap so it fires at most once when the shell exits.
+    exit_trap_done: bool,
 }
 
 impl Default for Shell {
@@ -313,6 +323,8 @@ impl Shell {
             lower_attr: HashSet::new(),
             upper_attr: HashSet::new(),
             dir_stack: Vec::new(),
+            traps: HashMap::new(),
+            exit_trap_done: false,
         }
     }
 
@@ -1469,6 +1481,16 @@ impl Shell {
             lower_attr: self.lower_attr.clone(),
             upper_attr: self.upper_attr.clone(),
             dir_stack: self.dir_stack.clone(),
+            // A subshell resets non-ignored traps to their default disposition
+            // (bash). Ignored ('') traps are inherited; keep only those.
+            traps: self
+                .traps
+                .iter()
+                .filter(|(_, v)| v.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            // The EXIT trap only fires for the top-level shell in our model.
+            exit_trap_done: true,
         }
     }
 
@@ -3196,6 +3218,7 @@ impl Shell {
             }
             "source" | "." => self.builtin_source(args),
             "type" => self.builtin_type(args, out, redir),
+            "trap" => self.builtin_trap(args, out, redir),
             "exit" => {
                 let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(self.last_status);
                 flow = Flow::Exit(code);
@@ -3496,6 +3519,127 @@ impl Shell {
             .collect::<Vec<_>>()
             .join(" ");
         self.write_line(out, redir, &line)
+    }
+
+    /// `trap [-lp] [[action] sigspec ...]` — set, reset, print, or list signal
+    /// and pseudo-signal handlers. Only the `EXIT` trap is currently *fired*
+    /// (on top-level shell exit); other specs are recorded and printed
+    /// faithfully but not yet delivered — async signal delivery needs kernel
+    /// support (see known-issues TD-OILS11).
+    fn builtin_trap(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut print = false;
+        let mut list = false;
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            match a.as_str() {
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                "-p" => print = true,
+                "-l" => list = true,
+                "-lp" | "-pl" => {
+                    print = true;
+                    list = true;
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+        let rest = &args[i..];
+
+        if list {
+            return self.trap_list(out, redir);
+        }
+        // With no action operands (or `-p`), print the current traps.
+        let first_is_spec = rest.first().is_some_and(|s| normalize_sigspec(s).is_some());
+        if print || rest.is_empty() || first_is_spec {
+            return self.trap_print(rest, out, redir);
+        }
+
+        // Otherwise the first operand is the action; the rest are sigspecs.
+        let action = &rest[0];
+        let specs = &rest[1..];
+        if specs.is_empty() {
+            self.emit_stderr(b"osh: trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
+            return 2;
+        }
+        let reset = action == "-";
+        let mut status = 0;
+        for spec in specs {
+            match normalize_sigspec(spec) {
+                Some(norm) => {
+                    if reset {
+                        self.traps.remove(&norm);
+                    } else {
+                        self.traps.insert(norm, action.clone());
+                    }
+                }
+                None => {
+                    self.emit_stderr(
+                        format!("osh: trap: {spec}: invalid signal specification\n").as_bytes(),
+                    );
+                    status = 1;
+                }
+            }
+        }
+        status
+    }
+
+    /// Print the currently-set traps in re-inputtable form (`trap -- 'act' SIG`),
+    /// sorted by signal number. When `specs` is non-empty, only those are shown.
+    fn trap_print(&mut self, specs: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let filter: Option<Vec<String>> = if specs.is_empty() {
+            None
+        } else {
+            Some(specs.iter().filter_map(|s| normalize_sigspec(s)).collect())
+        };
+        let mut entries: Vec<(&String, &String)> = self
+            .traps
+            .iter()
+            .filter(|(k, _)| filter.as_ref().is_none_or(|f| f.contains(k)))
+            .collect();
+        entries.sort_by_key(|(k, _)| sigspec_order(k));
+        let mut buf = String::new();
+        for (sig, action) in entries {
+            let quoted = single_quote(action);
+            buf.push_str(&format!("trap -- {quoted} {sig}\n"));
+        }
+        self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// `trap -l` — list the known signal names, five per line, numbered.
+    fn trap_list(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut buf = String::new();
+        for (idx, (num, name)) in SIGNALS.iter().enumerate() {
+            buf.push_str(&format!("{num:2}) SIG{name:<9}"));
+            if idx % 5 == 4 {
+                buf.push('\n');
+            }
+        }
+        if !buf.ends_with('\n') {
+            buf.push('\n');
+        }
+        self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
+    /// Called by the binary driver at each true-exit point.
+    pub fn run_exit_trap(&mut self) {
+        if self.exit_trap_done {
+            return;
+        }
+        self.exit_trap_done = true;
+        if let Some(action) = self.traps.get("EXIT").cloned()
+            && !action.is_empty()
+        {
+            // bash: the shell's exit status is the one in effect when the trap
+            // fires; preserve it across the handler (a handler that itself runs
+            // `exit N` is a rare case we do not special-case).
+            let saved = self.last_status;
+            self.run_source(&action);
+            self.last_status = saved;
+        }
     }
 
     fn builtin_pwd(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -5549,6 +5693,98 @@ fn initial_rng_seed() -> u32 {
 /// transform). Simple safe words are returned unquoted; values with control
 /// characters use ANSI-C `$'…'` quoting; everything else is single-quoted with
 /// embedded single quotes escaped as `'\''`.
+/// The signals `trap`/`trap -l` know about, as `(number, name-without-SIG)`.
+/// Numbers follow the common Linux x86 layout. `EXIT` (0) and the pseudo
+/// signals `ERR`/`DEBUG`/`RETURN` are handled as specs but not listed here.
+const SIGNALS: &[(u8, &str)] = &[
+    (1, "HUP"),
+    (2, "INT"),
+    (3, "QUIT"),
+    (4, "ILL"),
+    (5, "TRAP"),
+    (6, "ABRT"),
+    (7, "BUS"),
+    (8, "FPE"),
+    (9, "KILL"),
+    (10, "USR1"),
+    (11, "SEGV"),
+    (12, "USR2"),
+    (13, "PIPE"),
+    (14, "ALRM"),
+    (15, "TERM"),
+    (16, "STKFLT"),
+    (17, "CHLD"),
+    (18, "CONT"),
+    (19, "STOP"),
+    (20, "TSTP"),
+    (21, "TTIN"),
+    (22, "TTOU"),
+    (23, "URG"),
+    (24, "XCPU"),
+    (25, "XFSZ"),
+    (26, "VTALRM"),
+    (27, "PROF"),
+    (28, "WINCH"),
+    (29, "IO"),
+    (30, "PWR"),
+    (31, "SYS"),
+];
+
+/// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …).
+/// Accepts case-insensitive names with or without a `SIG` prefix, the pseudo
+/// signals `EXIT`/`ERR`/`DEBUG`/`RETURN`, and signal numbers (`0` = `EXIT`).
+/// Returns `None` for an unrecognized spec.
+fn normalize_sigspec(spec: &str) -> Option<String> {
+    if let Ok(n) = spec.parse::<u8>() {
+        if n == 0 {
+            return Some("EXIT".to_string());
+        }
+        return SIGNALS
+            .iter()
+            .find(|(num, _)| *num == n)
+            .map(|(_, name)| (*name).to_string());
+    }
+    let upper = spec.to_ascii_uppercase();
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    if matches!(bare, "EXIT" | "ERR" | "DEBUG" | "RETURN") {
+        return Some(bare.to_string());
+    }
+    SIGNALS
+        .iter()
+        .find(|(_, name)| *name == bare)
+        .map(|(_, name)| (*name).to_string())
+}
+
+/// Sort key placing `EXIT` first, then real signals by number, then the other
+/// pseudo signals — used to order `trap -p` output deterministically.
+fn sigspec_order(spec: &str) -> u16 {
+    match spec {
+        "EXIT" => 0,
+        "DEBUG" => 200,
+        "RETURN" => 201,
+        "ERR" => 202,
+        _ => SIGNALS
+            .iter()
+            .find(|(_, name)| *name == spec)
+            .map_or(255, |(num, _)| u16::from(*num)),
+    }
+}
+
+/// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
+/// POSIX way (`'\''`). Always quotes (even simple words), matching bash.
+fn single_quote(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -5750,6 +5986,7 @@ fn is_builtin(name: &str) -> bool {
             | "source"
             | "."
             | "type"
+            | "trap"
             | "exit"
             | "return"
             | "break"
@@ -8021,6 +8258,52 @@ mod tests {
         assert_eq!(d, "\nreal\t1m2.250s\nuser\t0m0.000s\nsys\t0m0.000s\n");
         let z = Shell::format_time_report(0.0, false);
         assert_eq!(z, "\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s\n");
+    }
+
+    #[test]
+    fn trap_set_print_reset() {
+        // Setting a trap and printing it back in re-inputtable form.
+        let (o, _) = run("trap 'echo bye' EXIT; trap -p");
+        assert!(o.contains("trap -- 'echo bye' EXIT"), "got {o:?}");
+
+        // A signal name with/without SIG prefix, case-insensitive, normalizes.
+        let (o, _) = run("trap 'x' sigint; trap -p int");
+        assert!(o.contains("trap -- 'x' INT"), "got {o:?}");
+
+        // `trap - SIG` resets (removes) the handler.
+        let (o, _) = run("trap 'x' INT; trap - INT; trap -p");
+        assert!(!o.contains("INT"), "reset should remove INT, got {o:?}");
+
+        // Ignore form ('') round-trips.
+        let (o, _) = run("trap '' TERM; trap -p TERM");
+        assert!(o.contains("trap -- '' TERM"), "got {o:?}");
+
+        // An invalid spec is a status-1 error.
+        let (_, st) = run("trap 'x' NOPE");
+        assert_eq!(st, 1);
+    }
+
+    #[test]
+    fn trap_list_names() {
+        let (o, st) = run("trap -l");
+        assert_eq!(st, 0);
+        assert!(o.contains("SIGINT"));
+        assert!(o.contains("SIGTERM"));
+        assert!(o.contains("SIGKILL"));
+    }
+
+    #[test]
+    fn trap_exit_fires_once() {
+        let mut sh = Shell::new();
+        sh.run_source("trap 'TRAP_MARK=1' EXIT");
+        // The handler has not run yet — only stored.
+        assert!(!sh.vars.contains_key("TRAP_MARK"));
+        sh.run_exit_trap();
+        assert_eq!(sh.vars.get("TRAP_MARK").map(String::as_str), Some("1"));
+        // A second call is a no-op (fires at most once).
+        sh.vars.remove("TRAP_MARK");
+        sh.run_exit_trap();
+        assert!(!sh.vars.contains_key("TRAP_MARK"));
     }
 
     #[test]

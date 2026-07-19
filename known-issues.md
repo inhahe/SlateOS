@@ -344,6 +344,32 @@ stages, sample a per-thread CPU clock around the stage. Deferred: real time is
 the field scripts most commonly want, and it is exact; user/sys reported as
 zero is clearly documented and does not affect the pipeline's stdout/status.
 
+### TD-OILS11. `osh` `trap`: only the `EXIT` pseudo-signal is actually fired; other specs are stored but not delivered — OPEN (gated on kernel signal/exception support)
+
+**Where:** `userspace/oils/src/interp.rs` (`builtin_trap`, `run_exit_trap`,
+`traps` map on `Shell`) and `userspace/oils/src/main.rs` (calls
+`run_exit_trap` at true shell exit).
+
+**What:** `trap` records handlers for any valid signal/pseudo-signal spec and
+prints/lists/resets them correctly (`trap`, `trap -p`, `trap -l`, `trap - SIG`,
+`trap '' SIG`), but the interpreter only *runs* the `EXIT` handler — fired once
+when the top-level shell exits. Handlers for real async signals (`INT`, `TERM`,
+`HUP`, …) and the other pseudo-signals `ERR`, `DEBUG`, and `RETURN` are stored
+faithfully but never invoked. There is no OS-level signal delivery on the host
+(and SlateOS uses IPC/exceptions rather than Unix signals), and `ERR`/`DEBUG`/
+`RETURN` need per-command / per-return interpreter hooks not yet wired.
+
+**Proper fix:** (1) `ERR` — invoke the handler wherever `errexit` would trip
+(a failing command outside an exempt context), reusing the errexit detection
+path; (2) `DEBUG` — invoke before each simple command in `exec_simple`;
+(3) `RETURN` — invoke on function/sourced-script return in the `Flow::Return`
+path; (4) async signals — map SlateOS exception/IPC "signal" events to the
+stored handlers once the process model exposes them. Each is an independent,
+synchronous hook except (4). Deferred: `EXIT` (cleanup handlers — the most
+common use, e.g. `trap 'rm -f "$tmp"' EXIT`) is fully supported, and the
+storage/print/list/reset surface is complete, so scripts that only rely on
+those work today.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

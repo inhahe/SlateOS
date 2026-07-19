@@ -710,7 +710,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects + function-invocation redirects implemented; `exec 3>&1` and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects + function-invocation redirects + fd save/restore/swap (`exec 3>&1`/`1>&3`/swap) implemented; only a true in-place `execve` remains — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -723,9 +723,11 @@ command exits 127). Status of the remaining aspects:
 1. **Output redirection-only `exec` — RESOLVED 2026-07-19.** `exec > file`,
    `exec >> file`, `exec 2> file`, `exec 2>> file`, `exec > file 2>&1`, and
    `exec 1>&2` now persistently rebind the shell's ambient fd 1 / fd 2. The
-   shell stores the target as `exec_stdout`/`exec_stderr = (path, append)` —
-   truncated once for `>` then accumulated in append mode — and every ambient
-   fd-1/fd-2 write consults it: builtins via `write_bytes`'s `Out::Inherit`
+   shell stores the target as `exec_stdout`/`exec_stderr: Option<Arc<File>>` —
+   the file opened once (truncated for `>`, append for `>>`) with the handle
+   kept so all subsequent writes share one OS offset (bash dups the fd; it does
+   not reopen) — and every ambient fd-1/fd-2 write consults it: builtins via
+   `write_bytes`'s `Out::Inherit`
    arm, `>&2` diagnostics via `emit_stderr`, and external children via
    `run_external` (the child's stdout/stderr is opened on the file). Subshell
    clones inherit the redirect (bash: a subshell inherits the fd table). Note
@@ -822,21 +824,35 @@ command exits 127). Status of the remaining aspects:
    Note `stdout_to_fd`/`stderr_to_fd` (dup onto an `exec`-opened write descriptor)
    are *not* covered by the scope — those are applied per-builtin/-external — so
    `myfunc >&3` is not yet routed for the whole body.
-8. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+8. **fd save/restore/swap (`exec 3>&1`, `exec 1>&3`, `exec 3>&1 1>&2 2>&3`) —
+   RESOLVED 2026-07-19.** A redirection-only `exec` now applies its redirects in
+   strict left-to-right *source order* against the shell's persistent fd table,
+   so all the standard fd-juggling idioms work: `exec 3>&1` saves the current
+   fd 1 sink into a user-space write fd (a `try_clone` of `exec_stdout`'s handle,
+   or a dup of the real terminal when fd 1 is unredirected); `exec 1>&3` restores
+   fd 1 from a saved fd; and the classic swap `exec 3>&1 1>&2 2>&3 3>&-` exchanges
+   stdout and stderr. The collapsed `RedirPlan` cannot express ordered fd
+   mutation (it buckets each effect into a fixed field and loses order), so the
+   `exec` builtin bypasses it: `exec_simple_inner` intercepts an args-less `exec`
+   with redirects and calls `apply_exec_redirects(&sc.redirects)`, which walks the
+   raw redirects in order. Each `M>&N` dup reads fd N's *current* sink via
+   `exec_dup_source` (which returns a concrete dup of the real std fd when fd N is
+   still on the terminal, so `1>&2` points fd 1 at fd 2's actual sink even when
+   the shell's real fd 1 ≠ fd 2 — e.g. launched under `1>file`). This also
+   required widening `exec_stdout`/`exec_stderr` from `(path, append)` to
+   `Option<Arc<File>>` so a restored fd can point at an arbitrary handle, not just
+   a re-openable path. (The rare `command exec`/`builtin exec` re-dispatch still
+   goes through the collapsed-plan path, which handles save/restore but not
+   arbitrary-order swaps — an essentially nonexistent usage.) Tests:
+   `exec_save_and_restore_stdout`, `exec_swap_stdout_stderr`.
+9. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
 
-**Still OPEN (smaller gaps):** duplicating a write-fd *onto* a standard fd
-(`exec 3>&1`, making fd 3 alias the current stdout — our `open_write_fds` only
-holds real `File` handles, so aliasing fd 3 to the shell's live stdout/stderr
-would need the table to become an enum `WriteSink { File, Stdout, Stderr }`).
-
-**Proper fix:** (2), (3), (4), (5), (6), and (7) done (see above). Remaining:
-model `exec M>&N` where the *target* N is a standard fd (`exec 3>&1`) by widening
-the write-fd table to a `WriteSink` enum. (8) once the kernel exposes `execve`,
-replace the spawn+wait+exit with an actual in-place image replacement for
-`exec cmd`.
+**Proper fix:** (2)–(8) done (see above). Remaining: (9) once the kernel exposes
+`execve`, replace the spawn+wait+exit with an actual in-place image replacement
+for `exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)
 

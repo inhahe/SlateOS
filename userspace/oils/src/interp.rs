@@ -267,18 +267,21 @@ pub struct Shell {
     /// [`Shell::run_external`] (child fd 2). Reset to empty in subshell clones.
     stderr_stack: Vec<StderrTarget>,
     /// Persistent stdout target set by a redirection-only `exec > file` /
-    /// `exec >> file`: `(path, append)` where `append` is always true after the
-    /// initial truncate, so every subsequent command's ambient fd 1 goes to the
-    /// file. `None` = the shell's real stdout. Inherited by subshell clones
-    /// (a subshell inherits the shell's fd table). Consulted by every ambient
-    /// fd-1 write ([`Shell::write_bytes`] `Out::Inherit`, external children).
-    exec_stdout: Option<(String, bool)>,
+    /// `exec >> file`: an open [`File`] handle (the file is opened once, so all
+    /// subsequent writes share one OS offset — bash dups the fd, it does not
+    /// reopen). `None` = the shell's real stdout. Inherited by subshell clones
+    /// (a subshell shares the same `Arc<File>`, matching a real fd inheritance).
+    /// A restore `exec 1>&N` points this at fd N's `open_write_fds` handle.
+    /// Consulted by every ambient fd-1 write ([`Shell::write_bytes`]
+    /// `Out::Inherit`, external children).
+    exec_stdout: Option<std::sync::Arc<std::fs::File>>,
     /// Persistent stderr target set by a redirection-only `exec 2> file` /
-    /// `exec 2>> file` (or mirrored from `exec_stdout` by `exec … 2>&1`). Same
-    /// `(path, append)` convention as [`Shell::exec_stdout`]. `None` = the
-    /// shell's real stderr. Consulted by [`Shell::emit_stderr`] and external
-    /// children as the base fd-2 sink beneath any `stderr_stack` entry.
-    exec_stderr: Option<(String, bool)>,
+    /// `exec 2>> file` (or mirrored from `exec_stdout` by `exec … 2>&1`, which
+    /// shares the same `Arc<File>`). `None` = the shell's real stderr. A restore
+    /// `exec 2>&N` points this at fd N's handle. Consulted by
+    /// [`Shell::emit_stderr`] and external children as the base fd-2 sink
+    /// beneath any `stderr_stack` entry.
+    exec_stderr: Option<std::sync::Arc<std::fs::File>>,
     /// Persistent stdin source set by a redirection-only `exec < file` (or an
     /// `exec << EOF` here-doc): the file's bytes are read once into a
     /// position-tracking cursor so successive ambient `read` calls (and an
@@ -306,8 +309,9 @@ pub struct Shell {
     /// (externals) route their stdout to it via `RedirPlan::stdout_to_fd`, and
     /// `exec 3>&-` removes it. Persistent across commands. A subshell clone
     /// shares the same `Arc<File>` (bash: a subshell inherits the fd, so writes
-    /// share one OS offset). Per-command write redirects to fd ≥ 3 and duplicating
-    /// a write-fd *onto* a standard fd (`exec 3>&1`) are not yet modelled.
+    /// share one OS offset). `exec 3>&1` / `exec 3>&2` snapshot fd 1 / fd 2's
+    /// current sink (an `exec`-redirected file, or a dup of the real terminal)
+    /// into an entry here, matching bash's dup-at-exec-time semantics.
     open_write_fds: std::collections::HashMap<i32, std::sync::Arc<std::fs::File>>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
@@ -1511,6 +1515,15 @@ impl Shell {
                     }
                     Err(e) => {
                         self.errln(&format!("osh: {path}: {e}"));
+                        self.last_status = 1;
+                    }
+                },
+                ExtraFdOp::AliasStd(n) => match self.snapshot_std_fd(*n) {
+                    Ok(f) => {
+                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: {fd}: {e}"));
                         self.last_status = 1;
                     }
                 },
@@ -3160,6 +3173,18 @@ impl Shell {
             }
         }
 
+        // A redirection-only `exec` (`exec > file`, `exec 3>&1 1>&2 2>&3`,
+        // `exec 1>&3`) mutates the shell's persistent fd table and must apply
+        // its redirects in strict source order — which the collapsed RedirPlan
+        // cannot express. Handle it directly here, before plan resolution.
+        // (`exec cmd …`, and the rare `command exec`/`builtin exec` re-dispatch,
+        // still go through the plan-based path below.)
+        if argv.len() == 1 && argv[0] == "exec" && !sc.redirects.is_empty() {
+            let rc = self.apply_exec_redirects(&sc.redirects);
+            self.last_status = rc;
+            return Flow::Next;
+        }
+
         // Resolve redirections (targets are expanded now).
         let redir = match self.resolve_redirects(&sc.redirects) {
             Ok(r) => r,
@@ -3786,14 +3811,15 @@ impl Shell {
                             return;
                         }
                     }
-                } else if let Some((path, append)) = &self.exec_stdout {
-                    // Persistent `exec > file`: the child's fd 1 is the file.
-                    match open_out(path, *append) {
-                        Ok(f) => {
-                            cmd.stdout(Stdio::from(f));
+                } else if let Some(f) = &self.exec_stdout {
+                    // Persistent `exec > file`: the child's fd 1 is the file (a
+                    // dup of the shared handle, so it writes at the live offset).
+                    match f.try_clone() {
+                        Ok(fc) => {
+                            cmd.stdout(Stdio::from(fc));
                         }
                         Err(e) => {
-                            self.errln(&format!("osh: {path}: {e}"));
+                            self.errln(&format!("osh: exec stdout: {e}"));
                             self.last_status = 1;
                             return;
                         }
@@ -3862,13 +3888,13 @@ impl Shell {
             match self.stderr_stack.last() {
                 None => {
                     // Base fd 2: a persistent `exec 2> file` target, else inherit.
-                    if let Some((path, append)) = &self.exec_stderr {
-                        match open_out(path, *append) {
-                            Ok(f) => {
-                                cmd.stderr(Stdio::from(f));
+                    if let Some(f) = &self.exec_stderr {
+                        match f.try_clone() {
+                            Ok(fc) => {
+                                cmd.stderr(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: {path}: {e}"));
+                                self.errln(&format!("osh: exec stderr: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -3915,13 +3941,13 @@ impl Shell {
                 // else inherit (fd 2 → terminal, same visual result at the
                 // shell's controlling terminal).
                 Some(StderrTarget::Stdout) => {
-                    if let Some((path, append)) = &self.exec_stdout {
-                        match open_out(path, *append) {
-                            Ok(f) => {
-                                cmd.stderr(Stdio::from(f));
+                    if let Some(f) = &self.exec_stdout {
+                        match f.try_clone() {
+                            Ok(fc) => {
+                                cmd.stderr(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: {path}: {e}"));
+                                self.errln(&format!("osh: exec stdout: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -4155,6 +4181,13 @@ impl Shell {
                     } else if r.fd >= 3 && target == "-" {
                         // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
                         plan.extra_fds.push((r.fd, ExtraFdOp::Close));
+                    } else if r.fd >= 3 && (target == "1" || target == "2") {
+                        // `exec 3>&1` / `exec 3>&2`: alias a user-space write
+                        // descriptor to a standard fd. Consumed only by `exec`
+                        // (and the scoped compound-command path), which snapshots
+                        // fd 1 / fd 2's current sink into `open_write_fds[fd]`.
+                        let n = if target == "1" { 1 } else { 2 };
+                        plan.extra_fds.push((r.fd, ExtraFdOp::AliasStd(n)));
                     } else if let Ok(n) = target.parse::<i32>()
                         && n >= 3
                     {
@@ -4171,6 +4204,189 @@ impl Shell {
             }
         }
         Ok(plan)
+    }
+
+    /// Apply a redirection-only `exec`'s redirects to the shell's *persistent*
+    /// fd table, in strict left-to-right source order.
+    ///
+    /// Ordering matters: `exec 3>&1 1>&2 2>&3` must save fd 1 into fd 3, then
+    /// point fd 1 at fd 2, then point fd 2 at the saved fd 3 — a stdout/stderr
+    /// swap. The collapsed [`RedirPlan`] cannot express that (it buckets each
+    /// effect into a fixed field and loses order), so `exec` bypasses the plan
+    /// and walks the raw redirects here. Each `>&N`/`>&1`/`>&2`/`>&-` dup reads
+    /// the *current* sink of its source fd (as already mutated by earlier
+    /// redirects in the same `exec`), matching bash's dup-at-that-moment
+    /// semantics. Returns the resulting status (1 if any redirect failed).
+    fn apply_exec_redirects(&mut self, redirs: &[Redirect]) -> i32 {
+        let mut rc = 0;
+        for r in redirs {
+            match r.op {
+                RedirectOp::Read => {
+                    let path = self.expand_to_string(&r.target);
+                    match std::fs::read(map_device_path(&path)) {
+                        Ok(bytes) => {
+                            if r.fd == 0 {
+                                self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                            } else if r.fd >= 3 {
+                                self.open_fds
+                                    .insert(r.fd, RefCell::new(io::Cursor::new(bytes)));
+                                self.open_write_fds.remove(&r.fd);
+                            }
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {path}: {e}"));
+                            rc = 1;
+                        }
+                    }
+                }
+                RedirectOp::HereDoc | RedirectOp::HereStr => {
+                    let bytes = if matches!(r.op, RedirectOp::HereDoc) {
+                        self.expand_double_quoted(&r.target.parts).into_bytes()
+                    } else {
+                        let mut s = self.expand_to_string(&r.target);
+                        s.push('\n');
+                        s.into_bytes()
+                    };
+                    if r.fd == 0 {
+                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                    } else if r.fd >= 3 {
+                        self.open_fds
+                            .insert(r.fd, RefCell::new(io::Cursor::new(bytes)));
+                        self.open_write_fds.remove(&r.fd);
+                    }
+                }
+                RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
+                    let target = self.expand_to_string(&r.target);
+                    let append = matches!(r.op, RedirectOp::AppendBoth);
+                    match open_out(&target, append) {
+                        Ok(f) => {
+                            // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one
+                            // handle (a single OS offset).
+                            let a = std::sync::Arc::new(f);
+                            self.exec_stdout = Some(a.clone());
+                            self.exec_stderr = Some(a);
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {target}: {e}"));
+                            rc = 1;
+                        }
+                    }
+                }
+                RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
+                    let target = self.expand_to_string(&r.target);
+                    let append = matches!(r.op, RedirectOp::Append);
+                    if self.noclobber
+                        && matches!(r.op, RedirectOp::Write)
+                        && std::path::Path::new(map_device_path(&target))
+                            .metadata()
+                            .is_ok_and(|m| m.is_file())
+                    {
+                        self.errln(&format!("osh: {target}: cannot overwrite existing file"));
+                        rc = 1;
+                        continue;
+                    }
+                    match open_out(&target, append) {
+                        Ok(f) => {
+                            let a = std::sync::Arc::new(f);
+                            match r.fd {
+                                0 | 1 => self.exec_stdout = Some(a),
+                                2 => self.exec_stderr = Some(a),
+                                _ => {
+                                    self.open_write_fds.insert(r.fd, a);
+                                    self.open_fds.remove(&r.fd);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {target}: {e}"));
+                            rc = 1;
+                        }
+                    }
+                }
+                RedirectOp::DupOut => {
+                    let target = self.expand_to_string(&r.target);
+                    if target == "-" {
+                        // `N>&-` / `N<&-`: close the descriptor.
+                        match r.fd {
+                            1 => self.exec_stdout = None,
+                            2 => self.exec_stderr = None,
+                            _ => {
+                                self.open_write_fds.remove(&r.fd);
+                                self.open_fds.remove(&r.fd);
+                            }
+                        }
+                    } else if let Ok(n) = target.parse::<i32>() {
+                        // `M>&N`: fd M becomes a dup of fd N's *current* sink.
+                        match self.exec_dup_source(n) {
+                            Ok(src) => match r.fd {
+                                1 => self.exec_stdout = src,
+                                2 => self.exec_stderr = src,
+                                _ => {
+                                    // A user-space write fd needs a concrete
+                                    // handle: reuse the source handle, or (when
+                                    // the source is a std fd still on the
+                                    // terminal) dup the terminal.
+                                    let handle = match src {
+                                        Some(h) => Some(h),
+                                        None => match dup_std_handle(n == 1) {
+                                            Ok(f) => Some(std::sync::Arc::new(f)),
+                                            Err(e) => {
+                                                self.errln(&format!("osh: {}: {e}", r.fd));
+                                                rc = 1;
+                                                None
+                                            }
+                                        },
+                                    };
+                                    if let Some(h) = handle {
+                                        self.open_write_fds.insert(r.fd, h);
+                                        self.open_fds.remove(&r.fd);
+                                    }
+                                }
+                            },
+                            Err(bad) => {
+                                self.errln(&format!("osh: {bad}: Bad file descriptor"));
+                                rc = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rc
+    }
+
+    /// Resolve the current write sink of source fd `n` for an `exec M>&N` dup:
+    /// `Ok(Some(h))` = fd `n` currently writes to handle `h`; `Err(n)` = fd `n`
+    /// (≥ 3) is not open (a `bad file descriptor`).
+    ///
+    /// When fd 1 / fd 2 is still on the terminal (`exec_stdout`/`exec_stderr` is
+    /// `None`), this duplicates that *specific* real std fd rather than
+    /// returning `None`. The distinction matters when the shell's real fd 1 and
+    /// fd 2 differ (e.g. it was launched with `1>file`): `1>&2` must point fd 1
+    /// at fd 2's actual sink, not at `None` (which write paths resolve to the
+    /// real fd 1). `Ok(None)` is only produced if duplicating the real std fd
+    /// fails (pathological — a closed std fd), in which case callers fall back
+    /// to the real std fd. This is the swap-idiom fix (`exec 3>&1 1>&2 2>&3`).
+    fn exec_dup_source(
+        &self,
+        n: i32,
+    ) -> Result<Option<std::sync::Arc<std::fs::File>>, i32> {
+        match n {
+            1 | 2 => {
+                let cur = if n == 1 { &self.exec_stdout } else { &self.exec_stderr };
+                match cur {
+                    Some(f) => Ok(Some(f.clone())),
+                    None => match dup_std_handle(n == 1) {
+                        Ok(f) => Ok(Some(std::sync::Arc::new(f))),
+                        Err(_) => Ok(None),
+                    },
+                }
+            }
+            _ => match self.open_write_fds.get(&n) {
+                Some(f) => Ok(Some(f.clone())),
+                None => Err(n),
+            },
+        }
     }
 
     // ---- expansion ----------------------------------------------------------
@@ -5421,34 +5637,62 @@ impl Shell {
                             }
                         }
                     }
-                    // fd 1 (`> file` / `>> file`): truncate once (for `>`), then
-                    // store as append so later commands accumulate into the file.
+                    // fd 1 (`> file` / `>> file`): open the file once and keep
+                    // the shared handle, so later commands accumulate into it at
+                    // one OS offset (bash dups the fd, it does not reopen).
                     if let Some((path, append)) = &redir.stdout {
-                        if !*append && let Err(e) = open_out(path, false) {
-                            self.errln(&format!("osh: {path}: {e}"));
-                            rc = 1;
-                        }
-                        if rc == 0 {
-                            self.exec_stdout = Some((path.clone(), true));
+                        match open_out(path, *append) {
+                            Ok(f) => {
+                                self.exec_stdout = Some(std::sync::Arc::new(f));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: {path}: {e}"));
+                                rc = 1;
+                            }
                         }
                     }
                     // fd 2 (`2> file` / `2>> file`).
                     if rc == 0 && let Some((path, append)) = &redir.stderr {
-                        if !*append && let Err(e) = open_out(path, false) {
-                            self.errln(&format!("osh: {path}: {e}"));
-                            rc = 1;
-                        }
-                        if rc == 0 {
-                            self.exec_stderr = Some((path.clone(), true));
+                        match open_out(path, *append) {
+                            Ok(f) => {
+                                self.exec_stderr = Some(std::sync::Arc::new(f));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: {path}: {e}"));
+                                rc = 1;
+                            }
                         }
                     }
-                    // `2>&1` with fd 1 not a file: fd 2 mirrors the fd 1 target.
+                    // `2>&1` with fd 1 not a file: fd 2 mirrors the fd 1 target
+                    // (shares the same `Arc<File>` — a true dup, one offset).
                     if rc == 0 && redir.stderr_to_stdout {
                         self.exec_stderr = self.exec_stdout.clone();
                     }
                     // `1>&2` with fd 2 not a file: fd 1 mirrors the fd 2 target.
                     if rc == 0 && redir.stdout_to_stderr {
                         self.exec_stdout = self.exec_stderr.clone();
+                    }
+                    // Restore `exec 1>&N` / `exec 2>&N` (N ≥ 3): rebind ambient
+                    // fd 1 / fd 2 to a user-space write descriptor's live handle
+                    // (typically one saved earlier by `exec N>&1`). An unopened
+                    // fd is a status-1 `N: Bad file descriptor`, as in bash.
+                    if rc == 0 && let Some(n) = redir.stdout_to_fd {
+                        match self.open_write_fds.get(&n) {
+                            Some(f) => self.exec_stdout = Some(std::sync::Arc::clone(f)),
+                            None => {
+                                self.errln(&format!("osh: {n}: Bad file descriptor"));
+                                rc = 1;
+                            }
+                        }
+                    }
+                    if rc == 0 && let Some(n) = redir.stderr_to_fd {
+                        match self.open_write_fds.get(&n) {
+                            Some(f) => self.exec_stderr = Some(std::sync::Arc::clone(f)),
+                            None => {
+                                self.errln(&format!("osh: {n}: Bad file descriptor"));
+                                rc = 1;
+                            }
+                        }
                     }
                     // fd ≥ 3 input descriptors (`exec 3< file`, `exec 3<&-`):
                     // install / remove entries in the persistent open-fd table so
@@ -5478,6 +5722,17 @@ impl Shell {
                                         }
                                     }
                                 }
+                                ExtraFdOp::AliasStd(n) => match self.snapshot_std_fd(*n) {
+                                    Ok(f) => {
+                                        self.open_write_fds
+                                            .insert(*fd, std::sync::Arc::new(f));
+                                        self.open_fds.remove(fd);
+                                    }
+                                    Err(e) => {
+                                        self.errln(&format!("osh: {fd}: {e}"));
+                                        rc = 1;
+                                    }
+                                },
                                 ExtraFdOp::Close => {
                                     self.open_fds.remove(fd);
                                     self.open_write_fds.remove(fd);
@@ -8866,10 +9121,10 @@ impl Shell {
                 Out::Inherit => {
                     // A persistent `exec > file` rebinds the shell's ambient
                     // fd 1 to a file; otherwise write to the real stdout.
-                    if let Some((path, append)) = &self.exec_stdout {
-                        match open_out(path, *append) {
-                            Ok(mut f) => {
-                                if f.write_all(bytes).is_err() {
+                    if let Some(f) = &self.exec_stdout {
+                        match f.try_clone() {
+                            Ok(mut fc) => {
+                                if fc.write_all(bytes).is_err() {
                                     return 1;
                                 }
                                 0
@@ -8906,6 +9161,25 @@ impl Shell {
     /// `exec N> file`. A `try_clone` of the shared handle is used so the write
     /// goes to the descriptor's current OS offset. An unopened fd is a status-1
     /// `N: bad file descriptor` (bash).
+    /// Snapshot standard fd `n` (1 or 2) into an owned [`File`] for an
+    /// `exec 3>&1` / `exec 3>&2` alias. If fd `n` is currently redirected to a
+    /// file (`exec > file` / `exec 2> file`), duplicate that live handle so the
+    /// alias writes to the same file at the shared offset; otherwise duplicate
+    /// the real terminal handle. This captures the *current* sink (bash's
+    /// dup-at-exec-time semantics), so a later `exec > other` does not retarget
+    /// the alias.
+    fn snapshot_std_fd(&self, n: i32) -> io::Result<std::fs::File> {
+        let redirected = if n == 1 {
+            self.exec_stdout.as_ref()
+        } else {
+            self.exec_stderr.as_ref()
+        };
+        match redirected {
+            Some(f) => f.try_clone(),
+            None => dup_std_handle(n == 1),
+        }
+    }
+
     fn write_to_fd(&mut self, fd: i32, bytes: &[u8]) -> i32 {
         match self.open_write_fds.get(&fd) {
             Some(f) => match f.try_clone() {
@@ -8942,9 +9216,9 @@ impl Shell {
             None => {
                 // Base fd 2: a persistent `exec 2> file` target if set, else the
                 // shell's real stderr.
-                if let Some((path, append)) = &self.exec_stderr {
-                    if let Ok(mut f) = open_out(path, *append) {
-                        let _ = f.write_all(bytes);
+                if let Some(f) = &self.exec_stderr {
+                    if let Ok(mut fc) = f.try_clone() {
+                        let _ = fc.write_all(bytes);
                     }
                 } else {
                     let e = io::stderr();
@@ -8956,9 +9230,9 @@ impl Shell {
             Some(StderrTarget::Stdout) => {
                 // fd 2 follows fd 1: a persistent `exec > file` target if set,
                 // else the real stdout.
-                if let Some((path, append)) = &self.exec_stdout {
-                    if let Ok(mut f) = open_out(path, *append) {
-                        let _ = f.write_all(bytes);
+                if let Some(f) = &self.exec_stdout {
+                    if let Ok(mut fc) = f.try_clone() {
+                        let _ = fc.write_all(bytes);
                     }
                 } else {
                     let o = io::stdout();
@@ -9207,6 +9481,11 @@ enum ExtraFdOp {
     /// Open fd N for writing to `path` (`N> file` / `N>> file`); the `bool` is
     /// the append flag.
     OutputFile(String, bool),
+    /// Alias fd N to a standard write fd (`exec 3>&1` / `exec 3>&2`): the inner
+    /// value is the target standard fd (`1` or `2`). At apply time the target's
+    /// *current* sink is duplicated into fd N (a snapshot, matching bash's dup
+    /// semantics — a later `exec > file` does not retarget the alias).
+    AliasStd(i32),
     /// Close fd N (`N<&-` / `N>&-`).
     Close,
 }
@@ -10441,6 +10720,35 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
         opts.truncate(true);
     }
     opts.open(map_device_path(path))
+}
+
+/// Duplicate the process's real standard stdout (`is_stdout`) or stderr into an
+/// owned [`File`]. Used to snapshot fd 1 / fd 2's *terminal* sink for
+/// `exec 3>&1` / `exec 3>&2` when that fd is not currently redirected to a file.
+/// Writing to the returned handle writes to the same terminal (a `dup`, so it
+/// shares the OS file offset for a regular-file-backed standard fd).
+#[cfg(unix)]
+fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
+    use std::os::fd::AsFd;
+    let owned = if is_stdout {
+        io::stdout().as_fd().try_clone_to_owned()?
+    } else {
+        io::stderr().as_fd().try_clone_to_owned()?
+    };
+    Ok(std::fs::File::from(owned))
+}
+
+/// Windows counterpart of [`dup_std_handle`] — duplicates the console/handle
+/// backing stdout or stderr into an owned [`File`].
+#[cfg(windows)]
+fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
+    use std::os::windows::io::AsHandle;
+    let owned = if is_stdout {
+        io::stdout().as_handle().try_clone_to_owned()?
+    } else {
+        io::stderr().as_handle().try_clone_to_owned()?
+    };
+    Ok(std::fs::File::from(owned))
 }
 
 /// Read one newline-terminated line, returning `(text, terminated)` where
@@ -15818,6 +16126,36 @@ mod tests {
         // empty. (The body writes to fd 1; `echo body >&2` inside would instead
         // target fd 2 = the file, which is a different case.)
         assert_eq!(run_exec_redirect("{ echo body; } >&2 2>\"{FILE}\""), "");
+    }
+
+    #[test]
+    fn exec_save_and_restore_stdout() {
+        // The canonical save/restore idiom: `exec 3>&1` snapshots fd 1, then
+        // `exec > file` redirects it. A `>&3` write bypasses the file (goes to
+        // the saved original fd 1), and `exec 1>&3` restores fd 1 so later
+        // output leaves the file too. The file must hold *only* the pre-restore,
+        // non-`>&3` writes. (Regression for TD-OILS14 `exec 3>&1`/`exec 1>&3`.)
+        assert_eq!(
+            run_exec_redirect(
+                "exec 3>&1\nexec > \"{FILE}\"\necho to-file\necho bypass >&3\nexec 1>&3\necho after-restore"
+            ),
+            "to-file\n"
+        );
+    }
+
+    #[test]
+    fn exec_swap_stdout_stderr() {
+        // The classic swap idiom `exec 3>&1 1>&2 2>&3 3>&-` exchanges fd 1 and
+        // fd 2. With fd 2 pre-pointed at the file, after the swap fd 1 is the
+        // file and fd 2 is the terminal: `echo a` lands in the file while
+        // `echo b >&2` does not. This exercises strict left-to-right ordering of
+        // exec redirects (the collapsed RedirPlan could not express it).
+        assert_eq!(
+            run_exec_redirect(
+                "exec 2> \"{FILE}\"\nexec 3>&1 1>&2 2>&3 3>&-\necho a\necho b >&2"
+            ),
+            "a\n"
+        );
     }
 
     #[test]

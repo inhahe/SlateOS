@@ -883,6 +883,26 @@ impl Shell {
         Flow::Next
     }
 
+    /// The `let arg …` builtin. Evaluates each argument as an arithmetic
+    /// expression (applying any assignment/increment side effects). The exit
+    /// status is 0 when the *last* expression evaluates non-zero, 1 when it is
+    /// zero; an arithmetic error or no arguments yields status 1 (bash: 2 for
+    /// "expression expected", but 1 for a zero result — we report 1 for both).
+    fn builtin_let(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            self.emit_stderr(b"osh: let: expression expected\n");
+            return 1;
+        }
+        let mut last = 0i64;
+        for arg in args {
+            match self.eval_arith_raw(arg) {
+                Some(v) => last = v,
+                None => return 1, // the arithmetic error was already reported
+            }
+        }
+        i32::from(last == 0)
+    }
+
     /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
     /// mutating shell state for any assignment/increment operators. Returns the
     /// value, or `None` after printing the error.
@@ -2922,6 +2942,7 @@ impl Shell {
             "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir),
             "read" => self.builtin_read(args, stdin, redir),
             "test" | "[" => self.builtin_test(name, args),
+            "let" => self.builtin_let(args),
             "eval" => {
                 let joined = args.join(" ");
                 self.run_source(&joined)
@@ -4607,6 +4628,7 @@ fn is_builtin(name: &str) -> bool {
             | "read"
             | "test"
             | "["
+            | "let"
             | "eval"
             | "source"
             | "."
@@ -5852,6 +5874,24 @@ mod tests {
         assert_eq!(run("x=2; (( x > 3 ))").1, 1);
         // Used as a condition.
         assert_eq!(run("x=10; if (( x > 5 )); then echo big; fi").0, "big\n");
+    }
+
+    #[test]
+    fn let_builtin_assigns_and_status() {
+        // `let` evaluates the expression, mutating the variable.
+        assert_eq!(run("let x=3+4; echo $x").0, "7\n");
+        // Status is 0 when the last expression is non-zero, 1 when zero.
+        assert_eq!(run("let '1 + 1'").1, 0);
+        assert_eq!(run("let '0'").1, 1);
+        // Multiple expressions: the last one drives the status.
+        assert_eq!(run("let 'a=5' 'a>3'").1, 0);
+        // Increment operators work.
+        assert_eq!(run("x=4; let x++; echo $x").0, "5\n");
+    }
+
+    #[test]
+    fn let_no_args_fails() {
+        assert_eq!(run("let").1, 1);
     }
 
     #[test]

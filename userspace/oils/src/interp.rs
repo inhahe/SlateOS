@@ -592,8 +592,16 @@ impl Shell {
     /// Mark the shell as executing a script *file* (`osh SCRIPT`). Enables the
     /// bottom `main` pseudo-frame in the call-stack arrays (see
     /// `refresh_funcname`). Called once by the binary before running the script.
+    ///
+    /// Materialises the base frame immediately so that even at the script's top
+    /// level (before any function call) `${BASH_SOURCE[0]}` is the script path
+    /// and `${BASH_LINENO[0]}` is 0 — matching bash, which populates these from
+    /// the moment the script starts. `refresh_funcname` only runs on function
+    /// enter/exit, so without this the arrays would be empty until the first
+    /// call.
     pub fn set_script_mode(&mut self) {
         self.script_mode = true;
+        self.refresh_funcname();
     }
 
     /// Set a shell variable.
@@ -3376,24 +3384,86 @@ impl Shell {
         }
     }
 
+    /// The source-file label bash reports for a *function* call frame in
+    /// `BASH_SOURCE`. It depends on how the shell was started, because bash has
+    /// no real file for `-c`/interactive frames and substitutes a sentinel:
+    ///   * script file (`osh SCRIPT`) → the script path (`$0`),
+    ///   * `-c COMMAND`               → the literal string `environment`,
+    ///   * stdin / interactive REPL   → the literal string `main`.
+    ///
+    /// (`caller` uses a *different* sentinel — `NULL` — for the non-file cases;
+    /// see `caller_source`.) Per-function definition source is not tracked, so
+    /// every frame reports the same label (see known-issues TD-OILS21).
+    fn frame_source(&self) -> String {
+        if self.script_mode {
+            self.name.clone()
+        } else if self.command_mode {
+            "environment".to_string()
+        } else {
+            "main".to_string()
+        }
+    }
+
+    /// `FUNCNAME[i]` for the current call stack, or `None` past the end.
+    /// Index 0 is the innermost function; in script-file mode a bottom `main`
+    /// pseudo-frame sits just past the real function frames.
+    fn funcname_at(&self, i: usize) -> Option<String> {
+        let depth = self.fn_stack.len();
+        if i < depth {
+            Some(self.fn_stack[depth - 1 - i].clone())
+        } else if self.script_mode && i == depth {
+            Some("main".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// `BASH_LINENO[i]` — the line at which `FUNCNAME[i]` was invoked. In
+    /// script-file mode the bottom frame (the script itself) reports line 0.
+    fn bash_lineno_at(&self, i: usize) -> Option<u32> {
+        let depth = self.fn_stack.len();
+        if i < depth {
+            Some(self.call_line_stack[depth - 1 - i])
+        } else if self.script_mode && i == depth {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    /// `BASH_SOURCE[i]` — the source label of frame `i`. Function frames share
+    /// `frame_source`; the script-mode base frame reports the script path.
+    fn bash_source_at(&self, i: usize) -> Option<String> {
+        let depth = self.fn_stack.len();
+        if i < depth {
+            Some(self.frame_source())
+        } else if self.script_mode && i == depth {
+            Some(self.name.clone())
+        } else {
+            None
+        }
+    }
+
     /// Materialise the `FUNCNAME`, `BASH_LINENO`, and `BASH_SOURCE` arrays from
     /// the current call stack. Bash makes `FUNCNAME[0]` the currently-executing
-    /// function, then each caller outward; the arrays are unset outside any
-    /// function and contain exactly one entry per real call frame (no bottom
-    /// `main` pseudo-entry). `BASH_LINENO[i]` is the line where `FUNCNAME[i]`
-    /// was called, and `BASH_SOURCE[i]` is the source file where `FUNCNAME[i]`
-    /// is defined — here always `$0`, since per-function definition source is
-    /// not tracked (see known-issues TD-OILS21).
+    /// function, then each caller outward. `BASH_LINENO[i]` is the line where
+    /// `FUNCNAME[i]` was called, and `BASH_SOURCE[i]` is the source label of
+    /// that frame (see `frame_source`).
+    ///
+    /// Bash's boundary behaviour differs by frame array *and* invocation mode:
+    ///   * `-c` / stdin: no bottom frame — all three arrays hold exactly the
+    ///     active function frames (empty at top level).
+    ///   * script file: there is always a bottom frame for the script itself.
+    ///     `BASH_SOURCE`/`BASH_LINENO` carry it even at top level (so
+    ///     `${BASH_SOURCE[0]}` yields the script path outside any function),
+    ///     but `FUNCNAME` gains its bottom `main` entry only once at least one
+    ///     function frame sits above it. This makes the arrays legitimately
+    ///     differ in length at a script's top level (FUNCNAME 0, the others 1).
     fn refresh_funcname(&mut self) {
-        if self.fn_stack.is_empty() {
-            self.arrays.remove("FUNCNAME");
-            self.arrays.remove("BASH_LINENO");
-            self.arrays.remove("BASH_SOURCE");
-            return;
-        }
         let mut names: BTreeMap<usize, String> = BTreeMap::new();
         let mut linenos: BTreeMap<usize, String> = BTreeMap::new();
         let mut sources: BTreeMap<usize, String> = BTreeMap::new();
+        let src = self.frame_source();
         let mut idx = 0usize;
         // Walk both stacks from innermost (last) to outermost (first).
         for (name, line) in self
@@ -3404,18 +3474,23 @@ impl Shell {
         {
             names.insert(idx, name.clone());
             linenos.insert(idx, line.to_string());
-            sources.insert(idx, self.name.clone());
+            sources.insert(idx, src.clone());
             idx += 1;
         }
-        // Bash appends a bottom `main` pseudo-frame (call line 0, source = `$0`)
-        // ONLY when executing a script file (or a sourced file). For `-c` and
-        // interactive shells there is no top-level script frame, so FUNCNAME is
-        // exactly the active function frames (inside `f` at top level → `(f)`,
-        // length 1). Matching bash exactly requires this mode distinction.
         if self.script_mode {
-            names.insert(idx, "main".to_string());
+            // FUNCNAME gains `main` only when a function frame sits above it.
+            if !self.fn_stack.is_empty() {
+                names.insert(idx, "main".to_string());
+            }
+            // BASH_SOURCE/BASH_LINENO always carry the script's own base frame.
             linenos.insert(idx, "0".to_string());
             sources.insert(idx, self.name.clone());
+        }
+        if names.is_empty() && linenos.is_empty() && sources.is_empty() {
+            self.arrays.remove("FUNCNAME");
+            self.arrays.remove("BASH_LINENO");
+            self.arrays.remove("BASH_SOURCE");
+            return;
         }
         self.arrays.insert("FUNCNAME".to_string(), names);
         self.arrays.insert("BASH_LINENO".to_string(), linenos);
@@ -6661,12 +6736,20 @@ impl Shell {
             self.emit_stderr(b"osh: caller: no such frame\n");
             return 1;
         }
+        // bash prints the source label of the *caller's* frame — BASH_SOURCE[n+1]
+        // for `caller n`, BASH_SOURCE[1] for bare `caller` — with the literal
+        // `NULL` when that frame does not exist (e.g. the caller is the
+        // top-level of a `-c`/interactive shell, which has no bottom frame).
         let spec = args.iter().find(|a| a.as_str() != "--");
         match spec {
             None => {
-                // Bare `caller`: line + source of the current call site.
-                let line = self.call_line_stack[depth - 1];
-                let src = self.name.clone();
+                // Bare `caller`: line of the current call site (BASH_LINENO[0])
+                // and the source of its caller (BASH_SOURCE[1]). Unlike the
+                // numbered form, this never fails while inside a function.
+                let Some(line) = self.bash_lineno_at(0) else {
+                    return 1;
+                };
+                let src = self.bash_source_at(1).unwrap_or_else(|| "NULL".to_string());
                 self.write_bytes(out, redir, format!("{line} {src}\n").as_bytes())
             }
             Some(expr) => {
@@ -6676,16 +6759,15 @@ impl Shell {
                     );
                     return 1;
                 };
-                if n >= depth {
-                    // Out of range for the active call stack.
+                // Frame n reports BASH_LINENO[n] + FUNCNAME[n+1] (the caller of
+                // the function at depth n). Out of range when the caller frame
+                // does not exist — e.g. `caller 0` from a single function under
+                // `-c`, where there is no bottom `main` frame.
+                let (Some(line), Some(func)) = (self.bash_lineno_at(n), self.funcname_at(n + 1))
+                else {
                     return 1;
-                }
-                // Frame n: FUNCNAME[n] = fn_stack[depth-1-n], called at
-                // call_line_stack[depth-1-n].
-                let k = depth - 1 - n;
-                let line = self.call_line_stack[k];
-                let func = self.fn_stack[k].clone();
-                let src = self.name.clone();
+                };
+                let src = self.bash_source_at(n + 1).unwrap_or_else(|| "NULL".to_string());
                 self.write_bytes(out, redir, format!("{line} {func} {src}\n").as_bytes())
             }
         }
@@ -13719,6 +13801,7 @@ mod tests {
         // bottom `main` pseudo-frame; `-c`/interactive (the plain harness) do not.
         let script_run = |src: &str| {
             let mut sh = Shell::new();
+            sh.set_name("scr.sh");
             sh.set_script_mode();
             let mut buf = Vec::new();
             let mut out = Out::Capture(&mut buf);
@@ -13736,12 +13819,29 @@ mod tests {
             script_run("g() { echo \"${FUNCNAME[*]}|${BASH_LINENO[*]}\"; }\nf() { g; }\nf"),
             "g f main|2 3 0\n"
         );
+        // At the *top level* of a script bash still exposes the base frame in
+        // BASH_SOURCE/BASH_LINENO (the script itself), even though FUNCNAME is
+        // empty there. The three arrays therefore differ in length.
+        assert_eq!(
+            script_run(
+                "echo \"[${BASH_SOURCE[0]}] bl=${BASH_LINENO[0]} \
+                 fn=${#FUNCNAME[@]} bs=${#BASH_SOURCE[@]}\""
+            ),
+            "[scr.sh] bl=0 fn=0 bs=1\n"
+        );
+        // BASH_SOURCE reports the script path for the frames of functions
+        // defined in it, and `caller` walks up to the `main` base frame.
+        assert_eq!(
+            script_run("f() { echo \"src=${BASH_SOURCE[0]}\"; caller 0; }\nf"),
+            "src=scr.sh\n2 main scr.sh\n"
+        );
     }
 
     #[test]
     fn bash_lineno_and_source_arrays() {
-        // BASH_SOURCE[0] is the script name ($0 = "osh" in the harness).
-        assert_eq!(run("f() { echo ${BASH_SOURCE[0]}; }; f").0, "osh\n");
+        // The harness runs like stdin/REPL (neither `-c` nor a script file), so
+        // bash labels function frames `main` in BASH_SOURCE.
+        assert_eq!(run("f() { echo ${BASH_SOURCE[0]}; }; f").0, "main\n");
         // BASH_LINENO[0] is the line where the current function was called.
         assert_eq!(run("f() { echo ${BASH_LINENO[0]}; }\nf").0, "2\n");
         // Nested: BASH_LINENO tracks each call site. The harness runs like
@@ -13755,13 +13855,25 @@ mod tests {
 
     #[test]
     fn caller_builtin() {
-        // Bare `caller` prints "LINE SOURCE" of the current call site.
-        assert_eq!(run("f() { caller; }\nf").0, "2 osh\n");
-        // `caller 0` adds the function name: "LINE FUNCNAME SOURCE".
-        assert_eq!(run("f() { caller 0; }\nf").0, "2 f osh\n");
-        // `caller 1` walks one frame up the stack.
-        let src = "g() { caller 1; }\nf() { g; }\nf";
-        assert_eq!(run(src).0, "3 f osh\n");
+        // The harness runs like stdin/interactive: no bottom `main` frame, and
+        // the source of a top-level caller is reported as the literal `NULL`.
+        // Bare `caller` prints "LINE SOURCE" of the current call site; the
+        // source is BASH_SOURCE[1] (the caller's frame), here `NULL`.
+        assert_eq!(run("f() { caller; }\nf").0, "2 NULL\n");
+        // `caller 0` from a single function needs FUNCNAME[1] (the caller),
+        // which doesn't exist without a `main` frame → status 1, no output.
+        let (o, c) = run("f() { caller 0; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 1);
+        // Nested: `caller 0` from g reports g's call site + its caller f, whose
+        // frame source is `main` in stdin/interactive mode.
+        assert_eq!(run("g() { caller 0; }\nf() { g; }\nf").0, "2 f main\n");
+        // Bare `caller` from g reports g's call line and f's source (`main`).
+        assert_eq!(run("g() { caller; }\nf() { g; }\nf").0, "2 main\n");
+        // `caller 1` needs FUNCNAME[2] (the `main` base frame), absent here.
+        let (o, c) = run("g() { caller 1; }\nf() { g; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 1);
         // Out of range → status 1, no output.
         let (o, c) = run("f() { caller 5; }\nf");
         assert_eq!(o, "");

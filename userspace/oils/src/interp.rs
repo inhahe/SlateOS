@@ -4675,14 +4675,46 @@ impl Shell {
     }
 
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
-        for a in args {
+        // Parse leading `-v` (variables only) / `-f` (functions only) flags.
+        // Without a flag, a name that is a set variable is unset as a variable,
+        // otherwise it is unset as a function (bash: variables take precedence).
+        let mut funcs_only = false;
+        let mut vars_only = false;
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+                && flags.chars().all(|c| matches!(c, 'v' | 'f'))
+            {
+                for c in flags.chars() {
+                    match c {
+                        'f' => funcs_only = true,
+                        'v' => vars_only = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        for a in &args[i..] {
+            if funcs_only {
+                self.funcs.remove(a);
+                continue;
+            }
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.emit_stderr(format!("osh: {a}: cannot unset: readonly variable\n").as_bytes());
                 return 1;
             }
             // `unset name[i]` removes a single element; `unset name` removes the
-            // whole variable/array/function.
+            // whole variable (or, without `-v` and when not a set variable, the
+            // function).
             if let Some(open) = a.find('[')
                 && a.ends_with(']')
             {
@@ -4700,11 +4732,18 @@ impl Shell {
                 }
                 continue;
             }
+            let is_var = self.vars.contains_key(a)
+                || self.arrays.contains_key(a)
+                || self.assoc.contains_key(a);
+            if !vars_only && !is_var {
+                // Not a set variable: fall back to unsetting a function.
+                self.funcs.remove(a);
+                continue;
+            }
             self.vars.remove(a);
             self.arrays.remove(a);
             self.assoc.remove(a);
             self.exported.remove(a);
-            self.funcs.remove(a);
             // Unsetting a variable also drops its attributes (bash semantics).
             self.integer_attr.remove(a);
             self.lower_attr.remove(a);
@@ -9870,6 +9909,25 @@ mod tests {
         let (o, s) = run("cmd /c exit 0\nhash -t cmd");
         assert_eq!(s, 0, "hash -t cmd should succeed; out {o:?}");
         assert!(o.to_lowercase().contains("cmd"), "got {o:?}");
+    }
+
+    #[test]
+    fn unset_v_and_f_flags() {
+        // `-v` unsets only the variable, leaving a same-named function intact.
+        assert_eq!(
+            run("f() { echo fn; }; f=1; unset -v f; f").0,
+            "fn\n"
+        );
+        // `-f` unsets only the function, leaving the variable intact.
+        assert_eq!(
+            run("g() { echo fn; }; g=val; unset -f g; echo $g").0,
+            "val\n"
+        );
+        // No flag: a set variable is removed in preference to the function.
+        assert_eq!(
+            run("h() { echo fn; }; h=v; unset h; echo \"[$h]\"; h").0,
+            "[]\nfn\n"
+        );
     }
 
     #[test]

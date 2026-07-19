@@ -5006,12 +5006,21 @@ impl Shell {
                     cur.unwrap_or_default()
                 } else {
                     let msg = self.expand_to_string(arg);
-                    let text = if msg.is_empty() {
+                    // bash's default diagnostic distinguishes the two forms: the
+                    // colon form (`:?`) tests null-or-unset ("parameter null or
+                    // not set"); the colon-less form (`?`) tests only unset
+                    // ("parameter not set").
+                    let text = if !msg.is_empty() {
+                        &msg
+                    } else if colon {
                         "parameter null or not set"
                     } else {
-                        &msg
+                        "parameter not set"
                     };
-                    self.emit_stderr(format!("osh: {name}: {text}\n").as_bytes());
+                    // bash renders the parameter name with its subscript exactly
+                    // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded).
+                    let disp = crate::unparse::name_sub(name, index);
+                    self.emit_stderr(format!("osh: {disp}: {text}\n").as_bytes());
                     // bash: `${var:?word}` on an unset/null parameter writes the
                     // message and, in a non-interactive shell, exits. Reuse the
                     // nounset abort path so the simple-command driver terminates
@@ -5093,10 +5102,14 @@ impl Shell {
                 } else {
                     let sub = if star { "*" } else { "@" };
                     let msg = self.expand_to_string(arg);
-                    let text = if msg.is_empty() {
+                    // Match bash's colon (null-or-unset) vs colon-less (unset)
+                    // default-message distinction — see `expand_param_op`.
+                    let text = if !msg.is_empty() {
+                        &msg
+                    } else if colon {
                         "parameter null or not set"
                     } else {
-                        &msg
+                        "parameter not set"
                     };
                     self.emit_stderr(format!("osh: {name}[{sub}]: {text}\n").as_bytes());
                     self.unbound_error = true;
@@ -13152,6 +13165,29 @@ mod tests {
         let (o2, s2) = run("no_such_cmd_xyz123 2>&1; echo done");
         assert_eq!(o2, "osh: no_such_cmd_xyz123: command not found\ndone\n");
         assert_eq!(s2, 0);
+    }
+
+    #[test]
+    fn error_if_unset_message_and_subscript() {
+        // Colon-less `?` tests only unset ("parameter not set"); colon `:?` tests
+        // null-or-unset ("parameter null or not set"). A custom message overrides
+        // the default text. bash renders an array subscript exactly as written in
+        // source (unexpanded) in the diagnostic name. The `${var?}` error aborts
+        // the shell, so we fold the diagnostic into the captured stdout with a
+        // group `{ …; } 2>&1` (the group's stderr redirect covers the abort path).
+        let (o, _) = run("{ echo \"${y?}\"; } 2>&1");
+        assert_eq!(o, "osh: y: parameter not set\n");
+        let (o2, _) = run("x=; { echo \"${x:?}\"; } 2>&1");
+        assert_eq!(o2, "osh: x: parameter null or not set\n");
+        let (o3, _) = run("{ echo \"${z:?custom}\"; } 2>&1");
+        assert_eq!(o3, "osh: z: custom\n");
+        // Associative-array element: the key appears in the name.
+        let (o4, _) = run("declare -A m; { echo \"${m[k]?}\"; } 2>&1");
+        assert_eq!(o4, "osh: m[k]: parameter not set\n");
+        // Indexed-array element: the subscript is rendered as written, not the
+        // evaluated index (`a[$i]`, not `a[5]`).
+        let (o5, _) = run("i=5; declare -a a; { echo \"${a[$i]?}\"; } 2>&1");
+        assert_eq!(o5, "osh: a[$i]: parameter not set\n");
     }
 
     #[test]

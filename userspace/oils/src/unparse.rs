@@ -581,7 +581,8 @@ fn dollar_name(name: &str) -> String {
 }
 
 /// `name` optionally followed by `[index]`.
-fn name_sub(name: &str, index: &Option<Box<Word>>) -> String {
+#[must_use]
+pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> String {
     match index {
         Some(i) => format!("{name}[{}]", word_src(i)),
         None => name.to_string(),

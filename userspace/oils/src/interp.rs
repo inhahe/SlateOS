@@ -1810,6 +1810,26 @@ impl Shell {
         }
     }
 
+    /// Store a plain scalar value into a variable, honoring the readonly guard,
+    /// nameref redirection, the case attributes, and `set -a` export. Returns
+    /// `false` (with the `readonly variable` diagnostic already emitted) when the
+    /// target is readonly. Used by write paths outside `apply_assignment` — the
+    /// `read` builtin and temporary `NAME=val cmd` env prefixes — so a readonly
+    /// variable cannot be overwritten there either (bash rejects both).
+    fn set_scalar_checked(&mut self, name: &str, val: String) -> bool {
+        let target = self.resolve_ref_name(name);
+        if self.readonly.contains(&target) {
+            self.emit_stderr(format!("osh: {target}: readonly variable\n").as_bytes());
+            return false;
+        }
+        if self.allexport {
+            self.exported.insert(target.clone());
+        }
+        let val = self.fold_case_attr(&target, val);
+        self.vars.insert(target, val);
+        true
+    }
+
     fn apply_assignment(&mut self, a: &Assignment) -> bool {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
@@ -2729,6 +2749,18 @@ impl Shell {
         let mut assigns: Vec<(String, String)> = Vec::with_capacity(sc.assignments.len());
         for a in &sc.assignments {
             assigns.push(self.assignment_prefix_value(a));
+        }
+
+        // A readonly variable cannot be set even as a temporary command prefix
+        // (`readonly x; x=1 cmd` → error, command not run, status 1). Guard
+        // before dispatch so no path (function/builtin/external) mutates it.
+        for (k, _) in &assigns {
+            let target = self.resolve_ref_name(k);
+            if self.readonly.contains(&target) {
+                self.emit_stderr(format!("osh: {target}: readonly variable\n").as_bytes());
+                self.last_status = 1;
+                return Flow::Next;
+            }
         }
 
         // Resolve redirections (targets are expanded now).
@@ -7162,6 +7194,12 @@ impl Shell {
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
 
         if let Some(arr) = array {
+            // A readonly array target rejects the whole read (status 1, no
+            // mutation), matching bash's `read -a`.
+            if self.readonly.contains(&arr) {
+                self.emit_stderr(format!("osh: {arr}: readonly variable\n").as_bytes());
+                return 1;
+            }
             let fields = read_split(&line, &ifs, raw, None);
             let map: BTreeMap<usize, String> =
                 fields.into_iter().enumerate().collect();
@@ -7174,14 +7212,21 @@ impl Shell {
         if names.is_empty() {
             // No names: assign the (optionally unescaped) whole line to REPLY.
             let reply = if raw { line } else { unescape_read_line(&line) };
-            self.vars.insert("REPLY".to_string(), reply);
+            // REPLY is rarely readonly, but honor it if so (status 1, no write).
+            if !self.set_scalar_checked("REPLY", reply) {
+                return 1;
+            }
             return eof_status;
         }
 
         let fields = read_split(&line, &ifs, raw, Some(names.len()));
         for (idx, name) in names.iter().enumerate() {
             let val = fields.get(idx).cloned().unwrap_or_default();
-            self.vars.insert(name.clone(), val);
+            // A readonly target aborts the read at that field (bash: earlier
+            // fields are already assigned, the read fails with status 1).
+            if !self.set_scalar_checked(name, val) {
+                return 1;
+            }
         }
         eof_status
     }
@@ -13364,6 +13409,39 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 0);
         assert_eq!(out, "L:a\nL:b\nL:c\nend\n");
+    }
+
+    #[test]
+    fn read_into_readonly_var_fails() {
+        // `read x` where x is readonly leaves x unchanged and the read reports
+        // status 1 (diagnostic goes to real stderr, not captured stdout).
+        let (out, _) = run("readonly x=orig; read x <<< 'new'; echo \"$x $?\"");
+        assert_eq!(out, "orig 1\n");
+    }
+
+    #[test]
+    fn read_field_readonly_aborts_after_earlier_fields() {
+        // `read a b` with b readonly: a is assigned, then b's field is rejected
+        // and the read fails with status 1 (matching bash's field-order abort).
+        let (out, _) = run("readonly b=keep; read a b <<< 'x y'; echo \"$a|$b|$?\"");
+        assert_eq!(out, "x|keep|1\n");
+    }
+
+    #[test]
+    fn read_array_readonly_fails() {
+        // `read -a arr` with arr readonly rejects the whole read (no mutation).
+        let (out, _) = run(
+            "readonly arr; read -a arr <<< 'p q'; s=$?; echo \"[${arr[*]}]|$s\"",
+        );
+        assert_eq!(out, "[]|1\n");
+    }
+
+    #[test]
+    fn env_prefix_readonly_var_errors() {
+        // `readonly y; y=1 cmd` cannot temporarily override a readonly variable:
+        // the command is not run and the status is 1, y keeps its value.
+        let (out, _) = run("readonly y=5; y=9 :; echo \"$y|$?\"");
+        assert_eq!(out, "5|1\n");
     }
 
     #[test]

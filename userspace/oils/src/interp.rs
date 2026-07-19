@@ -7706,6 +7706,20 @@ impl Shell {
         None
     }
 
+    /// Format a variable as the bare `set` builtin lists it. Arrays use the same
+    /// double-quoted form as `declare -p`, but scalars use bash's minimal
+    /// single-quote style (see `quote_set_value`) — e.g. `y=5`, `x='a b'` rather
+    /// than `declare -p`'s `y="5"`, `x="a b"`.
+    fn format_var_setline(&self, name: &str) -> Option<String> {
+        if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
+            return self.format_var_assignment(name);
+        }
+        if let Some(v) = self.vars.get(name) {
+            return Some(format!("{name}={}", quote_set_value(v)));
+        }
+        None
+    }
+
     fn builtin_declare(&mut self, args: &[String], is_local: bool) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(b"osh: local: can only be used in a function\n");
@@ -8456,7 +8470,7 @@ impl Shell {
             all.dedup();
             let mut listing = String::new();
             for name in all {
-                if let Some(def) = self.format_var_assignment(name) {
+                if let Some(def) = self.format_var_setline(name) {
                     listing.push_str(&def);
                     listing.push('\n');
                 }
@@ -11386,6 +11400,55 @@ fn quote_declare_value(v: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Quote a scalar value the way bash's bare `set` variable listing does — which
+/// differs from `declare -p` (that one always double-quotes). Here a value is
+/// rendered *raw* when it needs no quoting, ANSI-C `$'…'`-quoted when it holds a
+/// control character, and single-quoted when it holds a shell metacharacter (or
+/// leads with `#`/`~`, which would otherwise start a comment or tilde-expand on
+/// re-input). An empty value renders as the bare `name=` (no quotes).
+///
+/// The metacharacter set mirrors bash's `sh_contains_shell_metas` as observed
+/// from real `set` output (note: comma does *not* force quoting, matching bash).
+fn quote_set_value(v: &str) -> String {
+    if v.is_empty() {
+        return String::new();
+    }
+    if v.chars().any(char::is_control) {
+        let mut out = String::from("$'");
+        for c in v.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("\\'"),
+                c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    const METAS: &[char] = &[
+        ' ', '\'', '"', '\\', '|', '&', ';', '(', ')', '<', '>', '!', '{', '}', '*', '[', '?',
+        ']', '^', '$', '`',
+    ];
+    let leads = v.starts_with('#') || v.starts_with('~');
+    if leads || v.chars().any(|c| METAS.contains(&c)) {
+        let mut out = String::from("'");
+        for c in v.chars() {
+            if c == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(c);
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    v.to_string()
 }
 
 /// Split an expanded value into fields on `$ifs`, following POSIX word-splitting
@@ -17212,15 +17275,36 @@ mod tests {
     #[test]
     fn set_no_args_lists_variables() {
         // Bare `set` lists shell variables in sorted, re-inputtable form.
+        // Scalars use bash's minimal single-quote style (plain values unquoted),
+        // while arrays keep the double-quoted element form.
         let (o, s) = run("zebra=1; apple=2; arr=(x y); set");
         assert_eq!(s, 0);
-        assert!(o.contains("apple=\"2\"\n"), "got {o:?}");
-        assert!(o.contains("zebra=\"1\"\n"), "got {o:?}");
+        assert!(o.contains("apple=2\n"), "got {o:?}");
+        assert!(o.contains("zebra=1\n"), "got {o:?}");
         assert!(o.contains("arr=([0]=\"x\" [1]=\"y\")\n"), "got {o:?}");
         // Sorted: apple must appear before zebra.
         let ai = o.find("apple=").expect("apple");
         let zi = o.find("zebra=").expect("zebra");
         assert!(ai < zi, "expected sorted output, got {o:?}");
+    }
+
+    #[test]
+    fn set_scalar_quoting_matches_bash() {
+        // bash's bare `set` quotes scalar values minimally: raw when safe,
+        // single-quoted around shell metacharacters, `$'…'` for control chars.
+        let src = "a=hello; b='a b'; c=; g=a=b; num=5; lh='#x'; star='a*b'; nl=$'a\\nb'";
+        let (o, s) = run(&format!("{src}; set"));
+        assert_eq!(s, 0);
+        assert!(o.contains("a=hello\n"), "got {o:?}");
+        assert!(o.contains("b='a b'\n"), "got {o:?}");
+        assert!(o.contains("c=\n"), "got {o:?}");
+        assert!(o.contains("g=a=b\n"), "got {o:?}");
+        assert!(o.contains("num=5\n"), "got {o:?}");
+        // Leading `#`/`~` and glob/meta chars force single-quoting.
+        assert!(o.contains("lh='#x'\n"), "got {o:?}");
+        assert!(o.contains("star='a*b'\n"), "got {o:?}");
+        // A newline (control char) uses ANSI-C quoting.
+        assert!(o.contains("nl=$'a\\nb'\n"), "got {o:?}");
     }
 
     #[test]

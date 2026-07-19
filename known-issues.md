@@ -40,6 +40,51 @@ when invoked via `-c`, and have the fatal-expansion handlers return
 `Flow::Exit(127)` when `c_mode` is set (both the `unbound_error` and the
 command-word/prefix `arith_error` branches). Add a test covering both modes.
 
+### TD-OILS-ASSOC-KEY-TRIM. `osh` trims leading/trailing whitespace from an unquoted associative-array subscript key — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` associative assignment/read
+(`expand_to_string(idx_word)` at ~2105 for stores; `assoc_element`/
+`split_name_subscript` paths for reads) and/or `parser.rs`
+`assignment_from_segs` subscript extraction (~889).
+
+**What:** After the lexer fix that keeps `h[a b]=v` as one assignment word
+(interior spaces preserved — the common case works), a subscript with
+*leading/trailing* spaces is still trimmed: `declare -A h; h[ x ]=v;
+echo "${!h[@]}"` prints `x` in osh but ` x ` in bash. Interior spaces
+(`h[a b]`, `h[key with space]`) are correct; only the surrounding
+whitespace of an associative key is lost. osh is self-consistent (store
+and read both trim, so round-trips work), just not bash-identical.
+
+**Why deferred:** an associative key deliberately padded with unquoted
+leading/trailing spaces is extremely rare; the realistic interior-space
+case is fixed. Indexed (arithmetic) subscripts *should* strip whitespace
+(`a[ 1 + 2 ]`), so the trim must be gated on `is_assoc`.
+
+**Proper fix:** when the array is associative, use the subscript's expanded
+text verbatim (no trim) as the key on both the store and read paths; keep
+whitespace-stripping only for the arithmetic (indexed) subscript path.
+
+### TD-OILS-DECLARE-BADID. `osh` `declare NAME[a b]=v` silently no-ops; bash errors "not a valid identifier" — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` `builtin_declare` argument
+parsing (the per-arg assignment/attribute handling).
+
+**What:** In *argument* position (after the `declare` command word), bash's
+tokenizer splits `declare h[a b]=v` into `h[a` and `b]=v` and `declare`
+then rejects each: `declare: `h[a': not a valid identifier` (status 1). osh
+splits the same way but its `declare` builtin silently ignores the
+malformed args (no error, exit 0). Reproduce: `declare -A h; declare
+h[a b]=v; echo $?` → bash prints two errors + status 1; osh prints nothing
++ status 0.
+
+**Why deferred:** niche (unquoted spaces in a `declare` argument subscript);
+the correct incantation `declare "h[a b]=v"` works in both shells.
+
+**Proper fix:** in `builtin_declare`, when an argument is neither a valid
+attribute flag nor a well-formed `name[sub]?=value` assignment, emit
+`osh: declare: \`ARG': not a valid identifier` to stderr and set the exit
+status to 1 (accumulating the worst status across args).
+
 ### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` `builtin_readonly` listing branch

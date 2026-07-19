@@ -245,6 +245,69 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// True when `s` is a syntactically valid shell variable name (an identifier).
+fn is_valid_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if is_name_start(c) => chars.all(is_name_char),
+        _ => false,
+    }
+}
+
+/// True when the previous token leaves us in a position where a leading
+/// assignment word (`name=…`, `name[sub]=…`, `name+=…`) is acceptable. bash's
+/// tokenizer only slurps an unquoted-space array subscript (`h[a b]=v`) here.
+/// This holds at the start of a command *and* immediately after another
+/// assignment word (so `h[a b]=1 h[c d]=2` chains).
+fn assignment_acceptable(prev: Option<&Tok>) -> bool {
+    if starts_command(prev) {
+        return true;
+    }
+    matches!(prev, Some(Tok::Word(segs)) if word_is_assignment(segs))
+}
+
+/// Heuristic: does this word token have the shape of an assignment
+/// (`name=`, `name[subscript]=`, or `name+=`)? Only the first literal segment
+/// is inspected; a subscript containing an expansion (`h[$i]=…`) is not chained
+/// past, which is an acceptable limitation for the rare "chained assignments
+/// with an expanded subscript" case.
+fn word_is_assignment(segs: &[Seg]) -> bool {
+    let Some(Seg::Lit(s)) = segs.first() else {
+        return false;
+    };
+    let b: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    if b.first().is_none_or(|&c| !is_name_start(c)) {
+        return false;
+    }
+    while i < b.len() && is_name_char(b[i]) {
+        i += 1;
+    }
+    // Optional `[subscript]` with balanced brackets inside this literal.
+    if b.get(i) == Some(&'[') {
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    i += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    if b.get(i) == Some(&'+') {
+        i += 1;
+    }
+    b.get(i) == Some(&'=')
+}
+
 impl Lexer {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
@@ -435,7 +498,8 @@ impl Lexer {
                     if let Some(tok) = self.try_array_assign()? {
                         out.push(tok);
                     } else {
-                        let segs = self.read_word()?;
+                        let assign_ok = assignment_acceptable(out.last());
+                        let segs = self.read_word_inner(assign_ok)?;
                         self.emit_word(&mut out, segs);
                     }
                 }
@@ -639,8 +703,20 @@ impl Lexer {
     }
 
     fn read_word(&mut self) -> Result<Vec<Seg>, LexError> {
+        self.read_word_inner(false)
+    }
+
+    /// Read one word; when `assign_ok`, an array-subscript at the head of the
+    /// word (`name[…]`) is consumed as part of the word even across unquoted
+    /// whitespace, matching bash's assignment-word tokenization.
+    fn read_word_inner(&mut self, assign_ok: bool) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
+        // Bracket-nesting depth while consuming a leading `name[subscript]`
+        // subscript. While > 0, unquoted whitespace and operator characters are
+        // literal content; only balanced `]` closes it. Quotes/expansions inside
+        // are still processed normally.
+        let mut sub_depth = 0usize;
         // Depth of nested `extglob` groups. Inside a group the pattern
         // metacharacters `(`, `)`, `|`, whitespace, etc. are literal word content
         // rather than word/operator delimiters, so the whole `@(a|b c)` stays one
@@ -652,6 +728,48 @@ impl Lexer {
         // pattern word, not a negated subshell — use `! (cmd)` for the latter.
         let mut ext_depth = 0usize;
         while let Some(c) = self.peek() {
+            // Array-subscript assignment head: when this word begins with a valid
+            // name immediately followed by `[`, bash consumes the whole `[…]`
+            // subscript — including unquoted spaces — as part of the word, so
+            // `h[a b]=v` stays one assignment word. Only in assignment-acceptable
+            // position (`assign_ok`), and only for the leading subscript (segs
+            // still empty, `lit` a valid identifier).
+            if sub_depth == 0
+                && assign_ok
+                && c == '['
+                && segs.is_empty()
+                && is_valid_name(&lit)
+            {
+                lit.push('[');
+                self.pos += 1;
+                sub_depth += 1;
+                continue;
+            }
+            if sub_depth > 0 {
+                match c {
+                    '[' => {
+                        lit.push('[');
+                        sub_depth += 1;
+                        self.pos += 1;
+                        continue;
+                    }
+                    ']' => {
+                        lit.push(']');
+                        sub_depth -= 1;
+                        self.pos += 1;
+                        continue;
+                    }
+                    // Quotes, expansion and escapes keep their normal processing
+                    // (fall through to the outer match); everything else — spaces,
+                    // operators — is literal subscript content.
+                    '\'' | '"' | '`' | '\\' | '$' => {}
+                    other => {
+                        lit.push(other);
+                        self.pos += 1;
+                        continue;
+                    }
+                }
+            }
             // Opener: `X(` where X ∈ ?*+@! (unquoted). Begins/nests a group.
             if matches!(c, '?' | '*' | '+' | '@' | '!') && self.peek_at(1) == Some('(') {
                 lit.push(c);
@@ -1319,6 +1437,24 @@ mod tests {
     fn io_number() {
         let toks = tokenize("cmd 2> err").unwrap();
         assert!(toks.iter().any(|t| matches!(t, Tok::Io(2))));
+    }
+
+    #[test]
+    fn array_subscript_assignment_keeps_spaces() {
+        // In assignment position, a `name[…]` subscript is one word even with
+        // unquoted spaces inside the brackets (bash's tokenizer behaviour).
+        let toks = tokenize("h[a b]=v").unwrap();
+        assert_eq!(toks.len(), 1);
+        match &toks[0] {
+            Tok::Word(segs) => assert_eq!(segs.as_slice(), &[Seg::Lit("h[a b]=v".into())]),
+            other => panic!("expected single word, got {other:?}"),
+        }
+        // Chained assignments: the second word is still assignment position.
+        let toks = tokenize("h[a b]=1 h[c d]=2").unwrap();
+        assert_eq!(toks.len(), 2, "expected two words, got {toks:?}");
+        // In *argument* position the subscript splits normally on the space.
+        let toks = tokenize("echo h[a b]=v").unwrap();
+        assert_eq!(toks.len(), 3, "argument-position subscript must split: {toks:?}");
     }
 
     #[test]

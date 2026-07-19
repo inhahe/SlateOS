@@ -14559,6 +14559,23 @@ mod tests {
     }
 
     #[test]
+    fn assoc_key_with_unquoted_spaces() {
+        // bash's tokenizer keeps a `name[…]=` subscript as one assignment word
+        // even with unquoted interior spaces, so `h[a b]=v` stores under the
+        // literal key "a b". Chained assignments on one line also work.
+        assert_eq!(
+            run("declare -A h; h[a b]=1 h[c d]=2; echo \"${h[a b]}${h[c d]}\"").0,
+            "12\n"
+        );
+        assert_eq!(
+            run("declare -A h; h[key with space]=v; echo \"${h[key with space]}\"").0,
+            "v\n"
+        );
+        // Argument position still word-splits: `echo h[a b]` prints two fields.
+        assert_eq!(run("echo h[a b]").0, "h[a b]\n");
+    }
+
+    #[test]
     fn assoc_unset_key() {
         let src = "declare -A m; m[a]=1; m[b]=2; unset m[a]; echo ${!m[@]}; echo ${#m[@]}";
         assert_eq!(run(src).0, "b\n1\n");

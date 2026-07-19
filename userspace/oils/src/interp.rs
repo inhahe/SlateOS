@@ -6656,6 +6656,17 @@ mod tests {
     }
 
     #[test]
+    fn arith_number_bases() {
+        // base#num and leading-zero octal survive `$(( … ))` expansion:
+        // the `#` must not be mistaken for a comment.
+        assert_eq!(run("echo $(( 2#1010 ))").0, "10\n");
+        assert_eq!(run("echo $(( 16#ff ))").0, "255\n");
+        assert_eq!(run("echo $(( 8#17 ))").0, "15\n");
+        assert_eq!(run("echo $(( 017 ))").0, "15\n");
+        assert_eq!(run("echo $(( 64#_ ))").0, "63\n");
+    }
+
+    #[test]
     fn arith_assignment_command() {
         // `(( x = … ))` writes back to the shell scalar.
         assert_eq!(run("(( x = 5 )); echo $x").0, "5\n");

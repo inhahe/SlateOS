@@ -426,7 +426,7 @@ impl AParser<'_> {
 
     fn parse_number(&mut self) -> Result<i64, ArithError> {
         let start = self.pos;
-        // Support 0x.. hex and plain decimal.
+        // 0x / 0X hexadecimal.
         if self.peek() == Some('0') && matches!(self.chars.get(self.pos + 1), Some('x' | 'X')) {
             self.pos += 2;
             let hstart = self.pos;
@@ -437,13 +437,67 @@ impl AParser<'_> {
             return i64::from_str_radix(&hex, 16)
                 .map_err(|_| ArithError(format!("bad hex literal '0x{hex}'")));
         }
+        // Collect the leading decimal run. It is either the whole number, an
+        // octal literal (leading zero), or the base of a `base#num` literal.
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.pos += 1;
         }
-        let num: String = self.chars[start..self.pos].iter().collect();
-        num.parse::<i64>()
-            .map_err(|_| ArithError(format!("bad number '{num}'")))
+        // base#num — bash arbitrary-base literals, base 2..=64.
+        if self.peek() == Some('#') {
+            let base_str: String = self.chars[start..self.pos].iter().collect();
+            let base: u32 = base_str
+                .parse()
+                .map_err(|_| ArithError(format!("bad arithmetic base '{base_str}'")))?;
+            if !(2..=64).contains(&base) {
+                return Err(ArithError(format!("invalid arithmetic base ({base})")));
+            }
+            self.pos += 1; // consume '#'
+            let dstart = self.pos;
+            let mut val: i64 = 0;
+            while let Some(c) = self.peek() {
+                let Some(d) = digit_value(c, base) else { break };
+                self.pos += 1;
+                val = val
+                    .wrapping_mul(i64::from(base))
+                    .wrapping_add(i64::from(d));
+            }
+            if self.pos == dstart {
+                return Err(ArithError(format!("missing digits in base-{base} literal")));
+            }
+            return Ok(val);
+        }
+        let text: String = self.chars[start..self.pos].iter().collect();
+        // A leading zero (other than bare "0") denotes octal.
+        if text.len() > 1 && text.starts_with('0') {
+            return i64::from_str_radix(&text, 8)
+                .map_err(|_| ArithError(format!("bad octal literal '{text}'")));
+        }
+        text.parse::<i64>()
+            .map_err(|_| ArithError(format!("bad number '{text}'")))
     }
+}
+
+/// Value of `c` as a digit in `base` (bash `base#num` semantics), or `None` if
+/// `c` is not a valid digit for that base. Digits above 9 use the lowercase
+/// letters, then the uppercase letters, then `@`, then `_`. For bases <= 36 the
+/// letter cases are interchangeable; for larger bases lowercase is 10..=35 and
+/// uppercase is 36..=61.
+fn digit_value(c: char, base: u32) -> Option<u32> {
+    let v = match c {
+        '0'..='9' => c as u32 - '0' as u32,
+        'a'..='z' => 10 + (c as u32 - 'a' as u32),
+        'A'..='Z' => {
+            if base <= 36 {
+                10 + (c as u32 - 'A' as u32)
+            } else {
+                36 + (c as u32 - 'A' as u32)
+            }
+        }
+        '@' => 62,
+        '_' => 63,
+        _ => return None,
+    };
+    if v < base { Some(v) } else { None }
 }
 
 /// Convert a parsed expression into an lvalue, or error if it is not
@@ -760,6 +814,30 @@ mod tests {
         assert_eq!(ev("2 ** 2 * 3"), 12);
         // Negative exponent is an error.
         assert!(eval("2 ** -1", &mut Map::default()).is_err());
+    }
+
+    #[test]
+    fn number_bases() {
+        // Leading-zero octal.
+        assert_eq!(ev("017"), 15);
+        assert_eq!(ev("0"), 0);
+        assert_eq!(ev("010 + 1"), 9);
+        // base#num arbitrary bases.
+        assert_eq!(ev("2#1010"), 10);
+        assert_eq!(ev("16#ff"), 255);
+        assert_eq!(ev("16#FF"), 255); // case-insensitive for base <= 36
+        assert_eq!(ev("8#17"), 15);
+        assert_eq!(ev("36#z"), 35);
+        // base > 36: uppercase continues past lowercase, then @ and _.
+        assert_eq!(ev("64#_"), 63);
+        assert_eq!(ev("64#A"), 36);
+        // Combined with arithmetic.
+        assert_eq!(ev("2#101 * 16#a"), 50);
+        // Errors.
+        assert!(eval("2#12", &mut Map::default()).is_err()); // '2' not valid in base 2
+        assert!(eval("1#0", &mut Map::default()).is_err()); // base < 2
+        assert!(eval("65#0", &mut Map::default()).is_err()); // base > 64
+        assert!(eval("099", &mut Map::default()).is_err()); // bad octal digit
     }
 
     #[test]

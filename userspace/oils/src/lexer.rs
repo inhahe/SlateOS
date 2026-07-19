@@ -936,6 +936,13 @@ impl Lexer {
                 let raw = self.read_balanced('{', '}')?;
                 Ok(Some(Seg::ParamBraced(raw)))
             }
+            Some('[') => {
+                // `$[ … ]` — the deprecated (pre-`$(( ))`) arithmetic expansion.
+                // bash still accepts it as an alias for `$(( … ))`.
+                self.pos += 1;
+                let raw = self.read_balanced('[', ']')?;
+                Ok(Some(Seg::Arith(raw)))
+            }
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
                     self.pos += 2;

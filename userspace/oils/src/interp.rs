@@ -12568,6 +12568,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_dollar_bracket_arith() {
+        // `$[ … ]` is bash's deprecated arithmetic expansion, an alias for
+        // `$(( … ))`. Verify basic evaluation, spacing, variables, array
+        // subscripts, and use inside a double-quoted context.
+        assert_eq!(run("echo $[1+2]").0, "3\n");
+        assert_eq!(run("echo $[ 2 * 3 ]").0, "6\n");
+        assert_eq!(run("x=4; echo $[x*x]").0, "16\n");
+        assert_eq!(run("a=(10 20 30); echo $[a[1]+5]").0, "25\n");
+        assert_eq!(run("echo \"$[10/3]\"").0, "3\n");
+    }
+
+    #[test]
     fn arith_command_with_vars() {
         assert_eq!(run("x=4; (( x > 3 ))").1, 0);
         assert_eq!(run("x=2; (( x > 3 ))").1, 1);

@@ -1720,6 +1720,49 @@ a follow-up). ~40 emission sites + ~15 test assertions to update — see
 `open-questions.md` (flagged for the operator because it reformats *every* error
 message the shell prints, a pervasive user-visible output change).
 
+### TD-OILS-ARITH-ERRFMT. Arithmetic error messages don't match bash's `<expr> : <msg> (error token is "<tok>")` format/taxonomy — OPEN 2026-07-19
+
+**Where:** `userspace/oils/src/arith.rs` — the `ArithError(String)` payloads
+raised throughout `parse`/`parse_*`/`parse_number`/`str_to_val`, and the
+`$(( … ))` / `let` / `(( … ))` call sites in `interp.rs` that surface them.
+
+**Symptom:** bash formats every arithmetic diagnostic as
+`<full expression> : <core message> (error token is "<remaining input>")`, with
+a specific message taxonomy; `osh` emits a generic `arithmetic: <msg>` with no
+expression echo and no error token. Observed (line-prefix stripped):
+
+| input | bash | osh |
+|---|---|---|
+| `$((08))` | `08: value too great for base (error token is "08")` | `arithmetic: bad octal literal '08'` |
+| `$((0xG))` | `0xG: value too great for base (error token is "0xG")` | `arithmetic: unexpected trailing input in arithmetic: ' 0xG '` |
+| `$((2#12))` | `2#12: value too great for base (error token is "2#12")` | `arithmetic: unexpected trailing input in arithmetic: ' 2#12 '` |
+| `$((1_000))` | `1_000: value too great for base (error token is "1_000")` | `arithmetic: unexpected trailing input in arithmetic: '1_000'` |
+| `$((2**0.5))` | `2**0.5: syntax error: invalid arithmetic operator (error token is ".5")` | `arithmetic: unexpected trailing input in arithmetic: '2**0.5'` |
+| `$((2 @ 3))` | `2 @ 3 : syntax error: invalid arithmetic operator (error token is "@ 3 ")` | `arithmetic: unexpected trailing input in arithmetic: ' 2 @ 3 '` |
+| `$((1 + ))` | `1 + : syntax error: operand expected (error token is "+ ")` | `arithmetic: unexpected character in arithmetic: None` |
+| `$((1 2))` | `1 2 : syntax error in expression (error token is "2 ")` | `arithmetic: unexpected trailing input in arithmetic: ' 1 2 '` |
+| `$((5 % 0))` | `5 % 0 : division by 0 (error token is "0 ")` | `arithmetic: division by 0` |
+
+bash's core-message set: `value too great for base`, `syntax error: invalid
+arithmetic operator`, `syntax error: operand expected`, `syntax error in
+expression`, `division by 0`, `exponent less than 0`. (The `division by 0` /
+`exponent less than 0` *phrases* were already matched, 2026-07-19 — but not the
+`<expr> :` prefix or `(error token …)` suffix.)
+
+**Why deferred (and flagged, not fixed unilaterally):** (1) It is entangled with
+**TD-OILS-ERRLINE** — bash's *full* line is `bash: line N: <expr> : <msg>
+(error token is "…")`, so matching the message body without a coordinated ERRLINE
+decision yields a half-matching line and likely rework; the operator has reserved
+ERRLINE for their own call. (2) Reproducing bash's "error token" (the remaining
+unparsed input, *including* bash's trailing-space quirks like `"+ "` / `"0 "`)
+needs the Pratt parser to surface the cursor position/remaining slice at each
+error site — a real refactor, and bug-for-bug on the whitespace details.
+
+**Proper fix:** thread the error position through `arith.rs` (return the byte
+offset / remaining slice with each `ArithError`), map each raise site to bash's
+core-message taxonomy, and format at the call site as `<expr> : <msg> (error
+token is "<remaining>")` — done together with ERRLINE so the whole line matches.
+
 ### TD-OILS-INTERACTIVE-DETECT. Non-tty stdin is treated as interactive — OPEN 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `shopt_default`/`aliases_enabled`

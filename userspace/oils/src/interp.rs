@@ -5763,8 +5763,20 @@ impl Shell {
     fn builtin_export(&mut self, args: &[String]) -> i32 {
         for a in args {
             if let Some(eq) = a.find('=') {
-                let (k, v) = (a[..eq].to_string(), a[eq + 1..].to_string());
-                self.vars.insert(k.clone(), v);
+                // Support the `NAME+=value` append form alongside `NAME=value`.
+                let (k, append, v) = if eq > 0 && a.as_bytes()[eq - 1] == b'+' {
+                    (a[..eq - 1].to_string(), true, a[eq + 1..].to_string())
+                } else {
+                    (a[..eq].to_string(), false, a[eq + 1..].to_string())
+                };
+                let stored = if append {
+                    let mut cur = self.vars.get(&k).cloned().unwrap_or_default();
+                    cur.push_str(&v);
+                    cur
+                } else {
+                    v
+                };
+                self.vars.insert(k.clone(), stored);
                 self.exported.insert(k);
             } else {
                 self.exported.insert(a.clone());
@@ -6240,9 +6252,20 @@ impl Shell {
         }
         let mut status = 0;
         for name_val in names {
-            let (name, value) = match name_val.find('=') {
-                Some(eq) => (&name_val[..eq], Some(name_val[eq + 1..].to_string())),
-                None => (name_val.as_str(), None),
+            // Support `NAME=value` and the `NAME+=value` append form.
+            let (name, append, value) = match name_val.find('=') {
+                Some(eq) => {
+                    if eq > 0 && name_val.as_bytes()[eq - 1] == b'+' {
+                        (
+                            &name_val[..eq - 1],
+                            true,
+                            Some(name_val[eq + 1..].to_string()),
+                        )
+                    } else {
+                        (&name_val[..eq], false, Some(name_val[eq + 1..].to_string()))
+                    }
+                }
+                None => (name_val.as_str(), false, None),
             };
             if name.is_empty() {
                 continue;
@@ -6261,7 +6284,14 @@ impl Shell {
                 && !assoc
                 && !indexed
             {
-                self.vars.insert(name.to_string(), v);
+                let stored = if append {
+                    let mut cur = self.vars.get(name).cloned().unwrap_or_default();
+                    cur.push_str(&v);
+                    cur
+                } else {
+                    v
+                };
+                self.vars.insert(name.to_string(), stored);
             }
             self.readonly.insert(name.to_string());
         }
@@ -10627,11 +10657,22 @@ mod tests {
         assert_eq!(run("HOME=/h; readonly R=~/r; echo \"$R\"").0, "/h/r\n");
         // A quoted tilde stays literal even for a declaration builtin.
         assert_eq!(run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0, "/h/a:~/b\n");
-        // The append form NAME+=value expands its RHS too.
+        // The append form NAME+=value expands its RHS too, for declare, export,
+        // and readonly alike (previously mis-parsed as a var named "NAME+").
         assert_eq!(
             run("HOME=/h; A=/pre; declare A+=:~/bin; echo \"$A\"").0,
             "/pre:/h/bin\n"
         );
+        assert_eq!(
+            run("HOME=/h; B=/pre; export B+=:~/bin; echo \"$B\"").0,
+            "/pre:/h/bin\n"
+        );
+        assert_eq!(
+            run("HOME=/h; C=/pre; readonly C+=:~/bin; echo \"$C\"").0,
+            "/pre:/h/bin\n"
+        );
+        // Under -i, += performs numeric addition.
+        assert_eq!(run("declare -i n=10; declare n+=5; echo \"$n\"").0, "15\n");
         // `local` inside a function gets assignment-context expansion.
         assert_eq!(
             run("HOME=/h; f() { local L=~/lib; echo \"$L\"; }; f").0,

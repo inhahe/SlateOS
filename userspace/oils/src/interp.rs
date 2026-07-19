@@ -2457,9 +2457,21 @@ impl Shell {
             return self.resolve_ref_name(refname);
         }
         let Some(target) = self.param_value(refname) else {
+            // The pointer variable itself is unset: bash reports
+            // "invalid indirect expansion" and aborts a non-interactive shell.
+            // Reuse the nounset fatal-expansion flag (checked by the simple-
+            // command driver) so the following command never runs.
+            self.emit_stderr(format!("osh: {refname}: invalid indirect expansion\n").as_bytes());
+            self.unbound_error = true;
             return String::new();
         };
-        if target.is_empty() {
+        // The resolved name must be a valid parameter name. An empty or
+        // malformed name (`ptr=`, `ptr="a b"`, `ptr=1abc`) is a fatal
+        // "invalid variable name" error in bash (unlike a valid-but-unset
+        // target such as `ptr=missing`, which quietly expands to empty).
+        if !is_valid_indirect_target(&target) {
+            self.emit_stderr(format!("osh: {target}: invalid variable name\n").as_bytes());
+            self.unbound_error = true;
             return String::new();
         }
         // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
@@ -3007,6 +3019,16 @@ impl Shell {
         // bare-assignment and command-word cases above).
         if self.arith_error {
             self.arith_error = false;
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
+
+        // A fatal word-expansion error while expanding a prefix value — a
+        // nounset reference under `set -u` or a bad indirect expansion
+        // (`x=${!nonexist} cmd`) — likewise aborts the shell before running the
+        // command (the diagnostic was already printed at expansion time).
+        if self.unbound_error {
+            self.unbound_error = false;
             self.last_status = 1;
             return Flow::Exit(1);
         }
@@ -9977,6 +9999,41 @@ fn is_special_param(name: &str) -> bool {
     matches!(name, "@" | "*" | "#" | "?" | "$" | "!" | "0" | "-" | "_")
 }
 
+/// Whether `s` is a valid parameter name to use as the *target* of an indirect
+/// expansion `${!ptr}` (i.e. the value held by `ptr`). bash accepts a special
+/// parameter (`@`, `#`, …), a positional parameter (all digits), a plain
+/// identifier, or an array-element reference `name[subscript]`, and reports
+/// `"invalid variable name"` for anything else (`a-b`, `1abc`, empty, `[]`).
+fn is_valid_indirect_target(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if is_special_param(s) {
+        return true;
+    }
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    // A plain identifier, optionally followed by a non-empty `[subscript]`.
+    let name = if let Some(open) = s.find('[') {
+        let Some(inner) = s.strip_suffix(']') else {
+            return false; // `[` without a closing `]`
+        };
+        if inner.get(open + 1..).unwrap_or("").is_empty() {
+            return false; // empty subscript `name[]`
+        }
+        &s[..open]
+    } else {
+        s
+    };
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(b) if b == b'_' || b.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
+}
+
 /// Remove `read`'s backslash escapes from a whole line (non-`-r` mode): a
 /// backslash makes the following character literal.
 fn unescape_read_line(s: &str) -> String {
@@ -11715,8 +11772,16 @@ mod tests {
         assert_eq!(run("x=hello; ref=x; echo ${!ref}").0, "hello\n");
         // Chained/renamed references.
         assert_eq!(run("a=b; b=c; c=done; echo ${!a} ${!b}").0, "c done\n");
-        // Unset referent yields empty.
-        assert_eq!(run("echo [${!nope}]").0, "[]\n");
+        // A pointer that names an unset *target* yields empty (the target
+        // `missing` is a valid name that is simply unset).
+        assert_eq!(run("ref=missing; echo [${!ref}]").0, "[]\n");
+        // An unset *pointer* itself is a fatal "invalid indirect expansion" in a
+        // non-interactive shell (bash): the shell exits, so nothing is printed.
+        let (o, s) = run("echo [${!nope}]; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // A pointer holding a malformed name is a fatal "invalid variable name".
+        assert_eq!(run("ref='a-b'; echo [${!ref}]; echo after").0, "");
         // Referent naming an array element.
         assert_eq!(run("a=(x y z); ref='a[1]'; echo ${!ref}").0, "y\n");
         assert_eq!(
@@ -11737,6 +11802,26 @@ mod tests {
             run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
             "<a b>\n<c>\n"
         );
+    }
+
+    #[test]
+    fn indirect_expansion_bad_pointer_is_fatal() {
+        // An indirect expansion whose pointer is unset (or holds a malformed
+        // name) is a fatal word-expansion error in a non-interactive shell
+        // (bash): the shell exits with status 1 and the following command never
+        // runs, in every expansion context.
+        // Command word:
+        let (o, s) = run("echo ${!nope}; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // Bare assignment value:
+        let (o, s) = run("x=${!nope}; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // Temporary-prefix value (the command must NOT run):
+        let (o, s) = run("x=${!nope} echo mid; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // A valid-but-unset target is fine (empty, non-fatal):
+        let (o, _) = run("p=missing; echo [${!p}]; echo after");
+        assert_eq!(o, "[]\nafter\n");
     }
 
     #[test]

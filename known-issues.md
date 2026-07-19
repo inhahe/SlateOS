@@ -14,6 +14,50 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-INDIRECT-MOD. `osh` rejects indirect expansion combined with a modifier (`${!ptr:-def}`, `${!ptr#pat}`, …) — 2026-07-19
+
+**Where:** `userspace/oils/src/parser.rs` (parameter-expansion parser) and
+`userspace/oils/src/interp.rs` `expand_indirect`. The parser only recognises a
+bare `${!name}` (indirect) and the name-listing/keys forms (`${!pre@}`,
+`${!pre*}`, `${!arr[@]}`); combining `!` indirection with a value operator is
+reported as `syntax error: unsupported parameter expansion '${!ptr:-def}'`.
+
+**What:** bash allows the full operator set to apply to the *indirect target*:
+`${!ptr:-default}`, `${!ptr:offset:len}`, `${!ptr#pat}`, `${!ptr/a/b}`,
+`${!ptr^^}`, etc. — the `!ptr` first resolves to the target name, then the
+operator applies to that target's value. osh does not parse these.
+
+**Proper fix:** in the parameter-expansion parser, when a `${` body starts with
+`!` followed by a *name* (not a prefix-`@`/`*` or `[@]`/`[*]` listing form),
+parse the remainder as an ordinary modifier suffix and record an "indirect"
+flag on the resulting `WordPart`. At expansion time, resolve the indirect
+target name first (via the same logic as `expand_indirect`, including the
+fatal unset-pointer / invalid-name errors), then apply the modifier to the
+target's value. Add tests: `ptr=missing; echo ${!ptr:-fb}` -> `fb`;
+`x=hello; p=x; echo ${!p:2:3}` -> `llo`; `x=FOO; p=x; echo ${!p,,}` -> `foo`.
+
+### TD-OILS-INDIRECT-ARITH. `osh` indirect-expansion error inside a `(( ))`/arith command is not fatal — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `eval_arith_raw` (~line 1198) and
+its callers (`exec_arith_command`, `builtin_let`, `exec_for_arith`, array
+subscript evaluation). The arith-command path expands `$…`/`${…}` via
+`expand_arith_params`, which does not route `${!ptr}` through `expand_indirect`,
+so a bad pointer inside `(( ${!nonexist} ))` does not set `unbound_error`.
+
+**What:** bash makes an invalid indirect expansion fatal even inside an
+arithmetic *command*: `(( ${!nonexist} )); echo after` exits with status 1 and
+never prints `after`. osh evaluates the arith command as if the expansion were
+empty (0) and continues, printing `after`. (The related `let x=${!nonexist}`
+case *is* already fatal because `let`'s argument is word-expanded through the
+normal path that reaches `expand_indirect`.) This is a narrow edge — indirect
+expansion inside `(( ))` is rare.
+
+**Proper fix:** have `expand_arith_params` resolve `${!ptr}` through the same
+indirect-expansion logic as the word expander (so it sets `unbound_error` on a
+bad pointer), and — since `unbound_error` is not save/restored around
+`expand_arith_params` — the following simple command's driver check will then
+abort as bash does. Add test: `(( ${!nonexist} )); echo after` -> `("", 1)`.
+
 ### TD-OILS-PREFIX-RO. `osh` aborts a command with a readonly temp-assignment prefix; bash runs it anyway — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs`, the simple-command execution path

@@ -9137,6 +9137,9 @@ enum ExtKind {
 enum ClassItem {
     Ch(char),
     Range(char, char),
+    /// A POSIX character class such as `[:space:]` (stored as the name between
+    /// the inner colons, e.g. `"space"`). Matched by [`posix_class_matches`].
+    Posix(String),
 }
 
 /// Compile one annotated path component into glob tokens. Quoted characters are
@@ -9254,6 +9257,22 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
         if c == ']' && !first {
             return Some((PatTok::Class { negate, items }, i + 1));
         }
+        // POSIX character class `[:name:]` (e.g. `[[:space:]]`). Only valid
+        // when the bracket is immediately followed by a colon; scan to the
+        // closing `:]`. If no terminator is found, fall through and treat the
+        // `[` literally.
+        if c == '['
+            && matches!(comp.get(i + 1).map(|e| e.c), Some(':'))
+            && let Some(end) = (i + 2..comp.len()).find(|&k| {
+                comp[k].c == ':' && matches!(comp.get(k + 1).map(|e| e.c), Some(']'))
+            })
+        {
+            let name: String = comp[i + 2..end].iter().map(|e| e.c).collect();
+            items.push(ClassItem::Posix(name));
+            first = false;
+            i = end + 2; // past `:]`
+            continue;
+        }
         first = false;
         if i + 2 < comp.len() && comp[i + 1].c == '-' && comp[i + 2].c != ']' {
             items.push(ClassItem::Range(c, comp[i + 2].c));
@@ -9332,7 +9351,29 @@ fn class_matches(items: &[ClassItem], ch: char) -> bool {
     items.iter().any(|it| match it {
         ClassItem::Ch(c) => *c == ch,
         ClassItem::Range(a, b) => *a <= ch && ch <= *b,
+        ClassItem::Posix(name) => posix_class_matches(name, ch),
     })
+}
+
+/// Whether `ch` belongs to the POSIX character class `name` (the text between
+/// the inner colons of `[:name:]`). Unknown class names match nothing, matching
+/// bash's behavior of treating an unrecognized class as an empty set.
+fn posix_class_matches(name: &str, ch: char) -> bool {
+    match name {
+        "alnum" => ch.is_alphanumeric(),
+        "alpha" => ch.is_alphabetic(),
+        "blank" => ch == ' ' || ch == '\t',
+        "cntrl" => ch.is_control(),
+        "digit" => ch.is_ascii_digit(),
+        "graph" => !ch.is_whitespace() && !ch.is_control(),
+        "lower" => ch.is_lowercase(),
+        "print" => !ch.is_control(),
+        "punct" => ch.is_ascii_punctuation(),
+        "space" => ch.is_whitespace(),
+        "upper" => ch.is_uppercase(),
+        "xdigit" => ch.is_ascii_hexdigit(),
+        _ => false,
+    }
 }
 
 /// Whether a compiled component's first token is a literal `.` — controls the
@@ -13288,6 +13329,35 @@ mod tests {
         assert!(!g("[!0-9]", "5"));
         assert!(g("file.txt", "file.txt"));
         assert!(!g("file.txt", "file.md"));
+    }
+
+    #[test]
+    fn glob_posix_char_classes() {
+        let g = |p: &str, t: &str| {
+            glob_match(
+                &p.chars().collect::<Vec<_>>(),
+                &t.chars().collect::<Vec<_>>(),
+                false,
+            )
+        };
+        // Single POSIX classes match one appropriate character.
+        assert!(g("[[:digit:]]", "5"));
+        assert!(!g("[[:digit:]]", "a"));
+        assert!(g("[[:alpha:]]", "a"));
+        assert!(g("[[:space:]]", " "));
+        assert!(g("[[:upper:]]", "A"));
+        assert!(!g("[[:upper:]]", "a"));
+        // Negated class: `[![:space:]]` = a non-space char.
+        assert!(g("[![:space:]]", "x"));
+        assert!(!g("[![:space:]]", " "));
+        // Mixed with literals/ranges inside one bracket.
+        assert!(g("[[:digit:]_]", "_"));
+        assert!(g("[a-c[:digit:]]", "7"));
+        // The classic left-trim idiom: strip everything from the first
+        // non-space onward, leaving the leading whitespace.
+        assert_eq!(param_trim("  trim  ", &"[![:space:]]*".chars().collect::<Vec<_>>(), true, true, false), "  ");
+        // Shortest leading-whitespace `#` strip removes just one space char.
+        assert_eq!(param_trim("  trim  ", &"[[:space:]]*".chars().collect::<Vec<_>>(), false, false, false), " trim  ");
     }
 
     #[test]

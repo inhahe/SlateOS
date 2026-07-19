@@ -1264,7 +1264,25 @@ impl Shell {
                 return Flow::Next;
             }
         };
+        self.exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_command(inner, o, s))
+    }
 
+    /// Run `run` with `plan`'s redirects installed for its whole duration, then
+    /// torn down. Shared by compound-command redirection (`{ …; } > f`,
+    /// `while …; done 2> err`) and function-invocation redirection
+    /// (`myfunc > f`): it establishes the stdin source (here-doc/here-string/
+    /// `< file` bytes), pushes the stderr target (`2> file`/`2>&N`/`2>&1`),
+    /// installs scoped fd ≥ 3 descriptors, captures stdout when it is file- or
+    /// stderr-bound, runs the body, then restores everything and finalises the
+    /// captured stdout / folded stderr. `run` receives the (possibly capture)
+    /// `Out` and the redirected `StdinSrc`.
+    fn exec_with_redirects(
+        &mut self,
+        plan: RedirPlan,
+        out: &mut Out,
+        stdin: &StdinSrc,
+        run: impl FnOnce(&mut Self, &mut Out, &StdinSrc) -> Flow,
+    ) -> Flow {
         // Establish the input bytes (if the command redirects stdin).
         let input_bytes: Option<Vec<u8>> = if let Some(data) = plan.stdin_data.clone() {
             Some(data)
@@ -1387,9 +1405,9 @@ impl Shell {
             match &mut capture {
                 Some(buf) => {
                     let mut o = Out::Capture(buf);
-                    self.exec_command(inner, &mut o, sin)
+                    run(self, &mut o, sin)
                 }
-                None => self.exec_command(inner, out, sin),
+                None => run(self, out, sin),
             }
         };
 
@@ -2804,9 +2822,18 @@ impl Shell {
             return self.exec_builtin_builtin(&argv, &assigns, out, stdin, &redir);
         }
 
-        // Function?
+        // Function? A function invocation's own redirects (`myfunc > file`,
+        // `myfunc 2> err`, `myfunc < in`) apply to the whole function body, so
+        // run it inside a redirect scope when any are present. Without redirects,
+        // dispatch directly to avoid the scope-setup overhead.
         if self.funcs.contains_key(&name) {
-            return self.call_function(&name, &argv[1..], &assigns, out, stdin, &redir);
+            let args: Vec<String> = argv[1..].to_vec();
+            if redir.needs_scope() {
+                return self.exec_with_redirects(redir, out, stdin, move |sh, o, s| {
+                    sh.call_function(&name, &args, &assigns, o, s, &RedirPlan::default())
+                });
+            }
+            return self.call_function(&name, &args, &assigns, out, stdin, &redir);
         }
 
         // Builtin? (unless disabled via `enable -n`, in which case fall through
@@ -7969,6 +7996,24 @@ struct RedirPlan {
     /// tables; on any other command they are ignored (a documented limitation —
     /// scoped per-command extra fds are not yet modelled).
     extra_fds: Vec<(i32, ExtraFdOp)>,
+}
+
+impl RedirPlan {
+    /// True when the plan carries a redirect that [`Shell::exec_with_redirects`]
+    /// can install for a whole command body (stdin source, stdout/stderr file or
+    /// stream merge, or a scoped fd ≥ 3). Used to decide whether a function
+    /// invocation (`myfunc > file`) must run inside a redirect scope; `stdout_to_fd`
+    /// / `stderr_to_fd` (dup onto an `exec`-opened write descriptor) are *not*
+    /// covered here — those are applied per-builtin/-external, not body-wide.
+    fn needs_scope(&self) -> bool {
+        self.stdin.is_some()
+            || self.stdin_data.is_some()
+            || self.stdout.is_some()
+            || self.stderr.is_some()
+            || self.stderr_to_stdout
+            || self.stdout_to_stderr
+            || !self.extra_fds.is_empty()
+    }
 }
 
 /// A saved binding of one non-standard descriptor while a compound command's
@@ -13497,6 +13542,47 @@ mod tests {
         // so a command substitution sees the diagnostic as stdout.
         let (out, _) = run("v=$(read -u 88 x 2>&1); echo \"[$v]\"");
         assert_eq!(out, "[osh: read: 88: bad file descriptor]\n");
+    }
+
+    #[test]
+    fn function_invocation_stdout_redirect() {
+        // `myfunc > file` applies the redirect to the whole function body: both
+        // echoes land in the file, nothing on the caller's stdout.
+        let contents = run_exec_redirect(
+            "greet() { echo hello; echo world; }\ngreet > \"{FILE}\"",
+        );
+        assert_eq!(contents, "hello\nworld\n");
+    }
+
+    #[test]
+    fn function_invocation_stderr_redirect() {
+        // `myfunc 2> file` routes the body's diagnostics (a bad-fd `read`) to the
+        // file, leaving the caller's stderr untouched.
+        let contents = run_exec_redirect(
+            "boom() { read -u 88 v; echo done; }\nboom 2> \"{FILE}\"",
+        );
+        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+    }
+
+    #[test]
+    fn function_invocation_stdin_redirect() {
+        // `myfunc < file` feeds the file to the body's `read`, so the function
+        // sees the redirected stdin.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_fn_stdin_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, b"redirected-line\n").expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = format!("f() {{ read x; echo \"got:$x\"; }}\nf < \"{p}\"");
+        let (out, status) = run(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert_eq!(out, "got:redirected-line\n");
     }
 
     #[test]

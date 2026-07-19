@@ -435,7 +435,7 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects implemented; `exec 3>&1` and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
+### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects + function-invocation redirects implemented; `exec 3>&1` and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
 persistent targets; `Shell.exec_stdout`/`exec_stderr`/`exec_stdin` fields;
@@ -525,7 +525,23 @@ command exits 127). Status of the remaining aspects:
    the rare `>&2 2>file` combination routes the `>&2` output to the file (the
    `2>file >&2` ordering) rather than the pre-redirect stderr — our `RedirPlan`
    does not track redirection order.
-7. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+7. **Function-invocation redirects — RESOLVED 2026-07-19.** A function call
+   carrying its own redirects (`myfunc > file`, `myfunc 2> err`, `myfunc < in`,
+   and compound-scoped fd ≥ 3 forms like `myfunc 3< file`) now applies the
+   redirect to the *whole function body*. The former `exec_redirected` body was
+   extracted into a reusable `exec_with_redirects(plan, out, stdin, run)` helper
+   (it establishes the stdin cursor, pushes the `StderrTarget`, installs scoped
+   fd ≥ 3 descriptors, captures file/stderr-bound stdout, runs the body via the
+   `run` closure, then tears everything down). `exec_redirected` delegates to it
+   with `run = |sh,o,s| sh.exec_command(inner, o, s)`; `exec_simple`'s function
+   branch delegates with `run = |sh,o,s| sh.call_function(name, args, assigns,
+   o, s, default)` — gated on a new `RedirPlan::needs_scope()` so a redirect-free
+   call still dispatches directly. Tests: `function_invocation_stdout_redirect`,
+   `function_invocation_stderr_redirect`, `function_invocation_stdin_redirect`.
+   Note `stdout_to_fd`/`stderr_to_fd` (dup onto an `exec`-opened write descriptor)
+   are *not* covered by the scope — those are applied per-builtin/-external — so
+   `myfunc >&3` is not yet routed for the whole body.
+8. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
@@ -534,14 +550,10 @@ command exits 127). Status of the remaining aspects:
 (`exec 3>&1`, making fd 3 alias the current stdout — our `open_write_fds` only
 holds real `File` handles, so aliasing fd 3 to the shell's live stdout/stderr
 would need the table to become an enum `WriteSink { File, Stdout, Stderr }`).
-A related smaller gap: a *function* invocation's own stderr redirect
-(`myfunc 2> file`) is still ignored — `call_function` takes `_redir` unused; the
-same scoped-push mechanism now used for builtins could be applied there.
 
-**Proper fix:** (2), (3), (4), (5), and (6) done (see above). Remaining: model
-`exec M>&N` where the *target* N is a standard fd (`exec 3>&1`) by widening the
-write-fd table to a `WriteSink` enum, and apply the scoped stderr push to
-`call_function` for `myfunc 2> file`. (7) once the kernel exposes `execve`,
+**Proper fix:** (2), (3), (4), (5), (6), and (7) done (see above). Remaining:
+model `exec M>&N` where the *target* N is a standard fd (`exec 3>&1`) by widening
+the write-fd table to a `WriteSink` enum. (8) once the kernel exposes `execve`,
 replace the spawn+wait+exit with an actual in-place image replacement for
 `exec cmd`.
 

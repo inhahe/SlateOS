@@ -2779,6 +2779,12 @@ impl Shell {
         if let BulkOp::Transform { op: k @ ('k' | 'K') } = op {
             return self.bulk_keyvalue(name, *k == 'K');
         }
+        // `@A` / `@a` over `[@]`/`[*]` are collection-wide, not per-element:
+        // `@A` yields one re-inputtable declare/`set --`, `@a` yields each
+        // element's attribute letters.
+        if let BulkOp::Transform { op: t @ ('A' | 'a') } = op {
+            return self.bulk_attr_transform(name, *t);
+        }
         let elems: Vec<String> = if name == "@" || name == "*" {
             self.positional.clone()
         } else {
@@ -2788,6 +2794,41 @@ impl Shell {
             .into_iter()
             .map(|v| self.apply_bulk_op(op, &v))
             .collect()
+    }
+
+    /// `${a[@]@A}` / `${@@A}` (whole-collection assignment form) and
+    /// `${a[@]@a}` (per-element attribute letters) — collection-wide `@`
+    /// transforms that do not fit the per-element [`Shell::apply_bulk_op`] model.
+    ///
+    /// `@A` on a real array/assoc yields a single field holding the full
+    /// re-inputtable `declare` (identical to `declare -p`); on the positional
+    /// params (`${@@A}`/`${*@A}`) it yields a single `set -- 'a' 'b' …` field,
+    /// matching bash. `@a` yields one attribute-letter field per element (the
+    /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
+    /// attributes, so each field is empty.
+    fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<String> {
+        let name = &self.resolve_ref_name(name);
+        let positional = name == "@" || name == "*";
+        if op == 'A' {
+            if positional {
+                let body = self
+                    .positional
+                    .iter()
+                    .map(|v| shell_quote(v))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return vec![format!("set -- {body}")];
+            }
+            return self.format_declare_def(name).map_or_else(Vec::new, |s| vec![s]);
+        }
+        // op == 'a'
+        let count = if positional {
+            self.positional.len()
+        } else {
+            self.array_elements(name).len()
+        };
+        let letters = if positional { String::new() } else { self.attr_flag_letters(name) };
+        vec![letters; count]
     }
 
     /// `${a[@]@k}` / `${a[@]@K}` — expand an array (or the positional params) as
@@ -3079,8 +3120,10 @@ impl Shell {
             return self.attr_flag_letters(name);
         }
         // `@A` recreates an assignment/`declare` statement for the variable.
+        // The whole-array forms (`${arr[@]@A}` / `${arr[*]@A}`) are handled in
+        // the bulk path; here `index` is either absent or a single element.
         if op == 'A' {
-            return self.transform_assign(name);
+            return self.transform_assign(name, index);
         }
         // An unset variable yields the empty string for every transform (bash):
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
@@ -3326,13 +3369,24 @@ impl Shell {
     /// `${name@A}` — a re-inputtable assignment/`declare` statement that would
     /// recreate `name` with its current value and attributes. A plain scalar
     /// with no attributes renders as `name=<shell-quoted value>` (bash's short
-    /// form); arrays, associative arrays, and any attributed variable render as
-    /// a full `declare` command. An unset variable yields the empty string.
-    fn transform_assign(&self, name: &str) -> String {
-        // Arrays and associative arrays render as a full `declare` with
-        // double-quoted elements, identical to `declare -p` output.
+    /// form); an attributed scalar renders as `declare -flags name='value'`.
+    ///
+    /// For an array or associative array this is the *single-element* form
+    /// (`${arr[i]@A}`, or the plain/element-0 `${arr@A}`): bash renders the
+    /// array's declare flags with just that one element's value in scalar
+    /// single-quoted form — e.g. `declare -a arr='v'`, or `declare -a arr` for
+    /// an unset element. The *whole-array* form (`${arr[@]@A}` / `${arr[*]@A}`)
+    /// is a re-inputtable full `declare` and is produced by the bulk path
+    /// ([`Shell::bulk_attr_transform`]), not here. An unset variable yields the
+    /// empty string.
+    fn transform_assign(&mut self, name: &str, index: &Option<Box<Word>>) -> String {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
-            return self.format_declare_def(name).unwrap_or_default();
+            let kind = if self.assoc.contains_key(name) { "A" } else { "a" };
+            let flags = self.declare_attr_flags(name, kind);
+            return match self.param_elem_value(name, index) {
+                Some(v) => format!("declare {flags} {name}={}", shell_quote(&v)),
+                None => format!("declare {flags} {name}"),
+            };
         }
         let Some(v) = self.vars.get(name) else {
             return String::new();
@@ -8737,8 +8791,11 @@ impl Shell {
     /// Shared by `declare -p` and the bare `set` variable listing.
     fn format_var_assignment(&self, name: &str) -> Option<String> {
         if let Some(map) = self.assoc.get(name) {
-            // bash prints an empty array as just the bare name (`declare -A m`),
-            // and a non-empty associative array with a trailing space before the
+            // An empty associative array prints as the bare name (`declare -A m`)
+            // — but see TD-OILS-ARRAY-EMPTY-ASSIGNED: bash actually distinguishes
+            // a never-assigned `declare -A m` (bare) from an assigned-empty
+            // `m=()` (`m=()`), which osh's model cannot yet tell apart. A
+            // non-empty associative array prints with a trailing space before the
             // closing paren (`([k]="v" )`).
             if map.is_empty() {
                 return Some(name.to_string());
@@ -8751,7 +8808,8 @@ impl Shell {
             return Some(format!("{name}=({body} )"));
         }
         if let Some(arr) = self.arrays.get(name) {
-            // An empty indexed array likewise prints as the bare name.
+            // An empty indexed array likewise prints as the bare name
+            // (`declare -a e`) — see TD-OILS-ARRAY-EMPTY-ASSIGNED.
             if arr.is_empty() {
                 return Some(name.to_string());
             }
@@ -16752,20 +16810,52 @@ mod tests {
             run("declare -x x='a b'; echo \"${x@A}\"").0,
             "declare -x x='a b'\n"
         );
-        // Arrays and associative arrays render as `declare` too.
+        // A bare array/assoc name is element 0 / key "0" (bash: `${a@A}` ==
+        // `${a[0]@A}`), rendered as the array's declare flags with that single
+        // element's value in scalar single-quoted form — NOT the whole array.
+        assert_eq!(run("a=(x y); echo \"${a@A}\"").0, "declare -a a='x'\n");
+        assert_eq!(run("a=(x y); echo \"${a[0]@A}\"").0, "declare -a a='x'\n");
+        // A specific element likewise: `${a[1]@A}` uses element 1's value.
+        assert_eq!(run("a=(x y); echo \"${a[1]@A}\"").0, "declare -a a='y'\n");
+        // An unset element drops the value entirely (`declare -a a`).
+        assert_eq!(run("a=(x y); echo \"${a[9]@A}\"").0, "declare -a a\n");
+        // Associative: bare name is key "0"; unset there → no value.
+        assert_eq!(run("declare -A m; m[k]=v; echo \"[${m@A}]\"").0, "[declare -A m]\n");
+        assert_eq!(run("declare -A m; m[0]=z; echo \"${m@A}\"").0, "declare -A m='z'\n");
+        // The WHOLE array/assoc form is `${a[@]@A}` / `${a[*]@A}` — a full
+        // re-inputtable `declare` (see `array_transform_at_a_whole`).
         assert_eq!(
-            run("a=(x y); echo \"${a@A}\"").0,
+            run("a=(x y); echo \"${a[@]@A}\"").0,
             "declare -a a=([0]=\"x\" [1]=\"y\")\n"
-        );
-        // osh keeps `@A` and `declare -p` consistent (bash has a long-standing
-        // bug where `@A` drops associative entries); both include the trailing
-        // space before the closing paren.
-        assert_eq!(
-            run("declare -A m; m[k]=v; echo \"${m@A}\"").0,
-            "declare -A m=([k]=\"v\" )\n"
         );
         // An unset variable yields the empty string.
         assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn array_transform_at_a_whole() {
+        // `${arr[@]@A}` / `${arr[*]@A}` produce one field: the full re-inputtable
+        // `declare` (matching `declare -p`), not a per-element transform.
+        assert_eq!(
+            run("declare -a a=(1 2 3); echo \"${a[@]@A}\"").0,
+            "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3\")\n"
+        );
+        assert_eq!(
+            run("declare -a a=(1 2 3); echo \"${a[*]@A}\"").0,
+            "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3\")\n"
+        );
+        // A readonly array carries its flags through.
+        assert_eq!(
+            run("declare -ar a=(1 2); echo \"${a[@]@A}\"").0,
+            "declare -ar a=([0]=\"1\" [1]=\"2\")\n"
+        );
+        // Positional params render as a single `set -- 'a' 'b' …` statement.
+        assert_eq!(run("set -- a b c; echo \"${@@A}\"").0, "set -- 'a' 'b' 'c'\n");
+        assert_eq!(run("set -- a b c; echo \"${*@A}\"").0, "set -- 'a' 'b' 'c'\n");
+        // `@a` yields one attribute-letter field per element.
+        assert_eq!(run("declare -a a=(1 2 3); echo \"${a[@]@a}\"").0, "a a a\n");
+        assert_eq!(run("declare -ar a=(1 2); echo \"${a[@]@a}\"").0, "ar ar\n");
+        assert_eq!(run("declare -a a=(1 2 3); echo \"${a[1]@a}\"").0, "a\n");
     }
 
     #[test]

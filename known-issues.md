@@ -1527,6 +1527,42 @@ stderr. Ultimately this is another symptom of the collapsed-`RedirPlan`
 order-loss; the long-term proper fix is an ordered fd-op executor shared by
 all command kinds.
 
+### TD-OILS-ARRAY-EMPTY-ASSIGNED. `declare -p` / `@A` can't distinguish a never-assigned empty array from an assigned-empty one — MINOR 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `format_var_assignment` (~8792) and
+the array/assoc state (`Shell::arrays`, `Shell::assoc`). Surfaces in `declare -p`,
+the bare `set` listing, and the whole-array `${arr[@]@A}` transform.
+
+**Symptom:** bash distinguishes an array that was *declared but never assigned*
+from one that was *assigned an empty value list*, and prints them differently:
+
+```
+declare -a e;    declare -p e   →  bash: declare -a e       osh: declare -a e     (match)
+declare -a e=(); declare -p e   →  bash: declare -a e=()    osh: declare -a e     (DIFF)
+```
+
+The same split applies to `${e[@]@A}` (bash `declare -a e=()` vs osh
+`declare -a e`) and the `set` listing. osh currently prints an empty array/assoc
+as the bare name in *both* cases. (A non-empty array is unambiguous and already
+matches; the divergence is only for the empty-but-assigned state.)
+
+**Why deferred:** osh's model stores every array as a `HashMap`/`BTreeMap` entry;
+both `declare -a e` (`arrays.entry(name).or_default()`) and `e=()`
+(`arrays.insert(name, empty)`) produce an identical empty container, so the two
+states are indistinguishable without extra bookkeeping. A proper fix needs an
+"has been assigned a value list (even empty)" marker per array — set on every
+value-assignment site (`name=(…)`, `name[i]=…`, `+=`, `e=()`) but **not** on a
+bare `declare -a`/`declare -A` — cloned into subshells and cleared on `unset`.
+That touches many mutation sites for an obscure cosmetic distinction, so it was
+split out. (An earlier attempt to unconditionally emit `=()` for empty arrays
+was reverted: it fixed the `e=()` case but regressed the far more common
+`declare -a e` no-init case.)
+
+**Proper fix:** add `Shell::arrays_assigned: HashSet<String>` (covering indexed +
+associative), set it at each value-assignment site, honour it in
+`format_var_assignment` (empty + assigned → `name=()`, empty + not-assigned →
+bare `name`), clone it in `clone_for_subshell`, and remove on `unset`.
+
 ### TD-OILS-PRINTF-ERRORDER. `printf` emits all invalid-number errors before its stdout, not interleaved — MINOR 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_printf` (~8381) and

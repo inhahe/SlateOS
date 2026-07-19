@@ -370,7 +370,52 @@ impl Parser {
             let body = self.parse_compound_body()?;
             return Ok(Command::Function(FunctionDef { name, body }));
         }
+        // `coproc [NAME] command` — bash reserved word, recognised only at
+        // command start.
+        if self.bare_word_here().as_deref() == Some("coproc") {
+            return self.parse_coproc();
+        }
         self.parse_simple()
+    }
+
+    /// Parse a `coproc [NAME] command`. Grammar (matches bash):
+    /// - `coproc simple_command` → default name `COPROC` (an explicit NAME is
+    ///   *not* accepted before a simple command).
+    /// - `coproc NAME compound_command` → explicit NAME (only when a valid
+    ///   identifier is immediately followed by a compound-command starter).
+    /// - `coproc compound_command` → default name `COPROC`.
+    fn parse_coproc(&mut self) -> Result<Command, ParseError> {
+        self.pos += 1; // consume `coproc`
+        let mut name = None;
+        if let Some(w) = self.bare_word_here()
+            && is_valid_name(&w)
+            && self.compound_starts_at(self.pos + 1)
+        {
+            name = Some(w);
+            self.pos += 1;
+        }
+        let body = self.parse_command()?;
+        Ok(Command::Coproc { name, body: Box::new(body) })
+    }
+
+    /// Whether the token at `idx` begins a compound command (`{`, `(`, `((`,
+    /// `[[`, or a control keyword). Used to decide whether the word after
+    /// `coproc` is an explicit array name or the command itself.
+    fn compound_starts_at(&self, idx: usize) -> bool {
+        match self.toks.get(idx) {
+            Some(Tok::Op(Op::LParen)) | Some(Tok::ArithCmd(_)) => true,
+            Some(Tok::Word(segs)) => {
+                if let [Seg::Lit(s)] = segs.as_slice() {
+                    matches!(
+                        s.as_str(),
+                        "{" | "[[" | "if" | "while" | "until" | "for" | "select" | "case"
+                    )
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Is the current token the start of a redirection (`<`, `>`, `>>`, `2>`, …)?

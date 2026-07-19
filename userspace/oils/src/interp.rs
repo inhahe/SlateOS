@@ -321,6 +321,23 @@ pub struct Shell {
     /// current sink (an `exec`-redirected file, or a dup of the real terminal)
     /// into an entry here, matching bash's dup-at-exec-time semantics.
     open_write_fds: std::collections::HashMap<i32, std::sync::Arc<std::fs::File>>,
+    /// Live *read* endpoints of running `coproc`s (fd ≥ 10 → the coproc's
+    /// stdout). Unlike [`Shell::open_fds`] (which replays a byte snapshot), these
+    /// are genuine OS pipe streams behind a persistent [`io::BufReader`] so
+    /// successive `read <&N` / `read -u N` on `NAME[0]` consume successive lines
+    /// as the coproc produces them (a chunk-buffering reader must persist across
+    /// commands, or bytes read past a delimiter would be lost). A subshell clone
+    /// `try_clone`s each handle (bash: a subshell inherits the coproc fd — one
+    /// shared OS pipe), unlike the byte-snapshot used for `open_fds`. The
+    /// *write* endpoint (`NAME[1]`) is stored in [`Shell::open_write_fds`]
+    /// instead, so `>&"${NAME[1]}"` needs no write-path changes.
+    coproc_read_fds: std::collections::HashMap<i32, RefCell<io::BufReader<std::fs::File>>>,
+    /// Join handles for the background threads running each `coproc` body. Kept
+    /// so the threads are not orphaned bookkeeping-wise; they finish when the
+    /// coproc's stdin reaches EOF (its `NAME[1]` write end drops) and its body
+    /// returns. A subshell clone starts with none (it cannot join the parent's
+    /// threads).
+    coproc_jobs: Vec<std::thread::JoinHandle<()>>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -536,6 +553,8 @@ impl Shell {
             exec_stdin: None,
             open_fds: std::collections::HashMap::new(),
             open_write_fds: std::collections::HashMap::new(),
+            coproc_read_fds: std::collections::HashMap::new(),
+            coproc_jobs: Vec::new(),
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
             getopts_col: 0,
@@ -1161,6 +1180,7 @@ impl Shell {
             Command::Cond(e) => self.exec_cond(e),
             Command::Arith(raw) => self.exec_arith(raw),
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
+            Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body),
             Command::Redirected { inner, redirects } => {
                 self.exec_redirected(inner, redirects, out, stdin)
             }
@@ -2300,6 +2320,24 @@ impl Shell {
                 .iter()
                 .map(|(&fd, f)| (fd, std::sync::Arc::clone(f)))
                 .collect(),
+            // A subshell inherits each live coproc read fd as a *shared* OS pipe
+            // (bash: the subshell dups the coproc fd, one open file description).
+            // `try_clone` duplicates the handle; a fresh `BufReader` starts empty
+            // (any bytes the parent already buffered are not replayed — an exotic
+            // edge: reading a coproc fd from inside a subshell).
+            coproc_read_fds: self
+                .coproc_read_fds
+                .iter()
+                .filter_map(|(&fd, rd)| {
+                    rd.borrow()
+                        .get_ref()
+                        .try_clone()
+                        .ok()
+                        .map(|f| (fd, RefCell::new(io::BufReader::new(f))))
+                })
+                .collect(),
+            // The subshell cannot join the parent's coproc threads.
+            coproc_jobs: Vec::new(),
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
@@ -4331,14 +4369,31 @@ impl Shell {
         // redirect, then the inherited pipeline input.
         let mut input_bytes: Option<Vec<u8>> = None;
         if let Some(n) = redir.stdin_from_fd {
-            // `cmd <&N`: feed the child the source cursor's remaining bytes,
-            // advancing it (a close approximation of a shared-offset dup).
-            let mut rest = Vec::new();
-            if let Some(cur) = self.input_fd_cursor(n) {
-                let _ = cur.borrow_mut().read_to_end(&mut rest);
+            if let Some(rd) = self.coproc_read_fds.get(&n) {
+                // `cmd <&"${COPROC[0]}"`: hand the child a dup of the live coproc
+                // read pipe so it streams (slurping would block until the coproc
+                // closed its stdout). Bytes already buffered by an earlier `read`
+                // on this fd are not replayed (rare mixed use — documented).
+                match rd.borrow().get_ref().try_clone() {
+                    Ok(f) => {
+                        cmd.stdin(Stdio::from(f));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: coproc: {e}"));
+                        self.last_status = 1;
+                        return;
+                    }
+                }
+            } else {
+                // `cmd <&N`: feed the child the source cursor's remaining bytes,
+                // advancing it (a close approximation of a shared-offset dup).
+                let mut rest = Vec::new();
+                if let Some(cur) = self.input_fd_cursor(n) {
+                    let _ = cur.borrow_mut().read_to_end(&mut rest);
+                }
+                input_bytes = Some(rest);
+                cmd.stdin(Stdio::piped());
             }
-            input_bytes = Some(rest);
-            cmd.stdin(Stdio::piped());
         } else if let Some(data) = &redir.stdin_data {
             input_bytes = Some(data.clone());
             cmd.stdin(Stdio::piped());
@@ -4739,6 +4794,70 @@ impl Shell {
         let _ = self.exec_and_or(ao, &mut out, &StdinSrc::Inherit);
     }
 
+    /// Execute `coproc [NAME] body`: run `body` on a background thread with its
+    /// stdin/stdout wired to two OS pipes, and expose the parent-side endpoints
+    /// as `NAME[0]` (read the coproc's stdout), `NAME[1]` (write its stdin) plus
+    /// the scalar `NAME_PID`. `NAME` defaults to `COPROC`.
+    fn exec_coproc(&mut self, name: Option<&str>, body: &Command) -> Flow {
+        let name = name.unwrap_or("COPROC").to_string();
+        // Pipe A carries the parent's writes to the coproc's stdin; pipe B
+        // carries the coproc's stdout back to the parent.
+        let (child_stdin_r, parent_stdin_w) = match io::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.errln(&format!("osh: coproc: {e}"));
+                self.last_status = 1;
+                return Flow::Next;
+            }
+        };
+        let (parent_stdout_r, child_stdout_w) = match io::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.errln(&format!("osh: coproc: {e}"));
+                self.last_status = 1;
+                return Flow::Next;
+            }
+        };
+        // Clone the shell state for the coproc body *before* installing the
+        // parent-side endpoints, so the body does not inherit copies of its own
+        // coproc fds (bash closes them in the child).
+        let mut sub = self.clone_for_subshell();
+        let body_owned = body.clone();
+        let handle = std::thread::spawn(move || {
+            let mut out = Out::Pipe(child_stdout_w);
+            let sin = StdinSrc::Pipe(RefCell::new(io::BufReader::new(child_stdin_r)));
+            let _ = sub.exec_command(&body_owned, &mut out, &sin);
+            // Dropping `out` (its `PipeWriter`) at scope end closes the coproc's
+            // stdout, delivering EOF to the parent's `NAME[0]` reader.
+        });
+        self.coproc_jobs.push(handle);
+
+        // Parent-side endpoints get fresh descriptors ≥ 10 (never colliding with
+        // exec/varfd fds). Read end → the live coproc-read table; write end →
+        // the ordinary write-fd table (so `>&"${NAME[1]}"` just works).
+        let read_fd = self.alloc_varfd(&[]);
+        let read_file = pipe_reader_into_file(parent_stdout_r);
+        self.coproc_read_fds
+            .insert(read_fd, RefCell::new(io::BufReader::new(read_file)));
+        let write_fd = self.alloc_varfd(&[]);
+        let write_file = pipe_writer_into_file(parent_stdin_w);
+        self.open_write_fds
+            .insert(write_fd, std::sync::Arc::new(write_file));
+
+        // Publish `NAME=(read_fd write_fd)` and `NAME_PID`. The body runs as a
+        // thread, not an OS process, so `NAME_PID` is a synthetic monotonic id
+        // (best-effort, like other in-process background bodies).
+        let synth_pid = COPROC_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut elems = BTreeMap::new();
+        elems.insert(0usize, read_fd.to_string());
+        elems.insert(1usize, write_fd.to_string());
+        self.arrays.insert(name.clone(), elems);
+        self.vars.insert(format!("{name}_PID"), synth_pid.to_string());
+        self.last_bg_pid = Some(synth_pid);
+        self.last_status = 0;
+        Flow::Next
+    }
+
     // ---- redirection resolution ---------------------------------------------
 
     /// Allocate the lowest free descriptor ≥ 10 for a `{name}>file` varfd
@@ -4750,6 +4869,7 @@ impl Shell {
         let mut n = 10;
         while self.open_fds.contains_key(&n)
             || self.open_write_fds.contains_key(&n)
+            || self.coproc_read_fds.contains_key(&n)
             || reserved.contains(&n)
         {
             n += 1;
@@ -5166,10 +5286,14 @@ impl Shell {
                         // corner not modelled here (documented limitation).
                     } else if let Ok(n) = target.parse::<i32>() {
                         if fd == 0 && n >= 3 {
-                            // fd 0 reads from input descriptor N's shared cursor.
-                            // An unbound source fd fails the whole redirect (bash:
-                            // "N: Bad file descriptor"), rather than silent EOF.
-                            if !self.open_fds.contains_key(&n) {
+                            // fd 0 reads from input descriptor N's shared cursor
+                            // (a `read -u`/`exec 3<` byte fd) or, for a `coproc`
+                            // read end, the live pipe. An unbound source fd fails
+                            // the whole redirect (bash: "N: Bad file descriptor"),
+                            // rather than silent EOF.
+                            if !self.open_fds.contains_key(&n)
+                                && !self.coproc_read_fds.contains_key(&n)
+                            {
                                 return Err(format!("{n}: Bad file descriptor"));
                             }
                             plan.stdin_from_fd = Some(n);
@@ -10009,27 +10133,38 @@ impl Shell {
             i += 1;
         }
 
-        // `-u N` (N ≥ 3): read from the user-space open-fd table's cursor
-        // instead of the ambient input, ignoring any `redir` stdin. Validate the
-        // fd up front (before borrowing) so a bad descriptor is a clean error.
+        // `-u N` (N ≥ 3): read from the user-space fd table instead of the
+        // ambient input, ignoring any `redir` stdin. Validate the fd up front
+        // (before borrowing) so a bad descriptor is a clean error. Both the
+        // `exec 3<`/`read -u` byte cursors and live `coproc` read ends qualify.
         if let Some(n) = ufd
             && n >= 3
             && !self.open_fds.contains_key(&n)
+            && !self.coproc_read_fds.contains_key(&n)
         {
             self.errln(&format!("osh: read: {n}: bad file descriptor"));
             return 1;
         }
-        // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N cursor is the
-        // authoritative source. The `StdinSrc::Cursor` borrows `open_fds`
-        // immutably; that borrow ends before the later `&mut self` stores (NLL).
-        let ufd_plan = RedirPlan::default();
-        let ufd_stdin = ufd
-            .filter(|&n| n >= 3)
-            .and_then(|n| self.open_fds.get(&n))
-            .map(StdinSrc::Cursor);
-        let (rd_stdin, rd_redir): (&StdinSrc, &RedirPlan) = match &ufd_stdin {
-            Some(s) => (s, &ufd_plan),
-            None => (stdin, redir),
+        // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N source is
+        // authoritative. A `coproc` read end (live pipe) is routed via
+        // `stdin_from_fd` — the same path `read <&N` uses — while an `open_fds`
+        // byte fd is surfaced as a `StdinSrc::Cursor` (borrows `open_fds`
+        // immutably; the borrow ends before later `&mut self` stores, per NLL).
+        let mut ufd_plan = RedirPlan::default();
+        let inherit_src = StdinSrc::Inherit;
+        let ufd_active = ufd.is_some_and(|n| n >= 3);
+        let ufd_stdin = ufd.filter(|&n| n >= 3).and_then(|n| {
+            if self.coproc_read_fds.contains_key(&n) {
+                ufd_plan.stdin_from_fd = Some(n);
+                None
+            } else {
+                self.open_fds.get(&n).map(StdinSrc::Cursor)
+            }
+        });
+        let (rd_stdin, rd_redir): (&StdinSrc, &RedirPlan) = if ufd_active {
+            (ufd_stdin.as_ref().unwrap_or(&inherit_src), &ufd_plan)
+        } else {
+            (stdin, redir)
         };
 
         // `-p PROMPT`: bash writes it to stderr only when the input is an actual
@@ -10041,6 +10176,7 @@ impl Shell {
                 && self.exec_stdin.is_none()
                 && rd_redir.stdin.is_none()
                 && rd_redir.stdin_data.is_none()
+                && rd_redir.stdin_from_fd.is_none()
                 && io::stdin().is_terminal();
             if input_is_tty {
                 self.emit_stderr(p.as_bytes());
@@ -10142,7 +10278,9 @@ impl Shell {
         use io::Read;
         if let Some(n) = redir.stdin_from_fd {
             let mut buf = Vec::new();
-            if let Some(c) = self.input_fd_cursor(n) {
+            if let Some(rd) = self.coproc_read_fds.get(&n) {
+                let _ = rd.borrow_mut().read_to_end(&mut buf);
+            } else if let Some(c) = self.input_fd_cursor(n) {
                 let _ = c.borrow_mut().read_to_end(&mut buf);
             }
             return buf;
@@ -11041,7 +11179,11 @@ impl Shell {
 
     fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(String, bool)> {
         if let Some(n) = redir.stdin_from_fd {
-            // `read <&N`: read from and advance descriptor N's shared cursor.
+            // `read <&N`: read from and advance descriptor N's shared source — a
+            // live coproc pipe, or a `read -u`/`exec 3<` byte cursor.
+            if let Some(rd) = self.coproc_read_fds.get(&n) {
+                return read_one_line(&mut *rd.borrow_mut());
+            }
             let c = self.input_fd_cursor(n)?;
             return read_one_line(&mut *c.borrow_mut());
         }
@@ -11097,6 +11239,9 @@ impl Shell {
         exact: bool,
     ) -> Option<(String, bool)> {
         if let Some(n) = redir.stdin_from_fd {
+            if let Some(rd) = self.coproc_read_fds.get(&n) {
+                return read_record(&mut *rd.borrow_mut(), delim, nchars, exact);
+            }
             let c = self.input_fd_cursor(n)?;
             return read_record(&mut *c.borrow_mut(), delim, nchars, exact);
         }
@@ -12826,6 +12971,38 @@ fn pipe_writer_to_file(w: &io::PipeWriter) -> io::Result<std::fs::File> {
     ))
 }
 
+/// Consume an anonymous-pipe read end into an owned [`File`] over the same OS
+/// pipe. Used to store a `coproc`'s parent-side stdout read end in the live
+/// coproc-read table (a `File` is `Read`, so it drives the `read` builtins).
+#[cfg(unix)]
+fn pipe_reader_into_file(r: io::PipeReader) -> std::fs::File {
+    std::fs::File::from(std::os::fd::OwnedFd::from(r))
+}
+
+/// Windows counterpart of `pipe_reader_into_file`.
+#[cfg(windows)]
+fn pipe_reader_into_file(r: io::PipeReader) -> std::fs::File {
+    std::fs::File::from(std::os::windows::io::OwnedHandle::from(r))
+}
+
+/// Consume an anonymous-pipe write end into an owned [`File`] over the same OS
+/// pipe. Used to store a `coproc`'s parent-side stdin write end in
+/// [`Shell::open_write_fds`], so `>&"${NAME[1]}"` reaches the coproc.
+#[cfg(unix)]
+fn pipe_writer_into_file(w: io::PipeWriter) -> std::fs::File {
+    std::fs::File::from(std::os::fd::OwnedFd::from(w))
+}
+
+/// Windows counterpart of `pipe_writer_into_file`.
+#[cfg(windows)]
+fn pipe_writer_into_file(w: io::PipeWriter) -> std::fs::File {
+    std::fs::File::from(std::os::windows::io::OwnedHandle::from(w))
+}
+
+/// Monotonic synthetic pid source for `coproc` bodies (which run as threads,
+/// not OS processes). Starts high to avoid colliding with real pids.
+static COPROC_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(900_000);
+
 /// Non-blocking readability probe for a Windows OS handle, used by `read -t 0`.
 /// Returns true when a read would proceed immediately (data queued, or the
 /// source is at EOF), false when it would block. Distinguishes the handle type:
@@ -14376,6 +14553,112 @@ mod tests {
         // A fragment-style message still gets the prefix.
         let e2 = ParseError("expected ')'".into());
         assert_eq!(format_parse_error(&e2), "osh: syntax error: expected ')'");
+    }
+
+    #[test]
+    fn coproc_basic_default_name() {
+        // `coproc { … }` with no explicit name → array `COPROC`; `COPROC[0]`
+        // reads the coproc's stdout.
+        assert_eq!(
+            run(r#"coproc { echo fromco; }; read x <&"${COPROC[0]}"; echo "$x""#).0,
+            "fromco\n"
+        );
+    }
+
+    #[test]
+    fn coproc_simple_command_body() {
+        // A *simple* command body also works and defaults to `COPROC` (no
+        // explicit name is accepted before a simple command).
+        assert_eq!(
+            run(r#"coproc echo hello; read x <&"${COPROC[0]}"; echo "$x""#).0,
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn coproc_named() {
+        // `coproc NAME compound` → the named array holds the endpoints.
+        assert_eq!(
+            run(r#"coproc myco { echo hi; }; read x <&"${myco[0]}"; echo "$x""#).0,
+            "hi\n"
+        );
+    }
+
+    #[test]
+    fn coproc_bidirectional() {
+        // Write to `COPROC[1]` (the coproc's stdin), read its reply from
+        // `COPROC[0]` — the full round trip through both pipes.
+        assert_eq!(
+            run(r#"coproc { read line; echo "got:$line"; }
+echo feed >&"${COPROC[1]}"
+read out <&"${COPROC[0]}"
+echo "$out""#)
+            .0,
+            "got:feed\n"
+        );
+    }
+
+    #[test]
+    fn coproc_read_u_fd() {
+        // `read -u "${COPROC[0]}"` reads the coproc's stdout via the -u path.
+        assert_eq!(
+            run(r#"coproc { echo viaU; }; read -u "${COPROC[0]}" x; echo "$x""#).0,
+            "viaU\n"
+        );
+    }
+
+    #[test]
+    fn coproc_multiple_lines_successive_reads() {
+        // Successive `read <&N` on a live coproc fd must consume successive
+        // lines — a fresh chunk-buffering reader per read would drop the second.
+        assert_eq!(
+            run(r#"coproc { printf 'a\nb\n'; }
+read x <&"${COPROC[0]}"
+read y <&"${COPROC[0]}"
+echo "$x $y""#)
+            .0,
+            "a b\n"
+        );
+    }
+
+    #[test]
+    fn coproc_pid_is_set() {
+        // `NAME_PID` is populated (a synthetic id for the in-process body).
+        assert_eq!(
+            run(r#"coproc { echo x; }; read _ <&"${COPROC[0]}"; [[ -n $COPROC_PID ]] && echo haspid"#).0,
+            "haspid\n"
+        );
+    }
+
+    #[test]
+    fn coproc_endpoint_fds_are_high() {
+        // Both endpoints are auto-allocated descriptors ≥ 10 (like varfds), and
+        // the two are distinct.
+        assert_eq!(
+            run(r#"coproc { echo x; }
+read _ <&"${COPROC[0]}"
+r=${COPROC[0]}; w=${COPROC[1]}
+if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
+            .0,
+            "ok\n"
+        );
+    }
+
+    #[test]
+    fn coproc_parses_named_only_before_compound() {
+        // `coproc NAME { … }` is a named coproc; the AST records the name.
+        let prog = parse("coproc c1 { echo hi; }").expect("parse");
+        match &prog.items[0].list.first.commands[0] {
+            Command::Coproc { name, .. } => assert_eq!(name.as_deref(), Some("c1")),
+            other => panic!("expected coproc, got {other:?}"),
+        }
+        // `coproc echo hi` is an *unnamed* coproc over a simple command (no name
+        // is consumed before a simple command).
+        let prog = parse("coproc echo hi").expect("parse");
+        match &prog.items[0].list.first.commands[0] {
+            Command::Coproc { name, .. } => assert_eq!(*name, None),
+            other => panic!("expected coproc, got {other:?}"),
+        }
     }
 
     /// Run `setup` (to define aliases), then parse+run `src` with those aliases

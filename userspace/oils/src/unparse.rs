@@ -306,6 +306,15 @@ fn command_block(cmd: &Command, level: usize) -> String {
         }
         Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
         Command::Arith(text) => format!("(( {text} ))"),
+        Command::Coproc { name, body } => {
+            let mut s = String::from("coproc ");
+            if let Some(n) = name {
+                s.push_str(n);
+                s.push(' ');
+            }
+            s.push_str(&command_block(body, level));
+            s
+        }
         Command::Redirected { inner, redirects } => {
             let mut s = command_block(inner, level);
             for r in redirects {
@@ -413,6 +422,15 @@ fn command_inline(cmd: &Command) -> String {
         Command::Subshell(prog) => format!("( {} )", program_inline(prog)),
         Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
         Command::Arith(text) => format!("(( {text} ))"),
+        Command::Coproc { name, body } => {
+            let mut s = String::from("coproc ");
+            if let Some(n) = name {
+                s.push_str(n);
+                s.push(' ');
+            }
+            s.push_str(&command_inline(body));
+            s
+        }
         Command::Redirected { inner, redirects } => {
             let mut s = command_inline(inner);
             for r in redirects {

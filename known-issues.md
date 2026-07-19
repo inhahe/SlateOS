@@ -14,9 +14,50 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-COPROC. `osh` does not implement `coproc` (raw syntax error) — 2026-07-19
+### TD-OILS-COPROC. `osh` does not implement `coproc` — RESOLVED 2026-07-19
 
-**Where:** `userspace/oils/src/parser.rs` (no `coproc` production — the
+**RESOLVED (2026-07-19).** `coproc` is now implemented following the
+minimal-surface design spiked below. Summary of what shipped:
+- Parser: `Command::Coproc { name: Option<String>, body }` (ast.rs);
+  `parse_coproc` + `compound_starts_at` recognise `coproc [NAME] command`
+  at command start with the exact bash grammar (explicit NAME only before
+  a compound starter). Unparser arms in `command_block`/`command_inline`.
+- Executor: `exec_coproc` (interp.rs) creates two `std::io::pipe()`s,
+  spawns the body on a detached `std::thread::spawn` with an owned
+  `clone_for_subshell()` (cloned *before* the endpoints are installed, so
+  the body doesn't inherit its own coproc fds) driving `Out::Pipe` /
+  `StdinSrc::Pipe`. Parent write end → `open_write_fds` (zero write-path
+  change); parent read end → new `coproc_read_fds:
+  HashMap<i32, RefCell<BufReader<File>>>` (a *persistent* buffered reader,
+  so successive `read <&N` consume successive lines). `NAME=(readfd
+  writefd)`, `NAME_PID` = synthetic monotonic id (`COPROC_PID` atomic).
+- Read-resolution points updated to consult `coproc_read_fds`: `read -u N`,
+  transient `<&N` (`resolve_redirects` DupIn), `read_line`,
+  `read_record_input`, `read_all_bytes`, and external-command stdin in
+  `run_external` (hands the child a live `try_clone` so it streams).
+  `alloc_varfd` also skips `coproc_read_fds`. `clone_for_subshell`
+  `try_clone`s each live read handle (shared OS pipe, bash semantics).
+- New helpers `pipe_reader_into_file` / `pipe_writer_into_file`
+  (cfg-split unix/windows, via `OwnedFd`/`OwnedHandle`, no unsafe).
+- Tests: 9 (`coproc_*`) covering default/named/simple-command bodies,
+  bidirectional round-trip, `read -u`, successive-line reads, `NAME_PID`,
+  high-fd allocation, and the named-only-before-compound grammar. All
+  match real MSYS bash (6 probes). 539 tests green, clippy clean, both
+  host + slateos targets build.
+
+**Remaining minor limitations (low priority):** persistent `exec M<&N`
+duplicating a coproc read fd is not wired (`clone_input_fd` / persistent
+`apply_persistent_redirect` DupIn still only look at `open_fds` — `exec
+4<&${COPROC[0]}` would report "bad fd"); only the single-active-coproc
+case is targeted (bash itself warns on a second); coproc threads are
+detached rather than joined on shell exit / `unset NAME` (relies on
+process exit for reclaim); `NAME_PID` is synthetic so `wait`/`kill` on it
+are best-effort. None of these affect the common `coproc`/`read <&N`
+idioms. The original analysis + full design spike is retained below.
+
+---
+
+**Where (original):** `userspace/oils/src/parser.rs` (no `coproc` production — the
 word is only listed as a reserved word in `interp.rs` ~9670/9880 for
 completion, never parsed) and `userspace/oils/src/interp.rs` (no executor
 or `COPROC`/`NAME`/`NAME_PID` support). The fd model in `Shell` also can't
@@ -1283,9 +1324,21 @@ concurrently with the enclosing command and stream. The lexer/parser/AST plumbin
 change. Also sweep the non-simple-command contexts (or move cleanup to a
 shell-level teardown) to avoid the temp-file leak.
 
-### TD-OILS-COPROC. `osh` has no `coproc` support at all — OPEN (gated on a live-pipe-fd model; same root cause as TD-OILS22)
+### TD-OILS-COPROC. `osh` has no `coproc` support at all — RESOLVED 2026-07-19
 
-**Where:** would touch `lexer.rs`/`parser.rs`/`ast.rs` (recognise the `coproc`
+**RESOLVED 2026-07-19.** Implemented — see the resolved TD-OILS-COPROC
+entry near the top of this file for the shipped design and remaining minor
+limitations. Note the "why deferred" reasoning below turned out to be
+over-cautious on one point: a full `Box<dyn Read>`/`Box<dyn Write>`
+generalisation of *both* fd tables was **not** needed. `std::io::pipe()`
+(stable 1.87, cross-platform) plus a *dedicated* live read table
+(`coproc_read_fds`) and reuse of `open_write_fds` for the write end kept
+the change to ~4 read-resolution points; the body runs on an OS thread
+with its own `Shell` (not an OS process), so no `Child`/reaping subsystem
+was required. The concurrency concern was valid and is satisfied by the
+real OS pipes + background thread. Original analysis retained below.
+
+**Where (original):** would touch `lexer.rs`/`parser.rs`/`ast.rs` (recognise the `coproc`
 reserved word and parse both `coproc [NAME] simple-command` and
 `coproc [NAME] { compound }` forms), `interp.rs` (a new async-process launch +
 the `open_fds`/`open_write_fds` fd tables + `COPROC`/`NAME` array and

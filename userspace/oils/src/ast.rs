@@ -86,6 +86,15 @@ pub enum Command {
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
     /// non-zero, 1 if zero). The `String` holds the raw arithmetic text.
     Arith(String),
+    /// `coproc [NAME] command` — run `command` asynchronously with its
+    /// stdin/stdout wired to two pipes. Exposes an array `NAME` (default
+    /// `COPROC`) where `NAME[0]` reads the coproc's stdout and `NAME[1]`
+    /// writes its stdin, plus scalar `NAME_PID`. `name` is `None` when no
+    /// explicit name was given (defaults to `COPROC` at runtime).
+    Coproc {
+        name: Option<String>,
+        body: Box<Command>,
+    },
     /// A compound command with trailing redirections, e.g.
     /// `while read l; do …; done < file` or `{ …; } > out`. Simple commands
     /// carry their own redirects; this wraps the non-simple forms.

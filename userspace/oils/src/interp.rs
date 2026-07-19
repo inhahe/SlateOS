@@ -359,6 +359,11 @@ pub struct Shell {
     /// expansion, matching bash (which discards the command on an arithmetic
     /// error rather than running it with a bogus value).
     arith_error: bool,
+    /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
+    /// in a command word matches nothing. The simple-command driver reports
+    /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
+    /// expansion, matching a non-interactive bash under `failglob`.
+    glob_error: Option<String>,
     /// Stack of function-local variable scopes. Each frame records the variables
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
@@ -489,6 +494,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: false,
             arith_error: false,
+            glob_error: None,
             local_frames: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
@@ -1066,6 +1072,13 @@ impl Shell {
             }
             None => self.positional.clone(),
         };
+        // `failglob`: an unmatched glob in the word list is a fatal expansion
+        // error — abort the loop before running the body, as bash does.
+        if let Some(pat) = self.glob_error.take() {
+            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
         // A `for` over an empty list runs no body and has exit status 0.
         let mut body_status = 0;
         for item in items {
@@ -1859,6 +1872,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: false,
             arith_error: false,
+            glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
@@ -2909,6 +2923,10 @@ impl Shell {
     }
 
     fn exec_simple_inner(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // Clear any stale `failglob` marker so a miss raised in an unchecked
+        // expansion context can never misfire on an unrelated later command;
+        // this command's own glob expansions re-set it below if they miss.
+        self.glob_error = None;
         // Record the command about to run for `$BASH_COMMAND` (the command
         // currently executing, as seen by DEBUG/ERR traps and readable
         // generally). Not updated while a trap handler runs, so the handler
@@ -2972,6 +2990,16 @@ impl Shell {
             return Flow::Exit(1);
         }
 
+        // `shopt -s failglob`: a command-word glob that matched nothing is a
+        // fatal expansion error — bash reports `no match: PATTERN` and discards
+        // the command (and, in a non-interactive `-c`, the rest of the list)
+        // without running it.
+        if let Some(pat) = self.glob_error.take() {
+            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
+
         // Pure assignment (no command word): persist the variables/arrays.
         // A readonly-variable rejection makes the whole command fail (status 1).
         if argv.is_empty() {
@@ -2987,6 +3015,14 @@ impl Shell {
                 if !self.apply_assignment(a) {
                     ok = false;
                 }
+            }
+            // A `failglob` miss while expanding an array-literal value
+            // (`arr=(*.nope)`) is fatal, just like the command-word case.
+            if let Some(pat) = self.glob_error.take() {
+                self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+                self.arith_error = false;
+                self.last_status = 1;
+                return Flow::Exit(1);
             }
             if !ok || self.arith_error {
                 // A readonly rejection or an arithmetic error in the value of a
@@ -3039,6 +3075,14 @@ impl Shell {
         // command (the diagnostic was already printed at expansion time).
         if self.unbound_error {
             self.unbound_error = false;
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
+
+        // A `failglob` miss while expanding a prefix assignment value
+        // (`x=*.nope cmd`) is fatal, mirroring the command-word case.
+        if let Some(pat) = self.glob_error.take() {
+            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
             self.last_status = 1;
             return Flow::Exit(1);
         }
@@ -4083,13 +4127,24 @@ impl Shell {
                 return fields.iter().map(|f| f.iter().map(|e| e.c).collect()).collect();
             }
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
+            let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
             let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
             let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
             let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
             let globstar = self.shopt.get("globstar").copied().unwrap_or(false);
             let mut out = Vec::new();
+            let mut failed = None;
             for f in fields {
-                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob, extglob, globstar);
+                glob_or_literal(
+                    &f, &mut out, nullglob, failglob, dotglob, nocaseglob, extglob, globstar,
+                    &mut failed,
+                );
+            }
+            // `failglob`: a pattern that matched nothing is a fatal expansion
+            // error. Record it for the simple-command driver, which reports it
+            // and aborts the command list (like a non-interactive bash).
+            if let Some(pat) = failed {
+                self.glob_error = Some(pat);
             }
             return out;
         }
@@ -8966,14 +9021,17 @@ fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn glob_or_literal(
     field: &[EChar],
     out: &mut Vec<String>,
     nullglob: bool,
+    failglob: bool,
     dotglob: bool,
     nocaseglob: bool,
     extglob: bool,
     globstar: bool,
+    failed: &mut Option<String>,
 ) {
     let has_meta = field_has_glob_meta(field, extglob);
     let literal: String = field.iter().map(|e| e.c).collect();
@@ -8983,10 +9041,15 @@ fn glob_or_literal(
     }
     let mut matches = glob_expand_field(field, dotglob, nocaseglob, extglob, globstar);
     if matches.is_empty() {
-        // Default (no `nullglob`): an unmatched pattern is left as the literal
-        // word. With `nullglob` on, the word is removed entirely (produces no
-        // field).
-        if !nullglob {
+        // `failglob` takes precedence over `nullglob`: an unmatched pattern is a
+        // reported error that aborts the command (bash). Record the first
+        // unmatched pattern so the caller can raise it. Otherwise, `nullglob`
+        // removes the word entirely and the default leaves it literal.
+        if failglob {
+            if failed.is_none() {
+                *failed = Some(literal);
+            }
+        } else if !nullglob {
             out.push(literal);
         }
     } else {
@@ -13744,6 +13807,24 @@ mod tests {
             run("shopt -s nullglob; shopt -u nullglob; echo osh_no_such_glob_*.zzz").0,
             "osh_no_such_glob_*.zzz\n"
         );
+    }
+
+    #[test]
+    fn shopt_failglob_aborts_on_no_match() {
+        // With `failglob`, an unmatched command-word glob is a fatal expansion
+        // error: the command does not run, `$?` is 1, and (as in a single
+        // non-interactive `-c` list) a following command is discarded.
+        let (out, st) = run("shopt -s failglob; echo osh_no_such_glob_*.zzz; echo after");
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // A non-glob word is unaffected by failglob.
+        assert_eq!(run("shopt -s failglob; echo hello").0, "hello\n");
+        // failglob also aborts an unmatched glob in an array-literal value.
+        let (aout, ast) = run("shopt -s failglob; a=(osh_no_such_*.zzz); echo after");
+        assert_eq!(aout, "");
+        assert_eq!(ast, 1);
+        // A stale marker from an aborted command must not misfire on the next.
+        assert_eq!(run("shopt -s failglob; echo osh_no_*.zzz\necho ok").1, 1);
     }
 
     #[test]

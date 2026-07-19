@@ -26,6 +26,10 @@ fn main() {
 
 fn run(args: &[String]) -> i32 {
     let mut sh = Shell::new();
+    // Take ownership of the inherited process environment: environment
+    // variables become ordinary (exported) shell variables, so `unset`,
+    // prefix matching (`${!P*}`), and `set` listings behave like bash.
+    sh.import_environment();
 
     let code = match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {

@@ -224,6 +224,15 @@ pub struct Shell {
     /// associative: subscripts are string keys, not arithmetic indices.
     assoc: HashMap<String, Vec<(String, String)>>,
     exported: HashSet<String>,
+    /// True once the real process environment has been imported into `vars`
+    /// (via [`Shell::import_environment`], called by the binary at startup).
+    /// When set, `vars` is the authoritative variable namespace: reads no
+    /// longer fall back to `std::env` (so `unset PATH` actually hides it) and
+    /// child processes are spawned with a cleared env populated only from the
+    /// exported shell variables. Tests construct the shell via `new()` without
+    /// importing, so they keep the on-demand `std::env` fallback and inherited
+    /// child environment — staying deterministic and host-independent.
+    env_imported: bool,
     funcs: HashMap<String, Program>,
     positional: Vec<String>,
     name: String,
@@ -446,6 +455,7 @@ impl Shell {
             arrays: HashMap::new(),
             assoc: HashMap::new(),
             exported: HashSet::new(),
+            env_imported: false,
             funcs: HashMap::new(),
             positional: Vec::new(),
             name: "osh".to_string(),
@@ -513,6 +523,23 @@ impl Shell {
     /// Set a shell variable.
     pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.vars.insert(name.into(), value.into());
+    }
+
+    /// Import the real process environment into the shell variable namespace,
+    /// marking every imported name exported (bash: environment variables *are*
+    /// shell variables). Called once by the binary at startup. After this, the
+    /// shell owns its environment: variable reads come from `vars` (no
+    /// `std::env` fallback, so `unset PATH` truly hides it), prefix matching
+    /// (`${!P*}`) and `set`/`export -p` listings see the inherited variables,
+    /// and child processes are spawned from the exported set with a cleared
+    /// base env. A name already defined in `vars` (e.g. set before import) is
+    /// left untouched.
+    pub fn import_environment(&mut self) {
+        for (k, v) in std::env::vars() {
+            self.vars.entry(k.clone()).or_insert(v);
+            self.exported.insert(k);
+        }
+        self.env_imported = true;
     }
 
     /// The exit status of the most recently completed command.
@@ -836,6 +863,12 @@ impl Shell {
 
             let mut pc = PCommand::new(program);
             pc.args(&argv[1..]);
+            // When the shell owns its environment (imported at startup), spawn
+            // from a cleared base so an `unset`/non-exported variable does not
+            // leak in via the parent process's inherited environment.
+            if self.env_imported {
+                pc.env_clear();
+            }
             for (k, v) in &self.vars {
                 if self.exported.contains(k) {
                     pc.env(k, v);
@@ -1747,6 +1780,7 @@ impl Shell {
             arrays: self.arrays.clone(),
             assoc: self.assoc.clone(),
             exported: self.exported.clone(),
+            env_imported: self.env_imported,
             funcs: self.funcs.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
@@ -3345,9 +3379,14 @@ impl Shell {
             let p = Path::new(name);
             return p.is_file().then(|| p.to_path_buf());
         }
-        let path = self
-            .param_value("PATH")
-            .or_else(|| std::env::var("PATH").ok())?;
+        let path = match self.param_value("PATH") {
+            Some(p) => p,
+            // Only consult the real process PATH when the shell has not taken
+            // ownership of its environment; once imported, an unset PATH means
+            // no path search (bash).
+            None if !self.env_imported => std::env::var("PATH").ok()?,
+            None => return None,
+        };
         for dir in std::env::split_paths(&path) {
             let cand = dir.join(name);
             if cand.is_file() {
@@ -3397,11 +3436,13 @@ impl Shell {
             }
             return out;
         }
-        let Some(path) = self
-            .param_value("PATH")
-            .or_else(|| std::env::var("PATH").ok())
-        else {
-            return out;
+        let path = match self.param_value("PATH") {
+            Some(p) => p,
+            None if !self.env_imported => match std::env::var("PATH") {
+                Ok(p) => p,
+                Err(_) => return out,
+            },
+            None => return out,
         };
         for dir in std::env::split_paths(&path) {
             let cand = dir.join(name);
@@ -3436,6 +3477,11 @@ impl Shell {
         cmd.args(&argv[1..]);
 
         // Environment: exported shell vars + this command's temp assignments.
+        // When the shell owns its environment, start from a cleared base so an
+        // unset/non-exported variable does not leak in via inheritance.
+        if self.env_imported {
+            cmd.env_clear();
+        }
         for (k, v) in &self.vars {
             if self.exported.contains(k) {
                 cmd.env(k, v);
@@ -3787,6 +3833,9 @@ impl Shell {
             if !argv.is_empty() && !self.funcs.contains_key(&argv[0]) && !self.builtin_enabled(&argv[0]) {
                 let mut cmd = PCommand::new(&argv[0]);
                 cmd.args(&argv[1..]);
+                if self.env_imported {
+                    cmd.env_clear();
+                }
                 for (k, v) in &self.vars {
                     if self.exported.contains(k) {
                         cmd.env(k, v);
@@ -4588,10 +4637,18 @@ impl Shell {
                 if let Some(arr) = self.arrays.get(name) {
                     return arr.get(&0).cloned();
                 }
-                self.vars
-                    .get(name)
-                    .cloned()
-                    .or_else(|| std::env::var(name).ok())
+                // Once the environment is imported, `vars` is authoritative —
+                // no `std::env` fallback, so `unset NAME` on an inherited env
+                // variable actually hides it. Tests (no import) keep the
+                // fallback so `$HOME`/`$PATH` still resolve host-independently.
+                if let Some(v) = self.vars.get(name) {
+                    return Some(v.clone());
+                }
+                if self.env_imported {
+                    None
+                } else {
+                    std::env::var(name).ok()
+                }
             }
         }
     }
@@ -12565,6 +12622,37 @@ mod tests {
         assert_eq!(run("(( 0 ))").1, 1);
         assert_eq!(run("(( 5 > 3 ))").1, 0);
         assert_eq!(run("(( 3 > 5 ))").1, 1);
+    }
+
+    /// Run `src` on a shell that has imported the real process environment
+    /// (as the binary does at startup). Reads process env — no mutation — so
+    /// it is safe under the parallel test harness.
+    fn run_imported(src: &str) -> (String, i32) {
+        let mut sh = Shell::new();
+        sh.import_environment();
+        let mut buf = Vec::new();
+        let prog = parse(src).expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn env_import_env_vars_are_shell_vars() {
+        // After importing the environment, an inherited env variable behaves
+        // exactly like a shell variable: it is readable, appears in prefix
+        // name-matching (`${!PATH*}`), and `unset` truly hides it (no silent
+        // std::env resurrection). PATH is present in every environment.
+        assert_eq!(run_imported("echo \"${PATH:+yes}\"").0, "yes\n");
+        // Prefix matching includes the inherited PATH.
+        assert_eq!(
+            run_imported("for n in ${!PATH*}; do [ \"$n\" = PATH ] && echo found; done").0,
+            "found\n"
+        );
+        // unset removes it — no fallback to the real process environment.
+        assert_eq!(run_imported("unset PATH; echo \"[${PATH-gone}]\"").0, "[gone]\n");
     }
 
     #[test]

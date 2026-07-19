@@ -10104,11 +10104,16 @@ fn format_conversion(
     let mut spec = String::from("%");
     let mut left = false;
     let mut zero = false;
+    let mut plus = false;
+    let mut space = false;
+    let mut hash = false;
     while let Some(&c) = chars.peek() {
         match c {
             '-' => left = true,
             '0' => zero = true,
-            '+' | ' ' | '#' => {}
+            '+' => plus = true,
+            ' ' => space = true,
+            '#' => hash = true,
             _ => break,
         }
         spec.push(c);
@@ -10249,6 +10254,10 @@ fn format_conversion(
         v
     };
 
+    // Sign/base prefix rendered separately from the digit body so that
+    // zero-padding can insert zeros *between* the prefix and the body
+    // (e.g. `%+05d` on 5 → `+0005`, `%#06x` on 255 → `0x00ff`).
+    let mut num_prefix = String::new();
     let rendered = match conv {
         's' => {
             let mut s = next_arg(arg_i);
@@ -10265,26 +10274,57 @@ fn format_conversion(
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
         'd' | 'i' => {
             let n = parse_printf_int(&next_arg(arg_i));
-            n.to_string()
+            let (p, b) = split_sign(n.to_string(), plus, space);
+            num_prefix = p;
+            b
         }
         'u' => parse_printf_int(&next_arg(arg_i)).cast_unsigned().to_string(),
-        'x' => format!("{:x}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
-        'X' => format!("{:X}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
-        'o' => format!("{:o}", parse_printf_int(&next_arg(arg_i)).cast_unsigned()),
+        'x' => {
+            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            // `#` prefixes nonzero hex with `0x` (bash/C: zero gets no prefix).
+            if hash && v != 0 {
+                num_prefix.push_str("0x");
+            }
+            format!("{v:x}")
+        }
+        'X' => {
+            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            if hash && v != 0 {
+                num_prefix.push_str("0X");
+            }
+            format!("{v:X}")
+        }
+        'o' => {
+            let v = parse_printf_int(&next_arg(arg_i)).cast_unsigned();
+            let s = format!("{v:o}");
+            // `#` forces a leading `0` on octal (a bare `0` is left as-is).
+            if hash && !s.starts_with('0') {
+                num_prefix.push('0');
+            }
+            s
+        }
         'f' | 'F' => {
             let f = parse_printf_float(&next_arg(arg_i));
-            format!("{:.*}", prec_n.unwrap_or(6), f)
+            let (p, b) = split_sign(format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
+            num_prefix = p;
+            b
         }
         'e' | 'E' => {
             let f = parse_printf_float(&next_arg(arg_i));
             let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
             let s = normalize_exp(&s);
-            if conv == 'E' { s.to_uppercase() } else { s }
+            let s = if conv == 'E' { s.to_uppercase() } else { s };
+            let (p, b) = split_sign(s, plus, space);
+            num_prefix = p;
+            b
         }
         'g' | 'G' => {
             let f = parse_printf_float(&next_arg(arg_i));
             let s = format!("{f}");
-            if conv == 'G' { s.to_uppercase() } else { s }
+            let s = if conv == 'G' { s.to_uppercase() } else { s };
+            let (p, b) = split_sign(s, plus, space);
+            num_prefix = p;
+            b
         }
         other => {
             // Unknown conversion: emit literally.
@@ -10300,24 +10340,47 @@ fn format_conversion(
         }
     };
 
-    // Apply field width padding (numeric width only).
-    if rendered.chars().count() < width_n {
-        let pad = width_n - rendered.chars().count();
+    // Apply field width padding. The sign/base prefix and the digit body are
+    // padded as a unit; for zero-padding the zeros go between them.
+    let total_len = num_prefix.chars().count() + rendered.chars().count();
+    if total_len < width_n {
+        let pad = width_n - total_len;
         if left {
+            out.push_str(&num_prefix);
             out.push_str(&rendered);
             out.extend(std::iter::repeat_n(' ', pad));
+        } else if zero
+            && matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G')
+        {
+            // Zero-pad: prefix, then the padding zeros, then the body.
+            out.push_str(&num_prefix);
+            out.extend(std::iter::repeat_n('0', pad));
+            out.push_str(&rendered);
         } else {
-            // Zero-pad only for numeric conversions.
-            let pad_ch = if zero && matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G') {
-                '0'
-            } else {
-                ' '
-            };
-            out.extend(std::iter::repeat_n(pad_ch, pad));
+            out.extend(std::iter::repeat_n(' ', pad));
+            out.push_str(&num_prefix);
             out.push_str(&rendered);
         }
     } else {
+        out.push_str(&num_prefix);
         out.push_str(&rendered);
+    }
+}
+
+/// Split a formatted numeric string into a sign prefix and its magnitude body,
+/// applying printf's `+`/space flags when the value is non-negative. A leading
+/// `-` always becomes the prefix; otherwise `+` (then space) is added if the
+/// corresponding flag is set. Keeping the sign separate lets zero-padding place
+/// the fill zeros after the sign (`%+05d` on 5 → `+0005`, not `000+5`).
+fn split_sign(s: String, plus: bool, space: bool) -> (String, String) {
+    if let Some(rest) = s.strip_prefix('-') {
+        ("-".to_string(), rest.to_string())
+    } else if plus {
+        ("+".to_string(), s)
+    } else if space {
+        (" ".to_string(), s)
+    } else {
+        (String::new(), s)
     }
 }
 
@@ -11740,6 +11803,31 @@ mod tests {
         assert_eq!(run("v='a b'; echo \"${v@Q}\"").0, "'a b'\n");
         assert_eq!(run("printf '%b' 'a\\tb'").0, "a\tb");
         assert_eq!(run("printf '%c' xyz").0, "x");
+    }
+
+    #[test]
+    fn printf_sign_and_hash_flags() {
+        // `+` forces a leading sign on non-negative numbers; negatives keep `-`.
+        assert_eq!(run("printf '%+d %+d %+d' 5 -3 0").0, "+5 -3 +0");
+        // The space flag reserves a sign column for non-negatives.
+        assert_eq!(run("printf '% d|% d' 5 -3").0, " 5|-3");
+        // Sign is placed before the zero padding, not swallowed by it.
+        assert_eq!(run("printf '%+05d' 5").0, "+0005");
+        assert_eq!(run("printf '%+05d' -5").0, "-0005");
+        assert_eq!(run("printf '% 05d' 5").0, " 0005");
+        // `+`/space apply to floats too.
+        assert_eq!(run("printf '%+.2f' 3.5").0, "+3.50");
+        assert_eq!(run("printf '% .2f' 3.5").0, " 3.50");
+        // `#` adds base prefixes; the fill zeros go after the prefix.
+        assert_eq!(run("printf '%#x' 255").0, "0xff");
+        assert_eq!(run("printf '%#X' 255").0, "0XFF");
+        assert_eq!(run("printf '%#06x' 255").0, "0x00ff");
+        assert_eq!(run("printf '%#o' 8").0, "010");
+        // `#` on zero produces no prefix (hex) / bare `0` (octal).
+        assert_eq!(run("printf '%#x' 0").0, "0");
+        assert_eq!(run("printf '%#o' 0").0, "0");
+        // Left-justify keeps the sign attached to the number.
+        assert_eq!(run("printf '%-+6d|' 5").0, "+5    |");
     }
 
     #[test]

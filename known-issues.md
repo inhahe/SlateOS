@@ -1419,6 +1419,34 @@ input). **Proper fix (if ever wanted):** apply quote-removal semantics to
 brace-generated literal segments so a generated lone `\` is consumed as an
 escape, matching bash.
 
+### TD-OILS-PRINTF-ERRORDER. `printf` batches all "invalid number" diagnostics *before* its stdout, where bash interleaves each at the point of the bad conversion — MINOR ORDERING DEVIATION 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_printf` / `format_printf`.
+
+**What:** `format_printf` builds the *entire* output string while collecting all
+per-argument numeric-parse errors into a `Vec`, and `builtin_printf` then writes
+every error to stderr *first*, followed by the whole stdout string. bash instead
+processes the format left-to-right, emitting each conversion's output and any
+error as it reaches it. The difference is only observable when stdout and stderr
+are merged (`2>&1`):
+
+```
+printf "%d\n" 0x1F 010 0b101 2>&1
+# osh:  <error for 0b101>, 31, 8, 0     (error batched to the front)
+# bash: 31, 8, <error for 0b101>, 0     (error at the 3rd conversion)
+```
+
+The numeric *values* are identical (31, 8, 0 — `0b101` is invalid in printf `%d`,
+falls back to 0); only the diagnostic ordering differs.
+
+**Proper fix:** stream printf output incrementally to the target fd, emitting each
+argument's diagnostic to stderr at the moment its conversion is processed rather
+than collecting them up front — i.e. thread the write/emit through
+`format_conversion` instead of returning a fully-built `String` + `errors` Vec.
+Deferred because it only surfaces under `2>&1` stream-merging and needs a
+restructure of printf's single-write-at-the-end buffering model (which also
+serves `-v` assignment, where there is no stdout interleaving at all).
+
 ### TD-OILS-MSYS-EXIT127. Host probe artifact: MSYS bash exits **127** for fatal expansion errors where real bash exits **1** — NOT AN OSH BUG (osh is correct) 2026-07-19
 
 **What:** when a *non-interactive* shell terminates due to a fatal parameter-

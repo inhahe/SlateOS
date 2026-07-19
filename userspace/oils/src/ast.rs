@@ -135,6 +135,10 @@ pub enum UnaryOp {
     VarSet,
     /// `-o` — the named shell option is enabled.
     OptionSet,
+    /// `-L`/`-h` — path exists and is a symbolic link.
+    Symlink,
+    /// `-t` — the file descriptor (0/1/2) is open and refers to a terminal.
+    Terminal,
 }
 
 /// Binary comparison operators inside `[[ … ]]`.

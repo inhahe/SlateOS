@@ -82,7 +82,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -1431,6 +1431,24 @@ impl Shell {
                 let name = self.expand_to_string(w);
                 self.shell_option_enabled(&name)
             }
+            // `-L`/`-h` — the operand is a path; test whether it is a symlink
+            // (without following the final component).
+            UnaryOp::Symlink => {
+                let path = self.expand_to_string(w);
+                std::fs::symlink_metadata(&path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            }
+            // `-t fd` — the operand is a descriptor number, not a path.
+            UnaryOp::Terminal => {
+                let fd = self.expand_to_string(w);
+                match fd.parse::<i32>() {
+                    Ok(0) => io::stdin().is_terminal(),
+                    Ok(1) => io::stdout().is_terminal(),
+                    Ok(2) => io::stderr().is_terminal(),
+                    _ => false,
+                }
+            }
             _ => {
                 let path = self.expand_to_string(w);
                 let meta = std::fs::metadata(&path);
@@ -1450,7 +1468,9 @@ impl Shell {
                     UnaryOp::ZeroLen
                     | UnaryOp::NonZeroLen
                     | UnaryOp::VarSet
-                    | UnaryOp::OptionSet => unreachable!(),
+                    | UnaryOp::OptionSet
+                    | UnaryOp::Symlink
+                    | UnaryOp::Terminal => unreachable!(),
                 }
             }
         }
@@ -7996,9 +8016,18 @@ fn eval_test(a: &[&str]) -> bool {
         }
         3 => {
             let (l, op, r) = (a[0], a[1], a[2]);
-            if op == "!" {
-                // `! op x` handled as negation of a 2-arg test.
+            // POSIX 3-argument rules, in order: a binary primary in the middle
+            // wins first (so `[ ! = x ]` is a string comparison), then a leading
+            // `!` negates the 2-argument test of the remaining operands (so
+            // `[ ! -L path ]` / `[ ! -f path ]` work), then `( expr )` grouping.
+            if is_test_binary_op(op) {
+                return eval_binary(l, op, r);
+            }
+            if l == "!" {
                 return !eval_test(&a[1..]);
+            }
+            if l == "(" && r == ")" {
+                return !op.is_empty();
             }
             eval_binary(l, op, r)
         }
@@ -8113,8 +8142,31 @@ fn eval_unary(op: &str, x: &str) -> bool {
         "-d" => std::path::Path::new(x).is_dir(),
         "-s" => std::fs::metadata(x).map(|m| m.len() > 0).unwrap_or(false),
         "-r" | "-w" | "-x" => std::path::Path::new(x).exists(),
+        // `-L`/`-h` — the path is a symbolic link. `symlink_metadata` does not
+        // follow the final component, so a broken symlink still tests true.
+        "-L" | "-h" => std::fs::symlink_metadata(x)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        // `-t FD` — file descriptor `FD` is open and refers to a terminal.
+        // Only the standard streams (0/1/2) are addressable from a shell.
+        "-t" => match x.parse::<i32>() {
+            Ok(0) => io::stdin().is_terminal(),
+            Ok(1) => io::stdout().is_terminal(),
+            Ok(2) => io::stderr().is_terminal(),
+            _ => false,
+        },
         _ => !x.is_empty(),
     }
+}
+
+/// Whether `op` is a `test`/`[` binary primary. Used to disambiguate the
+/// 3-argument case (a binary operator in the middle beats a leading `!`).
+fn is_test_binary_op(op: &str) -> bool {
+    matches!(
+        op,
+        "=" | "==" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt"
+            | "-ot" | "-ef"
+    )
 }
 
 fn eval_binary(l: &str, op: &str, r: &str) -> bool {
@@ -8940,6 +8992,32 @@ mod tests {
         let src = "target=orig; f() { local -n ref=target; ref=changed; }; f; \
                    echo $target; ref=plainvalue; echo $ref; echo $target";
         assert_eq!(run(src).0, "changed\nplainvalue\nchanged\n");
+    }
+
+    #[test]
+    fn test_symlink_and_terminal_ops() {
+        // -L/-h on a non-symlink is false; the operators parse without error in
+        // both `[ ]` and `[[ ]]`.
+        assert_eq!(run("[ -L . ]; echo $?").0, "1\n");
+        assert_eq!(run("[[ -h . ]]; echo $?").0, "1\n");
+        // -t on an invalid descriptor is false.
+        assert_eq!(run("[ -t 99 ]; echo $?").0, "1\n");
+        assert_eq!(run("[[ -t 99 ]]; echo $?").0, "1\n");
+        // Negation composes with the new operators.
+        assert_eq!(run("[ ! -L . ] && echo notlink").0, "notlink\n");
+    }
+
+    #[test]
+    fn test_three_arg_negation_and_binary_precedence() {
+        // Regression: `[ ! -f X ]` must negate the unary file test, not be
+        // parsed as a bogus binary op. A missing file makes the negation true.
+        assert_eq!(run("[ ! -f no_such_file_xyz ] && echo ok").0, "ok\n");
+        assert_eq!(run("[ ! -d no_such_dir_xyz ] && echo ok").0, "ok\n");
+        // A binary operator in the middle still wins over a leading `!`:
+        // `[ ! = x ]` compares the strings "!" and "x" (not equal → false).
+        assert_eq!(run("[ ! = x ]; echo $?").0, "1\n");
+        // And a genuine equal comparison of "!" to itself is true.
+        assert_eq!(run("[ ! = ! ]; echo $?").0, "0\n");
     }
 
     #[test]

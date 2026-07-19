@@ -14,6 +14,41 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-COPROC. `osh` does not implement `coproc` (raw syntax error) — 2026-07-19
+
+**Where:** `userspace/oils/src/parser.rs` (no `coproc` production — the
+word is only listed as a reserved word in `interp.rs` ~9670/9880 for
+completion, never parsed) and `userspace/oils/src/interp.rs` (no executor
+or `COPROC`/`NAME`/`NAME_PID` support). The fd model in `Shell` also can't
+represent a coproc's endpoints: `open_fds` is `HashMap<i32,
+RefCell<Cursor<Vec<u8>>>>` (dead in-memory byte buffers) and
+`open_write_fds` is `HashMap<i32, Arc<File>>` — neither can hold a *live*
+`io::PipeReader`/`io::PipeWriter` that streams to/from a running coproc.
+
+**What:** `coproc [NAME] cmd` / `coproc [NAME] { compound; }` is a bash
+keyword that runs `cmd` asynchronously with its stdin/stdout wired to two
+pipes, exposing an array `NAME` (default `COPROC`) where `NAME[0]` is the
+fd to read the coproc's stdout and `NAME[1]` the fd to write its stdin,
+plus `NAME_PID`. osh parses it as a plain word followed by a brace group
+and dies: `coproc { echo hi; }` → `osh: syntax error: unexpected reserved
+word '}'`. Reproduce: `osh -c 'coproc { echo fromco; }; read x
+<&"${COPROC[0]}"; echo "$x"'` → syntax error; bash prints `fromco`.
+
+**Why deferred:** this is not a small fix — it needs (1) a parser
+production for `coproc` (optional NAME, then a command or compound
+command → a new `Command::Coproc { name: Option<String>, body }`); (2)
+extending the fd model so `open_fds`/`open_write_fds` (or new tables) can
+hold live pipe endpoints — e.g. make each an enum `Cursor(...)  |
+Pipe(...)`; every read/write site that matches those tables must handle
+the new variant; (3) a background thread running a subshell clone of the
+body with `Out::Pipe`/`StdinSrc::Pipe` wired to the two OS pipes, fds
+allocated ≥ 10 and stored in the `NAME` array, plus `NAME_PID`; (4)
+lifecycle/cleanup (join/close on shell exit, `wait`, and when the array
+is unset). Because step 2 touches a mature, heavily-relied-on fd model,
+it warrants a dedicated, carefully-tested effort rather than being
+bolted on mid-sweep. `coproc` is comparatively rare in real scripts, so
+this is lower priority than user-visible expansion/redirect correctness.
+
 ### TD-OILS-VARFD-RO-MSG. `osh` readonly-varfd redirect emits one error line; bash emits two — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` `redir_effective_fd` (returns

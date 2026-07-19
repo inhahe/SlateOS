@@ -2535,9 +2535,10 @@ impl Shell {
             let fields = self.expand_word_annotated(word);
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
             let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
+            let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
             let mut out = Vec::new();
             for f in fields {
-                glob_or_literal(&f, &mut out, nullglob, dotglob);
+                glob_or_literal(&f, &mut out, nullglob, dotglob, nocaseglob);
             }
             return out;
         }
@@ -4503,7 +4504,13 @@ fn push_chars(buf: &mut Vec<EChar>, s: &str, quoted: bool) {
 /// literal field, if it has no unquoted metacharacter or matches nothing) into
 /// `out`. This implements bash's default (no-`nullglob`) behavior: an
 /// unmatched pattern is left as the literal word.
-fn glob_or_literal(field: &[EChar], out: &mut Vec<String>, nullglob: bool, dotglob: bool) {
+fn glob_or_literal(
+    field: &[EChar],
+    out: &mut Vec<String>,
+    nullglob: bool,
+    dotglob: bool,
+    nocaseglob: bool,
+) {
     let has_meta = field
         .iter()
         .any(|e| !e.quoted && matches!(e.c, '*' | '?' | '['));
@@ -4512,7 +4519,7 @@ fn glob_or_literal(field: &[EChar], out: &mut Vec<String>, nullglob: bool, dotgl
         out.push(literal);
         return;
     }
-    let mut matches = glob_expand_field(field, dotglob);
+    let mut matches = glob_expand_field(field, dotglob, nocaseglob);
     if matches.is_empty() {
         // Default (no `nullglob`): an unmatched pattern is left as the literal
         // word. With `nullglob` on, the word is removed entirely (produces no
@@ -4660,7 +4667,7 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 
 /// Expand an annotated field containing at least one unquoted metacharacter
 /// against the filesystem, returning the matching paths (unsorted).
-fn glob_expand_field(field: &[EChar], dotglob: bool) -> Vec<String> {
+fn glob_expand_field(field: &[EChar], dotglob: bool, nocaseglob: bool) -> Vec<String> {
     let absolute = field.first().is_some_and(|e| e.c == '/');
     // Split into non-empty components on '/'.
     let mut comps: Vec<Vec<EChar>> = Vec::new();
@@ -4691,6 +4698,20 @@ fn glob_expand_field(field: &[EChar], dotglob: bool) -> Vec<String> {
             if has_meta {
                 let dir = if base.is_empty() { "." } else { base.as_str() };
                 let toks = compile_glob(comp);
+                // With `nocaseglob`, match against an ASCII-lowercased copy of
+                // both the pattern and each filename (token structure is kept
+                // 1:1 by using ASCII folding). The original filename is still
+                // the value returned.
+                let toks_ci = nocaseglob.then(|| {
+                    let low: Vec<EChar> = comp
+                        .iter()
+                        .map(|e| EChar {
+                            c: e.c.to_ascii_lowercase(),
+                            quoted: e.quoted,
+                        })
+                        .collect();
+                    compile_glob(&low)
+                });
                 // A leading `.` in a filename is only matched when the pattern
                 // itself begins with a literal dot, or when `dotglob` is set.
                 // Even with `dotglob`, `.` and `..` are never matched by a glob.
@@ -4708,7 +4729,15 @@ fn glob_expand_field(field: &[EChar], dotglob: bool) -> Vec<String> {
                     if dotglob && !glob_starts_with_dot(&toks) && (name == "." || name == "..") {
                         continue;
                     }
-                    if match_glob_toks(&toks, &nch) {
+                    let matched = match &toks_ci {
+                        Some(tci) => {
+                            let low: Vec<char> =
+                                nch.iter().map(|c| c.to_ascii_lowercase()).collect();
+                            match_glob_toks(tci, &low)
+                        }
+                        None => match_glob_toks(&toks, &nch),
+                    };
+                    if matched {
                         names.push(name);
                     }
                 }
@@ -6746,7 +6775,7 @@ mod tests {
         let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false)
+        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false)
             .iter()
             .map(|p| basename(p))
             .collect();
@@ -6754,13 +6783,41 @@ mod tests {
         assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false);
+        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false);
         assert!(all.iter().all(|p| !p.ends_with(".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false);
+        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn shopt_nocaseglob_matches_case_insensitively() {
+        let uniq = format!(
+            "osh_nocaseglob_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::path::Path::new(&uniq);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        for n in ["README.md", "Notes.TXT"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+
+        // Case-sensitive: lowercase pattern misses the uppercase-extension file.
+        let field = field_lit(&format!("{uniq}/*.txt"));
+        let cs = glob_expand_field(&field, false, false);
+        assert!(cs.is_empty());
+        // With nocaseglob, `*.txt` matches `Notes.TXT`.
+        let ci = glob_expand_field(&field, false, true);
+        assert_eq!(ci.len(), 1);
+        assert!(ci[0].ends_with("Notes.TXT"));
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -6817,9 +6874,9 @@ mod tests {
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field(&field, false);
+        let plain = glob_expand_field(&field, false, false);
         assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
-        let with_dot = glob_expand_field(&field, true);
+        let with_dot = glob_expand_field(&field, true, false);
         assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
         assert!(with_dot.iter().all(|p| {
             let b = p.rsplit('/').next().unwrap_or(p);

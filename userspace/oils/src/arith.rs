@@ -716,13 +716,15 @@ fn apply(op: &str, a: i64, b: i64) -> Result<i64, ArithError> {
         }
         "/" => {
             if b == 0 {
-                return Err(ArithError("division by zero".into()));
+                // Match bash's wording verbatim (`division by 0`), not "division by zero".
+                return Err(ArithError("division by 0".into()));
             }
             a.wrapping_div(b)
         }
         "%" => {
             if b == 0 {
-                return Err(ArithError("modulo by zero".into()));
+                // bash reports modulo-by-zero with the same "division by 0" text as `/`.
+                return Err(ArithError("division by 0".into()));
             }
             a.wrapping_rem(b)
         }
@@ -1075,6 +1077,19 @@ mod tests {
     #[test]
     fn div_zero() {
         assert!(eval("1 / 0", &mut Map::default()).is_err());
+    }
+
+    #[test]
+    fn zero_division_messages_match_bash() {
+        // bash reports both `/` and `%` by zero with the exact text "division by 0"
+        // (not "division by zero"/"modulo by zero"), and exponent-by-negative with
+        // "exponent less than 0". Keep the wording verbatim for bash-superset parity.
+        let div = eval("1 / 0", &mut Map::default()).unwrap_err();
+        assert_eq!(div.0, "division by 0");
+        let modulo = eval("1 % 0", &mut Map::default()).unwrap_err();
+        assert_eq!(modulo.0, "division by 0");
+        let exp = eval("5 ** -1", &mut Map::default()).unwrap_err();
+        assert_eq!(exp.0, "exponent less than 0");
     }
 
     #[test]

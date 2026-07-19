@@ -146,6 +146,11 @@ fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
         vars,
     };
     p.skip_ws();
+    // An empty (or whitespace-only) arithmetic expression is `0` in bash:
+    // `$(( ))`, and — after expansion — `n=; echo $((n))` / `$(( $x ))`.
+    if p.pos == p.chars.len() {
+        return Ok(Expr::Num(0));
+    }
     let e = p.parse_comma()?;
     p.skip_ws();
     if p.pos != p.chars.len() {
@@ -784,6 +789,13 @@ mod tests {
 
     fn ev(s: &str) -> i64 {
         eval(s, &mut Map::default()).unwrap()
+    }
+
+    #[test]
+    fn empty_expression_is_zero() {
+        // bash: `$(( ))` and, after expansion, `$(( $unset ))` → 0.
+        assert_eq!(ev(""), 0);
+        assert_eq!(ev("   "), 0);
     }
 
     #[test]

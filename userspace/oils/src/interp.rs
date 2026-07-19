@@ -652,6 +652,12 @@ impl Shell {
         // renders readonly arrays correctly (TD-OILS-RO-ARRAY fixed), so this no
         // longer surfaces malformed output.
         self.readonly.insert("BASH_VERSINFO".to_string());
+        // SHELLOPTS: bash exposes the enabled `set -o` options as a readonly,
+        // colon-separated list. Seed it from the current (default) option state
+        // and mark it readonly so scripts can't clobber it; `refresh_shellopts`
+        // keeps it current as options are toggled.
+        self.refresh_shellopts();
+        self.readonly.insert("SHELLOPTS".to_string());
     }
 
     /// Set `$0`, the shell/script name.
@@ -9873,6 +9879,7 @@ impl Shell {
             'C' => self.noclobber = enable,
             _ => {}
         }
+        self.refresh_shellopts();
     }
 
     /// Apply a `set -o NAME` / `set +o NAME` long option. Unknown names are
@@ -9888,6 +9895,45 @@ impl Shell {
             "noclobber" => self.noclobber = enable,
             _ => {}
         }
+        self.refresh_shellopts();
+    }
+
+    /// Recompute `$SHELLOPTS` from the current option state and store it as a
+    /// readonly shell variable, mirroring bash. bash keeps `SHELLOPTS` as a
+    /// colon-separated, alphabetically-sorted list of the enabled `set -o`
+    /// options; for a non-interactive shell the always-on defaults are
+    /// `braceexpand`, `hashall`, and `interactive-comments`, plus whichever of
+    /// the modeled toggles are currently enabled. The result byte-matches bash
+    /// because osh models exactly the options bash reports for `-c` scripts.
+    /// The variable is readonly (bash renders it `declare -r`, not `-rx`), so it
+    /// is not exported by default; refreshing here bypasses the readonly gate
+    /// deliberately since option toggles are the legitimate mutation path.
+    fn refresh_shellopts(&mut self) {
+        // Always-on defaults for a non-interactive shell.
+        let mut opts: Vec<&str> = vec!["braceexpand", "hashall", "interactive-comments"];
+        if self.allexport {
+            opts.push("allexport");
+        }
+        if self.errexit {
+            opts.push("errexit");
+        }
+        if self.noclobber {
+            opts.push("noclobber");
+        }
+        if self.noglob {
+            opts.push("noglob");
+        }
+        if self.nounset {
+            opts.push("nounset");
+        }
+        if self.pipefail {
+            opts.push("pipefail");
+        }
+        if self.xtrace {
+            opts.push("xtrace");
+        }
+        opts.sort_unstable();
+        self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
     }
 
     /// Render the `set -o` / `set +o` option listing. With `reinput` false
@@ -18904,6 +18950,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("read -a arr <<< 'x y'; declare -p arr").0,
             "declare -a arr=([0]=\"x\" [1]=\"y\")\n"
         );
+    }
+
+    #[test]
+    fn shellopts_reflects_option_state_and_is_readonly() {
+        // bash exposes the enabled `set -o` options as a readonly, colon-
+        // separated, alphabetically-sorted list. A non-interactive shell's
+        // default is braceexpand:hashall:interactive-comments.
+        assert_eq!(
+            run("echo \"[$SHELLOPTS]\"").0,
+            "[braceexpand:hashall:interactive-comments]\n"
+        );
+        // Enabling an option inserts its long name in sorted position.
+        assert_eq!(
+            run("set -u; echo \"$SHELLOPTS\"").0,
+            "braceexpand:hashall:interactive-comments:nounset\n"
+        );
+        assert_eq!(
+            run("set -f -a -C -x; echo \"$SHELLOPTS\"").0,
+            "allexport:braceexpand:hashall:interactive-comments:noclobber:noglob:xtrace\n"
+        );
+        // Disabling removes it again.
+        assert_eq!(
+            run("set -u; set +u; echo \"$SHELLOPTS\"").0,
+            "braceexpand:hashall:interactive-comments\n"
+        );
+        // `declare -p` renders it readonly (not exported).
+        assert_eq!(
+            run("set -u; declare -p SHELLOPTS").0,
+            "declare -r SHELLOPTS=\"braceexpand:hashall:interactive-comments:nounset\"\n"
+        );
+        // It cannot be assigned to.
+        assert_eq!(run("SHELLOPTS=foo; echo after").1, 1);
     }
 
     #[test]

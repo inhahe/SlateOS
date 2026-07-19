@@ -54,6 +54,46 @@ minimal `userspace/coreutils/src/bin/sh.rs` stays a small POSIX baseline.
 
 ---
 
+## Q27 — Should `osh` advertise itself as bash via `$BASH_VERSION` / `$BASH_VERSINFO`?
+
+**Status:** OPEN (heads-up only; not currently set).
+
+**Question.** Many real-world scripts feature-detect bash by testing
+`[ -n "$BASH_VERSION" ]` or gate on `${BASH_VERSINFO[0]} -ge N`. `osh` is an
+in-tree Rust reimplementation of the OSH *language* (a bash superset), not bash
+itself, and today sets **neither** variable. Should it set them — and if so, to
+what value?
+
+**Options.**
+- **(A) Set both, reporting a bash-compatible version** (e.g. `BASH_VERSION="5.2.0(1)-release"`,
+  `BASH_VERSINFO=(5 2 0 1 release x86_64-slateos)`).
+  - *Pro:* the widest set of "is this bash?" scripts take their bash code path and
+    run — the whole point of a bash-superset shell. *Con:* it's a lie: a script may
+    then assume a specific bash's behavior/feature that `osh` implements slightly
+    differently or not at all, producing a subtler failure than an honest "not bash".
+- **(B) Set them to an honest `osh`-branded value** (e.g. `BASH_VERSION` unset but a
+  new `OSH_VERSION`/`OILS_VERSION` set, mirroring upstream Oils).
+  - *Pro:* truthful; scripts that specifically want Oils can detect it. *Con:* the
+    common `[ -n "$BASH_VERSION" ]` guard fails, so bash-only script branches are
+    skipped even though `osh` could run them.
+- **(C) Leave both unset (status quo).**
+  - *Pro:* zero risk of masquerade-induced misbehavior. *Con:* bash-detecting
+    scripts silently fall back to a POSIX-sh code path (or bail), losing bash
+    features `osh` actually supports.
+
+**Claude's recommendation / meanwhile.** Leaning **(A)** — the crate's stated goal
+is to be a drop-in bash-superset replacement, and the dominant real-world use of
+`$BASH_VERSION` is exactly the "run the bash branch" gate we *want* to satisfy;
+upstream Oils itself sets `$BASH_VERSION` for this reason. But it's a user-visible
+compatibility *policy* (deliberately claiming to be bash) with a real downside, so
+I've deferred rather than decided. Meanwhile both stay unset.
+
+**Where it bites.** `interp.rs` `param_value` (~4619) and shell init (`new()`
+~454) — where read-only dynamic vars like `BASHPID`/`EPOCHSECONDS` are produced and
+where seed vars would be inserted.
+
+---
+
 Earlier deferred operator decisions (Q1–Q25) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
 full rationale. New decisions should be appended above this line as `## Q27 …`.

@@ -233,6 +233,9 @@ pub struct Shell {
     /// Only ever set on a per-stage subshell clone, never the top-level shell.
     pipe_broken: bool,
     pid: u32,
+    /// 1-based source line of the item currently executing, backing `$LINENO`.
+    /// Updated by [`Shell::exec_program`] before each item runs.
+    current_line: u32,
     /// Active stderr (fd 2) redirections, innermost last. Empty = real stderr.
     /// Pushed/popped by [`Shell::exec_redirected`] around a compound command's
     /// body so its stderr redirect (`{ …; } 2> err`) covers every command in
@@ -379,6 +382,7 @@ impl Shell {
             pipefail: false,
             pipe_broken: false,
             pid: std::process::id(),
+            current_line: 1,
             stderr_stack: Vec::new(),
             getopts_col: 0,
             getopts_optind: 1,
@@ -457,6 +461,7 @@ impl Shell {
 
     fn exec_program(&mut self, prog: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
         for item in &prog.items {
+            self.current_line = item.line;
             if item.background {
                 // Only a single external simple command is truly backgrounded;
                 // everything else runs synchronously (documented limitation).
@@ -1582,6 +1587,7 @@ impl Shell {
             pipefail: self.pipefail,
             pipe_broken: false,
             pid: self.pid,
+            current_line: self.current_line,
             // A subshell inherits fd 2 = the shell's real stderr; any active
             // compound-command stderr redirect does not carry into a pipeline
             // stage's own subshell (and keeping the `Arc`s off the clone is what
@@ -3800,6 +3806,7 @@ impl Shell {
             "0" => Some(self.name.clone()),
             "-" => Some(String::new()),
             "BASHPID" => Some(self.pid.to_string()),
+            "LINENO" => Some(self.current_line.to_string()),
             "RANDOM" => Some(self.next_random().to_string()),
             "SECONDS" => Some(
                 self.seconds_base
@@ -9827,6 +9834,18 @@ mod tests {
         assert_eq!(run("echo $SECONDS").0, "0\n");
         assert_eq!(run("SECONDS=100; echo $SECONDS").0, "100\n");
         assert_eq!(run("[ $EPOCHSECONDS -gt 1000000000 ] && echo ok").0, "ok\n");
+    }
+
+    #[test]
+    fn special_var_lineno() {
+        // $LINENO reflects the 1-based source line of the executing item.
+        assert_eq!(run("echo $LINENO").0, "1\n");
+        assert_eq!(run("echo $LINENO\necho $LINENO").0, "1\n2\n");
+        // Blank and comment lines still advance the counter.
+        assert_eq!(run("\n\necho $LINENO").0, "3\n");
+        assert_eq!(run("# comment\necho $LINENO").0, "2\n");
+        // Semicolon-separated commands on one line share a line number.
+        assert_eq!(run("echo $LINENO; echo $LINENO").0, "1\n1\n");
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn parse_with_aliases(
 }
 
 fn parse_tokens(toks: Vec<Tok>) -> Result<Program, ParseError> {
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, line: 1 };
     let prog = p.parse_program(&[])?;
     if p.pos != p.toks.len() {
         // Leftover tokens — typically an unmatched `)` or reserved word.
@@ -68,6 +68,9 @@ fn parse_tokens(toks: Vec<Tok>) -> Result<Program, ParseError> {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// 1-based current source line, advanced each time a top-level `Newline`
+    /// token is consumed. Stamped onto each [`Item`] to drive `$LINENO`.
+    line: u32,
 }
 
 /// Reserved words that terminate a command list or introduce a compound.
@@ -117,6 +120,7 @@ impl Parser {
     fn skip_newlines(&mut self) {
         while matches!(self.peek(), Some(Tok::Newline)) {
             self.pos += 1;
+            self.line += 1;
         }
     }
 
@@ -125,6 +129,9 @@ impl Parser {
             self.peek(),
             Some(Tok::Newline) | Some(Tok::Op(Op::Semi))
         ) {
+            if matches!(self.peek(), Some(Tok::Newline)) {
+                self.line += 1;
+            }
             self.pos += 1;
         }
     }
@@ -143,6 +150,9 @@ impl Parser {
             {
                 break;
             }
+            // Stamp the line on which this item begins (before parsing consumes
+            // any interior newlines of a multi-line and-or list).
+            let line = self.line;
             let list = self.parse_and_or()?;
             let mut background = false;
             match self.peek() {
@@ -150,12 +160,16 @@ impl Parser {
                     background = true;
                     self.pos += 1;
                 }
-                Some(Tok::Op(Op::Semi)) | Some(Tok::Newline) => {
+                Some(Tok::Newline) => {
+                    self.pos += 1;
+                    self.line += 1;
+                }
+                Some(Tok::Op(Op::Semi)) => {
                     self.pos += 1;
                 }
                 _ => {}
             }
-            items.push(Item { list, background });
+            items.push(Item { list, background, line });
         }
         Ok(Program { items })
     }
@@ -558,6 +572,7 @@ impl Parser {
             {
                 break;
             }
+            let line = self.line;
             let list = self.parse_and_or()?;
             let mut background = false;
             match self.peek() {
@@ -565,12 +580,16 @@ impl Parser {
                     background = true;
                     self.pos += 1;
                 }
-                Some(Tok::Op(Op::Semi)) | Some(Tok::Newline) => {
+                Some(Tok::Newline) => {
+                    self.pos += 1;
+                    self.line += 1;
+                }
+                Some(Tok::Op(Op::Semi)) => {
                     self.pos += 1;
                 }
                 _ => {}
             }
-            items.push(Item { list, background });
+            items.push(Item { list, background, line });
         }
         Ok(Program { items })
     }

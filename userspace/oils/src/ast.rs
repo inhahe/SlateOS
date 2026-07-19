@@ -17,6 +17,12 @@ pub struct Item {
     pub list: AndOr,
     /// `true` when the item ended with `&` (run asynchronously).
     pub background: bool,
+    /// 1-based source line on which this item begins. Used to maintain the
+    /// `$LINENO` special parameter as the interpreter executes each item. Line
+    /// numbers are counted from top-level newlines; newlines swallowed inside a
+    /// multi-line substitution/quote/here-doc are not counted (see known-issues
+    /// TD-OILS20), so this is exact for the common one-command-per-line case.
+    pub line: u32,
 }
 
 /// A pipeline joined to further pipelines by `&&` / `||`, evaluated

@@ -584,6 +584,39 @@ command-substitution parse path. Deferred because it touches the top-level
 execution driver; the current behavior covers interactive use and the common
 "aliases defined in an rc file, used at the prompt" workflow.
 
+### TD-OILS20. `$LINENO` counts only top-level newline tokens — lines inside multi-line quotes/substitutions/here-docs are undercounted — OPEN (minor fidelity gap)
+
+**Where:** `userspace/oils/src/parser.rs` (`Parser.line`, incremented on each
+top-level `Tok::Newline` in `skip_newlines`/`skip_separators`/`parse_program`/
+`parse_case_body`), `userspace/oils/src/ast.rs` (`Item.line`),
+`userspace/oils/src/interp.rs` (`Shell.current_line`, set in `exec_program`,
+read in `param_value` as `"LINENO"`).
+
+**What:** `$LINENO` is implemented by having the parser count the top-level
+`Tok::Newline` tokens it consumes and stamp the current 1-based line onto each
+parsed `Item`; the interpreter sets `self.current_line = item.line` before
+running each item and returns it for `$LINENO`. This is accurate for ordinary
+multi-line scripts, blank/comment lines, and semicolon-joined commands. It
+diverges from bash when a **single logical line spans multiple physical lines
+via a construct whose interior newlines are not top-level `Newline` tokens** —
+e.g. newlines inside a double-quoted string, a `$(…)`/`` `…` `` command
+substitution body, an arithmetic `$(( … ))` spanning lines, or a here-document
+body. Those interior newlines are absorbed by the lexer into a single segment/
+token, so the parser's line counter does not advance across them, and a
+`$LINENO` appearing *after* such a construct reports a line number lower than
+bash would (bash counts every physical newline the reader consumes). The
+counter also does not reset per function body the way bash resets `$LINENO` to
+be relative to the function's definition — ours is absolute to the parsed unit.
+
+**Proper fix:** track physical line numbers in the **lexer** (attach a source
+line to every `Tok`, counting newlines even inside quoted/substitution/heredoc
+segments) and thread that through to `Item.line`, rather than counting
+top-level `Newline` tokens in the parser. That makes `$LINENO` exact for all
+constructs. Deferred because it requires adding position info to the token
+stream (a lexer-wide change) and the current approximation is correct for the
+overwhelming majority of real scripts; the discrepancy only appears after
+embedded multi-line quotes/substitutions/here-docs.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

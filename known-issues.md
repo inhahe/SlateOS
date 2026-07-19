@@ -660,6 +660,43 @@ script** (only function returns), and an `exit N` *inside* an `ERR`/`DEBUG`/
 handler runs via a nested `run_source` whose `Flow::Exit` is swallowed). Both
 are edge cases; the fix is to thread the handler's flow out of `fire_trap`.
 
+### TD-OILS-BUILTINS. `osh` is missing several bash builtins: `kill`, `ulimit`, and the interactive-only set — OPEN (each gated on OS infrastructure or interactive-shell support)
+
+**Where:** `userspace/oils/src/interp.rs` (`BUILTIN_NAMES`, the builtin dispatch
+in `run_builtin`, `SIGNALS` table). `type -t <name>` currently reports `file`
+(shells out to an external) or nothing for these.
+
+**What:** the following bash builtins are not implemented. On the host they
+either resolve to an external (MSYS `kill`/`fc`) or fail; on SlateOS, where those
+externals do not exist, they would be `command not found`:
+
+- **`kill`** — script-relevant. Two halves: (a) `kill -l`/`-L` signal
+  name↔number translation and listing is *pure formatting* and fully
+  implementable now (using osh's Linux-x86 `SIGNALS` table — note this
+  intentionally differs from MSYS/Cygwin bash's numbering, so a host probe
+  against MSYS bash shows spurious diffs); (b) actually *sending* a signal is
+  gated on TD-OILS11 (SlateOS has no Unix signal delivery; std exposes no
+  portable arbitrary-PID `kill`). osh can already terminate its own tracked
+  jobs via `Child::kill`, but not arbitrary pids/signals.
+- **`ulimit`** — read/set process resource limits. Gated on a SlateOS
+  resource-limit model (cf. TD-OILS15 `umask`, which is tracked but not
+  enforced for the same class of reason).
+- **`suspend`** — stops the shell via SIGSTOP; gated on job-control/signals
+  (cf. TD-OILS13).
+- **Interactive-only (not applicable to `-c`/script use):** `bind` (readline
+  key bindings), `complete`/`compopt` (programmable completion), `history`,
+  `fc` (history editing/re-execution), `logout` (login-shell exit). These have
+  no effect in a non-interactive shell and are low priority until osh grows an
+  interactive line editor.
+
+**Proper fix:** implement `kill -l`/`-L` translation + listing now (it is
+un-gated), wiring `kill pid`/`kill -SIG pid` to whatever signal/IPC mechanism
+SlateOS exposes once TD-OILS11 lands; add `ulimit` against the resource-limit
+model when it exists; defer the interactive builtins until there is an
+interactive REPL. Each should become a real builtin (registered in
+`BUILTIN_NAMES` so `type`/`command -v` report `builtin`) rather than shelling
+out.
+
 ### TD-OILS12. `osh` `-ef` file test uses path canonicalization, not device+inode — OPEN (low priority, gated on portable inode access)
 
 **Where:** `userspace/oils/src/interp.rs` (`file_cmp`, used by both `test`/`[`

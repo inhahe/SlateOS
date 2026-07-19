@@ -2589,7 +2589,27 @@ impl Shell {
             return self.run_builtin(&name, &argv, &assigns, out, stdin, &redir);
         }
 
-        // External command.
+        // External command. If a bare command name resolves nowhere on `$PATH`
+        // and a `command_not_found_handle` function is defined, bash invokes
+        // that function with the command word and its arguments (as `$1`, `$2`,
+        // …) instead of reporting "command not found". The cheap function-
+        // existence check comes first so the common case never scans `$PATH`
+        // twice.
+        if !name.contains('/')
+            && !name.contains('\\')
+            && self.funcs.contains_key("command_not_found_handle")
+            && self.find_in_path(&name).is_none()
+        {
+            return self.call_function(
+                "command_not_found_handle",
+                &argv,
+                &assigns,
+                out,
+                stdin,
+                &redir,
+            );
+        }
+
         self.run_external(&argv, &assigns, out, stdin, &redir);
         Flow::Next
     }
@@ -8946,6 +8966,29 @@ mod tests {
         assert_eq!(run("read -n 3 x <<< 'abcdef'; echo \"$x\"").0, "abc\n");
         // Status 0 because the character count was reached.
         assert_eq!(run("read -n 3 x <<< 'abcdef'; echo $?").0, "0\n");
+    }
+
+    #[test]
+    fn command_not_found_handle_invoked_with_args() {
+        // A defined `command_not_found_handle` receives the command word as `$1`
+        // and its arguments as `$2`…, and its exit status becomes `$?`.
+        let src = "command_not_found_handle() { echo \"caught: $1 $2\"; return 42; }; \
+                   no_such_cmd_xyz123 abc; echo status=$?";
+        assert_eq!(run(src).0, "caught: no_such_cmd_xyz123 abc\nstatus=42\n");
+    }
+
+    #[test]
+    fn command_not_found_handle_absent_reports_127() {
+        // Without the handler, a missing command still reports 127.
+        assert_eq!(run("no_such_cmd_xyz123; echo $?").0, "127\n");
+    }
+
+    #[test]
+    fn command_not_found_handle_skipped_for_path_names() {
+        // A name containing a slash bypasses the handler (bash: a slash path that
+        // does not exist is a spawn error, not a "command not found" lookup).
+        let src = "command_not_found_handle() { echo caught; }; ./no_such_cmd_xyz123; echo $?";
+        assert_eq!(run(src).0, "127\n");
     }
 
     #[test]

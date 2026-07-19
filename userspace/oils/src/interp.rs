@@ -242,6 +242,19 @@ pub struct Shell {
     /// the group. Consulted by [`Shell::emit_stderr`] (diagnostics/`>&2`) and
     /// [`Shell::run_external`] (child fd 2). Reset to empty in subshell clones.
     stderr_stack: Vec<StderrTarget>,
+    /// Persistent stdout target set by a redirection-only `exec > file` /
+    /// `exec >> file`: `(path, append)` where `append` is always true after the
+    /// initial truncate, so every subsequent command's ambient fd 1 goes to the
+    /// file. `None` = the shell's real stdout. Inherited by subshell clones
+    /// (a subshell inherits the shell's fd table). Consulted by every ambient
+    /// fd-1 write ([`Shell::write_bytes`] `Out::Inherit`, external children).
+    exec_stdout: Option<(String, bool)>,
+    /// Persistent stderr target set by a redirection-only `exec 2> file` /
+    /// `exec 2>> file` (or mirrored from `exec_stdout` by `exec … 2>&1`). Same
+    /// `(path, append)` convention as [`Shell::exec_stdout`]. `None` = the
+    /// shell's real stderr. Consulted by [`Shell::emit_stderr`] and external
+    /// children as the base fd-2 sink beneath any `stderr_stack` entry.
+    exec_stderr: Option<(String, bool)>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -388,6 +401,8 @@ impl Shell {
             pid: std::process::id(),
             current_line: 1,
             stderr_stack: Vec::new(),
+            exec_stdout: None,
+            exec_stderr: None,
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -1598,6 +1613,10 @@ impl Shell {
             // stage's own subshell (and keeping the `Arc`s off the clone is what
             // lets `Shell` stay `Send` for the scoped-thread pipeline).
             stderr_stack: Vec::new(),
+            // A subshell inherits the shell's fd table, including any persistent
+            // `exec > file` / `exec 2> file` redirection.
+            exec_stdout: self.exec_stdout.clone(),
+            exec_stderr: self.exec_stderr.clone(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -3140,6 +3159,18 @@ impl Shell {
                             return;
                         }
                     }
+                } else if let Some((path, append)) = &self.exec_stdout {
+                    // Persistent `exec > file`: the child's fd 1 is the file.
+                    match open_out(path, *append) {
+                        Ok(f) => {
+                            cmd.stdout(Stdio::from(f));
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {path}: {e}"));
+                            self.last_status = 1;
+                            return;
+                        }
+                    }
                 } else {
                     cmd.stdout(Stdio::inherit());
                 }
@@ -3190,7 +3221,21 @@ impl Shell {
             }
         } else {
             match self.stderr_stack.last() {
-                None => {}
+                None => {
+                    // Base fd 2: a persistent `exec 2> file` target, else inherit.
+                    if let Some((path, append)) = &self.exec_stderr {
+                        match open_out(path, *append) {
+                            Ok(f) => {
+                                cmd.stderr(Stdio::from(f));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: {path}: {e}"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        }
+                    }
+                }
                 Some(StderrTarget::File(f)) => match f.try_clone() {
                     Ok(fc) => {
                         cmd.stderr(Stdio::from(fc));
@@ -3215,10 +3260,24 @@ impl Shell {
                     cmd.stderr(Stdio::piped());
                     stderr_capture = Some(Arc::clone(b));
                 }
-                // Real fd 1: inherit (fd 2 → terminal, same visual result at the
+                // fd 2 follows fd 1: a persistent `exec > file` target if set,
+                // else inherit (fd 2 → terminal, same visual result at the
                 // shell's controlling terminal).
                 Some(StderrTarget::Stdout) => {
-                    cmd.stderr(Stdio::inherit());
+                    if let Some((path, append)) = &self.exec_stdout {
+                        match open_out(path, *append) {
+                            Ok(f) => {
+                                cmd.stderr(Stdio::from(f));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: {path}: {e}"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        }
+                    } else {
+                        cmd.stderr(Stdio::inherit());
+                    }
                 }
             }
         }
@@ -4047,10 +4106,41 @@ impl Shell {
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
                 if args.is_empty() {
-                    // `exec` with no command applies its redirections to the
-                    // shell persistently; we don't yet support rebinding the
-                    // shell's own fds (documented, TD-OILS14). Treat as success.
-                    0
+                    // Redirection-only `exec`: rebind the shell's own fds for
+                    // every subsequent command. We model fd 1 / fd 2 file
+                    // targets (`exec > log 2>&1` etc). A persistent *input*
+                    // redirect (`exec < file`) is not yet supported (TD-OILS14).
+                    let mut rc = 0;
+                    // fd 1 (`> file` / `>> file`): truncate once (for `>`), then
+                    // store as append so later commands accumulate into the file.
+                    if let Some((path, append)) = &redir.stdout {
+                        if !*append && let Err(e) = open_out(path, false) {
+                            self.errln(&format!("osh: {path}: {e}"));
+                            rc = 1;
+                        }
+                        if rc == 0 {
+                            self.exec_stdout = Some((path.clone(), true));
+                        }
+                    }
+                    // fd 2 (`2> file` / `2>> file`).
+                    if rc == 0 && let Some((path, append)) = &redir.stderr {
+                        if !*append && let Err(e) = open_out(path, false) {
+                            self.errln(&format!("osh: {path}: {e}"));
+                            rc = 1;
+                        }
+                        if rc == 0 {
+                            self.exec_stderr = Some((path.clone(), true));
+                        }
+                    }
+                    // `2>&1` with fd 1 not a file: fd 2 mirrors the fd 1 target.
+                    if rc == 0 && redir.stderr_to_stdout {
+                        self.exec_stderr = self.exec_stdout.clone();
+                    }
+                    // `1>&2` with fd 2 not a file: fd 1 mirrors the fd 2 target.
+                    if rc == 0 && redir.stdout_to_stderr {
+                        self.exec_stdout = self.exec_stderr.clone();
+                    }
+                    rc
                 } else {
                     // Replace the shell with the command: run it with the current
                     // environment/redirections, then exit with its status. A true
@@ -6817,13 +6907,27 @@ impl Shell {
                     0
                 }
                 Out::Inherit => {
-                    let stdout = io::stdout();
-                    let mut lock = stdout.lock();
-                    if lock.write_all(bytes).is_err() {
-                        return 1;
+                    // A persistent `exec > file` rebinds the shell's ambient
+                    // fd 1 to a file; otherwise write to the real stdout.
+                    if let Some((path, append)) = &self.exec_stdout {
+                        match open_out(path, *append) {
+                            Ok(mut f) => {
+                                if f.write_all(bytes).is_err() {
+                                    return 1;
+                                }
+                                0
+                            }
+                            Err(_) => 1,
+                        }
+                    } else {
+                        let stdout = io::stdout();
+                        let mut lock = stdout.lock();
+                        if lock.write_all(bytes).is_err() {
+                            return 1;
+                        }
+                        let _ = lock.flush();
+                        0
                     }
-                    let _ = lock.flush();
-                    0
                 }
                 Out::Pipe(w) => {
                     // A downstream reader that closed early yields `BrokenPipe`;
@@ -6848,16 +6952,32 @@ impl Shell {
     fn emit_stderr(&self, bytes: &[u8]) {
         match self.stderr_stack.last() {
             None => {
-                let e = io::stderr();
-                let mut lock = e.lock();
-                let _ = lock.write_all(bytes);
-                let _ = lock.flush();
+                // Base fd 2: a persistent `exec 2> file` target if set, else the
+                // shell's real stderr.
+                if let Some((path, append)) = &self.exec_stderr {
+                    if let Ok(mut f) = open_out(path, *append) {
+                        let _ = f.write_all(bytes);
+                    }
+                } else {
+                    let e = io::stderr();
+                    let mut lock = e.lock();
+                    let _ = lock.write_all(bytes);
+                    let _ = lock.flush();
+                }
             }
             Some(StderrTarget::Stdout) => {
-                let o = io::stdout();
-                let mut lock = o.lock();
-                let _ = lock.write_all(bytes);
-                let _ = lock.flush();
+                // fd 2 follows fd 1: a persistent `exec > file` target if set,
+                // else the real stdout.
+                if let Some((path, append)) = &self.exec_stdout {
+                    if let Ok(mut f) = open_out(path, *append) {
+                        let _ = f.write_all(bytes);
+                    }
+                } else {
+                    let o = io::stdout();
+                    let mut lock = o.lock();
+                    let _ = lock.write_all(bytes);
+                    let _ = lock.flush();
+                }
             }
             // `&File`/`&PipeWriter` both implement `Write`; the shared handle is
             // append-positioned (files opened once) so concurrent writers from
@@ -12120,6 +12240,66 @@ mod tests {
         let (o, s) = run("exec\necho hi");
         assert_eq!(o, "hi\n");
         assert_eq!(s, 0);
+    }
+
+    /// Run `src` with `Out::Inherit` (the ambient/terminal fd 1) so a
+    /// persistent `exec > file` redirect is exercised, then return the bytes
+    /// written to `path`. Uses a real temp file since the redirect diverts the
+    /// shell's ambient stdout away from any in-memory capture.
+    fn run_exec_redirect(src_tmpl: &str) -> String {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_exec_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = src_tmpl.replace("{FILE}", &p);
+        let mut sh = Shell::new();
+        let prog = parse(&src).expect("parse");
+        {
+            let mut out = Out::Inherit;
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        let mut contents = String::new();
+        if let Ok(mut f) = std::fs::File::open(&path) {
+            let _ = f.read_to_string(&mut contents);
+        }
+        let _ = std::fs::remove_file(&path);
+        contents
+    }
+
+    #[test]
+    fn exec_redirects_stdout_persistently() {
+        // `exec > file` rebinds fd 1 for every following command; both echoes
+        // land in the file (append semantics after the initial truncate).
+        assert_eq!(
+            run_exec_redirect("exec > \"{FILE}\"\necho one\necho two"),
+            "one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn exec_redirects_stdout_and_stderr_combined() {
+        // `exec > file 2>&1` folds fd 2 into fd 1's file target, so both a
+        // normal echo and a `>&2` diagnostic accumulate in the same file.
+        assert_eq!(
+            run_exec_redirect("exec > \"{FILE}\" 2>&1\necho out\necho err >&2"),
+            "out\nerr\n"
+        );
+    }
+
+    #[test]
+    fn exec_redirects_stderr_only() {
+        // `exec 2> file` redirects only fd 2; a `>&2` write lands in the file
+        // while normal stdout is untouched (not written to the file).
+        assert_eq!(
+            run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
+            "diag\n"
+        );
     }
 
     #[cfg(windows)]

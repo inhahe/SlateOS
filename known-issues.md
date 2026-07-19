@@ -428,27 +428,40 @@ job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
 just narrow.
 
-### TD-OILS14. `osh` `exec` does not support redirection-only form or a true in-place `execve` — OPEN (partly gated on kernel `execve`)
+### TD-OILS14. `osh` `exec`: output redirection-only form implemented; input redirect and a true in-place `execve` remain — PARTIALLY RESOLVED 2026-07-19
 
-**Where:** `userspace/oils/src/interp.rs` (`run_builtin`, the `"exec"` arm).
+**Where:** `userspace/oils/src/interp.rs` (`run_builtin` `"exec"` arm sets the
+persistent targets; `Shell.exec_stdout`/`exec_stderr` fields; `write_bytes`
+`Out::Inherit`, `emit_stderr`, and `run_external` consult them).
 
 **What:** the `exec` builtin is implemented for the command-replacement case
 (`exec cmd args` runs `cmd` then exits the shell with its status; a missing
-command exits 127), but two aspects are incomplete:
-1. **Redirection-only `exec` is a no-op.** `exec > file` / `exec 2>> log` /
-   `exec 3< in` in bash permanently rebind the *shell's own* file descriptors so
-   all subsequent commands inherit them. Our shell writes through an `Out`
-   abstraction rather than a persistent fd table, so there is nothing to rebind;
-   `exec` with no command word currently just returns success and the
-   redirections are dropped.
-2. **Not a true `execve`.** `exec cmd` spawns `cmd` as a child, waits, and exits
-   with its status — observationally the shell does not continue, but the pid is
-   not preserved and signals are not transparently forwarded the way a real
-   in-place `execve` would provide.
+command exits 127). Status of the remaining aspects:
+1. **Output redirection-only `exec` — RESOLVED 2026-07-19.** `exec > file`,
+   `exec >> file`, `exec 2> file`, `exec 2>> file`, `exec > file 2>&1`, and
+   `exec 1>&2` now persistently rebind the shell's ambient fd 1 / fd 2. The
+   shell stores the target as `exec_stdout`/`exec_stderr = (path, append)` —
+   truncated once for `>` then accumulated in append mode — and every ambient
+   fd-1/fd-2 write consults it: builtins via `write_bytes`'s `Out::Inherit`
+   arm, `>&2` diagnostics via `emit_stderr`, and external children via
+   `run_external` (the child's stdout/stderr is opened on the file). Subshell
+   clones inherit the redirect (bash: a subshell inherits the fd table). Note
+   the same left-to-right ordering simplification the rest of the shell has for
+   `2>&1 > f` vs `> f 2>&1` applies here (the dup follows fd 1's *final* sink).
+2. **Input redirection-only `exec < file` — still OPEN.** Persistent *input*
+   rebinding is not modelled: `read`/external stdin flows through the `StdinSrc`
+   parameter threaded down the call tree rather than a shell field, so there is
+   no single place to install a persistent fd-0 source. Rare compared to output
+   redirection.
+3. **Not a true `execve` — still OPEN (gated on kernel `execve`).** `exec cmd`
+   spawns `cmd` as a child, waits, and exits with its status — observationally
+   the shell does not continue, but the pid is not preserved and signals are not
+   transparently forwarded the way a real in-place `execve` would provide.
 
-**Proper fix:** (1) give `Shell` a real fd table (or an `Out`/stdin stack that
-`exec` can push onto persistently) so redirection-only `exec` rebinds it; (2)
-once the kernel exposes `execve`, replace the spawn+wait+exit with an actual
+**Proper fix:** (2) give `Shell` a persistent `exec_stdin: Option<...>` source
+(analogous to `exec_stdout`) consulted wherever `StdinSrc::Inherit` is the base
+input (the `read` builtins and `run_external`'s stdin `None`/`Inherit` arm);
+(3) once the kernel exposes `execve`, replace the spawn+wait+exit with an actual
 in-place image replacement for `exec cmd`.
 
 ### TD-OILS15. `osh` `umask` value is tracked but not applied to created-file permissions — OPEN (gated on the target file-mode model)

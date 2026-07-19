@@ -566,7 +566,7 @@ impl Lexer {
                     }
                 }
                 '$' => {
-                    if let Some(seg) = self.read_dollar()? {
+                    if let Some(seg) = self.read_dollar(false)? {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
@@ -621,7 +621,7 @@ impl Lexer {
                     }
                 }
                 '$' => {
-                    if let Some(seg) = self.read_dollar()? {
+                    if let Some(seg) = self.read_dollar(false)? {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
@@ -727,7 +727,7 @@ impl Lexer {
                     }
                 }
                 '$' => {
-                    if let Some(seg) = self.read_dollar()? {
+                    if let Some(seg) = self.read_dollar(false)? {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
@@ -897,7 +897,7 @@ impl Lexer {
                     segs.push(Seg::CmdSub(raw));
                 }
                 '$' => {
-                    if let Some(seg) = self.read_dollar()? {
+                    if let Some(seg) = self.read_dollar(true)? {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
@@ -913,18 +913,25 @@ impl Lexer {
     }
 
     /// Handle a `$`. Returns `None` if it is a literal `$` (e.g. `$` at EOL).
-    fn read_dollar(&mut self) -> Result<Option<Seg>, LexError> {
+    ///
+    /// `in_dquote` is set when the `$` is being read from *inside* a
+    /// double-quoted string. In that context `$'…'`/`$"…"` are NOT the
+    /// ANSI-C-quote / locale-translation forms — the `$` is a literal
+    /// character and the following quote is handled by the enclosing
+    /// double-quote scanner (bash: `"a$'b'"` is the 6 literal chars `a$'b'`,
+    /// and a `$` right before the closing `"` is a literal `$`).
+    fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
         // Consume the `$`.
         self.pos += 1;
         match self.peek() {
-            Some('\'') => {
+            Some('\'') if !in_dquote => {
                 // `$'…'` — ANSI-C quoting: a literal string with backslash
                 // escapes processed (no expansion/splitting — like `'…'`).
                 self.pos += 1;
                 let s = self.read_ansi_c_quote()?;
                 Ok(Some(Seg::Sq(s)))
             }
-            Some('"') => {
+            Some('"') if !in_dquote => {
                 // `$"…"` — locale translation. We have no message catalogs, so
                 // it behaves as a plain double-quoted string (bash's fallback).
                 self.pos += 1;
@@ -1245,7 +1252,7 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
                 segs.push(Seg::CmdSub(lx.read_backtick()?));
             }
             '$' => {
-                if let Some(seg) = lx.read_dollar()? {
+                if let Some(seg) = lx.read_dollar(true)? {
                     flush_lit(&mut segs, &mut lit);
                     segs.push(seg);
                 } else {

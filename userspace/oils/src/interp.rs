@@ -12568,6 +12568,21 @@ mod tests {
     }
 
     #[test]
+    fn dollar_literal_before_closing_dquote() {
+        // A `$` immediately before the closing `"` is a literal `$` (bash),
+        // and inside double quotes `$'…'`/`$"…"` are NOT the ANSI-C-quote /
+        // locale forms — the `$` is literal and the quote is handled by the
+        // enclosing double-quote scanner. Previously osh's `read_dollar`
+        // consumed the closing quote, giving "unterminated double quote".
+        assert_eq!(run("echo \"abc$\"").0, "abc$\n");
+        assert_eq!(run("echo \"^[0-9]+$\"").0, "^[0-9]+$\n");
+        assert_eq!(run("echo \"$\"").0, "$\n");
+        assert_eq!(run("x=5; echo \"val=$x$\"").0, "val=5$\n");
+        // `$'x'` inside double quotes is the 4 literal chars `$'x'`.
+        assert_eq!(run("echo \"a$'x'\"").0, "a$'x'\n");
+    }
+
+    #[test]
     fn legacy_dollar_bracket_arith() {
         // `$[ … ]` is bash's deprecated arithmetic expansion, an alias for
         // `$(( … ))`. Verify basic evaluation, spacing, variables, array

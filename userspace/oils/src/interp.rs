@@ -96,7 +96,7 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::parser::parse;
+use crate::parser::parse_with_aliases;
 
 /// Non-local control flow produced while executing statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +320,11 @@ pub struct Shell {
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
     disabled_builtins: HashSet<String>,
+    /// Command aliases defined via the `alias` builtin (name → replacement
+    /// text). Expanded over the token stream before parsing (see
+    /// `parse_with_aliases`). `BTreeMap` keeps `alias` listings sorted. Cloned
+    /// into subshells (bash inherits aliases).
+    aliases: BTreeMap<String, String>,
     /// Signal/pseudo-signal traps set by the `trap` builtin, keyed by the
     /// normalized spec (`EXIT`, `ERR`, `INT`, …). The value is the action
     /// command string; an empty string means "ignore". Currently only the
@@ -399,6 +404,7 @@ impl Shell {
             nameref_attr: HashSet::new(),
             dir_stack: Vec::new(),
             disabled_builtins: HashSet::new(),
+            aliases: BTreeMap::new(),
             traps: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
@@ -431,7 +437,7 @@ impl Shell {
 
     /// Parse and execute shell source, returning the final exit status.
     pub fn run_source(&mut self, src: &str) -> i32 {
-        let prog = match parse(src) {
+        let prog = match parse_with_aliases(src, &self.aliases) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("osh: syntax error: {e}");
@@ -1609,6 +1615,7 @@ impl Shell {
             nameref_attr: self.nameref_attr.clone(),
             dir_stack: self.dir_stack.clone(),
             disabled_builtins: self.disabled_builtins.clone(),
+            aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
             // (bash). Ignored ('') traps are inherited; keep only those.
             traps: self
@@ -3964,6 +3971,8 @@ impl Shell {
             "disown" => self.builtin_disown(args),
             "times" => self.builtin_times(out, redir),
             "enable" => self.builtin_enable(args, out, redir),
+            "alias" => self.builtin_alias(args, out, redir),
+            "unalias" => self.builtin_unalias(args),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
@@ -4818,6 +4827,79 @@ impl Shell {
                 self.disabled_builtins.insert(name.clone());
             } else {
                 self.disabled_builtins.remove(name);
+            }
+        }
+        status
+    }
+
+    /// `alias [-p] [name[=value] ...]` — define, print, or list aliases. With no
+    /// operands (or `-p`), print every alias in re-inputtable `alias NAME='VAL'`
+    /// form. `name=value` defines an alias; a bare `name` prints that one alias
+    /// (status 1 if undefined). Aliases are expanded over the token stream before
+    /// parsing (see `parse_with_aliases`).
+    fn builtin_alias(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Consume leading `-p` / `--`; other operands begin the name list.
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            match a.as_str() {
+                "-p" => i += 1,
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let operands = &args[i..];
+        if operands.is_empty() {
+            let mut buf = String::new();
+            for (name, val) in &self.aliases {
+                buf.push_str(&format!("alias {name}={}\n", single_quote(val)));
+            }
+            return self.write_bytes(out, redir, buf.as_bytes());
+        }
+        let mut status = 0;
+        for op in operands {
+            if let Some(eq) = op.find('=') {
+                let name = &op[..eq];
+                if name.is_empty() {
+                    self.emit_stderr(
+                        format!("osh: alias: `{op}': invalid alias name\n").as_bytes(),
+                    );
+                    status = 1;
+                    continue;
+                }
+                self.aliases.insert(name.to_string(), op[eq + 1..].to_string());
+            } else if let Some(val) = self.aliases.get(op).cloned() {
+                let line = format!("alias {op}={}\n", single_quote(&val));
+                self.write_bytes(out, redir, line.as_bytes());
+            } else {
+                self.emit_stderr(format!("osh: alias: {op}: not found\n").as_bytes());
+                status = 1;
+            }
+        }
+        status
+    }
+
+    /// `unalias [-a] name ...` — remove aliases. `-a` removes every alias; an
+    /// unknown name is a status-1 error.
+    fn builtin_unalias(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            self.emit_stderr(b"osh: unalias: usage: unalias [-a] name [name ...]\n");
+            return 2;
+        }
+        if args.iter().any(|a| a == "-a") {
+            self.aliases.clear();
+            return 0;
+        }
+        let mut status = 0;
+        for name in args {
+            if name == "--" {
+                continue;
+            }
+            if self.aliases.remove(name).is_none() {
+                self.emit_stderr(format!("osh: unalias: {name}: not found\n").as_bytes());
+                status = 1;
             }
         }
         status
@@ -7598,7 +7680,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "wait", "disown", "times", "hash", "umask", "exec", "exit",
-    "return", "break", "continue", "enable",
+    "return", "break", "continue", "enable", "alias", "unalias",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -8519,6 +8601,7 @@ fn file_cmp(op: &str, l: &str, r: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::parse;
 
     /// Serializes tests that read or mutate the process-global current
     /// working directory. Tests that call `set_current_dir` (the directory-
@@ -8542,6 +8625,84 @@ mod tests {
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    /// Run `setup` (to define aliases), then parse+run `src` with those aliases
+    /// expanded over the token stream — mirroring bash's rule that aliases apply
+    /// to input read *after* the alias definition, not within the same parse.
+    fn run_with_aliases(setup: &str, src: &str) -> (String, i32) {
+        let mut sh = Shell::new();
+        sh.run_source(setup);
+        let mut buf = Vec::new();
+        let prog = parse_with_aliases(src, &sh.aliases).expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn alias_expands_in_command_position() {
+        let (o, s) = run_with_aliases("alias greet='echo hello'", "greet");
+        assert_eq!(o, "hello\n");
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn alias_arguments_append_after_replacement() {
+        let (o, _) = run_with_aliases("alias ll='echo LL'", "ll world");
+        assert_eq!(o, "LL world\n");
+    }
+
+    #[test]
+    fn alias_only_expands_command_word() {
+        // `greet` as an argument is not alias-expanded.
+        let (o, _) = run_with_aliases("alias greet='echo hello'", "echo greet");
+        assert_eq!(o, "greet\n");
+    }
+
+    #[test]
+    fn alias_self_reference_terminates() {
+        // `echo` aliased to `echo hi` must not recurse forever; the guard stops
+        // the inner `echo` from re-expanding.
+        let (o, _) = run_with_aliases("alias echo='echo hi'", "echo there");
+        assert_eq!(o, "hi there\n");
+    }
+
+    #[test]
+    fn alias_trailing_blank_expands_next_word() {
+        // A value ending in a blank makes the following word alias-eligible.
+        let (o, _) = run_with_aliases(
+            "alias sudo='echo SUDO '; alias ll='echo LL'",
+            "sudo ll",
+        );
+        assert_eq!(o, "SUDO echo LL\n");
+    }
+
+    #[test]
+    fn alias_listing_and_single_lookup() {
+        let (o, s) = run("alias foo='bar baz'; alias foo");
+        assert_eq!(s, 0);
+        assert_eq!(o, "alias foo='bar baz'\n");
+    }
+
+    #[test]
+    fn alias_missing_lookup_errors() {
+        let (_, s) = run("alias nope");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn unalias_removes_and_reports_missing() {
+        let (_, s) = run("alias foo='x'; unalias foo; alias foo");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn unalias_all_clears_every_alias() {
+        let (o, _) = run("alias a='1'; alias b='2'; unalias -a; alias");
+        assert_eq!(o, "");
     }
 
     #[test]

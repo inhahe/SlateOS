@@ -13,7 +13,8 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::lexer::{Op, Seg, Tok, tokenize};
+use crate::lexer::{Op, Seg, Tok, expand_aliases, tokenize};
+use std::collections::BTreeMap;
 
 /// A parse error with a human-readable message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,27 @@ impl core::fmt::Display for ParseError {
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let toks = tokenize(src).map_err(|e| ParseError(e.0))?;
+    parse_tokens(toks)
+}
+
+/// Parse shell source, expanding shell aliases over the token stream first.
+///
+/// # Errors
+/// Returns [`ParseError`] on a lexing or grammar error.
+pub fn parse_with_aliases(
+    src: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<Program, ParseError> {
+    let toks = tokenize(src).map_err(|e| ParseError(e.0))?;
+    let toks = if aliases.is_empty() {
+        toks
+    } else {
+        expand_aliases(&toks, aliases)
+    };
+    parse_tokens(toks)
+}
+
+fn parse_tokens(toks: Vec<Tok>) -> Result<Program, ParseError> {
     let mut p = Parser { toks, pos: 0 };
     let prog = p.parse_program(&[])?;
     if p.pos != p.toks.len() {

@@ -541,6 +541,37 @@ TD-OILS16 too). Deferred because it is a sizeable standalone subsystem; the
 name-listing/existing-status behavior covers the common scripting idioms in the
 meantime.
 
+### TD-OILS19. `osh` alias expansion applies across `run_source` calls (input reads), not within a single parsed unit — OPEN (minor fidelity gap; interactive/REPL use unaffected)
+
+**Where:** `userspace/oils/src/interp.rs` (`run_source` → `parse_with_aliases`),
+`userspace/oils/src/lexer.rs` (`expand_aliases`), `userspace/oils/src/main.rs`
+(script/`-c`/REPL entry points).
+
+**What:** `alias`/`unalias` are implemented and aliases are expanded over the
+token stream *before parsing* (`parse_with_aliases`), matching bash's pre-parse
+alias pass — including command-position-only expansion, the recursion guard
+(`alias ls='ls -l'` terminates), and the trailing-blank rule (`alias sudo='sudo '`
+makes the next word alias-eligible). However, because the interpreter parses an
+entire `run_source` input in one shot, an alias **defined earlier in the same
+input** does not take effect for **later commands in that same input** (e.g. a
+script file or a single `osh -c '…'` string). Bash's own rule is close but not
+identical: bash reads a script line-by-line, so `alias x=…; x` on one line does
+not expand either, but `alias x=…` on line 1 and `x` on line 2 *does*. Our
+REPL reads one line per `run_source` call, so interactive alias use behaves
+correctly; only multi-line scripts / `-c` strings diverge (an alias defined on
+an earlier line is not seen by a later line in the same file). Aliases inside
+command-substitution bodies (`$(…)`) are also not expanded — those are parsed by
+`parser.rs`'s recursive `parse(raw)`, which has no access to the shell's alias
+table.
+
+**Proper fix:** parse-and-execute the top-level input command-by-command (or
+line-by-line) so the alias table is consulted incrementally, re-tokenizing/
+re-expanding each command against the live `self.aliases` right before it runs;
+and thread the alias table (or a `parse_with_aliases` variant) through the
+command-substitution parse path. Deferred because it touches the top-level
+execution driver; the current behavior covers interactive use and the common
+"aliases defined in an rc file, used at the prompt" workflow.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

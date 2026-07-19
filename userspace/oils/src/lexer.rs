@@ -131,6 +131,85 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
     lx.run()
 }
 
+/// Reserved words after which a new simple command begins — so a following
+/// word is in "command position" and eligible for alias expansion.
+const CMD_INTRODUCERS: &[&str] = &[
+    "if", "then", "elif", "else", "while", "until", "do", "{", "!",
+];
+
+/// True when a word following `prev` (the previous kept token) starts a simple
+/// command. Bash only alias-expands the command word of a simple command.
+fn starts_command(prev: Option<&Tok>) -> bool {
+    match prev {
+        None | Some(Tok::Newline) => true,
+        Some(Tok::Op(op)) => matches!(
+            op,
+            Op::Pipe
+                | Op::AndIf
+                | Op::OrIf
+                | Op::Amp
+                | Op::Semi
+                | Op::DSemi
+                | Op::SemiAmp
+                | Op::DSemiAmp
+                | Op::LParen
+        ),
+        Some(Tok::Word(segs)) => {
+            matches!(segs.as_slice(), [Seg::Lit(w)] if CMD_INTRODUCERS.contains(&w.as_str()))
+        }
+        _ => false,
+    }
+}
+
+/// Expand shell aliases over a token stream (bash's pre-parse alias pass).
+///
+/// Only a single unquoted-literal word in command position is a candidate. The
+/// alias value is re-tokenized and spliced in; its first word is itself an
+/// expansion candidate (guarded against recursion by `active`, so `alias
+/// ls='ls -l'` terminates). If an alias value ends in a blank, the *next* word
+/// is also checked (bash's trailing-blank rule, enabling `alias sudo='sudo '`).
+#[must_use]
+pub fn expand_aliases(toks: &[Tok], aliases: &std::collections::BTreeMap<String, String>) -> Vec<Tok> {
+    let mut active = std::collections::BTreeSet::new();
+    expand_aliases_inner(toks, aliases, &mut active)
+}
+
+fn expand_aliases_inner(
+    toks: &[Tok],
+    aliases: &std::collections::BTreeMap<String, String>,
+    active: &mut std::collections::BTreeSet<String>,
+) -> Vec<Tok> {
+    let mut out: Vec<Tok> = Vec::new();
+    // Whether the *next* token must be treated as command position regardless of
+    // structure (carried across an alias whose value ended in a blank).
+    let mut force = false;
+    for tok in toks {
+        let at_cmd = force || starts_command(out.last());
+        force = false;
+        if at_cmd
+            && let Tok::Word(segs) = tok
+            && let [Seg::Lit(name)] = segs.as_slice()
+            && !active.contains(name)
+            && let Some(val) = aliases.get(name)
+            && let Ok(mut repl) = tokenize(val)
+        {
+            // Drop a trailing newline the lexer may append so the splice stays
+            // within the current command.
+            while matches!(repl.last(), Some(Tok::Newline)) {
+                repl.pop();
+            }
+            active.insert(name.clone());
+            let expanded = expand_aliases_inner(&repl, aliases, active);
+            active.remove(name);
+            out.extend(expanded);
+            force = val.ends_with(' ') || val.ends_with('\t');
+            continue;
+        }
+        out.push(tok.clone());
+    }
+    out
+}
+
 fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }

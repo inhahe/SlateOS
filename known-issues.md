@@ -325,10 +325,16 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
-### TD-OILS10. `osh` `time` keyword: user/sys CPU times are always reported as 0.00 — OPEN (low priority, gated on per-child CPU accounting)
+### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — OPEN (low priority, gated on per-child CPU accounting)
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::format_time_report`, called
-from `exec_pipeline` when a pipeline is prefixed with `time`).
+from `exec_pipeline` when a pipeline is prefixed with `time`; and
+`Shell::builtin_times`, the `times` builtin).
+
+**Also affects `times`:** the POSIX `times` builtin prints two `user sys` lines
+(shell, then children) in bash's `%dm%d.%03ds` form, but both are reported as
+`0m0.000s` for the same reason — no per-process CPU accounting exists yet. The
+line structure/format matches bash so parsers still work.
 
 **What:** the `time` reserved word (and `time -p`) reports **real** (wall-clock)
 time accurately via `std::time::Instant`, but the **user** and **system** CPU

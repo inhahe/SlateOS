@@ -3912,6 +3912,7 @@ impl Shell {
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
+            "times" => self.builtin_times(out, redir),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "exec" => {
@@ -4678,6 +4679,18 @@ impl Shell {
             self.jobs.retain(|j| !target_ids.contains(&j.id));
         }
         0
+    }
+
+    /// `times` — print the accumulated user and system CPU times for the shell
+    /// and its children, one pair per line (shell first, then children), in
+    /// bash's `%dm%d.%03ds` form. We have no per-process CPU accounting yet
+    /// (see known-issues TD-OILS10), so the reported times are zero; the format
+    /// and line structure match bash so scripts that parse the output still work.
+    fn builtin_times(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Each pair is "user sys"; both lines currently report 0m0.000s.
+        let zero = "0m0.000s";
+        let text = format!("{zero} {zero}\n{zero} {zero}\n");
+        self.write_bytes(out, redir, text.as_bytes())
     }
 
     /// `hash [-lr] [-p pathname] [-dt] [name ...]` — manage the remembered
@@ -7427,6 +7440,7 @@ fn is_builtin(name: &str) -> bool {
             | "jobs"
             | "wait"
             | "disown"
+            | "times"
             | "hash"
             | "umask"
             | "exec"
@@ -10943,6 +10957,14 @@ mod tests {
     fn disown_bad_spec_errors() {
         let mut sh = Shell::new();
         assert_eq!(sh.run_source("disown %9"), 1);
+    }
+
+    #[test]
+    fn times_prints_two_cpu_lines() {
+        // `times` prints two "user sys" lines in bash's %dm%d.%03ds form.
+        let (o, s) = run("times");
+        assert_eq!(s, 0);
+        assert_eq!(o, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
     }
 
     #[test]

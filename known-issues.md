@@ -690,10 +690,16 @@ command exits 127). Status of the remaining aspects:
    a `WriteFd` arm. The `2>&1`-into-captured-stdout case folds the buffered
    stderr into fd 1's sink after the builtin's stdout (line-level interleaving
    not preserved, as elsewhere). The `exec` builtin is exempt from the scoped
-   push (it sets the *persistent* `exec_stderr` itself). One order-free caveat:
-   the rare `>&2 2>file` combination routes the `>&2` output to the file (the
-   `2>file >&2` ordering) rather than the pre-redirect stderr — our `RedirPlan`
-   does not track redirection order.
+   push (it sets the *persistent* `exec_stderr` itself). The former order-free
+   caveat (the `>&2 2>file` combination routing `>&2` output to the file rather
+   than the pre-redirect stderr) is **RESOLVED 2026-07-19**: the resolver only
+   sets `stdout_to_stderr` for the dup-first ordering (`2>file >&2` still copies
+   the file target into `stdout`), so when a per-command stderr redirect is
+   present it is the freshly-pushed top of `stderr_stack`. Both the builtin
+   `write_bytes` path and the compound/function `exec_with_redirects` finaliser
+   now route the `>&2` output via `emit_stderr_depth`, skipping that top entry so
+   fd 1 lands in the pre-redirect (enclosing/inherited) sink — matching bash's
+   left-to-right redirection semantics. Regression: `dup_stdout_before_stderr_redirect`.
 7. **Function-invocation redirects — RESOLVED 2026-07-19.** A function call
    carrying its own redirects (`myfunc > file`, `myfunc 2> err`, `myfunc < in`,
    and compound-scoped fd ≥ 3 forms like `myfunc 3< file`) now applies the

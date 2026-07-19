@@ -1564,7 +1564,20 @@ impl Shell {
                     }
                 }
             } else if stdout_to_err {
-                self.emit_stderr(&buf);
+                // `{ …; } >&2 2>file` (or a redirected function call): the `>&2`
+                // dup captured fd 2 *before* this command's own `2>file` took
+                // effect (bash applies redirects left to right, and the resolver
+                // only sets `stdout_to_stderr` for that dup-first ordering). The
+                // per-command stderr, if any, is the freshly-pushed top of the
+                // stack — skip it so fd 1 lands in the pre-redirect sink. This
+                // capture is flushed before the pop, so the top is still present.
+                // See TD-OILS14.
+                let depth = if pushed_stderr {
+                    self.stderr_stack.len().saturating_sub(1)
+                } else {
+                    self.stderr_stack.len()
+                };
+                self.emit_stderr_depth(&buf, depth);
             }
         }
 
@@ -8670,7 +8683,22 @@ impl Shell {
         // `1>&2` on the builtin (e.g. `echo msg >&2`): the builtin's stdout is
         // the current stderr sink, not the ambient stdout.
         if redir.stdout_to_stderr && redir.stdout.is_none() {
-            self.emit_stderr(bytes);
+            // When the same command also redirects its own stderr
+            // (`echo msg >&2 2>file`), bash applies redirections left to right:
+            // the `>&2` dup captures fd 2 *before* the `2>file` takes effect, so
+            // fd 1 follows the pre-redirect (enclosing/inherited) stderr, not the
+            // file. Our resolver only sets `stdout_to_stderr` for that dup-first
+            // ordering (a `2>file >&2` sequence copies the file into `stdout`
+            // instead), so when a per-command stderr redirect is present it is the
+            // freshly-pushed top of `stderr_stack` — skip it. See TD-OILS14.
+            let skip_top =
+                redir.stderr.is_some() || redir.stderr_to_fd.is_some() || redir.stderr_to_stdout;
+            let depth = if skip_top {
+                self.stderr_stack.len().saturating_sub(1)
+            } else {
+                self.stderr_stack.len()
+            };
+            self.emit_stderr_depth(bytes, depth);
             return 0;
         }
         // A `>`/`>>` redirect on the builtin wins over the ambient sink.
@@ -8759,7 +8787,16 @@ impl Shell {
     /// for command diagnostics and `>&2` builtin output so both honour a
     /// compound command's `2>` redirect.
     fn emit_stderr(&self, bytes: &[u8]) {
-        match self.stderr_stack.last() {
+        self.emit_stderr_depth(bytes, self.stderr_stack.len());
+    }
+
+    /// Like [`emit_stderr`], but only consider the first `depth` entries of the
+    /// `stderr_stack` when choosing the sink. `depth == stderr_stack.len()` is
+    /// the normal case; a smaller depth lets `>&2` on a command that also has
+    /// its own `2>file` redirect skip that just-pushed per-command stderr and
+    /// target the *pre-redirect* sink (the dup-first ordering — see TD-OILS14).
+    fn emit_stderr_depth(&self, bytes: &[u8], depth: usize) {
+        match self.stderr_stack.get(..depth).and_then(<[_]>::last) {
             None => {
                 // Base fd 2: a persistent `exec 2> file` target if set, else the
                 // shell's real stderr.
@@ -15526,6 +15563,24 @@ mod tests {
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
         );
+    }
+
+    #[test]
+    fn dup_stdout_before_stderr_redirect() {
+        // `echo x >&2 2>file`: bash applies redirects left to right, so `>&2`
+        // duplicates fd 2 (the terminal) into fd 1 *before* `2>file` rebinds
+        // fd 2. The echo therefore lands on the original stderr, not the file —
+        // so the file must be empty. (Regression for TD-OILS14; the order-free
+        // RedirPlan previously routed the echo into the file.)
+        assert_eq!(run_exec_redirect("echo x >&2 2>\"{FILE}\""), "");
+        // The reverse order `2>file >&2` binds fd 1 to the already-redirected
+        // fd 2, so the echo *does* land in the file.
+        assert_eq!(run_exec_redirect("echo x 2>\"{FILE}\" >&2"), "x\n");
+        // Same for a compound command: the body's stdout goes through the
+        // compound's `>&2` to the pre-redirect stderr, so the `2>file` stays
+        // empty. (The body writes to fd 1; `echo body >&2` inside would instead
+        // target fd 2 = the file, which is a different case.)
+        assert_eq!(run_exec_redirect("{ echo body; } >&2 2>\"{FILE}\""), "");
     }
 
     #[test]

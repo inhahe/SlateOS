@@ -8503,9 +8503,14 @@ impl Shell {
                 self.emit_stderr(format!("osh: {arr}: readonly variable\n").as_bytes());
                 return 1;
             }
-            let fields = read_split(&line, &ifs, raw, None);
-            let map: BTreeMap<usize, String> =
-                fields.into_iter().enumerate().collect();
+            // `-N` assigns the raw record without IFS splitting: a single
+            // element holding exactly the characters read (bash).
+            let map: BTreeMap<usize, String> = if exact {
+                let v = if raw { line } else { unescape_read_line(&line) };
+                std::iter::once((0usize, v)).collect()
+            } else {
+                read_split(&line, &ifs, raw, None).into_iter().enumerate().collect()
+            };
             self.vars.remove(&arr);
             self.assoc.remove(&arr);
             self.arrays.insert(arr, map);
@@ -8522,7 +8527,16 @@ impl Shell {
             return eof_status;
         }
 
-        let fields = read_split(&line, &ifs, raw, Some(names.len()));
+        // `-N` does not split on IFS: the whole record goes to the first name
+        // (any remaining names are cleared), matching bash's exact-read intent.
+        let fields = if exact {
+            let v = if raw { line } else { unescape_read_line(&line) };
+            let mut f = vec![v];
+            f.resize(names.len(), String::new());
+            f
+        } else {
+            read_split(&line, &ifs, raw, Some(names.len()))
+        };
         for (idx, name) in names.iter().enumerate() {
             let val = fields.get(idx).cloned().unwrap_or_default();
             // A readonly target aborts the read at that field (bash: earlier
@@ -11164,6 +11178,10 @@ fn format_conversion(
             '+' => plus = true,
             ' ' => space = true,
             '#' => hash = true,
+            // Thousands-grouping flag. We run in the C locale, which has no
+            // grouping, so accept and ignore it (bash: `printf "%'d" 1234567`
+            // prints `1234567` unless a grouping locale is active).
+            '\'' => {}
             _ => break,
         }
         spec.push(c);
@@ -11408,8 +11426,18 @@ fn format_conversion(
             if let Some(kind) = err {
                 errors.push(format!("{raw}: {kind}"));
             }
-            let s = format!("{f}");
-            let s = if conv == 'G' { s.to_uppercase() } else { s };
+            let s = format_g(f, prec_n.unwrap_or(6), conv == 'G', hash);
+            let (p, b) = split_sign(s, plus, space);
+            num_prefix = p;
+            b
+        }
+        'a' | 'A' => {
+            let raw = next_arg(arg_i);
+            let (f, err) = parse_printf_float_checked(&raw);
+            if let Some(kind) = err {
+                errors.push(format!("{raw}: {kind}"));
+            }
+            let s = format_a(f, prec_n, conv == 'A');
             let (p, b) = split_sign(s, plus, space);
             num_prefix = p;
             b
@@ -11438,7 +11466,10 @@ fn format_conversion(
             out.push_str(&rendered);
             out.extend(std::iter::repeat_n(' ', pad));
         } else if zero
-            && matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G')
+            && matches!(
+                conv,
+                'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A'
+            )
         {
             // Zero-pad: prefix, then the padding zeros, then the body.
             out.push_str(&num_prefix);
@@ -11739,6 +11770,150 @@ fn normalize_exp(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Strip a `%g`-formatted string's trailing fractional zeros (and a trailing
+/// bare decimal point), preserving any exponent suffix. `1.5000e+10` →
+/// `1.5e+10`, `3.140` → `3.14`, `100.` → `100`.
+fn strip_g_zeros(s: &str) -> String {
+    let (mant, exp) = match s.find(['e', 'E']) {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    };
+    let mant = if mant.contains('.') {
+        mant.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        mant
+    };
+    format!("{mant}{exp}")
+}
+
+/// Format a float using C's `%g`/`%G` rules: `prec` significant digits (a
+/// precision of 0 is treated as 1). Chooses `%e` style when the decimal
+/// exponent is `< -4` or `>= prec`, otherwise `%f` style; trailing zeros are
+/// removed unless the `#` (alternate) flag is set. `upper` selects `%G`.
+fn format_g(f: f64, prec: usize, upper: bool, hash: bool) -> String {
+    if !f.is_finite() {
+        let s = if f.is_nan() {
+            "nan".to_string()
+        } else if f < 0.0 {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        };
+        return if upper { s.to_uppercase() } else { s };
+    }
+    let p = prec.max(1);
+    // Format in %e style with p-1 fractional digits to learn the exponent and
+    // to reuse for the scientific branch.
+    let e_str = format!("{:.*e}", p - 1, f);
+    let exp: i32 = e_str
+        .rsplit(['e', 'E'])
+        .next()
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(0);
+    let mut s = if exp < -4 || exp >= p as i32 {
+        normalize_exp(&e_str)
+    } else {
+        // %f style with (p - 1 - exp) fractional digits.
+        let fprec = usize::try_from(p as i32 - 1 - exp).unwrap_or(0);
+        format!("{f:.fprec$}")
+    };
+    if !hash {
+        s = strip_g_zeros(&s);
+    }
+    if upper { s.to_uppercase() } else { s }
+}
+
+/// Format a float using C's `%a`/`%A` hexadecimal-float notation, e.g. `1.5`
+/// → `0x1.8p+0`. Without an explicit precision the shortest exact fractional
+/// representation is used (trailing zero hex digits stripped); with a
+/// precision the fraction is rounded (round-half-to-even) to that many hex
+/// digits. `upper` selects the `%A` (uppercase `0X`/`P`) form.
+fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
+    if f.is_nan() {
+        return if upper { "NAN".to_string() } else { "nan".to_string() };
+    }
+    if f.is_infinite() {
+        let s = if f < 0.0 { "-inf" } else { "inf" };
+        return if upper { s.to_uppercase() } else { s.to_string() };
+    }
+    let bits = f.to_bits();
+    let neg = (bits >> 63) == 1;
+    let exp_bits = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+    let mantissa = bits & 0x000f_ffff_ffff_ffff; // low 52 bits
+    let (mut lead, exp2) = if exp_bits == 0 {
+        // Zero or subnormal.
+        if mantissa == 0 { (0u64, 0i64) } else { (0u64, -1022) }
+    } else {
+        (1u64, exp_bits - 1023)
+    };
+    // The 52-bit mantissa is exactly 13 hex digits (MSB first).
+    let mut digits: Vec<u8> = (0..13)
+        .map(|i| u8::try_from((mantissa >> (48 - 4 * i)) & 0xf).unwrap_or(0))
+        .collect();
+    if let Some(p) = prec {
+        if p < digits.len() {
+            let next = digits[p];
+            let round_up = if next > 8 {
+                true
+            } else if next < 8 {
+                false
+            } else if digits[p + 1..].iter().any(|&d| d != 0) {
+                true
+            } else {
+                // Exact halfway: round to even (up if the kept digit is odd).
+                let last = if p == 0 { lead } else { u64::from(digits[p - 1]) };
+                last % 2 == 1
+            };
+            digits.truncate(p);
+            if round_up {
+                let mut carry = true;
+                for d in digits.iter_mut().rev() {
+                    if *d == 0xf {
+                        *d = 0;
+                    } else {
+                        *d += 1;
+                        carry = false;
+                        break;
+                    }
+                }
+                if carry {
+                    // A carry out of the fraction bumps the leading digit
+                    // (e.g. `%.0a` of 1.5 → `0x2p+0`). glibc/bash keep the
+                    // 2 rather than renormalizing to `0x1p+1`, so we do too.
+                    lead += 1;
+                }
+            }
+        } else {
+            digits.resize(p, 0);
+        }
+    } else {
+        while digits.last() == Some(&0) {
+            digits.pop();
+        }
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    }
+    s.push_str("0x");
+    s.push(HEX[lead as usize] as char);
+    if !digits.is_empty() {
+        s.push('.');
+        for &d in &digits {
+            s.push(HEX[d as usize] as char);
+        }
+    }
+    s.push('p');
+    if exp2 >= 0 {
+        s.push('+');
+    } else {
+        s.push('-');
+    }
+    s.push_str(&exp2.abs().to_string());
+    if upper { s.to_uppercase() } else { s }
 }
 
 /// Evaluate a `test`/`[` expression. Returns `Ok(true)`/`Ok(false)` for the
@@ -13116,6 +13291,69 @@ mod tests {
     fn printf_float_conversion() {
         assert_eq!(run("printf '%.2f' 3.14159").0, "3.14");
         assert_eq!(run("printf '%f' 1").0, "1.000000");
+    }
+
+    #[test]
+    fn printf_g_conversion() {
+        // `%g` uses `prec` significant digits (default 6) and strips trailing
+        // zeros; the exponent decides `%f`- vs `%e`-style.
+        assert_eq!(run("printf '%.3g\\n' 3.14159").0, "3.14\n");
+        assert_eq!(run("printf '%g\\n' 3.14159").0, "3.14159\n");
+        assert_eq!(run("printf '%g\\n' 100000").0, "100000\n");
+        assert_eq!(run("printf '%g\\n' 1000000").0, "1e+06\n");
+        assert_eq!(run("printf '%g\\n' 0.0001").0, "0.0001\n");
+        assert_eq!(run("printf '%g\\n' 0.00001").0, "1e-05\n");
+        assert_eq!(run("printf '%.10g\\n' 3.14159").0, "3.14159\n");
+        assert_eq!(run("printf '%G\\n' 0.00001").0, "1E-05\n");
+        // `#` keeps trailing zeros.
+        assert_eq!(run("printf '%#g\\n' 1.5").0, "1.50000\n");
+        assert_eq!(run("printf '%g\\n' 0").0, "0\n");
+    }
+
+    #[test]
+    fn printf_a_hex_float_conversion() {
+        // `%a` renders IEEE-754 doubles in hexadecimal float form.
+        assert_eq!(run("printf '%a\\n' 1.5").0, "0x1.8p+0\n");
+        assert_eq!(run("printf '%A\\n' 1.5").0, "0X1.8P+0\n");
+        assert_eq!(run("printf '%a\\n' 0").0, "0x0p+0\n");
+        assert_eq!(run("printf '%a\\n' 2").0, "0x1p+1\n");
+        assert_eq!(run("printf '%a\\n' -1.5").0, "-0x1.8p+0\n");
+        assert_eq!(run("printf '%+a\\n' 1.5").0, "+0x1.8p+0\n");
+        // Explicit precision rounds the fraction (round-half-to-even): 1.5's
+        // `0x1.8` rounds to the even `0x2p+0`, not a renormalized `0x1p+1`.
+        assert_eq!(run("printf '%.0a\\n' 1.5").0, "0x2p+0\n");
+        // 0.1's 52-bit mantissa is exactly 13 hex digits.
+        assert_eq!(run("printf '%a\\n' 0.1").0, "0x1.999999999999ap-4\n");
+    }
+
+    #[test]
+    fn printf_thousands_flag_ignored() {
+        // The `'` grouping flag is accepted; in the C locale it groups nothing.
+        assert_eq!(run("printf \"%'d\\n\" 1234567").0, "1234567\n");
+        assert_eq!(run("printf \"%'5d|\" 42").0, "   42|");
+    }
+
+    #[test]
+    fn read_exact_n_no_ifs_split() {
+        // `-N` reads exactly N characters and assigns them raw, without IFS
+        // splitting or trimming (leading/trailing whitespace preserved).
+        assert_eq!(run("read -N 3 x <<< 'ab cd'; echo \"[$x]\"").0, "[ab ]\n");
+        assert_eq!(run("read -N 5 x <<< '  hi  there'; echo \"[$x]\"").0, "[  hi ]\n");
+        // With several names the whole record goes to the first; the rest clear.
+        assert_eq!(
+            run("read -N 5 a b <<< 'x y z w'; echo \"[$a][$b]\"").0,
+            "[x y z][]\n"
+        );
+        // An array target receives a single element holding the raw record.
+        assert_eq!(
+            run("read -N 5 -a arr <<< 'x y z w'; echo \"${#arr[@]}:[${arr[0]}]\"").0,
+            "1:[x y z]\n"
+        );
+        // A custom IFS is likewise ignored under `-N`.
+        assert_eq!(
+            run("IFS=: read -N 3 x <<< 'a:b:c'; echo \"[$x]\"").0,
+            "[a:b]\n"
+        );
     }
 
     #[test]

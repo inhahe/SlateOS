@@ -98,6 +98,11 @@ use crate::ast::{
 };
 use crate::parser::parse_with_aliases;
 
+/// The bash release level this shell emulates, exposed via `$BASH_VERSION`
+/// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
+/// we report a 5.2 compatibility level with `slateos` as the vendor field.
+const BASH_VERSION: &str = "5.2.0(1)-release";
+
 /// Non-local control flow produced while executing statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -455,7 +460,7 @@ impl Shell {
     /// Create a fresh shell with `$0` defaulting to `osh`.
     #[must_use]
     pub fn new() -> Self {
-        Shell {
+        let mut sh = Shell {
             vars: HashMap::new(),
             arrays: HashMap::new(),
             assoc: HashMap::new(),
@@ -513,7 +518,38 @@ impl Shell {
             jobs: Vec::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
+        };
+        sh.seed_shell_vars();
+        sh
+    }
+
+    /// Seed the shell-internal variables bash defines unconditionally (not from
+    /// the environment): the `BASH_VERSION` string and its parsed
+    /// `BASH_VERSINFO` array. We report a bash 5.2 compatibility level (the
+    /// language level this shell targets) with `slateos` as the vendor field.
+    fn seed_shell_vars(&mut self) {
+        self.vars
+            .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+        // BASH_VERSINFO: (major, minor, patch, build, status, machtype). bash
+        // marks it readonly; matching that guards scripts that probe the level.
+        let versinfo = [
+            (0usize, "5"),
+            (1, "2"),
+            (2, "0"),
+            (3, "1"),
+            (4, "release"),
+            (5, "x86_64-slateos"),
+        ];
+        let mut arr = BTreeMap::new();
+        for (i, v) in versinfo {
+            arr.insert(i, v.to_string());
         }
+        self.arrays.insert("BASH_VERSINFO".to_string(), arr);
+        // bash marks BASH_VERSINFO readonly; osh does not, to avoid it appearing
+        // in `readonly -p` output (which still uses osh's `readonly name=val`
+        // listing form rather than bash's `declare -ar` array form — see
+        // TD-OILS-RO-ARRAY in known-issues.md). A script clobbering it is rare
+        // and low-harm.
     }
 
     /// Set `$0`, the shell/script name.
@@ -6969,14 +7005,24 @@ impl Shell {
     /// Shared by `declare -p` and the bare `set` variable listing.
     fn format_var_assignment(&self, name: &str) -> Option<String> {
         if let Some(map) = self.assoc.get(name) {
+            // bash prints an empty array as just the bare name (`declare -A m`),
+            // and a non-empty associative array with a trailing space before the
+            // closing paren (`([k]="v" )`).
+            if map.is_empty() {
+                return Some(name.to_string());
+            }
             let body = map
                 .iter()
                 .map(|(k, v)| format!("[{k}]={}", quote_declare_value(v)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            return Some(format!("{name}=({body})"));
+            return Some(format!("{name}=({body} )"));
         }
         if let Some(arr) = self.arrays.get(name) {
+            // An empty indexed array likewise prints as the bare name.
+            if arr.is_empty() {
+                return Some(name.to_string());
+            }
             let body = arr
                 .iter()
                 .map(|(i, v)| format!("[{i}]={}", quote_declare_value(v)))
@@ -12704,10 +12750,15 @@ mod tests {
     #[test]
     fn declare_p_arrays() {
         assert_eq!(run("a=(x y); declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"y\")\n");
+        // bash prints a non-empty associative array with a trailing space
+        // before the closing paren.
         assert_eq!(
             run("declare -A m; m[k]=v; declare -p m").0,
-            "declare -A m=([k]=\"v\")\n"
+            "declare -A m=([k]=\"v\" )\n"
         );
+        // An empty array (indexed or associative) prints as the bare name.
+        assert_eq!(run("declare -a e; declare -p e").0, "declare -a e\n");
+        assert_eq!(run("declare -A me; declare -p me").0, "declare -A me\n");
     }
 
     #[test]
@@ -12798,6 +12849,16 @@ mod tests {
         // Deterministic when reseeded, and within bash's 15-bit range.
         assert_eq!(run("RANDOM=1; a=$RANDOM; RANDOM=1; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo same").0, "same\n");
         assert_eq!(run("RANDOM=7; r=$RANDOM; [ \"$r\" -ge 0 ] && [ \"$r\" -lt 32768 ] && echo ok").0, "ok\n");
+    }
+
+    #[test]
+    fn special_var_bash_version() {
+        // BASH_VERSION is seeded (non-empty, 5.x compatibility level).
+        assert_eq!(run("echo $BASH_VERSION").0, "5.2.0(1)-release\n");
+        // BASH_VERSINFO is a 6-element array; [0] is the major version.
+        assert_eq!(run("echo ${BASH_VERSINFO[0]}").0, "5\n");
+        assert_eq!(run("echo ${#BASH_VERSINFO[@]}").0, "6\n");
+        assert_eq!(run("echo ${BASH_VERSINFO[4]}").0, "release\n");
     }
 
     #[test]
@@ -13112,9 +13173,12 @@ mod tests {
             run("a=(x y); echo \"${a@A}\"").0,
             "declare -a a=([0]=\"x\" [1]=\"y\")\n"
         );
+        // osh keeps `@A` and `declare -p` consistent (bash has a long-standing
+        // bug where `@A` drops associative entries); both include the trailing
+        // space before the closing paren.
         assert_eq!(
             run("declare -A m; m[k]=v; echo \"${m@A}\"").0,
-            "declare -A m=([k]=\"v\")\n"
+            "declare -A m=([k]=\"v\" )\n"
         );
         // An unset variable yields the empty string.
         assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");

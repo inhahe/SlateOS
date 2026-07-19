@@ -400,6 +400,12 @@ pub struct Shell {
     /// `call_line_stack[k]` is the line where `fn_stack[k]` was invoked. Drives
     /// `BASH_LINENO` and the `caller` builtin. Kept in lockstep with `fn_stack`.
     call_line_stack: Vec<u32>,
+    /// Nesting depth of `source`/`.` invocations currently executing. `return`
+    /// is only valid inside a function *or* a sourced script; this lets the
+    /// `return` builtin distinguish a legal source-level return from an illegal
+    /// top-level one (which bash reports as an error, status 2, without
+    /// unwinding). Reset to 0 in subshell clones.
+    source_depth: u32,
     /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
@@ -524,6 +530,7 @@ impl Shell {
             local_frames: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
+            source_depth: 0,
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
@@ -2009,6 +2016,9 @@ impl Shell {
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),
             call_line_stack: self.call_line_stack.clone(),
+            // A subshell starts a fresh `source` nesting (it is not itself a
+            // sourced script), though it inherits the function context above.
+            source_depth: 0,
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
@@ -5941,9 +5951,23 @@ impl Shell {
                 code
             }
             "return" => {
-                let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(self.last_status);
-                flow = Flow::Return;
-                code
+                // `return` is only valid inside a function (`fn_stack` is
+                // non-empty — inherited by subshells too) or a sourced script.
+                // Elsewhere bash reports an error, yields status 2, and does
+                // NOT unwind, so execution continues with the next command.
+                if self.fn_stack.is_empty() && self.source_depth == 0 {
+                    self.errln(
+                        "osh: return: can only `return' from a function or sourced script",
+                    );
+                    2
+                } else {
+                    let code = args
+                        .first()
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(self.last_status);
+                    flow = Flow::Return;
+                    code
+                }
             }
             "break" => {
                 let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
@@ -9160,7 +9184,11 @@ impl Shell {
                 } else {
                     None
                 };
+                // Mark that we are inside a sourced script so a `return` in it is
+                // legal (and unwinds just this source, like bash).
+                self.source_depth = self.source_depth.saturating_add(1);
                 let code = self.run_source(&src);
+                self.source_depth = self.source_depth.saturating_sub(1);
                 if let Some(p) = saved {
                     self.positional = p;
                 }
@@ -16050,6 +16078,30 @@ mod tests {
         let mut sh = Shell::new();
         sh.run_source("trap 'RET=1' RETURN\nf() { :; }\nf");
         assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn return_outside_function_is_error_and_continues() {
+        // Top-level `return` is an error (status 2) that does NOT unwind: the
+        // following command still runs. (bash: same behaviour.)
+        let (o, _) = run("echo before; return; echo after");
+        assert_eq!(o, "before\nafter\n");
+        // The error message and status-2 are observable via a group's 2>&1.
+        let (o2, _) = run("{ return; } 2>&1; echo \"s=$?\"");
+        assert_eq!(
+            o2,
+            "osh: return: can only `return' from a function or sourced script\ns=2\n"
+        );
+        // Inside a function, `return` unwinds normally with its status.
+        assert_eq!(run("f() { echo in; return 7; echo out; }; f; echo $?").0, "in\n7\n");
+        // A `return` in a subshell inside a function exits just the subshell.
+        assert_eq!(
+            run("f() { ( echo a; return 5; echo b ); echo \"s=$?\"; }; f").0,
+            "a\ns=5\n"
+        );
+        // A `return` in a top-level subshell is still an error (no unwind).
+        let (o3, _) = run("( echo a; return 3; echo b ) 2>/dev/null; echo done");
+        assert_eq!(o3, "a\nb\ndone\n");
     }
 
     #[test]

@@ -5296,7 +5296,10 @@ impl Shell {
             } else {
                 Vec::new()
             };
-            let found = is_kw || is_fn || is_bi || !files.is_empty();
+            // A command remembered in the hash table counts as found even when a
+            // fresh PATH search comes up empty (bash reports it as hashed).
+            let is_hashed = self.cmd_hash.contains_key(name.as_str());
+            let found = is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
             if !found {
                 if !mode_t && !mode_p && !mode_pp {
                     self.errln(&format!("osh: type: {name}: not found"));
@@ -5347,6 +5350,11 @@ impl Shell {
                     }
                 } else if let Some(f) = files.first() {
                     let _ = self.write_line(out, redir, &f.to_string_lossy());
+                } else if let Some((p, _)) = self.cmd_hash.get(name.as_str()) {
+                    // A hashed command with no live PATH match still prints its
+                    // remembered path.
+                    let p = p.to_string_lossy().into_owned();
+                    let _ = self.write_line(out, redir, &p);
                 }
                 continue;
             }
@@ -5374,6 +5382,9 @@ impl Shell {
                     format!("{name} is a function")
                 } else if is_bi {
                     format!("{name} is a shell builtin")
+                } else if let Some((p, _)) = self.cmd_hash.get(name.as_str()) {
+                    // A previously-run command is remembered in the hash table.
+                    format!("{name} is hashed ({})", p.to_string_lossy())
                 } else {
                     format!("{name} is {}", files[0].to_string_lossy())
                 };
@@ -9859,6 +9870,14 @@ mod tests {
         let (o, s) = run("cmd /c exit 0\nhash -t cmd");
         assert_eq!(s, 0, "hash -t cmd should succeed; out {o:?}");
         assert!(o.to_lowercase().contains("cmd"), "got {o:?}");
+    }
+
+    #[test]
+    fn type_reports_hashed_command() {
+        // A remembered command is described as "hashed (path)".
+        let (o, s) = run("hash -p /bin/foo foo; type foo");
+        assert_eq!(s, 0);
+        assert_eq!(o, "foo is hashed (/bin/foo)\n");
     }
 
     #[test]

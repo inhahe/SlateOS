@@ -160,6 +160,7 @@ enum StdinSrc<'a> {
 /// pipeline stage's subshell clone is moved into a scoped thread. (Clones reset
 /// the stack to empty via [`Shell::clone_for_subshell`], so the `Arc` contents
 /// never actually cross a thread boundary, but the type must still be `Send`.)
+#[derive(Clone)]
 enum StderrTarget {
     /// `2> file` / `2>> file` — write to this already-opened file (shared by all
     /// commands in the group via `try_clone`).
@@ -1100,6 +1101,15 @@ impl Shell {
             Command::Subshell(p) => {
                 // A subshell gets a clone of the state; mutations don't escape.
                 let mut sub = self.clone_for_subshell();
+                // A subshell inherits the fds applied to it, including an active
+                // compound-command stderr redirect (`( … ) 2>&1`, `( … ) 2>file`).
+                // `clone_for_subshell` resets `stderr_stack` (so pipeline-stage
+                // clones on threads don't chase an outer group's stderr), so copy
+                // it back here for this inline subshell — otherwise a `>&2` inside
+                // `$( ( … ) 2>&1 )` would leak to the real stderr instead of the
+                // command-substitution capture. This runs on the current thread,
+                // so `Send` is not a concern; `StderrTarget` is all `Arc`-based.
+                sub.stderr_stack.clone_from(&self.stderr_stack);
                 let flow = sub.exec_program(p, out, stdin);
                 // Fire the subshell's own EXIT trap (if it set one) before its
                 // state is discarded — matching bash, which runs an EXIT trap for
@@ -18800,6 +18810,31 @@ mod tests {
             run_exec_redirect("( echo keep; echo diag >&2 ) 2> \"{FILE}\""),
             "diag\n"
         );
+    }
+
+    #[test]
+    fn subshell_2to1_into_capture_folds_stderr() {
+        // `$( ( … ) 2>&1 )`: a subshell body under `2>&1` inside a command
+        // substitution must fold its `>&2` output into the captured stdout, not
+        // leak it to the real stderr. Regression: the subshell clone reset
+        // `stderr_stack`, so the `2>&1` Buffer target was lost and `>&2` escaped.
+        // (Line-order interleaving of the two streams is a separate, documented
+        // limitation — stdout goes live, stderr is folded after — so this only
+        // asserts both streams are present in the capture.)
+        let (o, s) = run(r#"x=$( ( echo out; echo err >&2 ) 2>&1 ); echo "[$x]""#);
+        assert_eq!(s, 0);
+        assert!(o.contains("out"), "stdout missing: {o:?}");
+        assert!(o.contains("err"), "stderr not folded into capture: {o:?}");
+    }
+
+    #[test]
+    fn nested_subshell_2to1_into_capture_folds_stderr() {
+        // The fix must survive nesting: `$( ( ( … >&2 ) 2>&1 ) )` — the inner
+        // subshell's stderr propagates out through both subshell layers into the
+        // command-substitution capture.
+        let (o, s) = run(r#"y=$( ( ( echo deep >&2 ) 2>&1 ) ); echo "[$y]""#);
+        assert_eq!(s, 0);
+        assert_eq!(o, "[deep]\n");
     }
 
     #[test]

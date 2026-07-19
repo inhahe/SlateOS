@@ -46,6 +46,7 @@ fn run(args: &[String]) -> i32 {
                 return 2;
             };
             // `osh -c cmd [name [arg…]]`
+            sh.set_command_mode();
             if let Some(name) = args.get(3) {
                 sh.set_name(name.clone());
                 sh.set_positional(args.get(4..).map(<[String]>::to_vec).unwrap_or_default());

@@ -350,6 +350,10 @@ pub struct Shell {
     /// `set -C` (noclobber): a plain `>` refuses to truncate an existing regular
     /// file; `>|` overrides. Consulted in `resolve_redirects`.
     noclobber: bool,
+    /// The shell was invoked as `osh -c COMMAND`. Bash reports a `c` flag in
+    /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
+    /// consulted only by `option_flags`. Set once at startup by the binary.
+    command_mode: bool,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -496,6 +500,7 @@ impl Shell {
             noglob: false,
             allexport: false,
             noclobber: false,
+            command_mode: false,
             errexit_suppress: 0,
             unbound_error: false,
             arith_error: false,
@@ -560,6 +565,12 @@ impl Shell {
     /// Set the positional parameters (`$1`, `$2`, …).
     pub fn set_positional(&mut self, args: Vec<String>) {
         self.positional = args;
+    }
+
+    /// Mark the shell as invoked via `-c COMMAND` so `$-` reports the `c` flag
+    /// (bash behaviour). Called once by the binary before running the command.
+    pub fn set_command_mode(&mut self) {
+        self.command_mode = true;
     }
 
     /// Set a shell variable.
@@ -1917,6 +1928,7 @@ impl Shell {
             noglob: self.noglob,
             allexport: self.allexport,
             noclobber: self.noclobber,
+            command_mode: self.command_mode,
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
@@ -4751,6 +4763,11 @@ impl Shell {
             if on {
                 s.push(c);
             }
+        }
+        // Bash appends `c` (invoked via `-c`) last, after every `set`-toggled
+        // option letter, e.g. `hBc`, `ehBc`, `hBCc`.
+        if self.command_mode {
+            s.push('c');
         }
         s
     }
@@ -12991,6 +13008,22 @@ mod tests {
         assert_eq!(run("set -xu; echo $-").0, "huxB\n");
         // Disabling drops the flag again.
         assert_eq!(run("set -e; set +e; echo $-").0, "hB\n");
+    }
+
+    #[test]
+    fn special_var_dash_command_mode() {
+        // A `-c` invocation appends `c` last (bash: `hBc`, `ehBc`, `hBCc`).
+        let cmd_dash = |src: &str| {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            let mut buf = Vec::new();
+            let mut out = Out::Capture(&mut buf);
+            let prog = parse(src).expect("parse");
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            String::from_utf8(buf).unwrap()
+        };
+        assert_eq!(cmd_dash("echo $-"), "hBc\n");
+        assert_eq!(cmd_dash("set -eC; echo $-"), "ehBCc\n");
     }
 
     #[test]

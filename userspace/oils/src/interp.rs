@@ -1409,8 +1409,32 @@ impl Shell {
         match arith::eval(&expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
-                eprintln!("osh: arithmetic: {e}");
+                // Route through `errln` (not `eprintln!`) so the diagnostic
+                // honours an active `2>`/`2>&1` redirect on the enclosing
+                // command — bash silences `let "3 x" 2>/dev/null`, `declare -i
+                // k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
+                self.errln(&format!("osh: arithmetic: {e}"));
                 None
+            }
+        }
+    }
+
+    /// Evaluate an *integer-assignment* initializer — the value bound to a
+    /// variable carrying the integer attribute (`declare -i x=EXPR`, a plain
+    /// `x=EXPR` when `x` is `-i`, or an element of an `-ia` array). Unlike
+    /// `let` / `(( … ))` (which merely return a non-zero status on a bad
+    /// expression), an arithmetic error in an integer *assignment* is **fatal**
+    /// in bash: the diagnostic is printed and the shell aborts with status 1.
+    /// `eval_arith_raw` deliberately suppresses `arith_error` (so nested
+    /// `$(( … ))` in `let`/`((` don't trip the abort), so this wrapper re-sets
+    /// it on failure. The command driver / `run_builtin` tail consumes the flag
+    /// and turns it into a `Flow::Exit(1)`. Yields 0 as the placeholder value.
+    fn eval_int_assign(&mut self, raw: &str) -> i64 {
+        match self.eval_arith_raw(raw) {
+            Some(n) => n,
+            None => {
+                self.arith_error = true;
+                0
             }
         }
     }
@@ -2311,7 +2335,7 @@ impl Shell {
     /// `declare -ia a=(1+1)` stores `2` and `declare -ua u=(ab)` stores `AB`.
     fn apply_elem_attrs(&mut self, name: &str, val: String) -> String {
         if self.integer_attr.contains(name) {
-            self.eval_arith_raw(&val).unwrap_or(0).to_string()
+            self.eval_int_assign(&val).to_string()
         } else {
             self.fold_case_attr(name, val)
         }
@@ -2450,8 +2474,7 @@ impl Shell {
                             } else {
                                 0
                             };
-                            base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0))
-                                .to_string()
+                            base.wrapping_add(self.eval_int_assign(&val)).to_string()
                         } else {
                             val
                         };
@@ -2482,7 +2505,7 @@ impl Shell {
                             } else {
                                 0
                             };
-                            Some(base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0)))
+                            Some(base.wrapping_add(self.eval_int_assign(&val)))
                         } else {
                             None
                         };
@@ -2507,7 +2530,7 @@ impl Shell {
                             .get(&a.name)
                             .and_then(|c| c.trim().parse::<i64>().ok())
                             .unwrap_or(0);
-                        let sum = base.wrapping_add(self.eval_arith_raw(&val).unwrap_or(0));
+                        let sum = base.wrapping_add(self.eval_int_assign(&val));
                         self.vars.insert(a.name.clone(), sum.to_string());
                     } else if let Some(arr) = self.arrays.get_mut(&a.name) {
                         arr.entry(0).or_default().push_str(&val);
@@ -2516,7 +2539,7 @@ impl Shell {
                         self.vars.insert(a.name.clone(), cur + &val);
                     }
                 } else if is_int {
-                    let n = self.eval_arith_raw(&val).unwrap_or(0);
+                    let n = self.eval_int_assign(&val);
                     self.set_scalar_store(&a.name, n.to_string());
                 } else {
                     self.set_scalar_store(&a.name, val);
@@ -6677,6 +6700,19 @@ impl Shell {
         }
 
         self.last_status = status;
+        // A fatal arithmetic error while binding an integer-attribute value
+        // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`) is
+        // fatal in bash — the shell aborts with status 1 — unlike `let`/`(( ))`,
+        // which only return non-zero. The declare/local builtin sets
+        // `arith_error` via `eval_int_assign`; honour it here exactly as the
+        // simple-command driver does for a bare `k=$((…))` assignment. In a
+        // subshell this `Flow::Exit(1)` yields status 1 without aborting the
+        // parent (see `fatal_abort_status`'s companion subshell boundary).
+        if self.arith_error {
+            self.arith_error = false;
+            self.last_status = 1;
+            return Flow::Exit(1);
+        }
         flow
     }
 
@@ -8624,8 +8660,10 @@ impl Shell {
                 } else if self.integer_attr.contains(name) {
                     // Integer attribute: the initializer is an arithmetic
                     // expression, evaluated and stored as its decimal value. With
-                    // `+=`, the result is added to the current numeric value.
-                    let n = self.eval_arith_raw(&v).unwrap_or(0);
+                    // `+=`, the result is added to the current numeric value. A
+                    // bad expression is fatal (bash aborts the shell) — see
+                    // `eval_int_assign`; `run_builtin` turns the flag into an exit.
+                    let n = self.eval_int_assign(&v);
                     let n = if append {
                         let cur = self
                             .vars
@@ -13986,6 +14024,50 @@ mod tests {
         // Bad indirect / subscript expansions are always 1, even at the main
         // shell (no 127 remap).
         assert_eq!(run("echo ${!badref}").1, 1);
+    }
+
+    #[test]
+    fn integer_assignment_arith_error_is_fatal() {
+        // A bad arithmetic expression bound to an *integer-attribute* variable is
+        // fatal in bash (status 1, the shell aborts) — unlike `let`/`(( ))`,
+        // which merely return non-zero. Covers `declare -i NAME=EXPR`, a plain
+        // assignment to an already-`-i` variable, `declare -ia` array elements,
+        // and `name[i]=EXPR`. Both syntax errors and division by zero abort.
+        assert_eq!(run("declare -i k=\"3 apples\"; echo after"), (String::new(), 1));
+        assert_eq!(run("declare -i k=\"1/0\"; echo after"), (String::new(), 1));
+        assert_eq!(run("declare -i k; k=\"3 apples\"; echo after"), (String::new(), 1));
+        assert_eq!(run("declare -ia arr=(1 \"2 x\" 3); echo after"), (String::new(), 1));
+        assert_eq!(run("declare -i a[0]=\"2 x\"; echo after"), (String::new(), 1));
+        // A valid integer initializer still works and is non-fatal.
+        assert_eq!(run("declare -i k=\"5+3\"; echo $k").0, "8\n");
+        // A bare word that is a (bare) identifier is a variable reference -> 0,
+        // not an error.
+        assert_eq!(run("declare -i k=abc; echo $k").0, "0\n");
+
+        // In a subshell / command substitution the abort is status 1 and does
+        // NOT abort the parent.
+        assert_eq!(run("(declare -i k=\"3 apples\"); echo done").1, 0);
+        assert_eq!(run("x=$(declare -i k=\"3 apples\"; echo in); echo $?").0, "1\n");
+
+        // `let` / `(( ))` remain non-fatal (the following command still runs).
+        assert_eq!(run("let \"3 apples\" 2>/dev/null; echo after").0, "after\n");
+        assert_eq!(run("(( 3 apples )) 2>/dev/null; echo after").0, "after\n");
+    }
+
+    #[test]
+    fn arith_error_diagnostic_honors_stderr_redirect() {
+        // Arithmetic-error diagnostics go through the shell's stderr routing, so
+        // a command-scoped `2>/dev/null` silences them (bash parity) — regression
+        // for a prior `eprintln!` that bypassed the redirect.
+        assert_eq!(run("let \"3 apples\" 2>/dev/null; echo after"), ("after\n".into(), 0));
+        assert_eq!(
+            run("declare -i k=\"3 apples\" 2>/dev/null; echo after"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            run("for ((i=0;i<\"a b\";i++)); do :; done 2>/dev/null; echo after").0,
+            "after\n"
+        );
     }
 
     #[test]

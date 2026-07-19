@@ -258,6 +258,12 @@ pub struct Shell {
     /// evaluated as arithmetic before storing (`x=5+3` stores `8`, `x+=2` adds).
     /// Inherited by subshell clones.
     integer_attr: HashSet<String>,
+    /// Names with the lowercase attribute (`declare -l`). Assigned values are
+    /// converted to lowercase before storing. Inherited by subshell clones.
+    lower_attr: HashSet<String>,
+    /// Names with the uppercase attribute (`declare -u`). Assigned values are
+    /// converted to uppercase before storing. Inherited by subshell clones.
+    upper_attr: HashSet<String>,
 }
 
 impl Default for Shell {
@@ -299,6 +305,8 @@ impl Shell {
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
+            lower_attr: HashSet::new(),
+            upper_attr: HashSet::new(),
         }
     }
 
@@ -1420,6 +1428,8 @@ impl Shell {
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
+            lower_attr: self.lower_attr.clone(),
+            upper_attr: self.upper_attr.clone(),
         }
     }
 
@@ -1429,6 +1439,19 @@ impl Shell {
     /// elements (`name[i]=v`), whole arrays (`name=(a b c)`), and append (`+=`).
     /// Apply a variable/array assignment. Returns `false` (and reports) if the
     /// target is readonly, leaving the existing value intact; `true` otherwise.
+    /// Apply the `declare -l`/`-u` case attribute (if any) of `name` to a value
+    /// about to be stored. Lowercase (`-l`) and uppercase (`-u`) are mutually
+    /// exclusive in bash; if both are somehow set, uppercase wins here.
+    fn fold_case_attr(&self, name: &str, val: String) -> String {
+        if self.upper_attr.contains(name) {
+            val.to_uppercase()
+        } else if self.lower_attr.contains(name) {
+            val.to_lowercase()
+        } else {
+            val
+        }
+    }
+
     fn apply_assignment(&mut self, a: &Assignment) -> bool {
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
@@ -1459,6 +1482,14 @@ impl Shell {
                 // arithmetic expression: it is evaluated before storing, and
                 // `+=` performs numeric addition rather than string append.
                 let is_int = self.integer_attr.contains(&a.name);
+                // With `declare -l`/`-u`, fold the value's case before storing.
+                // Integer values are numeric (no case), so folding is skipped
+                // on the integer path.
+                let val = if is_int {
+                    val
+                } else {
+                    self.fold_case_attr(&a.name, val)
+                };
                 if let Some(idx_word) = &a.index {
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
@@ -3299,11 +3330,19 @@ impl Shell {
         let readonly = self.readonly.contains(name);
         let exported = self.exported.contains(name);
         let integer = self.integer_attr.contains(name);
+        let lower = self.lower_attr.contains(name);
+        let upper = self.upper_attr.contains(name);
         // Build the trailing attribute letters shared by all kinds.
         let attr = |kind: &str| -> String {
             let mut s = String::from(kind);
             if integer {
                 s.push('i');
+            }
+            if lower {
+                s.push('l');
+            }
+            if upper {
+                s.push('u');
             }
             if readonly {
                 s.push('r');
@@ -3347,6 +3386,10 @@ impl Shell {
         // Integer attribute: `-i` sets it, `+i` removes it.
         let mut integer = false;
         let mut unset_integer = false;
+        // Case attribute directive, updated in flag order so the last one wins
+        // (`-l`/`-u` are mutually exclusive; `+l`/`+u` clear). `None` = untouched,
+        // `Some(0)` = clear, `Some(1)` = lowercase, `Some(2)` = uppercase.
+        let mut case_dir: Option<u8> = None;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
@@ -3371,7 +3414,9 @@ impl Shell {
                                 unset_integer = true;
                             }
                         }
-                        _ => {} // -g/-l/-u/-n/-p: accepted, no effect here.
+                        'l' => case_dir = Some(if enable { 1 } else { 0 }),
+                        'u' => case_dir = Some(if enable { 2 } else { 0 }),
+                        _ => {} // -g/-n/-p: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -3403,12 +3448,31 @@ impl Shell {
             } else if indexed {
                 self.arrays.entry(name.to_string()).or_default();
             }
-            // Apply/remove the integer attribute before binding the value, so a
-            // `declare -i x=5+3` initial value is evaluated arithmetically.
+            // Apply/remove the integer and case attributes before binding the
+            // value, so a `declare -i x=5+3` initial value is evaluated
+            // arithmetically and `declare -u x=abc` is folded to uppercase.
             if integer {
                 self.integer_attr.insert(name.to_string());
             } else if unset_integer {
                 self.integer_attr.remove(name);
+            }
+            match case_dir {
+                Some(1) => {
+                    // `-l`: lowercase (mutually exclusive with uppercase).
+                    self.lower_attr.insert(name.to_string());
+                    self.upper_attr.remove(name);
+                }
+                Some(2) => {
+                    // `-u`: uppercase.
+                    self.upper_attr.insert(name.to_string());
+                    self.lower_attr.remove(name);
+                }
+                Some(_) => {
+                    // `+l`/`+u`: clear both case attributes.
+                    self.lower_attr.remove(name);
+                    self.upper_attr.remove(name);
+                }
+                None => {}
             }
             if let Some(v) = value {
                 if assoc || indexed {
@@ -3420,7 +3484,8 @@ impl Shell {
                     let n = self.eval_arith_raw(&v).unwrap_or(0);
                     self.vars.insert(name.to_string(), n.to_string());
                 } else {
-                    self.vars.insert(name.to_string(), v);
+                    // Case attribute (`-l`/`-u`), if any, folds the value.
+                    self.vars.insert(name.to_string(), self.fold_case_attr(name, v));
                 }
             }
             if export {
@@ -3694,6 +3759,10 @@ impl Shell {
             self.assoc.remove(a);
             self.exported.remove(a);
             self.funcs.remove(a);
+            // Unsetting a variable also drops its attributes (bash semantics).
+            self.integer_attr.remove(a);
+            self.lower_attr.remove(a);
+            self.upper_attr.remove(a);
         }
         0
     }
@@ -6982,6 +7051,25 @@ mod tests {
         assert_eq!(run("declare -ia arr; arr[0]=3+4; echo ${arr[0]}").0, "7\n");
         // `declare -p` reflects the integer attribute.
         assert_eq!(run("declare -i n=9; declare -p n").0, "declare -i n=\"9\"\n");
+    }
+
+    #[test]
+    fn declare_case_attributes() {
+        // `-l` lowercases assigned values; `-u` uppercases them.
+        assert_eq!(run("declare -l x; x=HeLLo; echo $x").0, "hello\n");
+        assert_eq!(run("declare -u y; y=HeLLo; echo $y").0, "HELLO\n");
+        // The initializer on the declare itself is folded too.
+        assert_eq!(run("declare -u z=abc; echo $z").0, "ABC\n");
+        // `-u` and `-l` are mutually exclusive; the later flag wins.
+        assert_eq!(run("declare -l w; declare -u w; w=AbC; echo $w").0, "ABC\n");
+        // Within one cluster the last case flag wins (`-ul` → lowercase).
+        assert_eq!(run("declare -ul v=AbC; echo $v").0, "abc\n");
+        // `+u` removes the attribute.
+        assert_eq!(run("declare -u q=abc; declare +u q; q=def; echo $q").0, "def\n");
+        // Array elements are folded too.
+        assert_eq!(run("declare -u arr; arr[0]=xy; echo ${arr[0]}").0, "XY\n");
+        // `declare -p` reflects the case attribute.
+        assert_eq!(run("declare -l s=Hi; declare -p s").0, "declare -l s=\"hi\"\n");
     }
 
     #[test]

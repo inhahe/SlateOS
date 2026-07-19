@@ -473,7 +473,7 @@ for `FunctionDef` bodies (which we do not yet have — `declare -f`/`type` rende
 functions only loosely). When that pretty-printer exists, reuse it here and in
 `declare -f`. Low priority: `set`'s variable listing is the common use.
 
-### TD-OILS17. `osh` namerefs (`declare -n`): a few edge cases deviate from bash — OPEN (low priority)
+### TD-OILS17. `osh` namerefs (`declare -n`): one edge case deviates from bash — OPEN (low priority; 2 of 3 originally-listed items now fixed)
 
 **Where:** `userspace/oils/src/interp.rs` (`resolve_ref_name` and the read/write
 chokepoints: `param_value`, `param_elem_value`, `assign_elem`, `array_elements`,
@@ -484,9 +484,12 @@ and writes of the nameref (scalar and array element, `${ref[@]}`, `${#ref[@]}`,
 the pass-array-by-reference-to-a-function pattern) transparently redirect to the
 target, chains are followed with a cycle guard, `declare -p` shows `-n`, and
 `unset -n`/`unset` behave per bash. Remaining deviations:
-1. **`${!ref}` on a nameref** returns the target's *value* (ordinary indirect
-   expansion), whereas bash returns the target *name*. We keep the generic
-   indirect-expansion behavior.
+1. ~~**`${!ref}` on a nameref** returns the target's *value* (ordinary indirect
+   expansion), whereas bash returns the target *name*.~~ **FIXED 2026-07-18.**
+   `expand_indirect` now special-cases a nameref `refname`: `${!ref}` follows
+   the nameref chain (`resolve_ref_name`) and yields the final target *name*,
+   while `$ref` still yields the target value. Regression: the
+   `param_indirect_expansion` test.
 2. **Namerefs to an array element** (`declare -n ref=arr[0]`) are stored verbatim;
    `resolve_ref_name` returns `arr[0]` and the caller's subscript logic does not
    further interpret it, so `$ref` does not resolve to that element.
@@ -500,8 +503,11 @@ target, chains are followed with a cycle guard, `declare -p` shows `-n`, and
    `local_integer_attr_does_not_leak`, `local_restores_shadowed_integer_attr`,
    `local_nameref_does_not_leak`.
 
-**Proper fix:** (1)/(2) special-case namerefs in `expand_indirect` and parse a
-trailing subscript in `resolve_ref_name`. (3) is now fixed (see above).
+**Proper fix:** (1) and (3) are now fixed (see above). For the remaining item
+(2), the read/write chokepoints would need to parse a trailing subscript out of
+the resolved nameref target (e.g. split `arr[0]` into name + subscript) so that
+`$ref` reads and `ref=v` writes the referenced *element* rather than a variable
+literally named `arr[0]`.
 
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 

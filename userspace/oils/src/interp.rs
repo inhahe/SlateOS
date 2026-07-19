@@ -2064,6 +2064,12 @@ impl Shell {
     /// value of `ref`. The referent may itself name an array element
     /// (`ref=a[0]` / `ref=m[key]`).
     fn expand_indirect(&mut self, refname: &str) -> String {
+        // Nameref special case: `${!ref}` where `ref` has the `-n` attribute
+        // expands to the *name* of the referenced variable, not a second level
+        // of indirection (bash). Follow the chain to the final target name.
+        if self.nameref_attr.contains(refname) {
+            return self.resolve_ref_name(refname);
+        }
         let Some(target) = self.param_value(refname) else {
             return String::new();
         };
@@ -8476,6 +8482,12 @@ mod tests {
         assert_eq!(
             run("declare -A m; m[k]=v; ref='m[k]'; echo ${!ref}").0,
             "v\n"
+        );
+        // Nameref special case: `${!ref}` yields the target NAME (not a second
+        // indirection). `$ref` still yields the target value.
+        assert_eq!(
+            run("target=hi; declare -n ref=target; echo ${!ref} $ref").0,
+            "target hi\n"
         );
     }
 

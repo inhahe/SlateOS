@@ -1237,6 +1237,56 @@ top-level item boundary, discarding the remaining items of the current parsed
 input unit before resuming. Also expand the offending assignment's value up-front
 (before storing) so an errored `x=$((1/0))` leaves `x` unset, matching bash.
 
+### TD-OILS-ARITH-ERRTEXT. `osh` arithmetic error *messages* don't match bash's `<expr> : <msg> (error token is "<tok>")` format — OPEN (low priority, cosmetic stderr text; needs AST source-span annotation) — 2026-07-19
+
+**Where:** `userspace/oils/src/arith.rs` — every `Err(ArithError(...))` site
+(`parse`, `parse_atom`, `parse_number`, `apply`, `eval_expr`) and the top-level
+`eval`. `ArithError` is a bare `String` with no position/token info.
+
+**What:** on an arithmetic error, bash prints a very specific format that osh
+does not reproduce. Two patterns (measured against bash 5.2):
+
+- **Pattern A** (parse/eval errors): `<expr> : <message> (error token is "<tok>")`,
+  where `<expr>` is the whole arithmetic string (leading whitespace stripped),
+  there is a space *before* the colon, and `<tok>` is the **remaining unparsed
+  input from the error position to the end** (double-quotes already removed, and
+  it keeps trailing whitespace). Messages seen: `division by 0` (both `/` and
+  `%` by zero), `exponent less than 0`, `syntax error: operand expected`
+  (`1+`, `x=`, `1&&&2`), `syntax error in expression` (`a b`, `1 2` — an operand
+  where an operator was expected), `syntax error: invalid arithmetic operator`
+  (`3.5` — a non-operator char where an operator was expected).
+- **Pattern B** (numeric-base errors): `<token>: <message> (error token is "<token>")`
+  — the prefix is the offending *number token itself* (no leading space, no
+  space before the colon), for `value too great for base` (`09`, `0xZ`) and
+  `invalid arithmetic base` (`99#5`).
+
+Concrete diffs:
+```
+$(( 5/0 ))   bash: 5/0 : division by 0 (error token is "0 ")
+             osh:  arithmetic: division by zero
+$(( 09 ))    bash: 09: value too great for base (error token is "09")
+             osh:  arithmetic: bad octal literal '09'
+$(( 3.5 ))   bash: 3.5 : syntax error: invalid arithmetic operator (error token is ".5 ")
+             osh:  arithmetic: unexpected trailing input in arithmetic: '3.5'
+```
+
+**Why deferred:** the parse-time errors can take the "error token" from the
+parser's `pos` (`chars[errpos..]`), but the **eval-time** errors (division by
+zero, modulo by zero, exponent < 0) fire during `eval_expr`/`apply` on the AST,
+*after* parsing — there is no parser position available, so matching bash's
+token there requires annotating every `Expr` node with a source span (byte
+range) and threading it through construction and evaluation. That is a real
+refactor of the `Expr` enum for purely cosmetic stderr text that essentially no
+script parses. Behavioral (result-affecting) divergences are higher value.
+
+**Proper fix:** (1) add a `span: (usize, usize)` to the relevant `Expr` variants
+(or a parallel side-table keyed by node), populated at parse time from `pos`;
+(2) classify errors into an enum carrying the bash message text and the error
+position; (3) in `eval`, format Pattern A as `{expr.trim_start()} : {msg} (error
+token is "{chars[pos..]}")` and Pattern B (base errors) as `{tok}: {msg} (error
+token is "{tok}")`. Match bash's operand-vs-operator "syntax error" distinction
+by inspecting the char at the failure position.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

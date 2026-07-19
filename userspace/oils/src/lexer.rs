@@ -1124,7 +1124,7 @@ impl Lexer {
             }
             Some('{') => {
                 self.pos += 1;
-                let raw = self.read_balanced('{', '}')?;
+                let raw = self.read_dollar_brace()?;
                 Ok(Some(Seg::ParamBraced(raw)))
             }
             Some('[') => {
@@ -1222,6 +1222,135 @@ impl Lexer {
                 }
             }
             raw.push(c);
+        }
+    }
+
+    /// Read the body of a `${ … }` parameter expansion (`self.pos` is just
+    /// past the opening `{`), returning the raw inner text without the closing
+    /// `}`.
+    ///
+    /// This mirrors bash's `${…}` scanner (`parse_matched_pair` with the
+    /// `P_DOLBRACE` flag), which differs from a naive brace-balancer in one
+    /// important way: a **bare** `{` does NOT open a new nesting level, so the
+    /// expansion closes at the first unquoted, unescaped `}` that is not part
+    /// of a nested `$…` construct. That is why `${x//[{}]/_}` closes at the `}`
+    /// inside `[{}]` (bash: pattern `[{`), and why `${x/\}/X}` treats the
+    /// backslash-escaped `}` as a literal rather than a terminator. Only
+    /// `${`, `$(`, `$((`, and backtick command substitutions start nested
+    /// spans that must balance with their own terminators; single/double
+    /// quotes protect their contents; a backslash escapes the next character.
+    fn read_dollar_brace(&mut self) -> Result<String, LexError> {
+        let mut raw = String::new();
+        loop {
+            let Some(c) = self.bump() else {
+                return Err(LexError("unterminated '{}' expansion".into()));
+            };
+            match c {
+                // First unescaped, unquoted, non-nested `}` closes the span.
+                '}' => return Ok(raw),
+                // Backslash escapes the next character (both are preserved
+                // verbatim so later re-parsing sees the escape).
+                '\\' => {
+                    raw.push('\\');
+                    if let Some(n) = self.bump() {
+                        raw.push(n);
+                    }
+                }
+                // Single quotes: copy verbatim to the closing quote.
+                '\'' => {
+                    raw.push('\'');
+                    loop {
+                        match self.bump() {
+                            Some('\'') => {
+                                raw.push('\'');
+                                break;
+                            }
+                            Some(q) => raw.push(q),
+                            None => return Err(LexError("unterminated single quote".into())),
+                        }
+                    }
+                }
+                // Double quotes: copy to the closing quote, honoring `\`.
+                '"' => {
+                    raw.push('"');
+                    loop {
+                        match self.bump() {
+                            Some('\\') => {
+                                raw.push('\\');
+                                if let Some(n) = self.bump() {
+                                    raw.push(n);
+                                }
+                            }
+                            Some('"') => {
+                                raw.push('"');
+                                break;
+                            }
+                            Some(q) => raw.push(q),
+                            None => return Err(LexError("unterminated double quote".into())),
+                        }
+                    }
+                }
+                // Backtick command substitution: copy verbatim to the closing
+                // backtick (honoring `\``).
+                '`' => {
+                    raw.push('`');
+                    loop {
+                        match self.bump() {
+                            Some('\\') => {
+                                raw.push('\\');
+                                if let Some(n) = self.bump() {
+                                    raw.push(n);
+                                }
+                            }
+                            Some('`') => {
+                                raw.push('`');
+                                break;
+                            }
+                            Some(q) => raw.push(q),
+                            None => return Err(LexError("unterminated backtick".into())),
+                        }
+                    }
+                }
+                // `$…` may begin a nested construct that must balance with its
+                // own terminator; consume it whole so a `}` or `)` inside it is
+                // not mistaken for our terminator.
+                '$' => {
+                    raw.push('$');
+                    match self.peek() {
+                        Some('{') => {
+                            raw.push('{');
+                            self.pos += 1;
+                            let inner = self.read_dollar_brace()?;
+                            raw.push_str(&inner);
+                            raw.push('}');
+                        }
+                        Some('(') => {
+                            raw.push('(');
+                            self.pos += 1;
+                            if self.peek() == Some('(') {
+                                raw.push('(');
+                                self.pos += 1;
+                                let inner = self.read_arith()?;
+                                raw.push_str(&inner);
+                                raw.push_str("))");
+                            } else {
+                                let inner = self.read_balanced('(', ')')?;
+                                raw.push_str(&inner);
+                                raw.push(')');
+                            }
+                        }
+                        Some('[') => {
+                            raw.push('[');
+                            self.pos += 1;
+                            let inner = self.read_balanced('[', ']')?;
+                            raw.push_str(&inner);
+                            raw.push(']');
+                        }
+                        _ => {}
+                    }
+                }
+                _ => raw.push(c),
+            }
         }
     }
 

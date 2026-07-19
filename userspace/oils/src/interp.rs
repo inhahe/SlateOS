@@ -17130,6 +17130,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn param_brace_closes_at_first_unescaped_brace() {
+        // bash's `${…}` scanner closes at the first unquoted, unescaped `}`
+        // that is not part of a nested `$…` construct. A bare `{` does NOT
+        // open a new nesting level, so `${x//[{}]/_}` closes at the `}` inside
+        // `[{}]` (leaving `]/_}` as literal text after the expansion). Pattern
+        // is therefore `[{` which matches nothing in `a{b}c`.
+        assert_eq!(run("x=a{b}c; echo \"${x//[{}]/_}\"").0, "a{b}c]/_}\n");
+        // A backslash-escaped `}` inside the body is a literal, not a
+        // terminator: pattern `\}` matches the literal `}`.
+        assert_eq!(run("x=a}c; echo \"${x/\\}/X}\"").0, "aXc\n");
+        // A backslash-escaped `{` is likewise literal.
+        assert_eq!(run("x=a{b; echo \"${x/\\{/X}\"").0, "aXb\n");
+        // The realistic JSON-stripping case: remove `{`, `}`, and `"`.
+        assert_eq!(
+            run("json='{\"a\":1}'; echo \"${json//[\\{\\}\\\"]/}\"").0,
+            "a:1\n"
+        );
+    }
+
+    #[test]
+    fn param_brace_balances_nested_dollar_constructs() {
+        // Nested `${…}`, `$(…)`, `$((…))`, and backtick spans inside a `${…}`
+        // must balance with their own terminators, so a `}` or `)` within them
+        // is not mistaken for the outer terminator.
+        assert_eq!(run("unset x; y=hi; echo \"${x:-${y}}\"").0, "hi\n");
+        assert_eq!(run("x=; echo \"${x:-$(echo })}\"").0, "}\n");
+        assert_eq!(run("x=; echo \"${x:-`echo }`}\"").0, "}\n");
+        assert_eq!(run("x=q; echo \"${x:-$((1+1))}\"").0, "q\n");
+        // A `}` protected by quotes inside the body is also not a terminator.
+        assert_eq!(run("x=; echo \"${x:-$(echo \"}\")}\"").0, "}\n");
+    }
+
+    #[test]
     fn param_ops_preserve_literal_whitespace() {
         // The pattern of `#`/`%` trims and `^`/`,` case ops, and the argument of
         // the `:-`/`:=`/`:+`/`:?` default ops, are single words with literal

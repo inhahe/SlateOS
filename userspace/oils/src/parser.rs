@@ -1112,6 +1112,33 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
 /// into an [`ArrayIndex`] and the characters after the closing `]` are returned
 /// as the remainder (for operator forms). The closing bracket is taken as the
 /// last `]` in the body so arithmetic subscripts like `arr[i+1]` still parse.
+/// Given `bytes[open] == '['`, return the index of the `]` that closes it,
+/// balancing nested `[`/`]` (arithmetic subscripts like `a[b[0]]`). This is
+/// deliberately *not* "the last `]` in the body": characters after the
+/// subscript can contain their own `]` — e.g. a slice offset with a nested
+/// parameter expansion `${a[@]:${#a[@]}-2}`, where the `]` inside `${#a[@]}`
+/// must not be mistaken for the subscript's close. Brackets inside any valid
+/// nested `${…}`/`$(…)` are themselves balanced, so plain depth counting over
+/// `[`/`]` handles those correctly too.
+fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 fn split_name_subscript(
     bytes: &[char],
 ) -> Result<(String, Option<ArrayIndex>, Vec<char>), ParseError> {
@@ -1133,9 +1160,8 @@ fn split_name_subscript(
     }
     let name: String = bytes[..i].iter().collect();
     if bytes.get(i) == Some(&'[')
-        && let Some(rel) = bytes[i..].iter().rposition(|&c| c == ']')
+        && let Some(close) = matching_subscript_close(bytes, i)
     {
-        let close = i + rel;
         let inner: String = bytes[i + 1..close].iter().collect();
         let index = match inner.as_str() {
             "@" => ArrayIndex::All,

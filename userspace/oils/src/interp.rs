@@ -17364,6 +17364,15 @@ mod tests {
         );
         // Out-of-range slice yields nothing.
         assert_eq!(run("a=(x y); echo \"end[${a[@]:5}]\"").0, "end[]\n");
+        // The slice offset/length may themselves contain a `${…}` whose `]`
+        // must not be mistaken for the subscript's close. (Regression: the
+        // subscript-close scan used the *last* `]` in the body, so
+        // `${a[@]:${#a[@]}-2}` failed to parse as "unterminated '{}'".)
+        assert_eq!(run("a=(1 2 3 4 5); echo ${a[@]:${#a[@]}-2}").0, "4 5\n");
+        assert_eq!(run("a=(1 2 3 4 5); echo ${a[@]:1:${#a[@]}-2}").0, "2 3 4\n");
+        assert_eq!(run("a=(1 2 3); echo ${a[${#a[@]}-1]}").0, "3\n");
+        // A genuinely nested `[` in the subscript still balances correctly.
+        assert_eq!(run("a=(10 20 30); echo ${a[a[0]/10]}").0, "20\n");
     }
 
     #[test]

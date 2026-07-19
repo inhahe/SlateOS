@@ -3367,8 +3367,27 @@ impl Shell {
     }
 
     fn builtin_cd(&mut self, args: &[String]) -> i32 {
+        // Leading `-L`/`-P` select logical (default) vs physical (symlink-
+        // resolved) handling. `-` is a target (`$OLDPWD`), not a flag.
+        let mut physical = false;
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            match a.as_str() {
+                "-L" => physical = false,
+                "-P" => physical = true,
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+        let rest = &args[i..];
+
         // `cd -` returns to `$OLDPWD` and echoes the new directory (bash).
-        let (target, echo) = match args.first().map(String::as_str) {
+        let is_dash = rest.first().map(String::as_str) == Some("-");
+        let (mut target, mut echo) = match rest.first().map(String::as_str) {
             None => (
                 self.param_value("HOME").unwrap_or_else(|| "/".to_string()),
                 false,
@@ -3382,8 +3401,36 @@ impl Shell {
             },
             Some(p) => (p.to_string(), false),
         };
+
+        // `CDPATH` search: a non-explicit relative target is looked up under
+        // each `CDPATH` entry; a match through a non-`.` entry echoes the
+        // destination path (bash), like `cd -`.
+        if !is_dash
+            && !cd_is_explicit(&target)
+            && let Some(cdpath) = self.param_value("CDPATH")
+        {
+            for entry in cdpath.split(':') {
+                let base = if entry.is_empty() { "." } else { entry };
+                let candidate = format!("{base}/{target}");
+                if std::path::Path::new(&candidate).is_dir() {
+                    if base != "." {
+                        echo = true;
+                    }
+                    target = candidate;
+                    break;
+                }
+            }
+        }
+
         match self.change_dir(&target) {
-            Ok(cwd) => {
+            Ok(mut cwd) => {
+                // `-P`: report/store the canonical (symlink-resolved) path.
+                if physical
+                    && let Ok(canon) = std::fs::canonicalize(&cwd)
+                {
+                    cwd = canon.to_string_lossy().into_owned();
+                    self.vars.insert("PWD".to_string(), cwd.clone());
+                }
                 if echo {
                     println!("{cwd}");
                 }
@@ -6929,6 +6976,18 @@ fn eval_test(a: &[&str]) -> bool {
     }
 }
 
+/// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
+/// for which `CDPATH` is not consulted — matching bash, which searches `CDPATH`
+/// only for a bare relative name like `cd subdir`.
+fn cd_is_explicit(t: &str) -> bool {
+    t == "."
+        || t == ".."
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with('/')
+        || std::path::Path::new(t).is_absolute()
+}
+
 fn eval_unary(op: &str, x: &str) -> bool {
     match op {
         "-z" => x.is_empty(),
@@ -8527,6 +8586,63 @@ mod tests {
     }
 
     #[test]
+    fn cd_uses_cdpath_and_echoes() {
+        // Mutates the process-global cwd; serialize with the other cwd tests.
+        let _cwd = cwd_guard();
+        let orig = std::env::current_dir().expect("cwd");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let uniq = format!("osh_cdpath_{}_{}", std::process::id(), nanos);
+        let tmp = std::env::temp_dir();
+        let base = tmp.join(&uniq);
+        let sub = base.join("proj");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        let ptmp = tmp.to_string_lossy().replace('\\', "/");
+
+        // `CDPATH` is a colon-separated list; on the Windows host we use a
+        // *relative* entry (the unique dir name) so the drive-letter `:` in an
+        // absolute path does not collide with the list separator. First cd into
+        // the temp dir (an explicit absolute path, so CDPATH is not consulted),
+        // then `cd proj` resolves through CDPATH=<uniq> to <uniq>/proj.
+        let (o, st) = run(&format!("cd {ptmp}\nCDPATH={uniq}\ncd proj\npwd"));
+        std::env::set_current_dir(&orig).expect("restore cwd");
+
+        assert_eq!(st, 0, "cd via CDPATH should succeed; output {o:?}");
+        // `pwd` (captured) confirms the relative name resolved under CDPATH.
+        // (The `cd` destination echo itself goes to the real stdout, matching
+        // the existing `cd -` behavior, so it is not in the captured buffer.)
+        assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
+        assert!(o.contains("proj"), "expected to land in proj, got {o:?}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn cd_physical_flag_changes_directory() {
+        let _cwd = cwd_guard();
+        let orig = std::env::current_dir().expect("cwd");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let uniq = format!("osh_cdp_{}_{}", std::process::id(), nanos);
+        let dir = std::env::temp_dir().join(&uniq);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let pdir = dir.to_string_lossy().replace('\\', "/");
+
+        // `cd -P dir` accepts the flag and changes directory (canonical PWD).
+        let (o, st) = run(&format!("cd -P {pdir}\npwd"));
+        std::env::set_current_dir(&orig).expect("restore cwd");
+
+        assert_eq!(st, 0, "cd -P should succeed; output {o:?}");
+        assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn time_keyword_runs_pipeline() {
         // `time` runs the pipeline transparently: stdout is unaffected (the
         // report goes to stderr) and the pipeline's exit status is preserved.
@@ -8902,8 +9018,14 @@ mod tests {
 
     /// A unique cwd-relative temp path (no `set_current_dir`, so parallel-safe).
     fn uniq_path(tag: &str) -> String {
+        // Absolute path under the temp dir (forward slashes so it feeds cleanly
+        // into shell scripts). Using an absolute path makes these tests
+        // independent of the process cwd, so they never race the cwd-mutating
+        // tests (`cd`/`pushd`) even though they don't hold `cwd_guard`.
+        let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let tmp = tmp.trim_end_matches('/');
         format!(
-            "osh_{tag}_{}_{}",
+            "{tmp}/osh_{tag}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

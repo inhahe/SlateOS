@@ -262,6 +262,12 @@ pub struct Shell {
     /// `set -x` (xtrace): print each simple command (prefixed `+ `) to stderr
     /// before executing it.
     xtrace: bool,
+    /// `set -f` (noglob): disable pathname (glob) expansion — patterns stay
+    /// literal. Wired into the glob-expansion entry point.
+    noglob: bool,
+    /// `set -a` (allexport): automatically mark every subsequently-assigned
+    /// variable for export. Consulted in `apply_assignment`.
+    allexport: bool,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -375,6 +381,8 @@ impl Shell {
             errexit: false,
             nounset: false,
             xtrace: false,
+            noglob: false,
+            allexport: false,
             errexit_suppress: 0,
             unbound_error: false,
             local_frames: Vec::new(),
@@ -1577,6 +1585,8 @@ impl Shell {
             errexit: self.errexit,
             nounset: self.nounset,
             xtrace: self.xtrace,
+            noglob: self.noglob,
+            allexport: self.allexport,
             // A subshell starts outside any condition/negation context.
             errexit_suppress: 0,
             unbound_error: false,
@@ -1658,6 +1668,11 @@ impl Shell {
         if self.readonly.contains(&a.name) {
             self.emit_stderr(format!("osh: {}: readonly variable\n", a.name).as_bytes());
             return false;
+        }
+        // `set -a` (allexport): any assigned variable is given the export
+        // attribute automatically.
+        if self.allexport {
+            self.exported.insert(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
         match &a.value {
@@ -3314,6 +3329,11 @@ impl Shell {
             // Command-argument context: field-split unquoted expansions, then
             // apply pathname (glob) expansion to each resulting field.
             let fields = self.expand_word_annotated(word);
+            if self.noglob {
+                // `set -f`: pathname expansion is disabled; each field keeps its
+                // literal (quote-removed) text without glob matching.
+                return fields.iter().map(|f| f.iter().map(|e| e.c).collect()).collect();
+            }
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
             let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
             let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
@@ -5777,6 +5797,8 @@ impl Shell {
             'e' => self.errexit = enable,
             'u' => self.nounset = enable,
             'x' => self.xtrace = enable,
+            'f' => self.noglob = enable,
+            'a' => self.allexport = enable,
             _ => {}
         }
     }
@@ -5789,6 +5811,8 @@ impl Shell {
             "errexit" => self.errexit = enable,
             "nounset" => self.nounset = enable,
             "xtrace" => self.xtrace = enable,
+            "noglob" => self.noglob = enable,
+            "allexport" => self.allexport = enable,
             _ => {}
         }
     }
@@ -5800,7 +5824,7 @@ impl Shell {
     /// order, so the reported state is always truthful.
     fn format_option_list(&self, reinput: bool) -> String {
         // Alphabetical, matching bash's ordering of these names.
-        let opts = ["errexit", "nounset", "pipefail", "xtrace"];
+        let opts = ["allexport", "errexit", "noglob", "nounset", "pipefail", "xtrace"];
         let mut s = String::new();
         for name in opts {
             let on = self.shell_option_enabled(name);
@@ -5824,6 +5848,8 @@ impl Shell {
             "errexit" => self.errexit,
             "nounset" => self.nounset,
             "xtrace" => self.xtrace,
+            "noglob" => self.noglob,
+            "allexport" => self.allexport,
             _ => false,
         }
     }
@@ -11128,6 +11154,38 @@ mod tests {
         // yet, TD-OILS18) and 1 otherwise.
         assert_eq!(run("foo() { :; }; declare -f foo").1, 0);
         assert_eq!(run("declare -f nofunc").1, 1);
+    }
+
+    #[test]
+    fn set_f_disables_globbing() {
+        // `set -f` (noglob): glob patterns stay literal.
+        assert_eq!(run("set -f; echo *.xyz").0, "*.xyz\n");
+        assert_eq!(run("set -f; echo a?b").0, "a?b\n");
+        // Long form via `set -o noglob`.
+        assert_eq!(run("set -o noglob; echo *").0, "*\n");
+    }
+
+    #[test]
+    fn set_a_allexport_marks_exported() {
+        // `set -a` (allexport): assigned variables are auto-exported.
+        let (o, s) = run("set -a; foo=bar; declare -p foo");
+        assert_eq!(s, 0);
+        assert!(o.contains("declare -x"), "declare -p output: {o:?}");
+        assert!(o.contains("foo"), "declare -p output: {o:?}");
+    }
+
+    #[test]
+    fn set_o_lists_noglob_and_allexport() {
+        let (o, _) = run("set -o");
+        assert!(o.contains("noglob"), "set -o list: {o:?}");
+        assert!(o.contains("allexport"), "set -o list: {o:?}");
+    }
+
+    #[test]
+    fn test_o_operator_reads_noglob() {
+        // `[ -o noglob ]` reflects the current option state.
+        assert_eq!(run("set -f; [ -o noglob ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -o noglob ]; echo $?").0, "1\n");
     }
 
     #[test]

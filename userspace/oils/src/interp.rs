@@ -491,6 +491,16 @@ pub struct Shell {
     /// caches every PATH search here and consults it before re-searching; the
     /// table is inherited by subshell clones. See `resolve_external`.
     cmd_hash: std::collections::HashMap<String, (std::path::PathBuf, u64)>,
+    /// Per-shell resource limits for the `ulimit` builtin, keyed by the bash
+    /// option letter (`'n'`, `'s'`, …). The value is a `(soft, hard)` pair in
+    /// the *display units* bash uses for that resource (`None` == unlimited).
+    ///
+    /// This is a shell-level model: osh tracks and reports limits and honours
+    /// get/set/`-H`/`-S` semantics, but does not yet query or enforce the real
+    /// kernel `getrlimit(2)`/`setrlimit(2)` limits on slateos (host builds have
+    /// no rlimit concept at all). See known-issues `TD-OILS-ULIMIT`. Inherited
+    /// by subshell clones, matching bash's per-process limit inheritance.
+    rlimits: std::collections::HashMap<char, (Option<u64>, Option<u64>)>,
 }
 
 impl Default for Shell {
@@ -566,6 +576,7 @@ impl Shell {
             jobs: Vec::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
+            rlimits: default_rlimits(),
         };
         sh.seed_shell_vars();
         sh
@@ -2354,6 +2365,8 @@ impl Shell {
             umask_val: self.umask_val,
             // The command hash table is inherited by subshells (bash).
             cmd_hash: self.cmd_hash.clone(),
+            // Resource limits are a process attribute inherited by subshells.
+            rlimits: self.rlimits.clone(),
         }
     }
 
@@ -6602,6 +6615,7 @@ impl Shell {
             "help" => self.builtin_help(args, out, redir),
             "hash" => self.builtin_hash(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
+            "ulimit" => self.builtin_ulimit(args, out, redir),
             "exec" => {
                 if args.is_empty() {
                     // Redirection-only `exec`: rebind the shell's own fds for
@@ -8127,6 +8141,129 @@ impl Shell {
             format!("{body}\n")
         };
         self.write_bytes(out, redir, line.as_bytes())
+    }
+
+    /// The `ulimit` builtin: report or set per-shell resource limits.
+    ///
+    /// This models bash's `ulimit` at the shell level — it tracks a `(soft,
+    /// hard)` pair per resource in [`Shell::rlimits`], supports the standard
+    /// option letters, `-a`, `-H`/`-S`, and the `unlimited`/`hard`/`soft`
+    /// operands — but does not query or enforce the real kernel limits yet (see
+    /// known-issues `TD-OILS-ULIMIT`). Modelled on Linux bash's option set,
+    /// which is what slateos (a unix/linux-family target) mirrors.
+    fn builtin_ulimit(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut resources: Vec<char> = Vec::new();
+        let mut want_hard = false;
+        let mut want_soft = false;
+        let mut show_all = false;
+        let mut value: Option<&str> = None;
+
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
+                for ch in flags.chars() {
+                    match ch {
+                        'H' => want_hard = true,
+                        'S' => want_soft = true,
+                        'a' => show_all = true,
+                        c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => resources.push(c),
+                        other => {
+                            self.emit_stderr(
+                                format!("osh: ulimit: -{other}: invalid option\n").as_bytes(),
+                            );
+                            self.emit_stderr(ULIMIT_USAGE.as_bytes());
+                            return 2;
+                        }
+                    }
+                }
+                i += 1;
+            } else {
+                value = Some(a.as_str());
+                i += 1;
+                break;
+            }
+        }
+        // Any tokens after the value operand are extra arguments (bash errors).
+        if i < args.len() {
+            self.emit_stderr(b"osh: ulimit: too many arguments\n");
+            return 1;
+        }
+
+        if show_all {
+            return self.ulimit_print_all(want_hard, out, redir);
+        }
+
+        // With no resource letters, bash defaults to the file-size limit (`-f`).
+        if resources.is_empty() {
+            resources.push('f');
+        }
+
+        // Neither -H nor -S: setting affects both, showing reports the soft limit.
+        let set_soft = want_soft || !want_hard;
+        let set_hard = want_hard || !want_soft;
+        let show_hard = want_hard;
+
+        if let Some(v) = value {
+            for &opt in &resources {
+                let entry = self.rlimits.entry(opt).or_insert((None, None));
+                let new = match v {
+                    "unlimited" => None,
+                    "hard" => entry.1,
+                    "soft" => entry.0,
+                    n => match n.parse::<u64>() {
+                        Ok(parsed) => Some(parsed),
+                        Err(_) => {
+                            self.emit_stderr(
+                                format!("osh: ulimit: {n}: invalid limit argument\n").as_bytes(),
+                            );
+                            return 1;
+                        }
+                    },
+                };
+                if set_soft {
+                    entry.0 = new;
+                }
+                if set_hard {
+                    entry.1 = new;
+                }
+            }
+            return 0;
+        }
+
+        // No value: report. A single resource prints the bare value; multiple
+        // resources print one labelled line each (matching bash).
+        if resources.len() == 1 {
+            let opt = resources[0];
+            let (soft, hard) = self.rlimits.get(&opt).copied().unwrap_or((None, None));
+            let v = if show_hard { hard } else { soft };
+            let line = format!("{}\n", ulimit_value_str(v));
+            return self.write_bytes(out, redir, line.as_bytes());
+        }
+        let mut buf = Vec::new();
+        for &opt in &resources {
+            if let Some(spec) = RLIMIT_SPECS.iter().find(|s| s.opt == opt) {
+                let (soft, hard) = self.rlimits.get(&opt).copied().unwrap_or((None, None));
+                let v = if show_hard { hard } else { soft };
+                buf.extend_from_slice(ulimit_line(spec, v).as_bytes());
+            }
+        }
+        self.write_bytes(out, redir, &buf)
+    }
+
+    /// Print every known resource limit in bash's `ulimit -a` format.
+    fn ulimit_print_all(&mut self, show_hard: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut buf = Vec::new();
+        for spec in RLIMIT_SPECS {
+            let (soft, hard) = self.rlimits.get(&spec.opt).copied().unwrap_or((None, None));
+            let v = if show_hard { hard } else { soft };
+            buf.extend_from_slice(ulimit_line(spec, v).as_bytes());
+        }
+        self.write_bytes(out, redir, &buf)
     }
 
     /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
@@ -12375,12 +12512,75 @@ const BUILTIN_NAMES: &[&str] = &[
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
-    "exec",
+    "ulimit", "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
 ];
 
 fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
+}
+
+/// A resource-limit descriptor for the `ulimit` builtin.
+struct RlimitSpec {
+    /// Single option letter (`ulimit -n` → `'n'`).
+    opt: char,
+    /// Human description printed by `ulimit -a`.
+    label: &'static str,
+    /// Unit annotation (`"blocks"`, `"kbytes"`, …); empty means no unit word.
+    unit: &'static str,
+    /// Starting soft-limit value in display units (`None` == unlimited).
+    default: Option<u64>,
+}
+
+/// The resource limits osh models, in the order bash prints them for `-a`.
+/// Values/units mirror Linux bash; defaults are conventional soft limits.
+const RLIMIT_SPECS: &[RlimitSpec] = &[
+    RlimitSpec { opt: 'c', label: "core file size", unit: "blocks", default: Some(0) },
+    RlimitSpec { opt: 'd', label: "data seg size", unit: "kbytes", default: None },
+    RlimitSpec { opt: 'e', label: "scheduling priority", unit: "", default: Some(0) },
+    RlimitSpec { opt: 'f', label: "file size", unit: "blocks", default: None },
+    RlimitSpec { opt: 'i', label: "pending signals", unit: "", default: None },
+    RlimitSpec { opt: 'l', label: "max locked memory", unit: "kbytes", default: None },
+    RlimitSpec { opt: 'm', label: "max memory size", unit: "kbytes", default: None },
+    RlimitSpec { opt: 'n', label: "open files", unit: "", default: Some(1024) },
+    RlimitSpec { opt: 'p', label: "pipe size", unit: "512 bytes", default: Some(8) },
+    RlimitSpec { opt: 'q', label: "POSIX message queues", unit: "bytes", default: Some(819200) },
+    RlimitSpec { opt: 'r', label: "real-time priority", unit: "", default: Some(0) },
+    RlimitSpec { opt: 's', label: "stack size", unit: "kbytes", default: Some(8192) },
+    RlimitSpec { opt: 't', label: "cpu time", unit: "seconds", default: None },
+    RlimitSpec { opt: 'u', label: "max user processes", unit: "", default: None },
+    RlimitSpec { opt: 'v', label: "virtual memory", unit: "kbytes", default: None },
+    RlimitSpec { opt: 'x', label: "file locks", unit: "", default: None },
+];
+
+const ULIMIT_USAGE: &str = "ulimit: usage: ulimit [-SHacdefilmnpqrstuvx] [limit]\n";
+
+/// Build the initial `(soft, hard)` limit table. Soft = the spec default,
+/// hard = unlimited (osh does not enforce, so an unlimited hard ceiling is the
+/// honest model — see `TD-OILS-ULIMIT`).
+fn default_rlimits() -> std::collections::HashMap<char, (Option<u64>, Option<u64>)> {
+    RLIMIT_SPECS.iter().map(|s| (s.opt, (s.default, None))).collect()
+}
+
+/// Format a limit value for display (`None` → `unlimited`).
+fn ulimit_value_str(v: Option<u64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "unlimited".to_string(),
+    }
+}
+
+/// Render one `ulimit -a` line: description, right-aligned `(unit, -x)` token,
+/// then the value. The `)` is placed at a fixed column so the tokens align.
+fn ulimit_line(spec: &RlimitSpec, v: Option<u64>) -> String {
+    let paren = if spec.unit.is_empty() {
+        format!("(-{})", spec.opt)
+    } else {
+        format!("({}, -{})", spec.unit, spec.opt)
+    };
+    // Column of the closing paren; pad the description so `)` lands there.
+    let width = 36usize.saturating_sub(paren.len());
+    format!("{:<width$}{} {}\n", spec.label, paren, ulimit_value_str(v), width = width)
 }
 
 /// The declaration builtins whose `name=value` operands bash treats as
@@ -18191,6 +18391,52 @@ mod tests {
         assert_eq!(run("read -t 0 </dev/null; echo $?"), ("0\n".into(), 0));
         // It must NOT consume: a following `read` still sees the first line.
         assert_eq!(run("{ read -t 0; read x; echo \"[$x]\"; } <<< \"keep\""), ("[keep]\n".into(), 0));
+    }
+
+    #[test]
+    fn ulimit_reports_and_sets_limits() {
+        // A single resource prints the bare value; `-n` defaults to 1024.
+        assert_eq!(run("ulimit -n"), ("1024\n".into(), 0));
+        // No option letter defaults to the file-size limit (`-f`), unlimited.
+        assert_eq!(run("ulimit"), ("unlimited\n".into(), 0));
+        // Setting a soft limit is honoured by a subsequent query.
+        assert_eq!(run("ulimit -n 512; ulimit -n"), ("512\n".into(), 0));
+        // `unlimited` operand round-trips.
+        assert_eq!(run("ulimit -c unlimited; ulimit -c"), ("unlimited\n".into(), 0));
+        // Setting without -H/-S touches both; -H then reads the hard value.
+        assert_eq!(run("ulimit -n 256; ulimit -Hn"), ("256\n".into(), 0));
+        // -S alone leaves the hard limit unchanged (still unlimited by default).
+        assert_eq!(run("ulimit -Sn 100; ulimit -Hn"), ("unlimited\n".into(), 0));
+        // Accepting a set operand returns success (common `ulimit -c 0` idiom).
+        assert_eq!(run("ulimit -c 0; echo $?"), ("0\n".into(), 0));
+    }
+
+    #[test]
+    fn ulimit_errors_and_multi() {
+        // An unknown option letter is a usage error (exit 2), like bash.
+        let (out, code) = run("ulimit -z 2>&1");
+        assert_eq!(code, 2);
+        assert!(out.contains("invalid option"), "got {out:?}");
+        // A bad limit argument is rejected without changing state.
+        let (out, code) = run("ulimit -n abc 2>&1; ulimit -n");
+        assert_eq!(code, 0); // trailing `ulimit -n` succeeds
+        assert!(out.contains("invalid limit argument"), "got {out:?}");
+        assert!(out.trim_end().ends_with("1024"), "limit unchanged: {out:?}");
+        // Multiple resource letters print one labelled line each.
+        let (out, code) = run("ulimit -c -n");
+        assert_eq!(code, 0);
+        assert!(out.contains("core file size") && out.contains("open files"), "got {out:?}");
+    }
+
+    #[test]
+    fn ulimit_dash_a_lists_all() {
+        let (out, code) = run("ulimit -a");
+        assert_eq!(code, 0);
+        // One line per modelled resource, in bash's order.
+        assert_eq!(out.lines().count(), 16);
+        assert!(out.contains("open files"));
+        assert!(out.contains("(-n) 1024"));
+        assert!(out.starts_with("core file size"));
     }
 
     #[test]

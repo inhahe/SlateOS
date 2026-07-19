@@ -3246,11 +3246,11 @@ impl Shell {
     }
 
     /// `declare`/`typeset`/`local`: create typed variables. Supports `-A`
-    /// (associative array), `-a` (indexed array), and scalar `name=value`.
-    /// Other type flags (`-r`, `-x`, `-i`, `-g`, …) are accepted but only
-    /// `-x`/`-g`'s export effect via a following `export` is honoured elsewhere;
-    /// here they are parsed and ignored. The combined form `declare -A m=(…)`
-    /// is not supported (parse restriction) — use `declare -A m; m=([k]=v …)`.
+    /// (associative array), `-a` (indexed array), `-x` (export), `-r`
+    /// (readonly), `-i`/`+i` (integer attribute — assignments evaluated as
+    /// arithmetic), and scalar `name=value`. Other type flags (`-g`, `-l`,
+    /// `-u`, `-n`) are accepted but have no effect here. The combined form
+    /// `declare -A m=(…)` is handled by [`Shell::exec_declare_with_arrays`].
     /// `declare`/`typeset` (`is_local = false`) and `local` (`is_local = true`).
     /// For `local`, each named variable is first shadowed in the current
     /// function frame; using it outside a function is an error.
@@ -3298,9 +3298,13 @@ impl Shell {
     fn format_declare_def(&self, name: &str) -> Option<String> {
         let readonly = self.readonly.contains(name);
         let exported = self.exported.contains(name);
+        let integer = self.integer_attr.contains(name);
         // Build the trailing attribute letters shared by all kinds.
         let attr = |kind: &str| -> String {
             let mut s = String::from(kind);
+            if integer {
+                s.push('i');
+            }
             if readonly {
                 s.push('r');
             }
@@ -6976,6 +6980,8 @@ mod tests {
         assert_eq!(run("declare -i w=4; declare +i w; w=1+2; echo $w").0, "1+2\n");
         // Integer array elements are evaluated too.
         assert_eq!(run("declare -ia arr; arr[0]=3+4; echo ${arr[0]}").0, "7\n");
+        // `declare -p` reflects the integer attribute.
+        assert_eq!(run("declare -i n=9; declare -p n").0, "declare -i n=\"9\"\n");
     }
 
     #[test]

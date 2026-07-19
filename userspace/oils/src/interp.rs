@@ -406,6 +406,13 @@ pub struct Shell {
     /// top-level one (which bash reports as an error, status 2, without
     /// unwinding). Reset to 0 in subshell clones.
     source_depth: u32,
+    /// Nesting depth of enclosing loops (`for`/`while`/`until`/`select`) whose
+    /// body is currently executing. `break`/`continue` are only meaningful
+    /// inside a loop: bash reports "only meaningful in a …" to stderr, returns
+    /// status 0, and keeps executing when this is 0. Reset to 0 on function
+    /// entry (a `break` inside a function must not escape to a caller's loop,
+    /// matching bash) and in subshell clones.
+    loop_depth: u32,
     /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
@@ -531,6 +538,7 @@ impl Shell {
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
             source_depth: 0,
+            loop_depth: 0,
             readonly: HashSet::new(),
             shopt: HashMap::new(),
             integer_attr: HashSet::new(),
@@ -1067,10 +1075,13 @@ impl Shell {
         match cmd {
             Command::Simple(sc) => self.exec_simple(sc, out, stdin),
             Command::If(c) => self.exec_if(c, out, stdin),
-            Command::Loop(c) => self.exec_loop(c, out, stdin),
-            Command::For(c) => self.exec_for(c, out, stdin),
-            Command::ForArith(c) => self.exec_for_arith(c, out, stdin),
-            Command::Select(c) => self.exec_select(c, out, stdin),
+            // `break`/`continue` are only meaningful inside a loop body, so we
+            // track loop nesting around each loop executor. `loop_depth` gates
+            // the `break`/`continue` builtins (0 → warn-and-continue like bash).
+            Command::Loop(c) => self.in_loop(|s| s.exec_loop(c, out, stdin)),
+            Command::For(c) => self.in_loop(|s| s.exec_for(c, out, stdin)),
+            Command::ForArith(c) => self.in_loop(|s| s.exec_for_arith(c, out, stdin)),
+            Command::Select(c) => self.in_loop(|s| s.exec_select(c, out, stdin)),
             Command::Function(f) => {
                 self.funcs.insert(f.name.clone(), f.body.clone());
                 self.last_status = 0;
@@ -1126,6 +1137,16 @@ impl Shell {
         }
         self.last_status = 0;
         Flow::Next
+    }
+
+    /// Run `f` with the loop-nesting counter bumped, so `break`/`continue`
+    /// executed anywhere inside `f` see a non-zero `loop_depth` and are treated
+    /// as meaningful. The counter is always restored, including on early return.
+    fn in_loop<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.loop_depth = self.loop_depth.saturating_add(1);
+        let r = f(self);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        r
     }
 
     fn exec_loop(&mut self, c: &LoopClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
@@ -2019,6 +2040,10 @@ impl Shell {
             // A subshell starts a fresh `source` nesting (it is not itself a
             // sourced script), though it inherits the function context above.
             source_depth: 0,
+            // A subshell body is not itself inside the parent's loop for the
+            // purpose of `break`/`continue`: bash resets loop_level in a
+            // subshell, so `(break)` inside a loop is an error, not a break.
+            loop_depth: 0,
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
             integer_attr: self.integer_attr.clone(),
@@ -3388,7 +3413,12 @@ impl Shell {
         self.fn_stack.push(name.to_string());
         self.call_line_stack.push(self.current_line);
         self.refresh_funcname();
+        // A function body starts a fresh loop-nesting context: a `break`/
+        // `continue` in the body must not escape to a loop at the call site
+        // (bash resets loop_level on function entry). Save and reset.
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let flow = self.exec_program(&body, out, stdin);
+        self.loop_depth = saved_loop_depth;
         // The RETURN trap fires when the function returns, before its locals are
         // torn down (so the handler still sees the function's scope), matching
         // bash.
@@ -5970,13 +6000,26 @@ impl Shell {
                 }
             }
             "break" => {
-                let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                flow = Flow::Break(n.max(1));
+                // Outside any loop, `break` is a no-op: bash warns to stderr,
+                // returns status 0, and continues executing the next command
+                // rather than unwinding.
+                if self.loop_depth == 0 {
+                    self.errln("osh: break: only meaningful in a `for', `while', or `until' loop");
+                } else {
+                    let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                    flow = Flow::Break(n.max(1));
+                }
                 0
             }
             "continue" => {
-                let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                flow = Flow::Continue(n.max(1));
+                if self.loop_depth == 0 {
+                    self.errln(
+                        "osh: continue: only meaningful in a `for', `while', or `until' loop",
+                    );
+                } else {
+                    let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                    flow = Flow::Continue(n.max(1));
+                }
                 0
             }
             _ => {
@@ -16102,6 +16145,35 @@ mod tests {
         // A `return` in a top-level subshell is still an error (no unwind).
         let (o3, _) = run("( echo a; return 3; echo b ) 2>/dev/null; echo done");
         assert_eq!(o3, "a\nb\ndone\n");
+    }
+
+    #[test]
+    fn break_continue_outside_loop_warn_and_continue() {
+        // Outside a loop, `break` warns to stderr, returns status 0, and does
+        // NOT unwind — the following command still runs. (bash: same.)
+        let (o, _) = run("echo before; break; echo after");
+        assert_eq!(o, "before\nafter\n");
+        let (o2, _) = run("{ break; } 2>&1; echo \"s=$?\"");
+        assert_eq!(
+            o2,
+            "osh: break: only meaningful in a `for', `while', or `until' loop\ns=0\n"
+        );
+        let (o3, _) = run("{ continue; } 2>&1; echo \"s=$?\"");
+        assert_eq!(
+            o3,
+            "osh: continue: only meaningful in a `for', `while', or `until' loop\ns=0\n"
+        );
+        // Inside a loop, `break` still works normally.
+        assert_eq!(run("for i in 1 2 3; do echo $i; break; done; echo done").0, "1\ndone\n");
+        // A `break` inside a function called from a loop must NOT break the
+        // enclosing loop: bash resets loop nesting on function entry, so the
+        // break is an error inside the function and the loop keeps iterating.
+        let (o4, _) = run("f() { break; }; for i in 1 2 3; do echo $i; f; done 2>/dev/null");
+        assert_eq!(o4, "1\n2\n3\n");
+        // A `break` in a subshell inside a loop likewise does not break the
+        // loop (bash resets loop nesting in the subshell).
+        let (o5, _) = run("for i in 1 2; do echo $i; ( break ); done 2>/dev/null");
+        assert_eq!(o5, "1\n2\n");
     }
 
     #[test]

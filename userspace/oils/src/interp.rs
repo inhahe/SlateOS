@@ -7909,28 +7909,44 @@ impl Shell {
         let mut set = false;
         let mut unset = false;
         let mut quiet = false;
+        // `-o`: operate on `set -o` options (noclobber, errexit, …) rather than
+        // shopt options. Flags may be clustered (`shopt -qo NAME`, `-so NAME`).
+        let mut opt_o = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             match arg.as_str() {
-                "-s" => set = true,
-                "-u" => unset = true,
-                "-q" => quiet = true,
-                // `-o` restricts to `set -o` options; not modeled here — accept
-                // and ignore so `shopt -o …` doesn't hard-error.
-                "-o" | "-p" => {}
                 "--" => {
                     i += 1;
                     break;
                 }
                 s if s.starts_with('-') && s.len() > 1 => {
-                    self.emit_stderr(format!("osh: shopt: {s}: invalid option\n").as_bytes());
-                    return 2;
+                    for c in s.chars().skip(1) {
+                        match c {
+                            's' => set = true,
+                            'u' => unset = true,
+                            'q' => quiet = true,
+                            'o' => opt_o = true,
+                            'p' => {} // `-p`: re-inputtable listing; treated as list.
+                            _ => {
+                                self.emit_stderr(
+                                    format!("osh: shopt: -{c}: invalid option\n").as_bytes(),
+                                );
+                                return 2;
+                            }
+                        }
+                    }
                 }
                 _ => break,
             }
             i += 1;
         }
         let names: Vec<&String> = args[i..].iter().collect();
+
+        // `-o` mode: query/toggle `set -o` shell options, reusing the same
+        // machinery (and `%-15s\t%s` listing format) as the `set` builtin.
+        if opt_o {
+            return self.shopt_o_mode(&names, set, unset, quiet, out, redir);
+        }
 
         // Query/list mode: neither -s nor -u.
         if !set && !unset {
@@ -7939,7 +7955,7 @@ impl Shell {
                 let mut listing = String::new();
                 for opt in KNOWN {
                     let on = self.shopt.get(*opt).copied().unwrap_or(false);
-                    listing.push_str(&format!("{opt}\t{}\n", if on { "on" } else { "off" }));
+                    listing.push_str(&format!("{opt:<15}\t{}\n", if on { "on" } else { "off" }));
                 }
                 if quiet {
                     return 0;
@@ -7960,7 +7976,7 @@ impl Shell {
                 if !on {
                     all_on = false;
                 }
-                listing.push_str(&format!("{name}\t{}\n", if on { "on" } else { "off" }));
+                listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
             }
             if !quiet {
                 self.write_bytes(out, redir, listing.as_bytes());
@@ -7981,6 +7997,98 @@ impl Shell {
             self.shopt.insert(name.clone(), set);
         }
         status
+    }
+
+    /// `shopt -o …`: the `-o` variant operates on `set -o` options. Handles the
+    /// list (`shopt -o`), query (`shopt -o NAME`), and set/unset
+    /// (`shopt -so NAME` / `shopt -uo NAME`) forms, reusing the `set` builtin's
+    /// option registry so only the options osh actually models report a live
+    /// state (others are accepted but inert, as with `set -o`).
+    fn shopt_o_mode(
+        &mut self,
+        names: &[&String],
+        set: bool,
+        unset: bool,
+        quiet: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> i32 {
+        // The full set of standard `set -o` option names, so a real option like
+        // `braceexpand` isn't rejected even though osh doesn't model it; only a
+        // truly unknown name is an error (matching bash).
+        const SETO_NAMES: &[&str] = &[
+            "allexport",
+            "braceexpand",
+            "emacs",
+            "errexit",
+            "errtrace",
+            "functrace",
+            "hashall",
+            "histexpand",
+            "history",
+            "ignoreeof",
+            "interactive-comments",
+            "keyword",
+            "monitor",
+            "noclobber",
+            "noexec",
+            "noglob",
+            "nolog",
+            "notify",
+            "nounset",
+            "onecmd",
+            "physical",
+            "pipefail",
+            "posix",
+            "privileged",
+            "verbose",
+            "vi",
+            "xtrace",
+        ];
+
+        // Set/unset mode.
+        if set || unset {
+            let mut status = 0;
+            for name in names {
+                if !SETO_NAMES.contains(&name.as_str()) {
+                    self.emit_stderr(
+                        format!("osh: shopt: {name}: invalid option name\n").as_bytes(),
+                    );
+                    status = 1;
+                    continue;
+                }
+                self.set_named_option(name, set);
+            }
+            return status;
+        }
+
+        // List mode: no names → dump every modeled option in `set -o` format.
+        if names.is_empty() {
+            if quiet {
+                return 0;
+            }
+            let listing = self.format_option_list(false);
+            return self.write_bytes(out, redir, listing.as_bytes());
+        }
+
+        // Query mode: status 0 iff every named option is enabled.
+        let mut all_on = true;
+        let mut listing = String::new();
+        for name in names {
+            if !SETO_NAMES.contains(&name.as_str()) {
+                self.emit_stderr(format!("osh: shopt: {name}: invalid option name\n").as_bytes());
+                return 1;
+            }
+            let on = self.shell_option_enabled(name);
+            if !on {
+                all_on = false;
+            }
+            listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
+        }
+        if !quiet {
+            self.write_bytes(out, redir, listing.as_bytes());
+        }
+        i32::from(!all_on)
     }
 
     fn builtin_unset(&mut self, args: &[String]) -> i32 {
@@ -8207,8 +8315,10 @@ impl Shell {
                 let flag = if on { "-o" } else { "+o" };
                 s.push_str(&format!("set {flag} {name}\n"));
             } else {
+                // bash's `set -o` listing is `%-15s\t%s` — a 15-wide left-
+                // justified name, then a TAB, then the on/off state.
                 let state = if on { "on" } else { "off" };
-                s.push_str(&format!("{name:<15}{state}\n"));
+                s.push_str(&format!("{name:<15}\t{state}\n"));
             }
         }
         s
@@ -14987,6 +15097,34 @@ mod tests {
     }
 
     #[test]
+    fn shopt_o_queries_set_o_options() {
+        // `shopt -o NAME` operates on `set -o` options, not shopt options.
+        // Off by default → status 1, and the listing uses `%-15s\t%s`.
+        assert_eq!(
+            run("shopt -o noclobber; echo $?").0,
+            "noclobber      \toff\n1\n"
+        );
+        // Enabling via `set -o` is reflected; `-q` suppresses output.
+        assert_eq!(
+            run("set -o noclobber; shopt -qo noclobber; echo $?").0,
+            "0\n"
+        );
+        // `shopt -so NAME` enables the option (like `set -o NAME`).
+        assert_eq!(
+            run("shopt -so noclobber; [[ -o noclobber ]] && echo on").0,
+            "on\n"
+        );
+        // A truly unknown option name is a status-1 error.
+        assert_eq!(run("shopt -o bogus_xyz 2>/dev/null; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn shopt_listing_is_padded() {
+        // The plain `shopt` listing pads the name to 15 then a TAB (bash).
+        assert_eq!(run("shopt nullglob").0, "nullglob       \toff\n");
+    }
+
+    #[test]
     fn shopt_dotglob_includes_hidden() {
         let _cwd = cwd_guard();
         let uniq = format!(
@@ -16512,13 +16650,14 @@ mod tests {
 
     #[test]
     fn set_o_lists_options() {
-        // `set -o` prints each modelled option with its on/off state.
+        // `set -o` prints each modelled option with its on/off state, using
+        // bash's `%-15s\t%s` layout (15-wide name, then a TAB, then the state).
         let (o, s) = run("set -e; set -o");
         assert_eq!(s, 0);
-        assert!(o.contains("errexit        on\n"), "got {o:?}");
-        assert!(o.contains("nounset        off\n"), "got {o:?}");
-        assert!(o.contains("pipefail       off\n"), "got {o:?}");
-        assert!(o.contains("xtrace         off\n"), "got {o:?}");
+        assert!(o.contains("errexit        \ton\n"), "got {o:?}");
+        assert!(o.contains("nounset        \toff\n"), "got {o:?}");
+        assert!(o.contains("pipefail       \toff\n"), "got {o:?}");
+        assert!(o.contains("xtrace         \toff\n"), "got {o:?}");
     }
 
     #[test]

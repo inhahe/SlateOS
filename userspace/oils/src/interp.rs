@@ -4669,17 +4669,60 @@ impl Shell {
         }
     }
 
-    /// Replace `$name`, `${name}`, and `$1` inside an arithmetic string with
-    /// the parameter's (numeric) value.
-    fn expand_arith_params(&self, expr: &str) -> String {
+    /// Expand `$name`, `${name}`, `$1`, command substitutions `$(cmd)` /
+    /// `` `cmd` ``, and nested arithmetic `$((expr))` inside an arithmetic
+    /// string, substituting each with its (numeric or textual) value. Bare
+    /// identifiers (no `$`) are left for the arithmetic evaluator to resolve via
+    /// `VarLookup`. Command substitutions and nested arithmetic must be expanded
+    /// here (before evaluation) so `$(( $(f) + $((n-1)) ))` works.
+    fn expand_arith_params(&mut self, expr: &str) -> String {
         let chars: Vec<char> = expr.chars().collect();
         let mut out = String::new();
         let mut i = 0;
         while i < chars.len() {
-            if chars[i] == '$' {
+            if chars[i] == '`' {
+                // Backtick command substitution: consume up to the next backtick.
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && chars[j] != '`' {
+                    j += 1;
+                }
+                let inner: String = chars[start..j].iter().collect();
+                i = if j < chars.len() { j + 1 } else { j };
+                out.push_str(self.run_command_sub_text(&inner).trim());
+                continue;
+            }
+            if chars[i] != '$' {
+                out.push(chars[i]);
                 i += 1;
-                let name = if chars.get(i) == Some(&'{') {
+                continue;
+            }
+            // `chars[i] == '$'`
+            match chars.get(i + 1) {
+                Some('(') if chars.get(i + 2) == Some(&'(') => {
+                    // `$((expr))` — nested arithmetic. Find the matching `))`.
+                    if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
+                        let val = self.arith_sub(&inner);
+                        out.push_str(if val.trim().is_empty() { "0" } else { val.trim() });
+                        i = next;
+                        continue;
+                    }
+                    // Unbalanced: fall through and emit the literal `$`.
+                    out.push('$');
                     i += 1;
+                }
+                Some('(') => {
+                    // `$(cmd)` — command substitution. Find the matching `)`.
+                    if let Some((inner, next)) = Self::scan_paren_group(&chars, i + 2) {
+                        out.push_str(self.run_command_sub_text(&inner).trim());
+                        i = next;
+                        continue;
+                    }
+                    out.push('$');
+                    i += 1;
+                }
+                Some('{') => {
+                    i += 2;
                     let mut n = String::new();
                     while i < chars.len() && chars[i] != '}' {
                         n.push(chars[i]);
@@ -4688,24 +4731,76 @@ impl Shell {
                     if i < chars.len() {
                         i += 1; // consume '}'
                     }
-                    n
-                } else {
+                    let val = self.param_value(&n).unwrap_or_default();
+                    let val = val.trim();
+                    out.push_str(if val.is_empty() { "0" } else { val });
+                }
+                _ => {
+                    i += 1;
                     let mut n = String::new();
                     while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                         n.push(chars[i]);
                         i += 1;
                     }
-                    n
-                };
-                let val = self.param_value(&name).unwrap_or_default();
-                let val = val.trim();
-                out.push_str(if val.is_empty() { "0" } else { val });
-            } else {
-                out.push(chars[i]);
-                i += 1;
+                    let val = self.param_value(&n).unwrap_or_default();
+                    let val = val.trim();
+                    out.push_str(if val.is_empty() { "0" } else { val });
+                }
             }
         }
         out
+    }
+
+    /// Parse `text` as a shell program and capture its stdout (a command
+    /// substitution body embedded in an arithmetic expression), reusing the
+    /// normal `command_sub` path (trailing-newline stripping, `$(<file)` fast
+    /// path). An unparseable body yields an empty string.
+    fn run_command_sub_text(&mut self, text: &str) -> String {
+        match crate::parser::parse(text) {
+            Ok(prog) => self.command_sub(&prog),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// From `chars[start..]` (just past an opening `(`), return the balanced
+    /// group's inner text and the index just past its matching `)`.
+    fn scan_paren_group(chars: &[char], start: usize) -> Option<(String, usize)> {
+        let mut depth = 0usize;
+        let mut i = start;
+        while i < chars.len() {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    return Some((chars[start..i].iter().collect(), i + 1));
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// From `chars[start..]` (just past the `$((`), return the arithmetic
+    /// expression text and the index just past its matching `))`.
+    fn scan_arith_sub(chars: &[char], start: usize) -> Option<(String, usize)> {
+        let mut depth = 0usize;
+        let mut i = start;
+        while i < chars.len() {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    if chars.get(i + 1) == Some(&')') {
+                        return Some((chars[start..i].iter().collect(), i + 2));
+                    }
+                    return None;
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        None
     }
 
     fn tilde_expand(&self, s: &str) -> String {
@@ -10563,6 +10658,20 @@ mod tests {
     fn arithmetic() {
         let (o, _) = run("echo $((6 * 7))");
         assert_eq!(o, "42\n");
+    }
+
+    #[test]
+    fn arithmetic_with_nested_command_sub() {
+        // Command substitutions and nested arithmetic embedded in a `$(( ))`
+        // expression must be expanded before evaluation.
+        assert_eq!(run("f() { echo 5; }; echo $(( $(f) + 1 ))").0, "6\n");
+        assert_eq!(run("f() { echo 5; }; echo $(( $(f) + $(f) ))").0, "10\n");
+        assert_eq!(run("n=3; echo $(( $((n-1)) + 1 ))").0, "3\n");
+        assert_eq!(run("echo $(( `echo 4` * 2 ))").0, "8\n");
+        // Recursion through arithmetic command substitution (fibonacci).
+        let fib = "fib() { local n=$1; if ((n<2)); then echo $n; \
+                   else echo $(( $(fib $((n-1))) + $(fib $((n-2))) )); fi; }; fib 7";
+        assert_eq!(run(fib).0, "13\n");
     }
 
     #[test]

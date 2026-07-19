@@ -680,7 +680,7 @@ impl Shell {
         let prog = match parse_with_aliases(src, &self.aliases) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("osh: syntax error: {e}");
+                eprintln!("{}", format_parse_error(&e));
                 self.last_status = 2;
                 return 2;
             }
@@ -7916,7 +7916,7 @@ impl Shell {
                     let _ = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
-                    eprintln!("osh: syntax error: {e}");
+                    eprintln!("{}", format_parse_error(&e));
                 }
             }
             self.last_status = saved;
@@ -12070,6 +12070,21 @@ fn map_device_path(path: &str) -> &str {
     path
 }
 
+/// Format a parse error for display the way bash does. bash's unexpected-token
+/// diagnostic is itself `syntax error near unexpected token '…'`, so blindly
+/// prefixing every parser message with `syntax error: ` would double the phrase
+/// (`syntax error: syntax error near …`). Only add the prefix for the
+/// fragment-style messages (`expected ')'`, `empty command`, …); pass through a
+/// message that already opens with `syntax error`.
+fn format_parse_error(e: &crate::parser::ParseError) -> String {
+    let msg = e.to_string();
+    if msg.starts_with("syntax error") {
+        format!("osh: {msg}")
+    } else {
+        format!("osh: syntax error: {msg}")
+    }
+}
+
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
@@ -13634,6 +13649,22 @@ mod tests {
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn syntax_error_message_not_doubled() {
+        use crate::parser::ParseError;
+        // A parser message that already opens with "syntax error" (bash's
+        // canonical unexpected-token phrasing) must NOT get a second
+        // "syntax error: " prefix.
+        let e = ParseError("syntax error near unexpected token '--'".into());
+        assert_eq!(
+            format_parse_error(&e),
+            "osh: syntax error near unexpected token '--'"
+        );
+        // A fragment-style message still gets the prefix.
+        let e2 = ParseError("expected ')'".into());
+        assert_eq!(format_parse_error(&e2), "osh: syntax error: expected ')'");
     }
 
     /// Run `setup` (to define aliases), then parse+run `src` with those aliases

@@ -1314,6 +1314,28 @@ top-level item boundary, discarding the remaining items of the current parsed
 input unit before resuming. Also expand the offending assignment's value up-front
 (before storing) so an errored `x=$((1/0))` leaves `x` unset, matching bash.
 
+### TD-OILS-PRINTF-ERRORDER. `osh` printf emits all `invalid number` diagnostics *before* any output; bash interleaves them per format-cycle — MINOR DEVIATION 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_printf` (~7975) calls
+`format_printf`, which builds the *entire* output string and collects every
+numeric-parse error into a `Vec`; the builtin then writes all errors to stderr
+and finally writes the accumulated stdout in one `write_bytes`.
+
+**What:** `printf "%d\n" 0x1f 010 0b101` in bash prints `31`, `8`, then the
+`0b101: invalid number` error, then `0` — output and error interleave in
+argument order. osh prints the error first, then `31 8 0`. Both streams are
+internally correctly ordered; only the *cross-stream* interleaving (visible
+only when stdout and stderr are merged, e.g. under `2>&1`) differs.
+
+**Impact:** negligible. With separate stdout/stderr — the normal case — every
+byte lands on the right stream in the right order, and printf's exit status is
+identical. Programs do not rely on stdout/stderr interleaving of an error path.
+
+**Proper fix:** make `format_printf` emit incrementally — write each format
+cycle's bytes to `out` as it is produced and flush before writing that cycle's
+error to stderr — instead of accumulating one String plus an error `Vec`. Only
+worth doing if a real script depends on the interleaving.
+
 ### TD-OILS-ENVNAME-IMPORT. `osh` imports environment variables whose names are **not valid shell identifiers** (e.g. Windows' `PROGRAMFILES(X86)`) as ordinary shell variables; bash keeps them in the child environment but hides them from the shell-variable namespace — OPEN (host-only artifact; needs a separate raw-env passthrough store) 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `import_environment` (~633) inserts

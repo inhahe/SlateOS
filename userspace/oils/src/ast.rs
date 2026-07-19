@@ -125,6 +125,8 @@ pub enum UnaryOp {
     ZeroLen,
     /// `-n` — string has non-zero length.
     NonZeroLen,
+    /// `-v` — the named shell variable (or array element) is set.
+    VarSet,
 }
 
 /// Binary comparison operators inside `[[ … ]]`.

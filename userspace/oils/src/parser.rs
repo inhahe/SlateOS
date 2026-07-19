@@ -1299,6 +1299,7 @@ fn unary_op_from(s: &str) -> Option<UnaryOp> {
         "-s" => UnaryOp::NonEmptyFile,
         "-z" => UnaryOp::ZeroLen,
         "-n" => UnaryOp::NonZeroLen,
+        "-v" => UnaryOp::VarSet,
         _ => return None,
     })
 }

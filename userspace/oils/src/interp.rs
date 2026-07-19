@@ -1290,6 +1290,12 @@ impl Shell {
         match op {
             UnaryOp::ZeroLen => self.expand_to_string(w).is_empty(),
             UnaryOp::NonZeroLen => !self.expand_to_string(w).is_empty(),
+            // `-v name` tests whether the shell variable/element is set; the
+            // operand is the *name*, not a value to expand to.
+            UnaryOp::VarSet => {
+                let name = self.expand_to_string(w);
+                self.var_is_set(&name)
+            }
             _ => {
                 let path = self.expand_to_string(w);
                 let meta = std::fs::metadata(&path);
@@ -1306,7 +1312,7 @@ impl Shell {
                     UnaryOp::Readable => meta.is_ok(),
                     UnaryOp::Writable => meta.map(|m| !m.permissions().readonly()).unwrap_or(false),
                     UnaryOp::Executable => meta.is_ok(),
-                    UnaryOp::ZeroLen | UnaryOp::NonZeroLen => unreachable!(),
+                    UnaryOp::ZeroLen | UnaryOp::NonZeroLen | UnaryOp::VarSet => unreachable!(),
                 }
             }
         }
@@ -2770,6 +2776,42 @@ impl Shell {
         }
     }
 
+    /// Whether a variable is "set" for `-v` / `test -v`. Accepts a plain scalar
+    /// name, an array/associative name (set if the array exists), or an explicit
+    /// element reference `name[subscript]` (set if that element exists). Special
+    /// parameters (`$?`, `$#`, positional `$1`, …) count as set when they have a
+    /// value.
+    fn var_is_set(&self, name: &str) -> bool {
+        // Explicit element reference `name[subscript]`.
+        if let Some(open) = name.find('[')
+            && name.ends_with(']')
+        {
+            let base = &name[..open];
+            let sub = &name[open + 1..name.len() - 1];
+            if let Some(map) = self.assoc.get(base) {
+                return map.iter().any(|(k, _)| k == sub);
+            }
+            if let Some(arr) = self.arrays.get(base) {
+                // `[@]`/`[*]` — set if the array has any element.
+                if sub == "@" || sub == "*" {
+                    return !arr.is_empty();
+                }
+                if let Ok(idx) = sub.parse::<usize>() {
+                    return arr.contains_key(&idx);
+                }
+            }
+            return false;
+        }
+        if self.vars.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+        {
+            return true;
+        }
+        // Special/positional parameters: set iff they resolve to a value.
+        self.param_value(name).is_some()
+    }
+
     /// Resolve a parameter's value; `None` means unset.
     fn param_value(&self, name: &str) -> Option<String> {
         match name {
@@ -3769,6 +3811,11 @@ impl Shell {
                 eprintln!("osh: [: missing ']'");
                 return 2;
             }
+        }
+        // `-v NAME` needs shell state (is the variable set?), which the free
+        // `eval_test` helper cannot see — handle it here.
+        if a.len() == 2 && a[0] == "-v" {
+            return i32::from(!self.var_is_set(a[1]));
         }
         i32::from(!eval_test(&a))
     }
@@ -5148,6 +5195,27 @@ mod tests {
         assert_eq!(s, 0);
         let (_, s2) = run("[ 1 -gt 2 ]");
         assert_eq!(s2, 1);
+    }
+
+    #[test]
+    fn test_v_variable_set() {
+        // `[ -v name ]` and `[[ -v name ]]` test whether a variable is set.
+        assert_eq!(run("x=1; [ -v x ]").1, 0);
+        assert_eq!(run("[ -v x ]").1, 1);
+        assert_eq!(run("x=1; [[ -v x ]] && echo yes").0, "yes\n");
+        assert_eq!(run("[[ -v missing ]] || echo no").0, "no\n");
+        // An empty-but-set variable still counts as set.
+        assert_eq!(run("x=; [ -v x ]").1, 0);
+    }
+
+    #[test]
+    fn test_v_array_element() {
+        // Whole array is set; specific element presence honored.
+        assert_eq!(run("a=(x y z); [[ -v a ]] && echo arr").0, "arr\n");
+        assert_eq!(run("a=(x y z); [[ -v a[1] ]] && echo e1").0, "e1\n");
+        assert_eq!(run("a=([5]=x); [[ -v a[2] ]] || echo gap").0, "gap\n");
+        assert_eq!(run("declare -A m; m[k]=v; [[ -v m[k] ]] && echo key").0, "key\n");
+        assert_eq!(run("declare -A m; [[ -v m[nope] ]] || echo nokey").0, "nokey\n");
     }
 
     #[test]

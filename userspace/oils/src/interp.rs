@@ -1603,12 +1603,16 @@ impl Shell {
         // a subshell's stderr reach the group's file at all.
         let mut stderr_file: Option<Arc<File>> = None;
         if let Some((path, append)) = &plan.stderr {
-            // `> f 2>&1` / `&> f`: the resolver recorded the *same* path for fd 2
-            // that it did for fd 1. Share fd 1's already-open handle (a
-            // `try_clone`, referencing the same file object and therefore the
-            // same offset) so the two streams interleave rather than clobber.
-            let same_as_stdout = plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
-            let opened: io::Result<File> = match (same_as_stdout, &stdout_file) {
+            // `> f 2>&1` / `&> f` / `2>f 1>&2`: fd 2 is a *dup* of fd 1's handle
+            // (the resolver set `stderr_shares_stdout`). Share fd 1's already-open
+            // handle (a `try_clone`, referencing the same open file description and
+            // therefore the same offset) so the two streams interleave. An
+            // *independent* `>f 2>f` (same path, but `stderr_shares_stdout` false)
+            // opens a fresh handle — each redirect truncates to offset 0, so the
+            // writes clobber, matching bash.
+            let share_stdout = plan.stderr_shares_stdout
+                && plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
+            let opened: io::Result<File> = match (share_stdout, &stdout_file) {
                 (true, Some(f)) => f.try_clone(),
                 _ => open_out(path, *append),
             };
@@ -4188,9 +4192,21 @@ impl Shell {
         // stdout
         let capturing =
             matches!(out, Out::Capture(_)) && redir.stdout.is_none() && redir.stdout_to_fd.is_none();
+        // For dup forms like `>f 2>&1` / `&>f` the resolver rewrites fd 2 to the
+        // same file path as fd 1, but stdout and stderr must share ONE open file
+        // description (interleaved, one offset) rather than two independent
+        // truncating opens (which would clobber). Keep a clone of the stdout file
+        // to hand to stderr in that case.
+        let mut stdout_file_for_stderr: Option<File> = None;
         match &redir.stdout {
             Some((path, append)) => match open_out(path, *append) {
                 Ok(f) => {
+                    if redir.stderr_shares_stdout
+                        && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
+                        && let Ok(c) = f.try_clone()
+                    {
+                        stdout_file_for_stderr = Some(c);
+                    }
                     cmd.stdout(Stdio::from(f));
                 }
                 Err(e) => {
@@ -4288,7 +4304,13 @@ impl Shell {
                 }
             }
         } else if let Some((path, append)) = &redir.stderr {
-            match open_out(path, *append) {
+            // Reuse the stdout handle for dup forms (shared file description),
+            // otherwise open the target independently (`2>file` clobbers on its own).
+            let opened = match stdout_file_for_stderr.take() {
+                Some(f) => Ok(f),
+                None => open_out(path, *append),
+            };
+            match opened {
                 Ok(f) => {
                     cmd.stderr(Stdio::from(f));
                 }
@@ -4792,6 +4814,9 @@ impl Shell {
                     let append = matches!(r.op, RedirectOp::AppendBoth);
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
+                    // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
+                    // open file description (and offset) — writes interleave.
+                    plan.stderr_shares_stdout = true;
                     // Both fds now target the file: clear every competing dup so
                     // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.stderr_to_stdout = false;
@@ -4816,6 +4841,10 @@ impl Shell {
                     match fd {
                         2 => {
                             plan.stderr = Some((target, append));
+                            // An explicit `2>file` is an *independent* open, even
+                            // if it names the same path as `>file`: bash gives each
+                            // its own offset, so the writes clobber (not share).
+                            plan.stderr_shares_stdout = false;
                             // Later file redirect overrides any earlier stderr dup.
                             plan.stderr_to_stdout = false;
                             plan.stderr_to_fd = None;
@@ -4852,6 +4881,9 @@ impl Shell {
                         if fd == 1 {
                             plan.stdout = Some((target.clone(), false));
                             plan.stderr = Some((target, false));
+                            // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared
+                            // offset, interleaved writes).
+                            plan.stderr_shares_stdout = true;
                             plan.stderr_to_stdout = false;
                             plan.stdout_to_stderr = false;
                             plan.stdout_to_fd = None;
@@ -4864,7 +4896,9 @@ impl Shell {
                         // stderr file/fd target so this dup wins (last-writer).
                         plan.stderr_to_fd = None;
                         if plan.stdout.is_some() {
+                            // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
                             plan.stderr = plan.stdout.clone();
+                            plan.stderr_shares_stdout = true;
                             plan.stderr_to_stdout = false;
                         } else {
                             plan.stderr = None;
@@ -4873,7 +4907,9 @@ impl Shell {
                     } else if fd == 1 && target == "2" {
                         plan.stdout_to_fd = None;
                         if plan.stderr.is_some() {
+                            // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
                             plan.stdout = plan.stderr.clone();
+                            plan.stderr_shares_stdout = true;
                             plan.stdout_to_stderr = false;
                         } else {
                             plan.stdout = None;
@@ -10595,6 +10631,13 @@ struct RedirPlan {
     stdin_from_fd: Option<i32>,
     stdout: Option<(String, bool)>,
     stderr: Option<(String, bool)>,
+    /// True when `stderr`'s file target is a *dup* of `stdout`'s (from `&>file`,
+    /// `>file 2>&1`, `2>file 1>&2`, or `1>&file`) — the two fds share one open
+    /// file description and therefore one offset, so their writes interleave.
+    /// False when `stdout` and `stderr` name the same path via two *independent*
+    /// redirects (`>f 2>f`): bash opens each separately (each truncates to
+    /// offset 0), so the writes clobber rather than interleave.
+    stderr_shares_stdout: bool,
     /// `2>&1` — fd 2 follows fd 1 (stderr goes wherever stdout currently goes).
     /// Distinct from `stderr` (a file path) so the merge works even when stdout
     /// is a pipe/terminal/capture rather than a file.
@@ -19113,6 +19156,31 @@ mod tests {
         assert_eq!(s, 0); // final `echo done` status
         assert!(!o.contains("hi"), "body ran despite bad fd: {o:?}");
         assert!(o.contains("done"));
+    }
+
+    #[test]
+    fn redirect_two_independent_opens_same_file_clobber() {
+        // `>f 2>f`: fd 1 and fd 2 are TWO independent truncating opens of the
+        // same path, so each has its own offset. Both writers start at 0 →
+        // last-writer-wins (bash: the file ends up with only fd 2's "err").
+        // Regression: osh's `same_as_stdout` shortcut cloned fd 1's handle for
+        // fd 2, sharing one offset and interleaving to "out\nerr".
+        assert_eq!(
+            run_exec_redirect("{ echo out; echo err >&2; } > \"{FILE}\" 2> \"{FILE}\""),
+            "err\n"
+        );
+    }
+
+    #[test]
+    fn redirect_dup_shares_one_open_interleaves() {
+        // `>f 2>&1`: fd 2 is dup'd from fd 1, so they SHARE one open file
+        // description (one offset) and both writes interleave. Contrast with the
+        // two-independent-opens case above. `stderr_shares_stdout` must keep this
+        // sharing intact.
+        assert_eq!(
+            run_exec_redirect("{ echo out; echo err >&2; } > \"{FILE}\" 2>&1"),
+            "out\nerr\n"
+        );
     }
 
     #[cfg(windows)]

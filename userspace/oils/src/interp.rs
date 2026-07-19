@@ -71,11 +71,14 @@
 //! - Compound commands accept trailing redirections
 //!   (`while read …; do …; done < file`, `for … done > out`, `{ …; } >> log`).
 //!   Input is fed through a shared cursor so successive `read`s in the body
-//!   consume successive lines; captured stdout is written to the target file.
+//!   consume successive lines; a `> file` stdout redirect drives fd 1 through
+//!   the file *live* (a scoped `exec_stdout` override) so output ordering — and
+//!   a same-file `2>&1`/`&>` interleave of stdout and stderr — is preserved.
 //!   A compound command's *stderr* is also redirectable (`{ …; } 2> err`,
-//!   `for … done 2>&1`) via a `stderr_stack` consulted by every fd-2 write;
-//!   `2>&1` into a captured stdout folds stderr in after the body (not
-//!   byte-interleaved).
+//!   `for … done 2>&1`) via a `stderr_stack` consulted by every fd-2 write.
+//!   The one exception is `2>&1` into a *captured* stdout (command substitution
+//!   `$( … 2>&1 )`), where stderr is folded into the capture after the body
+//!   (not byte-interleaved).
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
@@ -1557,16 +1560,53 @@ impl Shell {
             None
         };
 
+        // ---- fd 1 file sink (open once) ----
+        // When the compound command redirects stdout to a file (`{ …; } > f`,
+        // `> f 2>&1`, `&> f`), open it once here and drive fd 1 through it *live*
+        // (via a scoped `exec_stdout` override below) instead of buffering the
+        // whole body and dumping it at the end. Live writes preserve ordering
+        // and — crucially — let a same-file `2>&1`/`&>` interleave stdout and
+        // stderr at one shared OS offset (both fds `try_clone` this handle,
+        // which references the same file object on Unix and Windows alike). This
+        // is the faithful model of bash dup'ing fd 1 around the group's body.
+        let mut stdout_file: Option<Arc<File>> = None;
+        if let Some((path, append)) = &plan.stdout {
+            match open_out(path, *append) {
+                Ok(f) => stdout_file = Some(Arc::new(f)),
+                Err(e) => {
+                    self.errln(&format!("osh: {path}: {e}"));
+                    self.last_status = 1;
+                    return Flow::Next;
+                }
+            }
+        }
+
         // ---- stderr setup: push a target covering the whole body ----
         // `stderr_merge_buf` is the buffer whose bytes must be folded into the
         // stdout capture once the body finishes (the `2>&1`-into-captured-stdout
         // case, where fd 1 and fd 2 share a command-substitution buffer).
         let mut pushed_stderr = false;
         let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
+        // fd-2 file sink for the group, kept so it can also seed a scoped
+        // `exec_stderr` override — a `( … ) 2> f` / `( … ) 2>&1` subshell body
+        // clones `exec_stderr` (but *not* `stderr_stack`), so this is what lets
+        // a subshell's stderr reach the group's file at all.
+        let mut stderr_file: Option<Arc<File>> = None;
         if let Some((path, append)) = &plan.stderr {
-            match open_out(path, *append) {
+            // `> f 2>&1` / `&> f`: the resolver recorded the *same* path for fd 2
+            // that it did for fd 1. Share fd 1's already-open handle (a
+            // `try_clone`, referencing the same file object and therefore the
+            // same offset) so the two streams interleave rather than clobber.
+            let same_as_stdout = plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
+            let opened: io::Result<File> = match (same_as_stdout, &stdout_file) {
+                (true, Some(f)) => f.try_clone(),
+                _ => open_out(path, *append),
+            };
+            match opened {
                 Ok(f) => {
-                    self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                    let f = Arc::new(f);
+                    self.stderr_stack.push(StderrTarget::File(Arc::clone(&f)));
+                    stderr_file = Some(f);
                     pushed_stderr = true;
                 }
                 Err(e) => {
@@ -1596,8 +1636,29 @@ impl Shell {
                     }
                 },
                 Out::Inherit => {
-                    self.stderr_stack.push(StderrTarget::Stdout);
-                    pushed_stderr = true;
+                    if stdout_file.is_some() {
+                        // `2>&1 >file`: the `2>&1` dup copies fd 1's sink *before*
+                        // the later `>file` rebinds it, so fd 2 must stay on the
+                        // pre-override fd 1 (terminal, or a persistent `exec>other`)
+                        // — not follow the file. `StderrTarget::Stdout` resolves
+                        // `exec_stdout` dynamically and would wrongly chase the
+                        // override installed below, so snapshot the current fd 1
+                        // sink into a concrete handle now.
+                        match self.snapshot_std_fd(1) {
+                            Ok(f) => {
+                                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                                pushed_stderr = true;
+                            }
+                            Err(e) => {
+                                self.errln(&format!("osh: stdout: {e}"));
+                                self.last_status = 1;
+                                return Flow::Next;
+                            }
+                        }
+                    } else {
+                        self.stderr_stack.push(StderrTarget::Stdout);
+                        pushed_stderr = true;
+                    }
                 }
             }
         }
@@ -1649,14 +1710,29 @@ impl Shell {
             }
         }
 
-        // Capture stdout when it is redirected to a file (`> f`) or routed to
-        // stderr (`1>&2`); otherwise the body writes straight to `out`.
+        // Capture stdout only when it is routed to stderr (`1>&2`) with no file
+        // target — that folds fd 1's bytes into the pre-redirect stderr sink
+        // after the body. A plain `> f` sends fd 1 to the file live (below), so
+        // it no longer needs a buffer. Otherwise the body writes straight to
+        // `out`.
         let stdout_to_err = plan.stdout_to_stderr && plan.stdout.is_none();
-        let mut capture: Option<Vec<u8>> = if plan.stdout.is_some() || stdout_to_err {
+        let mut capture: Option<Vec<u8>> = if stdout_to_err {
             Some(Vec::new())
         } else {
             None
         };
+
+        // Scoped fd-1/fd-2 overrides: point ambient stdout/stderr at the group's
+        // file(s) for the duration of the body, saving the previous bindings (a
+        // persistent `exec > other`, or the real handles) to restore afterwards.
+        // Subshell clones inherit these handles (but not `stderr_stack`), so a
+        // `( … ) > f 2>&1` body reaches the file — matching bash fd inheritance.
+        let saved_exec_stdout = stdout_file
+            .as_ref()
+            .map(|f| self.exec_stdout.replace(Arc::clone(f)));
+        let saved_exec_stderr = stderr_file
+            .as_ref()
+            .map(|f| self.exec_stderr.replace(Arc::clone(f)));
 
         let flow = {
             let input_cursor;
@@ -1669,58 +1745,49 @@ impl Shell {
                 }
                 None => stdin,
             };
-            match &mut capture {
-                Some(buf) => {
-                    let mut o = Out::Capture(buf);
-                    run(self, &mut o, sin)
+            if stdout_file.is_some() {
+                // fd 1 flows to the file via `exec_stdout`; run with an ambient
+                // `Out::Inherit` (the group redirect fully rebinds fd 1, so the
+                // enclosing capture/pipe is bypassed for stdout).
+                let mut o = Out::Inherit;
+                run(self, &mut o, sin)
+            } else {
+                match &mut capture {
+                    Some(buf) => {
+                        let mut o = Out::Capture(buf);
+                        run(self, &mut o, sin)
+                    }
+                    None => run(self, out, sin),
                 }
-                None => run(self, out, sin),
             }
         };
 
-        // Finalise captured stdout: to the target file, or to the stderr sink
-        // (`1>&2`) — the latter while the stderr target is still on the stack.
+        // Restore the previous ambient fd-1 / fd-2 bindings.
+        if let Some(prev) = saved_exec_stdout {
+            self.exec_stdout = prev;
+        }
+        if let Some(prev) = saved_exec_stderr {
+            self.exec_stderr = prev;
+        }
+
+        // Finalise the `1>&2` capture (fd 1 → fd 2, no file target): flush the
+        // buffered stdout to the pre-redirect stderr sink now, while that target
+        // is still on the stack. (A `> f` stdout is written live above, so it is
+        // never captured here.)
         if let Some(buf) = capture {
-            if let Some((path, append)) = &plan.stdout {
-                // When stdout and stderr target the *same* file (`&>file`,
-                // `>file 2>&1`), stderr was already written to it via the pushed
-                // `StderrTarget::File` during the body; opening the stdout sink
-                // with truncation here would clobber it. Append instead so both
-                // streams survive (stderr-then-stdout order; interleaving is not
-                // preserved — the capture model buffers stdout to the end).
-                let same_file = plan
-                    .stderr
-                    .as_ref()
-                    .is_some_and(|(spath, _)| spath == path);
-                let append = *append || same_file;
-                match open_out(path, append) {
-                    Ok(mut f) => {
-                        if let Err(e) = f.write_all(&buf) {
-                            self.errln(&format!("osh: {path}: {e}"));
-                            self.last_status = 1;
-                        }
-                    }
-                    Err(e) => {
-                        self.errln(&format!("osh: {path}: {e}"));
-                        self.last_status = 1;
-                    }
-                }
-            } else if stdout_to_err {
-                // `{ …; } >&2 2>file` (or a redirected function call): the `>&2`
-                // dup captured fd 2 *before* this command's own `2>file` took
-                // effect (bash applies redirects left to right, and the resolver
-                // only sets `stdout_to_stderr` for that dup-first ordering). The
-                // per-command stderr, if any, is the freshly-pushed top of the
-                // stack — skip it so fd 1 lands in the pre-redirect sink. This
-                // capture is flushed before the pop, so the top is still present.
-                // See TD-OILS14.
-                let depth = if pushed_stderr {
-                    self.stderr_stack.len().saturating_sub(1)
-                } else {
-                    self.stderr_stack.len()
-                };
-                self.emit_stderr_depth(&buf, depth);
-            }
+            // `{ …; } >&2 2>file` (or a redirected function call): the `>&2` dup
+            // captured fd 2 *before* this command's own `2>file` took effect
+            // (bash applies redirects left to right, and the resolver only sets
+            // `stdout_to_stderr` for that dup-first ordering). The per-command
+            // stderr, if any, is the freshly-pushed top of the stack — skip it so
+            // fd 1 lands in the pre-redirect sink. This capture is flushed before
+            // the pop, so the top is still present. See TD-OILS14.
+            let depth = if pushed_stderr {
+                self.stderr_stack.len().saturating_sub(1)
+            } else {
+                self.stderr_stack.len()
+            };
+            self.emit_stderr_depth(&buf, depth);
         }
 
         if pushed_stderr {
@@ -18317,10 +18384,11 @@ mod tests {
     #[test]
     fn amp_redirect_both_streams() {
         // `&>file` sends both stdout and stderr to the file. A group with a
-        // normal echo and a `>&2` diagnostic both accumulate there.
+        // normal echo and a `>&2` diagnostic both accumulate there, interleaved
+        // in execution order (fd 1 and fd 2 share one live handle/offset — bash).
         assert_eq!(
             run_exec_redirect("{ echo out; echo err >&2; } &> \"{FILE}\""),
-            "err\nout\n"
+            "out\nerr\n"
         );
         // `&>>file` appends rather than truncating.
         assert_eq!(
@@ -18330,12 +18398,68 @@ mod tests {
         // `>&file` (non-numeric target) is the same as `&>file`.
         assert_eq!(
             run_exec_redirect("{ echo x; echo y >&2; } >& \"{FILE}\""),
-            "y\nx\n"
+            "x\ny\n"
         );
         // A numeric `>&N` stays an fd duplication, not a file redirect.
         assert_eq!(
             run_exec_redirect("exec > \"{FILE}\"\necho hi >&1"),
             "hi\n"
+        );
+    }
+
+    #[test]
+    fn group_redirect_stdout_stderr_interleave() {
+        // `{ …; } > f 2>&1`: fd 1 and fd 2 share one live file handle, so their
+        // writes interleave in execution order (regression for the old model
+        // that buffered stdout and folded it in after stderr — see the module
+        // docs and TD-OILS-STDERR-INTERLEAVE).
+        assert_eq!(
+            run_exec_redirect("{ echo o; echo e >&2; echo o2; } > \"{FILE}\" 2>&1"),
+            "o\ne\no2\n"
+        );
+    }
+
+    #[test]
+    fn for_loop_redirect_stdout_stderr_interleave() {
+        // The same live-interleave holds across a loop body's iterations.
+        assert_eq!(
+            run_exec_redirect(
+                "for i in 1 2; do echo o$i; echo e$i >&2; done > \"{FILE}\" 2>&1"
+            ),
+            "o1\ne1\no2\ne2\n"
+        );
+    }
+
+    #[test]
+    fn subshell_redirect_stdout_stderr_interleave() {
+        // A `( … ) > f 2>&1` subshell clones `exec_stdout`/`exec_stderr` (not the
+        // `stderr_stack`), so the scoped fd-1/fd-2 overrides are what route the
+        // body's output to the file — and keep it interleaved.
+        assert_eq!(
+            run_exec_redirect("( echo o; echo e >&2 ) > \"{FILE}\" 2>&1"),
+            "o\ne\n"
+        );
+    }
+
+    #[test]
+    fn subshell_stderr_only_redirect_reaches_file() {
+        // `( … ) 2> f`: the subshell's `>&2` write must reach the group's file
+        // (via the cloned `exec_stderr`), not leak to the real terminal.
+        assert_eq!(
+            run_exec_redirect("( echo keep; echo diag >&2 ) 2> \"{FILE}\""),
+            "diag\n"
+        );
+    }
+
+    #[test]
+    fn stderr_then_stdout_redirect_order_keeps_stderr_on_prior_sink() {
+        // `2>&1 > f`: the `2>&1` copies fd 1's sink *before* `> f` rebinds it, so
+        // fd 2 stays on the pre-redirect stdout (here the capture, not the file)
+        // and only fd 1's output reaches the file. Verifies the override does not
+        // wrongly drag fd 2 along to the file.
+        assert_eq!(
+            run_exec_redirect("{ echo o; echo e >&2; } 2>&1 > \"{FILE}\""),
+            "o\n"
         );
     }
 

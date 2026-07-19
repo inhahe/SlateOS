@@ -1561,41 +1561,46 @@ a follow-up). ~40 emission sites + ~15 test assertions to update — see
 `open-questions.md` (flagged for the operator because it reformats *every* error
 message the shell prints, a pervasive user-visible output change).
 
-### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — OPEN 2026-07-19
+### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — FIXED 2026-07-19 (one narrow subcase remains)
 
-**Where:** `userspace/oils/src/interp.rs` — the compound/group-command capture
-path that buffers stdout and redirected-stderr into *separate* in-memory
-buffers and concatenates them (stderr appended after stdout, or vice-versa)
-instead of writing both into a single ordered stream. Involves `resolve_redirects`
-/ `RedirPlan` and the group-body output capture.
+**Where:** `userspace/oils/src/interp.rs` — `exec_with_redirects` (the
+compound/group-command redirect+capture path).
 
-**Symptom:** when a command sends output to **both** stdout and stderr and both
-are redirected to the **same** file/sink in one shot — `cmd >f 2>&1` or the
-`cmd &>f` shorthand, and the compound form `{ echo o; echo e >&2; } >f 2>&1` —
-`osh` writes all the stderr content before all the stdout content (or the two
-blocks in a fixed order), rather than interleaving them in the order the writes
-actually happened. bash produces the natural write-order interleave. Example:
+**Symptom (fixed):** a compound command that wrote to **both** stdout and stderr
+with both redirected to the **same** file in one shot — `{ …; } >f 2>&1`,
+`( … ) >f 2>&1`, `for … done >f 2>&1`, the `&>f` shorthand — buffered stdout to
+the end and folded stderr in ahead of it, so `osh` produced `e\no` where bash
+produces `o\ne` (content correct, interleave order wrong).
 
-```
-{ echo o; echo e >&2; } >f 2>&1; cat f
-# bash: o\ne     osh: e\no   (content correct, interleave order wrong)
-```
+**Fix:** a `> f` stdout redirect now drives fd 1 through the file *live* via a
+scoped `exec_stdout` override (instead of capturing to a `Vec` and dumping at the
+end). When fd 2 targets the same path (`>f 2>&1`, `&>f`) it shares fd 1's open
+handle (a `try_clone`, same file object / same OS offset on both Unix and
+Windows), so the two streams interleave at one shared offset exactly as bash's
+dup does. A parallel scoped `exec_stderr` override was added so `( … )` subshell
+bodies — which clone `exec_stdout`/`exec_stderr` but reset `stderr_stack` — also
+reach the file (this incidentally fixed `( echo e >&2 ) 2> f`, which previously
+leaked the subshell's stderr to the real terminal). The `2>&1 > f` ordering case
+(fd 2 copies fd 1's sink *before* `> f` rebinds it) is handled by snapshotting
+fd 1's pre-override sink into a concrete handle. Regression tests:
+`group_redirect_stdout_stderr_interleave`, `for_loop_redirect_stdout_stderr_interleave`,
+`subshell_redirect_stdout_stderr_interleave`, `subshell_stderr_only_redirect_reaches_file`,
+`stderr_then_stdout_redirect_order_keeps_stderr_on_prior_sink`, and the updated
+`amp_redirect_both_streams`.
 
-**Scope / what is NOT affected:** the *content* is always correct — both streams
-reach the sink, nothing is dropped. The last-writer-wins fd-destination
-resolution (`2>/dev/null 2>&1`, `2>&1 2>/dev/null`, `2>&1 >/dev/null`, etc.) is
-correct as of the `|&` work. This bug is purely the *ordering* of interleaved
-lines when stdout and stderr share one destination. Pipes (`|&`) route through a
-single real pipe fd and are unaffected.
-
-**Proper fix:** when a plan's stdout and stderr resolve to the same underlying
-sink, write both through a *single* shared, order-preserving byte stream (one
-buffer / one fd) instead of two separate buffers concatenated at the end. This
-requires the group-command capture to detect the shared-sink case and merge the
-two logical streams into one ordered writer rather than tagging bytes by fd and
-reassembling. Deferred because it touches the capture/RedirPlan boundary broadly;
-logged so a future probe hitting an `>f 2>&1` interleave DIFF knows it is this
-gap, not a new regression.
+**Remaining narrow subcase (still open):** command-substitution *capture* of a
+`2>&1` **subshell** — `x=$( ( echo o; echo e >&2 ) 2>&1 )` — still loses the
+subshell's stderr (it goes to the real terminal, so `x` gets only `o`). The
+non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )` works (folds correctly).
+Root cause: the capture case routes fd 2 into an in-memory `StderrTarget::Buffer`
+(`Arc<Mutex<Vec<u8>>>`), but a subshell clone resets `stderr_stack` and there is
+no `Arc<File>` to hand it via the `exec_stderr` override mechanism (the sink is a
+buffer, not a file). Fixing it properly needs either a cloned-into-subshell
+"ambient stderr buffer" field or making command-substitution capture use a real
+OS pipe/temp handle that can be shared like the file case. Niche (requires
+capture + subshell + `2>&1` together); the pre-existing module-doc note about the
+`2>&1`-into-captured-stdout limitation already covers the interleave caveat for
+the non-subshell capture form.
 
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
 

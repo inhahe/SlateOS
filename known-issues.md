@@ -1491,6 +1491,42 @@ parser stricter. **Proper fix (if ever wanted):** have the lexer treat `X(` as a
 extended group only when a parse-time `extglob` flag is set, and surface a syntax
 error otherwise — but this buys only bug-for-bug parity on invalid input.
 
+### TD-OILS-COMPOUND-SCRATCHFD-PIPE. A compound command's `2>&N` dup through a scratch fd aliased to a *pipe* (command substitution) leaks stderr to the real terminal — MINOR, obscure 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — the compound-command redirect path
+(the `saved_fds`/`SavedFd` + `stderr_stack` mechanism, redirect function ~line
+1700+) vs. the simple-command paths (`run_external` ~line 4219, `run_builtin`
+~line 6459) which now share `install_extra_fds`/`restore_extra_fds`.
+
+**What:** for a *simple* command, `{ … } 3>&1 2>&3` inside `$( … )` correctly
+routes stderr into the capture pipe (fixed 2026-07-19, test
+`same_command_fd_dup_resolves`). But the *compound* form
+`r=$({ echo o; echo e >&2; } 3>&1 2>&3)` still sends the inner `>&2` output to
+the shell's real stderr instead of the command-substitution pipe:
+
+```
+bash:  r == "o\ne"
+osh :  r == "o"   (and "e" leaks to the terminal)
+```
+
+The base compound case without a scratch fd (`{ echo e >&2; } 2>&1` in a
+command sub) works — the gap is specifically the interaction of a scratch fd
+aliased to an `Out::Pipe` (`3>&1` where fd 1 is the capture pipe) with the
+compound path's separate stderr routing (`stderr_stack`), which does not
+consult `open_write_fds[3]` the way the simple-command paths do.
+
+**Why deferred:** rare edge-of-an-edge (a brace/subshell group that dups
+stderr through a user scratch fd, *and* is itself inside a capturing command
+substitution). The simple-command case — the common one — is fixed.
+
+**Proper fix:** unify the compound redirect executor onto the same
+`install_extra_fds`/`restore_extra_fds` + `open_write_fds`-consulting stderr
+routing the simple paths use, so a compound `2>&N` resolves N against the
+materialised scratch fd (pipe-aware) rather than falling through to the real
+stderr. Ultimately this is another symptom of the collapsed-`RedirPlan`
+order-loss; the long-term proper fix is an ordered fd-op executor shared by
+all command kinds.
+
 ### TD-OILS-BRACE-BACKSLASH. Brace char-range spanning the backslash char (e.g. `{A..z}`) — `osh` emits a literal `\`, bash drops it — MINOR, obscure 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (brace-expansion char-sequence

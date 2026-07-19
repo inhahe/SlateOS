@@ -1759,61 +1759,10 @@ impl Shell {
         // ---- scoped extra fds (fd ≥ 3 redirects on the compound command) ----
         // `{ …; } 3< file`, `while read -u 3; done 3< file`, `… 4> log`: install
         // the descriptor into the shell's open-fd table for the duration of the
-        // body only, saving each touched fd's prior binding (taken by ownership
-        // out of the map) so it is restored — and the scoped fd removed — when
-        // the body finishes. This is what makes `read -u 3` inside the body read
-        // the file while fd 0 stays free.
-        let mut saved_fds: Vec<SavedFd> = Vec::new();
-        let mut already_saved: std::collections::HashSet<i32> = std::collections::HashSet::new();
-        for (fd, op) in &plan.extra_fds {
-            if already_saved.insert(*fd) {
-                let prev_r = self.open_fds.remove(fd);
-                let prev_w = self.open_write_fds.remove(fd);
-                saved_fds.push((*fd, prev_r, prev_w));
-            } else {
-                // A repeated fd: drop whatever the earlier op installed before
-                // applying this one (prior binding already saved).
-                self.open_fds.remove(fd);
-                self.open_write_fds.remove(fd);
-            }
-            match op {
-                ExtraFdOp::InputBytes(bytes) => {
-                    self.open_fds
-                        .insert(*fd, RefCell::new(io::Cursor::new(bytes.clone())));
-                }
-                ExtraFdOp::OutputFile(path, append) => match open_out(path, *append) {
-                    Ok(f) => {
-                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
-                    }
-                    Err(e) => {
-                        self.errln(&format!("osh: {path}: {e}"));
-                        self.last_status = 1;
-                    }
-                },
-                ExtraFdOp::AliasStd(n) => {
-                    // `N>&1` (N ≥ 3 dup'ing fd 1) on a compound command that is a
-                    // *pipeline stage* must alias fd N to the stage's output pipe,
-                    // not the ambient terminal / persistent `exec` stdout that
-                    // `snapshot_std_fd(1)` returns. Otherwise a `>&N` write inside
-                    // the body (e.g. `{ echo x >&3; } 3>&1 | cat`) leaks past the
-                    // pipe and the downstream stage sees nothing.
-                    let handle = match (*n, &*out) {
-                        (1, Out::Pipe(w)) => pipe_writer_to_file(w),
-                        _ => self.snapshot_std_fd(*n),
-                    };
-                    match handle {
-                        Ok(f) => {
-                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
-                        }
-                        Err(e) => {
-                            self.errln(&format!("osh: {fd}: {e}"));
-                            self.last_status = 1;
-                        }
-                    }
-                }
-                ExtraFdOp::Close => {} // already removed above
-            }
-        }
+        // body only, saving each touched fd's prior binding so it is restored —
+        // and the scoped fd removed — when the body finishes. This is what makes
+        // `read -u 3` inside the body read the file while fd 0 stays free.
+        let saved_fds = self.install_extra_fds(&plan.extra_fds, out);
 
         // `{ …; } 1>&N` / `{ …; } 2>&N` (N ≥ 3): route fd 1 / fd 2 to the write
         // descriptor fd N currently holds — bash dup's the std fd onto fd N's
@@ -1947,16 +1896,7 @@ impl Shell {
 
         // Restore the scoped extra fds: remove whatever the body left for each
         // touched fd and reinstate its prior binding (if any).
-        for (fd, prev_r, prev_w) in saved_fds.into_iter().rev() {
-            self.open_fds.remove(&fd);
-            self.open_write_fds.remove(&fd);
-            if let Some(r) = prev_r {
-                self.open_fds.insert(fd, r);
-            }
-            if let Some(w) = prev_w {
-                self.open_write_fds.insert(fd, w);
-            }
-        }
+        self.restore_extra_fds(saved_fds);
 
         // Fold captured stderr (`2>&1` into a captured stdout) into `out` after
         // the target is popped. Interleaving with stdout is not preserved.
@@ -1967,6 +1907,83 @@ impl Shell {
             obuf.extend_from_slice(&g);
         }
         flow
+    }
+
+    /// Install a command's `extra_fds` (fd ≥ 3 dups/opens/closes) into the
+    /// shell's fd tables, returning the saved prior bindings for a later
+    /// [`Self::restore_extra_fds`]. Applying these *before* resolving a
+    /// same-command `N>&M` dup is what lets a later redirect see a descriptor an
+    /// earlier one created (`echo hi 3>&1 2>&3`): the collapsed [`RedirPlan`]
+    /// loses left-to-right order, so the fd must be materialised in the table
+    /// first. Shared by the compound-command path and simple builtins.
+    fn install_extra_fds(&mut self, extra_fds: &[(i32, ExtraFdOp)], out: &Out) -> Vec<SavedFd> {
+        let mut saved_fds: Vec<SavedFd> = Vec::new();
+        let mut already_saved: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for (fd, op) in extra_fds {
+            if already_saved.insert(*fd) {
+                let prev_r = self.open_fds.remove(fd);
+                let prev_w = self.open_write_fds.remove(fd);
+                saved_fds.push((*fd, prev_r, prev_w));
+            } else {
+                // A repeated fd: drop whatever the earlier op installed before
+                // applying this one (prior binding already saved).
+                self.open_fds.remove(fd);
+                self.open_write_fds.remove(fd);
+            }
+            match op {
+                ExtraFdOp::InputBytes(bytes) => {
+                    self.open_fds
+                        .insert(*fd, RefCell::new(io::Cursor::new(bytes.clone())));
+                }
+                ExtraFdOp::OutputFile(path, append) => match open_out(path, *append) {
+                    Ok(f) => {
+                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                    }
+                    Err(e) => {
+                        self.errln(&format!("osh: {path}: {e}"));
+                        self.last_status = 1;
+                    }
+                },
+                ExtraFdOp::AliasStd(n) => {
+                    // `N>&1` (N ≥ 3 dup'ing fd 1) on a *pipeline stage* must alias
+                    // fd N to the stage's output pipe, not the ambient terminal /
+                    // persistent `exec` stdout that `snapshot_std_fd(1)` returns.
+                    // Otherwise a `>&N` write inside the body (e.g.
+                    // `{ echo x >&3; } 3>&1 | cat`) leaks past the pipe and the
+                    // downstream stage sees nothing.
+                    let handle = match (*n, out) {
+                        (1, Out::Pipe(w)) => pipe_writer_to_file(w),
+                        _ => self.snapshot_std_fd(*n),
+                    };
+                    match handle {
+                        Ok(f) => {
+                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                        }
+                        Err(e) => {
+                            self.errln(&format!("osh: {fd}: {e}"));
+                            self.last_status = 1;
+                        }
+                    }
+                }
+                ExtraFdOp::Close => {} // already removed above
+            }
+        }
+        saved_fds
+    }
+
+    /// Restore fd bindings saved by [`Self::install_extra_fds`]: remove whatever
+    /// the body left for each touched fd and reinstate its prior binding.
+    fn restore_extra_fds(&mut self, saved_fds: Vec<SavedFd>) {
+        for (fd, prev_r, prev_w) in saved_fds.into_iter().rev() {
+            self.open_fds.remove(&fd);
+            self.open_write_fds.remove(&fd);
+            if let Some(r) = prev_r {
+                self.open_fds.insert(fd, r);
+            }
+            if let Some(w) = prev_w {
+                self.open_write_fds.insert(fd, w);
+            }
+        }
     }
 
     /// Execute a `[[ … ]]` conditional expression: exit 0 if true, 1 if false.
@@ -3727,7 +3744,20 @@ impl Shell {
             );
         }
 
+        // Install any scratch descriptors (`N>&M`, `N>&-`, `exec`-style dup
+        // targets) opened by this same command before spawning, so the external
+        // can resolve `>&N` / `2>&N` against them — then tear them back down.
+        // The collapsed RedirPlan cannot express left-to-right order between a
+        // dup *source* (`3>&1`) and a plain dup (`2>&3`) on its own, so the
+        // executor materialises the extra fds here (mirroring the compound and
+        // builtin paths) rather than only inside `exec`.
+        let ext_saved_fds = if redir.extra_fds.is_empty() {
+            Vec::new()
+        } else {
+            self.install_extra_fds(&redir.extra_fds, out)
+        };
         self.run_external(&argv, &assigns, out, stdin, &redir);
+        self.restore_extra_fds(ext_saved_fds);
         Flow::Next
     }
 
@@ -6441,6 +6471,17 @@ impl Shell {
             .map(|(k, v)| (k.clone(), self.vars.insert(k.clone(), v.clone())))
             .collect();
 
+        // Install any fd ≥ 3 dups/opens created by this command's own redirects
+        // (`echo hi 3>&1 2>&3`) before resolving the `2>&N` / `>&N` duplications
+        // below, so a later redirect can see a descriptor an earlier one made.
+        // `exec` is exempt — it applies redirects to the *persistent* fd table
+        // itself (further down), and must not have them torn down here.
+        let builtin_saved_fds = if name != "exec" && !redir.extra_fds.is_empty() {
+            self.install_extra_fds(&redir.extra_fds, out)
+        } else {
+            Vec::new()
+        };
+
         // Scoped stderr redirect: a simple-command builtin honors its own
         // `2> file`/`2>> file`/`2>&1`/`2>&N` by pushing a StderrTarget for the
         // builtin's duration, so diagnostics and `>&2` output land in the right
@@ -6769,6 +6810,9 @@ impl Shell {
             // A default plan writes straight to `out` (the fd 1 sink).
             self.write_bytes(out, &RedirPlan::default(), &bytes);
         }
+
+        // Tear down the scoped fd ≥ 3 descriptors installed for this builtin.
+        self.restore_extra_fds(builtin_saved_fds);
 
         // Restore temporary assignments (builtins don't persist them, except
         // pure-assignment which never reaches here).
@@ -17970,6 +18014,25 @@ mod tests {
         assert_eq!(st, 0);
         // A subsequent read of /dev/null still sees EOF (nothing was persisted).
         assert_eq!(run("read x < /dev/null; echo \"[$x]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn same_command_fd_dup_resolves() {
+        // Regression: a *simple* command that opens a scratch descriptor and
+        // then dups from it within the SAME command (`3>&1 2>&3`) must resolve
+        // the dup rather than report "3: Bad file descriptor". The collapsed
+        // RedirPlan buckets each effect into a fixed slot and loses left-to-
+        // right order, so only `exec` and compound commands used to install the
+        // scratch fds. The executor now materialises `extra_fds` for simple
+        // builtins and externals too (via install/restore around the run),
+        // mirroring the compound path. Captured through command substitution
+        // (fd 1 is a pipe), so the dup aliases onto that pipe.
+        // Builtin `echo`:
+        assert_eq!(run("r=$(echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
+        // A different scratch fd number works the same way.
+        assert_eq!(run("r=$(echo hi 4>&1 2>&4); echo \"[$r]\""), ("[hi]\n".into(), 0));
+        // External command (`env echo`): the child inherits the resolved fds.
+        assert_eq!(run("r=$(env echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
     }
 
     #[test]

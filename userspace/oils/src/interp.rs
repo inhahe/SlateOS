@@ -264,6 +264,11 @@ pub struct Shell {
     /// Names with the uppercase attribute (`declare -u`). Assigned values are
     /// converted to uppercase before storing. Inherited by subshell clones.
     upper_attr: HashSet<String>,
+    /// The directory stack below the current directory, managed by
+    /// `pushd`/`popd`/`dirs`. Element 0 is the directory `popd` would return to;
+    /// the *current* directory (the process cwd) is conceptually the top of the
+    /// stack and is not stored here. Cloned into subshells.
+    dir_stack: Vec<String>,
 }
 
 impl Default for Shell {
@@ -307,6 +312,7 @@ impl Shell {
             integer_attr: HashSet::new(),
             lower_attr: HashSet::new(),
             upper_attr: HashSet::new(),
+            dir_stack: Vec::new(),
         }
     }
 
@@ -1430,6 +1436,7 @@ impl Shell {
             integer_attr: self.integer_attr.clone(),
             lower_attr: self.lower_attr.clone(),
             upper_attr: self.upper_attr.clone(),
+            dir_stack: self.dir_stack.clone(),
         }
     }
 
@@ -3126,6 +3133,9 @@ impl Shell {
             "false" => 1,
             "cd" => self.builtin_cd(args),
             "pwd" => self.builtin_pwd(out, redir),
+            "pushd" => self.builtin_pushd(args, out, redir),
+            "popd" => self.builtin_popd(args, out, redir),
+            "dirs" => self.builtin_dirs(args, out, redir),
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args),
@@ -3197,16 +3207,44 @@ impl Shell {
         flow
     }
 
+    /// Change the process working directory to `path`, updating `$OLDPWD`
+    /// (to the previous cwd) and `$PWD` (to the new cwd). Returns the new cwd
+    /// as a display string on success, or an OS error string on failure.
+    fn change_dir(&mut self, path: &str) -> Result<String, String> {
+        let old = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .ok();
+        std::env::set_current_dir(path).map_err(|e| e.to_string())?;
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string());
+        if let Some(o) = old {
+            self.vars.insert("OLDPWD".to_string(), o);
+        }
+        self.vars.insert("PWD".to_string(), cwd.clone());
+        Ok(cwd)
+    }
+
     fn builtin_cd(&mut self, args: &[String]) -> i32 {
-        let target = match args.first() {
-            Some(p) => p.clone(),
-            None => self.param_value("HOME").unwrap_or_else(|| "/".to_string()),
+        // `cd -` returns to `$OLDPWD` and echoes the new directory (bash).
+        let (target, echo) = match args.first().map(String::as_str) {
+            None => (
+                self.param_value("HOME").unwrap_or_else(|| "/".to_string()),
+                false,
+            ),
+            Some("-") => match self.param_value("OLDPWD") {
+                Some(p) => (p, true),
+                None => {
+                    self.emit_stderr(b"osh: cd: OLDPWD not set\n");
+                    return 1;
+                }
+            },
+            Some(p) => (p.to_string(), false),
         };
-        match std::env::set_current_dir(&target) {
-            Ok(()) => {
-                if let Ok(cwd) = std::env::current_dir() {
-                    self.vars
-                        .insert("PWD".to_string(), cwd.to_string_lossy().into_owned());
+        match self.change_dir(&target) {
+            Ok(cwd) => {
+                if echo {
+                    println!("{cwd}");
                 }
                 0
             }
@@ -3215,6 +3253,217 @@ impl Shell {
                 1
             }
         }
+    }
+
+    /// Render a directory path for `dirs`/`pushd`/`popd` output: unless `long`,
+    /// contract a leading `$HOME` to `~` (bash's default short form).
+    fn dirs_render(&self, path: &str, long: bool) -> String {
+        if long {
+            return path.to_string();
+        }
+        if let Some(home) = self.param_value("HOME") {
+            if !home.is_empty() && path == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
+                return format!("~/{rest}");
+            }
+        }
+        path.to_string()
+    }
+
+    /// The current directory stack as a list with the current directory first
+    /// (the conceptual top), followed by the saved `dir_stack` entries.
+    fn dir_stack_full(&self) -> Vec<String> {
+        let cur = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut full = Vec::with_capacity(self.dir_stack.len() + 1);
+        full.push(cur);
+        full.extend(self.dir_stack.iter().cloned());
+        full
+    }
+
+    /// Print the directory stack in the default single-line form (used after a
+    /// successful `pushd`/`popd`).
+    fn print_dirs_line(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let line = self
+            .dir_stack_full()
+            .iter()
+            .map(|p| self.dirs_render(p, false))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.write_line(out, redir, &line)
+    }
+
+    /// `pushd [dir | +N | -N]` — push onto the directory stack and change to the
+    /// new top. With no argument, swap the top two entries. `+N`/`-N` rotate the
+    /// stack so the N-th entry (from the left / right) becomes current.
+    fn builtin_pushd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let is_rot = |s: &str| {
+            s.len() > 1
+                && (s.starts_with('+') || s.starts_with('-'))
+                && s[1..].chars().all(|c| c.is_ascii_digit())
+        };
+        let cur = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match args.first().map(String::as_str) {
+            None => {
+                if self.dir_stack.is_empty() {
+                    self.emit_stderr(b"osh: pushd: no other directory\n");
+                    return 1;
+                }
+                let top = self.dir_stack[0].clone();
+                match self.change_dir(&top) {
+                    Ok(_) => self.dir_stack[0] = cur,
+                    Err(e) => {
+                        self.emit_stderr(format!("osh: pushd: {top}: {e}\n").as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            Some(spec) if is_rot(spec) => {
+                let full = self.dir_stack_full();
+                let len = full.len();
+                let n: usize = spec[1..].parse().unwrap_or(0);
+                if n >= len {
+                    self.emit_stderr(b"osh: pushd: directory stack index out of range\n");
+                    return 1;
+                }
+                let idx = if spec.starts_with('+') { n } else { len - 1 - n };
+                let mut rotated: Vec<String> = full[idx..].to_vec();
+                rotated.extend_from_slice(&full[..idx]);
+                let newtop = rotated[0].clone();
+                match self.change_dir(&newtop) {
+                    Ok(_) => self.dir_stack = rotated[1..].to_vec(),
+                    Err(e) => {
+                        self.emit_stderr(format!("osh: pushd: {newtop}: {e}\n").as_bytes());
+                        return 1;
+                    }
+                }
+            }
+            Some(dir) => match self.change_dir(dir) {
+                Ok(_) => self.dir_stack.insert(0, cur),
+                Err(e) => {
+                    self.emit_stderr(format!("osh: pushd: {dir}: {e}\n").as_bytes());
+                    return 1;
+                }
+            },
+        }
+        self.print_dirs_line(out, redir)
+    }
+
+    /// `popd [+N | -N]` — pop the top of the directory stack and change to it.
+    /// `+N`/`-N` remove the N-th entry (from the left / right) instead; removing
+    /// the current entry (index 0) behaves like a plain `popd`.
+    fn builtin_popd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let is_rot = |s: &str| {
+            s.len() > 1
+                && (s.starts_with('+') || s.starts_with('-'))
+                && s[1..].chars().all(|c| c.is_ascii_digit())
+        };
+        match args.first().map(String::as_str) {
+            Some(spec) if is_rot(spec) => {
+                let len = self.dir_stack.len() + 1; // current + saved
+                let n: usize = spec[1..].parse().unwrap_or(0);
+                if n >= len {
+                    self.emit_stderr(b"osh: popd: directory stack index out of range\n");
+                    return 1;
+                }
+                let idx = if spec.starts_with('+') { n } else { len - 1 - n };
+                if idx == 0 {
+                    // Removing the current directory: fall back to a plain popd.
+                    return self.popd_top(out, redir);
+                }
+                // idx-1 indexes into the saved stack.
+                self.dir_stack.remove(idx - 1);
+            }
+            None => return self.popd_top(out, redir),
+            Some(_) => {
+                self.emit_stderr(b"osh: popd: invalid argument\n");
+                return 1;
+            }
+        }
+        self.print_dirs_line(out, redir)
+    }
+
+    /// Pop the saved top of the directory stack and change to it (the common
+    /// `popd` with no rotation argument). Errors if the stack is empty.
+    fn popd_top(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        if self.dir_stack.is_empty() {
+            self.emit_stderr(b"osh: popd: directory stack empty\n");
+            return 1;
+        }
+        let top = self.dir_stack.remove(0);
+        if let Err(e) = self.change_dir(&top) {
+            self.emit_stderr(format!("osh: popd: {top}: {e}\n").as_bytes());
+            return 1;
+        }
+        self.print_dirs_line(out, redir)
+    }
+
+    /// `dirs [-c] [-l] [-p] [-v] [+N | -N]` — display the directory stack.
+    /// `-c` clears it, `-l` uses long (un-contracted) paths, `-p` prints one per
+    /// line, `-v` prints one per line with an index; `+N`/`-N` print a single
+    /// entry (from the left / right).
+    fn builtin_dirs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut clear = false;
+        let mut long = false;
+        let mut per_line = false;
+        let mut verbose = false;
+        let mut single: Option<String> = None;
+        for a in args {
+            if a.len() > 1
+                && (a.starts_with('+') || a.starts_with('-'))
+                && a[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                single = Some(a.clone());
+            } else if let Some(flags) = a.strip_prefix('-') {
+                for c in flags.chars() {
+                    match c {
+                        'c' => clear = true,
+                        'l' => long = true,
+                        'p' => per_line = true,
+                        'v' => verbose = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if clear {
+            self.dir_stack.clear();
+            return 0;
+        }
+        let full = self.dir_stack_full();
+        if let Some(spec) = single {
+            let len = full.len();
+            let n: usize = spec[1..].parse().unwrap_or(0);
+            if n >= len {
+                self.emit_stderr(b"osh: dirs: directory stack index out of range\n");
+                return 1;
+            }
+            let idx = if spec.starts_with('+') { n } else { len - 1 - n };
+            let rendered = self.dirs_render(&full[idx], long);
+            return self.write_line(out, redir, &rendered);
+        }
+        if per_line || verbose {
+            let mut s = String::new();
+            for (i, p) in full.iter().enumerate() {
+                if verbose {
+                    s.push_str(&format!("{i:2}  "));
+                }
+                s.push_str(&self.dirs_render(p, long));
+                s.push('\n');
+            }
+            return self.write_bytes(out, redir, s.as_bytes());
+        }
+        let line = full
+            .iter()
+            .map(|p| self.dirs_render(p, long))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.write_line(out, redir, &line)
     }
 
     fn builtin_pwd(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -5442,6 +5691,9 @@ fn is_builtin(name: &str) -> bool {
             | "false"
             | "cd"
             | "pwd"
+            | "pushd"
+            | "popd"
+            | "dirs"
             | "echo"
             | "printf"
             | "export"
@@ -6205,6 +6457,18 @@ fn eval_binary(l: &str, op: &str, r: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that read or mutate the process-global current
+    /// working directory. Tests that call `set_current_dir` (the directory-
+    /// stack test) and tests that create/glob cwd-relative paths must all
+    /// hold this lock so a cwd change in one never races another.
+    fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
+        static CWD_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        CWD_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn run(src: &str) -> (String, i32) {
         // Capture stdout by running through command-substitution-style capture.
@@ -7448,6 +7712,7 @@ mod tests {
 
     #[test]
     fn glob_filesystem_expansion() {
+        let _cwd = cwd_guard();
         // Use a uniquely-named cwd-relative dir to avoid the process-wide-cwd
         // race between parallel tests (no `set_current_dir`).
         let uniq = format!(
@@ -7488,6 +7753,7 @@ mod tests {
 
     #[test]
     fn glob_globstar_recursive() {
+        let _cwd = cwd_guard();
         // Build a small tree:  root/{a.rs, sub/{b.rs, deep/c.rs}}
         let uniq = format!(
             "osh_gstar_{}_{}",
@@ -7556,6 +7822,7 @@ mod tests {
 
     #[test]
     fn shopt_nocaseglob_matches_case_insensitively() {
+        let _cwd = cwd_guard();
         let uniq = format!(
             "osh_nocaseglob_test_{}_{}",
             std::process::id(),
@@ -7617,6 +7884,7 @@ mod tests {
 
     #[test]
     fn shopt_dotglob_includes_hidden() {
+        let _cwd = cwd_guard();
         let uniq = format!(
             "osh_dotglob_test_{}_{}",
             std::process::id(),
@@ -7644,6 +7912,60 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn dir_stack_pushd_popd_dirs() {
+        // Mutates the process-global cwd, so serialize against the cwd-relative
+        // glob tests.
+        let _cwd = cwd_guard();
+        let orig = std::env::current_dir().expect("cwd");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let uniq = format!("osh_dirstack_{}_{}", std::process::id(), nanos);
+        let da = std::env::temp_dir().join(format!("{uniq}_a"));
+        let db = std::env::temp_dir().join(format!("{uniq}_b"));
+        std::fs::create_dir_all(&da).expect("mkdir a");
+        std::fs::create_dir_all(&db).expect("mkdir b");
+        // Feed the shell forward-slash paths (accepted by the OS on all
+        // platforms); the stored/echoed paths come back in native form.
+        let pa = da.to_string_lossy().replace('\\', "/");
+        let pb = db.to_string_lossy().replace('\\', "/");
+
+        // pushd a, pushd b -> stack top is b, next is a. popd returns to a.
+        let script = format!(
+            "pushd {pa}\npushd {pb}\necho ---\ndirs +0\ndirs +1\npopd\necho ===\ndirs +0"
+        );
+        let (o, _) = run(&script);
+
+        // Restore the process cwd before asserting (run() moved it).
+        std::env::set_current_dir(&orig).expect("restore cwd");
+
+        let lines: Vec<&str> = o.lines().collect();
+        let dash = lines.iter().position(|l| *l == "---").expect("--- marker");
+        let eq = lines.iter().position(|l| *l == "===").expect("=== marker");
+        // After both pushes: +0 is b, +1 is a.
+        assert!(
+            lines[dash + 1].ends_with(&format!("{uniq}_b")),
+            "dirs +0 should be b, got {:?}",
+            lines[dash + 1]
+        );
+        assert!(
+            lines[dash + 2].ends_with(&format!("{uniq}_a")),
+            "dirs +1 should be a, got {:?}",
+            lines[dash + 2]
+        );
+        // After popd, the current directory is a.
+        assert!(
+            lines[eq + 1].ends_with(&format!("{uniq}_a")),
+            "dirs +0 after popd should be a, got {:?}",
+            lines[eq + 1]
+        );
+
+        std::fs::remove_dir_all(&da).ok();
+        std::fs::remove_dir_all(&db).ok();
     }
 
     #[test]

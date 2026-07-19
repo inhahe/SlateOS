@@ -81,6 +81,11 @@ build_out3.txt
 build_output.txt
 boot_output.txt
 full_build.txt
+# Stray test/sweep output dumps and serial captures (transient build output).
+sweep_test_out.txt
+*_test_out.txt
+serial_out.txt
+serial_out*.txt
 
 # Exception: this saved page is intentionally tracked (reference kept in-repo),
 # even though the blanket *.html rule above ignores saved web pages.

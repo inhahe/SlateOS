@@ -766,7 +766,7 @@ impl Shell {
         let prog = match parsed {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("{}", format_parse_error(&e));
+                self.errln(&format_parse_error(&e, &self.err_prefix()));
                 self.last_status = 2;
                 return 2;
             }
@@ -973,7 +973,7 @@ impl Shell {
                     readers.push(Some(r)); // stage k+1 reads here
                 }
                 Err(e) => {
-                    eprintln!("osh: pipe: {e}");
+                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return (vec![1; n], Flow::Next);
                 }
@@ -1144,9 +1144,9 @@ impl Shell {
                 }
                 Err(e) => {
                     if e.kind() == io::ErrorKind::NotFound {
-                        eprintln!("osh: {program}: command not found");
+                        self.errln(&format!("{}{program}: command not found", self.err_prefix()));
                     } else {
-                        eprintln!("osh: {program}: {e}");
+                        self.errln(&format!("{}{program}: {e}", self.err_prefix()));
                     }
                     prev_stdout = None;
                     // A stage that fails to spawn reports 127 (not found) / 126.
@@ -1319,7 +1319,7 @@ impl Shell {
         // `failglob`: an unmatched glob in the word list is a fatal expansion
         // error — abort the loop before running the body, as bash does.
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
             return Flow::Exit(1);
         }
@@ -1461,7 +1461,7 @@ impl Shell {
     /// "expression expected", but 1 for a zero result — we report 1 for both).
     fn builtin_let(&mut self, args: &[String]) -> i32 {
         if args.is_empty() {
-            self.emit_stderr(b"osh: let: expression expected\n");
+            self.emit_stderr(format!("{}let: expression expected\n", self.err_prefix()).as_bytes());
             return 1;
         }
         let mut last = 0i64;
@@ -1492,7 +1492,7 @@ impl Shell {
                 // honours an active `2>`/`2>&1` redirect on the enclosing
                 // command — bash silences `let "3 x" 2>/dev/null`, `declare -i
                 // k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
-                self.errln(&format!("osh: arithmetic: {e}"));
+                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
                 None
             }
         }
@@ -1658,7 +1658,7 @@ impl Shell {
         let plan = match self.resolve_redirects(redirects) {
             Ok(p) => p,
             Err(msg) => {
-                self.errln(&format!("osh: {msg}"));
+                self.errln(&format!("{}{msg}", self.err_prefix()));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -1689,7 +1689,7 @@ impl Shell {
             match std::fs::read(map_device_path(path)) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -1712,7 +1712,7 @@ impl Shell {
             match open_out(path, *append) {
                 Ok(f) => stdout_file = Some(Arc::new(f)),
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -1752,7 +1752,7 @@ impl Shell {
                     pushed_stderr = true;
                 }
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -1772,7 +1772,7 @@ impl Shell {
                         pushed_stderr = true;
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: pipe: {e}"));
+                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return Flow::Next;
                     }
@@ -1792,7 +1792,7 @@ impl Shell {
                                 pushed_stderr = true;
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: stdout: {e}"));
+                                self.errln(&format!("{}stdout: {e}", self.err_prefix()));
                                 self.last_status = 1;
                                 return Flow::Next;
                             }
@@ -1829,7 +1829,7 @@ impl Shell {
             match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
                 Some(Ok(c)) => stdout_file = Some(Arc::new(c)),
                 _ => {
-                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     fd_alias_error = true;
                 }
@@ -1847,7 +1847,7 @@ impl Shell {
                     stderr_file = Some(f);
                 }
                 _ => {
-                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     fd_alias_error = true;
                 }
@@ -1989,7 +1989,7 @@ impl Shell {
                         self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: {path}: {e}"));
+                        self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                         self.last_status = 1;
                     }
                 },
@@ -2009,7 +2009,7 @@ impl Shell {
                             self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
                         }
                         Err(e) => {
-                            self.errln(&format!("osh: {fd}: {e}"));
+                            self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
                             self.last_status = 1;
                         }
                     }
@@ -2051,7 +2051,7 @@ impl Shell {
         match arith::eval(&expanded, self) {
             Ok(v) => self.last_status = i32::from(v == 0),
             Err(e) => {
-                eprintln!("osh: arithmetic: {e}");
+                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
                 self.last_status = 1;
             }
         }
@@ -2089,7 +2089,7 @@ impl Shell {
         let re = match crate::ere::Regex::new_flags(&pattern, ci) {
             Ok(re) => re,
             Err(e) => {
-                self.errln(&format!("osh: [[: =~: invalid regex: {}", e.0));
+                self.errln(&format!("{}[[: =~: invalid regex: {}", self.err_prefix(), e.0));
                 return false;
             }
         };
@@ -2467,7 +2467,7 @@ impl Shell {
     fn set_scalar_checked(&mut self, name: &str, val: String) -> bool {
         let target = self.resolve_ref_name(name);
         if self.readonly.contains(&target) {
-            self.emit_stderr(format!("osh: {target}: readonly variable\n").as_bytes());
+            self.emit_stderr(format!("{}{target}: readonly variable\n", self.err_prefix()).as_bytes());
             return false;
         }
         if self.allexport {
@@ -2534,7 +2534,7 @@ impl Shell {
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
-            self.emit_stderr(format!("osh: {}: readonly variable\n", a.name).as_bytes());
+            self.emit_stderr(format!("{}{}: readonly variable\n", self.err_prefix(), a.name).as_bytes());
             return false;
         }
         // `set -a` (allexport): any assigned variable is given the export
@@ -2614,7 +2614,7 @@ impl Shell {
                             .and_then(|arr| arr.keys().next_back().copied())
                             .map_or(0, |k| k.saturating_add(1));
                         let Some(idx) = Self::resolve_index(raw, bound) else {
-                            eprintln!("osh: {}: bad array subscript", a.name);
+                            self.errln(&format!("{}{}: bad array subscript", self.err_prefix(), a.name));
                             return true;
                         };
                         let int_val = if is_int {
@@ -2703,10 +2703,9 @@ impl Shell {
                             self.assoc_set(&a.name, key, val, false);
                         }
                         ArrayElem::Positional(_) => {
-                            eprintln!(
-                                "osh: {}: must use subscript when assigning associative array",
+                            self.errln(&format!("{}{}: must use subscript when assigning associative array", self.err_prefix(),
                                 a.name
-                            );
+                            ));
                         }
                     }
                 }
@@ -2747,7 +2746,7 @@ impl Shell {
                                 elems.insert(idx, val);
                                 next = idx.saturating_add(1);
                             } else {
-                                eprintln!("osh: {}: bad array subscript", a.name);
+                                self.errln(&format!("{}{}: bad array subscript", self.err_prefix(), a.name));
                             }
                         }
                     }
@@ -2839,7 +2838,7 @@ impl Shell {
                 // same fatal-arith abort machinery so the shell aborts at the
                 // main level and the subshell fails without aborting the parent.
                 if l < 0 {
-                    self.errln(&format!("osh: {l}: substring expression < 0"));
+                    self.errln(&format!("{}{l}: substring expression < 0", self.err_prefix()));
                     self.arith_error = true;
                     return Vec::new();
                 }
@@ -3109,7 +3108,7 @@ impl Shell {
             // "invalid indirect expansion" and aborts a non-interactive shell.
             // Reuse the nounset fatal-expansion flag (checked by the simple-
             // command driver) so the following command never runs.
-            self.emit_stderr(format!("osh: {refname}: invalid indirect expansion\n").as_bytes());
+            self.emit_stderr(format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes());
             // bash aborts a bad indirect expansion with status 1 (not 127).
             self.unbound_error = Some(1);
             return String::new();
@@ -3119,7 +3118,7 @@ impl Shell {
         // "invalid variable name" error in bash (unlike a valid-but-unset
         // target such as `ptr=missing`, which quietly expands to empty).
         if !is_valid_indirect_target(&target) {
-            self.emit_stderr(format!("osh: {target}: invalid variable name\n").as_bytes());
+            self.emit_stderr(format!("{}{target}: invalid variable name\n", self.err_prefix()).as_bytes());
             // bash aborts an invalid indirect target with status 1 (not 127).
             self.unbound_error = Some(1);
             return String::new();
@@ -3677,7 +3676,7 @@ impl Shell {
         // the command (and, in a non-interactive `-c`, the rest of the list)
         // without running it.
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
             return Flow::Exit(1);
         }
@@ -3701,7 +3700,7 @@ impl Shell {
             // A `failglob` miss while expanding an array-literal value
             // (`arr=(*.nope)`) is fatal, just like the command-word case.
             if let Some(pat) = self.glob_error.take() {
-                self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+                self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
                 self.arith_error = false;
                 self.last_status = 1;
                 return Flow::Exit(1);
@@ -3771,7 +3770,7 @@ impl Shell {
         // A `failglob` miss while expanding a prefix assignment value
         // (`x=*.nope cmd`) is fatal, mirroring the command-word case.
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("osh: no match: {pat}\n").as_bytes());
+            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
             return Flow::Exit(1);
         }
@@ -3782,7 +3781,7 @@ impl Shell {
         for (k, _) in &assigns {
             let target = self.resolve_ref_name(k);
             if self.readonly.contains(&target) {
-                self.emit_stderr(format!("osh: {target}: readonly variable\n").as_bytes());
+                self.emit_stderr(format!("{}{target}: readonly variable\n", self.err_prefix()).as_bytes());
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -3823,7 +3822,7 @@ impl Shell {
         let redir = match self.resolve_redirects(&sc.redirects) {
             Ok(r) => r,
             Err(msg) => {
-                eprintln!("osh: {msg}");
+                self.errln(&format!("{}{msg}", self.err_prefix()));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -4214,7 +4213,7 @@ impl Shell {
                     break;
                 }
                 other => {
-                    self.emit_cmd_stderr(out, redir, &format!("osh: command: {other}: invalid option"));
+                    self.emit_cmd_stderr(out, redir, &format!("{}command: {other}: invalid option", self.err_prefix()));
                     self.last_status = 2;
                     return Flow::Next;
                 }
@@ -4256,7 +4255,7 @@ impl Shell {
             let sub = sub.clone();
             return self.run_builtin(&sub, &argv[1..], assigns, out, stdin, redir);
         }
-        self.emit_cmd_stderr(out, redir, &format!("osh: builtin: {sub}: not a shell builtin"));
+        self.emit_cmd_stderr(out, redir, &format!("{}builtin: {sub}: not a shell builtin", self.err_prefix()));
         self.last_status = 1;
         Flow::Next
     }
@@ -4296,7 +4295,7 @@ impl Shell {
             self.last_status = 0;
         } else {
             if verbose {
-                self.errln(&format!("osh: command: {target}: not found"));
+                self.errln(&format!("{}command: {target}: not found", self.err_prefix()));
             }
             self.last_status = 1;
         }
@@ -4437,7 +4436,7 @@ impl Shell {
                         cmd.stdin(Stdio::from(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: coproc: {e}"));
+                        self.errln(&format!("{}coproc: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4462,7 +4461,7 @@ impl Shell {
                         cmd.stdin(Stdio::from(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: {path}: {e}"));
+                        self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4501,7 +4500,7 @@ impl Shell {
                                 cmd.stdin(Stdio::from(rp));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: pipe: {e}"));
+                                self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                                 self.last_status = 1;
                                 return;
                             }
@@ -4532,7 +4531,7 @@ impl Shell {
                     cmd.stdout(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return;
                 }
@@ -4546,7 +4545,7 @@ impl Shell {
                         cmd.stdout(Stdio::from(f));
                     }
                     _ => {
-                        self.errln(&format!("osh: {n}: Bad file descriptor"));
+                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4562,7 +4561,7 @@ impl Shell {
                             cmd.stdout(s);
                         }
                         Err(e) => {
-                            self.errln(&format!("osh: {e}"));
+                            self.errln(&format!("{}{e}", self.err_prefix()));
                             self.last_status = 1;
                             return;
                         }
@@ -4578,7 +4577,7 @@ impl Shell {
                             cmd.stdout(Stdio::from(wp));
                         }
                         Err(e) => {
-                            self.errln(&format!("osh: pipe: {e}"));
+                            self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                             self.last_status = 1;
                             return;
                         }
@@ -4591,7 +4590,7 @@ impl Shell {
                             cmd.stdout(Stdio::from(fc));
                         }
                         Err(e) => {
-                            self.errln(&format!("osh: exec stdout: {e}"));
+                            self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
                             self.last_status = 1;
                             return;
                         }
@@ -4620,7 +4619,7 @@ impl Shell {
                     cmd.stderr(Stdio::from(f));
                 }
                 _ => {
-                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     return;
                 }
@@ -4637,7 +4636,7 @@ impl Shell {
                     cmd.stderr(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     self.last_status = 1;
                     return;
                 }
@@ -4654,7 +4653,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(wp));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: pipe: {e}"));
+                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4672,7 +4671,7 @@ impl Shell {
                                 cmd.stderr(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: exec stderr: {e}"));
+                                self.errln(&format!("{}exec stderr: {e}", self.err_prefix()));
                                 self.last_status = 1;
                                 return;
                             }
@@ -4684,7 +4683,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(fc));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: stderr: {e}"));
+                        self.errln(&format!("{}stderr: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4694,7 +4693,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(pc));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: pipe: {e}"));
+                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4710,7 +4709,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(fc));
                     }
                     Err(e) => {
-                        self.errln(&format!("osh: stderr: {e}"));
+                        self.errln(&format!("{}stderr: {e}", self.err_prefix()));
                         self.last_status = 1;
                         return;
                     }
@@ -4725,7 +4724,7 @@ impl Shell {
                                 cmd.stderr(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: exec stdout: {e}"));
+                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
                                 self.last_status = 1;
                                 return;
                             }
@@ -4741,10 +4740,10 @@ impl Shell {
             Ok(c) => c,
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
-                    self.emit_cmd_stderr(out, redir, &format!("osh: {}: command not found", argv[0]));
+                    self.emit_cmd_stderr(out, redir, &format!("{}{}: command not found", self.err_prefix(), argv[0]));
                     self.last_status = 127;
                 } else {
-                    self.emit_cmd_stderr(out, redir, &format!("osh: {}: {e}", argv[0]));
+                    self.emit_cmd_stderr(out, redir, &format!("{}{}: {e}", self.err_prefix(), argv[0]));
                     self.last_status = 126;
                 }
                 return;
@@ -4790,7 +4789,7 @@ impl Shell {
                 self.last_status = status.code().unwrap_or(1);
             }
             Err(e) => {
-                self.errln(&format!("osh: wait failed: {e}"));
+                self.errln(&format!("{}wait failed: {e}", self.err_prefix()));
                 self.last_status = 1;
             }
         }
@@ -4840,7 +4839,7 @@ impl Shell {
                         return;
                     }
                     Err(e) => {
-                        eprintln!("osh: {}: {e}", argv[0]);
+                        self.errln(&format!("{}{}: {e}", self.err_prefix(), argv[0]));
                         self.last_status = 1;
                         return;
                     }
@@ -4863,7 +4862,7 @@ impl Shell {
         let (child_stdin_r, parent_stdin_w) = match io::pipe() {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format!("osh: coproc: {e}"));
+                self.errln(&format!("{}coproc: {e}", self.err_prefix()));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -4871,7 +4870,7 @@ impl Shell {
         let (parent_stdout_r, child_stdout_w) = match io::pipe() {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format!("osh: coproc: {e}"));
+                self.errln(&format!("{}coproc: {e}", self.err_prefix()));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -5393,13 +5392,13 @@ impl Shell {
             let fd = match self.redir_effective_fd(r, &mut reserved) {
                 Ok(n) => n,
                 Err(e) => {
-                    self.errln(&format!("osh: {e}"));
+                    self.errln(&format!("{}{e}", self.err_prefix()));
                     rc = 1;
                     continue;
                 }
             };
             if let Err(e) = self.apply_persistent_redirect(r, fd) {
-                self.errln(&format!("osh: {e}"));
+                self.errln(&format!("{}{e}", self.err_prefix()));
                 rc = 1;
             }
         }
@@ -5936,7 +5935,7 @@ impl Shell {
                         Some(t) => t,
                         None => {
                             self.emit_stderr(
-                                format!("osh: {refname}: invalid indirect expansion\n").as_bytes(),
+                                format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
                             );
                             // bash aborts a bad indirect expansion with status 1.
                             self.unbound_error = Some(1);
@@ -5945,7 +5944,7 @@ impl Shell {
                     }
                 };
                 if !is_valid_indirect_target(&tname) {
-                    self.emit_stderr(format!("osh: {tname}: invalid variable name\n").as_bytes());
+                    self.emit_stderr(format!("{}{tname}: invalid variable name\n", self.err_prefix()).as_bytes());
                     // bash aborts an invalid indirect target with status 1.
                     self.unbound_error = Some(1);
                     return String::new();
@@ -6021,7 +6020,7 @@ impl Shell {
                     // bash renders the parameter name with its subscript exactly
                     // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded).
                     let disp = crate::unparse::name_sub(name, index);
-                    self.emit_stderr(format!("osh: {disp}: {text}\n").as_bytes());
+                    self.emit_stderr(format!("{}{disp}: {text}\n", self.err_prefix()).as_bytes());
                     // bash: `${var:?word}` on an unset/null parameter writes the
                     // message and, in a non-interactive shell, exits with status
                     // 127. Reuse the nounset abort path so the simple-command
@@ -6091,7 +6090,7 @@ impl Shell {
                     // same and abort the expansion.
                     let sub = if star { "*" } else { "@" };
                     self.emit_stderr(
-                        format!("osh: {name}[{sub}]: bad array subscript\n").as_bytes(),
+                        format!("{}{name}[{sub}]: bad array subscript\n", self.err_prefix()).as_bytes(),
                     );
                     // bash aborts a bad array subscript with status 1 (not 127).
                     self.unbound_error = Some(1);
@@ -6113,7 +6112,7 @@ impl Shell {
                     } else {
                         "parameter not set"
                     };
-                    self.emit_stderr(format!("osh: {name}[{sub}]: {text}\n").as_bytes());
+                    self.emit_stderr(format!("{}{name}[{sub}]: {text}\n", self.err_prefix()).as_bytes());
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
                     self.unbound_error = Some(127);
                     Vec::new()
@@ -6141,7 +6140,7 @@ impl Shell {
             // bash aborts a non-interactive shell with status 127 on a nounset
             // unset-variable reference.
             self.unbound_error = Some(127);
-            self.emit_stderr(format!("osh: {name}: unbound variable\n").as_bytes());
+            self.emit_stderr(format!("{}{name}: unbound variable\n", self.err_prefix()).as_bytes());
         }
     }
 
@@ -6477,7 +6476,7 @@ impl Shell {
         match arith::eval(s, self) {
             Ok(v) => v,
             Err(e) => {
-                self.errln(&format!("osh: arithmetic: {e}"));
+                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
                 self.arith_error = true;
                 0
             }
@@ -6493,7 +6492,7 @@ impl Shell {
             Err(e) => {
                 // Route through `errln` so an active `2>`/`2>&1` redirect on the
                 // command silences the diagnostic, matching bash.
-                self.errln(&format!("osh: arithmetic: {e}"));
+                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
@@ -6754,7 +6753,7 @@ impl Shell {
                     self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(f)));
                     pushed_stderr = true;
                 } else {
-                    self.errln(&format!("osh: {n}: Bad file descriptor"));
+                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                 }
             } else if redir.stderr_to_stdout {
                 // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
@@ -6870,7 +6869,7 @@ impl Shell {
                                 self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: {path}: {e}"));
+                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                                 rc = 1;
                             }
                         }
@@ -6884,7 +6883,7 @@ impl Shell {
                                 self.exec_stdout = Some(std::sync::Arc::new(f));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: {path}: {e}"));
+                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                                 rc = 1;
                             }
                         }
@@ -6896,7 +6895,7 @@ impl Shell {
                                 self.exec_stderr = Some(std::sync::Arc::new(f));
                             }
                             Err(e) => {
-                                self.errln(&format!("osh: {path}: {e}"));
+                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                                 rc = 1;
                             }
                         }
@@ -6918,7 +6917,7 @@ impl Shell {
                         match self.open_write_fds.get(&n) {
                             Some(f) => self.exec_stdout = Some(std::sync::Arc::clone(f)),
                             None => {
-                                self.errln(&format!("osh: {n}: Bad file descriptor"));
+                                self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
                             }
                         }
@@ -6927,7 +6926,7 @@ impl Shell {
                         match self.open_write_fds.get(&n) {
                             Some(f) => self.exec_stderr = Some(std::sync::Arc::clone(f)),
                             None => {
-                                self.errln(&format!("osh: {n}: Bad file descriptor"));
+                                self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
                             }
                         }
@@ -6955,7 +6954,7 @@ impl Shell {
                                             self.open_fds.remove(fd);
                                         }
                                         Err(e) => {
-                                            self.errln(&format!("osh: {path}: {e}"));
+                                            self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                                             rc = 1;
                                         }
                                     }
@@ -6967,7 +6966,7 @@ impl Shell {
                                         self.open_fds.remove(fd);
                                     }
                                     Err(e) => {
-                                        self.errln(&format!("osh: {fd}: {e}"));
+                                        self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
                                         rc = 1;
                                     }
                                 },
@@ -7003,7 +7002,7 @@ impl Shell {
                 // NOT unwind, so execution continues with the next command.
                 if self.fn_stack.is_empty() && self.source_depth == 0 {
                     self.errln(
-                        "osh: return: can only `return' from a function or sourced script",
+                        &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
                     );
                     2
                 } else {
@@ -7020,7 +7019,7 @@ impl Shell {
                 // returns status 0, and continues executing the next command
                 // rather than unwinding.
                 if self.loop_depth == 0 {
-                    self.errln("osh: break: only meaningful in a `for', `while', or `until' loop");
+                    self.errln(&format!("{}break: only meaningful in a `for', `while', or `until' loop", self.err_prefix()));
                 } else {
                     let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
                     flow = Flow::Break(n.max(1));
@@ -7030,7 +7029,7 @@ impl Shell {
             "continue" => {
                 if self.loop_depth == 0 {
                     self.errln(
-                        "osh: continue: only meaningful in a `for', `while', or `until' loop",
+                        &format!("{}continue: only meaningful in a `for', `while', or `until' loop", self.err_prefix()),
                     );
                 } else {
                     let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
@@ -7039,7 +7038,7 @@ impl Shell {
                 0
             }
             _ => {
-                self.errln(&format!("osh: {name}: not a builtin"));
+                self.errln(&format!("{}{name}: not a builtin", self.err_prefix()));
                 127
             }
         };
@@ -7141,7 +7140,7 @@ impl Shell {
             Some("-") => match self.param_value("OLDPWD") {
                 Some(p) => (p, true),
                 None => {
-                    self.emit_stderr(b"osh: cd: OLDPWD not set\n");
+                    self.emit_stderr(format!("{}cd: OLDPWD not set\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             },
@@ -7183,7 +7182,7 @@ impl Shell {
                 0
             }
             Err(e) => {
-                self.errln(&format!("osh: cd: {target}: {e}"));
+                self.errln(&format!("{}cd: {target}: {e}", self.err_prefix()));
                 1
             }
         }
@@ -7245,14 +7244,14 @@ impl Shell {
         match args.first().map(String::as_str) {
             None => {
                 if self.dir_stack.is_empty() {
-                    self.emit_stderr(b"osh: pushd: no other directory\n");
+                    self.emit_stderr(format!("{}pushd: no other directory\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
                 let top = self.dir_stack[0].clone();
                 match self.change_dir(&top) {
                     Ok(_) => self.dir_stack[0] = cur,
                     Err(e) => {
-                        self.emit_stderr(format!("osh: pushd: {top}: {e}\n").as_bytes());
+                        self.emit_stderr(format!("{}pushd: {top}: {e}\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -7262,7 +7261,7 @@ impl Shell {
                 let len = full.len();
                 let n: usize = spec[1..].parse().unwrap_or(0);
                 if n >= len {
-                    self.emit_stderr(b"osh: pushd: directory stack index out of range\n");
+                    self.emit_stderr(format!("{}pushd: directory stack index out of range\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
                 let idx = if spec.starts_with('+') { n } else { len - 1 - n };
@@ -7272,7 +7271,7 @@ impl Shell {
                 match self.change_dir(&newtop) {
                     Ok(_) => self.dir_stack = rotated[1..].to_vec(),
                     Err(e) => {
-                        self.emit_stderr(format!("osh: pushd: {newtop}: {e}\n").as_bytes());
+                        self.emit_stderr(format!("{}pushd: {newtop}: {e}\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -7280,7 +7279,7 @@ impl Shell {
             Some(dir) => match self.change_dir(dir) {
                 Ok(_) => self.dir_stack.insert(0, cur),
                 Err(e) => {
-                    self.emit_stderr(format!("osh: pushd: {dir}: {e}\n").as_bytes());
+                    self.emit_stderr(format!("{}pushd: {dir}: {e}\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             },
@@ -7302,7 +7301,7 @@ impl Shell {
                 let len = self.dir_stack.len() + 1; // current + saved
                 let n: usize = spec[1..].parse().unwrap_or(0);
                 if n >= len {
-                    self.emit_stderr(b"osh: popd: directory stack index out of range\n");
+                    self.emit_stderr(format!("{}popd: directory stack index out of range\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
                 let idx = if spec.starts_with('+') { n } else { len - 1 - n };
@@ -7315,7 +7314,7 @@ impl Shell {
             }
             None => return self.popd_top(out, redir),
             Some(_) => {
-                self.emit_stderr(b"osh: popd: invalid argument\n");
+                self.emit_stderr(format!("{}popd: invalid argument\n", self.err_prefix()).as_bytes());
                 return 1;
             }
         }
@@ -7326,12 +7325,12 @@ impl Shell {
     /// `popd` with no rotation argument). Errors if the stack is empty.
     fn popd_top(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
         if self.dir_stack.is_empty() {
-            self.emit_stderr(b"osh: popd: directory stack empty\n");
+            self.emit_stderr(format!("{}popd: directory stack empty\n", self.err_prefix()).as_bytes());
             return 1;
         }
         let top = self.dir_stack.remove(0);
         if let Err(e) = self.change_dir(&top) {
-            self.emit_stderr(format!("osh: popd: {top}: {e}\n").as_bytes());
+            self.emit_stderr(format!("{}popd: {top}: {e}\n", self.err_prefix()).as_bytes());
             return 1;
         }
         self.print_dirs_line(out, redir)
@@ -7374,7 +7373,7 @@ impl Shell {
             let len = full.len();
             let n: usize = spec[1..].parse().unwrap_or(0);
             if n >= len {
-                self.emit_stderr(b"osh: dirs: directory stack index out of range\n");
+                self.emit_stderr(format!("{}dirs: directory stack index out of range\n", self.err_prefix()).as_bytes());
                 return 1;
             }
             let idx = if spec.starts_with('+') { n } else { len - 1 - n };
@@ -7440,7 +7439,9 @@ impl Shell {
         let action = &rest[0];
         let specs = &rest[1..];
         if specs.is_empty() {
-            self.emit_stderr(b"osh: trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
+            // A pure builtin usage message: bash's `builtin_usage()` prints
+            // `<builtin>: usage: …` with no `<name>: line N:` shell prefix.
+            self.emit_stderr(b"trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
             return 2;
         }
         let reset = action == "-";
@@ -7456,7 +7457,7 @@ impl Shell {
                 }
                 None => {
                     self.emit_stderr(
-                        format!("osh: trap: {spec}: invalid signal specification\n").as_bytes(),
+                        format!("{}trap: {spec}: invalid signal specification\n", self.err_prefix()).as_bytes(),
                     );
                     status = 1;
                 }
@@ -7598,7 +7599,7 @@ impl Shell {
             }
             if a == "-p" {
                 let Some(v) = args.get(i + 1) else {
-                    self.emit_stderr(b"osh: wait: -p: option requires an argument\n");
+                    self.emit_stderr(format!("{}wait: -p: option requires an argument\n", self.err_prefix()).as_bytes());
                     return 2;
                 };
                 pid_var = Some(v.clone());
@@ -7643,7 +7644,7 @@ impl Shell {
         let mut last = 0;
         for spec in &operands {
             let Some(idx) = self.resolve_job_spec(spec) else {
-                self.emit_stderr(format!("osh: wait: {spec}: no such job\n").as_bytes());
+                self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
                 last = 127;
                 continue;
             };
@@ -7675,7 +7676,7 @@ impl Shell {
                 match self.resolve_job_spec(spec) {
                     Some(idx) => v.push(idx),
                     None => {
-                        self.emit_stderr(format!("osh: wait: {spec}: no such job\n").as_bytes());
+                        self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
                     }
                 }
             }
@@ -7762,7 +7763,7 @@ impl Shell {
                 match self.resolve_job_spec(spec) {
                     Some(idx) => target_ids.push(self.jobs[idx].id),
                     None => {
-                        self.emit_stderr(format!("osh: disown: {spec}: no such job\n").as_bytes());
+                        self.emit_stderr(format!("{}disown: {spec}: no such job\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -7776,7 +7777,7 @@ impl Shell {
             match self.jobs.last() {
                 Some(j) => target_ids.push(j.id),
                 None => {
-                    self.emit_stderr(b"osh: disown: current: no such job\n");
+                    self.emit_stderr(format!("{}disown: current: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             }
@@ -7817,13 +7818,13 @@ impl Shell {
             Some(s) => match self.resolve_job_spec(s) {
                 Some(i) => i,
                 None => {
-                    self.emit_stderr(format!("osh: fg: {s}: no such job\n").as_bytes());
+                    self.emit_stderr(format!("{}fg: {s}: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             },
             None => {
                 if self.jobs.is_empty() {
-                    self.emit_stderr(b"osh: fg: current: no such job\n");
+                    self.emit_stderr(format!("{}fg: current: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
                 self.jobs.len() - 1
@@ -7854,7 +7855,7 @@ impl Shell {
         let specs: Vec<&String> = args.iter().filter(|a| a.as_str() != "--").collect();
         let idxs: Vec<usize> = if specs.is_empty() {
             if self.jobs.is_empty() {
-                self.emit_stderr(b"osh: bg: current: no such job\n");
+                self.emit_stderr(format!("{}bg: current: no such job\n", self.err_prefix()).as_bytes());
                 return 1;
             }
             vec![self.jobs.len() - 1]
@@ -7864,7 +7865,7 @@ impl Shell {
                 match self.resolve_job_spec(s) {
                     Some(i) => v.push(i),
                     None => {
-                        self.emit_stderr(format!("osh: bg: {s}: no such job\n").as_bytes());
+                        self.emit_stderr(format!("{}bg: {s}: no such job\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -7891,7 +7892,7 @@ impl Shell {
         let depth = self.fn_stack.len();
         // Not inside any function → no call context.
         if depth == 0 {
-            self.emit_stderr(b"osh: caller: no such frame\n");
+            self.emit_stderr(format!("{}caller: no such frame\n", self.err_prefix()).as_bytes());
             return 1;
         }
         // bash prints the source label of the *caller's* frame — BASH_SOURCE[n+1]
@@ -7913,7 +7914,7 @@ impl Shell {
             Some(expr) => {
                 let Ok(n) = expr.parse::<usize>() else {
                     self.emit_stderr(
-                        format!("osh: caller: {expr}: invalid number\n").as_bytes(),
+                        format!("{}caller: {expr}: invalid number\n", self.err_prefix()).as_bytes(),
                     );
                     return 1;
                 };
@@ -8029,7 +8030,7 @@ impl Shell {
                 }
             }
             if !matched {
-                self.emit_stderr(format!("osh: help: no help topics match `{pat}'\n").as_bytes());
+                self.emit_stderr(format!("{}help: no help topics match `{pat}'\n", self.err_prefix()).as_bytes());
                 status = 1;
             }
         }
@@ -8105,7 +8106,7 @@ impl Shell {
         let mut status = 0;
         for name in &names {
             if !is_builtin(name) {
-                self.emit_stderr(format!("osh: enable: {name}: not a shell builtin\n").as_bytes());
+                self.emit_stderr(format!("{}enable: {name}: not a shell builtin\n", self.err_prefix()).as_bytes());
                 status = 1;
                 continue;
             }
@@ -8150,7 +8151,7 @@ impl Shell {
                 let name = &op[..eq];
                 if name.is_empty() {
                     self.emit_stderr(
-                        format!("osh: alias: `{op}': invalid alias name\n").as_bytes(),
+                        format!("{}alias: `{op}': invalid alias name\n", self.err_prefix()).as_bytes(),
                     );
                     status = 1;
                     continue;
@@ -8160,7 +8161,7 @@ impl Shell {
                 let line = format!("alias {op}={}\n", single_quote(&val));
                 self.write_bytes(out, redir, line.as_bytes());
             } else {
-                self.emit_stderr(format!("osh: alias: {op}: not found\n").as_bytes());
+                self.emit_stderr(format!("{}alias: {op}: not found\n", self.err_prefix()).as_bytes());
                 status = 1;
             }
         }
@@ -8171,7 +8172,8 @@ impl Shell {
     /// unknown name is a status-1 error.
     fn builtin_unalias(&mut self, args: &[String]) -> i32 {
         if args.is_empty() {
-            self.emit_stderr(b"osh: unalias: usage: unalias [-a] name [name ...]\n");
+            // Pure usage message — unprefixed (see `trap` usage above).
+            self.emit_stderr(b"unalias: usage: unalias [-a] name [name ...]\n");
             return 2;
         }
         if args.iter().any(|a| a == "-a") {
@@ -8184,7 +8186,7 @@ impl Shell {
                 continue;
             }
             if self.aliases.remove(name).is_none() {
-                self.emit_stderr(format!("osh: unalias: {name}: not found\n").as_bytes());
+                self.emit_stderr(format!("{}unalias: {name}: not found\n", self.err_prefix()).as_bytes());
                 status = 1;
             }
         }
@@ -8212,7 +8214,7 @@ impl Shell {
             if arg == "-p" {
                 pathname = args.get(i + 1).cloned();
                 if pathname.is_none() {
-                    self.emit_stderr(b"osh: hash: -p: option requires an argument\n");
+                    self.emit_stderr(format!("{}hash: -p: option requires an argument\n", self.err_prefix()).as_bytes());
                     return 2;
                 }
                 i += 2;
@@ -8265,7 +8267,7 @@ impl Shell {
             let mut status = 0;
             for name in names {
                 if self.cmd_hash.remove(name).is_none() {
-                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
                     status = 1;
                 }
             }
@@ -8283,7 +8285,7 @@ impl Shell {
                         s.push_str(&format!("{}\n", path.to_string_lossy()));
                     }
                 } else {
-                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
                     status = 1;
                 }
             }
@@ -8313,7 +8315,7 @@ impl Shell {
                     self.cmd_hash.insert(name.clone(), (path, 0));
                 }
                 None => {
-                    self.emit_stderr(format!("osh: hash: {name}: not found\n").as_bytes());
+                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
                     status = 1;
                 }
             }
@@ -8344,7 +8346,7 @@ impl Shell {
                 match u32::from_str_radix(m, 8) {
                     Ok(v) => v & 0o777,
                     Err(_) => {
-                        self.emit_stderr(format!("osh: umask: {m}: invalid octal number\n").as_bytes());
+                        self.emit_stderr(format!("{}umask: {m}: invalid octal number\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -8352,7 +8354,7 @@ impl Shell {
                 match parse_symbolic_umask(self.umask_val, m) {
                     Some(v) => v,
                     None => {
-                        self.emit_stderr(format!("osh: umask: {m}: invalid symbolic mode\n").as_bytes());
+                        self.emit_stderr(format!("{}umask: {m}: invalid symbolic mode\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -8410,7 +8412,7 @@ impl Shell {
                         c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => resources.push(c),
                         other => {
                             self.emit_stderr(
-                                format!("osh: ulimit: -{other}: invalid option\n").as_bytes(),
+                                format!("{}ulimit: -{other}: invalid option\n", self.err_prefix()).as_bytes(),
                             );
                             self.emit_stderr(ULIMIT_USAGE.as_bytes());
                             return 2;
@@ -8426,7 +8428,7 @@ impl Shell {
         }
         // Any tokens after the value operand are extra arguments (bash errors).
         if i < args.len() {
-            self.emit_stderr(b"osh: ulimit: too many arguments\n");
+            self.emit_stderr(format!("{}ulimit: too many arguments\n", self.err_prefix()).as_bytes());
             return 1;
         }
 
@@ -8455,7 +8457,7 @@ impl Shell {
                         Ok(parsed) => Some(parsed),
                         Err(_) => {
                             self.emit_stderr(
-                                format!("osh: ulimit: {n}: invalid limit argument\n").as_bytes(),
+                                format!("{}ulimit: {n}: invalid limit argument\n", self.err_prefix()).as_bytes(),
                             );
                             return 1;
                         }
@@ -8558,7 +8560,7 @@ impl Shell {
                     let _ = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
-                    eprintln!("{}", format_parse_error(&e));
+                    self.errln(&format_parse_error(&e, &self.err_prefix()));
                 }
             }
             self.last_status = saved;
@@ -8621,7 +8623,7 @@ impl Shell {
         let mut assign_var: Option<String> = None;
         if args.first().map(String::as_str) == Some("-v") {
             let Some(name) = args.get(1) else {
-                self.errln("osh: printf: -v: option requires an argument");
+                self.errln(&format!("{}printf: -v: option requires an argument", self.err_prefix()));
                 return 2;
             };
             assign_var = Some(name.clone());
@@ -8636,7 +8638,7 @@ impl Shell {
         let mut errors: Vec<String> = Vec::new();
         let text = format_printf(fmt, &args[i + 1..], &mut errors);
         for e in &errors {
-            self.emit_stderr(format!("osh: printf: {e}\n").as_bytes());
+            self.emit_stderr(format!("{}printf: {e}\n", self.err_prefix()).as_bytes());
         }
         let num_status = i32::from(!errors.is_empty());
         if let Some(name) = assign_var {
@@ -8651,7 +8653,7 @@ impl Shell {
             // A readonly target is rejected (status 1), leaving it intact.
             let resolved = self.resolve_ref_name(&base);
             if self.readonly.contains(&resolved) {
-                self.emit_stderr(format!("osh: {base}: readonly variable\n").as_bytes());
+                self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
                 return 1;
             }
             self.assign_elem(&base, &index, text);
@@ -8683,7 +8685,7 @@ impl Shell {
                         'n' => unexport = true,
                         _ => {
                             self.emit_stderr(
-                                format!("osh: export: -{c}: invalid option\n").as_bytes(),
+                                format!("{}export: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
                             );
                             self.emit_stderr(
                                 b"export: usage: export [-fn] [name[=value] ...] or export -p\n",
@@ -8911,7 +8913,7 @@ impl Shell {
                     listing.push_str(&def);
                     listing.push('\n');
                 } else {
-                    self.emit_stderr(format!("osh: declare: {name}: not found\n").as_bytes());
+                    self.emit_stderr(format!("{}declare: {name}: not found\n", self.err_prefix()).as_bytes());
                     status = 1;
                 }
             }
@@ -9033,7 +9035,7 @@ impl Shell {
 
     fn builtin_declare(&mut self, args: &[String], is_local: bool) -> i32 {
         if is_local && self.local_frames.is_empty() {
-            self.emit_stderr(b"osh: local: can only be used in a function\n");
+            self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
             return 1;
         }
         let mut assoc = false;
@@ -9123,7 +9125,7 @@ impl Shell {
             }
             // Reassigning a value to an existing readonly variable is an error.
             if value.is_some() && self.readonly.contains(name) {
-                self.emit_stderr(format!("osh: {name}: readonly variable\n").as_bytes());
+                self.emit_stderr(format!("{}{name}: readonly variable\n", self.err_prefix()).as_bytes());
                 status = 1;
                 continue;
             }
@@ -9236,7 +9238,7 @@ impl Shell {
         let cmd = argv.first().map(String::as_str).unwrap_or("");
         let is_local = cmd == "local";
         if is_local && self.local_frames.is_empty() {
-            self.emit_stderr(b"osh: local: can only be used in a function\n");
+            self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
             return Flow::Next;
         }
@@ -9433,7 +9435,7 @@ impl Shell {
                 continue;
             }
             if value.is_some() && self.readonly.contains(name) {
-                self.emit_stderr(format!("osh: {name}: readonly variable\n").as_bytes());
+                self.emit_stderr(format!("{}{name}: readonly variable\n", self.err_prefix()).as_bytes());
                 status = 1;
                 continue;
             }
@@ -9508,7 +9510,7 @@ impl Shell {
                             'p' => {} // `-p`: re-inputtable listing; treated as list.
                             _ => {
                                 self.emit_stderr(
-                                    format!("osh: shopt: -{c}: invalid option\n").as_bytes(),
+                                    format!("{}shopt: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
                                 );
                                 return 2;
                             }
@@ -9547,7 +9549,7 @@ impl Shell {
             for name in &names {
                 if !KNOWN.contains(&name.as_str()) {
                     self.emit_stderr(
-                        format!("osh: shopt: {name}: invalid shell option name\n").as_bytes(),
+                        format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
                     );
                     return 1;
                 }
@@ -9572,7 +9574,7 @@ impl Shell {
         for name in names {
             if !KNOWN.contains(&name.as_str()) {
                 self.emit_stderr(
-                    format!("osh: shopt: {name}: invalid shell option name\n").as_bytes(),
+                    format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
                 );
                 status = 1;
                 continue;
@@ -9635,7 +9637,7 @@ impl Shell {
             for name in names {
                 if !SETO_NAMES.contains(&name.as_str()) {
                     self.emit_stderr(
-                        format!("osh: shopt: {name}: invalid option name\n").as_bytes(),
+                        format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes(),
                     );
                     status = 1;
                     continue;
@@ -9659,7 +9661,7 @@ impl Shell {
         let mut listing = String::new();
         for name in names {
             if !SETO_NAMES.contains(&name.as_str()) {
-                self.emit_stderr(format!("osh: shopt: {name}: invalid option name\n").as_bytes());
+                self.emit_stderr(format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes());
                 return 1;
             }
             let on = self.shell_option_enabled(name);
@@ -9722,7 +9724,7 @@ impl Shell {
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.emit_stderr(
-                    format!("osh: unset: {a}: cannot unset: readonly variable\n").as_bytes(),
+                    format!("{}unset: {a}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
                 );
                 return 1;
             }
@@ -9737,7 +9739,7 @@ impl Shell {
                 // reports the base name as the readonly variable.
                 if self.readonly.contains(name) {
                     self.emit_stderr(
-                        format!("osh: unset: {name}: cannot unset: readonly variable\n").as_bytes(),
+                        format!("{}unset: {name}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
                     );
                     return 1;
                 }
@@ -10004,14 +10006,14 @@ impl Shell {
         let optstring = match args.first() {
             Some(s) => s.clone(),
             None => {
-                self.errln("osh: getopts: usage: getopts optstring name [arg ...]");
+                self.errln("getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
         let name = match args.get(1) {
             Some(s) => s.clone(),
             None => {
-                self.errln("osh: getopts: usage: getopts optstring name [arg ...]");
+                self.errln("getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
@@ -10250,7 +10252,7 @@ impl Shell {
             && !self.open_fds.contains_key(&n)
             && !self.coproc_read_fds.contains_key(&n)
         {
-            self.errln(&format!("osh: read: {n}: bad file descriptor"));
+            self.errln(&format!("{}read: {n}: bad file descriptor", self.err_prefix()));
             return 1;
         }
         // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N source is
@@ -10305,7 +10307,7 @@ impl Shell {
         // into. A readonly target rejects the read before any reset.
         if let Some(arr) = &array {
             if self.readonly.contains(arr) {
-                self.emit_stderr(format!("osh: {arr}: readonly variable\n").as_bytes());
+                self.emit_stderr(format!("{}{arr}: readonly variable\n", self.err_prefix()).as_bytes());
                 return 1;
             }
             self.vars.remove(arr);
@@ -10464,7 +10466,7 @@ impl Shell {
                     origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
                 other if other.starts_with('-') && other.len() > 1 => {
-                    self.errln(&format!("osh: mapfile: {other}: invalid option"));
+                    self.errln(&format!("{}mapfile: {other}: invalid option", self.err_prefix()));
                     return 2;
                 }
                 _ => array = a.clone(),
@@ -10509,7 +10511,7 @@ impl Shell {
 
     fn builtin_source(&mut self, args: &[String]) -> i32 {
         let Some(path) = args.first() else {
-            self.errln("osh: source: filename argument required");
+            self.errln(&format!("{}source: filename argument required", self.err_prefix()));
             return 2;
         };
         match std::fs::read_to_string(path) {
@@ -10530,7 +10532,7 @@ impl Shell {
                 code
             }
             Err(e) => {
-                self.errln(&format!("osh: source: {path}: {e}"));
+                self.errln(&format!("{}source: {path}: {e}", self.err_prefix()));
                 1
             }
         }
@@ -10835,7 +10837,7 @@ impl Shell {
             let found = is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
             if !found {
                 if !mode_t && !mode_p && !mode_pp {
-                    self.errln(&format!("osh: type: {name}: not found"));
+                    self.errln(&format!("{}type: {name}: not found", self.err_prefix()));
                 }
                 status = 1;
                 continue;
@@ -10945,7 +10947,7 @@ impl Shell {
             if a.last() == Some(&"]") {
                 a.pop();
             } else {
-                self.errln("osh: [: missing ']'");
+                self.errln(&format!("{}[: missing ']'", self.err_prefix()));
                 return 2;
             }
         }
@@ -10961,7 +10963,7 @@ impl Shell {
         match eval_test(&a) {
             Ok(b) => i32::from(!b),
             Err(operand) => {
-                self.errln(&format!("osh: {name}: {operand}: integer expression expected"));
+                self.errln(&format!("{}{name}: {operand}: integer expression expected", self.err_prefix()));
                 2
             }
         }
@@ -11013,7 +11015,7 @@ impl Shell {
                     0
                 }
                 Err(e) => {
-                    self.errln(&format!("osh: {path}: {e}"));
+                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
                     1
                 }
             }
@@ -11097,7 +11099,7 @@ impl Shell {
                 Err(_) => 1,
             },
             None => {
-                self.errln(&format!("osh: {fd}: Bad file descriptor"));
+                self.errln(&format!("{}{fd}: Bad file descriptor", self.err_prefix()));
                 1
             }
         }
@@ -11173,6 +11175,27 @@ impl Shell {
         let mut line = msg.as_bytes().to_vec();
         line.push(b'\n');
         self.emit_stderr(&line);
+    }
+
+    /// The diagnostic prefix bash prepends to every shell error message. In a
+    /// non-interactive shell (`-c` or a script) this is `<name>: line <N>: `,
+    /// where `<name>` is `$0` (the `-c` pseudo-name `osh`, or the script path)
+    /// and `<N>` is the current source line (`$LINENO`); in interactive mode
+    /// bash omits the `line <N>:` component. Centralising the prefix here means
+    /// every error site reports the correct source name (so a script's errors
+    /// name the script, not a hard-coded `osh:`) and the line number, matching
+    /// bash's `error_prefix()`.
+    ///
+    /// Note: bash uses the magic source name `environment` for functions defined
+    /// in a `-c` string; osh deliberately keeps its own `$0`-based name instead,
+    /// since byte-matching bash's name is impossible anyway (osh's `$0` is `osh`,
+    /// not `bash`) and osh's own name is the more meaningful diagnostic.
+    fn err_prefix(&self) -> String {
+        if self.command_mode || self.script_mode {
+            format!("{}: line {}: ", self.name, self.current_line)
+        } else {
+            format!("{}: ", self.name)
+        }
     }
 
     /// Write a command-level diagnostic (e.g. `foo: command not found`, or a
@@ -13014,12 +13037,12 @@ fn map_device_path(path: &str) -> &str {
 /// (`syntax error: syntax error near …`). Only add the prefix for the
 /// fragment-style messages (`expected ')'`, `empty command`, …); pass through a
 /// message that already opens with `syntax error`.
-fn format_parse_error(e: &crate::parser::ParseError) -> String {
+fn format_parse_error(e: &crate::parser::ParseError, prefix: &str) -> String {
     let msg = e.to_string();
     if msg.starts_with("syntax error") {
-        format!("osh: {msg}")
+        format!("{prefix}{msg}")
     } else {
-        format!("osh: syntax error: {msg}")
+        format!("{prefix}syntax error: {msg}")
     }
 }
 
@@ -14701,12 +14724,57 @@ mod tests {
         // "syntax error: " prefix.
         let e = ParseError("syntax error near unexpected token '--'".into());
         assert_eq!(
-            format_parse_error(&e),
+            format_parse_error(&e, "osh: "),
             "osh: syntax error near unexpected token '--'"
         );
         // A fragment-style message still gets the prefix.
         let e2 = ParseError("expected ')'".into());
-        assert_eq!(format_parse_error(&e2), "osh: syntax error: expected ')'");
+        assert_eq!(
+            format_parse_error(&e2, "osh: "),
+            "osh: syntax error: expected ')'"
+        );
+    }
+
+    #[test]
+    fn error_prefix_includes_line_number_in_command_mode() {
+        // In a non-interactive shell (`osh -c` / a script) bash prefixes every
+        // diagnostic with `<name>: line <N>: `. osh matches that format (using
+        // its own `$0` name). The default test `run()` harness is interactive-
+        // like (no command/script mode), so it sees the bare `<name>: ` form;
+        // here we exercise the command-mode path explicitly.
+        fn run_cmd(src: &str) -> String {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            let mut buf = Vec::new();
+            let prog = parse(src).expect("parse");
+            {
+                let mut out = Out::Capture(&mut buf);
+                sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        // Unbound-variable diagnostic on line 1.
+        assert_eq!(
+            run_cmd("{ echo \"${y?}\"; } 2>&1"),
+            "osh: line 1: y: parameter not set\n"
+        );
+        // A command-not-found error reports the line it occurs on (line 2),
+        // and now honours the `2>&1` redirect (routed through errln).
+        assert_eq!(
+            run_cmd("echo hi\nno_such_cmd_xyz 2>&1"),
+            "hi\nosh: line 2: no_such_cmd_xyz: command not found\n"
+        );
+        // readonly-assignment rejection also carries the line prefix.
+        assert_eq!(
+            run_cmd("readonly r=1\n{ r=2; } 2>&1"),
+            "osh: line 2: r: readonly variable\n"
+        );
+        // Pure builtin *usage* messages (bash's `builtin_usage()`) stay
+        // unprefixed even in command mode — just `<builtin>: usage: …`.
+        assert_eq!(
+            run_cmd("getopts 2>&1"),
+            "getopts: usage: getopts optstring name [arg ...]\n"
+        );
     }
 
     #[test]

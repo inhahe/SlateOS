@@ -4068,6 +4068,14 @@ impl Shell {
         if self.nameref_attr.contains(refname) {
             return self.resolve_ref_name(refname);
         }
+        // `${!@}` / `${!*}` indirect through the positional list: the value of
+        // `$@`/`$*` becomes the target name. With **no** positionals there is
+        // nothing to indirect through — bash yields empty with status 0 (unlike
+        // a non-empty-but-malformed target, which is a fatal "invalid variable
+        // name"). Handle the empty case here so it never reaches the validator.
+        if (refname == "@" || refname == "*") && self.positional.is_empty() {
+            return String::new();
+        }
         let Some(target) = self.param_value(refname) else {
             // The pointer variable itself is unset: bash reports
             // "invalid indirect expansion" and aborts a non-interactive shell.
@@ -20714,6 +20722,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o1, s1) = run("echo ${!$} 2>/dev/null; echo after");
         assert_eq!((o1.as_str(), s1), ("", 1));
         assert_eq!(run("{ echo ${!!}; } 2>&1").0, "osh: ${!!}: bad substitution\n");
+    }
+
+    #[test]
+    fn indirect_at_star_positional() {
+        // `${!@}` / `${!*}` (empty prefix) indirect through the positional list
+        // `$@`/`$*`, NOT the "list all variable names" form (which requires a
+        // non-empty prefix like `${!PATH@}`). With `set -- a b c`, `$@` joins to
+        // "a b c", an invalid single variable name → fatal "invalid variable
+        // name" (status 1), matching bash.
+        let (o, s) = run("set -- a b c; echo \"${!@}\"; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        let (o2, s2) = run("set -- a b c; echo \"${!*}\"; echo after");
+        assert_eq!((o2.as_str(), s2), ("", 1));
+        // No positionals → nothing to indirect through → empty, status 0 (bash
+        // distinguishes "nothing to indirect" from "indirect through a bad name").
+        assert_eq!(run("foo=1; echo \"[${!@}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(run("foo=1; echo \"[${!*}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(run("foo=1; echo \"[${!@}]\"").1, 0);
+        // A single positional whose value is a valid set variable name resolves
+        // like `${!name}` — one level of indirection through that name.
+        assert_eq!(run("V=hi; set -- V; echo \"${!@}\"").0, "hi\n");
+        assert_eq!(run("V=hi; set -- V; echo \"${!*}\"").0, "hi\n");
+        // A NON-empty prefix still lists variable names (unchanged behavior).
+        assert_eq!(run("aa1=1; aa2=2; echo ${!aa@}").0, "aa1 aa2\n");
     }
 
     #[test]

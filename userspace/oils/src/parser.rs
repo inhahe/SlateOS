@@ -1484,9 +1484,13 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         // `prefix`. Distinguished from the array-keys form (`${!a[@]}`) by
         // ending in a bare `*`/`@` (no closing `]`). A valid name prefix is
         // required so we don't mistake other expansions.
+        // A *non-empty* prefix is required for the name-listing form: a bare
+        // `${!*}`/`${!@}` is instead indirect expansion through the positional
+        // list (`$*`/`$@`), handled below, not a listing of every variable.
         if let Some(prefix) = after_bang.strip_suffix('*')
+            && !prefix.is_empty()
             && !prefix.contains('[')
-            && (prefix.is_empty() || is_valid_name(prefix))
+            && is_valid_name(prefix)
         {
             return Ok(WordPart::VarNames {
                 prefix: prefix.to_string(),
@@ -1494,8 +1498,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             });
         }
         if let Some(prefix) = after_bang.strip_suffix('@')
+            && !prefix.is_empty()
             && !prefix.contains('[')
-            && (prefix.is_empty() || is_valid_name(prefix))
+            && is_valid_name(prefix)
         {
             return Ok(WordPart::VarNames {
                 prefix: prefix.to_string(),
@@ -1947,13 +1952,15 @@ fn is_valid_name(s: &str) -> bool {
 /// A referent usable in a *bare* indirect expansion `${!name}`: a plain
 /// identifier, a positional parameter (all digits, `${!1}`), or a special
 /// single-char parameter. bash accepts `#`, `?`, and `-` here but **rejects**
-/// `$` and `!` (`${!$}`/`${!!}` are a "bad substitution"), and `@`/`*` are
-/// consumed earlier as the variable-name listing forms (`${!prefix@}`). The
-/// referent's value is then used as the parameter name to expand.
+/// `$` and `!` (`${!$}`/`${!!}` are a "bad substitution"). A bare `@`/`*` is
+/// indirect expansion through the positional list: `${!@}` / `${!*}` treat
+/// each positional parameter's *value* as a variable name to indirect through
+/// (bash then rejects them as "invalid variable name" unless empty). Only a
+/// *prefixed* `@`/`*` (`${!prefix@}`) is the variable-name listing form.
 fn is_indirect_referent(name: &str) -> bool {
     is_valid_name(name)
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
-        || matches!(name, "#" | "?" | "-")
+        || matches!(name, "#" | "?" | "-" | "@" | "*")
 }
 
 /// True when a `>&`/`<&` target denotes an fd duplication (a bare number or

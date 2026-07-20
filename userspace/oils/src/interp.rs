@@ -181,6 +181,27 @@ fn shopt_is_known(name: &str) -> bool {
     SHOPT_TABLE.iter().any(|(n, _)| *n == name)
 }
 
+/// True when `p` is a candidate the shell may `exec` as a command, matching
+/// bash's `access(X_OK)` probe during a PATH search. On unix (incl. the
+/// slateos target) the file must be a regular file with at least one execute
+/// bit set, so a non-executable data file sharing a command's name is skipped.
+/// `fs::metadata` follows symlinks, so a symlink to an executable counts. On
+/// the Windows host executability is determined by extension, not a mode bit,
+/// so an ordinary `is_file()` test is the closest analogue (the caller pairs
+/// this with an explicit `.exe`/`.cmd`/`.bat` extension probe).
+fn path_is_executable(p: &std::path::Path) -> bool {
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(windows)]
+    {
+        p.is_file()
+    }
+}
+
 /// Format one `shopt` listing line. In re-inputtable mode (`shopt -p`) the line
 /// is `shopt -s NAME` / `shopt -u NAME` (which can be fed back to the shell);
 /// otherwise it is bash's `NAME<pad-to-15>\ton|off` status form.
@@ -5695,7 +5716,14 @@ impl Shell {
         };
         for dir in std::env::split_paths(&path) {
             let cand = dir.join(name);
-            if cand.is_file() {
+            // bash's PATH search skips files it cannot execute (it probes with
+            // `access(X_OK)`), so a non-executable data file (e.g. a `*.json`
+            // config) sharing a name with a real command in an earlier PATH dir
+            // does not shadow the executable found later. Mirror that: require
+            // the exec bit on unix. On the Windows host executability is by
+            // extension, so an exact `is_file()` match plus the extension probe
+            // below is the closest analogue.
+            if path_is_executable(&cand) {
                 return Some(cand);
             }
             // Host convenience: try common Windows executable extensions.
@@ -14040,10 +14068,14 @@ impl Shell {
         out
     }
 
-    /// Command-name candidates for `compgen -c`/`-A command`: every executable
+    /// Command-name candidates for `compgen -c`/`-A command`: every *executable*
     /// basename found on `$PATH`. Scans all PATH directories (the caller's
-    /// prefix filter trims the results). On Windows the common executable
-    /// extensions are stripped so bare command names are offered.
+    /// prefix filter trims the results). Only genuine executables are offered:
+    /// on Unix a file must have an execute bit set (so a config file like
+    /// `x.json` sitting in a PATH dir is skipped — matching bash); on Windows,
+    /// which has no execute bit, only files with a known executable extension
+    /// (`.exe`/`.cmd`/`.bat`/`.com`) qualify, and that extension is stripped so
+    /// the bare command name is offered.
     fn compgen_path_commands(&self, _word: &str) -> Vec<String> {
         let path = match self.param_value("PATH") {
             Some(p) => p,
@@ -14062,17 +14094,33 @@ impl Shell {
                 let raw = ent.file_name().to_string_lossy().into_owned();
                 #[cfg(windows)]
                 let name = {
-                    let mut n = raw;
+                    // No execute bit on Windows: gate on the extension so
+                    // non-executable files (e.g. `*.json`) are not offered.
+                    let lower = raw.to_ascii_lowercase();
+                    let mut base = None;
                     for ext in [".exe", ".cmd", ".bat", ".com"] {
-                        if let Some(stripped) = n.strip_suffix(ext) {
-                            n = stripped.to_string();
+                        if lower.ends_with(ext) {
+                            // `ext` is ASCII, so this byte slice is on a char
+                            // boundary and preserves the base name's case.
+                            base = Some(raw[..raw.len() - ext.len()].to_string());
                             break;
                         }
                     }
+                    let Some(n) = base else { continue };
                     n
                 };
                 #[cfg(not(windows))]
-                let name = raw;
+                let name = {
+                    // A command must be executable by someone. `fs::metadata`
+                    // follows symlinks (a symlink to an executable counts).
+                    use std::os::unix::fs::PermissionsExt;
+                    let is_exec = std::fs::metadata(ent.path())
+                        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+                    if !is_exec {
+                        continue;
+                    }
+                    raw
+                };
                 out.push(name);
             }
         }
@@ -23328,6 +23376,95 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, st) = run("compgen -W 'foo bar' xyz; echo \"st=$?\"");
         assert_eq!(o, "st=1\n");
         assert_eq!(st, 0);
+    }
+
+    #[test]
+    fn compgen_command_skips_non_executables() {
+        // `compgen -c` must offer only genuine executables from $PATH — never a
+        // stray config file that happens to sit in a PATH directory. Build a
+        // throwaway PATH dir with one executable-extension file and one `.json`.
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("osh_compgen_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // On Windows the gate is the extension; on Unix it is the execute bit.
+        #[cfg(windows)]
+        let exe = dir.join("mycmd.exe");
+        #[cfg(not(windows))]
+        let exe = dir.join("mycmd");
+        {
+            let mut f = std::fs::File::create(&exe).expect("create exe");
+            let _ = f.write_all(b"");
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
+        }
+        let cfg = dir.join("mycfg.json");
+        {
+            let mut f = std::fs::File::create(&cfg).expect("create cfg");
+            let _ = f.write_all(b"{}");
+        }
+
+        let mut sh = Shell::new();
+        sh.vars.insert("PATH".to_string(), dir.to_string_lossy().into_owned());
+        let cmds = sh.compgen_path_commands("");
+        // The executable is offered by its bare name; the `.json` is not (in
+        // either its raw or extension-stripped form).
+        assert!(cmds.iter().any(|c| c == "mycmd"), "expected mycmd in {cmds:?}");
+        assert!(!cmds.iter().any(|c| c == "mycfg" || c == "mycfg.json"), "config file leaked into {cmds:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_search_skips_non_executable_files() {
+        // A PATH search must resolve to a genuine executable, mirroring bash's
+        // `access(X_OK)` probe: a non-executable data file sharing a command's
+        // name must not be treated as that command.
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("osh_path_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A real executable — gated by extension on Windows, by the exec bit on
+        // Unix. `find_in_path` must locate it.
+        #[cfg(windows)]
+        let exe = dir.join("mytool.exe");
+        #[cfg(not(windows))]
+        let exe = dir.join("mytool");
+        {
+            let mut f = std::fs::File::create(&exe).expect("create exe");
+            let _ = f.write_all(b"");
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
+        }
+
+        let mut sh = Shell::new();
+        sh.vars.insert("PATH".to_string(), dir.to_string_lossy().into_owned());
+        assert!(sh.find_in_path("mytool").is_some(), "executable not found in PATH");
+
+        // A non-executable, plain-named data file. On Unix the missing exec bit
+        // must make the search skip it (returning None); on Windows executability
+        // is by extension, so this assertion is Unix-specific.
+        #[cfg(not(windows))]
+        {
+            let data = dir.join("mydata");
+            {
+                let mut f = std::fs::File::create(&data).expect("create data");
+                let _ = f.write_all(b"x");
+            }
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644));
+            assert!(
+                sh.find_in_path("mydata").is_none(),
+                "non-executable file was resolved as a command"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

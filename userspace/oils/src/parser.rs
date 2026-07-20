@@ -450,6 +450,7 @@ impl Parser {
                         | Op::DGreat
                         | Op::GreatAnd
                         | Op::LessAnd
+                        | Op::LessGreat
                         | Op::AmpGreat
                         | Op::AmpDGreat
                         | Op::DLess
@@ -948,6 +949,7 @@ impl Parser {
                     | Op::DGreat
                     | Op::GreatAnd
                     | Op::LessAnd
+                    | Op::LessGreat
                     | Op::AmpGreat
                     | Op::AmpDGreat
                     | Op::DLess
@@ -1001,6 +1003,7 @@ impl Parser {
                 RedirectOp::DupOut
             }
             Some(Tok::Op(Op::LessAnd)) => RedirectOp::DupIn,
+            Some(Tok::Op(Op::LessGreat)) => RedirectOp::ReadWrite,
             Some(Tok::Op(Op::AmpGreat)) => RedirectOp::WriteBoth,
             Some(Tok::Op(Op::AmpDGreat)) => RedirectOp::AppendBoth,
             Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,
@@ -1008,7 +1011,11 @@ impl Parser {
             _ => return Err(ParseError("expected redirection operator".into())),
         };
         let fd = explicit_fd.unwrap_or(match op {
-            RedirectOp::Read | RedirectOp::HereDoc | RedirectOp::HereStr | RedirectOp::DupIn => 0,
+            RedirectOp::Read
+            | RedirectOp::HereDoc
+            | RedirectOp::HereStr
+            | RedirectOp::DupIn
+            | RedirectOp::ReadWrite => 0,
             _ => 1,
         });
         let target = match self.bump() {

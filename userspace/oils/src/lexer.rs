@@ -49,6 +49,9 @@ pub enum Op {
     GreatPipe,
     GreatAnd,
     LessAnd,
+    /// `<>` — open the target for both reading and writing (create if absent,
+    /// no truncation). Default fd is 0.
+    LessGreat,
     /// `&>` — redirect both stdout and stderr (truncate/create).
     AmpGreat,
     /// `&>>` — redirect both stdout and stderr (append).
@@ -529,6 +532,11 @@ impl Lexer {
                         Some('&') => {
                             self.pos += 1;
                             out.push(Tok::Op(Op::LessAnd));
+                        }
+                        Some('>') => {
+                            // `<>` — open the target for reading and writing.
+                            self.pos += 1;
+                            out.push(Tok::Op(Op::LessGreat));
                         }
                         Some('<') => {
                             self.pos += 1;

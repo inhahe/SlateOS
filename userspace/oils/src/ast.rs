@@ -646,6 +646,9 @@ pub enum RedirectOp {
     AppendBoth,
     /// `< file` — read.
     Read,
+    /// `<> file` — open the target for both reading and writing (`O_RDWR |
+    /// O_CREAT`, no truncation). Default fd is 0.
+    ReadWrite,
     /// `n>&m` — duplicate an output fd (target parsed as the target fd number).
     DupOut,
     /// `n<&m` — duplicate an input fd (target parsed as the source fd number).

@@ -519,6 +519,7 @@ fn redirect_src(r: &Redirect) -> String {
             RedirectOp::Clobber => (">|", " "),
             RedirectOp::Append => (">>", " "),
             RedirectOp::Read => ("<", " "),
+            RedirectOp::ReadWrite => ("<>", " "),
             RedirectOp::DupOut => (">&", ""),
             RedirectOp::DupIn => ("<&", ""),
             // `{name}` never pairs with here-docs / `&>`; fall back to the plain
@@ -542,6 +543,10 @@ fn redirect_src_plain(r: &Redirect) -> String {
         RedirectOp::WriteBoth => format!("&> {}", word_src(&r.target)),
         RedirectOp::AppendBoth => format!("&>> {}", word_src(&r.target)),
         RedirectOp::Read => fd_prefixed(r.fd, 0, "<", " ", &word_src(&r.target)),
+        // `<>` opens fd 0 by default, but bash's `declare -f` deparser elides the
+        // source fd only for fd 1 (`1<> f` → `<> f`), showing it otherwise
+        // (`<> f` → `0<> f`, `3<> f` stays `3<> f`). Match that with default 1.
+        RedirectOp::ReadWrite => fd_prefixed(r.fd, 1, "<>", " ", &word_src(&r.target)),
         // bash always shows the explicit source fd on an output dup, including
         // the default (`>&2` → `1>&2`), so pass a default that never elides it.
         RedirectOp::DupOut => fd_prefixed(r.fd, -1, ">&", "", &word_src(&r.target)),
@@ -964,6 +969,17 @@ mod tests {
         assert!(d.contains("read x 0<&3"), "dump: {d:?}");
         assert!(d.contains("cat 0<&4"), "dump: {d:?}");
         assert!(!d.contains(">&3"), "input dup rendered as output dup: {d:?}");
+    }
+
+    #[test]
+    fn readwrite_redirect_renders_and_roundtrips() {
+        // `<>` (open for read+write) renders with its default source fd 0 shown
+        // tight against the operator (`0<> file`), like bash's deparser, and a
+        // non-default fd is preserved (`3<> file`).
+        let d = dump_fn("r() { cat <> io.txt; exec 3<> log; }", "r");
+        assert!(d.contains("cat 0<> io.txt"), "dump: {d:?}");
+        assert!(d.contains("3<> log"), "dump: {d:?}");
+        assert_roundtrip("r() { cat <> io.txt; exec 3<> log; }", "r");
     }
 
     #[test]

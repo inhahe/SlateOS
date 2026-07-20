@@ -14,6 +14,37 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-RW-OFFSET. `osh`'s `<>` read/write descriptor does not share one OS file offset — 2026-07-19 — OPEN (low priority)
+
+**What:** The `<>` (open-for-read-write) redirect is now implemented
+(`RedirectOp::ReadWrite`), covering `<> file` (fd 0 → stdin), `1<>`/`2<>`
+(no-truncate write), and `exec {fd}<> file` (persistent rw descriptor).
+The *write* side is fully faithful — writes land at offset 0 and overwrite
+in place, matching bash (verified via `od`). The *read* side, however, is a
+**byte snapshot** taken at open time (osh's fd model stores read fds as
+`io::Cursor<Vec<u8>>` in `open_fds` and write fds as live `File`s in
+`open_write_fds` — two independent handles). A real `O_RDWR` descriptor
+shares ONE OS file offset between reads and writes, so in bash a `read`
+after a `>&N` write on the same `<>` fd continues from the post-write
+position; in osh the read cursor is independent of the write handle and does
+not see writes made through the same fd after open.
+
+**Where:** `userspace/oils/src/interp.rs` — `ExtraFdOp::ReadWriteFile`
+(install in `install_extra_fds`, exec loop, and `apply_persistent_redirect`),
+`open_rw` helper, and the `RedirectOp::ReadWrite` arm of `resolve_redirects`.
+
+**Repro:** `exec 3<>f; echo AB >&3; read -u 3 x; echo "[$x]"` — bash reads
+from just past "AB\n" (EOF → empty); osh's read cursor still starts at the
+pre-write snapshot. This is unusual in real scripts (interleaved read+write
+on one `<>` fd), so it is low priority.
+
+**Proper fix:** unify osh's fd model so a single descriptor can be backed by
+one live `File` (or a shared seek position) usable for both reading and
+writing, rather than the split snapshot/live-handle representation. That is a
+broader fd-model refactor touching `open_fds`/`open_write_fds` and every
+builtin that reads/writes user-space fds — deferred until there is a concrete
+need beyond `<>`.
+
 ### TD-OILS-BADSUBST-AT. `osh` reports `${x@}` (bare `@` transform) as a bad substitution — 2026-07-19 — OPEN (very low priority)
 
 **What:** bash's handling of a `${name@}` with an *empty* transform operator is

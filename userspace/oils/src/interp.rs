@@ -2579,6 +2579,28 @@ impl Shell {
                         }
                     }
                 }
+                ExtraFdOp::ReadWriteFile(path) => {
+                    // `exec {fd}<> file`: register both a read snapshot and a
+                    // live write handle for the same descriptor. Create-if-absent,
+                    // never truncate. The two handles are independent (no shared
+                    // OS offset) — a documented model limitation.
+                    match open_rw(path) {
+                        Ok(f) => {
+                            let bytes = std::fs::read(map_device_path(path)).unwrap_or_default();
+                            self.open_fds
+                                .insert(*fd, RefCell::new(io::Cursor::new(bytes)));
+                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                        }
+                        Err(e) => {
+                            self.errln(&format!(
+                                "{}{path}: {}",
+                                self.err_prefix(),
+                                io_error_message(&e)
+                            ));
+                            self.last_status = 1;
+                        }
+                    }
+                }
                 ExtraFdOp::Close => {} // already removed above
             }
         }
@@ -5734,6 +5756,27 @@ impl Shell {
                     self.open_write_fds.remove(&fd);
                 }
             }
+            RedirectOp::ReadWrite => {
+                // `exec {v}<> file` (persistent open-for-read-write). Create the
+                // file if absent, never truncate. The read side snapshots the
+                // current bytes; the write side is a live handle. The two do not
+                // share an OS offset (a documented model limitation).
+                let path = self.expand_to_string(&r.target);
+                let f = open_rw(&path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                match fd {
+                    0 => {
+                        let bytes = std::fs::read(map_device_path(&path)).unwrap_or_default();
+                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                    }
+                    1 => self.exec_stdout = Some(std::sync::Arc::new(f)),
+                    2 => self.exec_stderr = Some(std::sync::Arc::new(f)),
+                    _ => {
+                        let bytes = std::fs::read(map_device_path(&path)).unwrap_or_default();
+                        self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                        self.open_write_fds.insert(fd, std::sync::Arc::new(f));
+                    }
+                }
+            }
             RedirectOp::HereDoc | RedirectOp::HereStr => {
                 let bytes = if matches!(r.op, RedirectOp::HereDoc) {
                     self.expand_double_quoted(&r.target.parts).into_bytes()
@@ -5939,6 +5982,42 @@ impl Shell {
                             }
                             Err(e) => return Err(format!("{path}: {}", io_error_message(&e))),
                         }
+                    }
+                }
+                RedirectOp::ReadWrite => {
+                    // `N<> file`: open the target `O_RDWR | O_CREAT` with no
+                    // truncation. Unlike `<`, bash *creates* the file if it is
+                    // absent (and never errors on a missing file). Validate the
+                    // open now so a genuinely unopenable path (e.g. a directory,
+                    // or a permission error) surfaces at redirection time.
+                    let path = self.expand_redirect_target(&r.target)?;
+                    if let Err(e) = open_rw(&path) {
+                        return Err(format!("{path}: {}", io_error_message(&e)));
+                    }
+                    if fd == 0 {
+                        // Connect the file to stdin. The read side yields the
+                        // file's current bytes from offset 0 (empty for a freshly
+                        // created file, matching bash's immediate-EOF behaviour).
+                        // Writing to fd 0 is not modelled (documented limitation).
+                        plan.stdin = Some(path);
+                        plan.stdin_data = None;
+                    } else if fd >= 3 {
+                        // `exec {fd}<> file`: a persistent read+write descriptor.
+                        plan.extra_fds.push((fd, ExtraFdOp::ReadWriteFile(path)));
+                    } else if fd == 2 {
+                        // `2<> file`: fd 2 writes to the file without truncating
+                        // it. osh models the write side as a no-truncate (append)
+                        // sink — the offset-0 write position of a real `O_RDWR`
+                        // fd is not modelled (documented limitation).
+                        plan.stderr = Some((path, true));
+                        plan.stderr_shares_stdout = false;
+                        plan.stderr_to_stdout = false;
+                        plan.stderr_to_fd = None;
+                    } else {
+                        // `1<> file` (or a bare `>`-side fd): as above for fd 1.
+                        plan.stdout = Some((path, true));
+                        plan.stdout_to_stderr = false;
+                        plan.stdout_to_fd = None;
                     }
                 }
                 RedirectOp::HereDoc => {
@@ -7873,6 +7952,28 @@ impl Shell {
                                         rc = 1;
                                     }
                                 },
+                                ExtraFdOp::ReadWriteFile(path) => {
+                                    // `exec {fd}<> file`: persistent read+write.
+                                    // Create-if-absent, no truncation; the read
+                                    // side snapshots current bytes, the write side
+                                    // is a live handle (independent offsets).
+                                    match open_rw(path) {
+                                        Ok(f) => {
+                                            let bytes = std::fs::read(map_device_path(path))
+                                                .unwrap_or_default();
+                                            self.open_fds.insert(
+                                                *fd,
+                                                RefCell::new(io::Cursor::new(bytes)),
+                                            );
+                                            self.open_write_fds
+                                                .insert(*fd, std::sync::Arc::new(f));
+                                        }
+                                        Err(e) => {
+                                            self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                                            rc = 1;
+                                        }
+                                    }
+                                }
                                 ExtraFdOp::Close => {
                                     self.open_fds.remove(fd);
                                     self.open_write_fds.remove(fd);
@@ -13508,6 +13609,13 @@ enum ExtraFdOp {
     /// *current* sink is duplicated into fd N (a snapshot, matching bash's dup
     /// semantics — a later `exec > file` does not retarget the alias).
     AliasStd(i32),
+    /// Open fd N for both reading and writing (`exec {fd}<> file`): the file is
+    /// created if absent and never truncated (`O_RDWR | O_CREAT`). In osh's
+    /// simulated fd model the read side is a byte snapshot of the file's current
+    /// contents (`open_fds`) and the write side is a live file handle
+    /// (`open_write_fds`); the two do NOT share an OS file offset the way a real
+    /// `O_RDWR` descriptor would — a documented limitation (see known-issues.md).
+    ReadWriteFile(String),
     /// Close fd N (`N<&-` / `N>&-`).
     Close,
 }
@@ -15192,6 +15300,22 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
         opts.truncate(true);
     }
     opts.open(map_device_path(path))
+}
+
+/// Open `path` for both reading and writing (`<>` redirect): create it if it is
+/// absent, never truncate it (`O_RDWR | O_CREAT`, no `O_TRUNC`). This differs
+/// from [`open_out`] (which truncates or appends) and from a read-only open
+/// (which errors on a missing file): `<>` guarantees the file exists afterward
+/// while preserving any current contents.
+fn open_rw(path: &str) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // `<>` never truncates: existing contents are preserved (writes land at
+        // offset 0 and overwrite in place). Spelled out for clippy and clarity.
+        .truncate(false)
+        .open(map_device_path(path))
 }
 
 /// Is this redirect a descriptor *close* (`N>&-` / `N<&-`)? For a varfd
@@ -24494,6 +24618,75 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, status) = run("echo hi >&5");
         assert_eq!(status, 1);
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn exec_readwrite_fd_roundtrip() {
+        // `exec {fd}<> file` opens a read+write descriptor (created if absent,
+        // never truncated). Successive `>&N` writes land in the file at a
+        // shared, advancing offset — matching bash.
+        assert_eq!(
+            run_exec_redirect(
+                "exec 3<> \"{FILE}\"\necho hi >&3\necho bye >&3\nexec 3>&-"
+            ),
+            "hi\nbye\n"
+        );
+    }
+
+    #[test]
+    fn readwrite_fd_writes_at_offset_zero_no_truncate() {
+        // `<>` opens without O_TRUNC and positions the write at offset 0, so a
+        // shorter write overwrites the head and leaves the tail intact (bash
+        // parity). "PREFIX\n" (7 bytes) → overwrite the first 4 with "add\n".
+        assert_eq!(
+            run_exec_redirect(
+                "printf 'PREFIX\\n' > \"{FILE}\"\nexec 3<> \"{FILE}\"\necho add >&3\nexec 3>&-"
+            ),
+            "add\nIX\n"
+        );
+    }
+
+    #[test]
+    fn readwrite_fd_read_side_sees_contents() {
+        // The read side of `exec {fd}<> file` yields the file's current bytes
+        // from offset 0: `read -u N` consumes successive lines just like `<`.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_rw_read_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, b"one\ntwo\n").expect("write input");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let src = format!("exec 4<> \"{p}\"\nread -u 4 a\nread -u 4 b\necho \"$a+$b\"\nexec 4<&-");
+        let (out, status) = run(&src);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert_eq!(out, "one+two\n");
+    }
+
+    #[test]
+    fn readwrite_fd0_creates_missing_file() {
+        // `<> file` on a nonexistent path *creates* it (unlike `<`, which errors
+        // on a missing file). The command succeeds (status 0) and the file
+        // exists afterward.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_rw_create_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        let _ = std::fs::remove_file(&path); // ensure absent
+        let p = path.to_string_lossy().replace('\\', "/");
+        let (_out, status) = run(&format!(": <> \"{p}\""));
+        let existed = path.exists();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 0);
+        assert!(existed, "<> must create a missing file");
     }
 
     #[test]

@@ -25800,6 +25800,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o3, "trap -- 'echo new' SIGINT\n");
         let (o4, _) = run("trap 'echo a' INT; (trap - INT; trap -p INT; echo cleared)");
         assert_eq!(o4, "cleared\n");
+        // A *pipeline stage* is also a subshell, so it likewise displays the
+        // inherited trap string (TD-OILS-SUBSHELL-TRAP-DISPLAY symptom): bash
+        // prints `trap -- 'echo x' SIGINT` for `trap -p | cat`.
+        let (o5, _) = run("trap 'echo x' INT; trap -p | cat");
+        assert_eq!(o5, "trap -- 'echo x' SIGINT\n");
+        // The default `DEBUG` pseudo-trap is *not* inherited for firing in a
+        // subshell (no `functrace`), yet its string is still listable there.
+        let (o6, _) = run("trap 'echo dbg' DEBUG; (trap -p DEBUG)");
+        assert_eq!(o6, "trap -- 'echo dbg' DEBUG\n");
     }
 
     #[test]

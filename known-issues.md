@@ -3306,7 +3306,7 @@ emitting a real osh version banner rather than faking bash's; (2) align each
 `HELP_TABLE` usage string with bash's exact synopsis wording byte-for-byte.
 Mechanical but tedious; parked as low-value.
 
-### TD-OILS-SUBSHELL-TRAP-DISPLAY. `osh` subshells drop parent trap *strings*, so `trap -p` inside a subshell shows nothing (bash keeps the strings for display while resetting their firing disposition) — OPEN (narrow fidelity gap; needs a display-vs-disposition split) 2026-07-19
+### TD-OILS-SUBSHELL-TRAP-DISPLAY. `osh` subshells drop parent trap *strings*, so `trap -p` inside a subshell shows nothing (bash keeps the strings for display while resetting their firing disposition) — FIXED 2026-07-20 (was already implemented; entry was stale)
 
 **Where:** `userspace/oils/src/interp.rs` — `clone_for_subshell` (the `traps`
 field: currently filters to keep only ignored `''` traps and drops the rest).
@@ -3343,6 +3343,23 @@ only under `errtrace` (`set -E`); by default they display but do not fire.
 Naively keeping the strings *without* that guard would wrongly fire
 `DEBUG`/`ERR`/`RETURN` handlers inside subshells, so the guard is required, which
 is why this is deferred rather than a one-line clone change.
+
+**Fix (verified 2026-07-20 — the code already did this; the entry lagged):**
+`clone_for_subshell` already implements the display-vs-disposition split via a
+dedicated `trap_shadow: HashMap<String, String>` field. The active `traps` map
+keeps only the traps that still *fire* in a subshell — ignored (`''`) traps
+always, plus `DEBUG`/`RETURN` under `functrace` and `ERR` under `errtrace` — and
+every non-inherited trap string is moved into `trap_shadow` (merged with any the
+parent already carried). `trap_print` (`trap -p`) and the bare `trap` listing
+merge `trap_shadow` in for any signal not already active, so a `( … )` group, a
+pipeline stage, and a command substitution all *display* the inherited strings
+while never firing the reset handlers — exactly bash's behaviour. Setting a trap
+inside the subshell replaces its shadow; `trap - SIG` clears it. Regression
+coverage: `subshell_lists_inherited_traps_but_does_not_fire_them` (now also
+asserts the pipeline-stage `trap -p | cat` display case and the default-`DEBUG`
+display-but-don't-fire case) and `subshell_exit_trap_fires`. Verified end-to-end
+against the built binary: `trap 'echo x' INT; (trap -p)` and `trap -p | cat`
+both print `trap -- 'echo x' SIGINT`.
 
 ### TD-OILS-FATAL-ABORT-STATUS. `osh` exit status after a *fatal expansion abort* diverges from bash in `-c` mode and for arithmetic errors — OPEN (narrow, mode-dependent quirk; bash itself is inconsistent) 2026-07-19
 

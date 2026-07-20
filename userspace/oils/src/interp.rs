@@ -878,6 +878,14 @@ impl Shell {
     fn seed_shell_vars(&mut self) {
         self.vars
             .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+        // IFS is a *real* variable in bash, initialised to the default
+        // space-tab-newline, not merely an implicit splitting default. Scripts
+        // read it (`"$IFS"`), test it (`${IFS+set}`), and — critically — save
+        // and restore it (`old=$IFS; IFS=,; …; IFS=$old`). Leaving it unset made
+        // that idiom restore an *empty* IFS, silently disabling field splitting.
+        // Seeded before `import_environment`, whose `or_insert` cannot override
+        // it — matching bash, which always resets IFS and never inherits it.
+        self.vars.insert("IFS".to_string(), " \t\n".to_string());
         // Platform identity strings bash always defines at startup. We report
         // SlateOS's own values (not the host build's), so scripts that branch on
         // `$OSTYPE`/`$MACHTYPE` see the target platform. bash leaves these as
@@ -14714,6 +14722,11 @@ fn read_record<R: BufRead>(
 /// and backslash-escape the characters that are special inside double quotes
 /// (`"`, `\`, `$`, and backtick), matching bash's re-inputtable output.
 fn quote_declare_value(v: &str) -> String {
+    // A value containing a control character is rendered in ANSI-C `$'…'` form
+    // (bash: `declare -- x=$'a\tb'`), not double-quoted with the literal byte.
+    if v.chars().any(char::is_control) {
+        return ansi_c_quote(v);
+    }
     let mut out = String::with_capacity(v.len() + 2);
     out.push('"');
     for c in v.chars() {
@@ -14734,12 +14747,19 @@ fn ansi_c_quote(s: &str) -> String {
     let mut out = String::from("$'");
     for c in s.chars() {
         match c {
-            '\n' => out.push_str("\\n"),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{08}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0b}' => out.push_str("\\v"),
+            '\u{0c}' => out.push_str("\\f"),
             '\r' => out.push_str("\\r"),
+            '\u{1b}' => out.push_str("\\E"),
             '\\' => out.push_str("\\\\"),
             '\'' => out.push_str("\\'"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            // bash renders any other control byte as 3-digit octal (`\001`,
+            // `\177`), matching its own `$'…'` re-input parser — not `\xHH`.
+            c if c.is_control() => out.push_str(&format!("\\{:03o}", u32::from(c))),
             c => out.push(c),
         }
     }
@@ -17052,6 +17072,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn ifs_defaults_to_space_tab_newline() {
+        // bash seeds IFS to the literal default at startup; it is a real,
+        // readable variable, not merely an implicit splitting rule. `declare -p`
+        // renders it via ANSI-C quoting (bash: `declare -- IFS=$' \t\n'`).
+        assert_eq!(run("declare -p IFS").0, "declare -- IFS=$' \\t\\n'\n");
+        assert_eq!(run(r#"printf '%s' "${#IFS}""#).0, "3");
+        // The ubiquitous save/restore idiom must round-trip: saving `$IFS`,
+        // narrowing it, then restoring must bring back whitespace splitting —
+        // if IFS were unset, `old=$IFS` would save "" and the restore would
+        // silently disable field splitting.
+        assert_eq!(
+            run(r#"old=$IFS; IFS=:; IFS=$old; x="a b c"; for w in $x; do echo "<$w>"; done"#).0,
+            "<a>\n<b>\n<c>\n"
+        );
+    }
+
+    #[test]
     fn unquoted_word_split_boundary_delims() {
         // IFS whitespace at an expansion boundary must break against adjacent
         // literal text (the classic bug: `[$x]` gluing `[` to the first field).
@@ -18769,6 +18806,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn declare_p_quotes_specials() {
         // A value with a double quote and `$` is backslash-escaped.
         assert_eq!(run("x='a\"b$c'; declare -p x").0, "declare -- x=\"a\\\"b\\$c\"\n");
+    }
+
+    #[test]
+    fn declare_p_control_chars_use_ansi_c_form() {
+        // A value containing a control byte is rendered in ANSI-C `$'…'` form
+        // (bash: `declare -- x=$'a\tb'`), not double-quoted with the raw byte.
+        assert_eq!(run("x=$'a\\tb'; declare -p x").0, "declare -- x=$'a\\tb'\n");
+        // The named escapes match bash exactly: \a \b \t \n \v \f \r \E.
+        assert_eq!(
+            run("x=$'\\a\\b\\t\\n\\v\\f\\r\\E'; declare -p x").0,
+            "declare -- x=$'\\a\\b\\t\\n\\v\\f\\r\\E'\n"
+        );
+        // Other control bytes are 3-digit octal (bash's re-input form), not \xHH:
+        // 0x01 -> \001, 0x7f (DEL) -> \177.
+        assert_eq!(
+            run("x=$'\\001\\177'; declare -p x").0,
+            "declare -- x=$'\\001\\177'\n"
+        );
     }
 
     #[test]

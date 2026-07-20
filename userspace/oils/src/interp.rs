@@ -2393,15 +2393,27 @@ impl Shell {
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> Flow {
+        // A process substitution in a *compound* command's redirect target
+        // (`{ …; } > >(cat)`, `for … done < <(…)`) is expanded here, in
+        // `resolve_redirects`, not in `exec_simple` — so its deferred `>(cmd)`
+        // body and temp files must be torn down here too. Record the marks
+        // before resolving, then finish after the redirected body completes (and
+        // its stdout file handle has been dropped, so the temp file is readable).
+        let in_mark = self.procsub_in_temps.len();
+        let out_mark = self.procsub_out_jobs.len();
         let plan = match self.resolve_redirects(redirects) {
             Ok(p) => p,
             Err(msg) => {
                 self.errln(&format!("{}{msg}", self.err_prefix()));
                 self.last_status = 1;
+                self.finish_procsubs(in_mark, out_mark);
                 return Flow::Next;
             }
         };
-        self.exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_command(inner, o, s))
+        let flow =
+            self.exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_command(inner, o, s));
+        self.finish_procsubs(in_mark, out_mark);
+        flow
     }
 
     /// Run `run` with `plan`'s redirects installed for its whole duration, then
@@ -27526,6 +27538,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let contents =
             run_exec_redirect("echo hello > >(read line; echo \"$line\" > \"{FILE}\")");
         assert_eq!(contents, "hello\n");
+    }
+
+    #[test]
+    fn process_sub_output_deferred_on_compound() {
+        // A process substitution in a *compound* command's redirect target
+        // (`{ …; } > >(…)`) must also run its deferred body — the bug fix in
+        // `exec_redirected`. Both lines of the group's output reach the body.
+        let contents = run_exec_redirect(
+            "{ echo one; echo two; } > >(cat > \"{FILE}\")",
+        );
+        assert_eq!(contents, "one\ntwo\n");
+        // Same for a loop's redirect target.
+        let looped = run_exec_redirect(
+            "for i in a b; do echo $i; done > >(cat > \"{FILE}\")",
+        );
+        assert_eq!(looped, "a\nb\n");
     }
 
     #[test]

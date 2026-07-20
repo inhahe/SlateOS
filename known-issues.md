@@ -1871,9 +1871,16 @@ Temp files are created lazily during word expansion and cleaned up when the
 enclosing command finishes: `exec_simple` records a mark into
 `procsub_in_temps`/`procsub_out_jobs` before running the command and calls
 `finish_procsubs` after (running deferred `>(cmd)` bodies, then deleting all temp
-files). Process substitutions created while expanding a non-simple-command
-context (a `for`-list, `case` word, `[[ … ]]`) are not swept by that wrapper and
-leak their temp file for the shell's lifetime — a minor, rarely-hit gap.
+files). `exec_redirected` does the same for a *compound* command's redirect
+target, so `{ …; } > >(cmd)`, `( … ) > >(cmd)`, and `for/while/if/case … > >(cmd)`
+now correctly run the deferred output body and clean up (**fixed 2026-07-20**;
+regression test `process_sub_output_deferred_on_compound`; previously these
+produced *no* output because `finish_procsubs` was never called for compound
+commands). Still not swept: process substitutions created while expanding a
+non-redirect, non-simple-command *word* context (a `for`-list operand `for x in
+<(…)`, a `case` word, a `[[ … ]]` operand) — those leak their temp file for the
+shell's lifetime (input procsubs there still *function*, since the file is
+written at expansion; only cleanup leaks). A minor, rarely-hit gap.
 
 **Proper fix:** once SlateOS exposes named pipes (a `mkfifo`/FIFO VFS node) or a
 `/dev/fd/N` mechanism, replace the temp file with a real pipe: for `<(cmd)` spawn

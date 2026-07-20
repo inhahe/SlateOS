@@ -5643,7 +5643,17 @@ impl Shell {
             match r.op {
                 RedirectOp::Read => {
                     if fd == 0 {
-                        plan.stdin = Some(self.expand_to_string(&r.target));
+                        // bash opens the redirect *before* the command runs and
+                        // reports a missing/unreadable file at redirection time —
+                        // even for a builtin that never reads stdin (`true < x`,
+                        // `: < x`, `echo hi < x`). Validate the open here so the
+                        // error surfaces uniformly for builtins and externals;
+                        // downstream code re-opens the path when it actually reads.
+                        let path = self.expand_to_string(&r.target);
+                        if let Err(e) = std::fs::File::open(map_device_path(&path)) {
+                            return Err(format!("{path}: {}", io_error_message(&e)));
+                        }
+                        plan.stdin = Some(path);
                         plan.stdin_data = None;
                     } else if fd >= 3 {
                         // `exec 3< file`: slurp the file now so a missing/unreadable
@@ -22670,6 +22680,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
         let _ = std::fs::remove_file(&path);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn input_redirect_missing_file_fails_before_builtin_runs() {
+        // bash opens `< file` before the command runs and reports a missing file
+        // even for builtins that never read stdin — the command does not run and
+        // status is 1. Regression: osh used to set `plan.stdin` without opening,
+        // so `echo hi < /nonexistent` printed "hi" (rc 0) instead of failing.
+        let missing = std::env::temp_dir()
+            .join(format!("osh_absent_{}_zzz.txt", std::process::id()));
+        let p = missing.to_string_lossy().replace('\\', "/");
+        let _ = std::fs::remove_file(&missing);
+        // `echo` never reads stdin, yet the missing redirect must abort it.
+        let (o, s) = run(&format!("echo hi < {p}"));
+        assert_eq!(o, "", "builtin must not run when its input redirect fails");
+        assert_eq!(s, 1);
+        // `true`/`:` likewise fail the redirect (status 1) despite ignoring stdin.
+        let (_o, s) = run(&format!("true < {p}"));
+        assert_eq!(s, 1);
     }
 
     #[test]

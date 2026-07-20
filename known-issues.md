@@ -1143,6 +1143,29 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
+### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20
+
+**Where:** `userspace/oils/src/interp.rs` (`exec_external`, the `PCommand`
+construction ~line 5664). The `arg0` override is `#[cfg(unix)]`.
+
+**What:** bash execs the PATH-resolved binary but hands the child `argv[0]` set
+to the command word *exactly as typed* (`cat`, not `/usr/bin/cat`), so a program
+reports its own name the way the user invoked it. Probe symptoms on the host:
+`osh -c 'cat /nope'` prints `/usr/bin/cat: /nope: No such file or directory`
+(bash: `cat: …`), and `osh -c 'sh -c "echo \$0"'` prints `/usr/bin/sh` (bash:
+`sh`). This affects any external program's self-named error prefix, `$0` in a
+child shell script, and `ps`/process listings.
+
+**Why NOT a bug on target:** osh *does* set `argv[0]` to the typed name via
+`std::os::unix::process::CommandExt::arg0`, which is compiled in for the
+slateos target (`cfg(unix)` true) — so the shipped OS matches bash. The
+divergence exists only on the `x86_64-pc-windows-gnu` host build, where
+`std::process::Command` has no `argv[0]` override and the MSYS runtime
+reconstructs `argv[0]` from the full executable path. Same disposition family as
+the `/tmp`→`D:\tmp` path and `$HOME` format artifacts: a host-execution
+difference, not a target-behavior bug. No action needed; validate argv[0]
+behavior on the slateos target when a ring-3 exec self-test exists.
+
 ### TD-OILS-UNICODE-ESC. `$'\uHHHH'` / `$'\UHHHHHHHH'` always emit UTF-8 (correct for SlateOS; differs only from MSYS bash's C-locale default) — NOT-A-BUG / documented probe artifact — 2026-07-20
 
 **Where:** `userspace/oils/src/lexer.rs` (ANSI-C `$'…'` unescaping, `\u`/`\U`

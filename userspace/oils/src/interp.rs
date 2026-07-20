@@ -6422,6 +6422,30 @@ impl Shell {
                 }
             }
         }
+
+        // Canonical dup-then-close idiom: `cmd 2>&3 3>&-` (and `1>&3 3>&-`)
+        // duplicates fd 3's target onto fd 2/1 and then closes fd 3 — all for
+        // the command's environment only. bash performs the redirects in source
+        // order, so the dup captures fd 3's target *before* the close removes it,
+        // and fd 3 is restored (still open) once the command finishes. Our
+        // `RedirPlan` is order-free: a `Close` op and a `stdout_to_fd`/
+        // `stderr_to_fd` dup naming the same descriptor would race, and
+        // `install_extra_fds` applies the close first — removing fd N before the
+        // dup resolves, yielding a spurious "N: Bad file descriptor". Since a
+        // per-command close is command-scoped anyway (restored afterward), drop
+        // the transient close of any fd the plan still dups from: the dup then
+        // resolves against the live descriptor and fd N is left in its correct
+        // post-command (still-open) state. The rare reverse ordering
+        // (`3>&- 2>&3`, which bash rejects) is indistinguishable in the collapsed
+        // plan and is treated as the useful ordering — a documented order-free
+        // simplification consistent with the rest of the redirect machinery.
+        if plan.stdout_to_fd.is_some() || plan.stderr_to_fd.is_some() {
+            let dup_fds = [plan.stdout_to_fd, plan.stderr_to_fd];
+            plan.extra_fds.retain(|(fd, op)| {
+                !(matches!(op, ExtraFdOp::Close) && dup_fds.contains(&Some(*fd)))
+            });
+        }
+
         Ok(plan)
     }
 
@@ -24719,6 +24743,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run("x=7 < /nonexistent_osh_probe_path; echo \"st=$? x=$x\"");
         assert!(o.contains("st=1"), "input-redirect failure should be status 1: {o:?}");
         assert!(o.contains("x=7"), "assignment should still apply: {o:?}");
+    }
+
+    #[test]
+    fn dup_then_close_same_command_resolves_before_close() {
+        // The canonical `cmd 2>&3 3>&-` idiom: fd 2 is duplicated from fd 3
+        // (a fd opened by `exec 3> file`) and fd 3 is then closed — both for the
+        // command's environment only. The order-free RedirPlan previously
+        // applied the close first, removing fd 3 before the dup resolved, so
+        // the command failed with "3: Bad file descriptor". Verified against
+        // bash 5.x. See the dup-then-close post-pass in `resolve_redirects`.
+        //
+        // fd 3 is routed to a real temp file (not `exec 3>&1`, which the
+        // in-memory `run()` capture harness cannot dup into a numbered fd — the
+        // stdout-capture variant is exercised by the CLI probe suite instead).
+        let base = std::env::temp_dir();
+        let uniq = format!("osh_dupclose_{}", std::process::id());
+
+        // `2>&3 3>&-` on a builtin: stderr routes to fd 3 (= the file), so the
+        // diagnostic written via `>&2` lands in the file. No "Bad fd" error.
+        let f = base.join(format!("{uniq}_a"));
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let (o, s) = run(&format!("exec 3> \"{fp}\"; {{ echo err >&2; }} 2>&3 3>&-"));
+        assert_eq!(s, 0, "should not error with Bad file descriptor: {o:?}");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "err\n");
+        let _ = std::fs::remove_file(&f);
+
+        // `1>&3 3>&-`: stdout follows fd 3 into the file.
+        let f = base.join(format!("{uniq}_b"));
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let (o, s) = run(&format!("exec 3> \"{fp}\"; echo hey 1>&3 3>&-"));
+        assert_eq!(s, 0, "unexpected error: {o:?}");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "hey\n");
+        let _ = std::fs::remove_file(&f);
+
+        // A per-command `3>&-` close is command-scoped: fd 3 is restored after
+        // the command, so a *later* command's `>&3` still succeeds (both writes
+        // reach the file). This confirms the dropped-close does not leak into a
+        // persistent close of fd 3.
+        let f = base.join(format!("{uniq}_c"));
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let (_, s) = run(&format!("exec 3> \"{fp}\"; echo before >&3 3>&-; echo x >&3"));
+        assert_eq!(s, 0);
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "before\nx\n",
+            "fd 3 should remain open after the command"
+        );
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]

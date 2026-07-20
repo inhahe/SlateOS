@@ -1390,6 +1390,20 @@ command exits 127). Status of the remaining aspects:
    spawns `cmd` as a child, waits, and exits with its status — observationally
    the shell does not continue, but the pid is not preserved and signals are not
    transparently forwarded the way a real in-place `execve` would provide.
+10. **Per-command dup-then-close (`cmd 2>&3 3>&-`) — RESOLVED 2026-07-20.** The
+    canonical idiom that duplicates a saved descriptor onto fd 1/2 and then
+    closes it *on the same command* (`echo hi 2>&3 3>&-`, `{ …; } 1>&3 3>&-`,
+    `ls … 2>&3 3>&-`) previously failed with a spurious `3: Bad file descriptor`:
+    the order-free `RedirPlan` records the `N>&-` close in `extra_fds` and the
+    `M>&N` dup in `stdout_to_fd`/`stderr_to_fd`, and `install_extra_fds` applied
+    the close *first*, removing fd N before the dup resolved. Fixed with a
+    post-pass in `resolve_redirects`: when the plan still dups from a descriptor,
+    the transient (command-scoped) close of that descriptor is dropped, so the
+    dup resolves against the live fd and fd N is left in its correct
+    post-command (still-open) state — a per-command close is undone afterward
+    anyway. The only residual is the reverse ordering `3>&- 2>&3` (which bash
+    *rejects*), indistinguishable in the collapsed plan and treated as the useful
+    ordering. Regression: `dup_then_close_same_command_resolves_before_close`.
 
 **Proper fix:** (2)–(8) done (see above). Remaining: (9) once the kernel exposes
 `execve`, replace the spawn+wait+exit with an actual in-place image replacement

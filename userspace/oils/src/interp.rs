@@ -1407,7 +1407,15 @@ impl Shell {
         // command in the same list — including one enabled mid-list, e.g.
         // `true && set -e && false` — does see errexit on and does exit.
         let mut errexit_before_last = self.errexit;
-        let flow = self.exec_pipeline(&ao.first, out, stdin);
+        // Per POSIX, `set -e` is ignored for any command of an AND-OR list other
+        // than the one following the final `&&`/`||`, and for a `!`-negated
+        // pipeline — and that exemption *propagates* into any function or
+        // compound command the exempt command invokes (so `f || g` runs f's body
+        // with errexit off even if f contains a bare failing command). The
+        // structurally-final pipeline is `ao.first` only when the list has no
+        // `&&`/`||` continuation; otherwise it is the last element of `ao.rest`.
+        let first_exempt = n_rest > 0 || ao.first.negated;
+        let flow = self.exec_and_or_pipeline(&ao.first, first_exempt, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
         }
@@ -1422,7 +1430,8 @@ impl Shell {
             };
             if run {
                 errexit_before_last = self.errexit;
-                let flow = self.exec_pipeline(pipe, out, stdin);
+                let exempt = idx + 1 != n_rest || pipe.negated;
+                let flow = self.exec_and_or_pipeline(pipe, exempt, out, stdin);
                 if !matches!(flow, Flow::Next) {
                     return flow;
                 }
@@ -1460,6 +1469,28 @@ impl Shell {
     fn exec_condition(&mut self, p: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
         self.errexit_suppress += 1;
         let flow = self.exec_program(p, out, stdin);
+        self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
+        flow
+    }
+
+    /// Execute one pipeline of an AND-OR list. When `exempt` is set the pipeline
+    /// occupies an errexit-exempt position (any command other than the one after
+    /// the final `&&`/`||`, or a `!`-negated pipeline), so errexit is suppressed
+    /// for the pipeline's whole dynamic extent — including any function or
+    /// compound command it calls — matching bash/POSIX. The suppression counter
+    /// is restored afterwards, leaving the surrounding context unchanged.
+    fn exec_and_or_pipeline(
+        &mut self,
+        pipe: &Pipeline,
+        exempt: bool,
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> Flow {
+        if !exempt {
+            return self.exec_pipeline(pipe, out, stdin);
+        }
+        self.errexit_suppress += 1;
+        let flow = self.exec_pipeline(pipe, out, stdin);
         self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
         flow
     }
@@ -3088,8 +3119,13 @@ impl Shell {
             errtrace: self.errtrace,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
-            // A subshell starts outside any condition/negation context.
-            errexit_suppress: 0,
+            // A subshell inherits the parent's errexit-ignore depth: per POSIX a
+            // compound command (including `( … )`) executed where `set -e` is
+            // being ignored — an if/while/until condition, a non-final `&&`/`||`
+            // operand, or a `!`-negated pipeline — runs its whole body with
+            // errexit suppressed. In a normal context the parent depth is 0, so
+            // the subshell's own commands are still subject to `-e`.
+            errexit_suppress: self.errexit_suppress,
             unbound_error: None,
             arith_error: false,
             cond_regex_error: false,
@@ -20982,6 +21018,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn set_errexit_final_and_or_fires() {
         // The command after the final `&&` is subject to errexit.
         let (o, s) = run("set -e; true && false; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn set_errexit_exemption_propagates_into_functions() {
+        // POSIX: errexit is ignored for any AND-OR command other than the one
+        // after the final `&&`/`||`, and for a `!`-negated pipeline — and the
+        // exemption PROPAGATES into the body of a function invoked there. So a
+        // bare failing command inside such a function does not abort the shell.
+        assert_eq!(run("set -e; f() { false; echo A; }; f || echo caught").0, "A\n");
+        assert_eq!(run("set -e; f() { false; echo A; }; f && echo B; echo C").0, "A\nB\nC\n");
+        assert_eq!(run("set -e; f() { false; echo A; }; ! f; echo done").0, "A\ndone\n");
+        // A brace group in an exempt position is exempt throughout too.
+        assert_eq!(run("set -e; { false; echo A; } || echo caught").0, "A\n");
+        // The exemption reaches through a nested call chain.
+        assert_eq!(
+            run("set -e; f() { g() { false; echo inner; }; g; echo outer; }; f || echo c").0,
+            "inner\nouter\n"
+        );
+        // But a function called in a NON-exempt position still honours errexit.
+        let (o, s) = run("set -e; f() { false; echo A; }; f; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn set_errexit_exemption_propagates_into_subshells() {
+        // A subshell executed where errexit is being ignored runs its whole body
+        // with errexit suppressed (bash/POSIX): the intermediate failure does not
+        // abort it. `( false; echo sub )` on the left of `||` prints `sub`.
+        assert_eq!(run("set -e; ( false; echo sub ) || echo subcaught").0, "sub\n");
+        // Same in an if-condition, and for a multi-failure body.
+        assert_eq!(
+            run("set -e; if ( false; echo X ); then echo t; else echo f; fi").0,
+            "X\nt\n"
+        );
+        assert_eq!(
+            run("set -e; ( false; echo A; true; false; echo B ) || echo c").0,
+            "A\nB\n"
+        );
+        // A subshell in a NORMAL (non-exempt) context still honours errexit: the
+        // intermediate failure aborts the subshell (and the failing subshell then
+        // aborts the outer shell), so neither `sub` nor `after` prints.
+        let (o, s) = run("set -e; ( false; echo sub ); echo after");
         assert_eq!(o, "");
         assert_eq!(s, 1);
     }

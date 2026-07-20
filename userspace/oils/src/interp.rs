@@ -12769,20 +12769,85 @@ impl Shell {
                         } else {
                             Some(rest)
                         };
+                        // Every argument-taking option requires an argument;
+                        // bash prints `option requires an argument` + the usage
+                        // synopsis and exits 2 when it is missing.
+                        let Some(val) = val else {
+                            self.emit_stderr(
+                                format!(
+                                    "{}read: -{c}: option requires an argument\n",
+                                    self.err_prefix()
+                                )
+                                .as_bytes(),
+                            );
+                            self.emit_stderr(b"read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n");
+                            return 2;
+                        };
                         match c {
-                            'a' => array = val,
-                            'p' => prompt = val,
+                            'a' => array = Some(val),
+                            'p' => prompt = Some(val),
                             // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
-                            'd' => {
-                                delim = Some(val.and_then(|s| s.bytes().next()).unwrap_or(0));
+                            'd' => delim = Some(val.bytes().next().unwrap_or(0)),
+                            // `-n`/`-N` require a non-negative integer; bash
+                            // rejects anything else with `invalid number` (exit 1).
+                            'n' | 'N' => {
+                                let Ok(n) = val.parse::<usize>() else {
+                                    self.emit_stderr(
+                                        format!(
+                                            "{}read: {val}: invalid number\n",
+                                            self.err_prefix()
+                                        )
+                                        .as_bytes(),
+                                    );
+                                    return 1;
+                                };
+                                nchars = Some(n);
+                                exact = c == 'N';
                             }
-                            'n' => nchars = val.and_then(|s| s.parse().ok()),
-                            'N' => {
-                                nchars = val.and_then(|s| s.parse().ok());
-                                exact = true;
+                            // `-u` requires a valid (non-negative) fd number; bash
+                            // rejects anything else with `invalid file descriptor
+                            // specification` (exit 1).
+                            'u' => {
+                                let Ok(fd) = val.parse::<i32>() else {
+                                    self.emit_stderr(
+                                        format!(
+                                            "{}read: {val}: invalid file descriptor specification\n",
+                                            self.err_prefix()
+                                        )
+                                        .as_bytes(),
+                                    );
+                                    return 1;
+                                };
+                                if fd < 0 {
+                                    self.emit_stderr(
+                                        format!(
+                                            "{}read: {val}: invalid file descriptor specification\n",
+                                            self.err_prefix()
+                                        )
+                                        .as_bytes(),
+                                    );
+                                    return 1;
+                                }
+                                ufd = Some(fd);
                             }
-                            'u' => ufd = val.and_then(|s| s.parse().ok()),
-                            't' => timeout = val.and_then(|s| s.parse().ok()),
+                            // `-t` requires a non-negative decimal timeout; bash
+                            // rejects anything else with `invalid timeout
+                            // specification` (exit 1).
+                            't' => {
+                                let ok =
+                                    val.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
+                                let Some(v) = ok else {
+                                    self.emit_stderr(
+                                        format!(
+                                            "{}read: {val}: invalid timeout specification\n",
+                                            self.err_prefix()
+                                        )
+                                        .as_bytes(),
+                                    );
+                                    return 1;
+                                };
+                                timeout = Some(v);
+                            }
                             // `-i` accepted but not honored yet.
                             _ => {}
                         }
@@ -19714,6 +19779,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("read -rn3 x <<< 'ab\\cd'; echo \"$x\"").0, "ab\\\n");
         // Separated form still works.
         assert_eq!(run("read -d ':' p <<< 'a:b'; echo \"$p\"").0, "a\n");
+    }
+
+    #[test]
+    fn read_option_argument_validation() {
+        // `-t` requires a non-negative decimal timeout; bash rejects a
+        // non-numeric or negative value with `invalid timeout specification`
+        // (exit 1) and accepts a fractional one.
+        let (out, st) = run("read -t abc x <<< hi 2>&1");
+        assert_eq!(out, "osh: read: abc: invalid timeout specification\n");
+        assert_eq!(st, 1);
+        assert_eq!(run("read -t -5 x <<< hi 2>&1").1, 1);
+        assert_eq!(run("read -t 1.5 x <<< hi; echo $?").0, "0\n");
+        // `-n`/`-N` require a non-negative integer.
+        assert_eq!(
+            run("read -n abc x <<< hi 2>&1").0,
+            "osh: read: abc: invalid number\n"
+        );
+        assert_eq!(run("read -N -3 x <<< hi 2>&1").1, 1);
+        // `-u` requires a valid file-descriptor specification.
+        assert_eq!(
+            run("read -u abc x <<< hi 2>&1").0,
+            "osh: read: abc: invalid file descriptor specification\n"
+        );
+        // A missing argument to an option prints the usage synopsis and exits 2.
+        let (out, st) = run("read -t 2>&1 </dev/null");
+        assert!(out.starts_with("osh: read: -t: option requires an argument\n"));
+        assert!(out.contains("read: usage: read [-ers]"));
+        assert_eq!(st, 2);
     }
 
     #[test]

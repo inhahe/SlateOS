@@ -58,8 +58,9 @@
 //!   pipe: `run_external`/`run_builtin` resolve the stage's `RedirPlan` against
 //!   the pipe endpoints, so `a | b > f` diverts `b`'s stdout to the file while
 //!   its stdin still streams from `a` (and likewise for `2>err`). Every stage is
-//!   a subshell (bash semantics, no lastpipe), so a stage's variable mutations
-//!   do not leak to the parent. Downstream early-exit propagates upstream: when a
+//!   a subshell (bash semantics), so a stage's variable mutations do not leak to
+//!   the parent — except that with `shopt -s lastpipe` the final stage runs in
+//!   the current shell, so `a | read x` sets `x`. Downstream early-exit propagates upstream: when a
 //!   consumer stops, an in-process producer's next write hits the `pipe_broken`
 //!   flag (the `SIGPIPE`/`EPIPE` analogue) and unwinds, and an external producer
 //!   terminates on the OS's broken-pipe signal (`yes | head` exits) on targets
@@ -1292,6 +1293,12 @@ impl Shell {
         writers.push(None); // last stage writes to `out`
 
         let mut statuses = vec![0i32; n];
+        // `shopt -s lastpipe`: with job control off (always, in osh) bash runs
+        // the LAST pipeline stage in the current shell rather than a subshell,
+        // so its variable/`cd`/function mutations persist and its control flow
+        // (`exit`/`return`/`break`) propagates. Captured out of the scope below.
+        let lastpipe = self.shopt.get("lastpipe").copied().unwrap_or(false);
+        let mut last_flow = Flow::Next;
 
         // Scoped threads let each stage borrow the shared AST (`cmds`) while
         // owning its subshell clone and pipe endpoints (all `Send`). `out` is
@@ -1321,18 +1328,26 @@ impl Shell {
                 handles.push((i, handle));
             }
 
-            // Last stage: run on this thread (writing to `out`) in a clone.
+            // Last stage: run on this thread (writing to `out`).
             let last = n - 1;
-            let mut sub = self.clone_for_subshell();
             let reader = readers[last].take();
             let stdin = match reader {
                 Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
                 None => StdinSrc::Inherit,
             };
-            sub.exec_command(&cmds[last], out, &stdin);
-            // The last stage is a subshell too: fire its own EXIT trap.
-            sub.run_exit_trap_out(out, &stdin);
-            statuses[last] = sub.last_status;
+            if lastpipe {
+                // Run in the current shell (not a subshell): mutations persist
+                // and control flow propagates. No EXIT trap firing here — this
+                // is the running shell, whose EXIT trap fires only on true exit.
+                last_flow = self.exec_command(&cmds[last], out, &stdin);
+                statuses[last] = self.last_status;
+            } else {
+                let mut sub = self.clone_for_subshell();
+                sub.exec_command(&cmds[last], out, &stdin);
+                // The last stage is a subshell too: fire its own EXIT trap.
+                sub.run_exit_trap_out(out, &stdin);
+                statuses[last] = sub.last_status;
+            }
             // Close this stage's read end NOW (before joining) so an upstream
             // producer that outlives the consumer sees EOF/EPIPE and stops —
             // otherwise the still-open reader would deadlock the join.
@@ -1345,8 +1360,9 @@ impl Shell {
         });
 
         // A pipeline is a single command; `exit`/`return`/`break` inside a stage
-        // affect only that stage's subshell and never escape (bash semantics).
-        (statuses, Flow::Next)
+        // affect only that stage's subshell and never escape (bash semantics) —
+        // except the last stage under `lastpipe`, whose flow we propagate.
+        (statuses, last_flow)
     }
 
     /// The underlying [`SimpleCommand`] of a pipeline stage, if the stage is a
@@ -18827,6 +18843,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // $BASH is defined and, unlike $BASHOPTS, is reassignable.
         assert!(!run("echo $BASH").0.trim().is_empty());
         assert_eq!(run("BASH=foo; echo $BASH").0, "foo\n");
+    }
+
+    #[test]
+    fn lastpipe_runs_final_stage_in_current_shell() {
+        // Without lastpipe the final stage is a subshell, so `read` cannot set a
+        // variable in the parent (the value is lost).
+        assert_eq!(run("echo hi | read x; echo \"${x:-empty}\"").0, "empty\n");
+        // With `shopt -s lastpipe` the final stage runs in the current shell, so
+        // `read` persists, a `while read` accumulator survives, and `mapfile`
+        // populates a parent array.
+        assert_eq!(
+            run("shopt -s lastpipe; echo hi | read x; echo \"${x:-empty}\"").0,
+            "hi\n"
+        );
+        assert_eq!(
+            run("shopt -s lastpipe; seq 3 | while read l; do s=$((s+l)); done; echo sum=$s").0,
+            "sum=6\n"
+        );
+        assert_eq!(
+            run("shopt -s lastpipe; printf 'a\\nb\\nc\\n' | mapfile -t arr; echo ${arr[1]}").0,
+            "b\n"
+        );
     }
 
     #[test]

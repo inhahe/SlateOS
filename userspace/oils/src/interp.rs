@@ -10334,20 +10334,35 @@ impl Shell {
         }
 
         if let Some(m) = mode {
-            // Set the mask from an octal number or a symbolic clause list.
-            let new = if m.bytes().all(|b| b.is_ascii_digit()) {
+            // Set the mask from an octal number or a symbolic clause list. bash
+            // selects the numeric form on a *leading digit* (so `6a` is a bad
+            // octal, not a symbolic clause), and masks a valid value to the low
+            // 9 bits. Any malformed octal (non-octal digit, letter, or overflow)
+            // is reported as "octal number out of range".
+            let new = if m.starts_with(|c: char| c.is_ascii_digit()) {
                 match u32::from_str_radix(m, 8) {
                     Ok(v) => v & 0o777,
                     Err(_) => {
-                        self.emit_stderr(format!("{}umask: {m}: invalid octal number\n", self.err_prefix()).as_bytes());
+                        self.emit_stderr(format!("{}umask: {m}: octal number out of range\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
             } else {
                 match parse_symbolic_umask(self.umask_val, m) {
-                    Some(v) => v,
-                    None => {
-                        self.emit_stderr(format!("{}umask: {m}: invalid symbolic mode\n", self.err_prefix()).as_bytes());
+                    Ok(v) => v,
+                    Err(e) => {
+                        // bash quotes the offending character and distinguishes a
+                        // missing/invalid operator from a bad permission letter.
+                        let msg = match e {
+                            SymUmaskErr::Operator(c) => {
+                                let ch: String = c.map(|c| c.to_string()).unwrap_or_default();
+                                format!("`{ch}': invalid symbolic mode operator")
+                            }
+                            SymUmaskErr::Character(c) => {
+                                format!("`{c}': invalid symbolic mode character")
+                            }
+                        };
+                        self.emit_stderr(format!("{}umask: {msg}\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
                 }
@@ -10700,6 +10715,8 @@ impl Shell {
                             "{}printf: -v: option requires an argument",
                             self.err_prefix()
                         ));
+                        // bash follows the diagnostic with the usage synopsis.
+                        self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
                         return 2;
                     };
                     assign_var = Some(name.clone());
@@ -18327,7 +18344,20 @@ fn symbolic_umask_string(mask: u32) -> String {
 /// the current mask, returning the new mask value. The symbolic notation
 /// operates on the *permission* set (the complement of the mask); the result is
 /// re-complemented back into mask bits. Returns `None` on a malformed clause.
-fn parse_symbolic_umask(current: u32, spec: &str) -> Option<u32> {
+/// A failure parsing a symbolic umask clause. bash reports two distinct
+/// diagnostics, quoting the exact offending character:
+/// `` `X': invalid symbolic mode operator `` (a `who` list not followed by one
+/// of `+`/`-`/`=`) and `` `X': invalid symbolic mode character `` (a permission
+/// letter that is not `r`/`w`/`x`).
+enum SymUmaskErr {
+    /// Expected a `+`/`-`/`=` operator; got this character (`None` = end of the
+    /// clause, which bash quotes as an empty `` `' ``).
+    Operator(Option<char>),
+    /// A permission letter that is not `r`/`w`/`x`.
+    Character(char),
+}
+
+fn parse_symbolic_umask(current: u32, spec: &str) -> Result<u32, SymUmaskErr> {
     // Work in "allowed permission" space, then invert back to a mask at the end.
     let mut allowed = !current & 0o777;
     for clause in spec.split(',') {
@@ -18350,10 +18380,10 @@ fn parse_symbolic_umask(current: u32, spec: &str) -> Option<u32> {
         if who_mask == 0 {
             who_mask = 0o777;
         }
-        let op = chars.next()?;
-        if !matches!(op, '+' | '-' | '=') {
-            return None;
-        }
+        let op = match chars.next() {
+            Some(c) if matches!(c, '+' | '-' | '=') => c,
+            other => return Err(SymUmaskErr::Operator(other)),
+        };
         // Permission letters → a 3-bit value replicated into every selected who.
         let mut pbits = 0u32;
         for c in chars {
@@ -18361,7 +18391,7 @@ fn parse_symbolic_umask(current: u32, spec: &str) -> Option<u32> {
                 'r' => pbits |= 0o4,
                 'w' => pbits |= 0o2,
                 'x' => pbits |= 0o1,
-                _ => return None,
+                _ => return Err(SymUmaskErr::Character(c)),
             }
         }
         let full = (pbits * 0o111) & who_mask; // spread rwx into u/g/o, then select
@@ -18376,7 +18406,7 @@ fn parse_symbolic_umask(current: u32, spec: &str) -> Option<u32> {
             _ => unreachable!(),
         }
     }
-    Some(!allowed & 0o777)
+    Ok(!allowed & 0o777)
 }
 
 /// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
@@ -26124,6 +26154,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.contains("printf: usage: printf [-v var] format [arguments]"), "got {o:?}");
         assert_eq!(s, 2);
 
+        // printf -v with no variable name: the diagnostic is followed by the
+        // usage synopsis (bash), and it fails with 2.
+        let (o, s) = run("printf -v 2>&1");
+        assert!(o.contains("printf: -v: option requires an argument"), "got {o:?}");
+        assert!(o.contains("printf: usage: printf [-v var] format [arguments]"), "got {o:?}");
+        assert_eq!(s, 2);
+
         // Valid options are still accepted (no false positives): -ir, -aA, -n
         // (read count), and readonly -a/-p all behave normally.
         let (_, s) = run("declare -ir x=5");
@@ -26233,6 +26270,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn umask_invalid_mode() {
         assert_eq!(run("umask 8qq").1, 1);
         assert_eq!(run("umask u=z").1, 1);
+    }
+
+    #[test]
+    fn umask_error_messages_match_bash() {
+        // A leading digit selects the octal form; any malformed octal (a
+        // non-octal digit, a trailing letter, or overflow) is "octal number out
+        // of range", matching bash — including `6a`, which bash treats as a bad
+        // octal, not a symbolic clause.
+        assert_eq!(
+            run("umask 9999 2>&1").0,
+            "osh: umask: 9999: octal number out of range\n"
+        );
+        assert_eq!(
+            run("umask 6a 2>&1").0,
+            "osh: umask: 6a: octal number out of range\n"
+        );
+        // Symbolic errors quote the offending character and distinguish an
+        // invalid operator from an invalid permission character.
+        assert_eq!(
+            run("umask abc 2>&1").0,
+            "osh: umask: `b': invalid symbolic mode operator\n"
+        );
+        assert_eq!(
+            run("umask xyz 2>&1").0,
+            "osh: umask: `x': invalid symbolic mode operator\n"
+        );
+        assert_eq!(
+            run("umask u=q 2>&1").0,
+            "osh: umask: `q': invalid symbolic mode character\n"
+        );
+        // A valid octal above 0o777 is masked to the low nine bits.
+        assert_eq!(run("umask 7777; umask").0, "0777\n");
     }
 
     #[test]

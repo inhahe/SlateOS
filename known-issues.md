@@ -508,10 +508,20 @@ path (all stderr-only; runtime-error messages already match bash):
      reports `unexpected end of file`. This is the same implicit-trailing-
      newline model gap as the `(`-in-command-position case — the token-vs-
      token redirect cases above are all resolved.
-   - `[[ … ]]` conditional errors use bash's *conditional-specific* phrasing
-     (`unexpected token \`newline', conditional binary operator expected`;
-     `unexpected argument \`]]' to conditional binary operator`; `syntax
-     error near \`]]'`), not the generic `near unexpected token` form.
+   - `[[ … ]]` conditional errors — **mostly resolved 2026-07-20.** osh now
+     emits bash's conditional-specific phrasing: `syntax error near \`X'` in
+     primary position (`[[ ]]`, `[[ a && ]]`, `[[ ! ]]`), `unexpected
+     argument \`X' to conditional {unary,binary} operator` after an operator
+     (`[[ a == ]]`, `[[ -f ]]`), `unexpected token \`X', expected \`)'` for an
+     unclosed sub-expression (`[[ ( a ]]`), and `unexpected EOF while looking
+     for \`]]'` for a missing closer at EOF (`[[ a == b`) — each with bash's
+     source-line echo where bash emits one. Driven by `CondPos` +
+     `cond_operand_error` in `parse_cond*`; covered by
+     `cond_expr_errors_match_bash_phrasing`. **Still open:** the *empty*
+     sub-expression `[[ ( ]]` (bash prioritises `expected \`)'` over the
+     primary near-error — needs paren-context state), and the EOF-after-
+     operator forms (`[[ a ==`, `[[ -f`, `[[ a &&`) which use bash's
+     implicit-`newline`/`EOF` model (same gap as the redirect/`(` EOL cases).
    - `${}` / `${a[]}`: bash defers these to a *runtime* `${…}: bad
      substitution` (no `-c:`/line prefix), whereas osh raises a parse error.
    - `for (( ))`: bash itself reports a bare `unexpected end of file` here.

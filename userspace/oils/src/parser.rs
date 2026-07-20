@@ -861,7 +861,17 @@ impl Parser {
         self.pos += 1;
         let expr = self.parse_cond_or()?;
         if self.bare_word_here().as_deref() != Some("]]") {
-            return Err(ParseError::new("expected ']]' to close '[['".into()));
+            // A complete expression but no closer: bash emits
+            // `unexpected EOF while looking for \`]]'` then `syntax error:
+            // unexpected end of file` (no source echo). If a stray token sits
+            // where `]]` should be, name it the ordinary way.
+            if self.peek().is_none() {
+                return Err(ParseError::new(
+                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file"
+                        .to_string(),
+                ));
+            }
+            return Err(self.unexpected_here());
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -902,7 +912,17 @@ impl Parser {
             self.pos += 1;
             let inner = self.parse_cond_or()?;
             if !self.at_op(Op::RParen) {
-                return Err(ParseError::new("expected ')' in '[[ … ]]'".into()));
+                // A parsed sub-expression but no `)`: bash says `unexpected
+                // token \`X', expected \`)'` (+ the `near \`X'` echo). At end of
+                // input it falls back to its implicit-newline model, which we
+                // don't reproduce.
+                if self.peek().is_none() {
+                    return Err(ParseError::new("syntax error: unexpected end of file".to_string()));
+                }
+                let tok = self.token_display();
+                return Err(ParseError::new(format!(
+                    "unexpected token `{tok}', expected `)'\nsyntax error near `{tok}'"
+                )));
             }
             self.pos += 1;
             return Ok(inner);
@@ -912,14 +932,14 @@ impl Parser {
             && let Some(op) = unary_op_from(&text)
         {
             self.pos += 1;
-            let operand = self.expect_cond_word()?;
+            let operand = self.expect_cond_word(CondPos::Unary)?;
             return Ok(CondExpr::Unary(op, operand));
         }
         // Otherwise: WORD [ binop WORD ].
-        let left = self.expect_cond_word()?;
+        let left = self.expect_cond_word(CondPos::Primary)?;
         if let Some(op) = self.peek_cond_binop() {
             self.advance_cond_binop();
-            let right = self.expect_cond_word()?;
+            let right = self.expect_cond_word(CondPos::Binary)?;
             if matches!(op, RawBinOp::Regex) {
                 return Ok(CondExpr::Regex(Box::new(left), Box::new(right)));
             }
@@ -932,20 +952,44 @@ impl Parser {
         Ok(CondExpr::Word(left))
     }
 
-    /// Expect a word operand inside `[[ … ]]` (not an operator/closer).
-    fn expect_cond_word(&mut self) -> Result<Word, ParseError> {
+    /// Expect a word operand inside `[[ … ]]` (not an operator/closer). `pos`
+    /// tells us what bash would say when the operand is missing: after a unary
+    /// or binary operator bash prepends `unexpected argument \`X' to conditional
+    /// {unary,binary} operator`, whereas in primary position it reports only
+    /// `syntax error near \`X'`.
+    fn expect_cond_word(&mut self, pos: CondPos) -> Result<Word, ParseError> {
         if let Some(Tok::Word(segs)) = self.peek() {
-            let segs = segs.clone();
             // `]]` is the closer, never an operand.
-            if let [Seg::Lit(s)] = segs.as_slice()
-                && s == "]]"
-            {
-                return Err(ParseError::new("unexpected ']]' (expected operand)".into()));
+            if !matches!(segs.as_slice(), [Seg::Lit(s)] if s == "]]") {
+                let segs = segs.clone();
+                self.pos += 1;
+                return self.word_from_segs(&segs);
             }
-            self.pos += 1;
-            return self.word_from_segs(&segs);
         }
-        Err(ParseError::new("expected operand in '[[ … ]]'".into()))
+        Err(self.cond_operand_error(pos))
+    }
+
+    /// Build bash's diagnostic for a missing/`]]`-filled operand slot inside
+    /// `[[ … ]]`. When the offending token is present, bash echoes the source
+    /// line (handled by `format_parse_error`); at end of input it uses an
+    /// implicit-`newline` model we don't reproduce, so we fall back to a plain
+    /// end-of-file diagnostic there.
+    fn cond_operand_error(&self, pos: CondPos) -> ParseError {
+        if self.peek().is_none() {
+            return ParseError::new("syntax error: unexpected end of file".to_string());
+        }
+        let tok = self.token_display();
+        let near = format!("syntax error near `{tok}'");
+        let msg = match pos {
+            CondPos::Primary => near,
+            CondPos::Unary => {
+                format!("unexpected argument `{tok}' to conditional unary operator\n{near}")
+            }
+            CondPos::Binary => {
+                format!("unexpected argument `{tok}' to conditional binary operator\n{near}")
+            }
+        };
+        ParseError::new(msg)
     }
 
     /// Peek at a binary operator following an operand, without consuming.
@@ -2108,6 +2152,20 @@ fn unary_op_from(s: &str) -> Option<UnaryOp> {
     })
 }
 
+/// Where inside a `[[ … ]]` conditional an operand was expected — selects the
+/// bash diagnostic emitted when the slot is empty (see `cond_operand_error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CondPos {
+    /// Start of a primary (or after `!`/`&&`/`||`): `syntax error near \`X'`.
+    Primary,
+    /// Right after a unary operator (`-f`, `-z`, …): `unexpected argument \`X'
+    /// to conditional unary operator`.
+    Unary,
+    /// Right after a binary operator (`==`, `-eq`, …): `unexpected argument
+    /// \`X' to conditional binary operator`.
+    Binary,
+}
+
 /// Raw binary operator recognised inside `[[ … ]]` (before lowering; `Regex`
 /// is recognised so it can be rejected with a clear message).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2385,6 +2443,47 @@ mod tests {
         }
         // A well-formed redirection still parses.
         assert!(parse("echo hi > out.txt").is_ok());
+    }
+
+    #[test]
+    fn cond_expr_errors_match_bash_phrasing() {
+        // `[[ … ]]` uses bash's conditional-specific diagnostics: a bare
+        // `syntax error near \`X'` in primary position, an `unexpected argument
+        // \`X' to conditional {unary,binary} operator` (with the `near` line
+        // appended) after an operator, and the `unexpected EOF while looking
+        // for \`]]'` form when the closer is missing at end of input.
+        for (src, want) in [
+            ("[[ ]]", "syntax error near `]]'"),
+            ("[[ a && ]]", "syntax error near `]]'"),
+            ("[[ a || ]]", "syntax error near `]]'"),
+            ("[[ ! ]]", "syntax error near `]]'"),
+            (
+                "[[ a == ]]",
+                "unexpected argument `]]' to conditional binary operator\nsyntax error near `]]'",
+            ),
+            (
+                "[[ a -eq ]]",
+                "unexpected argument `]]' to conditional binary operator\nsyntax error near `]]'",
+            ),
+            (
+                "[[ -f ]]",
+                "unexpected argument `]]' to conditional unary operator\nsyntax error near `]]'",
+            ),
+            (
+                "[[ ( a ]]",
+                "unexpected token `]]', expected `)'\nsyntax error near `]]'",
+            ),
+            (
+                "[[ a == b",
+                "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
+            ),
+        ] {
+            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+        }
+        // Well-formed conditionals still parse.
+        assert!(parse("[[ -f /etc ]]").is_ok());
+        assert!(parse("[[ a == a && ( b == b || c == c ) ]]").is_ok());
+        assert!(parse("[[ ! -z x ]]").is_ok());
     }
 
     #[test]

@@ -14936,16 +14936,27 @@ impl Shell {
     fn format_parse_error(&self, e: &crate::parser::ParseError, src: &str) -> String {
         let line = e.line.unwrap_or_else(|| self.current_line.max(1));
         let prefix = self.syntax_error_prefix(line);
-        let first = wrap_parse_message(&e.msg, &prefix);
-        // bash echoes the physical source line on a second diagnostic line only
-        // for the `near unexpected token` family — not for `unexpected end of
-        // file` or the lexer's `unexpected EOF while looking for matching` form.
-        if e.msg.starts_with("syntax error near unexpected token")
+        // A `ParseError` message may span several physical lines (bash emits
+        // multi-line diagnostics, e.g. `unexpected argument \`]]' to conditional
+        // binary operator` followed by `syntax error near \`]]'`). Prefix each
+        // line the way bash tags every line with `<$0>: <src>: line N:`.
+        let mut out = String::new();
+        for (i, msg_line) in e.msg.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&wrap_parse_message(msg_line, &prefix));
+        }
+        // bash echoes the offending physical source line on a final diagnostic
+        // line whenever it reports the error "near" a token (`near unexpected
+        // token \`X'` or the conditional-expression `near \`X'` form) — but not
+        // for `unexpected end of file` / `unexpected EOF while looking for …`.
+        if e.msg.contains("syntax error near ")
             && let Some(text) = nth_source_line(src, line)
         {
-            return format!("{first}\n{prefix}`{text}'");
+            out.push_str(&format!("\n{prefix}`{text}'"));
         }
-        first
+        out
     }
 
     /// Emit an arithmetic diagnostic in bash's form: `<name>: line N:
@@ -17083,8 +17094,13 @@ fn map_device_path(path: &str) -> &str {
 /// looking for matching \`C'` unclosed-quote/substitution diagnostic (bash
 /// emits these last two with no `syntax error:` tag).
 fn wrap_parse_message(msg: &str, prefix: &str) -> String {
+    // Messages that are already in one of bash's canonical parser forms pass
+    // through verbatim: `syntax error…`, any `unexpected …` diagnostic
+    // (`unexpected EOF…`, `unexpected argument…`, `unexpected token…`), and the
+    // `… not a valid identifier` form. Everything else is a bare osh fragment
+    // that bash would prefix with `syntax error: `.
     if msg.starts_with("syntax error")
-        || msg.starts_with("unexpected EOF")
+        || msg.starts_with("unexpected ")
         || msg.ends_with("not a valid identifier")
     {
         format!("{prefix}{msg}")

@@ -14335,7 +14335,10 @@ impl Shell {
     /// command silences it, as in bash.
     fn emit_arith_error(&mut self, expr: &str, e: &arith::ArithError) {
         let prefix = self.err_prefix();
-        let mut expr = expr.trim_start();
+        // When the failure occurred while recursively evaluating a variable's
+        // value as arithmetic, bash echoes that resolved value (e.g. `5 apples`)
+        // rather than the top-level source (`x`); `str_to_val` records it here.
+        let mut expr = e.expr_override.as_deref().unwrap_or(expr).trim_start();
         // A rejected number literal (`2#12`, `099`) truncates the echoed source
         // at the literal's end — bash reports `5+2#12+9` as `5+2#12`. Ordinary
         // parse/eval errors echo the whole source unchanged.
@@ -18740,6 +18743,23 @@ mod tests {
         assert_eq!(
             run_cmd("{ echo $((099+1)); } 2>&1"),
             "osh: line 1: 099: value too great for base (error token is \"099\")\n"
+        );
+        // When arithmetic recurses through a *variable* whose value is a bad
+        // expression, bash echoes the resolved VALUE as the `<expr>:` prefix, not
+        // the variable reference: `x="5 apples"; $(( x ))` reports `5 apples:`.
+        assert_eq!(
+            run_cmd(r#"x="5 apples"; { echo $((x)); } 2>&1"#),
+            "osh: line 1: 5 apples: syntax error in expression (error token is \"apples\")\n"
+        );
+        // The innermost value wins through an indirection chain.
+        assert_eq!(
+            run_cmd(r#"x=y; y="1 2"; { echo $((x)); } 2>&1"#),
+            "osh: line 1: 1 2: syntax error in expression (error token is \"2\")\n"
+        );
+        // `declare -i` recursing through a bad value likewise shows the value.
+        assert_eq!(
+            run_cmd(r#"x="5 apples"; declare -i z=x 2>&1"#),
+            "osh: line 1: declare: 5 apples: syntax error in expression (error token is \"apples\")\n"
         );
     }
 

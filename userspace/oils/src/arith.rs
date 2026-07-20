@@ -96,6 +96,14 @@ pub struct ArithError {
     /// source with the token being the unparsed remainder. See
     /// `Shell::emit_arith_error`.
     pub truncate_leading: bool,
+    /// The expression string to echo as the `<expr>:` prefix, when it should
+    /// differ from the top-level arithmetic source. bash, when a failure occurs
+    /// while recursively evaluating a *variable's value* as arithmetic (`x="5
+    /// apples"; $(( x ))`), echoes the resolved value (`5 apples`) rather than
+    /// the variable reference (`x`). `str_to_val` records the innermost failing
+    /// value here so [`Shell::emit_arith_error`] can prefer it. `None` for a
+    /// direct expression, where the caller-supplied source is already correct.
+    pub expr_override: Option<String>,
 }
 
 impl ArithError {
@@ -105,6 +113,7 @@ impl ArithError {
             msg: msg.into(),
             token: None,
             truncate_leading: false,
+            expr_override: None,
         }
     }
 
@@ -114,6 +123,7 @@ impl ArithError {
             msg: msg.into(),
             token: Some(token.into()),
             truncate_leading: false,
+            expr_override: None,
         }
     }
 
@@ -124,6 +134,7 @@ impl ArithError {
             msg: msg.into(),
             token: Some(lexeme.into()),
             truncate_leading: true,
+            expr_override: None,
         }
     }
 }
@@ -222,17 +233,25 @@ fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
         return Ok(n);
     }
     if depth >= RECURSION_LIMIT {
-        // bash reports the offending value token here. (bash also uses the
-        // innermost value as the `<expr>:` prefix; osh's caller supplies the
-        // top-level expression instead — a documented divergence for the rare
-        // reference-cycle case, see known-issues.md TD-OILS-ARITH-ERRFMT.)
-        return Err(ArithError::with_token(
-            "expression recursion level exceeded",
-            t.to_string(),
-        ));
+        // bash reports the offending value token here, and uses the innermost
+        // value as the `<expr>:` prefix (recorded via `expr_override`).
+        let mut e = ArithError::with_token("expression recursion level exceeded", t.to_string());
+        e.expr_override = Some(t.to_string());
+        return Err(e);
     }
-    let expr = parse(t, vars)?;
-    eval_expr(&expr, vars, depth + 1)
+    // When evaluating a variable's *value* as arithmetic fails, bash echoes that
+    // resolved value as the `<expr>:` prefix (`x="5 apples"; $(( x ))` reports
+    // `5 apples:`, not `x:`). Record the innermost failing value so the shell's
+    // diagnostic matches — the deepest level sets it first as errors unwind, and
+    // outer levels leave it in place.
+    parse(t, vars)
+        .and_then(|expr| eval_expr(&expr, vars, depth + 1))
+        .map_err(|mut e| {
+            if e.expr_override.is_none() {
+                e.expr_override = Some(t.to_string());
+            }
+            e
+        })
 }
 
 /// Parse `t` as a plain decimal integer (optionally signed), returning `None`

@@ -2633,6 +2633,17 @@ diagnostic line `<name>: line N: [<builtin>: ]<expr>: <body> (error token is
   `declare:`/`typeset:`/`local:` for the `-i` attribute builtins. Plain
   assignments, array-element assignments, and `$(( ))` word substitution get no
   tag (matching bash).
+- **Recursively-expanded `<expr>` prefix (FIXED 2026-07-20).** When a failure
+  occurs while recursively evaluating a *variable's value* as arithmetic, bash
+  echoes the resolved value, not the variable reference — `x="5 apples"; $((x))`
+  reports `5 apples: syntax error …`, not `x: …`. `arith.rs::str_to_val` now
+  records the innermost failing value in `ArithError::expr_override` (the deepest
+  level sets it first as the error unwinds; outer levels leave it in place), and
+  `emit_arith_error` prefers it over the top-level source. This also covers the
+  `expression recursion level exceeded` case (bash echoes the innermost value)
+  and indirection chains (`x=y; y="1 2"; $((x))` → `1 2:`). Verified against
+  MSYS bash for `x="5 apples"`, `x=3.5`, `x="1 2"`, `x=y;y=…` and the `declare
+  -i z=x` builtin-tag path.
 
 **Tests:** `arith.rs::error_bodies_and_tokens_match_bash` (16 body/token cases)
 and `interp.rs::arith_error_matches_bash_format` (full-line, incl. builtin tags
@@ -2648,21 +2659,6 @@ probed cases (name-normalized).
   offending-position rule.
 - **Nested subscript prefix:** `$((a[9/0]))` → bash echoes `9/0` as the expr,
   osh echoes `a[9/0]` (the full atom). A yacc reduction artifact.
-- **Recursion-limit prefix:** on `expression recursion level exceeded` bash
-  echoes the innermost value, osh echoes the top-level expression.
-- **Recursively-expanded `<expr>` subject:** when the failing operand is a bare
-  variable whose *value* is itself invalid arithmetic, bash echoes the
-  recursively-expanded value while osh echoes the outer source. E.g.
-  `x=3.5; echo $((x))` → bash `... line 1: 3.5: syntax error: invalid arithmetic
-  operator (error token is ".5")`, osh `... x: syntax error ...`. Likewise
-  `x=3.5; echo $((x+1))` (bash `3.5` / osh `x+1`), `x="1 2"; echo $((x))`
-  (bash `1 2` / osh `x`), and `x=3.5; y=x; echo $((y))` (bash `3.5` / osh `y`).
-  The **error token** (`.5`, etc.) already matches bash in every case — only the
-  `<expr>` subject differs, because osh's `emit_arith_error` receives the outer
-  `$(())` source rather than bash's inner recursively-expanded string. Matching
-  bash here would require threading the recursively-expanded operand text out of
-  arith eval into the diagnostic; purely cosmetic, essentially no script depends
-  on it.
 - **Function-scope name:** in a function body bash's `<name>` becomes
   `environment`; osh keeps `$0` (= `osh`) per design §74.
 

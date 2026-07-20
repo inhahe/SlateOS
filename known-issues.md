@@ -2872,11 +2872,14 @@ verified against MSYS bash). Still **missing** relative to bash:
 *default* (for host runs and pre-login target state) needs the operator's call.
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
-diverges from bash because osh does not define `BASH_ALIASES`, `BASH_CMDS`, or
-`BASH_LOADABLES_PATH`.
+diverges from bash because osh does not define `BASH_LOADABLES_PATH`.
+(`BASH_ALIASES`/`BASH_CMDS` are now defined — **RESOLVED 2026-07-20**, see plan
+turned-implementation note below.)
 (`BASH_EXECUTION_STRING` — the `-c` command string — is now defined, seeded via
 `Shell::set_execution_string` from `main.rs`'s `-c` path, so it reads correctly
-and appears in `${!BASH*}`. `BASH_ARGV0` is now defined too — **RESOLVED
+and appears in `${!BASH*}`. `BASH_ALIASES`/`BASH_CMDS` are now defined too —
+**RESOLVED 2026-07-20**, see the implementation note below. `BASH_ARGV0` is now
+defined too — **RESOLVED
 2026-07-20**: a dynamic variable tied to `self.name`; `BASH_ARGV0=name` sets
 `$0`, reading `$BASH_ARGV0` returns the current `$0`, it appears in `${!BASH*}`
 and `declare -p`. One deliberate divergence: bash's `+=` on `BASH_ARGV0` relies
@@ -2885,37 +2888,38 @@ on an obscure lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b` yield
 (`ab`) instead; `BASH_ARGV0+=` is vanishingly rare in real scripts.
 `BASH_ARGC`/`BASH_ARGV` — the extdebug call-argument stack — are now defined too,
 **RESOLVED 2026-07-20**; see TD-OILS-MISSING-SPECIAL-ARRAYS for the full
-semantics and the one documented non-extdebug divergence.) The remainder are
-`BASH_ALIASES`/`BASH_CMDS` (see plan below) and `BASH_LOADABLES_PATH`, which is
-meaningless on SlateOS (no loadable builtins) and is intentionally omitted. Low
-priority — scripts rarely enumerate `BASH*`.
+semantics and the one documented non-extdebug divergence.) The only remaining
+missing `BASH_*` var is `BASH_LOADABLES_PATH`, which is meaningless on SlateOS
+(no loadable builtins) and is intentionally omitted. Low priority.
 
-**Plan for `BASH_ALIASES`/`BASH_CMDS` (not yet done).** bash exposes these as
-*dynamic associative arrays* that are (a) present even when empty (`declare -A
-BASH_ALIASES=()`), (b) live — reflecting the current alias table / command hash,
-and (c) writable: `BASH_ALIASES[x]="…"` creates an alias, `BASH_CMDS[foo]=/p`
-adds a hash entry. osh stores aliases in `self.aliases: BTreeMap<String,String>`
-and the command hash in `self.cmd_hash: HashMap<String,(PathBuf,u64)>`. The
-faithful implementation is blocked on two structural facts, so it's a distinct
-task rather than a quick add:
-- **No central assoc-array read accessor.** `self.assoc.get`/`contains_key` is
-  read at ~20 sites in `interp.rs` (element read, `[@]`, `${!a[@]}`, `${#a[@]}`,
-  `declare -p`, `${!BASH*}` enumeration, etc.). Materialising these two names
-  fresh on every read would mean touching all of them; the clean fix is to add a
-  single `assoc_map(name) -> Cow<...>` choke point that special-cases
-  `BASH_ALIASES`→`self.aliases` and `BASH_CMDS`→`self.cmd_hash`, then route reads
-  through it. That is a small but cross-cutting refactor with regression surface
-  across all associative-array behaviour.
-- **`cmd_hash` mutates on a hot path.** `resolve_external` (interp.rs ~5523)
-  inserts into `cmd_hash` on *every* external-command resolution, so an
-  eager-sync copy in `self.assoc["BASH_CMDS"]` would go stale constantly unless
-  synced there too. This is why the read-accessor (materialise-on-read) approach
-  is preferred over eager-sync.
-Write-back (`BASH_ALIASES[k]=v` / `BASH_CMDS[k]=v`) is then intercepted in the
-assoc-index assignment path (`assoc_set`, interp.rs ~3618): route those two names
-to `self.aliases.insert` / `self.cmd_hash.insert` instead of `self.assoc`.
-Present-when-empty falls out of the read accessor (always returns a map, empty or
-not) plus adding both names to the `${!BASH*}`/`declare -A` enumeration set.
+**Implementation of `BASH_ALIASES`/`BASH_CMDS` — DONE 2026-07-20.** bash exposes
+these as *dynamic associative arrays* that are (a) present even when empty
+(`declare -A BASH_ALIASES=()`), (b) live — reflecting the current alias table /
+command hash, and (c) writable: `BASH_ALIASES[x]="…"` creates an alias,
+`BASH_CMDS[foo]=/p` adds a hash entry. The chosen design is **eager mirror
+sync at every source mutation** rather than the materialise-on-read accessor the
+earlier plan sketched: `self.aliases`/`self.cmd_hash` remain the source of truth,
+and `sync_bash_aliases`/`sync_bash_cmds` rebuild the `self.assoc["BASH_ALIASES"]`
+/`["BASH_CMDS"]` mirror. The concern that eager-sync would "go stale" was
+unfounded once the *complete* mutation set was enumerated — it is small and
+closed: the `alias`/`unalias`/`hash` builtins plus the single `resolve_external`
+insert (interp.rs ~5609, on the *new*-command branch only; the cache-hit branch
+mutates just the hit count, which the mirror doesn't expose, so it stays
+sync-free on the hot path). Element writes are intercepted in `assoc_set`
+(interp.rs ~3630): `BASH_ALIASES[k]=v`→`self.aliases.insert`, `BASH_CMDS[k]=v`→
+`self.cmd_hash.insert`, with `+=` append honoured, then a re-sync. Both names are
+seeded empty in `seed_shell_vars` (present-when-empty) and marked `array_valued`
+so `declare -p`/`declare -A` render `=()`. Because they live in `self.assoc`, all
+existing assoc read paths (`${x[k]}`, `${x[@]}`, `${!x[@]}`, `${#x[@]}`,
+`declare -p`, `${!BASH*}` enumeration, bare `declare -A` listing) work unchanged
+— no read-site refactor was needed. Verified against bash: `declare -p`,
+element read, count, `+=`, `unalias -a`, `hash -p`, and `${!BASH_ALIASES@}`
+enumeration all match; regression test `bash_aliases_and_cmds_live_assoc`.
+*One documented cosmetic divergence:* `${!BASH_ALIASES[@]}` key order is
+`self.aliases` (BTreeMap) sorted order, whereas bash uses its internal hash order
+(e.g. bash `b a` vs osh `a b` for aliases `a`,`b`) — unspecified/arbitrary in
+bash, and osh's sorted order is deterministic and matches osh's own `alias`
+builtin listing.
 
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
 `param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)

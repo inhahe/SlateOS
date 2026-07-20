@@ -1148,6 +1148,48 @@ impl Shell {
         // are toggled.
         self.refresh_bashopts();
         self.readonly.insert("BASHOPTS".to_string());
+        // BASH_ALIASES / BASH_CMDS: bash exposes the alias table and the
+        // command-hash table as *live* associative arrays that are present even
+        // when empty (`declare -A BASH_ALIASES=()`), reflect the current tables
+        // on read, and are writable (`BASH_ALIASES[x]=…` creates an alias). osh
+        // keeps the source of truth in `self.aliases`/`self.cmd_hash` and mirrors
+        // them into `self.assoc` under these names; `sync_bash_aliases`/
+        // `sync_bash_cmds` rebuild the mirror at every mutation of the source
+        // (the complete mutation set is small — the `alias`/`unalias`/`hash`
+        // builtins plus `resolve_external`), so the mirror is never stale, and
+        // element writes are intercepted in `assoc_set` and routed back to the
+        // source. Seeded empty here so they are present-when-empty like bash.
+        self.sync_bash_aliases();
+        self.sync_bash_cmds();
+    }
+
+    /// Rebuild the `BASH_ALIASES` associative-array mirror from `self.aliases`.
+    /// Called at every alias-table mutation so the mirror stays live. Keys come
+    /// out in `self.aliases` (BTreeMap) sorted order — bash uses its internal
+    /// hash order, an unspecified/cosmetic difference; sorted is deterministic.
+    fn sync_bash_aliases(&mut self) {
+        let v: Vec<(String, String)> = self
+            .aliases
+            .iter()
+            .map(|(k, val)| (k.clone(), val.clone()))
+            .collect();
+        self.assoc.insert("BASH_ALIASES".to_string(), v);
+        // Mark has-a-value so `declare -p` renders `=()` even when empty.
+        self.array_valued.insert("BASH_ALIASES".to_string());
+    }
+
+    /// Rebuild the `BASH_CMDS` associative-array mirror from `self.cmd_hash`.
+    /// `cmd_hash` is a `HashMap`, so its iteration order is nondeterministic;
+    /// sort by key for stable output (bash uses hash order, unspecified).
+    fn sync_bash_cmds(&mut self) {
+        let mut v: Vec<(String, String)> = self
+            .cmd_hash
+            .iter()
+            .map(|(k, (p, _))| (k.clone(), p.to_string_lossy().into_owned()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        self.assoc.insert("BASH_CMDS".to_string(), v);
+        self.array_valued.insert("BASH_CMDS".to_string());
     }
 
     /// Set `$0`, the shell/script name.
@@ -3628,6 +3670,38 @@ impl Shell {
 
     /// Set an associative-array element, creating the array if needed.
     fn assoc_set(&mut self, name: &str, key: String, val: String, append: bool) {
+        // BASH_ALIASES / BASH_CMDS are live mirrors of the alias/command-hash
+        // tables. A write like `BASH_ALIASES[ll]="ls -l"` must mutate the source
+        // table (creating a real alias), not the mirror — otherwise the next
+        // sync would overwrite it. Route the write to the source, then rebuild
+        // the mirror so the change is immediately visible on read.
+        if name == "BASH_ALIASES" {
+            let final_val = if append {
+                let cur = self.aliases.get(&key).cloned().unwrap_or_default();
+                format!("{cur}{val}")
+            } else {
+                val
+            };
+            self.aliases.insert(key, final_val);
+            self.sync_bash_aliases();
+            return;
+        }
+        if name == "BASH_CMDS" {
+            let final_val = if append {
+                let cur = self
+                    .cmd_hash
+                    .get(&key)
+                    .map(|(p, _)| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("{cur}{val}")
+            } else {
+                val
+            };
+            self.cmd_hash
+                .insert(key, (std::path::PathBuf::from(&final_val), 0));
+            self.sync_bash_cmds();
+            return;
+        }
         // Any element write gives the array a value (bash's has-a-value flag),
         // so an emptied assoc still shows `=()` under `declare -p`.
         self.array_valued.insert(name.to_string());
@@ -5533,6 +5607,10 @@ impl Shell {
         }
         let path = self.find_in_path(name)?;
         self.cmd_hash.insert(name.to_string(), (path.clone(), 1));
+        // Refresh the BASH_CMDS mirror only when a *new* command is hashed (rare,
+        // once per distinct command). The cache-hit branch above mutates only the
+        // hit count, which the mirror doesn't expose, so it stays sync-free.
+        self.sync_bash_cmds();
         Some(path)
     }
 
@@ -10303,6 +10381,8 @@ impl Shell {
                 status = 1;
             }
         }
+        // Keep the BASH_ALIASES mirror live after any definitions.
+        self.sync_bash_aliases();
         status
     }
 
@@ -10334,6 +10414,7 @@ impl Shell {
         }
         if all {
             self.aliases.clear();
+            self.sync_bash_aliases();
             return 0;
         }
         let names = &args[i..];
@@ -10349,6 +10430,8 @@ impl Shell {
                 status = 1;
             }
         }
+        // Keep the BASH_ALIASES mirror live after removals.
+        self.sync_bash_aliases();
         status
     }
 
@@ -10407,6 +10490,7 @@ impl Shell {
 
         if clear {
             self.cmd_hash.clear();
+            self.sync_bash_cmds();
             return 0;
         }
         if let Some(p) = pathname {
@@ -10416,6 +10500,7 @@ impl Shell {
             };
             self.cmd_hash
                 .insert(name.clone(), (std::path::PathBuf::from(p), 0));
+            self.sync_bash_cmds();
             return 0;
         }
         if list {
@@ -10436,6 +10521,7 @@ impl Shell {
                     status = 1;
                 }
             }
+            self.sync_bash_cmds();
             return status;
         }
         if print_path {
@@ -10486,6 +10572,7 @@ impl Shell {
                 }
             }
         }
+        self.sync_bash_cmds();
         status
     }
 
@@ -21932,6 +22019,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn bash_aliases_and_cmds_live_assoc() {
+        // BASH_ALIASES is present-when-empty and rendered as an empty assoc.
+        assert_eq!(run("declare -p BASH_ALIASES").0, "declare -A BASH_ALIASES=()\n");
+        assert_eq!(run("declare -p BASH_CMDS").0, "declare -A BASH_CMDS=()\n");
+        // Defining an alias makes it visible through the mirror (element read,
+        // count, and declare -p all reflect the live alias table).
+        assert_eq!(
+            run("alias ll=\"ls -l\"; echo \"[${BASH_ALIASES[ll]}]\"").0,
+            "[ls -l]\n"
+        );
+        assert_eq!(run("alias a=1 b=2; echo ${#BASH_ALIASES[@]}").0, "2\n");
+        assert_eq!(
+            run("alias ll=\"ls -l\"; declare -p BASH_ALIASES").0,
+            "declare -A BASH_ALIASES=([ll]=\"ls -l\" )\n"
+        );
+        // Writing an element goes back to the source: BASH_ALIASES[x]=… creates a
+        // real alias, and += appends to the existing alias value.
+        assert_eq!(run("BASH_ALIASES[gg]=grep; alias gg").0, "alias gg='grep'\n");
+        assert_eq!(
+            run("BASH_ALIASES[x]=a; BASH_ALIASES[x]+=b; alias x").0,
+            "alias x='ab'\n"
+        );
+        // unalias -a clears the table; the mirror goes back to empty.
+        assert_eq!(
+            run("alias z=1; unalias -a; declare -p BASH_ALIASES").0,
+            "declare -A BASH_ALIASES=()\n"
+        );
+        // BASH_CMDS is writable too (hash a path without a $PATH search).
+        assert_eq!(
+            run("BASH_CMDS[foo]=/bin/foo; echo ${BASH_CMDS[foo]}").0,
+            "/bin/foo\n"
+        );
+        assert_eq!(
+            run("hash -p /bin/bar bar; echo ${BASH_CMDS[bar]}").0,
+            "/bin/bar\n"
+        );
+        // Both names enumerate under the ${!BASH*} name-prefix expansion.
+        let listing = run("echo ${!BASH_ALIASES@} ${!BASH_CMDS@}").0;
+        assert!(
+            listing.contains("BASH_ALIASES") && listing.contains("BASH_CMDS"),
+            "listing: {listing}"
+        );
+    }
+
+    #[test]
     fn bash_execution_string_set_for_dash_c() {
         // `set_execution_string` seeds $BASH_EXECUTION_STRING; the value is an
         // ordinary reassignable variable and appears under `${!BASH*}`.
@@ -26057,10 +26189,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn declare_attr_filter_lists_matching_vars() {
         // `declare -A` (no names) lists only associative arrays, in
-        // re-inputtable declare-prefix form, sorted by name.
+        // re-inputtable declare-prefix form, sorted by name. The always-present
+        // dynamic mirrors BASH_ALIASES/BASH_CMDS sort ahead of user arrays,
+        // exactly as bash lists them.
         let (o, s) = run("declare -A m=([x]=1); declare -A n=([y]=2); a=(1 2); declare -A");
         assert_eq!(s, 0);
-        assert_eq!(o, "declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n");
+        assert_eq!(
+            o,
+            "declare -A BASH_ALIASES=()\ndeclare -A BASH_CMDS=()\n\
+             declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n"
+        );
 
         // `declare -i` lists only integer-attributed variables.
         let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");

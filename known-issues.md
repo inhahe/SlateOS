@@ -1145,6 +1145,44 @@ UTF-8-locale behavior. Same root cause and disposition as `TD-OILS-UNICODE-ESC`
 the MSYS byte-wise result is a host-locale artifact, not an osh divergence. No
 action needed.
 
+### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — cosmetic / documented tradeoff — 2026-07-20
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_threaded_pipeline` (and the
+all-external `exec_concurrent_pipeline`). Each pipeline stage emits its own
+xtrace line from inside `exec_simple` when it runs.
+
+**What:** `set -x; echo A | cat` prints, in bash:
+```
++ echo A
++ cat
+```
+but in osh:
+```
++ cat
++ echo A
+```
+The trace *content* (fully-expanded, one `+ ` line per stage) is identical; only
+the line ordering within the pipeline differs. Both shells are deterministic
+(bash always left-to-right, osh always last-stage-first).
+
+**Why it happens:** osh runs the pipeline's **last** stage synchronously on the
+current thread (required so `shopt -s lastpipe` can keep its mutations/flow, and
+to avoid an extra thread) while stages `0..n-1` run on worker threads that the OS
+has not necessarily scheduled yet. The current thread therefore reaches the last
+stage's `exec_simple` — and emits its trace — before the workers emit theirs.
+
+**Why not fixed now:** matching bash's exact intra-pipeline trace order would
+require either (a) abandoning the "last stage on the current thread" design that
+`lastpipe` and the concurrent-pipeline architecture depend on, or (b) hoisting
+the trace into the parent and expanding each stage's words there — which would
+run each stage's command substitutions **twice** (once for the parent trace,
+once in the child), a correctness regression (verified: bash expands each stage
+exactly once, in the child subshell). Neither is justified for a debugging-only
+cosmetic. The proper fix, if ever pursued, is a per-stage "ready to trace"
+barrier that releases the stages' trace emission left-to-right before their
+bodies run — non-trivial and not worth the added synchronization on the pipeline
+hot path. Deferred.
+
 ### TD-OILS-HELP-LAYOUT. Bare `help` uses an osh-identity header + single-column listing, not bash's "GNU bash" banner + COLUMNS-wide 2-column truncated layout — INTENTIONAL / documented — 2026-07-20
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_help`, the no-pattern branch.

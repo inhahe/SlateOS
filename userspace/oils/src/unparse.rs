@@ -141,7 +141,7 @@ fn and_or_block(ao: &AndOr, level: usize) -> String {
 }
 
 /// And-or list rendered strictly inline (for conditions / command subs).
-fn and_or_src(ao: &AndOr) -> String {
+pub fn and_or_src(ao: &AndOr) -> String {
     let mut s = pipeline_src(&ao.first);
     for (op, pl) in &ao.rest {
         s.push_str(match op {

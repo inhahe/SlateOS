@@ -381,16 +381,50 @@ struct VarSnapshot {
 /// A background job started with `&`. Tracks the spawned child so `wait`/`jobs`
 /// can reap and report it. `child` becomes `None` once the process has been
 /// reaped (its final status is kept in `status`).
+/// The still-running body of a background job. A single external command
+/// backgrounds as a real OS [`Child`](std::process::Child); every other
+/// backgrounded form (a builtin, function, compound command, pipeline, or
+/// and-or list) runs asynchronously on a dedicated OS thread executing a
+/// subshell clone — the thread's `JoinHandle` yields the final exit status.
+/// Both share the job table so `jobs`/`wait`/`$!`/`fg`/`disown` treat them
+/// uniformly. See TD-OILS13.
+enum JobBody {
+    Process(std::process::Child),
+    Thread(std::thread::JoinHandle<i32>),
+}
+
+impl JobBody {
+    /// Block until the job body finishes and return its exit status. A thread
+    /// that panicked is reported as status 1 (the shell keeps running).
+    fn wait_blocking(self) -> i32 {
+        match self {
+            JobBody::Process(mut c) => c.wait().ok().and_then(|s| s.code()).unwrap_or(1),
+            JobBody::Thread(h) => h.join().unwrap_or(1),
+        }
+    }
+
+    /// True if the body has finished and [`wait_blocking`](Self::wait_blocking)
+    /// would not block. For a process this consults `try_wait`; for a thread,
+    /// `is_finished`.
+    fn is_finished(&mut self) -> bool {
+        match self {
+            JobBody::Process(c) => !matches!(c.try_wait(), Ok(None)),
+            JobBody::Thread(h) => h.is_finished(),
+        }
+    }
+}
+
 struct Job {
     /// Job number as shown by `jobs` and referenced by `%n`.
     id: usize,
-    /// OS process id (also reported by `$!` at spawn time).
+    /// OS process id (also reported by `$!` at spawn time). Thread-backed jobs
+    /// carry a synthetic pid (≥ 900_000, from [`SYNTH_PID`]).
     pid: u32,
-    /// The live child handle, or `None` after the process has been reaped.
-    child: Option<std::process::Child>,
+    /// The live job body, or `None` after it has been reaped.
+    child: Option<JobBody>,
     /// The command line, for `jobs` display.
     cmd: String,
-    /// Final exit status once the process has finished and been reaped.
+    /// Final exit status once the body has finished and been reaped.
     status: Option<i32>,
     /// Set by `disown -h`: the job stays in the table but is marked so it
     /// would not receive SIGHUP when the shell exits. (We have no SIGHUP
@@ -1295,8 +1329,10 @@ impl Shell {
             }
             self.current_line = item.line;
             if item.background {
-                // Only a single external simple command is truly backgrounded;
-                // everything else runs synchronously (documented limitation).
+                // A single external command backgrounds as an OS process; every
+                // other form (builtin, function, compound, pipeline, …) runs on a
+                // background thread. Both register a job and set `$!`. See
+                // `exec_background` and TD-OILS13.
                 self.exec_background(&item.list);
                 continue;
             }
@@ -5682,7 +5718,7 @@ impl Shell {
                         self.jobs.push(Job {
                             id,
                             pid,
-                            child: Some(child),
+                            child: Some(JobBody::Process(child)),
                             cmd: argv.join(" "),
                             status: None,
                             no_hup: false,
@@ -5699,9 +5735,42 @@ impl Shell {
                 }
             }
         }
-        // Fallback: run synchronously.
-        let mut out = Out::Inherit;
-        let _ = self.exec_and_or(ao, &mut out, &StdinSrc::Inherit);
+        // Every other backgrounded form — a builtin, function, compound command,
+        // pipeline, negated command, or multi-command and-or list — runs
+        // asynchronously on a dedicated OS thread executing a subshell clone,
+        // registered in the job table with a synthetic pid (so `$!`, `jobs`,
+        // `wait`, and `disown` all see it). This is bash's "run `&` in a
+        // subshell" behaviour; osh uses a thread rather than a fork. See
+        // TD-OILS13.
+        let mut sub = self.clone_for_subshell();
+        let ao_owned = ao.clone();
+        let handle = std::thread::spawn(move || {
+            let mut out = Out::Inherit;
+            // A backgrounded job's stdin is disconnected (bash redirects it from
+            // /dev/null so it can't steal the terminal): feed an empty cursor so
+            // any `read` sees immediate EOF rather than racing the parent shell
+            // for real stdin.
+            let empty = RefCell::new(io::Cursor::new(Vec::new()));
+            let _ = sub.exec_and_or(&ao_owned, &mut out, &StdinSrc::Cursor(&empty));
+            // Fire the subshell's EXIT trap, then report its final status.
+            sub.run_exit_trap_out(&mut out, &StdinSrc::Cursor(&empty));
+            sub.last_status
+        });
+        let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut id = 1;
+        while self.jobs.iter().any(|j| j.id == id) {
+            id += 1;
+        }
+        self.jobs.push(Job {
+            id,
+            pid,
+            child: Some(JobBody::Thread(handle)),
+            cmd: crate::unparse::and_or_src(ao),
+            status: None,
+            no_hup: false,
+        });
+        self.last_bg_pid = Some(pid);
+        self.last_status = 0;
     }
 
     /// Execute `coproc [NAME] body`: run `body` on a background thread with its
@@ -5757,7 +5826,7 @@ impl Shell {
         // Publish `NAME=(read_fd write_fd)` and `NAME_PID`. The body runs as a
         // thread, not an OS process, so `NAME_PID` is a synthetic monotonic id
         // (best-effort, like other in-process background bodies).
-        let synth_pid = COPROC_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let synth_pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut elems = BTreeMap::new();
         elems.insert(0usize, read_fd.to_string());
         elems.insert(1usize, write_fd.to_string());
@@ -8767,9 +8836,9 @@ impl Shell {
             return exists;
         }
         if let Some(idx) = job_idx {
-            // Terminate the spawned child (platform-native process kill).
-            if let Some(child) = self.jobs[idx].child.as_mut() {
-                match child.kill() {
+            match self.jobs[idx].child.as_mut() {
+                // Terminate the spawned child (platform-native process kill).
+                Some(JobBody::Process(child)) => match child.kill() {
                     Ok(()) => {
                         // Record the terminated status so `wait`/`jobs` reflect it.
                         let _ = child.wait();
@@ -8784,10 +8853,19 @@ impl Shell {
                         );
                         return false;
                     }
+                },
+                // A thread-backed job (backgrounded builtin/compound command)
+                // cannot be signalled — Rust threads are not cancellable. Detach
+                // the handle (the thread runs to completion) and record the
+                // signalled status so `wait`/`jobs` reflect the kill request.
+                Some(JobBody::Thread(_)) => {
+                    self.jobs[idx].status = Some(128 + i32::from(signum));
+                    self.jobs[idx].child = None;
+                    return true;
                 }
+                // Already reaped: bash still succeeds for a just-finished job.
+                None => return true,
             }
-            // Already reaped: bash still succeeds for a just-finished job.
-            return true;
         }
         // A signal directed at the shell itself is delivered to our own trap
         // machinery. SlateOS/Windows have no real Unix signals, so self-delivery
@@ -8882,20 +8960,11 @@ impl Shell {
     /// reaped). Called before `jobs`/`wait` so the reported state is current.
     fn poll_jobs(&mut self) {
         for job in &mut self.jobs {
-            if let Some(child) = job.child.as_mut() {
-                match child.try_wait() {
-                    Ok(Some(es)) => {
-                        job.status = Some(es.code().unwrap_or(1));
-                        job.child = None;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        // Treat an un-waitable child as finished with failure so
-                        // it does not linger in the table forever.
-                        job.status = Some(1);
-                        job.child = None;
-                    }
-                }
+            if let Some(body) = job.child.as_mut()
+                && body.is_finished()
+            {
+                // Finished: reap it (join the thread / collect the exit code).
+                job.status = Some(job.child.take().map_or(1, JobBody::wait_blocking));
             }
         }
     }
@@ -9020,8 +9089,8 @@ impl Shell {
             let mut last = 0;
             let mut last_pid = None;
             for job in &mut self.jobs {
-                if let Some(mut child) = job.child.take() {
-                    last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+                if let Some(body) = job.child.take() {
+                    last = body.wait_blocking();
                     job.status = Some(last);
                 } else if let Some(s) = job.status {
                     last = s;
@@ -9042,8 +9111,8 @@ impl Shell {
             };
             let pid = self.jobs[idx].pid;
             let job = &mut self.jobs[idx];
-            if let Some(mut child) = job.child.take() {
-                last = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+            if let Some(body) = job.child.take() {
+                last = body.wait_blocking();
             } else {
                 last = job.status.unwrap_or(0);
             }
@@ -9120,13 +9189,17 @@ impl Shell {
                 let Some(job) = self.jobs.get_mut(idx) else {
                     continue;
                 };
-                let done = match &mut job.child {
-                    Some(child) => match child.try_wait() {
-                        Ok(Some(st)) => Some(st.code().unwrap_or(1)),
-                        Ok(None) => None,
-                        Err(_) => Some(1),
-                    },
-                    None => Some(job.status.unwrap_or(0)),
+                let finished = match &mut job.child {
+                    Some(body) => body.is_finished(),
+                    None => true,
+                };
+                let done = if finished {
+                    Some(match job.child.take() {
+                        Some(body) => body.wait_blocking(),
+                        None => job.status.unwrap_or(0),
+                    })
+                } else {
+                    None
                 };
                 if let Some(status) = done {
                     let pid = job.pid;
@@ -9261,8 +9334,8 @@ impl Shell {
         let _ = self.write_bytes(out, redir, format!("{cmd}\n").as_bytes());
         // Wait for the job to finish, then remove it from the table.
         let job = &mut self.jobs[idx];
-        let status = if let Some(mut child) = job.child.take() {
-            child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
+        let status = if let Some(body) = job.child.take() {
+            body.wait_blocking()
         } else {
             job.status.unwrap_or(0)
         };
@@ -15716,9 +15789,11 @@ fn pipe_writer_into_file(w: io::PipeWriter) -> std::fs::File {
     std::fs::File::from(std::os::windows::io::OwnedHandle::from(w))
 }
 
-/// Monotonic synthetic pid source for `coproc` bodies (which run as threads,
-/// not OS processes). Starts high to avoid colliding with real pids.
-static COPROC_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(900_000);
+/// Monotonic synthetic pid source for in-process background bodies (`coproc`
+/// and thread-backed background jobs) which run as threads, not OS processes.
+/// Starts high to avoid colliding with real OS pids; shared so every synthetic
+/// pid handed out (coproc `NAME_PID`, a thread job's `$!`) is globally unique.
+static SYNTH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(900_000);
 
 /// Non-blocking readability probe for a Windows OS handle, used by `read -t 0`.
 /// Returns true when a read would proceed immediately (data queued, or the
@@ -23933,6 +24008,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(sh.jobs.len(), 1);
         assert_eq!(sh.run_source("wait"), 7);
         assert!(sh.jobs.is_empty());
+    }
+
+    #[test]
+    fn thread_backed_background_jobs_set_pid_and_wait() {
+        // A backgrounded *builtin*, compound command, function, or pipeline is
+        // not a single external process, so it runs on a background thread. It
+        // must still register a job, set `$!`, and be waitable with its exit
+        // status — matching bash's "run `&` in a subshell". (Pre-fix, these fell
+        // back to synchronous execution and never set `$!`; see TD-OILS13.)
+        for (src, want) in [
+            ("true &", 0),          // builtin
+            ("false &", 1),         // builtin, nonzero status
+            ("{ exit 5; } &", 5),   // compound (brace group)
+            ("( exit 9 ) &", 9),    // subshell
+        ] {
+            let mut sh = Shell::new();
+            assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
+            assert!(sh.last_bg_pid.is_some(), "$! set for {src:?}");
+            assert_eq!(sh.jobs.len(), 1, "one job registered for {src:?}");
+            // `wait $!` returns the job's exit status and clears the table.
+            assert_eq!(sh.run_source("wait $!"), want, "wait status for {src:?}");
+            assert!(sh.jobs.is_empty(), "job reaped for {src:?}");
+        }
+
+        // `$!` survives after a fast job finishes (bash keeps the last bg pid).
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved"), 0);
     }
 
     #[cfg(windows)]

@@ -1206,20 +1206,36 @@ correctly, since they canonicalize identically.
 file-ID equivalent) through the VFS/`stat` path, compare those instead of
 canonical paths. The `-nt`/`-ot` mtime comparisons are already exact.
 
-### TD-OILS13. `osh` job control lacks terminal job control (no job *stop*/resume, no controlling-tty transfer), and only single external `&` commands background asynchronously — OPEN (gated on kernel job-control/signal support)
+### TD-OILS13. `osh` job control lacks terminal job control (no job *stop*/resume, no controlling-tty transfer); async `&` for all command forms now works — PARTIALLY RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_background`, `builtin_jobs`,
-`builtin_wait`, `builtin_fg`, `builtin_bg`, `builtin_disown`, the `Job` struct
-and `Shell::jobs` table).
+`builtin_wait`, `builtin_fg`, `builtin_bg`, `builtin_disown`, the `Job` struct /
+`JobBody` enum and `Shell::jobs` table).
 
 **What:** background-job tracking (`&` → job table, `jobs`, `wait`, `wait -n`,
-`$!`, `disown`, and now `fg`/`bg`) is implemented, but the parts that require a
-controlling terminal and job-control signals remain incomplete:
-1. **Only a single external simple command backgrounds asynchronously.** A
-   compound background job (`{ …; } &`, `( … ) &`, a pipeline `a | b &`) still
-   falls back to running *synchronously* (see `exec_background`'s fallback), so
-   it is never entered into the job table. bash runs these asynchronously in a
-   subshell.
+`$!`, `disown`, `fg`/`bg`) is implemented. Item (1) below is now **resolved**;
+the parts that require a controlling terminal and job-control signals remain
+incomplete:
+1. ~~Only a single external simple command backgrounds asynchronously.~~
+   **RESOLVED 2026-07-19:** every backgrounded form that is *not* a single
+   external process — a builtin (`true &`), function, compound command
+   (`{ …; } &`, `( … ) &`), pipeline (`a | b &`), negated command, or
+   multi-command and-or list — now runs asynchronously on a dedicated OS thread
+   executing a subshell clone, registered in the job table via the new
+   `JobBody::Thread` variant with a synthetic pid (`SYNTH_PID`, ≥ 900_000). So
+   `$!`, `jobs`, `wait`/`wait -n`/`wait $!`, and `disown` all see these jobs, and
+   the backgrounded body genuinely runs concurrently (bash's "run `&` in a
+   subshell", using a thread rather than a fork). A backgrounded thread job's
+   stdin is disconnected (fed an empty cursor → immediate EOF), matching bash's
+   redirect of async stdin from `/dev/null` in a non-interactive shell.
+   *Two residual narrow limitations of the thread model:* (a) a thread-backed job
+   **cannot be `kill`ed** — Rust threads are not cancellable, so `kill %n` on such
+   a job detaches the handle and records the signalled status but the thread runs
+   to completion; (b) a background job nested inside a **redirected/piped** context
+   (`cmd | { job & wait; }`) does not inherit that ambient stdin (it sees EOF),
+   because the live pipe reader is not shareable across the thread boundary — this
+   pre-dates the fix (the old synchronous fallback passed `Inherit`, equally wrong)
+   and is rare. Proper fix for (b): a thread-safe shareable stdin reader.
 2. **No job *stop*/resume and no controlling-tty transfer.** `fg`/`bg` are
    implemented as far as is meaningful without terminal job control: `fg` prints
    the job's command line and *waits* for it (it cannot resume a stopped job or
@@ -1229,13 +1245,11 @@ controlling terminal and job-control signals remain incomplete:
    (Ctrl-Z / `SIGTSTP`) — the "Stopped" state never occurs — and `fg` cannot
    grant a job the terminal.
 
-**Proper fix:** (1) route compound/pipeline `&` through a real async subshell
-thread that registers a job; (2) once the kernel provides process groups +
+**Proper fix (remaining):** once the kernel provides process groups +
 job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 `bg` to genuine stop/continue + terminal-foreground transfer and add the
 "Stopped" job state. The current implementation is correct for the
-overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job),
-just narrow.
+overwhelmingly common cases (`cmd & … wait`, `fg` to wait on a background job).
 
 ### TD-OILS14. `osh` `exec`: input+output redirection-only forms + named input/write fds + scoped per-command extra fds + builtin stderr redirects + function-invocation redirects + fd save/restore/swap (`exec 3>&1`/`1>&3`/swap) implemented; only a true in-place `execve` remains — PARTIALLY RESOLVED 2026-07-19
 

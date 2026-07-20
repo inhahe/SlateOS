@@ -27760,6 +27760,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn declare_f_subshell_glues_parens_to_body() {
+        // bash keeps a subshell body at the `(`'s indent, gluing the first
+        // statement to `( ` and the last to ` )` (TD-OILS-DECLAREF-QUIRKS item 2).
+        let (o, s) = run("f() { ( echo a; echo b; echo d ); }; declare -f f");
+        assert_eq!(s, 0);
+        assert_eq!(
+            o, "f () \n{ \n    ( echo a;\n    echo b;\n    echo d )\n}\n",
+            "multi-stmt subshell layout mismatch"
+        );
+        // Single-statement subshell stays on one line.
+        let (o2, _) = run("f() { ( echo a ); echo c; }; declare -f f");
+        assert_eq!(o2, "f () \n{ \n    ( echo a );\n    echo c\n}\n", "single subshell mismatch");
+    }
+
+    #[test]
     fn bare_set_lists_functions() {
         // Bare `set` prints functions after the variables.
         let (o, _) = run("foo() { echo hi; }; set");

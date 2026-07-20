@@ -553,7 +553,7 @@ project. The still-open (4) items each need a targeted grammar change
 model, or bash's `[[ ]]`/bad-substitution deferral) — behaviour-shifting
 and best done one class at a time with a focused test sweep.
 
-### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — items 1 (elif), 3 (inline background) & 4 (nested-fn keyword) ✅ RESOLVED 2026-07-20; one remains (subshell layout)
+### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — ✅ FULLY RESOLVED 2026-07-20 (all four items matched byte-for-byte)
 
 **Where:** `userspace/oils/src/unparse.rs` `command_block` (`If` elif branch,
 `Subshell`, `Function` nested case) and `item_stmt`/`program_block`
@@ -576,9 +576,14 @@ only the exact whitespace/keyword layout differs:
    MSYS bash across elif+else, elif-without-else, nested-if-in-elif-body, and
    loop-embedded cases; plain `if`/`if-else` (no elif) unchanged. Regression
    test `interp::declare_f_rewrites_elif_as_nested_else_if`.
-2. **Subshell layout.** bash prints `( echo a;\n echo b );` (first statement
+2. ~~**Subshell layout.** bash prints `( echo a;\n echo b );` (first statement
    glued to the `(`, continuation dedented). osh uses a clean indented block
-   (`(\n    echo a;\n    echo b\n)`).
+   (`(\n    echo a;\n    echo b\n)`).~~ **RESOLVED 2026-07-20.** The `Subshell`
+   arm now renders the body as a group at the `(`'s own indent level, strips
+   the first line's indent to glue it after `( `, and appends ` )` to the last
+   statement — matching bash's `( echo a;\n<ind>echo b )` layout (compound
+   commands and backgrounded/pipe'd subshells included). Verified byte-identical
+   against MSYS bash. Regression test `interp::declare_f_subshell_glues_parens_to_body`.
 3. ~~**Backgrounded statement in a list.** bash keeps `sleep 1 & echo b` on one
    line (`&` as an inline connector). osh puts each `Item` on its own line, so
    `sleep 1 &` and `echo b` split across two lines.~~ **RESOLVED 2026-07-20.**

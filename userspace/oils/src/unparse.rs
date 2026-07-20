@@ -348,11 +348,20 @@ fn command_block(cmd: &Command, level: usize) -> String {
             s
         }
         Command::Subshell(prog) => {
-            let mut s = String::from("(\n");
-            s.push_str(&program_block(prog, level + 1, false));
-            s.push_str(&ind(level));
-            s.push(')');
-            s
+            // bash's deparser keeps a subshell body at the *same* indent as the
+            // `(`, glues the first statement to `( ` and the last to ` )`
+            // (`( echo a;\n<ind>echo b )`) rather than using a deeper indented
+            // block. Render the body as a group (last statement unterminated),
+            // then strip the first line's indent and the trailing newline and
+            // wrap in `( … )`. (TD-OILS-DECLAREF-QUIRKS item 2.)
+            let body = program_block(prog, level, false);
+            if body.is_empty() {
+                return String::from("( )");
+            }
+            let indent = ind(level);
+            let trimmed = body.strip_prefix(indent.as_str()).unwrap_or(body.as_str());
+            let trimmed = trimmed.strip_suffix('\n').unwrap_or(trimmed);
+            format!("( {trimmed} )")
         }
         Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
         Command::Arith(text) => format!("(( {text} ))"),

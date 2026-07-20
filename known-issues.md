@@ -2063,6 +2063,17 @@ the time-bearing prompt escapes.
 
 ### TD-OILS-ARITH-ERRTEXT. `osh` arithmetic error *messages* don't match bash's `<expr> : <msg> (error token is "<tok>")` format — RESOLVED 2026-07-20 (superseded by TD-OILS-ARITH-ERRFMT)
 
+**Known residual (cosmetic, minor):** for an eval-time error whose offending
+operand carries a **unary prefix** (`-`/`+`/`~`/`!`), osh's `error token` includes
+that prefix while bash's token pointer skips it. Example: `$(( 2 ** -1 ))` →
+bash `exponent less than 0 (error token is "1 ")`, osh `… (error token is
+"-1 ")`. The message body and exit status match; only the parenthetical token
+text differs. osh attaches the whole RHS operand span (`arith.rs` `eval_expr`,
+`rhs_tok`) as the token, whereas bash reports the source from the innermost
+primary. Fixing it means recording the post-unary-prefix source position on the
+operand node — the same `Expr`-span refactor the proper fix below describes — for
+a token that essentially no script inspects. Deferred with the rest of this item.
+
 **Resolution:** superseded by the completed TD-OILS-ARITH-ERRFMT work. All three
 "concrete diffs" listed below now reproduce bash 5.2 exactly, verified 2026-07-20:
 `$((5/0))` → `5/0 : division by 0 (error token is "0 ")`; `$((09))` → `09: value

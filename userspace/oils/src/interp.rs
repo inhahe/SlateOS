@@ -3620,7 +3620,13 @@ impl Shell {
         };
         let n = elems.len() as i64;
         let off = self.eval_arith_index(offset);
-        let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+        // A negative offset counts from the end; if its magnitude exceeds the
+        // element count the start lands before the first element, and bash
+        // yields an empty slice (it does NOT clamp to 0 and return everything).
+        if off < 0 && n + off < 0 {
+            return Vec::new();
+        }
+        let start = if off < 0 { n + off } else { off.min(n) };
         let end = match length {
             Some(l) => {
                 let l = self.eval_arith_index(l);
@@ -16041,8 +16047,15 @@ fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String,
     let mut start = offset;
     if start < 0 {
         start += n;
+        // A negative offset whose magnitude exceeds the length lands before the
+        // start of the string. bash yields the empty string in this case — it
+        // does NOT clamp the start to 0 and return the whole value. (A positive
+        // offset past the end still clamps to `n`, giving empty naturally.)
+        if start < 0 {
+            return Ok(String::new());
+        }
     }
-    start = start.clamp(0, n);
+    start = start.min(n);
     let end = match length {
         None => n,
         Some(len) if len < 0 => {
@@ -22314,6 +22327,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             err.contains("-10: substring expression < 0"),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn param_substring_negative_offset_beyond_start_is_empty() {
+        // A negative offset whose magnitude exceeds the string length lands
+        // before the start: bash yields the EMPTY string (it does not clamp to 0
+        // and return the whole value). `${v: -N}` with N > len ⇒ empty.
+        assert_eq!(run(r#"v=hello; echo "[${v: -10}]""#).0, "[]\n");
+        assert_eq!(run(r#"v=hello; echo "[${v: -6}]""#).0, "[]\n");
+        // Exactly `-len` is in range and returns the whole string.
+        assert_eq!(run(r#"v=hello; echo "[${v: -5}]""#).0, "[hello]\n");
+        // With a length, an out-of-range negative offset is still empty.
+        assert_eq!(run(r#"v=hello; echo "[${v: -10:2}]""#).0, "[]\n");
+    }
+
+    #[test]
+    fn array_slice_negative_offset_beyond_start_is_empty() {
+        // Same rule for array / positional slices: a negative offset past the
+        // start yields an empty slice, not the whole array.
+        assert_eq!(run(r#"a=(1 2 3); echo "[${a[@]: -10}]""#).0, "[]\n");
+        assert_eq!(run(r#"a=(1 2 3); echo "[${a[@]: -10:2}]""#).0, "[]\n");
+        assert_eq!(run(r#"a=(1 2 3); echo "[${a[@]: -2}]""#).0, "[2 3]\n");
     }
 
     #[test]

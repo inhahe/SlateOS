@@ -871,7 +871,22 @@ impl Parser {
                         .to_string(),
                 ));
             }
-            return Err(self.unexpected_here());
+            // A complete sub-expression followed by a stray token where `]]` was
+            // expected. bash reports this as `syntax error in conditional
+            // expression` + `syntax error near \`TOKEN'` (TD-OILS-COND-ERRTEXT).
+            // This covers a leftover operator after a finished operand
+            // (`[[ 3 -gt 2 -gt 1 ]]`, near `-gt`) and a leftover word after a
+            // non-word primary (`[[ -z x y ]]`, near `y`). A stray `)` additionally
+            // carries bash's `: unexpected token \`)'` suffix on the first line.
+            let tok = self.token_display();
+            if self.at_op(Op::RParen) {
+                return Err(ParseError::new(format!(
+                    "syntax error in conditional expression: unexpected token `{tok}'\nsyntax error near `{tok}'"
+                )));
+            }
+            return Err(ParseError::new(format!(
+                "syntax error in conditional expression\nsyntax error near `{tok}'"
+            )));
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -948,6 +963,22 @@ impl Parser {
                 op.into_bin_op(),
                 Box::new(right),
             ));
+        }
+        // A bare word primary must be followed by `]]`, `&&`, `||`, `)`, or end
+        // of input. If instead another *word* token sits here — a plain operand
+        // (`[[ a b ]]`), a non-`[[` operator like `-a` (`[[ a -a b ]]`), or a
+        // unary operator used as an operand (`[[ a -z ]]`) — bash was expecting a
+        // binary operator and reports `conditional binary operator expected`
+        // followed by `syntax error near \`TOKEN'` (TD-OILS-COND-ERRTEXT). A
+        // stray `)` is *not* caught here: it is a structural token that
+        // `parse_cond` reports with its own "unexpected token" form.
+        if let Some(Tok::Word(segs)) = self.peek()
+            && !matches!(segs.as_slice(), [Seg::Lit(s)] if s == "]]")
+        {
+            let tok = self.token_display();
+            return Err(ParseError::new(format!(
+                "conditional binary operator expected\nsyntax error near `{tok}'"
+            )));
         }
         Ok(CondExpr::Word(left))
     }

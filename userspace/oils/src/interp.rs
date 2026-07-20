@@ -17297,6 +17297,9 @@ fn wrap_parse_message(msg: &str, prefix: &str) -> String {
     // that bash would prefix with `syntax error: `.
     if msg.starts_with("syntax error")
         || msg.starts_with("unexpected ")
+        // bash's `[[ … ]]` "conditional binary operator expected" diagnostic is a
+        // complete message with no `syntax error:` tag (TD-OILS-COND-ERRTEXT).
+        || msg.starts_with("conditional ")
         || msg.ends_with("not a valid identifier")
     {
         format!("{prefix}{msg}")
@@ -19586,6 +19589,82 @@ mod tests {
         // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
         // still driven by `err_prefix`, which omits it.
         assert_eq!(sh.err_prefix(), "osh: line 1: ");
+    }
+
+    #[test]
+    fn cond_syntax_error_messages_match_bash() {
+        // TD-OILS-COND-ERRTEXT: malformed `[[ … ]]` expressions produce bash's
+        // two-line, token-naming diagnostics (verified byte-for-byte against bash
+        // 5.2). Each case: the parser message + the echoed source line.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        let check = |sh: &Shell, src: &str, want: &str| {
+            let e = parse(src).unwrap_err();
+            assert_eq!(sh.format_parse_error(&e, src), want, "src: {src}");
+        };
+        // A bare word primary followed by another word: bash wanted a binary
+        // operator. Covers a plain operand, a non-`[[` operator, and a unary
+        // operator used as an operand.
+        check(
+            &sh,
+            "[[ a b ]]",
+            "osh: -c: line 1: conditional binary operator expected\n\
+             osh: -c: line 1: syntax error near `b'\n\
+             osh: -c: line 1: `[[ a b ]]'",
+        );
+        check(
+            &sh,
+            "[[ a -a b ]]",
+            "osh: -c: line 1: conditional binary operator expected\n\
+             osh: -c: line 1: syntax error near `-a'\n\
+             osh: -c: line 1: `[[ a -a b ]]'",
+        );
+        check(
+            &sh,
+            "[[ a && b c ]]",
+            "osh: -c: line 1: conditional binary operator expected\n\
+             osh: -c: line 1: syntax error near `c'\n\
+             osh: -c: line 1: `[[ a && b c ]]'",
+        );
+        // A completed operand followed by a stray token where `]]` was expected:
+        // the generic "syntax error in conditional expression".
+        check(
+            &sh,
+            "[[ 3 -gt 2 -gt 1 ]]",
+            "osh: -c: line 1: syntax error in conditional expression\n\
+             osh: -c: line 1: syntax error near `-gt'\n\
+             osh: -c: line 1: `[[ 3 -gt 2 -gt 1 ]]'",
+        );
+        check(
+            &sh,
+            "[[ -z x y ]]",
+            "osh: -c: line 1: syntax error in conditional expression\n\
+             osh: -c: line 1: syntax error near `y'\n\
+             osh: -c: line 1: `[[ -z x y ]]'",
+        );
+        // A stray `)` carries bash's `: unexpected token \`)'` suffix.
+        check(
+            &sh,
+            "[[ a ) ]]",
+            "osh: -c: line 1: syntax error in conditional expression: unexpected token `)'\n\
+             osh: -c: line 1: syntax error near `)'\n\
+             osh: -c: line 1: `[[ a ) ]]'",
+        );
+        // Unary/paren operand-slot diagnostics remain correct (regression guard).
+        check(
+            &sh,
+            "[[ -z ]]",
+            "osh: -c: line 1: unexpected argument `]]' to conditional unary operator\n\
+             osh: -c: line 1: syntax error near `]]'\n\
+             osh: -c: line 1: `[[ -z ]]'",
+        );
+        check(
+            &sh,
+            "[[ ( a ]]",
+            "osh: -c: line 1: unexpected token `]]', expected `)'\n\
+             osh: -c: line 1: syntax error near `]]'\n\
+             osh: -c: line 1: `[[ ( a ]]'",
+        );
     }
 
     #[test]

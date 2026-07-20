@@ -2444,7 +2444,31 @@ token is "{chars[pos..]}")` and Pattern B (base errors) as `{tok}: {msg} (error
 token is "{tok}")`. Match bash's operand-vs-operator "syntax error" distinction
 by inspecting the char at the failure position.
 
-### TD-OILS-COND-ERRTEXT. `osh` `[[ … ]]` syntax-error *messages* don't match bash's multi-line "conditional expression" diagnostics — OPEN (low priority, cosmetic stderr text) — 2026-07-20
+### TD-OILS-COND-ERRTEXT. `osh` `[[ … ]]` syntax-error *messages* don't match bash's multi-line "conditional expression" diagnostics — ✅ RESOLVED 2026-07-20
+
+**Status:** RESOLVED. `parse_cond` and `parse_cond_primary` now emit bash's
+context-specific two-line diagnostics, verified byte-for-byte against bash 5.2
+across 15 malformed forms:
+- a bare word primary followed by another word/word-operator
+  (`[[ a b ]]`, `[[ a -a b ]]`, `[[ a -z ]]`, `[[ a && b c ]]`, `[[ ! a b ]]`) →
+  `conditional binary operator expected` + `syntax error near \`TOK'`;
+- a completed operand followed by a stray token where `]]` was expected
+  (`[[ 3 -gt 2 -gt 1 ]]`, `[[ -z x y ]]`, `[[ ( a ) b ]]`, `[[ a -gt b -a c ]]`) →
+  `syntax error in conditional expression` + `syntax error near \`TOK'`;
+- a stray `)` (`[[ a ) ]]`) → the `: unexpected token \`)'` suffix form;
+- the pre-existing operand-slot forms (`[[ -z ]]`, `[[ ( a ]]`) still match.
+`wrap_parse_message` was extended to pass `conditional …` messages through
+without the `syntax error: ` tag. Regression-guarded by
+`cond_syntax_error_messages_match_bash`.
+
+*Known residual (pervasive, not cond-specific):* the `syntax error near \`TOK'`
+line reconstructs the token from osh's lexed segments, which do not preserve
+original source quoting — so an empty/quoted operand (`[[ a "" ]]`) shows an
+empty near-token where bash shows `""`. This is the same source-token
+reconstruction limitation tracked elsewhere and affects all near-token
+diagnostics equally.
+
+**Original report (for reference):**
 
 **Where:** `userspace/oils/src/parser.rs` `parse_cond` and its helpers (the
 `[[ … ]]` conditional-expression parser). Every `Err(ParseError(...))` in that

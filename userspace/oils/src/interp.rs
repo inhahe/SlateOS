@@ -2435,8 +2435,11 @@ impl Shell {
         while idx < c.items.len() {
             let item = &c.items[idx];
             let matched = item.patterns.iter().any(|pat| {
-                let pattern: Vec<char> = self.expand_to_string(pat).chars().collect();
-                glob_match_ci(&pattern, &subject, ci, extglob)
+                // Preserve per-character quoting so an escaped/quoted
+                // metacharacter (`a\*b`, `a'*'b`) matches literally, while a
+                // metacharacter from an unquoted expansion stays live.
+                let pattern = self.expand_word_pattern(pat);
+                glob_match_echars_ci(&pattern, &subject, ci, extglob)
             });
             if !matched {
                 idx += 1;
@@ -3112,13 +3115,18 @@ impl Shell {
         match op {
             CondBinOp::StrEq | CondBinOp::StrNe => {
                 let subject: Vec<char> = self.expand_to_string(l).chars().collect();
-                let rhs = self.expand_to_string(r);
                 // `shopt -s nocasematch` folds case for both the literal and the
                 // glob comparison.
                 let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+                // Expand the RHS once, preserving per-character quoting: an
+                // escaped/quoted metacharacter (`a\*b`, `"a*b"`) is a literal,
+                // an unquoted one is a live glob metacharacter. Expanding once
+                // also ensures an RHS `$(cmd)` runs a single time.
+                let pat = self.expand_word_pattern(r);
                 // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
                 let matched = if word_is_all_quoted(r) {
                     let lhs: String = subject.iter().collect();
+                    let rhs: String = pat.iter().map(|e| e.c).collect();
                     if ci {
                         lhs.to_lowercase() == rhs.to_lowercase()
                     } else {
@@ -3130,8 +3138,7 @@ impl Shell {
                     // of the manual) — extended patterns like `+(f|o)`/`@(a|b)`
                     // are always recognised here regardless of the `extglob`
                     // setting, unlike `case`/glob (which gate on it at parse).
-                    let pat: Vec<char> = rhs.chars().collect();
-                    glob_match_ci(&pat, &subject, ci, true)
+                    glob_match_echars_ci(&pat, &subject, ci, true)
                 };
                 if matches!(op, CondBinOp::StrEq) {
                     matched
@@ -4029,7 +4036,7 @@ impl Shell {
                 longest,
                 pattern,
             } => {
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 param_trim(value, &pat, *suffix, *longest, extglob)
             }
             BulkOp::Replace {
@@ -4038,7 +4045,7 @@ impl Shell {
                 pattern,
                 replacement,
             } => {
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
                 param_replace(value, &pat, &repl, *all, *anchor, extglob)
@@ -4048,7 +4055,7 @@ impl Shell {
                 all,
                 pattern,
             } => {
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 param_case(value, &pat, *mode, *all, extglob)
             }
             BulkOp::Transform { op } => Self::transform_value(value, *op),
@@ -7432,6 +7439,38 @@ impl Shell {
         out
     }
 
+    /// Expand `word` into a glob-pattern character sequence, tagging each
+    /// character with whether it was *quoted* (single/double-quoted or
+    /// backslash-escaped) and therefore a literal, versus unquoted — a live
+    /// pattern metacharacter. Used by `case` and `[[ == ]]`, where quoting must
+    /// suppress metacharacter meaning (so `a\*b` / `a'*'b` / `a"*"b` match a
+    /// literal `*`), while a character produced by an *unquoted* parameter or
+    /// command expansion stays live (`pat='a*'; [[ aXb == $pat ]]` matches).
+    ///
+    /// Unlike command-argument expansion this performs **no field splitting**
+    /// (a pattern is a single word) and calls each expansion exactly once, so a
+    /// pattern containing `$(cmd)` runs the command only once. The quoting
+    /// rules mirror `expand_word_annotated`: unquoted `Literal` and dynamic
+    /// expansions are live; single/double-quoted runs are literal.
+    fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
+        let mut buf: Vec<EChar> = Vec::new();
+        for part in &word.parts {
+            match part {
+                WordPart::Literal(s) => push_chars(&mut buf, s, false),
+                WordPart::SingleQuoted(s) => push_chars(&mut buf, s, true),
+                WordPart::DoubleQuoted(parts) => {
+                    let s = self.expand_double_quoted(parts);
+                    push_chars(&mut buf, &s, true);
+                }
+                other => {
+                    let s = self.expand_dynamic(other);
+                    push_chars(&mut buf, &s, false);
+                }
+            }
+        }
+        buf
+    }
+
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> String {
         let mut s = String::new();
         for part in parts {
@@ -7556,7 +7595,7 @@ impl Shell {
                 pattern,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
             }
@@ -7596,7 +7635,7 @@ impl Shell {
                 replacement,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
                 // replacement into `&`/literal tokens so the substitution can
@@ -7615,7 +7654,7 @@ impl Shell {
                 pattern,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
-                let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
+                let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
             }
@@ -16020,18 +16059,27 @@ fn word_is_all_quoted(w: &Word) -> bool {
             .all(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)))
 }
 
-/// Case-aware glob match. When `ci` is set (`shopt -s nocasematch`), both the
-/// pattern and the text are lowercased before matching — including
-/// character-class ranges (`[A-Z]` → `[a-z]`), which gives the case-folded
-/// semantics bash applies to `case`/`[[ == ]]`. `extglob` enables the extended
-/// pattern operators.
-fn glob_match_ci(pattern: &[char], text: &[char], ci: bool, extglob: bool) -> bool {
+/// Case-aware glob match whose pattern carries per-character quoting
+/// (`EChar.quoted`), so an escaped/quoted metacharacter is matched literally
+/// while an unquoted one stays live. `case` and `[[ == ]]` build their pattern
+/// with [`Shell::expand_word_pattern`] and match through this entry point. When
+/// `ci` is set (`shopt -s nocasematch`) both sides are lowercased before
+/// matching — the quoting flag is preserved across the fold so a quoted `*`
+/// stays literal — matching the case-folded `case`/`[[ == ]]` semantics.
+/// `extglob` enables the extended pattern operators.
+fn glob_match_echars_ci(pattern: &[EChar], text: &[char], ci: bool, extglob: bool) -> bool {
     if ci {
-        let p: Vec<char> = pattern.iter().flat_map(|c| c.to_lowercase()).collect();
+        let p: Vec<EChar> = pattern
+            .iter()
+            .flat_map(|e| {
+                let quoted = e.quoted;
+                e.c.to_lowercase().map(move |c| EChar { c, quoted })
+            })
+            .collect();
         let t: Vec<char> = text.iter().flat_map(|c| c.to_lowercase()).collect();
-        glob_match(&p, &t, extglob)
+        match_glob_toks(&compile_glob(&p, extglob), &t)
     } else {
-        glob_match(pattern, text, extglob)
+        match_glob_toks(&compile_glob(pattern, extglob), text)
     }
 }
 
@@ -16049,19 +16097,30 @@ fn glob_match(pattern: &[char], text: &[char], extglob: bool) -> bool {
     match_glob_toks(&toks, text)
 }
 
+/// Like [`glob_match`], but the pattern carries per-character quoting
+/// (`EChar.quoted`) so an escaped/quoted metacharacter (`${x#a\*b}`) matches
+/// literally while an unquoted one — including any produced by a nested
+/// expansion (`${x#$p}`) — stays live. Used by the parameter-expansion pattern
+/// operators (`#`/`%`/`/`/`^`/`,`).
+fn glob_match_e(pattern: &[EChar], text: &[char], extglob: bool) -> bool {
+    match_glob_toks(&compile_glob(pattern, extglob), text)
+}
+
 /// Longest match of `pattern` starting at `text[start]`; returns the end index
-/// (exclusive) of the match, or `None`. Used by `${…/…/…}` substitution.
-fn glob_match_at(pattern: &[char], text: &[char], start: usize, extglob: bool) -> Option<usize> {
+/// (exclusive) of the match, or `None`. Used by `${…/…/…}` substitution. The
+/// pattern carries per-character quoting (see [`glob_match_e`]).
+fn glob_match_at(pattern: &[EChar], text: &[char], start: usize, extglob: bool) -> Option<usize> {
     for j in (start..=text.len()).rev() {
-        if glob_match(pattern, &text[start..j], extglob) {
+        if glob_match_e(pattern, &text[start..j], extglob) {
             return Some(j);
         }
     }
     None
 }
 
-/// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`.
-fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglob: bool) -> String {
+/// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`. The pattern
+/// carries per-character quoting (see [`glob_match_e`]).
+fn param_trim(value: &str, pattern: &[EChar], suffix: bool, longest: bool, extglob: bool) -> String {
     let v: Vec<char> = value.chars().collect();
     if suffix {
         // Remove a matching suffix `v[k..]`, keeping `v[..k]`. Shortest match =
@@ -16072,7 +16131,7 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglo
             (0..=v.len()).rev().collect()
         };
         for k in range {
-            if glob_match(pattern, &v[k..], extglob) {
+            if glob_match_e(pattern, &v[k..], extglob) {
                 return v[..k].iter().collect();
             }
         }
@@ -16085,7 +16144,7 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglo
             (0..=v.len()).collect()
         };
         for k in range {
-            if glob_match(pattern, &v[..k], extglob) {
+            if glob_match_e(pattern, &v[..k], extglob) {
                 return v[k..].iter().collect();
             }
         }
@@ -16101,7 +16160,7 @@ fn param_trim(value: &str, pattern: &[char], suffix: bool, longest: bool, extglo
 /// matches `pattern`).
 fn param_case(
     value: &str,
-    pattern: &[char],
+    pattern: &[EChar],
     mode: crate::ast::CaseMode,
     all: bool,
     extglob: bool,
@@ -16109,7 +16168,7 @@ fn param_case(
     use crate::ast::CaseMode;
     // An empty pattern matches every character (bash: `^^`/`,,`/`~~` with no
     // pattern transforms the whole value).
-    let matches_char = |ch: char| pattern.is_empty() || glob_match(pattern, &[ch], extglob);
+    let matches_char = |ch: char| pattern.is_empty() || glob_match_e(pattern, &[ch], extglob);
     let convert = |ch: char| {
         // `char::to_uppercase`/`to_lowercase` can yield multiple chars
         // (e.g. 'ß' → "SS"); bash uses towupper/towlower per rune, but the
@@ -16834,7 +16893,7 @@ fn build_repl(replacement: &[ReplTok], matched: &[char]) -> String {
 /// unquoted `&` can expand to the matched text at each occurrence.
 fn param_replace(
     value: &str,
-    pattern: &[char],
+    pattern: &[EChar],
     replacement: &[ReplTok],
     all: bool,
     anchor: ReplaceAnchor,
@@ -16852,7 +16911,7 @@ fn param_replace(
         }
         ReplaceAnchor::End => {
             for i in 0..=v.len() {
-                if glob_match(pattern, &v[i..], extglob) {
+                if glob_match_e(pattern, &v[i..], extglob) {
                     let mut s: String = v[..i].iter().collect();
                     s.push_str(&build_repl(replacement, &v[i..]));
                     return s;
@@ -23978,6 +24037,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn escaped_metachar_is_literal_in_patterns() {
+        // A backslash-escaped glob metacharacter is a *literal*, matching bash
+        // (`a\*b` ≡ `a'*'b`): it must not act as a live `*`/`?`/`[` in `case`,
+        // `[[ == ]]`, or the `${…#pat}`/`${…/pat/…}`/`${…^pat}` operators.
+
+        // case: escaped `*` matches only a literal `*`.
+        assert_eq!(run(r#"case "aXb" in a\*b) echo M;; *) echo N;; esac"#).0, "N\n");
+        assert_eq!(run(r#"case "a*b" in a\*b) echo M;; *) echo N;; esac"#).0, "M\n");
+        // [[ == ]]: same, plus escaped `?`.
+        assert_eq!(run(r#"[[ "aXb" == a\*b ]] && echo M || echo N"#).0, "N\n");
+        assert_eq!(run(r#"[[ "a*b" == a\*b ]] && echo M || echo N"#).0, "M\n");
+        assert_eq!(run(r#"[[ "aXb" == a\?b ]] && echo M || echo N"#).0, "N\n");
+        assert_eq!(run(r#"[[ "a?b" == a\?b ]] && echo M || echo N"#).0, "M\n");
+        // A quoted RHS metacharacter is equivalent to an escaped one.
+        assert_eq!(run(r#"[[ "aXb" == "a*b" ]] && echo M || echo N"#).0, "N\n");
+
+        // ${x#pat} / ${x%pat}: escaped `*` does not strip arbitrary text.
+        assert_eq!(run(r#"x=aXb; echo "${x#a\*b}""#).0, "aXb\n");
+        assert_eq!(run(r#"x=a*b; echo "${x#a\*b}""#).0, "\n");
+        assert_eq!(run(r#"x=foo*bar; echo "${x%\*bar}""#).0, "foo\n");
+        // ${x//pat/repl}: escaped `*` replaces only literal `*` occurrences.
+        assert_eq!(run(r#"x=aXbXc; echo "${x//\*/_}""#).0, "aXbXc\n");
+        assert_eq!(run(r#"x=a*b*c; echo "${x//\*/_}""#).0, "a_b_c\n");
+        // Escaped bracket expression is literal.
+        assert_eq!(run(r#"x=a[b]c; echo "${x//\[b\]/_}""#).0, "a_c\n");
+
+        // Regression guard: a metacharacter supplied by an *unquoted* expansion
+        // stays LIVE (only the literal backslash escape suppresses it).
+        assert_eq!(run(r#"pat="a*b"; [[ "aXYZb" == $pat ]] && echo M || echo N"#).0, "M\n");
+        assert_eq!(run(r#"x=aXbc; p="a?b"; echo "${x#$p}""#).0, "c\n");
+        assert_eq!(run(r#"x=a.b.c; echo "${x//./_}""#).0, "a_b_c\n");
+
+        // Escaped tilde is literal (no home-directory expansion).
+        assert_eq!(run(r#"echo \~"#).0, "~\n");
+    }
+
+    #[test]
     fn param_replace_empty_extglob_match() {
         // Extglob quantifiers that can match the empty string (`?(x)`, `*(x)`)
         // produce zero-width matches in `${var//pat/repl}`: bash inserts the
@@ -24336,9 +24432,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(g("[a-c[:digit:]]", "7"));
         // The classic left-trim idiom: strip everything from the first
         // non-space onward, leaving the leading whitespace.
-        assert_eq!(param_trim("  trim  ", &"[![:space:]]*".chars().collect::<Vec<_>>(), true, true, false), "  ");
+        assert_eq!(param_trim("  trim  ", &field_lit("[![:space:]]*"), true, true, false), "  ");
         // Shortest leading-whitespace `#` strip removes just one space char.
-        assert_eq!(param_trim("  trim  ", &"[[:space:]]*".chars().collect::<Vec<_>>(), false, false, false), " trim  ");
+        assert_eq!(param_trim("  trim  ", &field_lit("[[:space:]]*"), false, false, false), " trim  ");
     }
 
     #[test]

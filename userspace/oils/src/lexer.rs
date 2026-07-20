@@ -838,15 +838,29 @@ impl Lexer {
                     if let Some(next) = self.bump()
                         && next != '\n'
                     {
-                        // In replacement context, keep `\&` and `\\` intact so
-                        // the later `&`-scan can tell an escaped ampersand (a
-                        // literal `&`) from an active one. Any other escape —
-                        // and every escape outside replacement context — is
-                        // consumed here, dropping the backslash.
                         if repl_escapes && (next == '&' || next == '\\') {
+                            // Replacement context: keep `\&`/`\\` intact so the
+                            // later `&`-scan can tell an escaped ampersand (a
+                            // literal `&`) from an active one.
                             lit.push('\\');
+                            lit.push(next);
+                        } else if next.is_ascii_alphanumeric() {
+                            // Escaped alphanumeric: fold into the plain literal
+                            // (an escaped letter/digit has no metacharacter
+                            // meaning), matching `read_word_inner`.
+                            lit.push(next);
+                        } else {
+                            // Escaped metacharacter/punctuation in a `${…#pat}` /
+                            // `${…/pat/…}` / `${…^pat}` pattern (or replacement):
+                            // emit it as a one-char single-quoted segment so it is
+                            // treated as a *literal* by the pattern matcher — an
+                            // escaped `*`/`?`/`[` matches that character, not as a
+                            // live glob metacharacter (bash). Same rationale and
+                            // representation as the escape handling in
+                            // `read_word_inner`.
+                            flush_lit(&mut segs, &mut lit);
+                            segs.push(Seg::Sq(next.to_string()));
                         }
-                        lit.push(next);
                     }
                 }
                 '$' => {
@@ -1019,7 +1033,31 @@ impl Lexer {
                     if let Some(next) = self.bump()
                         && next != '\n'
                     {
-                        lit.push(next);
+                        // A backslash-escaped character is semantically
+                        // identical to that same character single-quoted
+                        // (`a\*b` ≡ `a'*'b`): a literal, *quoted* character with
+                        // no glob/pattern-metacharacter meaning and no
+                        // tilde/parameter expansion. Emitting it as a one-char
+                        // `Seg::Sq` routes it through the fully-tested
+                        // single-quote path, so an escaped `*`/`?`/`[`/`~`/`$`…
+                        // is treated literally in globbing, `case`, and
+                        // `[[ == ]]`, matching bash (previously it was folded
+                        // into an unquoted literal and wrongly matched as a live
+                        // metacharacter). Two carve-outs preserve existing
+                        // behavior: (1) an escaped ASCII *alphanumeric* is folded
+                        // into the plain literal so reserved-word/command-name
+                        // recognition — which keys off a single flattened
+                        // `Seg::Lit` — still sees `\if`/`\ls` as `if`/`ls`; and
+                        // (2) inside an extglob group (`@( … )`, `ext_depth > 0`)
+                        // the group body is accumulated as one contiguous
+                        // literal, so we keep the fold there rather than split
+                        // the group across segments.
+                        if ext_depth > 0 || next.is_ascii_alphanumeric() {
+                            lit.push(next);
+                        } else {
+                            flush_lit(&mut segs, &mut lit);
+                            segs.push(Seg::Sq(next.to_string()));
+                        }
                     }
                 }
                 '$' => {

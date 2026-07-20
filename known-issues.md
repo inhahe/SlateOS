@@ -14,48 +14,54 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-ESCAPED-METACHAR. Backslash-escaped glob/pattern metacharacters in *unquoted* words are treated as live metacharacters — 2026-07-20 — PARTIALLY FIXED (inline `=~` regex done; glob/`case`/`[[ == ]]`/keyword paths OPEN, medium priority)
+### TD-OILS-ESCAPED-METACHAR. Backslash-escaped glob/pattern metacharacters in *unquoted* words are treated as live metacharacters — 2026-07-20 — ✅ RESOLVED 2026-07-20 (glob/`case`/`[[ == ]]`/param-expansion/`=~` all fixed; only reserved-word suppression `\if` remains, tracked below)
 
-**Where:** `userspace/oils/src/lexer.rs` — `read_word_inner` (the `'\\'` arm,
-~line 979) folds a backslash-escaped character into a plain unquoted `Seg::Lit`,
-dropping the "this character was quoted/literal" information. The glob/pattern
-machinery keys off a per-character `EChar.quoted` flag
-(`interp.rs`, `push_chars`, `field_has_glob_meta`), but an escaped char reaches
-it tagged `quoted:false`, so an escaped `*`/`?`/`[` is (wrongly) matched as a
-live metacharacter.
+**Where (root cause):** the two word lexers folded a backslash-escaped
+character into a plain unquoted `Seg::Lit`, dropping the "this character was
+quoted/literal" information. The glob/pattern machinery keys off a per-character
+`EChar.quoted` flag (`interp.rs`, `push_chars`, `field_has_glob_meta`), but an
+escaped char reached it tagged `quoted:false`, so an escaped `*`/`?`/`[` was
+(wrongly) matched as a live metacharacter.
 
-**What (symptoms, all one root cause):**
-- Command-argument globbing: `echo a\*b` in a dir with `aXb aYb` prints
-  `aXb aYb` in osh, but bash prints the literal `a*b` (escape suppresses glob).
-- `for f in a\*b; do …` iterates the glob matches in osh; bash yields one literal
-  `a*b`.
-- `[[ "aXb" == a\*b ]]` → osh matches (Y), bash does not (the `\*` is a literal
-  `*`, N). Same for `case "aXb" in a\*b)`.
-- Keyword suppression: `\if true; then …` — bash treats `\if` as an ordinary
-  **command** named `if` (backslash suppresses reserved-word recognition) and
-  reports a syntax error at `then`; osh still recognizes `\if` as the `if`
-  keyword and runs the conditional.
+**Fix (2026-07-20):** a backslash-escaped character is semantically identical to
+that same character single-quoted (`a\*b` ≡ `a'*'b`), so both lexers now emit an
+escaped **non-alphanumeric** character as a one-char `Seg::Sq` — routing it
+through the fully-tested single-quote path (literal, `quoted:true`, no
+expansion/splitting/globbing) with zero new AST variants:
+- `lexer.rs` `read_word_inner` (`'\\'` arm) — command words, `for` lists,
+  `case`/`[[ ]]` subject and pattern words. Guarded by `ext_depth == 0` (see the
+  extglob-group note below).
+- `lexer.rs` `read_word_verbatim` (`'\\'` arm) — the `${…#pat}` / `${…%pat}` /
+  `${…/pat/repl}` / `${…^pat}` pattern (and replacement) sub-lexer, preserving
+  the existing `\&`/`\\` replacement special-case.
+- `interp.rs` — new `Shell::expand_word_pattern` (quoted-preserving, no field
+  splitting) + `glob_match_echars_ci` route `case`/`[[ == ]]` through
+  quoting-aware matching; `param_trim`/`param_case`/`param_replace`/
+  `glob_match_at` now take `&[EChar]` patterns and match via `glob_match_e`.
+- Escaped **alphanumerics** are still folded into the plain literal so
+  command-name recognition (`\ls` → `ls`) is unchanged — see the remaining item.
+- Bonus fix: `echo \~` no longer performs tilde expansion (the escaped `~` is now
+  literal, matching bash). The `=~` regex RHS was already fixed earlier.
 
-**Already fixed (2026-07-20):** the inline `=~` regex RHS. `read_word_regex`
-(the dedicated `=~`-RHS lexer) now *preserves* the backslash so `\+`/`\.`/`\(`
-reach the ERE engine as literal `+`/`.`/`(`, exactly like a variable-supplied
-regex. That path is isolated (its word list feeds only the regex builder), so
-the fix was safe and self-contained. See `cond_regex_inline_backslash_escapes_metachar`.
+See test `escaped_metachar_is_literal_in_patterns`.
 
-**Proper fix for the rest (the refactor):** carry the escape through to the
-`EChar.quoted` flag. Add a `Seg::Escaped(char)` (lexer) / `WordPart::EscapedChar(char)`
-(AST) pair; `read_word_inner` emits `Escaped(c)` for a backslash escape; the
-field-splitter (`interp.rs` ~line 6753) maps `EscapedChar(c)` to
-`push_chars(&c.to_string(), true)` (i.e. `quoted:true`); `expand_to_string`,
-`unparse`, and the value-quoters render it as the bare char. The subtle part is
-the ~15 `[Seg::Lit(name)]` sites in `parser.rs`/`lexer.rs` used for command-name,
-**reserved-word**, and assignment detection: each must be reconsidered
-individually — some should fold an `Escaped` run into the flattened literal
-(command name: `\ls` → `ls`), while **keyword** detection must *not* (so `\if`
-stops being the keyword, matching bash). Because it touches core word/command
-parsing and I am the sole tester, this is deferred to its own focused, fully
-tested change rather than rushed. Low real-world frequency (scripts almost always
-quote a literal metacharacter instead), hence medium priority.
+**Still OPEN (narrow, low priority): reserved-word / keyword suppression.**
+`\if true; then …` — bash treats `\if` as an ordinary **command** named `if`
+(the backslash suppresses reserved-word recognition) and reports a syntax error
+at `then`; osh still recognizes `\if` as the `if` keyword and runs the
+conditional. This is intentionally *not* fixed by the change above: because the
+escape of an alphanumeric is folded into the flattened `Seg::Lit` (so `\ls`→`ls`
+command-name detection keeps working), keyword detection — which keys off the
+same single flattened literal — cannot distinguish `\if` from `if`. A proper fix
+would need to carry an "was-escaped" bit into reserved-word lookup only (not
+command-name lookup), e.g. a dedicated `Seg::Escaped`/`WordPart::EscapedChar`
+variant threaded through the ~15 `[Seg::Lit(name)]` detection sites, splitting
+command-name (fold) from keyword (don't fold) handling. Deferred: escaping a
+reserved word is a vanishingly rare idiom and the refactor touches core command
+parsing. Also unaddressed (same low bar): an escaped metacharacter *inside* an
+extglob group (`@(a\*b)`, `ext_depth > 0`), where the group body is accumulated
+as one contiguous literal; only observable when `extglob` was enabled in a prior
+parse unit (otherwise the whole line is a parse error either way — see TD-OILS8).
 
 ### TD-OILS-RW-OFFSET. `osh`'s `<>` read/write descriptor does not share one OS file offset — 2026-07-19 — OPEN (low priority)
 

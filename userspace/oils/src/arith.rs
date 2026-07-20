@@ -439,6 +439,10 @@ impl AParser<'_> {
                     self.rest_from(self.pos),
                 )
             })?;
+            // Record the assignment operator's position: if its right-hand side
+            // is missing (`x = `, `y += `), bash's operand-expected error token
+            // runs from the operator (`= `, `+= `), not the whole expression.
+            self.last_op_start = self.pos;
             self.pos += op.chars().count();
             let rhs = self.parse_assign()?;
             return Ok(Expr::Assign(lv, assign_base(&op), Box::new(rhs)));
@@ -540,9 +544,18 @@ impl AParser<'_> {
 
     fn parse_unary(&mut self) -> Result<Expr, ArithError> {
         self.skip_ws();
+        // A unary operator that consumes its operand slot becomes the "last
+        // operator": if the operand is missing (`1 + + `, `~ `), bash's
+        // operand-expected error token runs from this unary operator, not from
+        // an earlier binary operator or the start of the expression.
         if let Some(op) = self.read_op()
             && (op == "++" || op == "--")
         {
+            // bash's error token for a missing operand after a prefix `++`/`--`
+            // begins *one char into* the operator (`++ ` → `+ `, `-- ` → `- `):
+            // its lexer tokenises `++`/`--` and leaves its error pointer after
+            // the first character. Reproduce that offset.
+            self.last_op_start = self.pos + 1;
             self.pos += 2;
             let operand = self.parse_unary()?;
             let lv = lvalue_of(operand)?;
@@ -550,18 +563,22 @@ impl AParser<'_> {
         }
         match self.peek() {
             Some('-') => {
+                self.last_op_start = self.pos;
                 self.pos += 1;
                 Ok(Expr::Neg(Box::new(self.parse_unary()?)))
             }
             Some('+') => {
+                self.last_op_start = self.pos;
                 self.pos += 1;
                 self.parse_unary()
             }
             Some('!') => {
+                self.last_op_start = self.pos;
                 self.pos += 1;
                 Ok(Expr::Not(Box::new(self.parse_unary()?)))
             }
             Some('~') => {
+                self.last_op_start = self.pos;
                 self.pos += 1;
                 Ok(Expr::BitNot(Box::new(self.parse_unary()?)))
             }
@@ -1427,6 +1444,17 @@ mod tests {
             ("5 +", "syntax error: operand expected (error token is \"+\")"),
             ("3 * ", "syntax error: operand expected (error token is \"* \")"),
             ("* 3", "syntax error: operand expected (error token is \"* 3\")"),
+            // A missing operand after an assignment operator reports the operator
+            // as the error token (bash: `x = ` → `= `, `y += ` → `+= `), not the
+            // whole expression.
+            ("x = ", "syntax error: operand expected (error token is \"= \")"),
+            ("y += ", "syntax error: operand expected (error token is \"+= \")"),
+            // A missing operand after a prefix unary reports from the unary
+            // operator; bash's error pointer for `++`/`--` lands one char in.
+            ("1 + + ", "syntax error: operand expected (error token is \"+ \")"),
+            ("++ ", "syntax error: operand expected (error token is \"+ \")"),
+            ("-- ", "syntax error: operand expected (error token is \"- \")"),
+            ("~ ", "syntax error: operand expected (error token is \"~ \")"),
             ("@", "syntax error: operand expected (error token is \"@\")"),
             ("3 3", "syntax error in expression (error token is \"3\")"),
             ("a b c", "syntax error in expression (error token is \"b c\")"),

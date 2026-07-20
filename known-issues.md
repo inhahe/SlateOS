@@ -1120,7 +1120,11 @@ no-space negated subshells are vanishingly rare.
 **What:** bash's `printf '%(FMT)T'` formats the broken-down time in the
 shell's *local* timezone (honoring `$TZ` / the system zone). Our
 implementation renders the time in **UTC** because SlateOS has no timezone
-database and no `$TZ` handling yet. All calendar math (`civil_from_days` /
+database and no `$TZ` handling yet. This shifts not just the zone name/offset
+but the actual broken-down values near a day/year boundary: e.g.
+`printf '%(%Y)T' 0` (epoch 0 = 1970-01-01 00:00:00 UTC) prints `1970` in osh
+but `1969` under a negative-offset local zone like `EST` (bash → 1969-12-31
+19:00 local). All calendar math (`civil_from_days` /
 `days_from_civil`) and the specifier set (`%Y %C %y %m %d %e %H %I %k %l %M
 %S %p %P %A %a %B %b %h %j %u %w %s %z %Z %V %G %g %n %t %F %T %R %D %r %c
 %x %X %%`) are correct; only the local-zone offset is missing. Under the UTC

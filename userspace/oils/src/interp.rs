@@ -2834,8 +2834,16 @@ impl Shell {
             | CondBinOp::NumLe
             | CondBinOp::NumGt
             | CondBinOp::NumGe => {
-                let a = self.eval_arith_word(l);
-                let b = self.eval_arith_word(r);
+                // bash evaluates each operand as an arithmetic expression,
+                // left first, and short-circuits: a malformed left operand
+                // prints its diagnostic and the comparison is false without
+                // touching the right operand.
+                let Some(a) = self.eval_arith_cond_operand(l) else {
+                    return false;
+                };
+                let Some(b) = self.eval_arith_cond_operand(r) else {
+                    return false;
+                };
                 match op {
                     CondBinOp::NumEq => a == b,
                     CondBinOp::NumNe => a != b,
@@ -7257,25 +7265,44 @@ impl Shell {
 
     /// Expand a word to a string and evaluate it as an arithmetic expression
     /// (used for `${name:offset:length}`). Errors/empties yield `0`.
-    fn eval_arith_word(&mut self, w: &Word) -> i64 {
+    /// Evaluate a `[[ … ]]` numeric-comparison operand (`-eq`, `-lt`, …) as an
+    /// arithmetic expression. Bare identifiers resolve to 0 as usual, but a
+    /// *malformed* literal (`10.0`, `2#9`) is an arithmetic error: bash prints
+    /// the diagnostic tagged `[[` and treats the whole comparison as false
+    /// (status 1). Unlike an integer *assignment*, this is non-fatal — it does
+    /// not set `arith_error`/abort — so it returns `None` after emitting the
+    /// message and the caller yields `false`.
+    fn eval_arith_cond_operand(&mut self, w: &Word) -> Option<i64> {
         let s = self.expand_to_string(w);
         let s = s.trim();
         if s.is_empty() {
-            return 0;
+            return Some(0);
         }
-        arith::eval(s, self).unwrap_or(0)
+        let saved = self.arith_cmd;
+        self.arith_cmd = Some("[[");
+        let r = match arith::eval(s, self) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.emit_arith_error(s, &e);
+                None
+            }
+        };
+        self.arith_cmd = saved;
+        r
     }
 
-    /// Like [`eval_arith_word`], but an arithmetic *evaluation error* is **fatal**
-    /// — the bash behavior for an arithmetic subscript on an indexed array
-    /// (`${a[3 x]}`, `a[1/0]=v`) and for substring offset/length arithmetic
-    /// (`${x:1 z}`, `${x:2:1 z}`). The diagnostic is printed (honoring an active
-    /// stderr redirect) and `arith_error` is set, which the simple-command driver
-    /// / bare-assignment path turns into a `Flow::Exit(1)` (status 1 at the main
-    /// shell, or in a subshell without aborting the parent). A bare-identifier
-    /// subscript (`${a[abc]}`) is a normal arithmetic variable reference resolving
-    /// to 0, not an error. Non-fatal numeric-comparison contexts (`[[ a -eq b ]]`)
-    /// deliberately keep using the tolerant `eval_arith_word`, matching bash.
+    /// An arithmetic subscript / substring evaluation where an *evaluation
+    /// error* is **fatal** — the bash behavior for an arithmetic subscript on an
+    /// indexed array (`${a[3 x]}`, `a[1/0]=v`) and for substring offset/length
+    /// arithmetic (`${x:1 z}`, `${x:2:1 z}`). The diagnostic is printed (honoring
+    /// an active stderr redirect) and `arith_error` is set, which the
+    /// simple-command driver / bare-assignment path turns into a `Flow::Exit(1)`
+    /// (status 1 at the main shell, or in a subshell without aborting the
+    /// parent). A bare-identifier subscript (`${a[abc]}`) is a normal arithmetic
+    /// variable reference resolving to 0, not an error. Numeric-comparison
+    /// contexts (`[[ a -eq b ]]`) instead use the non-fatal
+    /// [`Shell::eval_arith_cond_operand`], which prints on a malformed literal
+    /// but yields `false` rather than aborting — matching bash.
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
         let s = self.expand_to_string(w);
         let s = s.trim();
@@ -18354,6 +18381,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("shopt -u extglob; [[ foo != +(f|o) ]] && echo y || echo n").0,
             "n\n"
         );
+    }
+
+    #[test]
+    fn dbracket_numeric_bad_operand_prints_and_is_false() {
+        // A malformed arithmetic operand to `[[ -eq ]]` (`10.0`) is an
+        // arithmetic error: bash prints the diagnostic tagged `[[` and the
+        // comparison is false (status 1), but the shell does not abort.
+        let (out, _) = run("[[ 10 -eq 10.0 ]] && echo y || echo n; echo done");
+        assert_eq!(out, "n\ndone\n");
+        // The diagnostic body matches bash's arithmetic error, tagged `[[`.
+        let (msg, _) = run("[[ 10 -eq 10.0 ]] 2>&1");
+        assert!(
+            msg.contains("[[: 10.0: syntax error: invalid arithmetic operator (error token is \".0\")"),
+            "got: {msg:?}"
+        );
+        // Left operand is evaluated first and short-circuits: only its error is
+        // reported when both are malformed.
+        let (msg2, _) = run("[[ 10.0 -eq 20.0 ]] 2>&1");
+        assert!(msg2.contains("10.0:"), "got: {msg2:?}");
+        assert!(!msg2.contains("20.0:"), "should short-circuit: {msg2:?}");
+        // A redirect silences it, like any other arithmetic diagnostic.
+        assert_eq!(run("[[ 10 -eq 10.0 ]] 2>/dev/null; echo $?").0, "1\n");
+        // A bare identifier is still a normal reference (0), not an error.
+        assert_eq!(run("[[ 10 -eq abc ]] 2>&1; echo $?").0, "1\n");
     }
 
     #[test]

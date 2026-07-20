@@ -1286,11 +1286,27 @@ command-substitution parse path. Deferred because it touches the top-level
 execution driver; the current behavior covers interactive use and the common
 "aliases defined in an rc file, used at the prompt" workflow.
 
-### TD-OILS20. `$LINENO` counts only top-level newline tokens — lines inside multi-line quotes/substitutions/here-docs are undercounted — OPEN (minor fidelity gap)
+### TD-OILS20. `$LINENO` counts only top-level newline tokens — lines inside multi-line quotes/substitutions/here-docs are undercounted — FIXED 2026-07-19 (embedded-newline undercount); two narrow sub-gaps remain
 
-**Where:** `userspace/oils/src/parser.rs` (`Parser.line`, incremented on each
-top-level `Tok::Newline` in `skip_newlines`/`skip_separators`/`parse_program`/
-`parse_case_body`), `userspace/oils/src/ast.rs` (`Item.line`),
+**Status (2026-07-19, FIXED):** the embedded-newline undercount is resolved. The
+lexer now tracks a running source line and stamps every token with its true
+starting line (`tokenize_spanned` returns a parallel `Vec<u32>`; see
+`Lexer::stamp_lines`), and the parser reads each `Item`'s line from that vector
+(`Parser::cur_line`) instead of counting top-level `Newline` tokens. `$LINENO`
+and error line numbers are now exact across newlines swallowed inside
+here-document bodies, multi-line quoted strings, and command substitutions
+(verified against bash). **Two narrow sub-gaps remain OPEN:** (a) per-*command*
+granularity — osh tracks line per top-level `Item`, whereas bash advances
+`$LINENO` per simple command, so a multi-line pipeline's failing stage or a
+command with an embedded-newline argument reports the item's start line rather
+than the stage/command line (logged in todo.txt with the exact fix: add a
+`line` to the command node and set `current_line` per stage). (b) `$LINENO` is
+not reset to be relative to a function's definition the way bash does — ours is
+absolute to the parsed unit.
+
+**Where:** `userspace/oils/src/lexer.rs` (`Lexer.line`/`stamp_lines`/
+`tokenize_spanned`), `userspace/oils/src/parser.rs` (`Parser.lines`/`cur_line`),
+`userspace/oils/src/ast.rs` (`Item.line`),
 `userspace/oils/src/interp.rs` (`Shell.current_line`, set in `exec_program`,
 read in `param_value` as `"LINENO"`).
 

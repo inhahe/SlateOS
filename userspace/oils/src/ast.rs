@@ -18,10 +18,12 @@ pub struct Item {
     /// `true` when the item ended with `&` (run asynchronously).
     pub background: bool,
     /// 1-based source line on which this item begins. Used to maintain the
-    /// `$LINENO` special parameter as the interpreter executes each item. Line
-    /// numbers are counted from top-level newlines; newlines swallowed inside a
-    /// multi-line substitution/quote/here-doc are not counted (see known-issues
-    /// TD-OILS20), so this is exact for the common one-command-per-line case.
+    /// `$LINENO` special parameter as the interpreter executes each item. The
+    /// line is taken from the lexer's per-token line stamp (see
+    /// `Parser::cur_line`), so it stays exact even when earlier tokens swallowed
+    /// newlines inside a here-doc body, a multi-line quoted string, or a command
+    /// substitution. (Line tracking is per-item, not per-simple-command; see
+    /// known-issues TD-OILS20 for the remaining per-command-granularity gap.)
     pub line: u32,
 }
 

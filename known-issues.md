@@ -358,6 +358,32 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
+### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`, `BASH_ARGC`/`BASH_ARGV`) — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` variable seeding
+(`seed_shell_vars`) and the dynamic-array materialisers (cf.
+`refresh_funcname` for FUNCNAME/BASH_SOURCE, `refresh_dirstack` for
+DIRSTACK).
+
+**What:** bash predefines several dynamic array variables that osh does
+not. Confirmed missing (each `${VAR+set}` is empty in osh, `set` in
+bash): `GROUPS` (the invoking user's supplementary group IDs),
+`BASH_ARGC` and `BASH_ARGV` (the extended-debug call-argument stack).
+`declare -a` with no name therefore lists fewer arrays than bash. DIRSTACK
+is now implemented (see `refresh_dirstack`); FUNCNAME, BASH_SOURCE,
+BASH_LINENO already were.
+
+**Why deferred:** `GROUPS` needs a host notion of Unix supplementary
+groups, which the Windows host build and the current slateos user model
+do not expose; `BASH_ARGC`/`BASH_ARGV` are only populated under
+`shopt -s extdebug` and are used almost exclusively by the `caller`
+builtin / debuggers. Low value; no known script depends on them.
+
+**Proper fix:** when the process/identity layer exposes supplementary
+groups, materialise `GROUPS` from it (like `refresh_dirstack`). Wire
+`BASH_ARGC`/`BASH_ARGV` alongside the existing FUNCNAME call-stack
+machinery when `extdebug` support is added.
+
 ### TD-OILS-COND-PAREN-REGEX. `[[ … =~ ( … ]]` — bash treats `(` as conditional grouping, osh treats it as regex — 2026-07-19
 
 **Where:** `userspace/oils/src/parser.rs` conditional-expression parsing

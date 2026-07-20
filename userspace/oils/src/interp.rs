@@ -965,6 +965,9 @@ impl Shell {
             rlimits: default_rlimits(),
         };
         sh.seed_shell_vars();
+        // Seed DIRSTACK with the initial (single-entry) directory stack so
+        // `${DIRSTACK[0]}` reads the current directory before any pushd.
+        sh.refresh_dirstack();
         sh
     }
 
@@ -7948,6 +7951,8 @@ impl Shell {
             self.vars.insert("OLDPWD".to_string(), o);
         }
         self.vars.insert("PWD".to_string(), cwd.clone());
+        // Keep DIRSTACK[0] (the current dir) in sync on every cwd change.
+        self.refresh_dirstack();
         Ok(cwd)
     }
 
@@ -8057,6 +8062,16 @@ impl Shell {
         full
     }
 
+    /// Materialise the `DIRSTACK` array from the live directory stack so
+    /// `${DIRSTACK[0]}` / `${DIRSTACK[@]}` read the same values bash exposes:
+    /// the current directory first, then the saved stack. Called whenever the
+    /// cwd or the saved stack changes (`cd`, `pushd`, `popd`, `dirs -c`).
+    fn refresh_dirstack(&mut self) {
+        let full: std::collections::BTreeMap<usize, String> =
+            self.dir_stack_full().into_iter().enumerate().collect();
+        self.arrays.insert("DIRSTACK".to_string(), full);
+    }
+
     /// Print the directory stack in the default single-line form (used after a
     /// successful `pushd`/`popd`).
     fn print_dirs_line(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -8124,6 +8139,9 @@ impl Shell {
                 }
             },
         }
+        // `change_dir` refreshed DIRSTACK from the pre-mutation stack; re-sync
+        // now that the saved stack has been pushed.
+        self.refresh_dirstack();
         self.print_dirs_line(out, redir)
     }
 
@@ -8158,6 +8176,9 @@ impl Shell {
                 return 1;
             }
         }
+        // A `+N`/`-N` removal edits the saved stack without a cwd change, so
+        // resync DIRSTACK here (the plain-popd path goes through `change_dir`).
+        self.refresh_dirstack();
         self.print_dirs_line(out, redir)
     }
 
@@ -8206,6 +8227,7 @@ impl Shell {
         }
         if clear {
             self.dir_stack.clear();
+            self.refresh_dirstack();
             return 0;
         }
         let full = self.dir_stack_full();
@@ -21310,6 +21332,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn dirstack_reflects_pushd_popd() {
+        let _cwd = cwd_guard();
+        // Initially DIRSTACK holds exactly the current directory (DIRSTACK[0]
+        // tracks the live cwd, like `pwd`), matching bash's dynamic array.
+        // (Compare against `$(pwd)`, not `$PWD`: on the Windows host build the
+        // inherited `$PWD` env var is forward-slash while the live cwd is
+        // backslash — an env artifact that does not exist on the real target.)
+        let (out, _) =
+            run("test \"${DIRSTACK[0]}\" = \"$(pwd)\" && echo eq; echo \"n=${#DIRSTACK[@]}\"");
+        assert_eq!(out, "eq\nn=1\n");
+        // pushd grows the stack to two entries with the new dir on top and the
+        // previous cwd saved beneath it; popd restores it to one.
+        let t = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let src = format!(
+            "orig=$(pwd); pushd \"{t}\" >/dev/null; echo \"n=${{#DIRSTACK[@]}}\"; \
+             test \"${{DIRSTACK[0]}}\" = \"$(pwd)\" && echo top; \
+             test \"${{DIRSTACK[1]}}\" = \"$orig\" && echo saved; \
+             popd >/dev/null; echo \"n2=${{#DIRSTACK[@]}}\""
+        );
+        let (out2, _) = run(&src);
+        assert_eq!(out2, "n=2\ntop\nsaved\nn2=1\n");
     }
 
     #[test]

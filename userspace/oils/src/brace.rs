@@ -202,6 +202,14 @@ fn sequence_of(body: &[Atom]) -> Option<Vec<Vec<Atom>>> {
         };
         let (s0, e0) = (u32::from(sc[0]), u32::from(ec[0]));
         let range = char_range(s0, e0, step);
+        // Each generated code point becomes a literal element as-is. Note this
+        // includes U+005C `\`: a range spanning it (e.g. `{A..z}`, `{Y..a}`)
+        // yields a literal `\` element, whereas bash yields an *empty* element
+        // there — a side effect of bash re-applying quote removal to brace-range
+        // output (a lone `\` is then eaten). osh deliberately treats brace-range
+        // characters as final literal data and does not re-lex them, which is
+        // both simpler and safer (bash's re-scan also turns a generated backtick
+        // into command-substitution). Documented as TD-OILS-BRACE-BACKSLASH.
         return Some(
             range
                 .into_iter()
@@ -346,6 +354,20 @@ mod tests {
     fn char_sequence() {
         assert_eq!(expand("{a..e}"), vec!["a", "b", "c", "d", "e"]);
         assert_eq!(expand("{c..a}"), vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn char_sequence_spanning_backslash_keeps_literal() {
+        // A range crossing U+005C `\` emits a literal `\` element (osh treats
+        // brace-range output as final literal data). bash instead yields an
+        // empty element there via quote removal — a documented, intentional
+        // divergence (TD-OILS-BRACE-BACKSLASH). `[`(91) `\`(92) `]`(93).
+        assert_eq!(expand("{[..]}"), vec!["[", "\\", "]"]);
+        // Element count still matches bash (9 for Y..a), only the `\` cell differs.
+        assert_eq!(
+            expand("{Y..a}"),
+            vec!["Y", "Z", "[", "\\", "]", "^", "_", "`", "a"]
+        );
     }
 
     #[test]

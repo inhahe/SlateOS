@@ -205,6 +205,12 @@ pub struct SimpleCommand {
     /// command word is a declaration builtin (`declare`/`typeset`/`local`);
     /// the interpreter applies these with the declared array kind.
     pub decl_arrays: Vec<Assignment>,
+    /// 1-based source line the command word sits on. Used to keep `$LINENO`
+    /// and diagnostics correct *per command* — bash advances `$LINENO` as each
+    /// simple command executes, so a multi-line pipeline blames the failing
+    /// stage's own line rather than the pipeline's first line. `0` for
+    /// synthetically-built commands with no source position.
+    pub line: u32,
 }
 
 /// A variable assignment: `name=value`, `name+=value`, `name[i]=value`, or an

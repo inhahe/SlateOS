@@ -865,7 +865,13 @@ impl Parser {
     }
 
     fn parse_simple(&mut self) -> Result<Command, ParseError> {
-        let mut cmd = SimpleCommand::default();
+        let mut cmd = SimpleCommand {
+            // Stamp the line the command begins on (its first token), so the
+            // interpreter can report the exact line of this command — matching
+            // bash's per-command `$LINENO` even inside a multi-line pipeline.
+            line: self.cur_line(),
+            ..SimpleCommand::default()
+        };
         let mut seen_word = false;
         loop {
             match self.peek() {

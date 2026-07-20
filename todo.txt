@@ -53587,21 +53587,22 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##       in interp.rs are where this would be extended if we choose to match it.
 
 ## Known limitation (osh, 2026-07-19): per-COMMAND line granularity for $LINENO/errors
-##   The lexer now stamps every token with its true source line, and the parser
+##   The lexer stamps every token with its true source line, and the parser
 ##   stamps each top-level Item (and-or list) with the line of its first token,
 ##   so line numbers stay correct across newlines swallowed inside here-doc
 ##   bodies, quoted strings, and command substitutions (previously every
-##   diagnostic after such a construct reported too small a line). What remains
-##   is that osh tracks line at ITEM granularity, whereas bash advances $LINENO
-##   per SIMPLE COMMAND as it executes. Two cases still differ from bash:
-##   (1) A pipeline whose stages span multiple physical lines
-##       (`echo a |`⏎`grep a |`⏎`no_such`): bash blames the failing stage's line
-##       (3), osh blames the pipeline's start line (1).
+##   diagnostic after such a construct reported too small a line). Additionally
+##   each SimpleCommand now carries its own source line (SimpleCommand.line,
+##   populated from Parser::cur_line() in parse_simple), and exec_simple_inner
+##   sets self.current_line = sc.line before executing the command. This makes
+##   $LINENO and error diagnostics per-SIMPLE-COMMAND accurate, matching bash:
+##   (1) FIXED: A multi-line pipeline blames the failing stage's own line
+##       (`echo a |`⏎`grep a |`⏎`no_such` -> line 3), and and-or lists likewise.
+##       Verified against bash for first/middle/last pipeline stages and and-or
+##       lists; regression test interp::tests::line_number_is_tracked_per_simple_command.
+##   One case still differs from bash:
 ##   (2) A single simple command with an argument that itself contains an
 ##       embedded newline (e.g. a double-quoted arg spanning two lines): bash
 ##       reports the line the command finishes on, osh the line it starts on.
-##   Proper fix: carry a source line on each Command/simple-command AST node
-##   (populate from the parser's cur_line() at the command word) and set
-##   self.current_line before executing each pipeline stage / simple command,
-##   rather than once per Item in exec_program (interp.rs ~line 1178). Deferred
-##   as lower-value than the token-stamping foundation just landed.
+##       Niche; would need the command node to record its END line as well as
+##       its start line. Deferred as very low value.

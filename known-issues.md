@@ -294,31 +294,77 @@ the pervasive errline gap). Proper fix if pursued: emit the second
 `{target}: cannot assign fd to variable` line after the readonly
 message. Very low value.
 
-### TD-OILS-CMODE-EXIT. `osh -c` fatal-expansion exit status is 1, not bash's `-c`-only 127 — 2026-07-19
-
-**Where:** `userspace/oils/src/interp.rs` fatal-expansion paths (the
-`unbound_error`/`arith_error` handlers returning `Flow::Exit(1)` around
-exec_simple, ~2946/2960) and `main.rs` `run` (no mode flag distinguishes
-`-c` from script execution — both call `sh.run_source`).
+### TD-OILS-CMODE-EXIT. `osh -c` fatal-expansion exit status is 1, not bash's `-c`-only 127 — 2026-07-19 — ✅ RESOLVED 2026-07-19
 
 **What:** bash exits with **127** when a fatal parameter-expansion error
 (`${var:?msg}`, `set -u` on an unbound variable) aborts a `bash -c STRING`
 invocation, but exits with **1** for the same error in a *script file*
-(`bash script.sh`). Reproduce: `bash -c 'echo "${var:?msg}"'; echo $?` → 127;
-`printf 'echo "${var:?msg}"\n' | bash /dev/stdin; echo $?` → 1. osh returns
-**1** in both modes — which matches bash's script behavior (the common
-execution path) but not the `-c`-only 127 quirk.
+(`bash script.sh`). osh originally returned 1 in both modes.
 
-**Why deferred:** matching 127 requires threading a "`-c` mode" flag from
-`main.rs` down through the fatal-expansion exit path solely to reproduce a
-bash idiosyncrasy (127 usually means "command not found") that varies by
-bash version and only manifests in `-c` mode. Low value; osh's consistent 1
-is defensible and script-mode-correct.
+**Resolution:** osh now carries a `command_mode` flag (set by `main.rs` for
+`-c`), and `fatal_abort_status(code)` returns the raw `code` (127) only at
+the main shell in command mode, else 1. Verified: `osh -c 'echo
+"${var:?msg}"'` → 127; `osh script.sh` (same body) → 1 — both match bash.
 
-**Proper fix (if pursued):** add a `Shell::c_mode: bool` set by `main.rs`
-when invoked via `-c`, and have the fatal-expansion handlers return
-`Flow::Exit(127)` when `c_mode` is set (both the `unbound_error` and the
-command-word/prefix `arith_error` branches). Add a test covering both modes.
+**Follow-up (also resolved 2026-07-19):** with **errexit** (`-e`) enabled,
+bash downgrades that 127 to **1** (it treats the fatal expansion as a failed
+command). This keys purely on the `-e` option being set, regardless of
+whether errexit would fire in the current context (`set -eu; echo $UNDEF ||
+true` still exits 1). `fatal_abort_status` now maps 127→1 when `self.errexit`
+is set. Covered by `nounset_abort_under_errexit_is_one`.
+
+---
+
+### TD-OILS-PARSE-ERR-LOC. `osh` syntax-error diagnostics differ from bash in source-token, line number, and partial output — 2026-07-19 — OPEN (low priority, error-path cosmetics)
+
+**Where:** `userspace/oils/src/parser.rs` (`ParseError`, `unexpected_here`,
+`cur_line`), `userspace/oils/src/lexer.rs` (`LexError`, which carries no
+line), `userspace/oils/src/interp.rs` `format_parse_error` (~15450) and the
+`err_prefix`-based prefix it is handed, and the whole-program parse-then-exec
+model in `run_source*`.
+
+**What:** three related divergences on the *syntax-error* path (all
+stderr-only; runtime-error messages already match bash):
+
+1. **Missing input-source token.** bash tags a syntax error with the current
+   input source between `$0` and `line N`: `bash: -c: line N: …` for `-c`,
+   `bash: eval: line N: …` for `eval`, and just `<script>: line N: …` /
+   `bash: line N: …` for a script file / stdin. osh emits only
+   `<name>: line N: …` (no `-c:`/`eval:` token). Repro: `bash -c 'if true'`
+   → `bash: -c: line 2: syntax error…`; `osh -c 'if true'` → `osh: line 1:
+   syntax error…`.
+
+2. **Wrong line number.** osh's parse-error prefix takes its line from
+   `self.current_line` (≈1 at parse time, before execution) rather than the
+   offending token's line, so *every* syntax error reports line 1 regardless
+   of where it is. bash reports the real line — and for *end-of-file* errors
+   uses (last-content-line + 1) (e.g. one-line `if true` → line 2). The
+   parser already knows the right line via `cur_line()`; the fix is to stamp
+   it onto `ParseError`/`LexError` at the point of failure (pos is not reset
+   on error, so a central capture in `parse_tokens` works) and to add the
+   EOF `+1` quirk.
+
+3. **No partial output before the error.** bash parses-and-executes a script
+   one command at a time, so `echo a; echo b; echo (` prints `a` and `b`
+   before the line-3 syntax error. osh parses the whole program up front, so
+   nothing runs when any part fails to parse.
+
+**Why deferred:** (1) and (2) are a bounded refactor (thread a line + a
+source-source-description through `ParseError`/`LexError`, convert ~24
+construction sites, replicate bash's token-vs-EOF line rule), but the payoff
+is purely syntax-error stderr cosmetics, and a *partial* fix still mismatches
+bash on the other axis. (3) is an architectural change (incremental
+parse/execute) that is much larger and interacts with here-docs, function
+definitions spanning commands, and `$LINENO`. Not worth the regression risk
+mid-compat-pass.
+
+**Proper fix (if pursued):** convert `ParseError` to `{ msg, line:
+Option<u32> }` with an `at(line)` builder; give `LexError` a line too (the
+lexer tracks the current line while scanning); stamp the line centrally in
+`parse_tokens` from `p.cur_line()` (and add `+1` for the EOF family); add a
+per-source-kind token (`-c`/`eval`/none) threaded from the `run_source`
+callers into `format_parse_error`. Tackle (3) separately as an
+incremental-execution project if ever needed.
 
 ### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19
 

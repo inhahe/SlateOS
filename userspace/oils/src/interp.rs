@@ -10268,7 +10268,11 @@ impl Shell {
             i = 2;
         }
         let Some(fmt) = args.get(i) else {
-            return 0;
+            // No format operand (`printf`, or `printf -v var` with nothing
+            // after): bash prints the usage synopsis (unprefixed, like the other
+            // builtins' usage lines) and fails with status 2.
+            self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
+            return 2;
         };
         // Collect per-argument "invalid number" diagnostics (bash writes each to
         // stderr and makes printf exit non-zero, but still emits the output with
@@ -10794,6 +10798,20 @@ impl Shell {
         None
     }
 
+    /// Usage synopsis for the `declare`/`typeset`/`local` family, matching bash's
+    /// wording (the three differ slightly). Emitted on an invalid option.
+    fn declare_usage(tag: &str) -> &'static str {
+        match tag {
+            "local" => "local: usage: local [option] name[=value] ...\n",
+            "typeset" => {
+                "typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]\n"
+            }
+            _ => {
+                "declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]\n"
+            }
+        }
+    }
+
     fn builtin_declare(&mut self, args: &[String], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
@@ -10867,7 +10885,22 @@ impl Shell {
                             }
                         }
                         'g' => global = enable,
-                        _ => {} // -p: accepted, no effect here.
+                        // Accepted but with no attribute effect in this
+                        // reimplementation: -p (print, handled elsewhere), -f/-F
+                        // (function restriction), -I (inherit), -t (trace).
+                        'p' | 'f' | 'F' | 'I' | 't' => {}
+                        _ => {
+                            // Genuinely unknown option letter: bash prints an
+                            // "invalid option" diagnostic plus the usage synopsis
+                            // and fails with status 2.
+                            let sign = if enable { '-' } else { '+' };
+                            self.emit_stderr(
+                                format!("{}{tag}: {sign}{c}: invalid option\n", self.err_prefix())
+                                    .as_bytes(),
+                            );
+                            self.emit_stderr(Self::declare_usage(tag).as_bytes());
+                            return 2;
+                        }
                     }
                 }
                 i += 1;
@@ -11235,7 +11268,19 @@ impl Shell {
                         'a' => indexed = true,
                         'p' => print_only = true,
                         'f' => func_mode = true, // operate on the function namespace
-                        _ => {} // -g: accepted, no effect here.
+                        'n' => {} // accepted (disable-readonly hint); no effect here.
+                        _ => {
+                            // Unknown option: bash prints "invalid option" plus the
+                            // usage synopsis and fails with status 2.
+                            self.emit_stderr(
+                                format!("{}readonly: -{c}: invalid option\n", self.err_prefix())
+                                    .as_bytes(),
+                            );
+                            self.emit_stderr(
+                                b"readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p\n",
+                            );
+                            return 2;
+                        }
                     }
                 }
                 i += 1;
@@ -12228,7 +12273,16 @@ impl Shell {
                         'r' => raw = true,
                         // silent / readline-edit: no-op for non-tty input.
                         's' | 'e' => {}
-                        _ => {} // unknown flag — ignored
+                        _ => {
+                            // Genuinely unknown option: bash prints the "invalid
+                            // option" diagnostic plus the usage synopsis, exit 2.
+                            self.emit_stderr(
+                                format!("{}read: -{c}: invalid option\n", self.err_prefix())
+                                    .as_bytes(),
+                            );
+                            self.emit_stderr(b"read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n");
+                            return 2;
+                        }
                     }
                     j += 1;
                 }
@@ -24791,6 +24845,59 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "fd 3 should remain open after the command"
         );
         let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn builtin_invalid_option_diagnostics() {
+        // bash rejects unknown options to declare/typeset/local/read/readonly
+        // with a `<builtin>: -<opt>: invalid option` line, the builtin's usage
+        // synopsis, and exit status 2. osh previously silently ignored these
+        // (declare/readonly exited 0, read exited 1). Verified against bash 5.x.
+
+        // declare / typeset: sign-aware (`+Z` reported with a `+`).
+        let (o, s) = run("declare -Z x 2>&1");
+        assert!(o.contains("declare: -Z: invalid option"), "got {o:?}");
+        assert!(o.contains("declare: usage: declare [-aAfFgiIlnrtux]"), "got {o:?}");
+        assert_eq!(s, 2);
+        let (o, s) = run("declare +Z x 2>&1");
+        assert!(o.contains("declare: +Z: invalid option"), "got {o:?}");
+        assert_eq!(s, 2);
+        let (o, s) = run("typeset -Z x 2>&1");
+        assert!(o.contains("typeset: -Z: invalid option"), "got {o:?}");
+        assert!(o.contains("typeset: usage: typeset [-aAfFgiIlnrtux]"), "got {o:?}");
+        assert_eq!(s, 2);
+
+        // local (inside a function) uses its own shorter usage line.
+        let (o, s) = run("f(){ local -Z x; }; f 2>&1");
+        assert!(o.contains("local: -Z: invalid option"), "got {o:?}");
+        assert!(o.contains("local: usage: local [option] name[=value] ..."), "got {o:?}");
+        assert_eq!(s, 2);
+
+        // read: unknown short option.
+        let (o, s) = run("read -x v 2>&1");
+        assert!(o.contains("read: -x: invalid option"), "got {o:?}");
+        assert!(o.contains("read: usage: read [-ers]"), "got {o:?}");
+        assert_eq!(s, 2);
+
+        // readonly: -g is not a valid readonly option (unlike declare).
+        let (o, s) = run("readonly -g x 2>&1");
+        assert!(o.contains("readonly: -g: invalid option"), "got {o:?}");
+        assert!(o.contains("readonly: usage: readonly [-aAf]"), "got {o:?}");
+        assert_eq!(s, 2);
+
+        // printf with no format operand prints its usage and fails with 2.
+        let (o, s) = run("printf 2>&1");
+        assert!(o.contains("printf: usage: printf [-v var] format [arguments]"), "got {o:?}");
+        assert_eq!(s, 2);
+
+        // Valid options are still accepted (no false positives): -ir, -aA, -n
+        // (read count), and readonly -a/-p all behave normally.
+        let (_, s) = run("declare -ir x=5");
+        assert_eq!(s, 0);
+        let (o, s) = run("read -n1 v <<< 'hi'; echo \"[$v]\"");
+        assert_eq!(s, 0, "got {o:?}");
+        let (_, s) = run("readonly -a arr=(1 2)");
+        assert_eq!(s, 0);
     }
 
     #[test]

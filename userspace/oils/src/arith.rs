@@ -633,6 +633,18 @@ impl AParser<'_> {
             while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
                 self.pos += 1;
             }
+            // bash lexes a numeric literal as a *maximal* run of base-64 digit
+            // characters (`0-9a-zA-Z@_`) and only then validates it against the
+            // radix. A trailing non-hex digit char (`0xg`, `0x1g`) therefore
+            // belongs to the same token and yields "value too great for base",
+            // not a hex literal followed by a stray identifier.
+            if matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
+                while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
+                    self.pos += 1;
+                }
+                let lexeme: String = self.chars[start..self.pos].iter().collect();
+                return Err(ArithError::lexeme_error("value too great for base", lexeme));
+            }
             let hex: String = self.chars[hstart..self.pos].iter().collect();
             // bash accepts a bare `0x`/`0X` with no following hex digits as 0
             // (e.g. `$((0x))` → 0, `$((1 + 0x))` → 1). Only a genuinely malformed
@@ -688,6 +700,17 @@ impl AParser<'_> {
                     .wrapping_add(i64::from(d));
             }
             return Ok(val);
+        }
+        // Not a `base#literal`. bash still consumes any trailing base-64 digit
+        // characters (letters, `_`, `@`) into the same numeric token, so `0b100`,
+        // `123abc` and `123_` are each a single "value too great for base" token
+        // rather than a number followed by a stray identifier / syntax error.
+        if matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
+            while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
+                self.pos += 1;
+            }
+            let lexeme: String = self.chars[start..self.pos].iter().collect();
+            return Err(ArithError::lexeme_error("value too great for base", lexeme));
         }
         let text: String = self.chars[start..self.pos].iter().collect();
         // A leading zero (other than bare "0") denotes octal. bash reports a
@@ -1301,6 +1324,22 @@ mod tests {
             // Leading-zero octal with a non-octal digit.
             ("099", "value too great for base (error token is \"099\")"),
             ("0778", "value too great for base (error token is \"0778\")"),
+            // A plain numeric literal consumes a maximal run of base-64 digit
+            // chars (`0-9a-zA-Z@_`) before validating, so a trailing letter,
+            // `_` or `@` makes the whole token "value too great for base" —
+            // bash never splits it into a number plus a stray identifier.
+            // (`0b100` has no binary-literal syntax in bash: leading `0` = octal,
+            // and `b` is an out-of-range digit.)
+            ("0b100", "value too great for base (error token is \"0b100\")"),
+            ("123abc", "value too great for base (error token is \"123abc\")"),
+            ("5+123abc", "value too great for base (error token is \"123abc\")"),
+            ("123_", "value too great for base (error token is \"123_\")"),
+            ("123@", "value too great for base (error token is \"123@\")"),
+            ("1e3", "value too great for base (error token is \"1e3\")"),
+            // The same rule applies after a `0x`/`0X` hex prefix: a trailing
+            // non-hex digit char is part of the token, not a new one.
+            ("0xg", "value too great for base (error token is \"0xg\")"),
+            ("0x1g+5", "value too great for base (error token is \"0x1g\")"),
             // Base edge cases: 0 → "invalid number", >64 → "invalid arithmetic
             // base", `N#` with no digits → "invalid integer constant".
             ("0#5", "invalid number (error token is \"0#5\")"),

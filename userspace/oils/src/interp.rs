@@ -412,6 +412,13 @@ pub struct Shell {
     /// expansion, matching bash (which discards the command on an arithmetic
     /// error rather than running it with a bogus value).
     arith_error: bool,
+    /// The name of the builtin whose execution should prefix an arithmetic
+    /// diagnostic — bash's `this_command_name`. bash reports arithmetic errors
+    /// raised while a builtin runs as `<name>: line N: <builtin>: <expr>: …`
+    /// (`let`, `((`, `declare`, `typeset`, `local`); errors from plain
+    /// assignments and word/`$(( … ))` expansion carry no builtin tag. Set for
+    /// the duration of the relevant builtin, `None` otherwise.
+    arith_cmd: Option<&'static str>,
     /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
@@ -585,6 +592,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             arith_error: false,
+            arith_cmd: None,
             glob_error: None,
             local_frames: Vec::new(),
             fn_stack: Vec::new(),
@@ -1477,6 +1485,17 @@ impl Shell {
     /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
     /// mutating shell state for any assignment/increment operators. Returns the
     /// value, or `None` after printing the error.
+    /// Evaluate an arithmetic string with a builtin/context tag set for the
+    /// duration (bash's `this_command_name`) — used by the `(( … ))` command and
+    /// the C-style `for (( … ))` sections, whose errors bash tags with `((`.
+    fn eval_arith_cmd(&mut self, raw: &str, tag: &'static str) -> Option<i64> {
+        let saved = self.arith_cmd;
+        self.arith_cmd = Some(tag);
+        let r = self.eval_arith_raw(raw);
+        self.arith_cmd = saved;
+        r
+    }
+
     fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
         // `(( … ))` commands, `let`, and arithmetic array subscripts report
         // their own errors and set their own status — a nested `$(( … ))` here
@@ -1488,11 +1507,11 @@ impl Shell {
         match arith::eval(&expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
-                // Route through `errln` (not `eprintln!`) so the diagnostic
-                // honours an active `2>`/`2>&1` redirect on the enclosing
-                // command — bash silences `let "3 x" 2>/dev/null`, `declare -i
-                // k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
-                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
+                // Route through `emit_arith_error` (not `eprintln!`) so the
+                // diagnostic honours an active `2>`/`2>&1` redirect on the
+                // enclosing command — bash silences `let "3 x" 2>/dev/null`,
+                // `declare -i k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
+                self.emit_arith_error(&expanded, &e);
                 None
             }
         }
@@ -1534,14 +1553,14 @@ impl Shell {
         };
         self.last_status = 0;
         trace_section(self, &c.init);
-        if !c.init.is_empty() && self.eval_arith_raw(&c.init).is_none() {
+        if !c.init.is_empty() && self.eval_arith_cmd(&c.init, "((").is_none() {
             self.last_status = 1;
             return Flow::Next;
         }
         loop {
             trace_section(self, &c.cond);
             if !c.cond.is_empty() {
-                match self.eval_arith_raw(&c.cond) {
+                match self.eval_arith_cmd(&c.cond, "((") {
                     Some(0) => break,
                     Some(_) => {}
                     None => {
@@ -1567,7 +1586,7 @@ impl Shell {
                 other => return other,
             }
             trace_section(self, &c.update);
-            if !c.update.is_empty() && self.eval_arith_raw(&c.update).is_none() {
+            if !c.update.is_empty() && self.eval_arith_cmd(&c.update, "((").is_none() {
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -2048,13 +2067,17 @@ impl Shell {
             self.xtrace_emit(&format!("(( {raw} ))"));
         }
         let expanded = self.expand_arith_params(raw);
+        // bash tags `(( … ))`-command arithmetic errors with `((`.
+        let saved_arith_cmd = self.arith_cmd;
+        self.arith_cmd = Some("((");
         match arith::eval(&expanded, self) {
             Ok(v) => self.last_status = i32::from(v == 0),
             Err(e) => {
-                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
+                self.emit_arith_error(&expanded, &e);
                 self.last_status = 1;
             }
         }
+        self.arith_cmd = saved_arith_cmd;
         Flow::Next
     }
 
@@ -2376,6 +2399,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             arith_error: false,
+            arith_cmd: None,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
@@ -6476,7 +6500,7 @@ impl Shell {
         match arith::eval(s, self) {
             Ok(v) => v,
             Err(e) => {
-                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
+                self.emit_arith_error(s, &e);
                 self.arith_error = true;
                 0
             }
@@ -6490,9 +6514,9 @@ impl Shell {
         match arith::eval(&expanded, self) {
             Ok(v) => v.to_string(),
             Err(e) => {
-                // Route through `errln` so an active `2>`/`2>&1` redirect on the
-                // command silences the diagnostic, matching bash.
-                self.errln(&format!("{}arithmetic: {e}", self.err_prefix()));
+                // Route through `emit_arith_error` so an active `2>`/`2>&1`
+                // redirect on the command silences the diagnostic, matching bash.
+                self.emit_arith_error(&expanded, &e);
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
@@ -6780,6 +6804,18 @@ impl Shell {
 
         let mut flow = Flow::Next;
         let args = &argv[1..];
+        // bash tags an arithmetic error with the running builtin's name
+        // (`this_command_name`): `let`/`(( ))`/`declare`/`typeset`/`local`
+        // arithmetic reports `<name>: line N: <builtin>: <expr>: …`. Set it for
+        // the builtin's duration so `eval_int_assign` picks up the right tag.
+        let saved_arith_cmd = self.arith_cmd;
+        self.arith_cmd = match name {
+            "let" => Some("let"),
+            "declare" => Some("declare"),
+            "typeset" => Some("typeset"),
+            "local" => Some("local"),
+            _ => None,
+        };
         let status = match name {
             ":" | "true" => 0,
             "false" => 1,
@@ -7042,6 +7078,7 @@ impl Shell {
                 127
             }
         };
+        self.arith_cmd = saved_arith_cmd;
 
         // Tear down the scoped stderr redirect and, for the `2>&1`-into-captured-
         // stdout case, fold the buffered stderr into fd 1's sink after the
@@ -11198,6 +11235,23 @@ impl Shell {
         }
     }
 
+    /// Emit an arithmetic diagnostic in bash's form: `<name>: line N:
+    /// [<builtin>: ]<expr>: <body> (error token is "…")`. `expr` is the
+    /// (already parameter-expanded) arithmetic source; bash echoes it with
+    /// leading whitespace trimmed, then the [`arith::ArithError`]'s body. When
+    /// the arithmetic ran inside a builtin (`let`/`((`/`declare`/…), that
+    /// builtin's name is inserted as a tag (see [`Shell::arith_cmd`]). Routed
+    /// through `errln` so an active `2>`/`2>&1` redirect on the enclosing
+    /// command silences it, as in bash.
+    fn emit_arith_error(&mut self, expr: &str, e: &arith::ArithError) {
+        let prefix = self.err_prefix();
+        let expr = expr.trim_start();
+        match self.arith_cmd {
+            Some(tag) => self.errln(&format!("{prefix}{tag}: {expr}: {e}")),
+            None => self.errln(&format!("{prefix}{expr}: {e}")),
+        }
+    }
+
     /// Write a command-level diagnostic (e.g. `foo: command not found`, or a
     /// special-builtin usage error) to the sink fd 2 resolves to **for this
     /// command**, honouring its own `2>file`/`2>/dev/null` (`redir.stderr`),
@@ -14775,6 +14829,58 @@ mod tests {
             run_cmd("getopts 2>&1"),
             "getopts: usage: getopts optstring name [arg ...]\n"
         );
+    }
+
+    #[test]
+    fn arith_error_matches_bash_format() {
+        // bash reports arithmetic errors as `<name>: line N: [<builtin>: ]<expr>:
+        // <body> (error token is "…")`. osh matches that format (bar its own
+        // `$0` name): the `<expr>:` prefix, bash's body wording, the error
+        // token, and the builtin tag (`(( `/`let`/`declare`) where bash uses one.
+        fn run_cmd(src: &str) -> String {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            let mut buf = Vec::new();
+            let prog = parse(src).expect("parse");
+            {
+                let mut out = Out::Capture(&mut buf);
+                sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        // `$(( … ))` substitution: no builtin tag, `<expr>:` prefix. The
+        // diagnostic is emitted during word expansion, before a *simple*
+        // command's `2>&1` is installed (bash behaves the same), so wrap in a
+        // brace group whose redirect is already active during expansion.
+        assert_eq!(
+            run_cmd("{ echo $((1/0)); } 2>&1"),
+            "osh: line 1: 1/0: division by 0 (error token is \"0\")\n"
+        );
+        assert_eq!(
+            run_cmd("{ echo $((5 +)); } 2>&1"),
+            "osh: line 1: 5 +: syntax error: operand expected (error token is \"+\")\n"
+        );
+        // `(( … ))` command is tagged `((`.
+        assert_eq!(
+            run_cmd("(( 1/0 )) 2>&1"),
+            "osh: line 1: ((: 1/0 : division by 0 (error token is \"0 \")\n"
+        );
+        // `let` is tagged `let`.
+        assert_eq!(
+            run_cmd("let '3 x' 2>&1"),
+            "osh: line 1: let: 3 x: syntax error in expression (error token is \"x\")\n"
+        );
+        // `declare -i` is tagged `declare`; a plain `-i` assignment is untagged.
+        assert_eq!(
+            run_cmd("declare -i k='3 x' 2>&1"),
+            "osh: line 1: declare: 3 x: syntax error in expression (error token is \"x\")\n"
+        );
+        assert_eq!(
+            run_cmd("declare -i k; { k='3 x'; } 2>&1"),
+            "osh: line 1: 3 x: syntax error in expression (error token is \"x\")\n"
+        );
+        // An active `2>/dev/null` silences the diagnostic (routed through errln).
+        assert_eq!(run_cmd("let '1/0' 2>/dev/null; echo $?"), "1\n");
     }
 
     #[test]

@@ -2008,9 +2008,9 @@ scripts), matching bash's format (the shell *name* still differs — `osh` vs
   the unprefixed usage line. All 550 oils tests pass; clippy clean; both host and
   slateos targets build.
 
-Remaining related nicety (not blocking): the arithmetic error *body* still
-differs (`arithmetic: division by 0` vs bash's `<expr>: division by 0 (error
-token is "…")`) — tracked separately as TD-OILS-ARITH-ERRFMT.
+Remaining related nicety: the arithmetic error *body* was tracked separately as
+TD-OILS-ARITH-ERRFMT and is now **RESOLVED** (2026-07-19) — osh emits bash's full
+`<name>: line N: [<builtin>: ]<expr>: <body> (error token is "…")` form.
 
 **Original report follows for reference.**
 
@@ -2058,48 +2058,59 @@ a follow-up). ~40 emission sites + ~15 test assertions to update — see
 `open-questions.md` (flagged for the operator because it reformats *every* error
 message the shell prints, a pervasive user-visible output change).
 
-### TD-OILS-ARITH-ERRFMT. Arithmetic error messages don't match bash's `<expr> : <msg> (error token is "<tok>")` format/taxonomy — OPEN 2026-07-19
+### TD-OILS-ARITH-ERRFMT. Arithmetic error messages don't match bash's `<expr>: <msg> (error token is "<tok>")` format/taxonomy — RESOLVED 2026-07-19
 
-**Where:** `userspace/oils/src/arith.rs` — the `ArithError(String)` payloads
+**Where:** `userspace/oils/src/arith.rs` — `ArithError { msg, token }` payloads
 raised throughout `parse`/`parse_*`/`parse_number`/`str_to_val`, and the
-`$(( … ))` / `let` / `(( … ))` call sites in `interp.rs` that surface them.
+`emit_arith_error` / `eval_arith_cmd` call sites in `interp.rs` that surface them.
 
-**Symptom:** bash formats every arithmetic diagnostic as
-`<full expression> : <core message> (error token is "<remaining input>")`, with
-a specific message taxonomy; `osh` emits a generic `arithmetic: <msg>` with no
-expression echo and no error token. Observed (line-prefix stripped):
+**Resolution (2026-07-19):** `osh` now reproduces bash's full arithmetic
+diagnostic line `<name>: line N: [<builtin>: ]<expr>: <body> (error token is
+"<tok>")`:
 
-| input | bash | osh |
-|---|---|---|
-| `$((08))` | `08: value too great for base (error token is "08")` | `arithmetic: bad octal literal '08'` |
-| `$((0xG))` | `0xG: value too great for base (error token is "0xG")` | `arithmetic: unexpected trailing input in arithmetic: ' 0xG '` |
-| `$((2#12))` | `2#12: value too great for base (error token is "2#12")` | `arithmetic: unexpected trailing input in arithmetic: ' 2#12 '` |
-| `$((1_000))` | `1_000: value too great for base (error token is "1_000")` | `arithmetic: unexpected trailing input in arithmetic: '1_000'` |
-| `$((2**0.5))` | `2**0.5: syntax error: invalid arithmetic operator (error token is ".5")` | `arithmetic: unexpected trailing input in arithmetic: '2**0.5'` |
-| `$((2 @ 3))` | `2 @ 3 : syntax error: invalid arithmetic operator (error token is "@ 3 ")` | `arithmetic: unexpected trailing input in arithmetic: ' 2 @ 3 '` |
-| `$((1 + ))` | `1 + : syntax error: operand expected (error token is "+ ")` | `arithmetic: unexpected character in arithmetic: None` |
-| `$((1 2))` | `1 2 : syntax error in expression (error token is "2 ")` | `arithmetic: unexpected trailing input in arithmetic: ' 1 2 '` |
-| `$((5 % 0))` | `5 % 0 : division by 0 (error token is "0 ")` | `arithmetic: division by 0` |
+- **`ArithError` carries a token.** Was `ArithError(String)`; now
+  `ArithError { msg: String, token: Option<String> }` with `new()` /
+  `with_token()` constructors and a `Display` impl that appends
+  ` (error token is "<tok>")` when a token is present. The `AParser` tracks
+  `last_op_start` / `last_atom_start` and a `rest_from(pos)` helper so every
+  raise site can emit "offending-position-to-end-of-input, de-quoted" as the
+  token (operand-expected → operator/last-op position; trailing-input → current
+  position; ternary `:` → then-branch start; assignment → operator position;
+  bad subscript → array-name start; missing `)` → last-atom start; div/mod/exp →
+  RHS operand start, threaded via `Expr::Bin`'s 4th field).
+- **Body wording matches bash's taxonomy:** `division by 0`, `exponent less
+  than 0`, `syntax error: operand expected`, `syntax error in expression`
+  (recognized trailing token) vs `syntax error: invalid arithmetic operator`
+  (untokenizable char), `` `:' expected for conditional expression ``,
+  `bad array subscript`, `attempted assignment to non-variable`, `` missing `)' ``,
+  `invalid arithmetic base`, `value too great for base`,
+  `expression recursion level exceeded`.
+- **`<expr>:` prefix + builtin tag.** `interp.rs::emit_arith_error` prints the
+  (leading-whitespace-trimmed) source expression, and `arith_cmd:
+  Option<&'static str>` models bash's `this_command_name` so the right builtin
+  tag is prepended: `let:` for `let`, `((:` for `(( ))` and `for (( ))`,
+  `declare:`/`typeset:`/`local:` for the `-i` attribute builtins. Plain
+  assignments, array-element assignments, and `$(( ))` word substitution get no
+  tag (matching bash).
 
-bash's core-message set: `value too great for base`, `syntax error: invalid
-arithmetic operator`, `syntax error: operand expected`, `syntax error in
-expression`, `division by 0`, `exponent less than 0`. (The `division by 0` /
-`exponent less than 0` *phrases* were already matched, 2026-07-19 — but not the
-`<expr> :` prefix or `(error token …)` suffix.)
+**Tests:** `arith.rs::error_bodies_and_tokens_match_bash` (16 body/token cases)
+and `interp.rs::arith_error_matches_bash_format` (full-line, incl. builtin tags
+and `2>/dev/null` silencing). Verified byte-for-byte against MSYS bash on 25/27
+probed cases (name-normalized).
 
-**Why deferred (and flagged, not fixed unilaterally):** (1) It is entangled with
-**TD-OILS-ERRLINE** — bash's *full* line is `bash: line N: <expr> : <msg>
-(error token is "…")`, so matching the message body without a coordinated ERRLINE
-decision yields a half-matching line and likely rework; the operator has reserved
-ERRLINE for their own call. (2) Reproducing bash's "error token" (the remaining
-unparsed input, *including* bash's trailing-space quirks like `"+ "` / `"0 "`)
-needs the Pratt parser to surface the cursor position/remaining slice at each
-error site — a real refactor, and bug-for-bug on the whitespace details.
+**Residual divergences (documented bash yacc artifacts, low value — left as-is):**
 
-**Proper fix:** thread the error position through `arith.rs` (return the byte
-offset / remaining slice with each `ArithError`), map each raise site to bash's
-core-message taxonomy, and format at the call site as `<expr> : <msg> (error
-token is "<remaining>")` — done together with ERRLINE so the whole line matches.
+- **Exponent error token:** `$((2**-1))` → bash reports `1` (its lexer's
+  last-consumed token), osh reports `-1` (the RHS operand source). bash is
+  internally inconsistent here (division uses the whole RHS source; exponent
+  uses the last lexed token) — osh picks the single consistent
+  offending-position rule.
+- **Nested subscript prefix:** `$((a[9/0]))` → bash echoes `9/0` as the expr,
+  osh echoes `a[9/0]` (the full atom). A yacc reduction artifact.
+- **Recursion-limit prefix:** on `expression recursion level exceeded` bash
+  echoes the innermost value, osh echoes the top-level expression.
+- **Function-scope name:** in a function body bash's `<name>` becomes
+  `environment`; osh keeps `$0` (= `osh`) per design §74.
 
 ### TD-OILS-ULIMIT. `ulimit` tracks limits at the shell level but does not query/enforce the real kernel `getrlimit`/`setrlimit` — MINOR 2026-07-19
 

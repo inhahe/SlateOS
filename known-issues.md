@@ -2005,7 +2005,16 @@ bash's default (system-localtime) case, so it's parked until a real time/zone
 facility exists. Impact: low — affects only wall-clock *display* in `%()T` and
 the time-bearing prompt escapes.
 
-### TD-OILS-ARITH-ERRTEXT. `osh` arithmetic error *messages* don't match bash's `<expr> : <msg> (error token is "<tok>")` format — OPEN (low priority, cosmetic stderr text; needs AST source-span annotation) — 2026-07-19
+### TD-OILS-ARITH-ERRTEXT. `osh` arithmetic error *messages* don't match bash's `<expr> : <msg> (error token is "<tok>")` format — RESOLVED 2026-07-20 (superseded by TD-OILS-ARITH-ERRFMT)
+
+**Resolution:** superseded by the completed TD-OILS-ARITH-ERRFMT work. All three
+"concrete diffs" listed below now reproduce bash 5.2 exactly, verified 2026-07-20:
+`$((5/0))` → `5/0 : division by 0 (error token is "0 ")`; `$((09))` → `09: value
+too great for base (error token is "09")`; `$((3.5))` → `3.5 : syntax error:
+invalid arithmetic operator (error token is ".5 ")`. The historical analysis
+below is retained for context only.
+
+
 
 **Where:** `userspace/oils/src/arith.rs` — every `Err(ArithError(...))` site
 (`parse`, `parse_atom`, `parse_number`, `apply`, `eval_expr`) and the top-level
@@ -2054,6 +2063,50 @@ position; (3) in `eval`, format Pattern A as `{expr.trim_start()} : {msg} (error
 token is "{chars[pos..]}")` and Pattern B (base errors) as `{tok}: {msg} (error
 token is "{tok}")`. Match bash's operand-vs-operator "syntax error" distinction
 by inspecting the char at the failure position.
+
+### TD-OILS-COND-ERRTEXT. `osh` `[[ … ]]` syntax-error *messages* don't match bash's multi-line "conditional expression" diagnostics — OPEN (low priority, cosmetic stderr text) — 2026-07-20
+
+**Where:** `userspace/oils/src/parser.rs` `parse_cond` and its helpers (the
+`[[ … ]]` conditional-expression parser). Every `Err(ParseError(...))` in that
+path uses osh's single-line house style (`syntax error: expected ']]' to close
+'[['`, `syntax error: unexpected ']]' (expected operand)`, `syntax error:
+expected ')' in '[[ … ]]'`).
+
+**What:** on a malformed `[[ … ]]` expression bash prints a **two-line**,
+token-naming diagnostic that osh does not reproduce (exit codes match — both
+non-zero — only the human-readable text differs). Measured against bash 5.2:
+
+```
+[[ 3 -gt 2 -gt 1 ]]   bash: syntax error in conditional expression
+                            syntax error near `-gt'
+                      osh : syntax error: expected ']]' to close '[['
+[[ a b ]]             bash: conditional binary operator expected
+                            syntax error near `b'
+                      osh : syntax error: expected ']]' to close '[['
+[[ -z ]]              bash: unexpected argument `]]' to conditional unary operator
+                            syntax error near `]]'
+                      osh : syntax error: unexpected ']]' (expected operand)
+[[ ( a ]]             bash: unexpected token `]]', expected `)'
+                            syntax error near `]]'
+                      osh : syntax error: expected ')' in '[[ … ]]'
+```
+
+**Why deferred:** this is the same class of cosmetic stderr-text divergence as
+the (resolved) arithmetic one and the `[[ ]]` errors only fire on invalid
+expressions that essentially no real script contains. bash's format needs
+per-context taxonomy ("conditional binary operator expected" vs "…unary
+operator" vs "conditional expression") plus the offending-token name and bash's
+second `syntax error near \`TOKEN'` line — osh deliberately uses single-line
+diagnostics everywhere (functions, coproc, arithmetic operand errors), so
+matching bash here would be an inconsistent one-off unless the whole shell moves
+to bash's two-line format. Behavioral (result-affecting) divergences are higher
+value.
+
+**Proper fix (if ever needed):** classify `parse_cond` failures into an enum
+carrying (a) bash's context-specific first line and (b) the offending token for
+the `syntax error near \`TOKEN'` second line; emit both lines with the `osh:
+line N:` prefix on each, mirroring how bash repeats the `bash: -c: line N:`
+prefix per line.
 
 ### TD-OILS-EXTGLOB-PARSE. `osh` always *parses* extended-glob syntax (`+(…)` etc.) even when `extglob` is off; bash gates it at parse time — MINOR LENIENCY DEVIATION 2026-07-19
 

@@ -106,6 +106,91 @@ use crate::parser::{parse, parse_with_aliases};
 /// we report a 5.2 compatibility level with `slateos` as the vendor field.
 const BASH_VERSION: &str = "5.2.0(1)-release";
 
+/// The complete `shopt` option inventory (bash 5.2), in bash's own listing
+/// order (roughly, but not strictly, alphabetical — it mirrors bash's internal
+/// table), each paired with its default state for a **non-interactive** shell
+/// (`bash -c 'shopt'`). Only a subset of these options actually changes osh's
+/// behavior (glob/match toggles, `expand_aliases`); the rest are stored so
+/// scripts that toggle them don't error and so `shopt`/`shopt -p`/`$BASHOPTS`
+/// report them faithfully. `expand_aliases` is listed `false` here but its live
+/// default is interactivity-dependent (see [`Shell::shopt_default`]).
+const SHOPT_TABLE: &[(&str, bool)] = &[
+    ("autocd", false),
+    ("assoc_expand_once", false),
+    ("cdable_vars", false),
+    ("cdspell", false),
+    ("checkhash", false),
+    ("checkjobs", false),
+    ("checkwinsize", true),
+    ("cmdhist", true),
+    ("compat31", false),
+    ("compat32", false),
+    ("compat40", false),
+    ("compat41", false),
+    ("compat42", false),
+    ("compat43", false),
+    ("compat44", false),
+    ("completion_strip_exe", false),
+    ("complete_fullquote", true),
+    ("direxpand", false),
+    ("dirspell", false),
+    ("dotglob", false),
+    ("execfail", false),
+    ("expand_aliases", false),
+    ("extdebug", false),
+    ("extglob", false),
+    ("extquote", true),
+    ("failglob", false),
+    ("force_fignore", true),
+    ("globasciiranges", true),
+    ("globskipdots", true),
+    ("globstar", false),
+    ("gnu_errfmt", false),
+    ("histappend", false),
+    ("histreedit", false),
+    ("histverify", false),
+    ("hostcomplete", true),
+    ("huponexit", false),
+    ("inherit_errexit", false),
+    ("interactive_comments", true),
+    ("lastpipe", false),
+    ("lithist", false),
+    ("localvar_inherit", false),
+    ("localvar_unset", false),
+    ("login_shell", false),
+    ("mailwarn", false),
+    ("no_empty_cmd_completion", false),
+    ("nocaseglob", false),
+    ("nocasematch", false),
+    ("noexpand_translation", false),
+    ("nullglob", false),
+    ("patsub_replacement", true),
+    ("progcomp", true),
+    ("progcomp_alias", false),
+    ("promptvars", true),
+    ("restricted_shell", false),
+    ("shift_verbose", false),
+    ("sourcepath", true),
+    ("varredir_close", false),
+    ("xpg_echo", false),
+];
+
+/// Whether `name` is a recognized `shopt` option.
+fn shopt_is_known(name: &str) -> bool {
+    SHOPT_TABLE.iter().any(|(n, _)| *n == name)
+}
+
+/// Format one `shopt` listing line. In re-inputtable mode (`shopt -p`) the line
+/// is `shopt -s NAME` / `shopt -u NAME` (which can be fed back to the shell);
+/// otherwise it is bash's `NAME<pad-to-15>\ton|off` status form.
+fn shopt_line(name: &str, on: bool, reinput: bool) -> String {
+    if reinput {
+        format!("shopt -{} {name}\n", if on { 's' } else { 'u' })
+    } else {
+        format!("{name:<15}\t{}\n", if on { "on" } else { "off" })
+    }
+}
+
 /// Non-local control flow produced while executing statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -802,6 +887,22 @@ impl Shell {
         // keeps it current as options are toggled.
         self.refresh_shellopts();
         self.readonly.insert("SHELLOPTS".to_string());
+        // BASH: the absolute path to the running shell binary. bash sets this at
+        // startup and leaves it reassignable (NOT readonly). We use the host
+        // executable path (lossy), falling back to the bare name if it can't be
+        // determined — matching bash, which still defines BASH even when argv[0]
+        // is a bare name.
+        let bash_path = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "osh".to_string());
+        self.vars.insert("BASH".to_string(), bash_path);
+        // BASHOPTS: bash exposes the enabled `shopt` options as a readonly,
+        // colon-separated, alphabetically-sorted list. Seed it from the current
+        // (default) shopt state; `refresh_bashopts` keeps it current as options
+        // are toggled.
+        self.refresh_bashopts();
+        self.readonly.insert("BASHOPTS".to_string());
     }
 
     /// Set `$0`, the shell/script name.
@@ -818,6 +919,9 @@ impl Shell {
     /// (bash behaviour). Called once by the binary before running the command.
     pub fn set_command_mode(&mut self) {
         self.command_mode = true;
+        // `expand_aliases` defaults off non-interactively, so BASHOPTS (seeded
+        // in `Shell::new` before the mode was known) must be recomputed.
+        self.refresh_bashopts();
     }
 
     /// Enable noexec (`set -n`) from the command line (`osh -n …`): parse the
@@ -841,6 +945,9 @@ impl Shell {
     pub fn set_script_mode(&mut self) {
         self.script_mode = true;
         self.refresh_funcname();
+        // `expand_aliases` defaults off non-interactively, so BASHOPTS (seeded
+        // in `Shell::new` before the mode was known) must be recomputed.
+        self.refresh_bashopts();
     }
 
     /// Set a shell variable.
@@ -885,13 +992,14 @@ impl Shell {
 
     /// Parse and execute shell source, returning the final exit status.
     /// The effective default for a `shopt` option the user hasn't explicitly
-    /// toggled. Bash defaults every option this shell models to *off* except
-    /// `expand_aliases`, which is on in an interactive shell and off under
-    /// `-c`/script (non-interactive) — matching bash's alias-expansion rule.
+    /// toggled, taken from [`SHOPT_TABLE`] (bash's non-interactive defaults).
+    /// `expand_aliases` is the one interactivity-dependent case: on in an
+    /// interactive shell, off under `-c`/script — matching bash's
+    /// alias-expansion rule.
     fn shopt_default(&self, name: &str) -> bool {
         match name {
             "expand_aliases" => !self.command_mode && !self.script_mode,
-            _ => false,
+            _ => SHOPT_TABLE.iter().find(|(n, _)| *n == name).map(|(_, d)| *d).unwrap_or(false),
         }
     }
 
@@ -9980,25 +10088,10 @@ impl Shell {
     /// faithfully. `-s` enables, `-u` disables, `-q` suppresses output (status
     /// only). With no option flag, listing/query mode is used.
     fn builtin_shopt(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        // Known option names. Unknown names are an error (like bash).
-        const KNOWN: &[&str] = &[
-            "nullglob",
-            "dotglob",
-            "nocaseglob",
-            "nocasematch",
-            "extglob",
-            "globstar",
-            "failglob",
-            "histappend",
-            "checkwinsize",
-            "cmdhist",
-            "lithist",
-            "autocd",
-            "expand_aliases",
-        ];
         let mut set = false;
         let mut unset = false;
         let mut quiet = false;
+        let mut reinput = false; // `-p`: re-inputtable `shopt -s/-u NAME` listing
         // `-o`: operate on `set -o` options (noclobber, errexit, …) rather than
         // shopt options. Flags may be clustered (`shopt -qo NAME`, `-so NAME`).
         let mut opt_o = false;
@@ -10016,7 +10109,7 @@ impl Shell {
                             'u' => unset = true,
                             'q' => quiet = true,
                             'o' => opt_o = true,
-                            'p' => {} // `-p`: re-inputtable listing; treated as list.
+                            'p' => reinput = true,
                             _ => {
                                 self.emit_stderr(
                                     format!("{}shopt: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
@@ -10038,25 +10131,29 @@ impl Shell {
             return self.shopt_o_mode(&names, set, unset, quiet, out, redir);
         }
 
-        // Query/list mode: neither -s nor -u.
-        if !set && !unset {
+        // Listing/query mode: no names, OR names given without `-s`/`-u`. With
+        // `-s`/`-u` and no names, the listing is filtered to the on/off options.
+        if names.is_empty() || (!set && !unset) {
             if names.is_empty() {
-                // List all known options with their on/off state.
+                // List every known option; `-s`/`-u` filters to on/off.
                 let mut listing = String::new();
-                for opt in KNOWN {
-                    let on = self.shopt.get(*opt).copied().unwrap_or_else(|| self.shopt_default(opt));
-                    listing.push_str(&format!("{opt:<15}\t{}\n", if on { "on" } else { "off" }));
+                for &(opt, _) in SHOPT_TABLE {
+                    let on = self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt));
+                    if (set && !on) || (unset && on) {
+                        continue;
+                    }
+                    listing.push_str(&shopt_line(opt, on, reinput));
                 }
-                if quiet {
-                    return 0;
+                if !quiet {
+                    self.write_bytes(out, redir, listing.as_bytes());
                 }
-                return self.write_bytes(out, redir, listing.as_bytes());
+                return 0;
             }
             // Query specific names: status 0 iff all named options are set.
             let mut all_on = true;
             let mut listing = String::new();
             for name in &names {
-                if !KNOWN.contains(&name.as_str()) {
+                if !shopt_is_known(name) {
                     self.emit_stderr(
                         format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
                     );
@@ -10070,7 +10167,7 @@ impl Shell {
                 if !on {
                     all_on = false;
                 }
-                listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
+                listing.push_str(&shopt_line(name, on, reinput));
             }
             if !quiet {
                 self.write_bytes(out, redir, listing.as_bytes());
@@ -10078,10 +10175,11 @@ impl Shell {
             return i32::from(!all_on);
         }
 
-        // Set/unset mode.
+        // Set/unset mode (names present with `-s` or `-u`).
         let mut status = 0;
+        let mut changed = false;
         for name in names {
-            if !KNOWN.contains(&name.as_str()) {
+            if !shopt_is_known(name) {
                 self.emit_stderr(
                     format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
                 );
@@ -10089,8 +10187,29 @@ impl Shell {
                 continue;
             }
             self.shopt.insert(name.clone(), set);
+            changed = true;
+        }
+        // Keep `$BASHOPTS` current (bash recomputes it on every shopt change).
+        if changed {
+            self.refresh_bashopts();
         }
         status
+    }
+
+    /// Recompute `$BASHOPTS` from the current `shopt` state: a colon-separated,
+    /// alphabetically-sorted list of the enabled `shopt` option names, mirroring
+    /// bash. bash keeps it as a readonly, dynamically-maintained variable; we
+    /// refresh it here (bypassing the readonly gate, as `refresh_shellopts`
+    /// does for `$SHELLOPTS`) whenever an option is toggled.
+    fn refresh_bashopts(&mut self) {
+        let mut on: Vec<&str> = Vec::new();
+        for &(opt, _) in SHOPT_TABLE {
+            if self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt)) {
+                on.push(opt);
+            }
+        }
+        on.sort_unstable();
+        self.vars.insert("BASHOPTS".to_string(), on.join(":"));
     }
 
     /// `shopt -o …`: the `-o` variant operates on `set -o` options. Handles the
@@ -18651,6 +18770,63 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("type -t complete").0, "builtin\n");
         assert_eq!(run("type -t compopt").0, "builtin\n");
         assert_eq!(run("compgen -b complete").0, "complete\n");
+    }
+
+    #[test]
+    fn shopt_full_inventory_listing() {
+        // The bare listing reports every option in bash's table order with the
+        // `NAME<pad-to-15>\ton|off` status form. Spot-check a few known entries.
+        let out = run("shopt").0;
+        assert!(out.contains("autocd         \toff\n"), "got: {out}");
+        assert!(out.contains("interactive_comments\ton\n"), "got: {out}");
+        assert!(out.contains("progcomp       \ton\n"), "got: {out}");
+        // The test harness leaves neither command nor script mode set, so it
+        // behaves interactively — `expand_aliases` defaults on.
+        assert!(out.contains("expand_aliases \ton\n"), "got: {out}");
+    }
+
+    #[test]
+    fn shopt_p_reinput_form() {
+        // `-p` prints re-inputtable `shopt -s/-u NAME` lines.
+        let out = run("shopt -p progcomp autocd").0;
+        assert_eq!(out, "shopt -s progcomp\nshopt -u autocd\n");
+    }
+
+    #[test]
+    fn shopt_s_filters_to_enabled() {
+        // `shopt -s` with no names lists only currently-enabled options.
+        let out = run("shopt -s").0;
+        assert!(out.contains("progcomp       \ton\n"), "got: {out}");
+        assert!(!out.contains("autocd"), "got: {out}");
+    }
+
+    #[test]
+    fn bashopts_is_sorted_enabled_options() {
+        // $BASHOPTS is a colon-joined, alphabetically-sorted list of enabled
+        // shopt options; toggling one updates it.
+        // The harness is interactive-like, so `expand_aliases` is enabled and
+        // appears in the sorted list.
+        assert_eq!(
+            run("echo $BASHOPTS").0,
+            "checkwinsize:cmdhist:complete_fullquote:expand_aliases:extquote:\
+             force_fignore:globasciiranges:globskipdots:hostcomplete:\
+             interactive_comments:patsub_replacement:progcomp:promptvars:sourcepath\n"
+        );
+        // Enabling `autocd` inserts it in sorted position.
+        assert!(run("shopt -s autocd; echo $BASHOPTS").0.starts_with("autocd:checkwinsize:"));
+    }
+
+    #[test]
+    fn bashopts_is_readonly() {
+        // bash marks $BASHOPTS readonly; `readonly -p` renders it as such.
+        assert!(run("readonly -p").0.contains("declare -r BASHOPTS="));
+    }
+
+    #[test]
+    fn bash_var_is_reassignable() {
+        // $BASH is defined and, unlike $BASHOPTS, is reassignable.
+        assert!(!run("echo $BASH").0.trim().is_empty());
+        assert_eq!(run("BASH=foo; echo $BASH").0, "foo\n");
     }
 
     #[test]

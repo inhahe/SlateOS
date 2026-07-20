@@ -2251,7 +2251,7 @@ verified `x=$( ( echo o; echo e >&2 ) 2>&1 )` now yields `o\ne` matching bash,
 as does the non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )`. No open
 subcases remain for this item.
 
-### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`BASH`/`BASHOPTS`/`HOSTNAME`) — PARTIALLY ADDRESSED 2026-07-19
+### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`HOSTNAME`; `BASH`/`BASHOPTS` now done) — PARTIALLY ADDRESSED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the
 `param_value` dynamic-var match arm around the `BASHPID`/`BASH_SUBSHELL` cases).
@@ -2259,8 +2259,14 @@ subcases remain for this item.
 **Status (2026-07-19):** the static *platform-identity* trio bash always
 defines is now seeded — `HOSTTYPE=x86_64`, `OSTYPE=slateos`,
 `MACHTYPE=x86_64-slateos` (ordinary reassignable shell vars, SlateOS values not
-the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic. Still
-**missing** relative to bash:
+the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic.
+**`BASH` and `BASHOPTS` are now defined (2026-07-19):** `BASH` is seeded from
+`std::env::current_exe()` (lossy, fallback `"osh"`) as a reassignable var;
+`BASHOPTS` is a readonly, colon-joined, alphabetically-sorted list of enabled
+`shopt` options kept current by `refresh_bashopts()` on every `shopt` toggle
+(osh now models bash's full 57-option `shopt` inventory with correct
+non-interactive defaults, so the seeded set matches bash byte-for-byte —
+verified against MSYS bash). Still **missing** relative to bash:
 
 - **`EUID` / `UID`** (numeric effective/real user id, readonly in bash). Very
   commonly read by scripts (`[ "$EUID" -ne 0 ]` root checks); leaving them unset
@@ -2272,29 +2278,30 @@ the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic. Still
 - **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
   `std::process` doesn't expose it portably on the host and the SlateOS syscall
   isn't wired. Deferred until a `getppid`-equivalent exists.
-- **`BASH`** (absolute path to the shell binary). Could be derived from
-  `argv[0]`/the resolved exe path; low value, deferred.
-- **`BASHOPTS`** (colon-joined list of enabled `shopt` names, readonly, dynamic).
-  Derivable from osh's `shopt` state, but osh models only a subset of bash's
-  shopt options, so the value would still diverge from bash's default set;
-  deferred as low-value partial fidelity. Would live as a computed `param_value`
-  case, mirroring `BASHPID`.
 - **`HOSTNAME`** — bash sets it from the host; osh's prompt helper already falls
   back to `localhost`. Whether to seed a fixed default (`localhost`/`slateos`) is
   a low-stakes naming choice bundled into the same open question as EUID/UID.
 
 **Proper fix:** once SlateOS credential/`getuid`/`getppid` syscalls exist, wire
-`EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly), seed `BASH` from
-the resolved executable path, and add a computed `BASHOPTS`. The identity
+`EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly). The identity
 *default* (for host runs and pre-login target state) needs the operator's call.
 
+**Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
+diverges from bash because osh does not define `BASH_ALIASES`, `BASH_ARGC`,
+`BASH_ARGV`, `BASH_ARGV0`, `BASH_CMDS`, `BASH_EXECUTION_STRING`, or
+`BASH_LOADABLES_PATH`. These are bash-internal (the call-stack arrays
+`BASH_ARGC`/`BASH_ARGV`, the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`,
+etc.); implementing them faithfully is a larger, separate task. Low priority —
+scripts rarely enumerate `BASH*`.
+
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
-`param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `BASHOPTS`/`EUID`/…)
+`param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)
 return a value when read directly (`echo $BASHPID`) but are **not listed** by the
 name-prefix expansions `${!BASH*}` / `${!BASH@}`, because those enumerate only the
-concrete `vars`/`arrays`/`assoc` maps. bash includes every dynamic variable in the
-prefix listing. Fixing this needs the prefix-match code to also consider the set of
-known dynamic-variable names (a static name list checked alongside the maps).
+concrete `vars`/`arrays`/`assoc` maps. (`BASH`/`BASHOPTS` are concrete `vars` now,
+so they *do* appear.) bash includes every dynamic variable in the prefix listing.
+Fixing this needs the prefix-match code to also consider the set of known
+dynamic-variable names (a static name list checked alongside the maps).
 Low-value (prefix enumeration of `BASH*` is rare in scripts) and coupled to the
 broader "define the missing `BASH*` vars" work above, so parked here.
 

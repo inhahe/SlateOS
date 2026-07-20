@@ -826,6 +826,15 @@ pub struct Shell {
     /// support (see known-issues TD-OILS11). NOT cloned into subshells (bash
     /// resets non-ignored traps to their default in a subshell).
     traps: HashMap<String, String>,
+    /// Inherited-but-reset trap strings that are shown by `trap`/`trap -p` but
+    /// never fired. bash resets a subshell's non-ignored traps to their default
+    /// *disposition* (so they do not fire), yet `trap -p` inside the subshell
+    /// still prints the inherited command strings until they are explicitly
+    /// re-set or reset. This map holds exactly those display-only entries; it is
+    /// empty at top level and populated only when forking a subshell. Setting or
+    /// resetting a trap via the builtin removes the key here (it is no longer a
+    /// mere inherited entry).
+    trap_shadow: HashMap<String, String>,
     /// Guards the `EXIT` trap so it fires at most once when the shell exits.
     exit_trap_done: bool,
     /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
@@ -941,6 +950,7 @@ impl Shell {
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
+            trap_shadow: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
             jobs: Vec::new(),
@@ -2982,6 +2992,22 @@ impl Shell {
                         || (self.errtrace && k.as_str() == "ERR")
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            // Traps that are *not* inherited for firing (the ones filtered out
+            // above) are still shown by `trap -p` in the subshell — bash resets
+            // their disposition but keeps the command strings listable. Record
+            // them as display-only shadows (merged with any the parent already
+            // had). The active `traps` map above stays authoritative for firing.
+            trap_shadow: self
+                .traps
+                .iter()
+                .filter(|(k, v)| {
+                    !(v.is_empty()
+                        || (self.functrace && (k.as_str() == "DEBUG" || k.as_str() == "RETURN"))
+                        || (self.errtrace && k.as_str() == "ERR"))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .chain(self.trap_shadow.iter().map(|(k, v)| (k.clone(), v.clone())))
                 .collect(),
             // A subshell fires its *own* EXIT trap when it exits (bash). The
             // parent's EXIT trap was filtered out above (only ignored `''` traps
@@ -8236,6 +8262,10 @@ impl Shell {
                     // frame: clear any inheritance mask so it fires normally
                     // (and, once set, persists globally after return).
                     self.unsuppress_trap(&norm);
+                    // Explicitly touching a trap removes any inherited display-only
+                    // shadow: it is now a real, current disposition, not a merely
+                    // listable leftover from the parent shell.
+                    self.trap_shadow.remove(&norm);
                     if reset {
                         self.traps.remove(&norm);
                     } else {
@@ -8266,6 +8296,13 @@ impl Shell {
             .iter()
             .filter(|(k, _)| filter.as_ref().is_none_or(|f| f.contains(k)))
             .collect();
+        // Merge in display-only shadow traps (inherited into a subshell, reset
+        // for firing but still listable) for any signal not already active.
+        for (k, v) in &self.trap_shadow {
+            if !self.traps.contains_key(k) && filter.as_ref().is_none_or(|f| f.contains(k)) {
+                entries.push((k, v));
+            }
+        }
         entries.sort_by_key(|(k, _)| sigspec_order(k));
         let mut buf = String::new();
         for (sig, action) in entries {
@@ -21847,6 +21884,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.vars.remove("TRAP_MARK");
         sh.run_exit_trap();
         assert!(!sh.vars.contains_key("TRAP_MARK"));
+    }
+
+    #[test]
+    fn subshell_lists_inherited_traps_but_does_not_fire_them() {
+        // bash resets a subshell's non-ignored traps for *firing* but keeps the
+        // inherited command strings listable via `trap -p`. osh mirrors this with
+        // a display-only shadow map.
+        // (The `run` harness does not fire the top-level EXIT trap on return, so
+        // the only output is the subshell's `trap -p` listing of the inherited
+        // trap string.)
+        let (o, _) = run("trap 'echo hi' EXIT; (trap -p)");
+        assert_eq!(o, "trap -- 'echo hi' EXIT\n");
+        // The inherited EXIT trap does not re-fire on subshell exit.
+        let (o2, _) = run("trap 'echo hi' EXIT; (echo insub); echo end");
+        assert_eq!(o2, "insub\nend\n");
+        // Re-setting the trap inside the subshell replaces the shadow entry, and
+        // `trap - SIG` clears it so `trap -p SIG` prints nothing.
+        let (o3, _) = run("trap 'echo a' INT; (trap 'echo new' INT; trap -p INT)");
+        assert_eq!(o3, "trap -- 'echo new' SIGINT\n");
+        let (o4, _) = run("trap 'echo a' INT; (trap - INT; trap -p INT; echo cleared)");
+        assert_eq!(o4, "cleared\n");
     }
 
     #[test]

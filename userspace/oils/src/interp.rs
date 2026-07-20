@@ -3367,6 +3367,24 @@ impl Shell {
                         format!("{prefix}{}{op}{}\n", a.name, xtrace_quote(&val)).as_bytes(),
                     );
                 }
+                // `BASH_ARGV0=name` sets `$0` (the shell/script name used in
+                // diagnostics and `$0` expansion). It is dynamic — not stored in
+                // `vars`; reads go through `param_value`, which returns
+                // `self.name`. We intercept `+=` too (appending to the current
+                // `$0`) so a stray append never leaves a stale `vars` entry that
+                // reads would ignore. (bash's own `+=` here depends on an obscure
+                // lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b`
+                // yields `b`, not `ab`, unless a read intervened; osh uses the
+                // predictable append instead. See known-issues TD-OILS-MISSING-
+                // SPECIAL-ARRAYS.)
+                if a.index.is_none() && a.name == "BASH_ARGV0" {
+                    self.name = if a.append {
+                        format!("{}{val}", self.name)
+                    } else {
+                        val
+                    };
+                    return true;
+                }
                 // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
                 // elapsed-seconds counter. Both are dynamic and not stored in
                 // `vars` (reads go through `param_value`'s special arms).
@@ -4385,6 +4403,7 @@ impl Shell {
     /// `arrays` entry is picked up there, so it appears only where bash lists it.
     const DYNAMIC_SPECIAL_NAMES: &'static [&'static str] = &[
         "BASHPID",
+        "BASH_ARGV0",
         "BASH_LINENO",
         "BASH_SOURCE",
         "BASH_SUBSHELL",
@@ -7678,6 +7697,9 @@ impl Shell {
             "*" => Some(self.positional.join(&self.star_sep())),
             "0" => Some(self.name.clone()),
             "-" => Some(self.option_flags()),
+            // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
+            // assignment hook in `apply_assignment`).
+            "BASH_ARGV0" => Some(self.name.clone()),
             "BASHPID" => Some(self.pid.to_string()),
             "PPID" => Some(self.ppid.to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
@@ -11247,7 +11269,7 @@ impl Shell {
             // `$PPID` is a readonly integer in bash (`declare -ir`).
             "PPID" => "-ir",
             "BASHPID" | "RANDOM" | "SECONDS" => "-i",
-            "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
+            "BASH_ARGV0" | "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
             _ => return None,
         };
         let val = self.param_value(name)?;
@@ -19789,6 +19811,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(out.starts_with("declare -- EPOCHSECONDS=\""), "got {out:?}");
         // A genuinely-unset name still errors with status 1.
         assert_eq!(run("declare -p NoSuchVar_xyz").1, 1);
+    }
+
+    #[test]
+    fn bash_argv0_sets_dollar_zero() {
+        // `BASH_ARGV0=name` sets `$0`; reading `$BASH_ARGV0` reflects the
+        // current `$0`. It is dynamic (not stored in `vars`).
+        assert_eq!(run("BASH_ARGV0=prog; echo \"$0\"").0, "prog\n");
+        assert_eq!(run("BASH_ARGV0=prog; echo \"[$BASH_ARGV0]\"").0, "[prog]\n");
+        // Assigning empty clears `$0`, matching bash.
+        assert_eq!(run("BASH_ARGV0=; echo \"[$0]\"").0, "[]\n");
+        // `$0` inside a function is still the shell name (BASH_ARGV0), not the
+        // function name — bash parity.
+        assert_eq!(run("f(){ echo \"$0\"; }; BASH_ARGV0=zz; f").0, "zz\n");
+        // `declare -p` prints it as a plain string variable.
+        assert_eq!(
+            run("BASH_ARGV0=nm; declare -p BASH_ARGV0").0,
+            "declare -- BASH_ARGV0=\"nm\"\n"
+        );
+        // It is enumerated by the `${!BASH*}` name-prefix expansion.
+        assert!(run("echo ${!BASH*}").0.contains("BASH_ARGV0"));
+        // `+=` appends to the current `$0` (osh uses a predictable append; see
+        // the note in `apply_assignment` about bash's obscure `+=` quirk).
+        assert_eq!(run("BASH_ARGV0=ab; BASH_ARGV0+=cd; echo \"$0\"").0, "abcd\n");
     }
 
     #[test]

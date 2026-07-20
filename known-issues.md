@@ -2814,14 +2814,21 @@ verified against MSYS bash). Still **missing** relative to bash:
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
 diverges from bash because osh does not define `BASH_ALIASES`, `BASH_ARGC`,
-`BASH_ARGV`, `BASH_ARGV0`, `BASH_CMDS`, or `BASH_LOADABLES_PATH`.
+`BASH_ARGV`, `BASH_CMDS`, or `BASH_LOADABLES_PATH`.
 (`BASH_EXECUTION_STRING` — the `-c` command string — is now defined, seeded via
 `Shell::set_execution_string` from `main.rs`'s `-c` path, so it reads correctly
-and appears in `${!BASH*}`.) The remainder are bash-internal (the call-stack
-arrays `BASH_ARGC`/`BASH_ARGV`, the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`,
-etc.); implementing them faithfully is a larger, separate task.
-`BASH_LOADABLES_PATH` is meaningless on SlateOS (no loadable builtins) and is
-intentionally omitted. Low priority — scripts rarely enumerate `BASH*`.
+and appears in `${!BASH*}`. `BASH_ARGV0` is now defined too — **RESOLVED
+2026-07-20**: a dynamic variable tied to `self.name`; `BASH_ARGV0=name` sets
+`$0`, reading `$BASH_ARGV0` returns the current `$0`, it appears in `${!BASH*}`
+and `declare -p`. One deliberate divergence: bash's `+=` on `BASH_ARGV0` relies
+on an obscure lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b` yields
+`b`, not `ab`, unless a read intervened — so osh uses the predictable append
+(`ab`) instead; `BASH_ARGV0+=` is vanishingly rare in real scripts.) The
+remainder are bash-internal (the call-stack arrays `BASH_ARGC`/`BASH_ARGV`, the
+dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`, etc.); implementing them
+faithfully is a larger, separate task. `BASH_LOADABLES_PATH` is meaningless on
+SlateOS (no loadable builtins) and is intentionally omitted. Low priority —
+scripts rarely enumerate `BASH*`.
 
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
 `param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)

@@ -693,31 +693,32 @@ attribute flag nor a well-formed `name[sub]?=value` assignment, emit
 status to 1 (accumulating the worst status across args).
 </details>
 
-### TD-OILS-BAD-ARRAY-SUBSCRIPT. `osh` "bad array subscript" underflow name/fatality — 2026-07-20 — ✅ MOSTLY RESOLVED 2026-07-20 (one obscure length-form subcase remains)
+### TD-OILS-BAD-ARRAY-SUBSCRIPT. `osh` "bad array subscript" underflow name/fatality — 2026-07-20 — ✅ RESOLVED 2026-07-20
 
-**Status:** The two common cases now match bash exactly:
-- **Write underflow** (`x[-9]=z` on a short/empty indexed array): now names the
-  **full** reference `x[-9]: bad array subscript` and is **fatal** in command
-  position (aborts, status 1), matching `bash -c 'a=(x y); a[-9]=Q; echo done'`.
-  Inside `declare "x[-9]=z"` it is demoted to **non-fatal** (status 1, `declare`
-  continues) — also matching bash. Implemented at `apply_assignment` (~3527, sets
-  `self.unbound_error = Some(1)` + full-ref message) with a `had_fatal` snapshot in
-  the `declare` subscript branch that clears `unbound_error` and sets `status = 1`.
-- **Read underflow** (`echo ${a[-5]}` on a short array): non-fatal, names the
-  **base** (`a: bad array subscript`), value expands empty — this matches bash
-  (bash also names only the base on reads). Implemented at `expand_array_ref`
-  (~4590), scoped to `!length`.
+**Status:** All four forms now match bash exactly, including the exact
+diagnostic text (which uses the **raw subscript source**, post word-expansion
+but pre-arithmetic — `a[1+2-20]`, `a[i]` — not the evaluated index):
+
+- **Write underflow** (`x[-9]=z`, `a[1+2-20]=z`, `a[i]=z`): names the **full**
+  reference with the raw source (`a[1+2-20]: bad array subscript`) and is
+  **fatal** in command position (aborts, status 1). Inside `declare "…"` it is
+  demoted to **non-fatal** (status 1, `declare` continues). Implemented at
+  `apply_assignment` (~3521): the subscript is evaluated with the arith tag
+  cleared (bash never tags a bad *subscript* expr, even under `-i` — only a bad
+  `-i` *value* is tagged `declare:`), a syntax error returns early, and an
+  underflow emits `{name}[{raw_src}]` + sets `unbound_error = Some(1)`. The
+  `declare` branch passes the raw subscript source straight through (no
+  pre-evaluation), so the message names the source and the value keeps its
+  `declare:` tag; a `had_fatal` snapshot demotes the underflow to status 1.
+- **Read underflow, value form** (`echo ${a[-5]}`): non-fatal, names the
+  **base** (`a: bad array subscript`), value expands empty — matches bash.
+- **Read underflow, length form** (`echo ${#a[-9]}`, `${#a[1+2-20]}`): the
+  obscure **fatal** subcase naming the raw source + `]`
+  (`1+2-20]: bad array subscript`), aborting the command. Implemented at
+  `expand_array_ref` (~4590).
+- **Positive out-of-range read** (`${a[9]}`): empty, no error — matches bash.
 
 Covered by `bad_array_subscript_underflow` and the updated `array_negative_index`.
-
-**Remaining (very low priority):** the **length form** `${#a[-9]}` on a short
-array. bash emits an obscure separate diagnostic `-9]: bad array subscript`
-(fatal); osh currently emits **no** error for the length subcase (the read error
-was deliberately scoped to `!length` to avoid a spurious line on `${#a[-1]}` of a
-populated array). Proper fix: detect underflow specifically in the `${#…[neg]}`
-length path and emit bash's `{sub_src}]: bad array subscript` fatal diagnostic,
-without regressing the valid `${#a[-1]}` case. Reproduce: `bash -c 'a=(x y); echo ${#a[-9]}'`
-vs `osh -c 'a=(x y); echo ${#a[-9]}'`.
 
 ### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19 — ✅ FIXED 2026-07-19
 

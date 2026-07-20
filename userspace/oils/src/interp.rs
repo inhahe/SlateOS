@@ -3518,7 +3518,20 @@ impl Shell {
                         // index counts back from `highest_index + 1` (bash:
                         // `a[-1]=v` overwrites the last element). A malformed
                         // arithmetic subscript is fatal (see `eval_arith_index`).
+                        // bash never tags a bad *subscript* arithmetic error with
+                        // the builtin name (unlike a bad `-i` *value*), even under
+                        // `declare -i`, so evaluate the subscript with the arith
+                        // tag cleared, then restore it for the value below.
+                        let saved_tag = self.arith_cmd.take();
                         let raw = self.eval_arith_index(idx_word);
+                        self.arith_cmd = saved_tag;
+                        if self.arith_error {
+                            // Malformed subscript expression (`a[x y]=v`): the
+                            // untagged diagnostic is emitted and `arith_error`
+                            // stays set so the command driver aborts; do not
+                            // assign anything.
+                            return false;
+                        }
                         let bound = self
                             .arrays
                             .get(&a.name)
@@ -3527,10 +3540,12 @@ impl Shell {
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             // A negative subscript that underflows below 0 is a
                             // fatal "bad array subscript" in bash, naming the full
-                            // reference with the *computed* index (`a[-5]`), and
-                            // aborting the command (status 1).
+                            // reference with the *raw subscript source* text
+                            // (post word-expansion, pre-arithmetic: `a[1+2-20]`,
+                            // `a[i]`), and aborting the command (status 1).
+                            let src = self.expand_to_string(idx_word);
                             self.errln(&format!(
-                                "{}{}[{raw}]: bad array subscript",
+                                "{}{}[{src}]: bad array subscript",
                                 self.err_prefix(),
                                 a.name
                             ));
@@ -4589,16 +4604,29 @@ impl Shell {
                 } else {
                     let idx = self.eval_arith_index(w);
                     // A negative subscript that underflows below index 0 is a
-                    // "bad array subscript" on *read* too (bash) — it names the
-                    // base (not the full `a[-5]` reference, unlike the write
-                    // path), is non-fatal, and the reference expands empty.
-                    if idx < 0 && !length && self.arrays.contains_key(name) {
+                    // "bad array subscript" on read too (bash), but the two read
+                    // forms diverge:
+                    //   * value form `${a[-9]}`  — non-fatal, names the *base*
+                    //     (`a: bad array subscript`), expands empty.
+                    //   * length form `${#a[-9]}` — *fatal*, names the raw
+                    //     subscript source followed by `]`
+                    //     (`-9]: bad array subscript`), aborts the command.
+                    if idx < 0 && self.arrays.contains_key(name) {
                         let bound = self
                             .arrays
                             .get(name)
                             .and_then(|a| a.keys().next_back().copied())
                             .map_or(0, |k| k.saturating_add(1));
                         if Self::resolve_index(idx, bound).is_none() {
+                            if length {
+                                let src = self.expand_to_string(w);
+                                self.errln(&format!(
+                                    "{}{src}]: bad array subscript",
+                                    self.err_prefix()
+                                ));
+                                self.unbound_error = Some(1);
+                                return "0".to_string();
+                            }
                             self.errln(&format!(
                                 "{}{name}: bad array subscript",
                                 self.err_prefix()
@@ -11838,31 +11866,16 @@ impl Shell {
                 if let Some(v) = value {
                     // Build the element assignment directly (not by re-parsing a
                     // `base[sub]=value` string — an unquoted-space value like
-                    // `x[0]="2 x"` would word-split). The subscript is resolved
-                    // here with the `declare:` arith tag CLEARED, because bash
-                    // reports a bad *subscript* like a command-position
-                    // `a[x y]=v` (untagged) even under `-i`; only a bad `-i`
-                    // *value* is tagged `declare:` (handled inside
-                    // `apply_assignment`, where the tag is still set).
-                    let index_word = if self.assoc.contains_key(base_name) {
-                        // Associative key: a literal string, no arith eval.
-                        Word::literal(sub)
-                    } else {
-                        let saved = self.arith_cmd.take();
-                        let raw = self.eval_arith_index(&Word::literal(sub));
-                        let fatal = self.arith_error;
-                        self.arith_cmd = saved;
-                        if fatal {
-                            // The untagged diagnostic is already emitted and
-                            // `arith_error` stays set so the command driver
-                            // aborts; skip the (invalid) element assignment.
-                            continue;
-                        }
-                        Word::literal(raw.to_string())
-                    };
+                    // `x[0]="2 x"` would word-split). Pass the *raw* subscript
+                    // source through; `apply_assignment` evaluates it once (with
+                    // the arith tag cleared for the subscript, so a bad subscript
+                    // is untagged like command-position `a[x y]=v`, even under
+                    // `-i`; only a bad `-i` *value* is tagged `declare:`) and its
+                    // "bad array subscript" diagnostic names the raw source
+                    // (`a[1+2-20]`), matching bash.
                     let assignment = Assignment {
                         name: base_name.to_string(),
-                        index: Some(index_word),
+                        index: Some(Word::literal(sub)),
                         append,
                         value: AssignRhs::Scalar(Word::literal(v)),
                     };
@@ -11873,6 +11886,11 @@ impl Shell {
                     // stay fatal, so we only demote the `unbound_error` flag.
                     let had_fatal = self.unbound_error.is_some();
                     self.apply_assignment(&assignment, false);
+                    if self.arith_error {
+                        // Malformed subscript/value expression: fatal, the command
+                        // driver aborts; skip export/readonly for this argument.
+                        continue;
+                    }
                     if !had_fatal && self.unbound_error.is_some() {
                         self.unbound_error = None;
                         status = 1;
@@ -22535,6 +22553,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("a=(1 2 3); echo \"${a[-1]}\"").0, "3\n");
         // A positive out-of-range read is empty WITHOUT an error (bash).
         assert_eq!(run("a=(1 2); echo \"[${a[9]}]\" 2>&1").0, "[]\n");
+        // The "bad array subscript" diagnostic names the RAW subscript source
+        // (post word-expansion, pre-arithmetic), not the evaluated index — bash:
+        // `a[1+2-20]` (write), `a[i]` (var), and `1+2-20]`/`i]` (length form).
+        let (o, s) = run("a=(1 2); { a[1+2-20]=z; } 2>&1; echo after");
+        assert_eq!(o, "osh: a[1+2-20]: bad array subscript\n");
+        assert_eq!(s, 1);
+        let (o, _) = run("a=(1 2); i=-5; { a[i]=z; } 2>&1; echo after");
+        assert_eq!(o, "osh: a[i]: bad array subscript\n");
+        // `declare` context keeps the raw source and stays non-fatal.
+        let (o, _) = run("a=(1 2); { declare \"a[1+2-20]=z\"; } 2>&1; echo after");
+        assert_eq!(o, "osh: a[1+2-20]: bad array subscript\nafter\n");
+        // LENGTH form `${#a[neg]}` is a *fatal* obscure subcase naming the raw
+        // subscript source followed by `]` (bash: `1+2-20]: bad array subscript`).
+        let (o, s) = run("a=(1 2); { echo \"[${#a[1+2-20]}]\"; } 2>&1; echo after");
+        assert_eq!(o, "osh: 1+2-20]: bad array subscript\n");
+        assert_eq!(s, 1);
+        // A valid negative length read is fine (no error).
+        assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
+        // A bad *subscript expression* (`a[x y]=v`) is untagged even under
+        // `declare -i`, and fatal (aborts) — no `after`.
+        let (o, s) = run("{ declare -i \"a[x y]=v\"; } 2>&1; echo after");
+        assert_eq!(o, "osh: x y: syntax error in expression (error token is \"y\")\n");
+        assert_eq!(s, 1);
     }
 
     #[test]

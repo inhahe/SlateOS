@@ -1158,15 +1158,24 @@ impl Shell {
 
     /// Resolve the exit status of a fatal word-expansion abort (nounset,
     /// `${var:?}`, bad indirect/subscript). The carried `code` is the status
-    /// bash uses in the *main shell environment* (127 for nounset/`:?`, 1 for
-    /// indirect/subscript). Inside any subshell, command substitution, or
-    /// pipeline stage (`subshell_depth > 0`) bash instead aborts that
-    /// environment with status **1** for all of these, without touching the
-    /// parent shell — so only honour the higher code at depth 0. Brace groups
-    /// and function bodies run at the caller's depth, so they correctly inherit
-    /// the main-shell status.
+    /// bash uses for a `-c` command-mode shell (127 for nounset/`:?`, 1 for
+    /// indirect/subscript).
+    ///
+    /// bash's nounset/`:?` abort status is **invocation-mode dependent**, verified
+    /// directly against bash 5.2:
+    /// - `bash -c '…'`  → **127**
+    /// - `bash script`  → **1**
+    /// - `echo … | bash` / interactive → **1** (the failed command's `$?`)
+    ///
+    /// So only a `-c` command-mode shell honours the higher 127; every other
+    /// top-level context (script file, stdin, interactive REPL) uses 1. Bad
+    /// indirect/subscript aborts carry 1 already, so they are 1 everywhere.
+    /// Inside any subshell, command substitution, or pipeline stage
+    /// (`subshell_depth > 0`) bash also uses 1, without touching the parent
+    /// shell. Brace groups and function bodies run at the caller's depth, so they
+    /// correctly inherit the enclosing shell's status.
     fn fatal_abort_status(&self, code: i32) -> i32 {
-        if self.subshell_depth == 0 {
+        if self.subshell_depth == 0 && self.command_mode {
             code
         } else {
             1
@@ -16600,6 +16609,22 @@ mod tests {
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
 
+    /// Like [`run`] but in `-c` command mode (`set_command_mode`). The default
+    /// `run` harness is interactive/stdin-like (neither `-c` nor script mode),
+    /// which matters for fatal-abort exit codes: bash's nounset/`:?` abort is
+    /// 127 only under `-c`, and 1 for a script file / stdin / interactive shell.
+    fn run_cmd_mode(src: &str) -> (String, i32) {
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        let mut buf = Vec::new();
+        let prog = parse(src).expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
     #[test]
     fn syntax_error_message_not_doubled() {
         use crate::parser::ParseError;
@@ -17198,42 +17223,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A set, non-empty parameter is unaffected.
         let (o2, _) = run("y=set; echo \"${y:?msg}\"");
         assert_eq!(o2, "set\n");
-        // At top level (main shell) the error aborts the whole run with 127,
-        // matching bash — whereas the subshell case above yields 1.
+        // At top level the error aborts the whole run; the status is mode
+        // dependent — 1 for the interactive/stdin/script-like `run` harness, 127
+        // only under `-c` (see fatal_expansion_abort_status_by_context).
         let (o3, st3) = run("unset q; echo \"${q:?gone}\" 2>/dev/null; echo unreached");
         assert_eq!(o3, "");
-        assert_eq!(st3, 127);
+        assert_eq!(st3, 1);
+        let (_, st3c) = run_cmd_mode("unset q; echo \"${q:?gone}\" 2>/dev/null; echo unreached");
+        assert_eq!(st3c, 127);
     }
 
     #[test]
     fn fatal_expansion_abort_status_by_context() {
-        // bash aborts a nounset / `${var:?}` error with 127 in the *main shell
-        // environment* (top level, brace groups, function bodies) but with 1
-        // inside a subshell / command substitution — and a subshell error does
-        // not abort the enclosing shell. Bad indirect / subscript expansions are
-        // always 1. These mirror bash 5.2, verified directly.
+        // A nounset / `${var:?}` error aborts the current shell environment. Its
+        // exit status is *invocation-mode dependent* (verified against bash 5.2):
+        // `bash -c` yields 127, while a script file / stdin / interactive shell
+        // yields 1. The default `run` harness is interactive/stdin-like, so it
+        // sees 1; `run_cmd_mode` models `-c` and sees 127. Inside a subshell /
+        // command substitution the status is always 1 and the parent survives.
+        // Bad indirect / subscript expansions are always 1.
 
-        // Main shell (top level): nounset and `:?` both give 127.
-        assert_eq!(run("set -u; echo $undef; echo after").1, 127);
-        assert_eq!(run("unset q; echo ${q:?} 2>/dev/null; echo after").1, 127);
-        // Brace group is still the main shell environment -> 127.
-        assert_eq!(run("set -u; { echo $undef; }").1, 127);
-        // Function body runs in the main shell environment -> 127.
-        assert_eq!(run("f(){ echo $undef; }; set -u; f; echo after").1, 127);
-        // Bare and array assignments abort the main shell with 127 too.
-        assert_eq!(run("set -u; x=$undef").1, 127);
-        assert_eq!(run("set -u; a=($undef)").1, 127);
+        // Top level, interactive/stdin/script-like (`run`): nounset and `:?` -> 1.
+        assert_eq!(run("set -u; echo $undef; echo after").1, 1);
+        assert_eq!(run("unset q; echo ${q:?} 2>/dev/null; echo after").1, 1);
+        assert_eq!(run("set -u; { echo $undef; }").1, 1);
+        assert_eq!(run("f(){ echo $undef; }; set -u; f; echo after").1, 1);
+        assert_eq!(run("set -u; x=$undef").1, 1);
+        assert_eq!(run("set -u; a=($undef)").1, 1);
+
+        // The same top-level cases under `-c` command mode -> 127.
+        assert_eq!(run_cmd_mode("set -u; echo $undef; echo after").1, 127);
+        assert_eq!(run_cmd_mode("unset q; echo ${q:?} 2>/dev/null; echo after").1, 127);
+        assert_eq!(run_cmd_mode("set -u; { echo $undef; }").1, 127);
+        assert_eq!(run_cmd_mode("f(){ echo $undef; }; set -u; f; echo after").1, 127);
+        assert_eq!(run_cmd_mode("set -u; x=$undef").1, 127);
+        assert_eq!(run_cmd_mode("set -u; a=($undef)").1, 127);
 
         // A subshell aborts with 1 and does NOT abort the parent (which goes on
-        // to run `echo done` and exit 0).
+        // to run `echo done` and exit 0) — regardless of the outer mode.
         assert_eq!(run("(set -u; echo $undef)").1, 1);
         assert_eq!(run("(set -u; echo $undef); echo done").1, 0);
+        assert_eq!(run_cmd_mode("(set -u; echo $undef)").1, 1);
+        assert_eq!(run_cmd_mode("(set -u; echo $undef); echo done").1, 0);
         // Command substitution is a subshell: it fails with 1, parent survives.
         assert_eq!(run("x=$(set -u; echo $undef); echo $?").0, "1\n");
 
-        // Bad indirect / subscript expansions are always 1, even at the main
-        // shell (no 127 remap).
+        // Bad indirect / subscript expansions are always 1, in every mode.
         assert_eq!(run("echo ${!badref}").1, 1);
+        assert_eq!(run_cmd_mode("echo ${!badref}").1, 1);
     }
 
     #[test]
@@ -19039,10 +19076,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn set_nounset_aborts_on_unset() {
-        // A nounset reference at the main shell aborts with 127 (bash), not 1.
+        // A nounset reference aborts word expansion. bash's abort status is
+        // invocation-mode dependent: a `-c` command-mode shell exits 127, while
+        // a script/stdin/interactive shell exits 1. The `run` harness models the
+        // non-command-mode shell, so the status here is 1.
         let (o, s) = run("set -u; echo $undefined; echo after");
         assert_eq!(o, "");
-        assert_eq!(s, 127);
+        assert_eq!(s, 1);
+        // Under `-c` command mode, the same abort exits 127.
+        assert_eq!(run_cmd_mode("set -u; echo $undefined; echo after").1, 127);
         // A default/alternate operator suppresses the error.
         assert_eq!(run("set -u; echo ${undefined:-ok}").0, "ok\n");
         // Special parameters are always considered set.
@@ -19436,9 +19478,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn set_can_disable_options() {
         // `set +e` turns errexit back off.
         assert_eq!(run("set -e; set +e; false; echo after").0, "after\n");
-        // Long-form option names work too; the nounset abort exits 127 (bash).
+        // Long-form option names work too; the nounset abort exits 1 in a
+        // script/stdin shell (127 only under `-c` command mode).
         let (_, s) = run("set -o nounset; echo $undefined; echo after");
-        assert_eq!(s, 127);
+        assert_eq!(s, 1);
     }
 
     #[test]

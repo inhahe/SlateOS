@@ -5879,6 +5879,25 @@ impl Shell {
         }
     }
 
+    /// Expand a redirection target word the way bash does for a `>`/`<`/`>>`/
+    /// `>&`/`<&` (and `&>`) target: parameter/command/arithmetic expansion,
+    /// tilde expansion, then **field splitting and pathname (glob) expansion**,
+    /// exactly like a command argument. bash requires the result to be a single
+    /// word: zero fields (an unset/empty *unquoted* expansion) or more than one
+    /// (word splitting, or a glob matching several names) is an "ambiguous
+    /// redirect" — the redirect fails (status 1, command not run) and bash
+    /// echoes the word **as written** (`>$r` → "$r: ambiguous redirect"), not
+    /// the expansion. Here-documents and here-strings are exempt and never routed
+    /// through here. On success returns the single expanded field.
+    fn expand_redirect_target(&mut self, w: &Word) -> Result<String, String> {
+        let mut fields = self.expand_word(w, true);
+        if fields.len() == 1 {
+            Ok(fields.pop().unwrap_or_default())
+        } else {
+            Err(format!("{}: ambiguous redirect", crate::unparse::word_src(w)))
+        }
+    }
+
     fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, String> {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
@@ -5903,7 +5922,7 @@ impl Shell {
                         // `: < x`, `echo hi < x`). Validate the open here so the
                         // error surfaces uniformly for builtins and externals;
                         // downstream code re-opens the path when it actually reads.
-                        let path = self.expand_to_string(&r.target);
+                        let path = self.expand_redirect_target(&r.target)?;
                         if let Err(e) = std::fs::File::open(map_device_path(&path)) {
                             return Err(format!("{path}: {}", io_error_message(&e)));
                         }
@@ -5913,7 +5932,7 @@ impl Shell {
                         // `exec 3< file`: slurp the file now so a missing/unreadable
                         // path surfaces as an error at redirection time (bash also
                         // reports it then), then hand the bytes to `exec`.
-                        let path = self.expand_to_string(&r.target);
+                        let path = self.expand_redirect_target(&r.target)?;
                         match std::fs::read(map_device_path(&path)) {
                             Ok(bytes) => {
                                 plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
@@ -5952,7 +5971,7 @@ impl Shell {
                     // `&>file` / `&>>file` / `>&file` → both stdout and stderr to
                     // the file (bash: equivalent to `>file 2>&1`). noclobber does
                     // not apply to `&>` (bash treats it like `>|`).
-                    let target = self.expand_to_string(&r.target);
+                    let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
@@ -5967,7 +5986,7 @@ impl Shell {
                     plan.stderr_to_fd = None;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
-                    let target = self.expand_to_string(&r.target);
+                    let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::Append);
                     // With `set -C` (noclobber), a plain `>` refuses to truncate an
                     // existing regular file; `>|` (Clobber) and `>>` (Append)
@@ -6011,7 +6030,7 @@ impl Shell {
                     // target directly; otherwise flag the dup so the executor
                     // routes fd 2→fd 1 (or fd 1→fd 2) to the live sink (pipe,
                     // terminal, or capture), not just to a file path.
-                    let target = self.expand_to_string(&r.target);
+                    let target = self.expand_redirect_target(&r.target)?;
                     // `M>&word` / `M<&word`: after expansion, a dup target must
                     // be a descriptor number or `-` (close). A non-numeric
                     // expansion on fd 1 (`>&$f`, `1>&$f`, `1>&file`) means "both
@@ -6031,7 +6050,10 @@ impl Shell {
                             plan.stdout_to_fd = None;
                             plan.stderr_to_fd = None;
                         } else {
-                            return Err(format!("{target}: ambiguous redirect"));
+                            return Err(format!(
+                                "{}: ambiguous redirect",
+                                crate::unparse::word_src(&r.target)
+                            ));
                         }
                     } else if fd == 2 && target == "1" {
                         // fd 2's destination is being (re)set: drop any earlier
@@ -6073,6 +6095,23 @@ impl Shell {
                         // `M>&N` with N ≥ 3: duplicate fd M onto a user-space
                         // write descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
                         // `Shell::open_write_fds[N]` by write_bytes / run_external.
+                        // bash validates the source fd when setting up the
+                        // redirect and, on failure, echoes the *word as written*
+                        // (`>&$n` → "$n: Bad file descriptor", not the expanded
+                        // "5"). Reconstruct the source with `word_src` so the
+                        // diagnostic matches. A scratch fd opened earlier in the
+                        // *same* command's redirect list is staged in
+                        // `plan.extra_fds` (not yet in `open_write_fds`), so an
+                        // in-command dup like `3>&1 2>&3` must still resolve.
+                        let staged_write = plan.extra_fds.iter().any(|(f, op)| {
+                            *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
+                        });
+                        if !self.open_write_fds.contains_key(&n) && !staged_write {
+                            return Err(format!(
+                                "{}: Bad file descriptor",
+                                crate::unparse::word_src(&r.target)
+                            ));
+                        }
                         if fd == 2 {
                             plan.stderr_to_fd = Some(n);
                             plan.stderr = None;
@@ -6089,7 +6128,7 @@ impl Shell {
                     // `cat <&$r`. The dup shares the source cursor's offset (see
                     // `stdin_from_fd`), matching bash. A `<&-` closes; a
                     // non-numeric expansion is an ambiguous redirect.
-                    let target = self.expand_to_string(&r.target);
+                    let target = self.expand_redirect_target(&r.target)?;
                     if target == "-" {
                         if fd >= 3 {
                             // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
@@ -6107,7 +6146,12 @@ impl Shell {
                             if !self.open_fds.contains_key(&n)
                                 && !self.coproc_read_fds.contains_key(&n)
                             {
-                                return Err(format!("{n}: Bad file descriptor"));
+                                // Echo the word as written (`<&$r` → "$r"), as
+                                // bash does, not the expanded fd number.
+                                return Err(format!(
+                                    "{}: Bad file descriptor",
+                                    crate::unparse::word_src(&r.target)
+                                ));
                             }
                             plan.stdin_from_fd = Some(n);
                             plan.stdin = None;
@@ -6119,7 +6163,12 @@ impl Shell {
                         // unchanged. `exec 5<&3` (fd ≥ 3 input alias) is only
                         // meaningful for `exec`, which walks the raw redirects.
                     } else {
-                        return Err(format!("{target}: ambiguous redirect"));
+                        // A non-numeric input-dup target (`<&file`) is ambiguous;
+                        // bash echoes the word as written, not the expansion.
+                        return Err(format!(
+                            "{}: ambiguous redirect",
+                            crate::unparse::word_src(&r.target)
+                        ));
                     }
                 }
             }
@@ -22731,6 +22780,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("r=$(echo hi 4>&1 2>&4); echo \"[$r]\""), ("[hi]\n".into(), 0));
         // External command (`env echo`): the child inherits the resolved fds.
         assert_eq!(run("r=$(env echo hi 3>&1 2>&3); echo \"[$r]\""), ("[hi]\n".into(), 0));
+    }
+
+    #[test]
+    fn ambiguous_redirect_target_must_be_one_field() {
+        // A redirect target that expands to zero fields (unset/empty *unquoted*
+        // expansion) or more than one (word splitting) is an "ambiguous
+        // redirect": the redirect fails (status 1) and the command does not run.
+        // (The diagnostic text — the word echoed *as written* — is verified
+        // against bash via the CLI probe suite; the resolve-time error bypasses
+        // the stdout capture used here, so these assert status + non-execution.)
+        assert_eq!(run("echo hi >$undef; echo after").1, 0); // list continues
+        assert_eq!(run("echo hi >$undef").1, 1);
+        // Multi-word split target is ambiguous; a *quoted* multi-word target is
+        // a single field and succeeds (writes the file — checked in the redirect
+        // file tests). Here just the status.
+        assert_eq!(run("v='a b'; echo hi >$v").1, 1);
+        // Input and append forms behave the same.
+        assert_eq!(run("cat <$undef").1, 1);
+        assert_eq!(run("echo hi >>$undef").1, 1);
+        // The command does not run when its redirect is ambiguous: a following
+        // command in the list still executes (status of the list is the echo).
+        assert_eq!(run("echo NOPE >$undef; echo after").0, "after\n");
+        // A *quoted* empty expansion is a single (empty) field — NOT ambiguous;
+        // it attempts to open "" and fails with a plain open error (still 1, but
+        // via a different path). Distinguished here by the DIRSTACK-independent
+        // fact that an unquoted-empty and quoted-empty both fail: assert both 1.
+        assert_eq!(run("v=; echo hi >\"$v\"").1, 1);
+    }
+
+    #[test]
+    fn fd_dup_bad_descriptor_is_status_one() {
+        // An unopened output/input fd dup fails the redirect with status 1 and
+        // does not run the command. (The diagnostic echoes the word as written —
+        // `>&$n` → "$n: Bad file descriptor" — verified against bash via the CLI
+        // probes; the message bypasses this harness's stdout capture.)
+        assert_eq!(run("n=5; echo hi >&$n").1, 1);
+        assert_eq!(run("echo hi >&7").1, 1);
+        assert_eq!(run("r=8; read x <&$r").1, 1);
+        // A following command still runs (the failure is scoped to the redirect).
+        assert_eq!(run("echo NOPE >&7; echo after").0, "after\n");
+        // A validly-opened scratch fd dup still resolves (regression guard for
+        // the resolve-time validation not rejecting staged same-command fds).
+        assert_eq!(run("r=$(echo ok 3>&1 2>&3)").1, 0);
     }
 
     #[test]

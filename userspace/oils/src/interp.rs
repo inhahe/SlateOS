@@ -5145,13 +5145,33 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        let Some(sub) = argv.get(1) else {
+        // Parse leading options. `builtin` accepts none of its own, so any
+        // `-X` (other than `--`) is an invalid option, reported like bash.
+        let mut i = 1;
+        if let Some(tok) = argv.get(i) {
+            if tok == "--" {
+                i += 1;
+            } else if let Some(c) = tok.strip_prefix('-').and_then(|s| s.chars().next()) {
+                // `builtin` is dispatched at exec level, so its diagnostics take
+                // the explicit `out`/`redir` path (like `command`), not the
+                // stderr-stack helper used by ordinary builtins.
+                self.emit_cmd_stderr(
+                    out,
+                    redir,
+                    &format!("{}builtin: -{c}: invalid option", self.err_prefix()),
+                );
+                self.emit_cmd_stderr(out, redir, "builtin: usage: builtin [shell-builtin [arg ...]]");
+                self.last_status = 2;
+                return Flow::Next;
+            }
+        }
+        let Some(sub) = argv.get(i) else {
             self.last_status = 0;
             return Flow::Next;
         };
         if is_builtin(sub) {
             let sub = sub.clone();
-            return self.run_builtin(&sub, &argv[1..], assigns, out, stdin, redir);
+            return self.run_builtin(&sub, &argv[i..], assigns, out, stdin, redir);
         }
         self.emit_cmd_stderr(out, redir, &format!("{}builtin: {sub}: not a shell builtin", self.err_prefix()));
         self.last_status = 1;
@@ -9372,8 +9392,14 @@ impl Shell {
             }
             if let Some(flags) = a.strip_prefix('-')
                 && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 'h' | 'a' | 'r'))
             {
+                if let Some(c) = flags.chars().find(|c| !matches!(c, 'h' | 'a' | 'r')) {
+                    return self.builtin_invalid_option(
+                        "disown",
+                        &format!("-{c}"),
+                        "disown [-h] [-ar] [jobspec ... | pid ...]",
+                    );
+                }
                 for c in flags.chars() {
                     match c {
                         'h' => mark_hup = true,
@@ -9707,14 +9733,21 @@ impl Shell {
                 names.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
-                && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 'n' | 'a'))
-            {
+            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.chars().find(|c| !matches!(c, 'a' | 'd' | 'n' | 'p' | 's' | 'f'))
+                {
+                    return self.builtin_invalid_option(
+                        "enable",
+                        &format!("-{c}"),
+                        "enable [-a] [-dnps] [-f filename] [name ...]",
+                    );
+                }
                 for c in flags.chars() {
                     match c {
                         'n' => disable = true,
                         'a' => list_all = true,
+                        // d/p/s/f: accepted; osh does not distinguish special vs
+                        // regular vs dynamically-loaded builtin classes.
                         _ => {}
                     }
                 }
@@ -10370,16 +10403,40 @@ impl Shell {
 
     fn builtin_printf(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // `-v var`: store the result in the shell variable `var` instead of
-        // writing it to stdout.
+        // writing it to stdout. The name may be a separate token (`-v x`) or
+        // glued (`-vx`). `--` ends option processing; any other `-X` is a usage
+        // error (bash's getopt behavior).
         let mut i = 0;
         let mut assign_var: Option<String> = None;
-        if args.first().map(String::as_str) == Some("-v") {
-            let Some(name) = args.get(1) else {
-                self.errln(&format!("{}printf: -v: option requires an argument", self.err_prefix()));
-                return 2;
-            };
-            assign_var = Some(name.clone());
-            i = 2;
+        if let Some(first) = args.first() {
+            if first == "--" {
+                i = 1;
+            } else if let Some(glued) = first.strip_prefix("-v") {
+                if glued.is_empty() {
+                    // `-v NAME` — the name is the next token.
+                    let Some(name) = args.get(1) else {
+                        self.errln(&format!(
+                            "{}printf: -v: option requires an argument",
+                            self.err_prefix()
+                        ));
+                        return 2;
+                    };
+                    assign_var = Some(name.clone());
+                    i = 2;
+                } else {
+                    // `-vNAME` — the name is glued to the flag.
+                    assign_var = Some(glued.to_string());
+                    i = 1;
+                }
+            } else if let Some(flags) = first.strip_prefix('-').filter(|f| !f.is_empty()) {
+                // A leading option that is not `-v`/`--` is invalid.
+                let opt: String = std::iter::once('-').chain(flags.chars().take(1)).collect();
+                return self.builtin_invalid_option(
+                    "printf",
+                    &opt,
+                    "printf [-v var] format [arguments]",
+                );
+            }
         }
         let Some(fmt) = args.get(i) else {
             // No format operand (`printf`, or `printf -v var` with nothing
@@ -11557,10 +11614,11 @@ impl Shell {
                             'o' => opt_o = true,
                             'p' => reinput = true,
                             _ => {
-                                self.emit_stderr(
-                                    format!("{}shopt: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
+                                return self.builtin_invalid_option(
+                                    "shopt",
+                                    &format!("-{c}"),
+                                    "shopt [-pqsu] [-o] [optname ...]",
                                 );
-                                return 2;
                             }
                         }
                     }
@@ -12927,6 +12985,17 @@ impl Shell {
                 "-s" => actions.push("service".into()),
                 "-u" => actions.push("user".into()),
                 "-v" => actions.push("variable".into()),
+                // An unrecognized `-X` (before `--`) is an invalid option,
+                // reported like bash. A bare word (no leading `-`) is the
+                // completion word.
+                _ if a.starts_with('-') && a.len() > 1 => {
+                    let c = a.chars().nth(1).unwrap_or('-');
+                    return self.builtin_invalid_option(
+                        "compgen",
+                        &format!("-{c}"),
+                        "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]",
+                    );
+                }
                 _ => {
                     if !word_seen {
                         word = args[i].clone();
@@ -15880,7 +15949,7 @@ const RLIMIT_SPECS: &[RlimitSpec] = &[
     RlimitSpec { opt: 'x', label: "file locks", unit: "", default: None },
 ];
 
-const ULIMIT_USAGE: &str = "ulimit: usage: ulimit [-SHacdefilmnpqrstuvx] [limit]\n";
+const ULIMIT_USAGE: &str = "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]\n";
 
 /// Build the initial `(soft, hard)` limit table. Soft = the spec default,
 /// hard = unlimited (osh does not enforce, so an unlimited hard ceiling is the
@@ -25163,6 +25232,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("jobs -Z", "jobs: -Z: invalid option", "jobs: usage: jobs [-lnprs]"),
             ("trap -Z", "trap: -Z: invalid option", "trap: usage: trap [-lp]"),
             ("command -Z ls", "command: -Z: invalid option", "command: usage: command [-pVv]"),
+            ("builtin -Z", "builtin: -Z: invalid option", "builtin: usage: builtin [shell-builtin"),
+            ("compgen -Z", "compgen: -Z: invalid option", "compgen: usage: compgen [-abcdefgjksuv]"),
+            ("disown -Z", "disown: -Z: invalid option", "disown: usage: disown [-h] [-ar]"),
+            ("ulimit -Z", "ulimit: -Z: invalid option", "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT]"),
+            ("enable -Z", "enable: -Z: invalid option", "enable: usage: enable [-a] [-dnps]"),
+            ("shopt -Z", "shopt: -Z: invalid option", "shopt: usage: shopt [-pqsu]"),
+            ("printf -Z", "printf: -Z: invalid option", "printf: usage: printf [-v var]"),
         ];
         for (src, diag, usage) in cases {
             let (o, s) = run(&format!("{src} 2>&1"));
@@ -25172,7 +25248,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         // No false positives: valid options on each of these still succeed.
-        for src in ["unset -v x", "cd -P .", "pwd -L", "hash -r", "alias -p", "type -t echo", "jobs -l"] {
+        for src in [
+            "unset -v x", "cd -P .", "pwd -L", "hash -r", "alias -p", "type -t echo", "jobs -l",
+            "builtin echo hi", "compgen -W 'aa ab' a", "printf -vx '%d' 5",
+        ] {
             let (o, s) = run(src);
             assert_eq!(s, 0, "{src}: expected success, got {s} ({o:?})");
         }

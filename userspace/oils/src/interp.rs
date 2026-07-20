@@ -3513,8 +3513,16 @@ impl Shell {
     /// slice, `$0` is *not* included here).
     fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<String> {
         // `@k` / `@K` are key-aware: they interleave subscripts and values
-        // rather than transforming each value in place.
-        if let BulkOp::Transform { op: k @ ('k' | 'K') } = op {
+        // rather than transforming each value in place. This is an *array*-only
+        // transform, though: on the positional parameters (`${@@k}`/`${*@K}`)
+        // bash degrades it to `@Q` — each value quoted, no interleaved index —
+        // so only route real indexed/associative arrays through the key-value
+        // path and let the positionals fall through to the per-element map
+        // (where `transform_value` quotes `k`/`K` like `Q`).
+        if let BulkOp::Transform { op: k @ ('k' | 'K') } = op
+            && name != "@"
+            && name != "*"
+        {
             return self.bulk_keyvalue(name, *k == 'K');
         }
         // `@A` / `@a` over `[@]`/`[*]` are collection-wide, not per-element:
@@ -3588,12 +3596,19 @@ impl Shell {
             (self.array_keys(name), self.array_elements(name))
         };
         if quoted {
-            let body = keys
+            let mut body = keys
                 .iter()
                 .zip(&values)
                 .map(|(k, v)| format!("{k} {}", quote_declare_value(v)))
                 .collect::<Vec<_>>()
                 .join(" ");
+            // bash appends a trailing space to the `@K` field for an
+            // *associative* array (`[m "1" ]`) but not for an indexed array or
+            // the positional params (`[0 "x" 1 "y"]`). Mirror that quirk so the
+            // re-inputtable form round-trips byte-for-byte.
+            if !body.is_empty() && self.assoc.contains_key(&self.resolve_ref_name(name)) {
+                body.push(' ');
+            }
             vec![body]
         } else {
             keys.into_iter()
@@ -21074,15 +21089,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn param_transform_keyvalue() {
         // `@k` interleaves subscripts and values as separate words.
         assert_eq!(run("a=(x y z); echo ${a[@]@k}").0, "0 x 1 y 2 z\n");
-        // `@K` yields one field: subscripts with double-quoted values.
+        // `@K` yields one field: subscripts with double-quoted values. An
+        // *indexed* array's field has no trailing space.
         assert_eq!(run("a=(x y); echo \"${a[@]@K}\"").0, "0 \"x\" 1 \"y\"\n");
+        // An *associative* array's `@K` field carries a bash trailing space so
+        // the re-inputtable form round-trips exactly.
+        assert_eq!(
+            run("declare -A h=([m]=1); echo \"[${h[@]@K}]\"").0,
+            "[m \"1\" ]\n"
+        );
         // Associative arrays interleave string keys.
         assert_eq!(
             run("declare -A m; m[a]=1; m[b]=2; echo ${m[@]@k}").0,
             "a 1 b 2\n"
         );
-        // Positional parameters key from 1.
-        assert_eq!(run("set -- p q; echo ${@@k}").0, "1 p 2 q\n");
+        // The positional parameters are not an array, so `@k`/`@K` degrade to
+        // `@Q` (each value quoted, no interleaved index) — matching bash, which
+        // reserves the key-value interleave for real indexed/associative arrays.
+        assert_eq!(run("set -- p q; echo ${@@k}").0, "'p' 'q'\n");
+        assert_eq!(run("set -- p q; echo ${@@K}").0, "'p' 'q'\n");
         // `@k` keeps each word separate even when quoted.
         assert_eq!(
             run("a=('x 1' y); for w in \"${a[@]@k}\"; do echo \"[$w]\"; done").0,

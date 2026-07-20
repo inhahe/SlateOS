@@ -90,6 +90,45 @@ fn dash_c_command_name_and_args() {
 }
 
 #[test]
+fn unknown_option_reports_invalid_option_and_exits_2() {
+    let (_out, err, code) = run_osh(&["-z"], "");
+    assert_eq!(code, 2);
+    let first = err.lines().next().unwrap_or("");
+    assert_eq!(first, "osh: -z: invalid option");
+    assert!(err.contains("Usage:"), "usage summary missing: {err:?}");
+}
+
+#[test]
+fn invalid_letter_in_cluster_reports_the_offending_letter() {
+    // bash applies `x` then aborts on the unknown `z`, naming `-z` (not `-xz`).
+    let (_out, err, code) = run_osh(&["-xz"], "");
+    assert_eq!(code, 2);
+    assert_eq!(err.lines().next().unwrap_or(""), "osh: -z: invalid option");
+}
+
+#[test]
+fn plus_sign_unknown_option_keeps_its_sign() {
+    let (_out, err, code) = run_osh(&["+q"], "");
+    assert_eq!(code, 2);
+    assert_eq!(err.lines().next().unwrap_or(""), "osh: +q: invalid option");
+}
+
+#[test]
+fn unknown_long_option_reports_invalid_option() {
+    let (_out, err, code) = run_osh(&["--nope"], "");
+    assert_eq!(code, 2);
+    assert_eq!(err.lines().next().unwrap_or(""), "osh: --nope: invalid option");
+}
+
+#[test]
+fn bare_dash_reads_commands_from_stdin() {
+    // `osh -` (legacy): end options, read stdin, operands become $1….
+    let (out, _err, code) = run_osh(&["-", "aa", "bb"], "echo \"$1-$2\"\n");
+    assert_eq!(out, "aa-bb\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn double_dash_makes_dash_c_a_script_path() {
     // After `--`, `-c` is a *file* name, not the command flag; opening it fails.
     let (_out, err, code) = run_osh(&["--", "-c"], "");

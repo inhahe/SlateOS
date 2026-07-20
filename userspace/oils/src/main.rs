@@ -134,42 +134,55 @@ fn run(args: &[String]) -> i32 {
                 }
                 base += 2;
             }
+            // Bare `-`: end option processing and read commands from stdin,
+            // like `-s` with no operands (a legacy bash spelling). The operands
+            // that follow become positional parameters.
+            "-" => {
+                base += 1;
+                mode = InvokeMode::Stdin;
+                break;
+            }
+            // osh's `-V` version shorthand is not a `set` letter; keep it out of
+            // the option-cluster parser so it reaches the version dispatch below.
+            "-V" => break,
             // A `-`/`+` cluster of single-letter invocation options: `set`
             // letters (`-e`, `-x`, `-eux`, `+x`), `-i`/`+i` (force
             // interactivity), and — for `-` — the mode letters `-c`/`-s`, which
-            // may be bundled (`-ec`, `-ic`, `-cs`). A cluster containing any
-            // other letter is *not* an options cluster: it falls through to the
-            // dispatch so `osh -V` (version) and an unknown `-z` are handled
-            // there, preserving their existing behaviour.
-            s if (s.starts_with('-') || s.starts_with('+'))
-                && s.len() > 1
-                && !s.starts_with("--")
-                && s[1..].chars().all(|c| {
-                    SET_OPTION_LETTERS.contains(c)
-                        || c == 'i'
-                        || (s.starts_with('-') && (c == 'c' || c == 's'))
-                }) =>
-            {
+            // may be bundled (`-ec`, `-ic`, `-cs`). bash parses these getopt-
+            // style: valid letters are applied left-to-right, and the first
+            // unrecognised letter aborts with `<opt>: invalid option` (exit 2),
+            // still having applied the good letters before it.
+            s if (s.starts_with('-') || s.starts_with('+')) && s.len() > 1 && !s.starts_with("--") => {
                 let enable = s.starts_with('-');
+                let sign = if enable { '-' } else { '+' };
                 let mut set_letters = String::new();
                 let mut found_mode = false;
                 for c in s[1..].chars() {
                     match c {
                         'i' => force_interactive = Some(enable),
-                        // Mode letters only appear with `-` (guarded above).
-                        'c' => {
+                        // Mode letters only select a mode with the `-` sign.
+                        'c' if enable => {
                             mode = InvokeMode::Command;
                             found_mode = true;
                         }
-                        's' => {
+                        's' if enable => {
                             mode = InvokeMode::Stdin;
                             found_mode = true;
                         }
-                        _ => set_letters.push(c),
+                        _ if SET_OPTION_LETTERS.contains(c) => set_letters.push(c),
+                        // First invalid letter: apply the good ones gathered so
+                        // far (bash's behaviour), then report and abort.
+                        _ => {
+                            if !set_letters.is_empty() {
+                                let _ = sh.apply_short_options(&set_letters, enable);
+                            }
+                            eprintln!("osh: {sign}{c}: invalid option");
+                            eprint_option_usage();
+                            return 2;
+                        }
                     }
                 }
                 if !set_letters.is_empty() {
-                    // Every letter was validated by the guard above.
                     let _ = sh.apply_short_options(&set_letters, enable);
                 }
                 base += 1;
@@ -237,7 +250,11 @@ fn run(args: &[String]) -> i32 {
                 }
             }
             Some(other) => {
-                eprintln!("osh: unrecognized option '{other}'");
+                // An unrecognised long option (`--foo`); bare `-`/`--`, `-V`,
+                // and short clusters are handled above. Match bash's
+                // `<opt>: invalid option` wording and usage summary.
+                eprintln!("osh: {other}: invalid option");
+                eprint_option_usage();
                 2
             }
             None => {
@@ -346,6 +363,19 @@ fn print_prompt(sh: &Shell) {
 fn print_continuation() {
     print!("> ");
     let _ = io::stdout().flush();
+}
+
+/// Print a concise invocation-usage summary to stderr, mirroring the summary
+/// bash emits after an `invalid option` error (adapted to osh's own option set).
+/// Kept short on purpose — the full feature list lives in `--help`.
+fn eprint_option_usage() {
+    eprintln!("Usage:\tosh [option] ... [script-file [arg ...]]");
+    eprintln!("\tosh [option] ... -c command [name [arg ...]]");
+    eprintln!("\tosh [option] ... -s [arg ...]");
+    eprintln!("Shell options:");
+    eprintln!("\t-abefhkmnptuvxBCEHPT or -o option");
+    eprintln!("\t-ics or -c command\t(invocation only)");
+    eprintln!("Run 'osh --help' for the full option list.");
 }
 
 fn print_help() {

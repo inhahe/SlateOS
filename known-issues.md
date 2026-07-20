@@ -3556,34 +3556,36 @@ value (scripts that care read `complete -p NAME`, not the unordered full dump) a
 would require hard-coding bash's hash function. Fixing (1) would also make (2)
 moot in practice (real completion never depends on listing order).
 
-### TD-OILS-INVALID-OPTION-MSG. `osh`'s unknown-invocation-option error differs from bash (wording + no usage dump, and reports the whole token not the offending letter) — MINOR, cosmetic 2026-07-20
+### TD-OILS-INVALID-OPTION-MSG. `osh`'s unknown-invocation-option error differs from bash (wording + no usage dump, and reports the whole token not the offending letter) — ✅ RESOLVED 2026-07-20
 
-**Where:** `userspace/oils/src/main.rs` — the `Some(other) => { eprintln!("osh:
-unrecognized option '{other}'"); 2 }` arm of the invocation-mode dispatch, and the
-`_ => break` fall-through in the leading-option `while` loop.
+**Where:** `userspace/oils/src/main.rs` — the leading-option `while` loop's
+short-cluster arm and the `Some(other)` invocation-mode dispatch arm, plus the
+new `eprint_option_usage()` helper.
 
-**What:** for an unrecognised leading option, bash prints `bash: -z: invalid
-option` followed by a multi-line `Usage:` block listing long options and the
-`-abefhkmnptuvxBCEHPT` / `-ilrsD -c -O` invocation summary, then exits 2. osh
-prints a single line `osh: unrecognized option '-z'` and exits 2. For a *cluster*
-containing an unknown letter (`-xz`), bash processes the valid letters first and
-then errors on the specific bad letter (`-z: invalid option`); osh's option
-loop instead falls through as soon as it sees the cluster is not a pure options
-cluster and reports the whole token (`unrecognized option '-xz'`) without
-applying the leading valid letters.
+**What (was):** for an unrecognised leading option, bash prints `bash: -z:
+invalid option` followed by a `Usage:` block, then exits 2. osh printed a single
+line `osh: unrecognized option '-z'` and exited 2. For a *cluster* containing an
+unknown letter (`-xz`), bash processes the valid letters first and then errors on
+the specific bad letter (`-z: invalid option`); osh reported the whole token
+(`unrecognized option '-xz'`) without applying the leading valid letters.
 
-**Impact:** cosmetic only. The **exit code already matches bash (2)**, and every
-*valid* invocation form — including the newly-added bundled mode clusters
-(`-ec`, `-ic`, `-cx`) and `-s` — behaves identically. Scripts that branch on the
-exact stderr text of a bad-option error are vanishingly rare.
+**Fix (2026-07-20):** the short-option cluster arm now parses getopt-style —
+valid letters (`set` options, `-i`, and mode letters `-c`/`-s`) are applied
+left-to-right, and the first unrecognised letter aborts with `osh: -<letter>:
+invalid option` (the offending *letter*, keeping its `-`/`+` sign) followed by a
+concise osh `Usage:` summary, exit 2. The `Some(other)` dispatch arm (unknown
+`--long` options) uses the same `<opt>: invalid option` wording + usage. As a
+bonus, bare `-` now ends option processing and reads commands from stdin with the
+operands as positional parameters (matching bash's legacy spelling), where it
+previously errored. Regression coverage: `tests/cli_options.rs`
+(`unknown_option_reports_invalid_option_and_exits_2`,
+`invalid_letter_in_cluster_reports_the_offending_letter`,
+`plus_sign_unknown_option_keeps_its_sign`, `unknown_long_option_reports_invalid_option`,
+`bare_dash_reads_commands_from_stdin`).
 
-**Proper fix (deferred):** rework the invalid-option path to (1) match bash's
-`osh: -{letter}: invalid option` wording, reporting the first offending letter
-by scanning the cluster rather than echoing the whole token, and (2) emit an
-osh-appropriate `Usage:` summary (the `--help` synopsis is already available via
-`print_help`). Deferred because it is purely cosmetic and the correctness-bearing
-behavior (exit 2, all valid forms parsed) is already right; not worth expanding
-the bundled-flag change that surfaced it.
+**Residual:** osh's `Usage:` text is osh-flavored (names `osh`, not the host bash
+path) and shorter than bash's full GNU-long-option dump — exact byte-parity of
+the usage block is neither possible (different program name) nor desirable.
 
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 

@@ -53546,3 +53546,22 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   so this is cosmetic. Proper fix if ever needed: compute a side-effect-free
 ##   trace string per stage in the parent (only when every stage's command word
 ##   is expansion-free), else accept the racy order.
+
+## Known limitation (osh, 2026-07-19): several `set -o` options are listed but inert
+##   `set -o` now lists the full standard bash option set (27 names, matching a
+##   Linux bash) so listings and validation match bash, and the following are
+##   fully functional: allexport, braceexpand (set -B/+B), errexit, errtrace,
+##   functrace, noclobber, noexec, noglob, nounset, pipefail, xtrace (plus the
+##   always-on defaults hashall and interactive-comments). The remaining standard
+##   options are accepted by `set -o NAME`/`set +o NAME` and reported truthfully
+##   in `set -o`/`$SHELLOPTS`, but do NOT yet change behavior: emacs, vi, history,
+##   histexpand (line-editing — osh has no interactive line editor), monitor,
+##   notify (job-control notification), ignoreeof, keyword, onecmd, physical,
+##   posix, nolog, privileged, verbose. They are modeled as off (their bash
+##   default in non-interactive `-c`/script mode). Proper fix if/when needed:
+##   give each real behavior — most are interactive-only (emacs/vi/history/
+##   ignoreeof) and thus low priority for a non-interactive-first shell; physical
+##   (cd -P symlink handling), posix mode, and verbose (echo input as read) are
+##   the most script-relevant to implement first. State lives in the individual
+##   bool fields plus shell_option_enabled() (interp.rs); STANDARD_SET_O_OPTIONS
+##   is the canonical name list.

@@ -215,6 +215,43 @@ fn io_error_message(e: &std::io::Error) -> String {
     }
 }
 
+/// The full set of standard bash `set -o` option names, in bash's alphabetical
+/// listing order (matching a Linux bash, which — unlike Cygwin/MSYS — does not
+/// expose `igncr`). Used both to validate `set -o NAME` / `shopt -o NAME` and to
+/// drive the `set -o` listing so osh's output matches bash even for options it
+/// models as always-on defaults (`hashall`, `interactive-comments`) or does not
+/// yet act on (line-editing `emacs`/`vi`, job-control `monitor`/`notify`,
+/// `posix`, etc.). Truthful state comes from [`Shell::shell_option_enabled`].
+const STANDARD_SET_O_OPTIONS: &[&str] = &[
+    "allexport",
+    "braceexpand",
+    "emacs",
+    "errexit",
+    "errtrace",
+    "functrace",
+    "hashall",
+    "histexpand",
+    "history",
+    "ignoreeof",
+    "interactive-comments",
+    "keyword",
+    "monitor",
+    "noclobber",
+    "noexec",
+    "noglob",
+    "nolog",
+    "notify",
+    "nounset",
+    "onecmd",
+    "physical",
+    "pipefail",
+    "posix",
+    "privileged",
+    "verbose",
+    "vi",
+    "xtrace",
+];
+
 /// Diagnostic + exit status for a failed `PCommand::spawn` of a command word.
 ///
 /// bash distinguishes two cases:
@@ -585,6 +622,11 @@ pub struct Shell {
     /// `set -a` (allexport): automatically mark every subsequently-assigned
     /// variable for export. Consulted in `apply_assignment`.
     allexport: bool,
+    /// `set -B` (braceexpand / `set -o braceexpand`): perform brace expansion
+    /// (`{a,b}`, `{1..5}`). On by default, as in bash; `set +B` disables it so
+    /// braces are left literal. Consulted at every brace-expansion call site via
+    /// [`Shell::expand_braces_opt`].
+    braceexpand: bool,
     /// `set -C` (noclobber): a plain `>` refuses to truncate an existing regular
     /// file; `>|` overrides. Consulted in `resolve_redirects`.
     noclobber: bool,
@@ -847,6 +889,7 @@ impl Shell {
             xtrace: false,
             noglob: false,
             allexport: false,
+            braceexpand: true,
             noclobber: false,
             noexec: false,
             functrace: false,
@@ -1714,7 +1757,7 @@ impl Shell {
             Some(words) => {
                 let mut v = Vec::new();
                 for w in words {
-                    for bw in crate::brace::expand_braces(w) {
+                    for bw in self.expand_braces_opt(w) {
                         v.extend(self.expand_word(&bw, true));
                     }
                 }
@@ -1782,7 +1825,7 @@ impl Shell {
             Some(words) => {
                 let mut v = Vec::new();
                 for w in words {
-                    for bw in crate::brace::expand_braces(w) {
+                    for bw in self.expand_braces_opt(w) {
                         v.extend(self.expand_word(&bw, true));
                     }
                 }
@@ -2790,6 +2833,7 @@ impl Shell {
             xtrace: self.xtrace,
             noglob: self.noglob,
             allexport: self.allexport,
+            braceexpand: self.braceexpand,
             noclobber: self.noclobber,
             noexec: self.noexec,
             functrace: self.functrace,
@@ -3176,7 +3220,7 @@ impl Shell {
                             // Brace expansion runs first (textually), so
                             // `a=({1..3})` and `a=(x{a,b})` expand like command
                             // words before parameter/other expansion.
-                            for bw in crate::brace::expand_braces(w) {
+                            for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
                                     let v = self.apply_elem_attrs(&a.name, v);
                                     elems.insert(next, v);
@@ -4118,7 +4162,7 @@ impl Shell {
             }
             // Brace expansion runs first (textually, before parameter/other
             // expansion), turning one word into one or more words.
-            for bw in crate::brace::expand_braces(w) {
+            for bw in self.expand_braces_opt(w) {
                 argv.extend(self.expand_word(&bw, true));
             }
         }
@@ -5961,6 +6005,17 @@ impl Shell {
 
     // ---- expansion ----------------------------------------------------------
 
+    /// Brace-expand `word` when `set -B` (braceexpand, the default) is enabled;
+    /// otherwise return the word unchanged so braces stay literal (`set +B`).
+    /// This is the single gate consulted at every brace-expansion call site.
+    fn expand_braces_opt(&self, word: &Word) -> Vec<Word> {
+        if self.braceexpand {
+            crate::brace::expand_braces(word)
+        } else {
+            vec![word.clone()]
+        }
+    }
+
     /// Expand a word, optionally field-splitting the results of unquoted
     /// expansions. Returns zero or more fields.
     fn expand_word(&mut self, word: &Word, split: bool) -> Vec<String> {
@@ -6745,7 +6800,8 @@ impl Shell {
 
     /// Build the value of `$-`: the currently-enabled single-letter shell
     /// option flags. We report the flags for the options we actually model,
-    /// plus `h` (hashall) and `B` (brace expansion) which are always on here.
+    /// plus `h` (hashall) which is always on here; `B` (brace expansion) is on
+    /// by default but is cleared by `set +B`.
     /// `-o`-only options without a letter (e.g. `pipefail`) are not included,
     /// matching bash. Order follows bash's fixed flag-table ordering.
     fn option_flags(&self) -> String {
@@ -6759,7 +6815,7 @@ impl Shell {
             ('n', self.noexec),
             ('u', self.nounset),
             ('x', self.xtrace),
-            ('B', true),
+            ('B', self.braceexpand),
             ('C', self.noclobber),
             // bash's `shell_flags[]` orders `E` (errtrace) and `T` (functrace)
             // after `C`: the table is …,B,C,E,H,P,T, so `E` precedes `T` (with
@@ -10640,35 +10696,7 @@ impl Shell {
         // The full set of standard `set -o` option names, so a real option like
         // `braceexpand` isn't rejected even though osh doesn't model it; only a
         // truly unknown name is an error (matching bash).
-        const SETO_NAMES: &[&str] = &[
-            "allexport",
-            "braceexpand",
-            "emacs",
-            "errexit",
-            "errtrace",
-            "functrace",
-            "hashall",
-            "histexpand",
-            "history",
-            "ignoreeof",
-            "interactive-comments",
-            "keyword",
-            "monitor",
-            "noclobber",
-            "noexec",
-            "noglob",
-            "nolog",
-            "notify",
-            "nounset",
-            "onecmd",
-            "physical",
-            "pipefail",
-            "posix",
-            "privileged",
-            "verbose",
-            "vi",
-            "xtrace",
-        ];
+        const SETO_NAMES: &[&str] = STANDARD_SET_O_OPTIONS;
 
         // Set/unset mode.
         if set || unset {
@@ -10936,6 +10964,7 @@ impl Shell {
             'n' => self.noexec = enable,
             'T' => self.functrace = enable,
             'E' => self.errtrace = enable,
+            'B' => self.braceexpand = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10955,6 +10984,7 @@ impl Shell {
             "noexec" => self.noexec = enable,
             "functrace" => self.functrace = enable,
             "errtrace" => self.errtrace = enable,
+            "braceexpand" => self.braceexpand = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10972,7 +11002,11 @@ impl Shell {
     /// deliberately since option toggles are the legitimate mutation path.
     fn refresh_shellopts(&mut self) {
         // Always-on defaults for a non-interactive shell.
-        let mut opts: Vec<&str> = vec!["braceexpand", "hashall", "interactive-comments"];
+        let mut opts: Vec<&str> = vec!["hashall", "interactive-comments"];
+        // braceexpand is on by default but can be cleared with `set +B`.
+        if self.braceexpand {
+            opts.push("braceexpand");
+        }
         if self.allexport {
             opts.push("allexport");
         }
@@ -11010,24 +11044,13 @@ impl Shell {
     /// Render the `set -o` / `set +o` option listing. With `reinput` false
     /// (`set -o`), each line is `name<pad>on|off`; with `reinput` true
     /// (`set +o`), each line is a re-inputtable `set -o name` / `set +o name`.
-    /// Only the options this shell actually models are listed, in alphabetical
-    /// order, so the reported state is always truthful.
+    /// Lists the full set of standard bash options (in bash's alphabetical
+    /// order), so `set -o` output matches bash even for options osh models as
+    /// always-on defaults or does not yet act on. Each option's reported state
+    /// comes from [`Shell::shell_option_enabled`], so it is always truthful.
     fn format_option_list(&self, reinput: bool) -> String {
-        // Alphabetical, matching bash's ordering of these names.
-        let opts = [
-            "allexport",
-            "errexit",
-            "errtrace",
-            "functrace",
-            "noclobber",
-            "noexec",
-            "noglob",
-            "nounset",
-            "pipefail",
-            "xtrace",
-        ];
         let mut s = String::new();
-        for name in opts {
+        for name in STANDARD_SET_O_OPTIONS {
             let on = self.shell_option_enabled(name);
             if reinput {
                 let flag = if on { "-o" } else { "+o" };
@@ -11053,10 +11076,20 @@ impl Shell {
             "xtrace" => self.xtrace,
             "noglob" => self.noglob,
             "allexport" => self.allexport,
+            "braceexpand" => self.braceexpand,
             "noclobber" => self.noclobber,
             "noexec" => self.noexec,
             "functrace" => self.functrace,
             "errtrace" => self.errtrace,
+            // Always-on defaults for a non-interactive shell, mirroring bash's
+            // `-c`/script `set -o` output (these have no osh-tunable state but
+            // must report their true default so listings match bash).
+            "hashall" | "interactive-comments" => true,
+            // Remaining standard options are modeled as off (their bash default
+            // in non-interactive mode): emacs/vi/history/histexpand line-editing,
+            // job-control (monitor/notify), posix, and the rare toggles. They are
+            // listed by `set -o` for compatibility but are currently inert; see
+            // the STANDARD_SET_O_OPTIONS note.
             _ => false,
         }
     }
@@ -22524,6 +22557,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run("set -o");
         assert!(o.contains("noglob"), "set -o list: {o:?}");
         assert!(o.contains("allexport"), "set -o list: {o:?}");
+    }
+
+    #[test]
+    fn set_b_toggles_brace_expansion() {
+        // `set +B` (and `set +o braceexpand`) leave braces literal; `set -B`
+        // re-enables expansion. Default (unset) expands, matching bash.
+        assert_eq!(run("echo {1..3}").0, "1 2 3\n");
+        assert_eq!(run("set +B; echo {1..3}").0, "{1..3}\n");
+        assert_eq!(run("set +o braceexpand; echo {a,b}").0, "{a,b}\n");
+        assert_eq!(run("set +B; set -B; echo {a,b}").0, "a b\n");
+        // The option is reflected in `$-`, `set -o braceexpand` query, and
+        // `[ -o braceexpand ]`.
+        assert_eq!(run("set +B; case $- in *B*) echo has;; *) echo no;; esac").0, "no\n");
+        assert_eq!(run("[ -o braceexpand ]; echo $?").0, "0\n");
+        assert_eq!(run("set +B; [ -o braceexpand ]; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn set_o_lists_all_standard_options() {
+        // `set -o` lists the full standard bash option set (27 names on a
+        // Linux-like target, i.e. excluding Cygwin's `igncr`), with the
+        // always-on non-interactive defaults reported on.
+        let (o, _) = run("set -o");
+        let names: Vec<&str> = o.lines().map(|l| l.split('\t').next().unwrap_or("").trim()).collect();
+        assert_eq!(names.len(), 27, "listing: {o:?}");
+        for expected in ["braceexpand", "hashall", "interactive-comments", "posix", "vi", "emacs"] {
+            assert!(names.contains(&expected), "missing {expected}: {o:?}");
+        }
+        assert!(o.contains("hashall        \ton"), "hashall should be on: {o:?}");
+        assert!(o.contains("interactive-comments\ton"), "ic should be on: {o:?}");
+        assert!(o.contains("posix          \toff"), "posix should be off: {o:?}");
     }
 
     #[test]

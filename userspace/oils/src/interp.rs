@@ -845,6 +845,12 @@ pub struct Shell {
     /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
     /// a handler's own commands from recursively re-triggering the same trap.
     in_trap: bool,
+    /// Set by a self-directed `kill` (`kill -TERM $$`) whose signal has no trap
+    /// and whose default disposition is to terminate: the requested exit status
+    /// (128 + signum). The `kill` builtin arm of [`Shell::run_builtin`] converts
+    /// it into a `Flow::Exit` after the builtin returns, since a builtin can only
+    /// hand back an `i32` status and needs this side channel to unwind the shell.
+    pending_signal_exit: Option<i32>,
     /// Background jobs started with `&`, tracked so `jobs`/`wait` can report and
     /// reap them. NOT inherited by subshell clones (a subshell has no jobs).
     /// Each new job takes the lowest unused job number (bash semantics), so the
@@ -959,6 +965,7 @@ impl Shell {
             trap_shadow: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
+            pending_signal_exit: None,
             jobs: Vec::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
@@ -1162,6 +1169,29 @@ impl Shell {
     pub fn run_source(&mut self, src: &str) -> i32 {
         let mut out = Out::Inherit;
         self.run_source_out(src, &mut out)
+    }
+
+    /// Like [`Shell::run_source`] but returns the control-flow outcome instead of
+    /// collapsing a `Flow::Exit` into a status code. Used by signal-trap delivery
+    /// so an `exit` inside a trap body unwinds the shell rather than being
+    /// swallowed. A parse error yields `Flow::Next` (status 2 recorded), matching
+    /// `run_source_out`.
+    fn run_source_flow(&mut self, src: &str) -> Flow {
+        let mut out = Out::Inherit;
+        let parsed = if self.aliases_enabled() {
+            parse_with_aliases(src, &self.aliases)
+        } else {
+            parse(src)
+        };
+        let prog = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                self.errln(&format_parse_error(&e, &self.err_prefix()));
+                self.last_status = 2;
+                return Flow::Next;
+            }
+        };
+        self.exec_program_top(&prog, &mut out, &StdinSrc::Inherit)
     }
 
     /// Parse and execute `src`, sending its standard output to the caller's
@@ -3064,6 +3094,7 @@ impl Shell {
             // boundary. `false` here means "not yet fired".
             exit_trap_done: false,
             in_trap: false,
+            pending_signal_exit: None,
             // A subshell does not inherit the parent's job table.
             jobs: Vec::new(),
             // The umask is a process attribute, inherited by subshells.
@@ -7834,7 +7865,15 @@ impl Shell {
             "compopt" => self.builtin_compopt(args),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
-            "kill" => self.builtin_kill(args, out, redir),
+            "kill" => {
+                let rc = self.builtin_kill(args, out, redir);
+                // A self-directed `kill` with a terminating default disposition
+                // unwinds the shell (128 + signum), via this side channel.
+                if let Some(code) = self.pending_signal_exit.take() {
+                    flow = Flow::Exit(code);
+                }
+                rc
+            }
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
             "fg" => self.builtin_fg(args, out, redir),
@@ -8711,12 +8750,52 @@ impl Shell {
             // Already reaped: bash still succeeds for a just-finished job.
             return true;
         }
+        // A signal directed at the shell itself is delivered to our own trap
+        // machinery. SlateOS/Windows have no real Unix signals, so self-delivery
+        // is simulated synchronously: a registered trap runs now, otherwise the
+        // signal's default disposition (terminate / ignore) applies.
+        if target.parse::<u32>().is_ok_and(|p| p == std::process::id()) {
+            return self.deliver_self_signal(signum);
+        }
         // A pid osh did not spawn cannot be signalled without the target's
         // process-control layer; report it like bash does for a stale pid.
         self.emit_stderr(
             format!("{}kill: ({target}) - No such process\n", self.err_prefix()).as_bytes(),
         );
         false
+    }
+
+    /// Deliver `signum` to the shell itself (`kill -SIG $$`). A registered trap
+    /// fires synchronously; a `trap '' SIG` (ignore) entry is a no-op; with no
+    /// trap the signal's default disposition applies — terminate (via
+    /// [`Shell::pending_signal_exit`], which the `kill` builtin arm turns into a
+    /// `Flow::Exit(128 + signum)`) or ignore. Always reports success (the target
+    /// exists). Matches bash's handling of a script signalling its own pid,
+    /// modulo SlateOS/Linux signal numbering (MSYS/Cygwin numbers differ for the
+    /// realtime/user signals, so the *name* and disposition match even where the
+    /// exit-status number would not).
+    fn deliver_self_signal(&mut self, signum: u8) -> bool {
+        let Some(name) = signal_name(signum) else {
+            return true;
+        };
+        if let Some(action) = self.traps.get(name).cloned() {
+            // A non-empty handler runs now; an empty handler ('' = ignore) does
+            // nothing. Either way the disposition is trap-controlled, so the
+            // default terminate/ignore below is not consulted. An `exit` inside
+            // the handler unwinds the shell (via the pending-exit side channel).
+            if !action.is_empty()
+                && let Flow::Exit(code) = self.fire_trap_flow(name)
+            {
+                self.pending_signal_exit = Some(code);
+            }
+            return true;
+        }
+        if signal_default_terminates(signum) {
+            self.pending_signal_exit = Some(128 + i32::from(signum));
+        }
+        // Otherwise a default-ignore signal (CHLD/URG/WINCH) or a stop/continue
+        // signal we do not simulate — the shell continues.
+        true
     }
 
     /// `kill -l [sigspec…]` — with no specs, print the columnar signal table;
@@ -9858,20 +9937,34 @@ impl Shell {
     /// restored afterwards, matching bash's "the trap does not alter the
     /// command's status" behavior for these traps).
     fn fire_trap(&mut self, name: &str) {
+        let _ = self.fire_trap_flow(name);
+    }
+
+    /// Like [`Shell::fire_trap`] but returns the trap body's control-flow
+    /// outcome, so a caller can propagate an `exit` executed inside the handler
+    /// (bash: an `exit` in a signal trap terminates the shell, and `after`
+    /// commands do not run). A non-exit body leaves `$?` untouched (bash's
+    /// "the trap does not alter the command's status" rule for these traps).
+    fn fire_trap_flow(&mut self, name: &str) -> Flow {
         if self.in_trap {
-            return;
+            return Flow::Next;
         }
         let Some(action) = self.traps.get(name).cloned() else {
-            return;
+            return Flow::Next;
         };
         if action.is_empty() {
-            return;
+            return Flow::Next;
         }
         self.in_trap = true;
         let saved = self.last_status;
-        self.run_source(&action);
-        self.last_status = saved;
+        let flow = self.run_source_flow(&action);
+        // Preserve the pre-trap status unless the handler asked to exit, in
+        // which case its code is the shell's exit status.
+        if !matches!(flow, Flow::Exit(_)) {
+            self.last_status = saved;
+        }
         self.in_trap = false;
+        flow
     }
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
@@ -14425,6 +14518,34 @@ const SIGNALS: &[(u8, &str)] = &[
     (31, "SYS"),
 ];
 
+/// The canonical name (`INT`, `USR1`, …) for a signal number, or `None` for an
+/// unknown number. Used to key self-delivered signals into the trap table.
+fn signal_name(signum: u8) -> Option<&'static str> {
+    SIGNALS.iter().find(|(num, _)| *num == signum).map(|(_, name)| *name)
+}
+
+/// Whether a signal's *default* disposition terminates the shell. False for the
+/// signals whose default is to be ignored (`CHLD`, `URG`, `WINCH`), to
+/// stop/continue the process (`CONT`, `STOP`, `TSTP`, `TTIN`, `TTOU`) — the
+/// latter we do not simulate, so the shell simply continues — and for `QUIT`,
+/// which bash sets to *ignore* for the shell process itself (so a stray `^\`
+/// does not kill a running script). Every other signal (`HUP`, `INT`, `TERM`,
+/// `USR1`, `SEGV`, …) terminates by default, matching bash's effective actions.
+fn signal_default_terminates(signum: u8) -> bool {
+    !matches!(
+        signum,
+        3  // QUIT (bash ignores it for the shell process)
+        | 17 // CHLD (ignore)
+        | 18 // CONT (continue)
+        | 19 // STOP
+        | 20 // TSTP
+        | 21 // TTIN
+        | 22 // TTOU
+        | 23 // URG (ignore)
+        | 28 // WINCH (ignore)
+    )
+}
+
 /// Render the full signal table in bash's `trap -l` / `kill -l` layout: five
 /// `N) SIGNAME` entries per line, separated by a literal tab (not space
 /// padding) and each row ending with a newline. A trailing partial row keeps
@@ -17192,7 +17313,12 @@ mod tests {
             // Use the top-level item loop so a `Flow::Discard` (arith error, bad
             // subscript, substring-<0, failglob) behaves like a real script/stdin
             // shell: it aborts the current parse unit but continues with the next.
-            sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
+            // Collapse a `Flow::Exit` into `last_status` exactly as the real
+            // `run_source` driver does (an `exit`, or a self-directed terminating
+            // signal, unwinds the shell with that code).
+            if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
+                sh.last_status = code;
+            }
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
@@ -22291,6 +22417,56 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("kill 999999 2>&1");
         assert!(o.contains("kill: (999999) - No such process"), "got {o:?}");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn self_kill_fires_trap() {
+        // `kill -SIG $$` delivers the signal to the shell's own trap machinery
+        // (SlateOS/Windows have no real Unix signals, so self-delivery is
+        // simulated synchronously). A registered handler runs, then execution
+        // continues — matching bash. (The handler sets a variable rather than
+        // echoing, since the test harness captures fd 1 while a trap body writes
+        // to the inherited fd 1; in a real `-c`/script shell the two coincide.)
+        assert_eq!(
+            run("trap 'M=hit' USR1; kill -USR1 $$; echo \"$M after\"").0,
+            "hit after\n"
+        );
+        // Signal names, not numbers, key the handler: TERM fires just the same.
+        assert_eq!(
+            run("trap 'T=1' TERM; kill -TERM $$; echo \"done$T\"").0,
+            "done1\n"
+        );
+    }
+
+    #[test]
+    fn self_kill_default_disposition() {
+        // With no trap, a terminating signal unwinds the shell with 128+signum;
+        // `echo after` never runs. TERM=15 → 143.
+        let (o, s) = run("kill -TERM $$; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 143);
+        // A default-ignore signal (CHLD=17) is a no-op; the shell continues.
+        assert_eq!(run("kill -CHLD $$; echo survived").0, "survived\n");
+        // bash ignores QUIT for the shell process, so it too is survivable.
+        assert_eq!(run("kill -QUIT $$; echo survived").0, "survived\n");
+        // `trap '' SIG` (ignore) overrides the terminating default.
+        assert_eq!(
+            run("trap '' TERM; kill -TERM $$; echo survived").0,
+            "survived\n"
+        );
+    }
+
+    #[test]
+    fn self_kill_trap_exit_unwinds() {
+        // An `exit` inside a signal trap terminates the shell with the trap's
+        // code; the command after the `kill` does not run (bash). The trap sets
+        // a side-effect var rather than echoing, since the capture harness does
+        // not intercept trap-emitted stdout (in a real `-c`/script shell it
+        // would). What matters here: `echo after` is unwound and the status is
+        // the trap's exit code.
+        let (o, s) = run("trap 'RAN=1; exit 7' TERM; kill -TERM $$; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 7);
     }
 
     #[test]

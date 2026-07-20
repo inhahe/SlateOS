@@ -685,6 +685,19 @@ impl AParser<'_> {
                 let lexeme: String = self.chars[start..self.pos].iter().collect();
                 return Err(ArithError::lexeme_error("value too great for base", lexeme));
             }
+            // A prefixed literal (`0x…`) cannot serve as the base of a
+            // `base#num` construct: bash's strlong() sets `foundbase` on the
+            // `0x` prefix and rejects a subsequent `#` as "invalid number"
+            // (`0x8#1`). Consume the rest of the token so the error names the
+            // whole literal, matching bash.
+            if self.peek() == Some('#') {
+                self.pos += 1;
+                while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
+                    self.pos += 1;
+                }
+                let lexeme: String = self.chars[start..self.pos].iter().collect();
+                return Err(ArithError::lexeme_error("invalid number", lexeme));
+            }
             let hex: String = self.chars[hstart..self.pos].iter().collect();
             // bash accepts a bare `0x`/`0X` with no following hex digits as 0
             // (e.g. `$((0x))` → 0, `$((1 + 0x))` → 1). Only a genuinely malformed
@@ -721,6 +734,24 @@ impl AParser<'_> {
                 self.pos += 1;
             }
             let lexeme: String = self.chars[start..self.pos].iter().collect();
+            // A base written with a leading `0` is an octal-prefixed literal, so
+            // bash's strlong() sets `foundbase` while reading it and then rejects
+            // the `#` as "invalid number" (`064#1`, `0#1`). It reads the base
+            // digits in octal first, however, so a non-octal digit in that prefix
+            // is diagnosed earlier as "value too great for base" (`08#1`). A bare
+            // `0` base (len 1) falls through to the base-range check below, where
+            // `base == 0` also yields "invalid number".
+            if base_str.len() > 1 && base_str.starts_with('0') {
+                for c in base_str[1..].chars() {
+                    if c.to_digit(8).is_none() {
+                        return Err(ArithError::lexeme_error(
+                            "value too great for base",
+                            lexeme,
+                        ));
+                    }
+                }
+                return Err(ArithError::lexeme_error("invalid number", lexeme));
+            }
             let base: u32 = base_str.parse().map_err(|_| {
                 ArithError::lexeme_error("invalid arithmetic base", lexeme.clone())
             })?;
@@ -1447,6 +1478,15 @@ mod tests {
             ("0#5", "invalid number (error token is \"0#5\")"),
             ("65#5", "invalid arithmetic base (error token is \"65#5\")"),
             ("2#", "invalid integer constant (error token is \"2#\")"),
+            // A base with an octal (`0…`) or hex (`0x…`) prefix cannot precede
+            // `#`: bash's strlong sets `foundbase` on the prefix and rejects the
+            // `#` as "invalid number" — regardless of the prefixed value being an
+            // otherwise-valid base (`064` = 52, `0x8` = 8). A non-octal digit in
+            // the octal prefix is diagnosed earlier as "value too great".
+            ("064#1", "invalid number (error token is \"064#1\")"),
+            ("065#1", "invalid number (error token is \"065#1\")"),
+            ("08#1", "value too great for base (error token is \"08#1\")"),
+            ("0x8#1", "invalid number (error token is \"0x8#1\")"),
         ];
         for (src, want) in cases {
             let e = eval(src, &mut Map::default()).unwrap_err();

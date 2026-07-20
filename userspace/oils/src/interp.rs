@@ -8287,28 +8287,29 @@ impl Shell {
                 // non-empty — inherited by subshells too) or a sourced script.
                 // Elsewhere bash reports an error, yields status 2, and does
                 // NOT unwind, so execution continues with the next command.
+                // Like `exit`, a non-numeric argument prints "return: ARG:
+                // numeric argument required" and forces status 2. bash validates
+                // the argument *before* the context check, so `return -Z` outside
+                // a function emits BOTH this and the "can only return" line.
+                let code = match args.first() {
+                    None => self.last_status,
+                    Some(s) => match s.trim().parse::<i32>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            self.errln(&format!(
+                                "{}return: {s}: numeric argument required",
+                                self.err_prefix()
+                            ));
+                            2
+                        }
+                    },
+                };
                 if self.fn_stack.is_empty() && self.source_depth == 0 {
                     self.errln(
                         &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
                     );
                     2
                 } else {
-                    // Like `exit`, a non-numeric argument prints "return: ARG:
-                    // numeric argument required", yields status 2, and still
-                    // unwinds the function/sourced script.
-                    let code = match args.first() {
-                        None => self.last_status,
-                        Some(s) => match s.trim().parse::<i32>() {
-                            Ok(n) => n,
-                            Err(_) => {
-                                self.errln(&format!(
-                                    "{}return: {s}: numeric argument required",
-                                    self.err_prefix()
-                                ));
-                                2
-                            }
-                        },
-                    };
                     flow = Flow::Return;
                     code
                 }
@@ -12229,14 +12230,31 @@ impl Shell {
     /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
     /// the end of the option list.
     fn builtin_getopts(&mut self, args: &[String]) -> i32 {
-        let optstring = match args.first() {
+        // getopts has no options of its own, so bash's internal_getopt rejects
+        // any leading `-X` (letter) as an invalid option; `--` ends option
+        // parsing, and a bare `-` is treated as the optstring operand.
+        let mut base = 0;
+        if let Some(first) = args.first() {
+            if first == "--" {
+                base = 1;
+            } else if first.len() > 1
+                && let Some(c) = first.strip_prefix('-').and_then(|r| r.chars().next())
+            {
+                return self.builtin_invalid_option(
+                    "getopts",
+                    &format!("-{c}"),
+                    "getopts optstring name [arg ...]",
+                );
+            }
+        }
+        let optstring = match args.get(base) {
             Some(s) => s.clone(),
             None => {
                 self.errln("getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
-        let name = match args.get(1) {
+        let name = match args.get(base + 1) {
             Some(s) => s.clone(),
             None => {
                 self.errln("getopts: usage: getopts optstring name [arg ...]");
@@ -12250,8 +12268,8 @@ impl Shell {
         // whereas OPTERR=0 only mutes the message and keeps non-silent values.
         let report_errors = self.vars.get("OPTERR").is_none_or(|v| v != "0");
         // Arguments to scan: explicit args after `name`, else the positionals.
-        let pos: Vec<String> = if args.len() > 2 {
-            args[2..].to_vec()
+        let pos: Vec<String> = if args.len() > base + 2 {
+            args[base + 2..].to_vec()
         } else {
             self.positional.clone()
         };
@@ -23169,6 +23187,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.contains("rc=2"), "got {o:?}");
         // A numeric arg still works normally.
         assert_eq!(run("f() { return 7; }; f; echo $?").0, "7\n");
+        // At top level (no function/sourced-script context) bash validates the
+        // argument numerically *before* the context check, so a non-numeric
+        // `return` arg emits BOTH the "numeric argument required" line and the
+        // "can only return" line, exiting 2.
+        let (o, s) = run("return -Z 2>&1");
+        assert!(o.contains("return: -Z: numeric argument required"), "got {o:?}");
+        assert!(o.contains("return: can only `return' from a function or sourced script"), "got {o:?}");
+        assert_eq!(s, 2);
+    }
+
+    #[test]
+    fn getopts_rejects_leading_options() {
+        // getopts has no options of its own; bash's internal_getopt rejects any
+        // leading `-X` letter (`getopts: -X: invalid option` + usage, exit 2),
+        // treats `--` as end-of-options, and a bare `-` as the optstring operand.
+        let (o, s) = run("getopts -Z 2>&1");
+        assert!(o.contains("getopts: -Z: invalid option"), "got {o:?}");
+        assert!(o.contains("getopts: usage: getopts optstring name [arg ...]"), "got {o:?}");
+        assert_eq!(s, 2);
+        let (o, s) = run("getopts -ab name 2>&1");
+        assert!(o.contains("getopts: -a: invalid option"), "got {o:?}");
+        assert_eq!(s, 2);
+        // `--` ends option parsing: optstring "ab", no args to scan → status 1.
+        assert_eq!(run("getopts -- ab name 2>&1").1, 1);
+        // A bare `-` is the optstring, not an option.
+        assert_eq!(run("getopts - name 2>&1").1, 1);
     }
 
     #[test]

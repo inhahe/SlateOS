@@ -9741,11 +9741,25 @@ impl Shell {
             i += 1;
         }
 
-        // No pattern: list every builtin's synopsis (sorted).
+        // No pattern: print an informative header (bash-shaped, but honest about
+        // osh's identity — it deliberately does NOT claim to be GNU bash, just as
+        // `--version` / `$BASH_VERSION` report osh's own strings), then every
+        // builtin's synopsis, sorted. bash lays the synopses out in COLUMNS-wide
+        // truncated columns; osh prints one per line (full, untruncated) so no
+        // information is lost and the output is width-independent — a documented,
+        // intentional cosmetic divergence (see known-issues TD-OILS-HELP-LAYOUT).
         if patterns.is_empty() {
             let mut names: Vec<&str> = HELP_TABLE.iter().map(|(n, _, _)| *n).collect();
             names.sort_unstable();
             let mut text = String::new();
+            text.push_str(concat!(
+                "osh (Oils for SlateOS) ",
+                env!("CARGO_PKG_VERSION"),
+                "\n",
+            ));
+            text.push_str("These shell commands are defined internally.  Type `help' to see this list.\n");
+            text.push_str("Type `help name' to find out more about the function `name'.\n");
+            text.push_str("Use `man -k' or `info' to find out more about commands not in this list.\n\n");
             for n in names {
                 if let Some((_, usage, _)) = HELP_TABLE.iter().find(|(hn, _, _)| hn == &n) {
                     text.push_str(usage);
@@ -21861,8 +21875,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Topic names with punctuation resolve via the prefix rule.
         assert_eq!(run("help -s '(('").0, "(( ... )): (( expression ))\n");
         assert_eq!(run("help -s '[['").0, "[[ ... ]]: [[ expression ]]\n");
-        // No-arg lists every builtin synopsis (sorted); spot-check a couple.
+        // No-arg prints an osh-identity header (never "GNU bash") + the guidance
+        // lines, then every builtin synopsis (sorted); spot-check.
         let out = run("help").0;
+        assert!(out.starts_with("osh (Oils for SlateOS) "), "got: {out:?}");
+        assert!(!out.contains("GNU bash"), "must not claim GNU bash: {out:?}");
+        assert!(out.contains("Type `help name' to find out more"), "got: {out:?}");
         assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");
         assert!(out.contains("help [-dms] [pattern ...]"), "got: {out:?}");
         // Unknown topic is a status-1 error with no stdout.

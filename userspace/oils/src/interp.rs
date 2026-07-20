@@ -3583,6 +3583,27 @@ impl Shell {
         }
     }
 
+    /// Special variables that bash always reports from `${!prefix*}` but that
+    /// osh computes on demand (in `param_value`) or only materialises in a
+    /// narrower context than bash. The prefix listing must name them explicitly
+    /// so it matches bash. `BASH_SOURCE`/`BASH_LINENO` are call-stack arrays
+    /// that bash keeps present (possibly empty) at every level; osh only stores
+    /// them in `arrays` while inside a function/script, so they are listed here
+    /// too to match bash at the top level. `FUNCNAME` is deliberately *absent*:
+    /// bash does not list it outside a function, and osh's in-function
+    /// `arrays` entry is picked up there, so it appears only where bash lists it.
+    const DYNAMIC_SPECIAL_NAMES: &'static [&'static str] = &[
+        "BASHPID",
+        "BASH_LINENO",
+        "BASH_SOURCE",
+        "BASH_SUBSHELL",
+        "LINENO",
+        "RANDOM",
+        "SECONDS",
+        "EPOCHSECONDS",
+        "EPOCHREALTIME",
+    ];
+
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables (scalars,
     /// indexed arrays, associative arrays) whose name begins with `prefix`,
     /// sorted (bash lists them in lexicographic order).
@@ -3592,8 +3613,10 @@ impl Shell {
             .keys()
             .chain(self.arrays.keys())
             .chain(self.assoc.keys())
+            .map(String::as_str)
+            .chain(Self::DYNAMIC_SPECIAL_NAMES.iter().copied())
             .filter(|k| k.starts_with(prefix))
-            .cloned()
+            .map(str::to_string)
             .collect();
         names.sort();
         names.dedup();
@@ -16424,6 +16447,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // No match → empty.
         assert_eq!(run("echo [${!zzz*}]").0, "[]\n");
+        // Dynamically-computed special variables (values produced on demand in
+        // param_value, not stored in `vars`) are still listed, like bash.
+        assert_eq!(run("echo ${!RAND*}").0, "RANDOM\n");
+        assert_eq!(run("echo ${!SEC*}").0, "SECONDS\n");
+        assert_eq!(run("echo ${!LINE*}").0, "LINENO\n");
+        assert_eq!(run("echo ${!EPOCH*}").0, "EPOCHREALTIME EPOCHSECONDS\n");
+        assert_eq!(run("echo ${!BASHP*}").0, "BASHPID\n");
+        // BASH_SOURCE is a call-stack array bash keeps present at every level;
+        // osh lists it (and BASH_SUBSHELL) to match, sorted.
+        assert_eq!(run("echo ${!BASH_S*}").0, "BASH_SOURCE BASH_SUBSHELL\n");
+        // A user variable and a dynamic special sharing a prefix are merged and
+        // sorted together.
+        assert_eq!(run("SECRET=1; echo ${!SEC*}").0, "SECONDS SECRET\n");
     }
 
     #[test]

@@ -389,6 +389,10 @@ impl AParser<'_> {
         loop {
             self.skip_ws();
             if self.peek() == Some(',') {
+                // Record the comma as the last operator so a missing operand
+                // after it (`3 ,`) reports bash's error token `, ` (from the
+                // comma) rather than the whole expression.
+                self.last_op_start = self.pos;
                 self.pos += 1;
                 let r = self.parse_assign()?;
                 e = Expr::Comma(Box::new(e), Box::new(r));
@@ -430,8 +434,28 @@ impl AParser<'_> {
         if self.peek() != Some('?') {
             return Ok(cond);
         }
+        let qpos = self.pos;
         self.pos += 1; // consume '?'
         self.skip_ws();
+        // bash inspects the token right after `?` (EXP_HIGHEST's first token):
+        // an immediate `:` or end of input is an empty true branch, reported as
+        // "expression expected" *before* attempting to parse an operand. The
+        // error token is the `:` itself, or the `?` when the input ends there.
+        match self.peek() {
+            Some(':') => {
+                return Err(ArithError::with_token(
+                    "expression expected",
+                    self.rest_from(self.pos),
+                ));
+            }
+            None => {
+                return Err(ArithError::with_token(
+                    "expression expected",
+                    self.rest_from(qpos),
+                ));
+            }
+            _ => {}
+        }
         let then_start = self.pos;
         // The middle branch is a full expression: bash parses it with
         // EXP_HIGHEST (expcomma), so it may be an assignment or even a comma
@@ -448,7 +472,19 @@ impl AParser<'_> {
                 self.rest_from(then_start),
             ));
         }
+        let colon_pos = self.pos;
         self.pos += 1; // consume ':'
+        self.skip_ws();
+        // An empty false branch (end of input right after `:`) is likewise
+        // "expression expected", with the `:` as the error token. A malformed
+        // (but present) else operand falls through to the normal operand-expected
+        // diagnostic below.
+        if self.peek().is_none() {
+            return Err(ArithError::with_token(
+                "expression expected",
+                self.rest_from(colon_pos),
+            ));
+        }
         let else_e = self.parse_ternary()?;
         Ok(Expr::Ternary(
             Box::new(cond),
@@ -1314,6 +1350,27 @@ mod tests {
             (
                 "1 ? 2",
                 "`:' expected for conditional expression (error token is \"2\")",
+            ),
+            // A missing operand after a comma reports the comma as the error
+            // token (bash: `3 ,` → `, `), not the whole expression.
+            (
+                "3 ,",
+                "syntax error: operand expected (error token is \",\")",
+            ),
+            // Empty ternary branches are "expression expected" (not "operand
+            // expected"), reported at the `:` — or the `?` when input ends there.
+            (
+                "1 ? : 3",
+                "expression expected (error token is \": 3\")",
+            ),
+            ("1 ? 2 :", "expression expected (error token is \":\")"),
+            ("1 ? :", "expression expected (error token is \":\")"),
+            ("1 ?", "expression expected (error token is \"?\")"),
+            // A trailing comma inside the true branch is mid-expression, so the
+            // `:` triggers the ordinary operand-expected diagnostic.
+            (
+                "1 ? 2,3, : 4",
+                "syntax error: operand expected (error token is \": 4\")",
             ),
             ("a[", "bad array subscript (error token is \"a[\")"),
             ("1#", "invalid arithmetic base (error token is \"1#\")"),

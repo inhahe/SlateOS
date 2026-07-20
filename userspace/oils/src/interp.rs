@@ -5132,7 +5132,19 @@ impl Shell {
         // Resolve via the shell's `$PATH` (and the `hash` cache) when possible;
         // fall back to the bare name so the OS can still try to locate it.
         let mut cmd = match self.resolve_external(&argv[0]) {
-            Some(path) => PCommand::new(path),
+            Some(path) => {
+                #[cfg_attr(not(unix), allow(unused_mut))]
+                let mut c = PCommand::new(path);
+                // Bash execs the resolved binary but sets argv[0] to the command
+                // word exactly as typed (`cat`, not `/usr/bin/cat`), so programs
+                // report their own name the way the user invoked them. Mirror
+                // that: run the resolved path, but hand the child the typed name
+                // as arg0. (Unix-only — Windows has no argv[0] override in std,
+                // and on the host the MSYS runtime reconstructs argv[0] itself.)
+                #[cfg(unix)]
+                std::os::unix::process::CommandExt::arg0(&mut c, &argv[0]);
+                c
+            }
             None => PCommand::new(&argv[0]),
         };
         cmd.args(&argv[1..]);

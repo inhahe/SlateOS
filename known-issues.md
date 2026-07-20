@@ -419,19 +419,18 @@ runtime would be a band-aid; better to land it whole. Findings below.)
   drop) delivers EOF to the coproc's stdin; the coproc's thread finishing
   drops `child_stdout_w`, delivering EOF to the parent's `NAME[0]` reader.
 
-### TD-OILS-VARFD-RO-MSG. `osh` readonly-varfd redirect emits one error line; bash emits two — 2026-07-19
+### TD-OILS-VARFD-RO-MSG. `osh` readonly-varfd redirect emits one error line; bash emits two — 2026-07-19 — ✅ FIXED 2026-07-20
 
-**Where:** `userspace/oils/src/interp.rs` `redir_effective_fd` (returns
-`Err("{target}: readonly variable")` when the varfd target is readonly).
+**Status:** FIXED. `redir_effective_fd`'s readonly-varfd branch now returns both
+diagnostics — `{target}: readonly variable` followed by a `line N:`-prefixed
+`{target}: cannot assign fd to variable` — so `readonly v=abc; echo x {v}>f`
+prints two lines exactly like bash (both status 1, command not run, `$v`
+unchanged). Verified byte-for-byte against bash 5.2 and regression-guarded by
+`varfd_readonly_target_emits_two_diagnostics`.
 
-**What:** `readonly v=abc; echo x {v}>f` — bash prints *two* diagnostics
-(`v: readonly variable` **and** `v: cannot assign fd to variable`), osh
-prints only the first. Functionally identical: both set exit status 1,
-run nothing, and leave `$v` unchanged. Purely cosmetic, and the error
-*prefix* already differs anyway (`osh:` vs `bash: line N:`, tracked as
-the pervasive errline gap). Proper fix if pursued: emit the second
-`{target}: cannot assign fd to variable` line after the readonly
-message. Very low value.
+**Where:** `userspace/oils/src/interp.rs` `redir_effective_fd` (the readonly
+varfd branch), emitted by the two `resolve_redirects`/`redir_effective_fd`
+callers via `err_prefix()`.
 
 ### TD-OILS-CMODE-EXIT. `osh -c` fatal-expansion exit status is 1, not bash's `-c`-only 127 — 2026-07-19 — ✅ RESOLVED 2026-07-19
 

@@ -6449,7 +6449,16 @@ impl Shell {
                 // own error) can't double-print with the caller's report.
                 let target = self.resolve_ref_name(name);
                 if self.readonly.contains(&target) {
-                    return Err(format!("{target}: readonly variable"));
+                    // bash emits *two* diagnostics for a readonly varfd target:
+                    // the generic readonly-variable error, then a
+                    // redirect-specific "cannot assign fd to variable" line. The
+                    // caller prefixes the first line via `err_prefix()`; bake the
+                    // prefixed second line into the message so it carries bash's
+                    // `line N:` prefix too (TD-OILS-VARFD-RO-MSG).
+                    return Err(format!(
+                        "{target}: readonly variable\n{}{target}: cannot assign fd to variable",
+                        self.err_prefix()
+                    ));
                 }
                 let n = self.alloc_varfd(reserved);
                 reserved.push(n);
@@ -28338,6 +28347,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("exec {v}>/dev/null; echo \"[$v]\"");
         assert_eq!(s, 0);
         assert_eq!(o, "[10]\n");
+    }
+
+    #[test]
+    fn varfd_readonly_target_emits_two_diagnostics() {
+        // TD-OILS-VARFD-RO-MSG: a `{v}>file` varfd redirect whose target `$v` is
+        // readonly is rejected with *two* diagnostics (bash): the generic
+        // readonly-variable error and a redirect-specific "cannot assign fd to
+        // variable" line. The command does not run and status is 1. (`2>&1`
+        // routes the diagnostics into the captured stdout; the harness shell is
+        // stdin-like, so the prefix is bare `osh:` with no line number.)
+        let (o, s) = run("readonly v=abc; { echo x {v}>/dev/null; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: v: readonly variable\nosh: v: cannot assign fd to variable\n"
+        );
+        assert_eq!(s, 1);
     }
 
     #[test]

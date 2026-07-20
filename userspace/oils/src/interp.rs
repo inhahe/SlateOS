@@ -7496,7 +7496,22 @@ impl Shell {
                 }
             }
             "exit" => {
-                let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(self.last_status);
+                // A non-numeric argument is an error in bash: it prints
+                // "exit: ARG: numeric argument required" and still exits with
+                // status 2. A bare `exit` uses `$?`.
+                let code = match args.first() {
+                    None => self.last_status,
+                    Some(s) => match s.trim().parse::<i32>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            self.errln(&format!(
+                                "{}exit: {s}: numeric argument required",
+                                self.err_prefix()
+                            ));
+                            2
+                        }
+                    },
+                };
                 flow = Flow::Exit(code);
                 code
             }
@@ -7511,10 +7526,22 @@ impl Shell {
                     );
                     2
                 } else {
-                    let code = args
-                        .first()
-                        .and_then(|s| s.parse::<i32>().ok())
-                        .unwrap_or(self.last_status);
+                    // Like `exit`, a non-numeric argument prints "return: ARG:
+                    // numeric argument required", yields status 2, and still
+                    // unwinds the function/sourced script.
+                    let code = match args.first() {
+                        None => self.last_status,
+                        Some(s) => match s.trim().parse::<i32>() {
+                            Ok(n) => n,
+                            Err(_) => {
+                                self.errln(&format!(
+                                    "{}return: {s}: numeric argument required",
+                                    self.err_prefix()
+                                ));
+                                2
+                            }
+                        },
+                    };
                     flow = Flow::Return;
                     code
                 }
@@ -8003,10 +8030,16 @@ impl Shell {
     /// `trap -l` — list the known signal names, five per line, numbered.
     fn trap_list(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut buf = String::new();
+        // bash separates the five entries per line with a literal tab (not
+        // space padding), e.g. ` 1) SIGHUP\t 2) SIGINT\t…`, and ends each row
+        // with a newline. A trailing partial row keeps its final tab before the
+        // closing newline (matching bash's `kill -l`/`trap -l` output exactly).
         for (idx, (num, name)) in SIGNALS.iter().enumerate() {
-            buf.push_str(&format!("{num:2}) SIG{name:<9}"));
+            buf.push_str(&format!("{num:2}) SIG{name}"));
             if idx % 5 == 4 {
                 buf.push('\n');
+            } else {
+                buf.push('\t');
             }
         }
         if !buf.ends_with('\n') {
@@ -20497,6 +20530,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ],
             "got {o:?}"
         );
+    }
+
+    #[test]
+    fn return_numeric_arg_required() {
+        // A non-numeric `return` arg prints the diagnostic, yields status 2, and
+        // still unwinds the function (the trailing echo must not run). `f 2>&1`
+        // folds the error onto the captured stdout.
+        let (o, _) = run("f() { return abc; echo unreached; }; f 2>&1; echo rc=$?");
+        assert!(!o.contains("unreached"), "return did not unwind: {o:?}");
+        assert!(o.contains("return: abc: numeric argument required"), "got {o:?}");
+        assert!(o.contains("rc=2"), "got {o:?}");
+        // A numeric arg still works normally.
+        assert_eq!(run("f() { return 7; }; f; echo $?").0, "7\n");
+    }
+
+    #[test]
+    fn trap_list_uses_tab_separators() {
+        // Entries within a row are tab-separated (not space-padded), matching
+        // bash's `trap -l`/`kill -l` layout.
+        let (o, _) = run("trap -l");
+        let first = o.lines().next().unwrap_or("");
+        assert!(first.starts_with(" 1) SIGHUP\t"), "got {first:?}");
+        assert!(first.contains("\t 2) SIGINT\t"), "got {first:?}");
     }
 
     #[test]

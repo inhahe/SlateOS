@@ -17943,11 +17943,35 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// ISO 8601 week date for a given calendar year, 1-based day-of-year, and
+/// weekday index (`wday`, Sunday = 0 … Saturday = 6). Returns
+/// `(iso_week_year, iso_week_number)`. Week 1 is the week containing the year's
+/// first Thursday; days early in January can belong to the previous year's last
+/// week and days late in December to the next year's week 1.
+fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
+    // ISO weekday: Monday = 1 … Sunday = 7.
+    let iso_wday = if wday == 0 { 7 } else { wday as i64 };
+    // A calendar year has 53 ISO weeks iff Jan 1 (or Dec 31) is a Thursday,
+    // i.e. its "p" value is 4, or the previous year's is 3 (leap-year case).
+    let p = |y: i64| (y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400)).rem_euclid(7);
+    let weeks_in = |y: i64| if p(y) == 4 || p(y - 1) == 3 { 53 } else { 52 };
+    let week = (yday - iso_wday + 10).div_euclid(7);
+    if week < 1 {
+        (year - 1, weeks_in(year - 1))
+    } else if week > weeks_in(year) {
+        (year + 1, 1)
+    } else {
+        (year, week)
+    }
+}
+
 /// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
 /// seconds since the Unix epoch; the broken-down time is computed in **UTC**
 /// (SlateOS has no timezone database — see known-issues TD-OILS). Supports the
-/// common specifiers `%Y %C %y %m %d %e %H %I %M %S %p %P %A %a %B %b %h %j %u
-/// %w %s %n %t %F %T %R %D %%`; an unknown `%x` is emitted verbatim.
+/// common specifiers `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h
+/// %j %u %w %s %z %Z %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown
+/// specifier is emitted verbatim. Zone-dependent output (`%z` `%Z`) reflects the
+/// UTC rendering (`+0000` / `UTC`).
 fn format_strftime(fmt: &str, epoch: i64) -> String {
     const WDAY_FULL: [&str; 7] = [
         "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
@@ -17989,6 +18013,14 @@ fn format_strftime(fmt: &str, epoch: i64) -> String {
                 };
                 out.push_str(&format!("{h12:02}"));
             }
+            'k' => out.push_str(&format!("{:2}", ctx.hour)),
+            'l' => {
+                let h12 = match ctx.hour % 12 {
+                    0 => 12,
+                    h => h,
+                };
+                out.push_str(&format!("{h12:2}"));
+            }
             'M' => out.push_str(&format!("{:02}", ctx.minute)),
             'S' => out.push_str(&format!("{:02}", ctx.second)),
             'p' => out.push_str(if ctx.hour < 12 { "AM" } else { "PM" }),
@@ -18001,6 +18033,25 @@ fn format_strftime(fmt: &str, epoch: i64) -> String {
             'u' => out.push_str(&(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
             'w' => out.push_str(&ctx.wday.to_string()),
             's' => out.push_str(&ctx.epoch.to_string()),
+            // osh renders all times in UTC (see TD-OILS9), so the zone offset is
+            // always +0000 and the zone name is UTC. bash would use the shell's
+            // local zone; matching that is gated on a timezone database.
+            'z' => out.push_str("+0000"),
+            'Z' => out.push_str("UTC"),
+            // ISO 8601 week date: %V = week number (01-53), %G = week-based year,
+            // %g = week-based year mod 100.
+            'V' => {
+                let (_, week) = iso_week(ctx.year, ctx.yday, ctx.wday);
+                out.push_str(&format!("{week:02}"));
+            }
+            'G' => {
+                let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
+                out.push_str(&iso_year.to_string());
+            }
+            'g' => {
+                let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
+                out.push_str(&format!("{:02}", iso_year.rem_euclid(100)));
+            }
             'n' => out.push('\n'),
             't' => out.push('\t'),
             '%' => out.push('%'),
@@ -18032,6 +18083,32 @@ fn format_strftime(fmt: &str, epoch: i64) -> String {
                 out.push('/');
                 emit(out, 'y', ctx);
             }
+            // `%r` — 12-hour clock time: `%I:%M:%S %p` (C locale).
+            'r' => {
+                emit(out, 'I', ctx);
+                out.push(':');
+                emit(out, 'M', ctx);
+                out.push(':');
+                emit(out, 'S', ctx);
+                out.push(' ');
+                emit(out, 'p', ctx);
+            }
+            // `%c` — C-locale date and time: `%a %b %e %H:%M:%S %Y`.
+            'c' => {
+                emit(out, 'a', ctx);
+                out.push(' ');
+                emit(out, 'b', ctx);
+                out.push(' ');
+                emit(out, 'e', ctx);
+                out.push(' ');
+                emit(out, 'T', ctx);
+                out.push(' ');
+                emit(out, 'Y', ctx);
+            }
+            // `%x` — C-locale date: `%m/%d/%y` (same as `%D`).
+            'x' => emit(out, 'D', ctx),
+            // `%X` — C-locale time: `%H:%M:%S` (same as `%T`).
+            'X' => emit(out, 'T', ctx),
             other => {
                 out.push('%');
                 out.push(other);
@@ -21223,6 +21300,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%(%R)T\\n' 1000000000").0, "01:46\n");
         // A negative argument means "now"; just check it produces 4-digit year.
         assert_eq!(run("printf '%(%Y)T\\n' -1").0.trim().len(), 4);
+        // Zone specifiers reflect osh's UTC rendering (bash would use the local
+        // zone; see TD-OILS9).
+        assert_eq!(run("printf '%(%z %Z)T\\n' 0").0, "+0000 UTC\n");
+        // Space-padded hours (%k 24h, %l 12h) and the %r 12-hour clock.
+        assert_eq!(run("printf '%(%k|%l|%r)T\\n' 1000000000").0, " 1| 1|01:46:40 AM\n");
+        // C-locale compound specifiers %c/%x/%X.
+        assert_eq!(
+            run("printf '%(%c)T\\n' 1000000000").0,
+            "Sun Sep  9 01:46:40 2001\n"
+        );
+        assert_eq!(run("printf '%(%x %X)T\\n' 1000000000").0, "09/09/01 01:46:40\n");
+        // ISO 8601 week date (%G week-year, %V week number, %g 2-digit year).
+        // 2001-09-09 is ISO week 36 of 2001.
+        assert_eq!(run("printf '%(%G-W%V-%g)T\\n' 1000000000").0, "2001-W36-01\n");
+        // Boundary: 2021-01-01 (Fri) belongs to ISO week 53 of 2020.
+        assert_eq!(run("printf '%(%G-W%V)T\\n' 1609459200").0, "2020-W53\n");
+        // Boundary: 2018-12-31 (Mon) belongs to ISO week 01 of 2019.
+        assert_eq!(run("printf '%(%G-W%V)T\\n' 1546214400").0, "2019-W01\n");
     }
 
     #[test]

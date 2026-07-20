@@ -1121,11 +1121,17 @@ no-space negated subshells are vanishingly rare.
 shell's *local* timezone (honoring `$TZ` / the system zone). Our
 implementation renders the time in **UTC** because SlateOS has no timezone
 database and no `$TZ` handling yet. All calendar math (`civil_from_days` /
-`days_from_civil`) and the specifier set (`%Y %C %y %m %d %e %H %I %M %S %p
-%P %A %a %B %b %h %j %u %w %s %n %t %F %T %R %D %%`) are correct; only the
-zone offset is missing. Also, bash's `-2` argument ("time the shell was
-started") is approximated as the current time, since `format_printf` is a
-free function without access to the shell's start instant.
+`days_from_civil`) and the specifier set (`%Y %C %y %m %d %e %H %I %k %l %M
+%S %p %P %A %a %B %b %h %j %u %w %s %z %Z %V %G %g %n %t %F %T %R %D %r %c
+%x %X %%`) are correct; only the local-zone offset is missing. Under the UTC
+model `%z`→`+0000` and `%Z`→`UTC` (added 2026-07-20 alongside `%k %l %r %V
+%G %g %c %x %X`; all verified equal to `TZ=UTC bash` across many epochs and
+ISO-week boundaries). Minor: `%Z` prints `UTC` (the glibc/target value)
+whereas the MSYS reference bash prints `GMT` for `TZ=UTC` — a host-libc name
+difference, not an osh bug (the slateos target is glibc-like). Also, bash's
+`-2` argument ("time the shell was started") is approximated as the current
+time, since `format_printf` is a free function without access to the shell's
+start instant.
 
 **Proper fix:** once SlateOS grows a timezone database / `$TZ` parsing,
 apply the local UTC offset (and DST rules) before breaking the epoch down,

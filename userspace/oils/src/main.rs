@@ -28,6 +28,13 @@ const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION
 /// not eagerly committed — so this is cheap on the host and on SlateOS alike.
 const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// Single-letter `set` options accepted as leading command-line flags (`bash
+/// -e`, `-x`, `-eu`, …). Mirrors `Shell::apply_short_options` / the `set`
+/// builtin's letter set: the modelled options plus the ones bash accepts as
+/// no-ops. Mode letters (`c`, `s`, `i`, `l`, `r`) are deliberately excluded so
+/// clusters containing them fall through to the mode dispatch.
+const SET_OPTION_LETTERS: &str = "euxfaCnTEBmbhkptvHP";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Run the shell on a dedicated large-stack thread (see `INTERP_STACK_SIZE`).
@@ -57,36 +64,80 @@ fn run(args: &[String]) -> i32 {
     // prefix matching (`${!P*}`), and `set` listings behave like bash.
     sh.import_environment();
 
-    // Consume leading `set`-style short-option flags (currently `-n`, noexec,
-    // the `bash -n` syntax-check mode). `base` advances past them so the mode
-    // token (`-c`, a script path, …) and its arguments keep their normal
-    // relative positions. `--` ends option processing; `-c` and the long
-    // options are handled by the dispatch below, so we stop at them.
+    // Consume leading `set`/`shopt`-style option flags (`bash -e`, `-x`, `-eu`,
+    // `-o pipefail`, `-O extglob`, `+O nocasematch`, `-n`, …), applying each to
+    // the shell before the mode token (`-c`, a script path, …) is dispatched.
+    // `base` advances past them so the mode token and its arguments keep their
+    // normal relative positions. `--` ends option processing; `-c`, `-s`, the
+    // long options, and any unrecognised token are handled by the dispatch
+    // below, so we stop at them.
     let mut base = 1;
+    // Set once `--` is seen: everything after it is operands, so the token at
+    // `base` is a script path even if it begins with `-` (`osh -- -c` opens a
+    // *file* named `-c`, matching bash), and the flag arms below are skipped.
+    let mut opts_ended = false;
     while let Some(arg) = args.get(base) {
         match arg.as_str() {
+            "--" => {
+                base += 1;
+                opts_ended = true;
+                break;
+            }
+            // `-n` keeps its dedicated latch path (see `Shell::set_noexec`).
             "-n" => {
                 sh.set_noexec();
                 base += 1;
             }
-            "--" => {
+            // `-o NAME` / `+o NAME` (long `set` option), `-O NAME` / `+O NAME`
+            // (shopt option). Each consumes the following word as its name.
+            "-o" | "+o" | "-O" | "+O" => {
+                let enable = arg.starts_with('-');
+                let is_shopt = arg.ends_with('O');
+                let Some(name) = args.get(base + 1) else {
+                    eprintln!("osh: {arg}: option requires an argument");
+                    return 2;
+                };
+                let ok = if is_shopt {
+                    sh.apply_shopt_option(name, enable)
+                } else {
+                    sh.apply_named_option(name, enable)
+                };
+                if !ok {
+                    if is_shopt {
+                        eprintln!("osh: {name}: invalid shell option name");
+                    } else {
+                        eprintln!("osh: {name}: invalid option name");
+                    }
+                    return 2;
+                }
+                base += 2;
+            }
+            // A `-`/`+` cluster made up entirely of single-letter `set` options
+            // (`-e`, `-x`, `-eux`, `+x`). Clusters containing a mode letter
+            // (`-c`, `-s`, …) or an unknown letter fall through to the dispatch.
+            s if (s.starts_with('-') || s.starts_with('+'))
+                && s.len() > 1
+                && s[1..].chars().all(|c| SET_OPTION_LETTERS.contains(c)) =>
+            {
+                let enable = s.starts_with('-');
+                // Every letter was validated by the guard above.
+                let _ = sh.apply_short_options(&s[1..], enable);
                 base += 1;
-                break;
             }
             _ => break,
         }
     }
 
     let code = match args.get(base).map(String::as_str) {
-        Some("--version" | "-V") => {
+        Some("--version" | "-V") if !opts_ended => {
             println!("{VERSION}");
             0
         }
-        Some("--help" | "-h") => {
+        Some("--help" | "-h") if !opts_ended => {
             print_help();
             0
         }
-        Some("-c") => {
+        Some("-c") if !opts_ended => {
             let Some(command) = args.get(base + 1) else {
                 eprintln!("osh: -c: option requires an argument");
                 return 2;
@@ -103,7 +154,7 @@ fn run(args: &[String]) -> i32 {
             }
             sh.run_source(command)
         }
-        Some(path) if !path.starts_with('-') => {
+        Some(path) if opts_ended || !path.starts_with('-') => {
             match std::fs::read_to_string(path) {
                 Ok(src) => {
                     sh.set_name(path.to_string());
@@ -199,6 +250,12 @@ fn print_help() {
     println!("  osh -n …                     Check syntax without executing (noexec).");
     println!("  osh --version                Print version and exit.");
     println!("  osh --help                   Print this help and exit.");
+    println!();
+    println!("Leading options (applied before the command/script, as in bash):");
+    println!("  -e -x -u -f -C …             Single-letter `set` options (clusters OK).");
+    println!("  -o NAME / +o NAME            Enable/disable a `set -o` option (e.g. pipefail).");
+    println!("  -O NAME / +O NAME            Enable/disable a shopt option (e.g. extglob).");
+    println!("  --                           End option processing.");
     println!();
     println!("A bash/POSIX-superset shell (OSH). Supports pipes, redirections,");
     println!("here-documents and here-strings, variables and parameter expansion,");

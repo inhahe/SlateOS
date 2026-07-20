@@ -1225,6 +1225,43 @@ impl Shell {
         self.refresh_shellopts();
     }
 
+    /// Apply a cluster of single-letter `set` options from the command line
+    /// (`bash -e`, `-x`, `-eu`, `+x`), reusing the same per-letter logic as the
+    /// `set` builtin. `enable` is `true` for a `-` sign, `false` for `+`.
+    /// Returns `Err(c)` for the first letter bash does not accept, so the caller
+    /// can report `<name>: -c: invalid option` and abort, as bash does.
+    pub fn apply_short_options(&mut self, cluster: &str, enable: bool) -> Result<(), char> {
+        for c in cluster.chars() {
+            if !self.set_short_option(c, enable) {
+                return Err(c);
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a `-o NAME` / `+o NAME` long shell option from the command line
+    /// (`bash -o pipefail`). Returns `false` for an unrecognised name.
+    pub fn apply_named_option(&mut self, name: &str, enable: bool) -> bool {
+        self.set_named_option(name, enable)
+    }
+
+    /// Apply a `-O NAME` / `+O NAME` shopt option from the command line
+    /// (`bash -O extglob`). Returns `false` for an unrecognised name. Mirrors
+    /// the `shopt -s/-u` builtin, including the extdebug base-frame capture.
+    pub fn apply_shopt_option(&mut self, name: &str, enable: bool) -> bool {
+        if !shopt_is_known(name) {
+            return false;
+        }
+        let extdebug_before = self.extdebug_on();
+        self.shopt.insert(name.to_string(), enable);
+        if !extdebug_before && self.extdebug_on() {
+            let base = self.positional.clone();
+            self.push_arg_frame(&base);
+        }
+        self.refresh_bashopts();
+        true
+    }
+
     /// Mark the shell as executing a script *file* (`osh SCRIPT`). Enables the
     /// bottom `main` pseudo-frame in the call-stack arrays (see
     /// `refresh_funcname`). Called once by the binary before running the script.
@@ -21920,6 +21957,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (noexec latches only for subsequent commands).
         assert_eq!(run("set -n; [[ -o noexec ]] && echo on").0, "");
         assert!(run("set -o").0.contains("noexec         \toff\n"));
+    }
+
+    /// Helper: run `src` in a `Shell` after `setup` has applied invocation-time
+    /// options, capturing stdout. Mirrors [`run`] but lets the caller poke the
+    /// command-line option methods (`apply_short_options`, …) first.
+    fn run_with(setup: impl FnOnce(&mut Shell), src: &str) -> (String, i32) {
+        let mut sh = Shell::new();
+        setup(&mut sh);
+        let mut buf = Vec::new();
+        let prog = parse(src).expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
+                sh.last_status = code;
+            }
+        }
+        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    #[test]
+    fn invocation_options_apply_set_and_shopt_state() {
+        // `-e` (errexit): a failing command aborts before the next runs.
+        let (out, _) = run_with(|sh| assert!(sh.apply_short_options("e", true).is_ok()), "false; echo after");
+        assert_eq!(out, "", "errexit should stop before `echo after`");
+
+        // A `-eu` cluster enables both; `[[ -o … ]]` reflects each.
+        let (out, _) = run_with(
+            |sh| assert!(sh.apply_short_options("eu", true).is_ok()),
+            "[[ -o errexit ]] && [[ -o nounset ]] && echo both",
+        );
+        assert_eq!(out, "both\n");
+
+        // `-o pipefail` (long option) is reflected in `set -o` / `[[ -o … ]]`.
+        let (out, _) = run_with(
+            |sh| assert!(sh.apply_named_option("pipefail", true)),
+            "[[ -o pipefail ]] && echo pf",
+        );
+        assert_eq!(out, "pf\n");
+
+        // `-O extglob` (shopt) enables extended globbing patterns.
+        let (out, _) = run_with(
+            |sh| assert!(sh.apply_shopt_option("extglob", true)),
+            "shopt extglob",
+        );
+        assert_eq!(out, "extglob        \ton\n");
+
+        // Invalid names are rejected (so the binary can exit 2).
+        let mut sh = Shell::new();
+        assert!(!sh.apply_named_option("bogus", true));
+        assert!(!sh.apply_shopt_option("bogus", true));
+        assert_eq!(sh.apply_short_options("eZx", true), Err('Z'));
     }
 
     // Trap-handler output is written through `run_source` (real stdout), not

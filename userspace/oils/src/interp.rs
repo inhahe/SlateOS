@@ -937,6 +937,21 @@ impl Shell {
         if self.noexec {
             return Flow::Next;
         }
+        // bash fires the DEBUG trap in the parent shell once for each pipeline
+        // stage that is a simple command, left-to-right, before the pipeline
+        // runs. Compound/group stages don't fire it, and each stage's own
+        // subshell resets the trap, so without functrace only these parent-side
+        // firings are observable. A single-command "pipeline" fires DEBUG via
+        // the normal `exec_simple` path instead, so handle only `len > 1` here.
+        if pipe.commands.len() > 1 && !self.in_trap && self.traps.contains_key("DEBUG") {
+            for cmd in &pipe.commands {
+                if let Some(sc) = Self::stage_simple(cmd) {
+                    self.vars
+                        .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
+                    self.fire_trap("DEBUG");
+                }
+            }
+        }
         let start = if pipe.timed {
             Some(std::time::Instant::now())
         } else {
@@ -1098,6 +1113,19 @@ impl Shell {
         // A pipeline is a single command; `exit`/`return`/`break` inside a stage
         // affect only that stage's subshell and never escape (bash semantics).
         (statuses, Flow::Next)
+    }
+
+    /// The underlying [`SimpleCommand`] of a pipeline stage, if the stage is a
+    /// (possibly redirected) simple command. Used to fire the `DEBUG` trap in
+    /// the parent shell for each simple-command stage of a pipeline, matching
+    /// bash (which fires `DEBUG` once per pipeline element that is a simple
+    /// command, before the pipeline runs; compound/group stages don't fire).
+    fn stage_simple(cmd: &Command) -> Option<&SimpleCommand> {
+        match cmd {
+            Command::Simple(sc) => Some(sc),
+            Command::Redirected { inner, .. } => Self::stage_simple(inner),
+            _ => None,
+        }
     }
 
     /// A pipeline stage qualifies for the real-pipe (concurrent) path only if it
@@ -17237,6 +17265,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             trap_var(
                 "trap 'R=1' RETURN\nf(){ :; }\ndeclare -ft f\ndeclare +ft f\nf",
                 "R"
+            )
+            .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn debug_trap_fires_per_simple_pipeline_stage() {
+        // bash fires DEBUG in the parent once per pipeline stage that is a
+        // simple command: `true | true | true` → 3 firings.
+        assert_eq!(
+            trap_var("trap 'D=$((D+1))' DEBUG\ntrue | true | true", "D").as_deref(),
+            Some("3")
+        );
+        // Group/compound stages do NOT fire it (bash), so a two-group pipeline
+        // leaves the counter unset.
+        assert_eq!(
+            trap_var("trap 'D=$((D+1))' DEBUG\n{ true; } | { true; }", "D"),
+            None
+        );
+        // A mixed pipeline fires only for the simple stage.
+        assert_eq!(
+            trap_var(
+                "trap 'D=$((D+1))' DEBUG\ntrue | while read _l; do :; done",
+                "D"
             )
             .as_deref(),
             Some("1")

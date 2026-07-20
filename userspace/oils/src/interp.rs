@@ -10672,14 +10672,21 @@ impl Shell {
         // Overflow "warnings" (`Numerical result out of range`) are emitted to
         // stderr like errors but, unlike them, leave printf's exit status at 0.
         let mut warnings: Vec<String> = Vec::new();
-        let text = format_printf(fmt, &args[i + 1..], &mut errors, &mut warnings);
+        // A malformed conversion directive (invalid/missing format character)
+        // aborts printf entirely with status 1, unlike the per-argument
+        // `errors` which keep processing the rest of the format.
+        let mut fatal: Option<String> = None;
+        let text = format_printf(fmt, &args[i + 1..], &mut errors, &mut warnings, &mut fatal);
         for e in &errors {
             self.emit_stderr(format!("{}printf: {e}\n", self.err_prefix()).as_bytes());
         }
         for w in &warnings {
             self.emit_stderr(format!("{}printf: warning: {w}\n", self.err_prefix()).as_bytes());
         }
-        let num_status = i32::from(!errors.is_empty());
+        if let Some(msg) = &fatal {
+            self.emit_stderr(format!("{}printf: {msg}\n", self.err_prefix()).as_bytes());
+        }
+        let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         if let Some(name) = assign_var {
             // `-v` may target an array element: `printf -v 'arr[2]' …`.
             let (base, index) = match (name.find('['), name.strip_suffix(']')) {
@@ -17003,6 +17010,7 @@ fn format_printf(
     args: &[String],
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
+    fatal: &mut Option<String>,
 ) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
@@ -17011,11 +17019,12 @@ fn format_printf(
     let mut arg_i = 0;
     loop {
         let start = arg_i;
-        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors, warnings);
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors, warnings, fatal);
         out.push_str(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
-        // recycling included.
-        if stop || arg_i >= args.len() || arg_i == start {
+        // recycling included. A malformed conversion (`fatal`) aborts printf
+        // entirely, keeping only the text produced before the bad directive.
+        if stop || fatal.is_some() || arg_i >= args.len() || arg_i == start {
             break;
         }
     }
@@ -17030,6 +17039,7 @@ fn format_printf_once(
     arg_i: &mut usize,
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
+    fatal: &mut Option<String>,
 ) -> (String, bool) {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
@@ -17041,8 +17051,12 @@ fn format_printf_once(
                 decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
             }
             '%' => {
-                if format_conversion(&mut chars, args, arg_i, &mut out, errors, warnings) {
+                if format_conversion(&mut chars, args, arg_i, &mut out, errors, warnings, fatal) {
                     return (out, true);
+                }
+                // A malformed conversion aborts the rest of this pass too.
+                if fatal.is_some() {
+                    return (out, false);
                 }
             }
             other => out.push(other),
@@ -17062,6 +17076,7 @@ fn format_conversion(
     out: &mut String,
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
+    fatal: &mut Option<String>,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&'%') {
@@ -17211,14 +17226,36 @@ fn format_conversion(
         return false;
     }
 
-    let Some(conv) = chars.next() else {
-        // Trailing bare `%…` with no conversion: emit literally.
-        out.push_str(&spec);
-        out.push_str(&width);
-        if let Some(p) = &prec {
-            out.push('.');
-            out.push_str(p);
+    // C length modifiers (`l ll h hh L j t z`) may precede the conversion; bash
+    // accepts and ignores them (`printf %ld 42` → `42`, `%zx` → hex). Consume a
+    // run of them so the conversion character that follows is what's rendered.
+    let mut mods = String::new();
+    while let Some(&c) = chars.peek() {
+        if matches!(c, 'l' | 'h' | 'L' | 'j' | 't' | 'z') {
+            mods.push(c);
+            chars.next();
+        } else {
+            break;
         }
+    }
+
+    // Reconstruct the directive text seen so far, for diagnostics.
+    let partial_spec = || -> String {
+        let mut s = spec.clone();
+        s.push_str(&width);
+        if let Some(p) = &prec {
+            s.push('.');
+            s.push_str(p);
+        }
+        s.push_str(&mods);
+        s
+    };
+
+    let Some(conv) = chars.next() else {
+        // No conversion character before the end of the format: bash aborts with
+        // `` `%…': missing format character `` and exit status 1, keeping any
+        // text produced before this directive.
+        *fatal = Some(format!("`{}': missing format character", partial_spec()));
         return false;
     };
 
@@ -17366,15 +17403,10 @@ fn format_conversion(
             b
         }
         other => {
-            // Unknown conversion: emit literally.
-            let mut s = spec.clone();
-            s.push_str(&width);
-            if let Some(p) = &prec {
-                s.push('.');
-                s.push_str(p);
-            }
-            s.push(other);
-            out.push_str(&s);
+            // An unrecognized conversion character is a fatal error in bash:
+            // `` `X': invalid format character ``, exit 1, and the rest of the
+            // format is abandoned (only text before this directive is kept).
+            *fatal = Some(format!("`{other}': invalid format character"));
             return false;
         }
     };
@@ -20327,6 +20359,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Floats: leading numeric prefix, invalid trailing junk.
         assert_eq!(run("printf '%.1f\\n' 3.5x"), ("3.5\n".to_string(), 1));
         assert_eq!(run("printf '%.1f\\n' xyz"), ("0.0\n".to_string(), 1));
+    }
+
+    #[test]
+    fn printf_invalid_and_missing_format_char() {
+        // An unrecognized conversion character aborts printf with status 1,
+        // keeping only the text produced before the bad directive (bash writes
+        // `` `y': invalid format character `` to stderr, checked via probe).
+        assert_eq!(run("printf '%y\\n' hi"), (String::new(), 1));
+        assert_eq!(run("printf 'AB%yCD\\n' hi"), ("AB".to_string(), 1));
+        assert_eq!(run("printf 'X%dY%yZ\\n' 5 9"), ("X5Y".to_string(), 1));
+        // A `%` (optionally with flags/width/precision) at the end of the format
+        // is a "missing format character" abort.
+        assert_eq!(run("printf 'a%'"), ("a".to_string(), 1));
+        assert_eq!(run("printf '%'"), (String::new(), 1));
+        assert_eq!(run("printf '%5'"), (String::new(), 1));
+        assert_eq!(run("printf '%.3'"), (String::new(), 1));
+        // C length modifiers (`l ll h hh L j t z`) are accepted and ignored, so
+        // the following conversion is what's rendered.
+        assert_eq!(run("printf '%ld\\n' 42"), ("42\n".to_string(), 0));
+        assert_eq!(run("printf '%lld\\n' 42"), ("42\n".to_string(), 0));
+        assert_eq!(run("printf '%hhd\\n' 42"), ("42\n".to_string(), 0));
+        assert_eq!(run("printf '%zx\\n' 42"), ("2a\n".to_string(), 0));
+        assert_eq!(run("printf '%Lf\\n' 42"), ("42.000000\n".to_string(), 0));
+        // `%q` is a conversion, not a modifier: `%qd` quotes then prints `d`.
+        assert_eq!(run("printf '%qd\\n' 42"), ("42d\n".to_string(), 0));
+        // A modifier with no following conversion is still a missing/invalid char.
+        assert_eq!(run("printf '%l\\n' 42").1, 1);
     }
 
     #[test]

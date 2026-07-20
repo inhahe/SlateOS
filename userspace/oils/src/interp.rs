@@ -15597,20 +15597,12 @@ fn shell_quote(s: &str) -> String {
         return "''".to_string();
     }
     if s.chars().any(char::is_control) {
-        let mut out = String::from("$'");
-        for c in s.chars() {
-            match c {
-                '\n' => out.push_str("\\n"),
-                '\t' => out.push_str("\\t"),
-                '\r' => out.push_str("\\r"),
-                '\\' => out.push_str("\\\\"),
-                '\'' => out.push_str("\\'"),
-                c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-                c => out.push(c),
-            }
-        }
-        out.push('\'');
-        return out;
+        // A control byte forces the ANSI-C `$'…'` form. Reuse `ansi_c_quote` so
+        // `${v@Q}`/`printf %q` render control chars exactly as bash does — named
+        // escapes (`\a \b \t \n \v \f \r \E`) with a 3-digit octal fallback
+        // (`\001`, `\177`), not `\xHH` — and so the `@Q`/`%q`/`declare -p`
+        // quoters can never drift apart.
+        return ansi_c_quote(s);
     }
     // bash's `${v@Q}`/`${v@A}` single-quote every non-empty, control-free value
     // — even a "plain" word like `hi` becomes `'hi'`. (`%q` printf uses a
@@ -21463,6 +21455,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An unset variable yields empty; a set-but-empty one yields `''`.
         assert_eq!(run("unset x; echo \"[${x@Q}]\"").0, "[]\n");
         assert_eq!(run("x=; echo \"[${x@Q}]\"").0, "['']\n");
+        // Control chars force the ANSI-C `$'…'` form and must use bash's exact
+        // escapes: named for `\a \b \t \n \v \f \r \E`, 3-digit octal otherwise
+        // (`\001`, `\177`) — never `\xHH`. Both @Q and printf %q share this.
+        assert_eq!(run("v=$'\\x01'; echo \"${v@Q}\"").0, "$'\\001'\n");
+        assert_eq!(run("v=$'\\a'; echo \"${v@Q}\"").0, "$'\\a'\n");
+        assert_eq!(run("v=$'\\x1b'; echo \"${v@Q}\"").0, "$'\\E'\n");
+        assert_eq!(run("v=$'\\x7f'; echo \"${v@Q}\"").0, "$'\\177'\n");
+        assert_eq!(run("v=$'a\\tb\\x01c'; echo \"${v@Q}\"").0, "$'a\\tb\\001c'\n");
+        assert_eq!(run("printf '%q\\n' $'\\x01'").0, "$'\\001'\n");
+        assert_eq!(run("printf '%q\\n' $'\\x1b'").0, "$'\\E'\n");
     }
 
     #[test]

@@ -186,7 +186,19 @@ impl Parser {
                 Op::Semi => ";",
                 Op::AndIf => "&&",
                 Op::OrIf => "||",
-                _ => "redirection",
+                Op::PipeAmp => "|&",
+                Op::Less => "<",
+                Op::Great => ">",
+                Op::DGreat => ">>",
+                Op::GreatPipe => ">|",
+                Op::GreatAnd => ">&",
+                Op::LessAnd => "<&",
+                Op::LessGreat => "<>",
+                Op::AmpGreat => "&>",
+                Op::AmpDGreat => "&>>",
+                Op::DLess => "<<",
+                Op::DLessDash => "<<-",
+                Op::TLess => "<<<",
             }
             .to_string(),
             _ => self.bare_word_here().unwrap_or_else(|| "word".to_string()),
@@ -1103,13 +1115,22 @@ impl Parser {
             | RedirectOp::ReadWrite => 0,
             _ => 1,
         });
-        let target = match self.bump() {
-            Some(Tok::Word(segs)) => self.word_from_segs(&segs)?,
+        // Peek (don't `bump`) so that on a bad target the cursor still sits on
+        // the offending token and `unexpected_here()` can name it — matching
+        // bash's `syntax error near unexpected token \`>'` (etc.). A missing
+        // target at end of input reports "unexpected end of file"; bash says
+        // "newline" there because of its implicit-trailing-newline model, a
+        // divergence noted in known-issues.md (TD-OILS-PARSE-ERR-LOC #4).
+        let target = match self.peek() {
             // The lexer emits the here-doc body as its own token right after the
             // `<<`/`<<-` operator. (Its swallowed body lines are already
             // accounted for by the lexer's per-token line stamping.)
-            Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
-            _ => return Err(ParseError::new("expected redirection target".into())),
+            Some(Tok::Word(segs) | Tok::HereDoc(segs)) => {
+                let segs = segs.clone();
+                self.pos = self.pos.saturating_add(1);
+                self.word_from_segs(&segs)?
+            }
+            _ => return Err(self.unexpected_here()),
         };
         // `>&file` (non-numeric *literal* target, no explicit/var fd) means
         // "both fds to file". A `{v}>&…` form keeps its dup semantics (varfd is
@@ -2335,6 +2356,35 @@ mod tests {
         }
         // A well-formed `case` still parses (guard against over-eager erroring).
         assert!(parse("case x in a) echo 1;; b) echo 2;; esac").is_ok());
+    }
+
+    #[test]
+    fn redirect_target_errors_name_the_offending_token() {
+        // A redirection whose target slot is occupied by an operator reports
+        // that operator by its literal spelling, exactly like bash's
+        // `near unexpected token \`>'`. The redirect site now peeks (rather than
+        // bumps) so `unexpected_here` sees the culprit; `token_display` spells
+        // out every redirect operator.
+        for (src, want) in [
+            ("echo > >", "syntax error near unexpected token `>'"),
+            ("echo > >>", "syntax error near unexpected token `>>'"),
+            ("echo > >&", "syntax error near unexpected token `>&'"),
+            ("echo > <&", "syntax error near unexpected token `<&'"),
+            ("echo > <>", "syntax error near unexpected token `<>'"),
+            ("echo > &>", "syntax error near unexpected token `&>'"),
+            ("echo > &>>", "syntax error near unexpected token `&>>'"),
+            ("echo > <<<", "syntax error near unexpected token `<<<'"),
+            ("echo > >|", "syntax error near unexpected token `>|'"),
+            ("echo > <<", "syntax error near unexpected token `<<'"),
+            ("echo > |", "syntax error near unexpected token `|'"),
+            ("echo > &&", "syntax error near unexpected token `&&'"),
+            ("echo > ;", "syntax error near unexpected token `;'"),
+            ("echo > )", "syntax error near unexpected token `)'"),
+        ] {
+            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+        }
+        // A well-formed redirection still parses.
+        assert!(parse("echo hi > out.txt").is_ok());
     }
 
     #[test]

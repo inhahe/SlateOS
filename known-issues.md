@@ -488,16 +488,26 @@ path (all stderr-only; runtime-error messages already match bash):
    **Done:** the `case` sites (`case ;`, `case )`, `case x in ;&`, `case x
    in )`, `case x in pat esac`) and subshell close (`( )`, `( echo hi`) —
    all verified equal to bash. Covered by
-   `case_and_subshell_errors_name_the_offending_token`.
+   `case_and_subshell_errors_name_the_offending_token`. The **redirect
+   target** site was also converted (2026-07-20): it now peeks rather than
+   `bump()`s, so on a bad target the cursor still sits on the culprit and
+   `unexpected_here` names it; `token_display` was extended to spell out
+   every redirect operator (`>`, `>>`, `>|`, `>&`, `<&`, `<>`, `&>`, `&>>`,
+   `<<`, `<<-`, `<<<`, `|&`). `echo > >`, `echo > >>`, `echo > >&`,
+   `echo > <&`, `echo > <>`, `echo > &>`, `echo > &>>`, `echo > <<<`,
+   `echo > >|`, `echo > <<`, `echo > |`, `echo > &&`, `echo > ;`,
+   `echo > )` all now match bash exactly. Covered by
+   `redirect_target_errors_name_the_offending_token`.
 
    **Still open (cursor is not on bash's culprit):**
    - `(`-in-command-position (`echo a; echo (`, `echo hello (`): bash scans
      past the `(` and reports `near unexpected token \`newline'`; osh errors
      at the `(` itself. Requires bash's implicit-trailing-newline model.
-   - Redirect target/operator (`echo > >`, `echo <`): bash reports the `>`
-     token / the `newline` at EOL; osh's site uses `bump()` (cursor already
-     advanced) and reaches true EOF, so it would name the wrong token /
-     report `unexpected end of file` rather than `newline`.
+   - Redirect target *at end of line* (`echo <`): bash reports the implicit
+     `newline` (`near unexpected token \`newline'`); osh reaches true EOF and
+     reports `unexpected end of file`. This is the same implicit-trailing-
+     newline model gap as the `(`-in-command-position case — the token-vs-
+     token redirect cases above are all resolved.
    - `[[ … ]]` conditional errors use bash's *conditional-specific* phrasing
      (`unexpected token \`newline', conditional binary operator expected`;
      `unexpected argument \`]]' to conditional binary operator`; `syntax

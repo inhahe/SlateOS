@@ -9823,8 +9823,43 @@ impl Shell {
                     // nameref itself is bound, not its eventual target).
                     self.vars.insert(name.to_string(), v);
                 } else if assoc || indexed {
-                    // `declare -A m=str` / `-a a=str` — scalar init unsupported;
-                    // ignore the value (bash would treat str as element/key).
+                    // A string value assigned to an array via `declare`. bash
+                    // treats a parenthesized string as a *compound array
+                    // literal* — re-parsed and re-expanded, so globbing,
+                    // word-splitting, quoting and `$var` all apply a second
+                    // time — while any other string becomes a single element at
+                    // index/key 0 (`declare -a a=x` → `([0]="x")`).
+                    let trimmed = v.trim();
+                    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+                        // Re-parse `name=(...)` and drive it through the normal
+                        // array-assignment path. `name` is already registered
+                        // as assoc/indexed above, so `apply_assignment` selects
+                        // the correct array kind.
+                        let op = if append { "+=" } else { "=" };
+                        let src = format!("{name}{op}{v}");
+                        if let Ok(prog) = crate::parser::parse(&src)
+                            && let Some(assignment) = prog
+                                .items
+                                .first()
+                                .and_then(|it| it.list.first.commands.first())
+                                .and_then(|c| match c {
+                                    Command::Simple(sc) => sc.assignments.first(),
+                                    _ => None,
+                                })
+                        {
+                            self.apply_assignment(assignment, false);
+                        }
+                    } else if assoc {
+                        self.assoc_set(name, "0".to_string(), v, append);
+                    } else {
+                        self.array_valued.insert(name.to_string());
+                        let arr = self.arrays.entry(name.to_string()).or_default();
+                        if append {
+                            arr.entry(0).or_default().push_str(&v);
+                        } else {
+                            arr.insert(0, v);
+                        }
+                    }
                 } else if self.integer_attr.contains(name) {
                     // Integer attribute: the initializer is an arithmetic
                     // expression, evaluated and stored as its decimal value. With
@@ -21004,6 +21039,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // indexed array in one statement.
         assert_eq!(run("declare -a a=(x y z); echo ${a[1]} ${#a[@]}").0, "y 3\n");
         assert_eq!(run("declare a=(p q); echo ${a[@]}").0, "p q\n");
+    }
+
+    #[test]
+    fn declare_array_string_value_is_reparsed_literal() {
+        // A quoted parenthesized string assigned to a declared array is a
+        // compound array literal that bash re-parses and re-expands.
+        assert_eq!(run("declare -a a=\"(1 2 3)\"; echo ${#a[@]} ${a[2]}").0, "3 3\n");
+        // Sparse indices survive the round-trip.
+        assert_eq!(
+            run("declare -a a=\"([2]=x [5]=y)\"; echo ${!a[@]}").0,
+            "2 5\n"
+        );
+        // Associative keys via a string literal.
+        assert_eq!(
+            run("declare -A m=\"([k1]=v1 [k2]=v2)\"; echo ${m[k1]}${m[k2]}").0,
+            "v1v2\n"
+        );
+        // A non-parenthesized string becomes element/key 0.
+        assert_eq!(run("declare -a a=\"hi\"; echo ${a[0]}").0, "hi\n");
+        assert_eq!(run("declare -A m=\"str\"; echo ${m[0]}").0, "str\n");
+        // Append merges another literal onto the existing elements.
+        assert_eq!(
+            run("declare -a a=\"(1 2)\"; declare -a a+=\"(3 4)\"; echo ${a[@]}").0,
+            "1 2 3 4\n"
+        );
     }
 
     #[test]

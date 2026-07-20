@@ -2853,10 +2853,36 @@ on an obscure lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b` yield
 `BASH_ARGC`/`BASH_ARGV` — the extdebug call-argument stack — are now defined too,
 **RESOLVED 2026-07-20**; see TD-OILS-MISSING-SPECIAL-ARRAYS for the full
 semantics and the one documented non-extdebug divergence.) The remainder are
-bash-internal (the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`, etc.);
-implementing them faithfully is a larger, separate task. `BASH_LOADABLES_PATH` is
+`BASH_ALIASES`/`BASH_CMDS` (see plan below) and `BASH_LOADABLES_PATH`, which is
 meaningless on SlateOS (no loadable builtins) and is intentionally omitted. Low
 priority — scripts rarely enumerate `BASH*`.
+
+**Plan for `BASH_ALIASES`/`BASH_CMDS` (not yet done).** bash exposes these as
+*dynamic associative arrays* that are (a) present even when empty (`declare -A
+BASH_ALIASES=()`), (b) live — reflecting the current alias table / command hash,
+and (c) writable: `BASH_ALIASES[x]="…"` creates an alias, `BASH_CMDS[foo]=/p`
+adds a hash entry. osh stores aliases in `self.aliases: BTreeMap<String,String>`
+and the command hash in `self.cmd_hash: HashMap<String,(PathBuf,u64)>`. The
+faithful implementation is blocked on two structural facts, so it's a distinct
+task rather than a quick add:
+- **No central assoc-array read accessor.** `self.assoc.get`/`contains_key` is
+  read at ~20 sites in `interp.rs` (element read, `[@]`, `${!a[@]}`, `${#a[@]}`,
+  `declare -p`, `${!BASH*}` enumeration, etc.). Materialising these two names
+  fresh on every read would mean touching all of them; the clean fix is to add a
+  single `assoc_map(name) -> Cow<...>` choke point that special-cases
+  `BASH_ALIASES`→`self.aliases` and `BASH_CMDS`→`self.cmd_hash`, then route reads
+  through it. That is a small but cross-cutting refactor with regression surface
+  across all associative-array behaviour.
+- **`cmd_hash` mutates on a hot path.** `resolve_external` (interp.rs ~5523)
+  inserts into `cmd_hash` on *every* external-command resolution, so an
+  eager-sync copy in `self.assoc["BASH_CMDS"]` would go stale constantly unless
+  synced there too. This is why the read-accessor (materialise-on-read) approach
+  is preferred over eager-sync.
+Write-back (`BASH_ALIASES[k]=v` / `BASH_CMDS[k]=v`) is then intercepted in the
+assoc-index assignment path (`assoc_set`, interp.rs ~3618): route those two names
+to `self.aliases.insert` / `self.cmd_hash.insert` instead of `self.assoc`.
+Present-when-empty falls out of the read accessor (always returns a map, empty or
+not) plus adding both names to the `${!BASH*}`/`declare -A` enumeration set.
 
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
 `param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)

@@ -693,27 +693,31 @@ attribute flag nor a well-formed `name[sub]?=value` assignment, emit
 status to 1 (accumulating the worst status across args).
 </details>
 
-### TD-OILS-BAD-ARRAY-SUBSCRIPT. `osh` "bad array subscript" names the base, not the full `name[sub]`, and is non-fatal — 2026-07-20 — OPEN (very low priority)
+### TD-OILS-BAD-ARRAY-SUBSCRIPT. `osh` "bad array subscript" underflow name/fatality — 2026-07-20 — ✅ MOSTLY RESOLVED 2026-07-20 (one obscure length-form subcase remains)
 
-**Where:** `userspace/oils/src/interp.rs` `apply_assignment`, the indexed
-element path (~3527): `let Some(idx) = Self::resolve_index(raw, bound) else {
-self.errln(&format!("{}{}: bad array subscript", …, a.name)); return true; }`.
+**Status:** The two common cases now match bash exactly:
+- **Write underflow** (`x[-9]=z` on a short/empty indexed array): now names the
+  **full** reference `x[-9]: bad array subscript` and is **fatal** in command
+  position (aborts, status 1), matching `bash -c 'a=(x y); a[-9]=Q; echo done'`.
+  Inside `declare "x[-9]=z"` it is demoted to **non-fatal** (status 1, `declare`
+  continues) — also matching bash. Implemented at `apply_assignment` (~3527, sets
+  `self.unbound_error = Some(1)` + full-ref message) with a `had_fatal` snapshot in
+  the `declare` subscript branch that clears `unbound_error` and sets `status = 1`.
+- **Read underflow** (`echo ${a[-5]}` on a short array): non-fatal, names the
+  **base** (`a: bad array subscript`), value expands empty — this matches bash
+  (bash also names only the base on reads). Implemented at `expand_array_ref`
+  (~4590), scoped to `!length`.
 
-**What:** When a negative array subscript underflows (e.g. `x[-1]=z` on an
-empty/short indexed array), bash reports the diagnostic naming the **full**
-reference `x[-1]: bad array subscript` and treats it as **fatal** (aborts the
-command; `x[-1]=z; echo done` prints nothing, status 1). osh names only the base
-(`x: bad array subscript`) and is **non-fatal** (continues; `echo done` runs).
-Pre-existing (not introduced by the TD-OILS-DECLARE-BADID fix — the same
-divergence shows in command position). Reproduce: `bash -c 'x[-1]=z; echo done'`
-vs `osh -c 'x[-1]=z; echo done'`.
+Covered by `bad_array_subscript_underflow` and the updated `array_negative_index`.
 
-**Proper fix:** carry the original subscript source into the error (reconstruct
-`{name}[{sub_src}]`, matching bash's echoed reference) and set the fatal
-expansion flag (`self.unbound_error`/`arith_error` equivalent) so the command
-aborts with status 1 rather than returning `true`. Verify both command-position
-and `declare "x[-1]=v"` paths, and that a *valid* negative index (`x[-1]` on a
-populated array) still overwrites the last element.
+**Remaining (very low priority):** the **length form** `${#a[-9]}` on a short
+array. bash emits an obscure separate diagnostic `-9]: bad array subscript`
+(fatal); osh currently emits **no** error for the length subcase (the read error
+was deliberately scoped to `!length` to avoid a spurious line on `${#a[-1]}` of a
+populated array). Proper fix: detect underflow specifically in the `${#…[neg]}`
+length path and emit bash's `{sub_src}]: bad array subscript` fatal diagnostic,
+without regressing the valid `${#a[-1]}` case. Reproduce: `bash -c 'a=(x y); echo ${#a[-9]}'`
+vs `osh -c 'a=(x y); echo ${#a[-9]}'`.
 
 ### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19 — ✅ FIXED 2026-07-19
 

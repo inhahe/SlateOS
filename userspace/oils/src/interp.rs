@@ -3525,8 +3525,17 @@ impl Shell {
                             .and_then(|arr| arr.keys().next_back().copied())
                             .map_or(0, |k| k.saturating_add(1));
                         let Some(idx) = Self::resolve_index(raw, bound) else {
-                            self.errln(&format!("{}{}: bad array subscript", self.err_prefix(), a.name));
-                            return true;
+                            // A negative subscript that underflows below 0 is a
+                            // fatal "bad array subscript" in bash, naming the full
+                            // reference with the *computed* index (`a[-5]`), and
+                            // aborting the command (status 1).
+                            self.errln(&format!(
+                                "{}{}[{raw}]: bad array subscript",
+                                self.err_prefix(),
+                                a.name
+                            ));
+                            self.unbound_error = Some(1);
+                            return false;
                         };
                         let int_val = if is_int {
                             let base = if a.append {
@@ -4579,6 +4588,23 @@ impl Shell {
                     self.assoc_element(name, &key)
                 } else {
                     let idx = self.eval_arith_index(w);
+                    // A negative subscript that underflows below index 0 is a
+                    // "bad array subscript" on *read* too (bash) — it names the
+                    // base (not the full `a[-5]` reference, unlike the write
+                    // path), is non-fatal, and the reference expands empty.
+                    if idx < 0 && !length && self.arrays.contains_key(name) {
+                        let bound = self
+                            .arrays
+                            .get(name)
+                            .and_then(|a| a.keys().next_back().copied())
+                            .map_or(0, |k| k.saturating_add(1));
+                        if Self::resolve_index(idx, bound).is_none() {
+                            self.errln(&format!(
+                                "{}{name}: bad array subscript",
+                                self.err_prefix()
+                            ));
+                        }
+                    }
                     self.array_element(name, idx)
                 };
                 if length {
@@ -11840,7 +11866,17 @@ impl Shell {
                         append,
                         value: AssignRhs::Scalar(Word::literal(v)),
                     };
+                    // A range-underflow "bad array subscript" is fatal in command
+                    // position but only sets status 1 inside `declare` (bash does
+                    // not abort the shell). Arithmetic *syntax* errors (bad `-i`
+                    // value / bad subscript expr) set `arith_error` instead and
+                    // stay fatal, so we only demote the `unbound_error` flag.
+                    let had_fatal = self.unbound_error.is_some();
                     self.apply_assignment(&assignment, false);
+                    if !had_fatal && self.unbound_error.is_some() {
+                        self.unbound_error = None;
+                        status = 1;
+                    }
                 }
                 // `-x`/`-r` on a subscripted target attach to the base array.
                 if export {
@@ -22472,6 +22508,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn bad_array_subscript_underflow() {
+        // WRITE, command position: a negative subscript that underflows below 0
+        // is a FATAL "bad array subscript" naming the full computed reference
+        // (`a[-5]`), aborting the command (status 1, no `after`).
+        let (o, s) = run("a=(1 2); { a[-5]=z; } 2>&1; echo after");
+        assert_eq!(o, "osh: a[-5]: bad array subscript\n");
+        assert_eq!(s, 1);
+        // A valid negative index still overwrites from the end.
+        assert_eq!(
+            run("a=(1 2 3); a[-1]=z; declare -p a").0,
+            "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"z\")\n"
+        );
+        // WRITE, `declare` context: the same underflow is NON-fatal (bash sets
+        // status 1 but does not abort — `after` runs).
+        let (o, _) = run("{ declare \"x[-9]=z\"; } 2>&1; echo after");
+        assert_eq!(o, "osh: x[-9]: bad array subscript\nafter\n");
+        // READ: an underflowing negative subscript errors too, naming just the
+        // base (not the full ref), non-fatal, expanding to empty.
+        // (The harness buffers stdout/stderr separately, so the merged order
+        // differs from a live terminal; the point is the error is emitted and
+        // the expansion is non-fatal — `[]` and `after` both appear.)
+        let (o, _) = run("a=(1 2); { echo \"[${a[-5]}]\"; } 2>&1; echo after");
+        assert_eq!(o, "[]\nosh: a: bad array subscript\nafter\n");
+        // A valid negative read is fine and errors nothing.
+        assert_eq!(run("a=(1 2 3); echo \"${a[-1]}\"").0, "3\n");
+        // A positive out-of-range read is empty WITHOUT an error (bash).
+        assert_eq!(run("a=(1 2); echo \"[${a[9]}]\" 2>&1").0, "[]\n");
+    }
+
+    #[test]
     fn error_prefix_uses_frame_source_inside_function() {
         // bash's `get_name_for_error`: a diagnostic emitted at the top level is
         // labelled with the shell/script name, but one emitted *inside a
@@ -25138,8 +25204,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Negative index in an assignment target overwrites from the end.
         assert_eq!(run("a=(x y z); a[-1]=Q; echo ${a[@]}").0, "x y Q\n");
         assert_eq!(run("a=(x y z); a[-2]=Q; echo ${a[@]}").0, "x Q z\n");
-        // Out-of-range negative assignment is a no-op error (array unchanged).
-        assert_eq!(run("a=(x y); a[-9]=Q; echo ${a[@]}").0, "x y\n");
+        // Out-of-range negative assignment is a fatal error in command position:
+        // bash aborts the script, so the trailing echo never runs (matches
+        // `bash -c 'a=(x y); { a[-9]=Q; } 2>&1; echo ${a[@]}'` → error, exit 1).
+        let (o, s) = run("a=(x y); { a[-9]=Q; } 2>&1; echo ${a[@]}");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\n");
+        assert_eq!(s, 1);
     }
 
     #[test]

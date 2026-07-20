@@ -18,9 +18,35 @@ use osh::Shell;
 
 const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION"));
 
+/// Stack reserved for the interpreter thread. A tree-walking shell recurses
+/// natively once per nested function call / compound command, so the ~1 MiB
+/// default main-thread stack overflows (and aborts the process) after only a
+/// few hundred nested calls — far short of the several thousand bash tolerates.
+/// A 64 MiB reserved stack gives comparable head-room (~thousands of levels)
+/// while `FUNCNEST` still provides the graceful, bash-compatible ceiling. The
+/// range is reserved virtual address space, grown on demand via guard pages —
+/// not eagerly committed — so this is cheap on the host and on SlateOS alike.
+const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let code = run(&args);
+    // Run the shell on a dedicated large-stack thread (see `INTERP_STACK_SIZE`).
+    // If the thread cannot be spawned, fall back to running directly on the
+    // main thread — a smaller stack, but still functional for shallow use.
+    let code = match std::thread::Builder::new()
+        .stack_size(INTERP_STACK_SIZE)
+        .spawn(move || run(&args))
+    {
+        Ok(handle) => handle.join().unwrap_or_else(|_| {
+            eprintln!("osh: fatal: shell thread terminated abnormally");
+            2
+        }),
+        Err(e) => {
+            eprintln!("osh: warning: could not allocate interpreter stack ({e}); running with default stack");
+            let args: Vec<String> = std::env::args().collect();
+            run(&args)
+        }
+    };
     process::exit(code);
 }
 

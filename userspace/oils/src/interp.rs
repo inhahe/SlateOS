@@ -7755,6 +7755,16 @@ impl Shell {
                 sub.traps.remove(k);
             }
         }
+        // `inherit_errexit` shopt (default OFF): a command substitution normally
+        // runs with errexit *unset* inside its subshell, so an intermediate
+        // failure — `x=$(false; echo A)` — does not abort the substitution and
+        // `A` is still captured (bash). Only when `shopt -s inherit_errexit` is
+        // enabled does the subshell inherit the caller's `set -e`. The overall
+        // exit status ($?) of the substitution still propagates via
+        // `self.last_status = sub.last_status` regardless.
+        if !self.shopt.get("inherit_errexit").copied().unwrap_or(false) {
+            sub.errexit = false;
+        }
         {
             let mut out = Out::Capture(&mut buf);
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
@@ -21063,6 +21073,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // intermediate failure aborts the subshell (and the failing subshell then
         // aborts the outer shell), so neither `sub` nor `after` prints.
         let (o, s) = run("set -e; ( false; echo sub ); echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn command_sub_does_not_inherit_errexit_by_default() {
+        // `inherit_errexit` is OFF by default: a command substitution runs with
+        // errexit unset in its subshell, so an intermediate failure does not
+        // abort it — `x=$(false; echo A)` still captures `A` (bash).
+        assert_eq!(run(r#"set -e; x=$(false; echo A); echo "[$x]""#).0, "[A]\n");
+        // Multiple intermediate failures are likewise tolerated; only the final
+        // command's status becomes $? of the substitution.
+        assert_eq!(run(r#"set -e; x=$(false; echo A; false; echo B; true); echo "[$x]""#).0, "[A\nB]\n");
+    }
+
+    #[test]
+    fn command_sub_inherits_errexit_when_shopt_set() {
+        // `shopt -s inherit_errexit`: the substitution subshell inherits the
+        // caller's `set -e`, so the intermediate failure aborts it before `echo A`
+        // runs. The substitution then exits non-zero, and under the outer `set -e`
+        // the failing assignment aborts the whole shell — so `echo "[$x]"` never
+        // runs and nothing is printed (bash).
+        let (o, s) = run(r#"shopt -s inherit_errexit; set -e; x=$(false; echo A); echo "[$x]""#);
         assert_eq!(o, "");
         assert_eq!(s, 1);
     }

@@ -480,24 +480,37 @@ path (all stderr-only; runtime-error messages already match bash):
    preceding output is missing, so single-statement syntax errors — the
    common case — now match bash byte-for-byte.
 
-4. **STILL OPEN — Token identity for `(`-in-command-position.** For a `(`
-   that appears where a command word is expected (`echo a; echo (`, `echo
-   hello (`), bash reports `near unexpected token \`newline'` (it scans past
-   the `(` to the following token), while osh reports `near unexpected token
-   \`('` (it errors at the `(` itself). Same for `for`/`select` reaching a
-   bare newline before the loop variable: bash reports the `newline` token,
-   osh reaches EOF and reports `unexpected end of file`. These are
-   parser-strategy differences (which token is named as the culprit), not a
-   prefix/line issue; the source-token, line number, and second-line echo
-   are all correct. Aligning them would require reworking where the grammar
-   raises the error (report at the *following* token rather than at the
-   offending one / EOF) — higher risk, deferred.
+4. **PARTIALLY RESOLVED 2026-07-20 — Token identity.** bash names the
+   token its parser cursor sits on (`near unexpected token \`X'`, or
+   `unexpected end of file` at EOF). Where osh's cursor *already* sits on
+   that same token, the fragment-style message was replaced with
+   `unexpected_here()` so the culprit and the second-line echo match bash.
+   **Done:** the `case` sites (`case ;`, `case )`, `case x in ;&`, `case x
+   in )`, `case x in pat esac`) and subshell close (`( )`, `( echo hi`) —
+   all verified equal to bash. Covered by
+   `case_and_subshell_errors_name_the_offending_token`.
+
+   **Still open (cursor is not on bash's culprit):**
+   - `(`-in-command-position (`echo a; echo (`, `echo hello (`): bash scans
+     past the `(` and reports `near unexpected token \`newline'`; osh errors
+     at the `(` itself. Requires bash's implicit-trailing-newline model.
+   - Redirect target/operator (`echo > >`, `echo <`): bash reports the `>`
+     token / the `newline` at EOL; osh's site uses `bump()` (cursor already
+     advanced) and reaches true EOF, so it would name the wrong token /
+     report `unexpected end of file` rather than `newline`.
+   - `[[ … ]]` conditional errors use bash's *conditional-specific* phrasing
+     (`unexpected token \`newline', conditional binary operator expected`;
+     `unexpected argument \`]]' to conditional binary operator`; `syntax
+     error near \`]]'`), not the generic `near unexpected token` form.
+   - `${}` / `${a[]}`: bash defers these to a *runtime* `${…}: bad
+     substitution` (no `-c:`/line prefix), whereas osh raises a parse error.
+   - `for (( ))`: bash itself reports a bare `unexpected end of file` here.
 
 **Remaining fix (if pursued):** (3) is a separate incremental-execution
-project. (4) means changing the for/select/command-position grammar to
-consume the offending token and error at the *next* token so the named
-culprit matches bash — a localized but behaviour-shifting parser change best
-done with a focused test sweep.
+project. The still-open (4) items each need a targeted grammar change
+(consume-then-error at the following token, or the implicit-EOL newline
+model, or bash's `[[ ]]`/bad-substitution deferral) — behaviour-shifting
+and best done one class at a time with a focused test sweep.
 
 ### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19
 

@@ -583,7 +583,9 @@ impl Parser {
         self.pos += 1;
         let body = self.parse_program(&[], false)?;
         if !self.at_op(Op::RParen) {
-            return Err(ParseError::new("expected ')'".into()));
+            // bash names the offending token here (`near unexpected token \`)'`
+            // for `( )`, `unexpected end of file` for an unclosed `( echo hi`).
+            return Err(self.unexpected_here());
         }
         self.pos += 1;
         Ok(Command::Subshell(body))
@@ -738,7 +740,9 @@ impl Parser {
     fn parse_case(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("case")?;
         let Some(Tok::Word(segs)) = self.peek() else {
-            return Err(ParseError::new("expected word after 'case'".into()));
+            // bash names the offending token (`case ;` → `near unexpected token
+            // \`;'`), or reports end of input.
+            return Err(self.unexpected_here());
         };
         let word = self.word_from_segs(&segs.clone())?;
         self.pos += 1;
@@ -760,7 +764,9 @@ impl Parser {
             let mut patterns = Vec::new();
             loop {
                 let Some(Tok::Word(segs)) = self.peek() else {
-                    return Err(ParseError::new("expected pattern in 'case'".into()));
+                    // bash names the offending token (`case x in ;&` → `near
+                    // unexpected token \`;&'`, `case x in )` → \`)').
+                    return Err(self.unexpected_here());
                 };
                 patterns.push(self.word_from_segs(&segs.clone())?);
                 self.pos += 1;
@@ -771,7 +777,9 @@ impl Parser {
                 break;
             }
             if !self.at_op(Op::RParen) {
-                return Err(ParseError::new("expected ')' after 'case' pattern".into()));
+                // bash names the offending token (`case x in pat esac` → `near
+                // unexpected token \`esac'`).
+                return Err(self.unexpected_here());
             }
             self.pos += 1;
             let body = self.parse_case_body()?;
@@ -2306,6 +2314,27 @@ mod tests {
             parse("f() echo hi").unwrap_err().msg,
             "syntax error near unexpected token `echo'"
         );
+    }
+
+    #[test]
+    fn case_and_subshell_errors_name_the_offending_token() {
+        // bash reports these as `near unexpected token \`X'` (or `unexpected end
+        // of file` at EOF), naming the token its cursor sits on — not a bespoke
+        // fragment. osh's parser now matches: the cursor already points at the
+        // culprit, so each site defers to `unexpected_here`.
+        for (src, want) in [
+            ("case x in ;& esac", "syntax error near unexpected token `;&'"),
+            ("case x in pat esac", "syntax error near unexpected token `esac'"),
+            ("case x in )", "syntax error near unexpected token `)'"),
+            ("case ; in", "syntax error near unexpected token `;'"),
+            ("case )", "syntax error near unexpected token `)'"),
+            ("( )", "syntax error near unexpected token `)'"),
+            ("( echo hi", "syntax error: unexpected end of file"),
+        ] {
+            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+        }
+        // A well-formed `case` still parses (guard against over-eager erroring).
+        assert!(parse("case x in a) echo 1;; b) echo 2;; esac").is_ok());
     }
 
     #[test]

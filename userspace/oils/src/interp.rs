@@ -12446,7 +12446,16 @@ impl Shell {
     /// command silences it, as in bash.
     fn emit_arith_error(&mut self, expr: &str, e: &arith::ArithError) {
         let prefix = self.err_prefix();
-        let expr = expr.trim_start();
+        let mut expr = expr.trim_start();
+        // A rejected number literal (`2#12`, `099`) truncates the echoed source
+        // at the literal's end — bash reports `5+2#12+9` as `5+2#12`. Ordinary
+        // parse/eval errors echo the whole source unchanged.
+        if e.truncate_leading
+            && let Some(tok) = &e.token
+            && let Some(pos) = expr.find(tok.as_str())
+        {
+            expr = &expr[..pos + tok.len()];
+        }
         match self.arith_cmd {
             Some(tag) => self.errln(&format!("{prefix}{tag}: {expr}: {e}")),
             None => self.errln(&format!("{prefix}{expr}: {e}")),
@@ -16218,6 +16227,16 @@ mod tests {
         );
         // An active `2>/dev/null` silences the diagnostic (routed through errln).
         assert_eq!(run_cmd("let '1/0' 2>/dev/null; echo $?"), "1\n");
+        // A rejected number literal truncates the echoed source at the literal's
+        // end: bash reports `5+2#12+9` as `5+2#12`, not the whole expression.
+        assert_eq!(
+            run_cmd("{ echo $((5+2#12+9)); } 2>&1"),
+            "osh: line 1: 5+2#12: value too great for base (error token is \"2#12\")\n"
+        );
+        assert_eq!(
+            run_cmd("{ echo $((099+1)); } 2>&1"),
+            "osh: line 1: 099: value too great for base (error token is \"099\")\n"
+        );
     }
 
     #[test]

@@ -89,6 +89,13 @@ pub struct ArithError {
     pub msg: String,
     /// The offending token (bash's `error token is "…"`), if known.
     pub token: Option<String>,
+    /// When `true`, the token is a self-contained *number literal* the lexer
+    /// rejected (`2#12`, `099`, `65#5`), so bash truncates the echoed source at
+    /// the end of that literal (`5+2#12+9` is reported as `5+2#12`). For
+    /// ordinary parse/eval errors this is `false` and bash echoes the whole
+    /// source with the token being the unparsed remainder. See
+    /// `Shell::emit_arith_error`.
+    pub truncate_leading: bool,
 }
 
 impl ArithError {
@@ -97,6 +104,7 @@ impl ArithError {
         Self {
             msg: msg.into(),
             token: None,
+            truncate_leading: false,
         }
     }
 
@@ -105,6 +113,17 @@ impl ArithError {
         Self {
             msg: msg.into(),
             token: Some(token.into()),
+            truncate_leading: false,
+        }
+    }
+
+    /// A number-literal lexer error whose token is a complete literal; the
+    /// echoed source is truncated at the literal's end (bash behaviour).
+    fn lexeme_error(msg: impl Into<String>, lexeme: impl Into<String>) -> Self {
+        Self {
+            msg: msg.into(),
+            token: Some(lexeme.into()),
+            truncate_leading: true,
         }
     }
 }
@@ -632,40 +651,50 @@ impl AParser<'_> {
         // base#num — bash arbitrary-base literals, base 2..=64.
         if self.peek() == Some('#') {
             let base_str: String = self.chars[start..self.pos].iter().collect();
-            let base: u32 = base_str.parse().map_err(|_| {
-                ArithError::with_token("invalid arithmetic base", self.rest_from(start))
-            })?;
-            if !(2..=64).contains(&base) {
-                return Err(ArithError::with_token(
-                    "invalid arithmetic base",
-                    self.rest_from(start),
-                ));
-            }
             self.pos += 1; // consume '#'
             let dstart = self.pos;
-            let mut val: i64 = 0;
-            while let Some(c) = self.peek() {
-                let Some(d) = digit_value(c, base) else { break };
+            // Consume the whole digit lexeme (every char that is a digit in
+            // *some* base: 0-9, a-z, A-Z, @, _) so the error token spans the
+            // full literal exactly as bash reports it — `5+2#12+9` blames
+            // `2#12`, not `2` or `2#12+9`.
+            while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
                 self.pos += 1;
+            }
+            let lexeme: String = self.chars[start..self.pos].iter().collect();
+            let base: u32 = base_str.parse().map_err(|_| {
+                ArithError::lexeme_error("invalid arithmetic base", lexeme.clone())
+            })?;
+            // bash distinguishes base 0 ("invalid number") from base 1 / >64
+            // ("invalid arithmetic base").
+            if base == 0 {
+                return Err(ArithError::lexeme_error("invalid number", lexeme));
+            }
+            if !(2..=64).contains(&base) {
+                return Err(ArithError::lexeme_error("invalid arithmetic base", lexeme));
+            }
+            if self.pos == dstart {
+                // `2#` with no following digits.
+                return Err(ArithError::lexeme_error("invalid integer constant", lexeme));
+            }
+            let mut val: i64 = 0;
+            for &c in &self.chars[dstart..self.pos] {
+                let Some(d) = digit_value(c, base) else {
+                    // A digit valid in some base but not in *this* one is bash's
+                    // "value too great for base" (`2#12`, `16#gz`, `10#0a`).
+                    return Err(ArithError::lexeme_error("value too great for base", lexeme));
+                };
                 val = val
                     .wrapping_mul(i64::from(base))
                     .wrapping_add(i64::from(d));
             }
-            if self.pos == dstart {
-                // bash reports an invalid/absent digit for the base as "value
-                // too great for base" (`2#5`, `16#zz`).
-                return Err(ArithError::with_token(
-                    "value too great for base",
-                    self.rest_from(start),
-                ));
-            }
             return Ok(val);
         }
         let text: String = self.chars[start..self.pos].iter().collect();
-        // A leading zero (other than bare "0") denotes octal.
+        // A leading zero (other than bare "0") denotes octal. bash reports a
+        // non-octal digit (`099`, `0778`) as "value too great for base".
         if text.len() > 1 && text.starts_with('0') {
             return i64::from_str_radix(&text, 8)
-                .map_err(|_| ArithError::new(format!("bad octal literal '{text}'")));
+                .map_err(|_| ArithError::lexeme_error("value too great for base", text.clone()));
         }
         text.parse::<i64>()
             .map_err(|_| ArithError::new(format!("bad number '{text}'")))
@@ -1262,10 +1291,40 @@ mod tests {
             ("a[", "bad array subscript (error token is \"a[\")"),
             ("1#", "invalid arithmetic base (error token is \"1#\")"),
             ("2#5", "value too great for base (error token is \"2#5\")"),
+            // A digit valid in *some* base but not in this one — even when it is
+            // not the first digit — is "value too great for base", and the token
+            // spans the whole literal (not just the offending digit).
+            ("2#12", "value too great for base (error token is \"2#12\")"),
+            ("10#0a", "value too great for base (error token is \"10#0a\")"),
+            ("5+2#12+9", "value too great for base (error token is \"2#12\")"),
+            ("16#gz+1", "value too great for base (error token is \"16#gz\")"),
+            // Leading-zero octal with a non-octal digit.
+            ("099", "value too great for base (error token is \"099\")"),
+            ("0778", "value too great for base (error token is \"0778\")"),
+            // Base edge cases: 0 → "invalid number", >64 → "invalid arithmetic
+            // base", `N#` with no digits → "invalid integer constant".
+            ("0#5", "invalid number (error token is \"0#5\")"),
+            ("65#5", "invalid arithmetic base (error token is \"65#5\")"),
+            ("2#", "invalid integer constant (error token is \"2#\")"),
         ];
         for (src, want) in cases {
             let e = eval(src, &mut Map::default()).unwrap_err();
             assert_eq!(&e.to_string(), want, "expr {src:?}");
+        }
+    }
+
+    #[test]
+    fn number_literal_errors_flag_leading_truncation() {
+        // Number-literal lexer errors set `truncate_leading` so the shell echoes
+        // the source up to the literal's end (`5+2#12+9` → `5+2#12`). Ordinary
+        // parse/eval errors leave it clear (the whole source is echoed).
+        for src in ["2#12", "099", "65#5", "2#", "0#5", "5+2#12+9"] {
+            let e = eval(src, &mut Map::default()).unwrap_err();
+            assert!(e.truncate_leading, "expr {src:?} should truncate leading");
+        }
+        for src in ["1/0", "5 +", "3 3"] {
+            let e = eval(src, &mut Map::default()).unwrap_err();
+            assert!(!e.truncate_leading, "expr {src:?} should not truncate");
         }
     }
 

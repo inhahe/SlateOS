@@ -770,6 +770,15 @@ impl Shell {
     }
 
     pub fn run_source(&mut self, src: &str) -> i32 {
+        let mut out = Out::Inherit;
+        self.run_source_out(src, &mut out)
+    }
+
+    /// Parse and execute `src`, sending its standard output to the caller's
+    /// `out` sink. This lets internally-generated commands (e.g. the `mapfile
+    /// -C` callback) participate in an active capture — a command substitution
+    /// or brace-group redirect — rather than escaping to the real fd 1.
+    fn run_source_out(&mut self, src: &str, out: &mut Out) -> i32 {
         // Expand command-word aliases only when `expand_aliases` is in effect;
         // otherwise parse the raw tokens so a non-interactive shell leaves alias
         // names untouched (bash parity).
@@ -786,8 +795,7 @@ impl Shell {
                 return 2;
             }
         };
-        let mut out = Out::Inherit;
-        match self.exec_program(&prog, &mut out, &StdinSrc::Inherit) {
+        match self.exec_program(&prog, out, &StdinSrc::Inherit) {
             Flow::Exit(code) => {
                 self.last_status = code;
                 code
@@ -6880,7 +6888,7 @@ impl Shell {
             "set" => self.builtin_set(args, out, redir),
             "shift" => self.builtin_shift(args),
             "getopts" => self.builtin_getopts(args),
-            "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir),
+            "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir, out),
             "read" => self.builtin_read(args, stdin, redir),
             "test" | "[" => self.builtin_test(name, args),
             "let" => self.builtin_let(args),
@@ -10545,17 +10553,29 @@ impl Shell {
         buf
     }
 
-    /// The `mapfile`/`readarray [-t] [-d delim] [-n count] [-s skip] [-O origin]
-    /// [array]` builtin: read lines from standard input into an indexed array
-    /// (default `MAPFILE`). Each element retains the trailing delimiter unless
-    /// `-t` is given. Supports `-d` (alternate delimiter), `-n` (max count, 0 =
-    /// all), `-s` (skip leading lines), and `-O` (starting array index).
-    fn builtin_mapfile(&mut self, args: &[String], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
+    /// The `mapfile`/`readarray [-d delim] [-n count] [-O origin] [-s skip] [-t]
+    /// [-C callback] [-c quantum] [array]` builtin: read lines from standard
+    /// input into an indexed array (default `MAPFILE`). Each element retains the
+    /// trailing delimiter unless `-t` is given. Supports `-d` (alternate
+    /// delimiter), `-n` (max count, 0 = all), `-s` (skip leading lines), `-O`
+    /// (starting array index), and `-C callback`/`-c quantum` (evaluate
+    /// `callback` every `quantum` lines, passing the target index and the raw
+    /// line — including its delimiter — before the element is assigned; the
+    /// default quantum is 5000).
+    fn builtin_mapfile(
+        &mut self,
+        args: &[String],
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+        out: &mut Out,
+    ) -> i32 {
         let mut strip = false;
         let mut delim = b'\n';
         let mut count: usize = 0; // 0 = unlimited
         let mut skip: usize = 0;
         let mut origin: usize = 0;
+        let mut callback: Option<String> = None;
+        let mut quantum: usize = 5000;
         let mut array = String::from("MAPFILE");
         let mut i = 0;
         while i < args.len() {
@@ -10566,9 +10586,19 @@ impl Shell {
                     i += 1;
                     delim = args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0);
                 }
-                "-n" | "-c" => {
+                "-n" => {
                     i += 1;
                     count = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                "-c" => {
+                    i += 1;
+                    // A quantum of 0 disables the callback in bash; keep the
+                    // default otherwise.
+                    quantum = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(5000);
+                }
+                "-C" => {
+                    i += 1;
+                    callback = args.get(i).cloned();
                 }
                 "-s" => {
                     i += 1;
@@ -10602,8 +10632,14 @@ impl Shell {
             pieces.push(cur);
         }
 
+        // A callback only fires when `-C` was given and the quantum is non-zero.
+        let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && quantum != 0;
+
         let mut elems: BTreeMap<usize, String> = BTreeMap::new();
         let mut idx = origin;
+        // Number of elements assigned so far (1-based when checking the quantum),
+        // matching bash's `line_count % quantum == 0` boundary test.
+        let mut assigned: usize = 0;
         for piece in pieces.into_iter().skip(skip) {
             if count != 0 && idx.saturating_sub(origin) >= count {
                 break;
@@ -10611,6 +10647,20 @@ impl Shell {
             let mut s = String::from_utf8_lossy(&piece).into_owned();
             if strip && s.as_bytes().last() == Some(&delim) {
                 s.pop();
+            }
+            // The callback runs before the element is assigned (so `${arr[$idx]}`
+            // is still empty inside it) and receives the *same* value that will
+            // be stored — i.e. the `-t`-stripped line, or the raw line (delimiter
+            // included) when `-t` is absent. bash passes the target index and the
+            // line as command arguments; the callback text itself is evaluated
+            // as-is, so only the index and line need quoting.
+            assigned = assigned.saturating_add(1);
+            if fire_callback
+                && assigned.is_multiple_of(quantum)
+                && let Some(cb) = &callback
+            {
+                let cmd = format!("{cb} {idx} {}", single_quote(&s));
+                self.run_source_out(&cmd, out);
             }
             elems.insert(idx, s);
             idx = idx.saturating_add(1);
@@ -12962,8 +13012,8 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("set", "set [-abefuxCo] [--] [arg ...]", "Set or unset shell options and positional parameters."),
     ("shift", "shift [n]", "Shift positional parameters."),
     ("getopts", "getopts optstring name [arg ...]", "Parse option arguments."),
-    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [array]", "Read lines into an indexed array variable."),
-    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [array]", "Read lines into an array (synonym for mapfile)."),
+    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-C callback] [-c quantum] [array]", "Read lines into an indexed array variable."),
+    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-C callback] [-c quantum] [array]", "Read lines into an array (synonym for mapfile)."),
     ("command", "command [-pVv] name [arg ...]", "Execute a command bypassing shell functions."),
     ("builtin", "builtin [shell-builtin [arg ...]]", "Execute a shell builtin."),
     ("read", "read [-raspd delim] [-nN count] [name ...]", "Read a line from standard input and split it."),
@@ -16458,6 +16508,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "mapfile arr <<< $'x\\ny'\n\
                    printf '[%s]' \"${arr[@]}\"";
         assert_eq!(run(src).0, "[x\n][y\n]");
+    }
+
+    #[test]
+    fn mapfile_callback_quantum() {
+        // -C callback fires every -c quantum lines. bash appends the target
+        // index and the line as command *arguments* (not $1/$2 of the caller).
+        // Here a helper function receives them as $1/$2 and observes that the
+        // element is not yet assigned (${arr[$1]} empty). With -t the line arg is
+        // the stripped value. Quantum 1 fires per line.
+        let src = "cb() { printf 'cb %s [%s] cur=[%s]\\n' \"$1\" \"$2\" \"${arr[$1]}\"; }\n\
+                   mapfile -t -C cb -c 1 arr <<< $'p\\nq'\n\
+                   printf 'final=%s\\n' \"${arr[*]}\"";
+        assert_eq!(
+            run(src).0,
+            "cb 0 [p] cur=[]\ncb 1 [q] cur=[]\nfinal=p q\n"
+        );
+    }
+
+    #[test]
+    fn mapfile_callback_line_keeps_delim_without_t() {
+        // Without -t the line argument to the callback keeps its delimiter.
+        let src = "cb() { printf '[%s|%s]' \"$1\" \"$2\"; }\n\
+                   mapfile -C cb -c 1 arr <<< $'x\\ny'";
+        assert_eq!(run(src).0, "[0|x\n][1|y\n]");
+    }
+
+    #[test]
+    fn mapfile_callback_quantum_two() {
+        // Quantum 2 fires at the 2nd and 4th assigned lines, with the index of
+        // the element about to be stored (1, then 3). `echo CB:` receives the
+        // index and line as appended arguments.
+        let src = "mapfile -t -C 'echo CB:' -c 2 arr <<< $'1\\n2\\n3\\n4\\n5'\n\
+                   echo done";
+        assert_eq!(run(src).0, "CB: 1 2\nCB: 3 4\ndone\n");
+    }
+
+    #[test]
+    fn mapfile_no_callback_without_dash_c_uppercase() {
+        // A large default quantum (5000) means no callback fires for a few lines
+        // when -C is given without -c.
+        let src = "mapfile -t -C 'echo NOPE' arr <<< $'a\\nb\\nc'\n\
+                   echo \"${#arr[@]}\"";
+        assert_eq!(run(src).0, "3\n");
+    }
+
+    #[test]
+    fn mapfile_dash_n_still_counts() {
+        // -n (count) is now distinct from -c (quantum): -n limits how many lines
+        // are read.
+        let src = "mapfile -t -n 2 arr <<< $'a\\nb\\nc\\nd'\n\
+                   echo \"${#arr[@]}\"; echo \"${arr[*]}\"";
+        assert_eq!(run(src).0, "2\na b\n");
     }
 
     #[test]

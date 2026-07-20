@@ -1,3 +1,6 @@
 the crate is ~15k+ lines with 477 passing tests and is quite mature now. Most calendar time is rate-limit windows, not active work. If you ever want the faithful C++ cross-compile instead, the crate is isolated enough to swap once a C++/slateos toolchain exists (which Chromium/WINE will need anyway) — but that path is currently prerequisite-blocked.
 
+". This is a real, in-scope bash-superset gap (the goal is bash compatibility, and line N: is strictly more useful for debugging). "
+The reason I wanted you to port oils is because of its superset capability. Can you port all of it?
 
+I have an idea: Continue porting a bash-compatible shell from oils, then once we get our C++ toolchain in, you can 

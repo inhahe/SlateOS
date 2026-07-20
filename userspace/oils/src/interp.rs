@@ -7384,6 +7384,7 @@ impl Shell {
             "compopt" => self.builtin_compopt(args),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
+            "kill" => self.builtin_kill(args, out, redir),
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
             "fg" => self.builtin_fg(args, out, redir),
@@ -8070,23 +8071,190 @@ impl Shell {
 
     /// `trap -l` — list the known signal names, five per line, numbered.
     fn trap_list(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
-        let mut buf = String::new();
-        // bash separates the five entries per line with a literal tab (not
-        // space padding), e.g. ` 1) SIGHUP\t 2) SIGINT\t…`, and ends each row
-        // with a newline. A trailing partial row keeps its final tab before the
-        // closing newline (matching bash's `kill -l`/`trap -l` output exactly).
-        for (idx, (num, name)) in SIGNALS.iter().enumerate() {
-            buf.push_str(&format!("{num:2}) SIG{name}"));
-            if idx % 5 == 4 {
-                buf.push('\n');
-            } else {
-                buf.push('\t');
+        let buf = signal_list_columns();
+        self.write_bytes(out, redir, buf.as_bytes())
+    }
+
+    /// `kill` — send a signal to jobs/processes, or list signal names.
+    ///
+    /// Forms:
+    ///   `kill -l|-L [sigspec…]`  list all signals (columnar) or translate.
+    ///   `kill [-s sig | -n num | -sig] target…`  signal jobs/pids.
+    ///
+    /// On SlateOS there are no Unix signals for process control (see
+    /// `design.txt`): delivery is expressed through `std::process::Child::kill`,
+    /// which each platform maps to its native process-termination primitive.
+    /// osh can therefore terminate the child processes it spawned (referenced by
+    /// job spec `%n` or by pid); signal *number* is honoured for `-l`/`-0`
+    /// (existence check) but every real delivery is a terminate, since there is
+    /// nothing for a child to catch. A target osh did not spawn reports bash's
+    /// "No such process", matching a nonexistent pid.
+    fn builtin_kill(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut i = 0;
+        // `-l` / `-L`: list or translate signal specs, then done.
+        if let Some(a) = args.first()
+            && (a == "-l" || a == "-L")
+        {
+            return self.kill_list(&args[1..], out, redir);
+        }
+
+        // Parse an optional signal specifier. Default is TERM (15).
+        let mut signum: u8 = 15;
+        if let Some(a) = args.get(i) {
+            if a == "--" {
+                i += 1;
+            } else if a == "-s" || a == "-n" {
+                let Some(spec) = args.get(i + 1) else {
+                    self.emit_stderr(
+                        format!("{}kill: {a}: option requires an argument\n", self.err_prefix())
+                            .as_bytes(),
+                    );
+                    return 2;
+                };
+                match kill_parse_sig(spec, a == "-n") {
+                    Some(n) => signum = n,
+                    None => {
+                        self.emit_stderr(
+                            format!(
+                                "{}kill: {spec}: invalid signal specification\n",
+                                self.err_prefix()
+                            )
+                            .as_bytes(),
+                        );
+                        return 1;
+                    }
+                }
+                i += 2;
+            } else if let Some(spec) = a.strip_prefix('-')
+                && !spec.is_empty()
+                && a != "-"
+            {
+                // `-SIGSPEC` where SIGSPEC is a name (`-KILL`, `-SIGKILL`) or a
+                // number (`-9`). A leading '-' followed by a non-spec is a bad
+                // signal spec, not an operand.
+                match kill_parse_sig(spec, false) {
+                    Some(n) => signum = n,
+                    None => {
+                        self.emit_stderr(
+                            format!(
+                                "{}kill: {spec}: invalid signal specification\n",
+                                self.err_prefix()
+                            )
+                            .as_bytes(),
+                        );
+                        return 1;
+                    }
+                }
+                i += 1;
             }
         }
-        if !buf.ends_with('\n') {
-            buf.push('\n');
+
+        let targets = &args[i..];
+        if targets.is_empty() {
+            // bash's builtin *usage* messages carry no `bash: line N:` location
+            // prefix (unlike its other builtin errors), so neither does ours.
+            self.emit_stderr(
+                b"kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]\n",
+            );
+            return 2;
         }
-        self.write_bytes(out, redir, buf.as_bytes())
+
+        let mut status = 0;
+        for t in targets {
+            if !self.kill_one(t, signum) {
+                status = 1;
+            }
+        }
+        status
+    }
+
+    /// Deliver `signum` to a single `kill` target (job spec `%n` or a pid).
+    /// Returns `true` on success. Signal 0 is an existence check (no delivery).
+    fn kill_one(&mut self, target: &str, signum: u8) -> bool {
+        // Resolve to one of our tracked jobs, if possible.
+        let job_idx = self.resolve_job_spec(target);
+        // Signal 0: just report whether the target exists (a live job or the
+        // shell itself); never terminate.
+        if signum == 0 {
+            let exists = job_idx.is_some()
+                || target.parse::<u32>().is_ok_and(|p| p == std::process::id());
+            if !exists {
+                self.emit_stderr(
+                    format!("{}kill: ({target}) - No such process\n", self.err_prefix())
+                        .as_bytes(),
+                );
+            }
+            return exists;
+        }
+        if let Some(idx) = job_idx {
+            // Terminate the spawned child (platform-native process kill).
+            if let Some(child) = self.jobs[idx].child.as_mut() {
+                match child.kill() {
+                    Ok(()) => {
+                        // Record the terminated status so `wait`/`jobs` reflect it.
+                        let _ = child.wait();
+                        self.jobs[idx].status = Some(128 + i32::from(signum));
+                        self.jobs[idx].child = None;
+                        return true;
+                    }
+                    Err(_) => {
+                        self.emit_stderr(
+                            format!("{}kill: ({target}) - No such process\n", self.err_prefix())
+                                .as_bytes(),
+                        );
+                        return false;
+                    }
+                }
+            }
+            // Already reaped: bash still succeeds for a just-finished job.
+            return true;
+        }
+        // A pid osh did not spawn cannot be signalled without the target's
+        // process-control layer; report it like bash does for a stale pid.
+        self.emit_stderr(
+            format!("{}kill: ({target}) - No such process\n", self.err_prefix()).as_bytes(),
+        );
+        false
+    }
+
+    /// `kill -l [sigspec…]` — with no specs, print the columnar signal table;
+    /// otherwise translate each spec (number→name, name→number).
+    fn kill_list(&mut self, specs: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        if specs.is_empty() {
+            let buf = signal_list_columns();
+            return self.write_bytes(out, redir, buf.as_bytes());
+        }
+        let mut buf = String::new();
+        let mut status = 0;
+        for spec in specs {
+            if let Ok(n) = spec.parse::<u16>() {
+                // A number → its name. bash decodes exit-status form (128+sig).
+                let sig = if n > 128 { n - 128 } else { n };
+                match SIGNALS.iter().find(|(num, _)| u16::from(*num) == sig) {
+                    Some((_, name)) => buf.push_str(&format!("{name}\n")),
+                    None => {
+                        self.emit_stderr(
+                            format!(
+                                "{}kill: {spec}: invalid signal specification\n",
+                                self.err_prefix()
+                            )
+                            .as_bytes(),
+                        );
+                        status = 1;
+                    }
+                }
+            } else if let Some(num) = kill_parse_sig(spec, false) {
+                buf.push_str(&format!("{num}\n"));
+            } else {
+                self.emit_stderr(
+                    format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix())
+                        .as_bytes(),
+                );
+                status = 1;
+            }
+        }
+        let w = self.write_bytes(out, redir, buf.as_bytes());
+        if w != 0 { w } else { status }
     }
 
     /// Poll every tracked background job without blocking, recording the exit
@@ -13617,6 +13785,45 @@ const SIGNALS: &[(u8, &str)] = &[
     (31, "SYS"),
 ];
 
+/// Render the full signal table in bash's `trap -l` / `kill -l` layout: five
+/// `N) SIGNAME` entries per line, separated by a literal tab (not space
+/// padding) and each row ending with a newline. A trailing partial row keeps
+/// its final tab before the closing newline, matching bash byte-for-byte.
+fn signal_list_columns() -> String {
+    let mut buf = String::new();
+    for (idx, (num, name)) in SIGNALS.iter().enumerate() {
+        buf.push_str(&format!("{num:2}) SIG{name}"));
+        if idx % 5 == 4 {
+            buf.push('\n');
+        } else {
+            buf.push('\t');
+        }
+    }
+    if !buf.ends_with('\n') {
+        buf.push('\n');
+    }
+    buf
+}
+
+/// Parse a `kill` signal spec to its number. Accepts a signal name with or
+/// without a `SIG` prefix (case-insensitive: `KILL`, `sigkill`) and, unless
+/// `numeric_only` restricts to `-n`, a decimal signal number. Signal `0` (the
+/// existence-check pseudo-signal) is valid. Returns `None` for anything else.
+fn kill_parse_sig(spec: &str, numeric_only: bool) -> Option<u8> {
+    if let Ok(n) = spec.parse::<u8>() {
+        if n == 0 || SIGNALS.iter().any(|(num, _)| *num == n) {
+            return Some(n);
+        }
+        return None;
+    }
+    if numeric_only {
+        return None;
+    }
+    let upper = spec.to_ascii_uppercase();
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    SIGNALS.iter().find(|(_, name)| *name == bare).map(|(num, _)| *num)
+}
+
 /// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …).
 /// Accepts case-insensitive names with or without a `SIG` prefix, the pseudo
 /// signals `EXIT`/`ERR`/`DEBUG`/`RETURN`, and signal numbers (`0` = `EXIT`).
@@ -14263,7 +14470,7 @@ const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
+    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
     "ulimit", "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
     "complete", "compopt",
@@ -20737,6 +20944,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let first = o.lines().next().unwrap_or("");
         assert!(first.starts_with(" 1) SIGHUP\t"), "got {first:?}");
         assert!(first.contains("\t 2) SIGINT\t"), "got {first:?}");
+    }
+
+    #[test]
+    fn kill_is_a_builtin() {
+        // `kill` must be an osh builtin (not delegated to an external), so it
+        // works on the SlateOS target where no `/usr/bin/kill` exists and can
+        // resolve osh's own job specs.
+        assert_eq!(run("type -t kill").0, "builtin\n");
+    }
+
+    #[test]
+    fn kill_l_lists_and_translates() {
+        // `kill -l` prints the same columnar table as `trap -l`.
+        assert_eq!(run("kill -l").0, run("trap -l").0);
+        // `-L` is an accepted alias.
+        assert_eq!(run("kill -L").0, run("kill -l").0);
+        // Number → name and name → number (with and without a SIG prefix).
+        assert_eq!(run("kill -l 9").0, "KILL\n");
+        assert_eq!(run("kill -l 9 15").0, "KILL\nTERM\n");
+        assert_eq!(run("kill -l TERM").0, "15\n");
+        assert_eq!(run("kill -l SIGTERM").0, "15\n");
+        // Exit-status form (128 + signum) decodes to the signal name.
+        assert_eq!(run("kill -l 137").0, "KILL\n");
+    }
+
+    #[test]
+    fn kill_l_rejects_bad_specs() {
+        // An unknown name and an out-of-range number are invalid specs (rc 1).
+        let (o, s) = run("kill -l BOGUS 2>&1");
+        assert!(o.contains("kill: BOGUS: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        let (o, s) = run("kill -l 99 2>&1");
+        assert!(o.contains("kill: 99: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn kill_usage_and_bad_signal_errors() {
+        // No operands → the usage message, which (like bash) carries no
+        // `line N:` location prefix, and exits 2.
+        let (o, s) = run("kill 2>&1");
+        assert!(o.starts_with("kill: usage: kill [-s sigspec"), "got {o:?}");
+        assert_eq!(s, 2);
+        // A bad `-SIGSPEC` is an invalid signal specification (rc 1).
+        let (o, s) = run("kill -BOGUS 123 2>&1");
+        assert!(o.contains("kill: BOGUS: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        // A pid osh never spawned is "No such process" (rc 1).
+        let (o, s) = run("kill 999999 2>&1");
+        assert!(o.contains("kill: (999999) - No such process"), "got {o:?}");
+        assert_eq!(s, 1);
     }
 
     #[test]

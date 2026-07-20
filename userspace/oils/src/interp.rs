@@ -13231,10 +13231,23 @@ impl Shell {
     /// since byte-matching bash's name is impossible anyway (osh's `$0` is `osh`,
     /// not `bash`) and osh's own name is the more meaningful diagnostic.
     fn err_prefix(&self) -> String {
-        if self.command_mode || self.script_mode {
-            format!("{}: line {}: ", self.name, self.current_line)
+        // bash labels a diagnostic with the source of the *currently-executing
+        // frame* (its `get_name_for_error`): at the top level that is the shell
+        // or script name (`$0`), but *inside a function* it is the function's
+        // definition source — the same value `${BASH_SOURCE[0]}` reports
+        // (`environment` for a `-c`-defined function, the script path for a
+        // script-defined one, `main` for an interactive one). Mirror that via
+        // `frame_source` so, e.g., `f(){ x=6; }; readonly x=5; f` reports
+        // `environment: line 1: x: readonly variable` under `-c`, as bash does.
+        let src = if self.fn_stack.is_empty() {
+            self.name.clone()
         } else {
-            format!("{}: ", self.name)
+            self.frame_source()
+        };
+        if self.command_mode || self.script_mode {
+            format!("{src}: line {}: ", self.current_line)
+        } else {
+            format!("{src}: ")
         }
     }
 
@@ -20084,8 +20097,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 1);
         let (o, _) = run("readonly y=1; typeset y=2 2>&1");
         assert_eq!(o, "osh: typeset: y: readonly variable\n");
+        // Inside a function the frame's source labels the error (bash's
+        // `get_name_for_error`): `main` in the harness's stdin-like mode.
         let (o, _) = run("f(){ local y=1; readonly y; local y=2 2>&1; }; f");
-        assert_eq!(o, "osh: local: y: readonly variable\n");
+        assert_eq!(o, "main: local: y: readonly variable\n");
+    }
+
+    #[test]
+    fn error_prefix_uses_frame_source_inside_function() {
+        // bash's `get_name_for_error`: a diagnostic emitted at the top level is
+        // labelled with the shell/script name, but one emitted *inside a
+        // function* is labelled with that frame's source (`${BASH_SOURCE[0]}`).
+        // In the harness's stdin-like mode the shell name is `osh` and a
+        // function frame's source is `main`, so the same command-not-found
+        // error is prefixed differently by nesting depth. (`2>&1` routes the
+        // diagnostic to the captured stdout; a *bare* readonly-reassignment
+        // error is written to the real fd 2 before the redirect, matching bash,
+        // so command-not-found is the reliable probe here.)
+        let (top, _) = run("nosuchcmd_zz 2>&1");
+        assert_eq!(top, "osh: nosuchcmd_zz: command not found\n");
+        let (infn, _) = run("g(){ nosuchcmd_zz 2>&1; }; g");
+        assert_eq!(infn, "main: nosuchcmd_zz: command not found\n");
+        // A builtin diagnostic (readonly reassignment) follows the same rule and
+        // additionally carries the builtin's name tag.
+        let (bi, _) = run("readonly z=1; h(){ declare z=2 2>&1; }; h");
+        assert_eq!(bi, "main: declare: z: readonly variable\n");
     }
 
     #[test]
@@ -24762,7 +24798,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let contents = run_exec_redirect(
             "boom() { read -u 88 v; echo done; }\nboom 2> \"{FILE}\"",
         );
-        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+        // Inside a function bash labels the error with the frame's source
+        // (`get_name_for_error`): in the test harness's stdin-like mode that is
+        // `main` (as bash prints for a function run from a piped script).
+        assert_eq!(contents, "main: read: 88: bad file descriptor\n");
     }
 
     #[test]

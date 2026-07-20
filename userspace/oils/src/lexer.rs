@@ -97,12 +97,10 @@ pub enum Tok {
     Op(Op),
     Newline,
     /// A here-document body, captured after its introducing line. Emitted
-    /// immediately after the `<<`/`<<-` operator token that owns it. The `u32`
-    /// is the number of physical source lines the body (including the closing
-    /// delimiter line) consumed, so the parser can keep its line counter in
-    /// sync for later diagnostics — those body lines produce no `Newline`
-    /// tokens of their own.
-    HereDoc(Vec<Seg>, u32),
+    /// immediately after the `<<`/`<<-` operator token that owns it. The body's
+    /// swallowed source lines are accounted for by the lexer's per-token line
+    /// stamping (see [`Lexer::stamp_lines`]), so no line count is carried here.
+    HereDoc(Vec<Seg>),
     /// `(( … ))` — an arithmetic command, holding the raw expression text.
     ArithCmd(String),
     /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
@@ -118,6 +116,12 @@ pub enum Tok {
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
+    /// 1-based source line the cursor currently sits on. Advanced by counting
+    /// the newlines each token consumes (including those swallowed *inside* a
+    /// token — quoted strings, here-doc bodies, command substitutions — which
+    /// produce no `Newline` token of their own) so every token can be stamped
+    /// with its true starting line for accurate diagnostics and `$LINENO`.
+    line: u32,
     /// Here-documents whose bodies are pending collection at the next newline.
     pending_heredocs: Vec<PendingHeredoc>,
     /// Nesting depth of open `[[ … ]]` conditionals. Used to enable regex-word
@@ -147,9 +151,22 @@ struct PendingHeredoc {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
+    tokenize_spanned(src).map(|(toks, _lines)| toks)
+}
+
+/// Tokenize `src`, returning the token stream alongside a parallel vector giving
+/// the 1-based source line each token starts on. The parser stamps these lines
+/// onto items for `$LINENO` and error diagnostics; unlike counting `Newline`
+/// tokens, this stays correct across newlines swallowed inside quoted strings,
+/// here-document bodies, and command substitutions.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer {
         chars: src.chars().collect(),
         pos: 0,
+        line: 1,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -170,6 +187,7 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer {
         chars: src.chars().collect(),
         pos: 0,
+        line: 1,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -216,21 +234,33 @@ fn starts_command(prev: Option<&Tok>) -> bool {
 /// ls='ls -l'` terminates). If an alias value ends in a blank, the *next* word
 /// is also checked (bash's trailing-blank rule, enabling `alias sudo='sudo '`).
 #[must_use]
-pub fn expand_aliases(toks: &[Tok], aliases: &std::collections::BTreeMap<String, String>) -> Vec<Tok> {
+pub fn expand_aliases(
+    toks: &[Tok],
+    lines: &[u32],
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> (Vec<Tok>, Vec<u32>) {
     let mut active = std::collections::BTreeSet::new();
-    expand_aliases_inner(toks, aliases, &mut active)
+    let mut out = Vec::new();
+    let mut out_lines = Vec::new();
+    expand_aliases_inner(toks, lines, aliases, &mut active, &mut out, &mut out_lines);
+    (out, out_lines)
 }
 
 fn expand_aliases_inner(
     toks: &[Tok],
+    lines: &[u32],
     aliases: &std::collections::BTreeMap<String, String>,
     active: &mut std::collections::BTreeSet<String>,
-) -> Vec<Tok> {
-    let mut out: Vec<Tok> = Vec::new();
+    out: &mut Vec<Tok>,
+    out_lines: &mut Vec<u32>,
+) {
     // Whether the *next* token must be treated as command position regardless of
     // structure (carried across an alias whose value ended in a blank).
     let mut force = false;
-    for tok in toks {
+    for (i, tok) in toks.iter().enumerate() {
+        // The source line of this token; expanded replacement tokens inherit it
+        // so post-alias line numbers stay anchored to the alias's call site.
+        let tok_line = lines.get(i).copied().unwrap_or(1);
         let at_cmd = force || starts_command(out.last());
         force = false;
         if at_cmd
@@ -245,16 +275,17 @@ fn expand_aliases_inner(
             while matches!(repl.last(), Some(Tok::Newline)) {
                 repl.pop();
             }
+            // Replacement tokens all inherit the alias word's source line.
+            let repl_lines = vec![tok_line; repl.len()];
             active.insert(name.clone());
-            let expanded = expand_aliases_inner(&repl, aliases, active);
+            expand_aliases_inner(&repl, &repl_lines, aliases, active, out, out_lines);
             active.remove(name);
-            out.extend(expanded);
             force = val.ends_with(' ') || val.ends_with('\t');
             continue;
         }
         out.push(tok.clone());
+        out_lines.push(tok_line);
     }
-    out
 }
 
 fn is_name_start(c: char) -> bool {
@@ -375,25 +406,32 @@ impl Lexer {
         Some((name, close + 1))
     }
 
-    fn run(&mut self) -> Result<Vec<Tok>, LexError> {
+    fn run(&mut self) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
         let mut out = Vec::new();
+        // Parallel to `out`: the 1-based source line each token starts on.
+        let mut lines: Vec<u32> = Vec::new();
         loop {
             // Skip inline blanks (but not newlines — those are tokens).
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
             }
             let Some(c) = self.peek() else { break };
+            // Every token produced by this iteration starts on `start_line`;
+            // `start_pos` lets us count the newlines the iteration consumes (so
+            // the counter advances past newlines swallowed inside a token body).
+            let start_line = self.line;
+            let start_pos = self.pos;
             // RHS of `=~`: read the whole regex as one word so that `(`, `)`,
             // `|`, `<`, `>` are literal metacharacters rather than shell
             // operators. Only unquoted whitespace terminates it (bash semantics).
-            if self.regex_next {
+            if self.regex_next && !matches!(c, '\n' | '\r') {
                 self.regex_next = false;
-                if !matches!(c, '\n' | '\r') {
-                    let segs = self.read_word_regex()?;
-                    self.emit_word(&mut out, segs);
-                    continue;
-                }
+                let segs = self.read_word_regex()?;
+                self.emit_word(&mut out, segs);
+                self.stamp_lines(&out, &mut lines, start_line, start_pos);
+                continue;
             }
+            self.regex_next = false;
             match c {
                 '\n' => {
                     self.pos += 1;
@@ -573,8 +611,26 @@ impl Lexer {
                     self.emit_word(&mut out, segs);
                 }
             }
+            self.stamp_lines(&out, &mut lines, start_line, start_pos);
         }
-        Ok(out)
+        Ok((out, lines))
+    }
+
+    /// After one `run` iteration, stamp `start_line` onto every token appended
+    /// since the iteration began, then advance `self.line` past every newline
+    /// the iteration consumed (`self.chars[start_pos..self.pos]`). Counting from
+    /// the consumed character span — rather than from emitted `Newline` tokens —
+    /// keeps the line accurate across newlines hidden inside a token body (a
+    /// quoted string, a here-doc body, a command substitution).
+    fn stamp_lines(&mut self, out: &[Tok], lines: &mut Vec<u32>, start_line: u32, start_pos: usize) {
+        while lines.len() < out.len() {
+            lines.push(start_line);
+        }
+        let consumed = self.chars[start_pos..self.pos]
+            .iter()
+            .filter(|&&ch| ch == '\n')
+            .count();
+        self.line = self.line.saturating_add(u32::try_from(consumed).unwrap_or(u32::MAX));
     }
 
     /// Try to lex an array assignment `name=( … )` / `name+=( … )` at the current
@@ -1408,7 +1464,7 @@ impl Lexer {
         let (delim, expand) = self.read_heredoc_delim();
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
-        out.push(Tok::HereDoc(Vec::new(), 0));
+        out.push(Tok::HereDoc(Vec::new()));
         self.pending_heredocs.push(PendingHeredoc {
             delim,
             strip,
@@ -1467,11 +1523,6 @@ impl Lexer {
         let pending = core::mem::take(&mut self.pending_heredocs);
         for ph in pending {
             let mut body = String::new();
-            // Count the physical lines this here-document consumes (body lines
-            // plus the closing delimiter line). These lines are swallowed here
-            // and never become `Newline` tokens, so the parser must be told how
-            // many there were to keep its line counter accurate.
-            let mut lines: u32 = 0;
             loop {
                 if self.pos >= self.chars.len() {
                     break; // EOF before the delimiter: accept what we have.
@@ -1483,7 +1534,6 @@ impl Lexer {
                 let mut line: String = self.chars[start..self.pos].iter().collect();
                 if self.peek() == Some('\n') {
                     self.pos += 1;
-                    lines = lines.saturating_add(1);
                 }
                 if line.ends_with('\r') {
                     line.pop();
@@ -1501,7 +1551,7 @@ impl Lexer {
             }
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
-                *slot = Tok::HereDoc(segs, lines);
+                *slot = Tok::HereDoc(segs);
             }
         }
         Ok(())
@@ -1554,6 +1604,7 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer {
         chars: body.chars().collect(),
         pos: 0,
+        line: 1,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -1724,14 +1775,32 @@ mod tests {
         let toks = tokenize("cat <<EOF\nline one\nline two\nEOF\n").unwrap();
         // Op::DLess followed by a HereDoc token carrying the body.
         let hd = toks.iter().find_map(|t| match t {
-            Tok::HereDoc(segs, lines) => Some((segs.clone(), *lines)),
+            Tok::HereDoc(segs) => Some(segs.clone()),
             _ => None,
         });
-        let (segs, lines) = hd.expect("here-doc token");
+        let segs = hd.expect("here-doc token");
         assert_eq!(segs, vec![Seg::Lit("line one\nline two\n".to_string())]);
-        // Two body lines + the closing `EOF` line = 3 physical lines consumed;
-        // the parser relies on this to keep later line numbers accurate.
-        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn token_lines_account_for_heredoc_and_quotes() {
+        // The lexer stamps each token with its true source line even when
+        // earlier tokens swallowed newlines (a here-doc body, a quoted string).
+        // `cat <<EOF\nbody\nEOF\nlast` — the `last` word is on physical line 4.
+        let (toks, lines) = tokenize_spanned("cat <<EOF\nbody\nEOF\nlast").unwrap();
+        let idx = toks
+            .iter()
+            .position(|t| matches!(t, Tok::Word(segs) if segs.as_slice() == [Seg::Lit("last".into())]))
+            .expect("last word");
+        assert_eq!(lines[idx], 4);
+        // A double-quoted string with an embedded newline (physical lines 1-2);
+        // the trailing `y` word therefore sits on line 3.
+        let (toks, lines) = tokenize_spanned("x=\"a\nb\"\ny").unwrap();
+        let idx = toks
+            .iter()
+            .position(|t| matches!(t, Tok::Word(segs) if segs.as_slice() == [Seg::Lit("y".into())]))
+            .expect("y word");
+        assert_eq!(lines[idx], 3);
     }
 
     #[test]
@@ -1740,7 +1809,7 @@ mod tests {
         let segs = toks
             .iter()
             .find_map(|t| match t {
-                Tok::HereDoc(segs, _) => Some(segs.clone()),
+                Tok::HereDoc(segs) => Some(segs.clone()),
                 _ => None,
             })
             .expect("here-doc token");

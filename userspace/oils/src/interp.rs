@@ -1244,7 +1244,16 @@ impl Shell {
     /// correctly inherit the enclosing shell's status.
     fn fatal_abort_status(&self, code: i32) -> i32 {
         if self.subshell_depth == 0 && self.command_mode {
-            code
+            // With errexit enabled, a fatal expansion error (nounset / `:?`) is
+            // treated as a failed command and exits 1 — not the 127 that a bare
+            // `-c` nounset abort uses. bash keys this purely on the `-e` option
+            // being set, regardless of whether errexit would actually fire in
+            // this context (`set -eu; echo $UNDEF || true` still exits 1).
+            if self.errexit && code == 127 {
+                1
+            } else {
+                code
+            }
         } else {
             1
         }
@@ -19917,6 +19926,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("set -u; echo $#").0, "0\n");
         // Set variables expand normally.
         assert_eq!(run("set -u; x=hi; echo $x").0, "hi\n");
+    }
+
+    #[test]
+    fn nounset_abort_under_errexit_is_one() {
+        // With errexit enabled, bash treats a fatal expansion error (nounset or
+        // `:?`) as a failed command and exits 1 — not the 127 a bare `-c`
+        // nounset abort uses. This keys purely on the `-e` option being set,
+        // regardless of whether errexit would fire in this context.
+        assert_eq!(run_cmd_mode("set -eu; echo $undef; echo after").1, 1);
+        // `-u` alone (no errexit) under `-c` still exits 127.
+        assert_eq!(run_cmd_mode("set -u; echo $undef").1, 127);
+        // The `-e` option flips it to 1 even where errexit is suppressed
+        // (`|| true`), and even for `:?` on an unset variable.
+        assert_eq!(run_cmd_mode("set -eu; echo $undef || true").1, 1);
+        assert_eq!(run_cmd_mode("set -e; echo ${undef:?bye}").1, 1);
+        // Without `-e`, a bare `:?` abort under `-c` is 127.
+        assert_eq!(run_cmd_mode("echo ${undef:?bye}").1, 127);
     }
 
     #[test]

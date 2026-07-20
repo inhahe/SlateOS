@@ -53530,3 +53530,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   longer blocked on the race. Remaining endgame gates are operator decisions:
 ##   Q23 (server-socket session model, blocks sys_bind/listen/accept4) and the
 ##   5.7 default-flip itself (user-visible policy). See open-questions.md.
+
+## Known limitation (osh, 2026-07-19): pipeline `set -x` xtrace ordering is racy
+##   `set -x; echo a | cat` traces `+ cat` then `+ echo a` (or any order),
+##   whereas bash deterministically traces left-to-right (`+ echo a` then
+##   `+ cat`). Cause: osh runs the last pipeline stage on the main thread and
+##   the earlier stages on scoped threads (exec_threaded_pipeline, interp.rs
+##   ~1316); each stage emits its own xtrace inside exec_command, so the output
+##   order follows thread scheduling, not pipeline order. Confirmed racy (varies
+##   run to run for a 3-stage pipeline). Not fixed because the clean fix — emit
+##   each stage's xtrace in the parent, in order, before spawning — would have to
+##   expand the stage's words in the parent, double-evaluating any command
+##   substitution in the traced command (a correctness bug worse than the
+##   cosmetic ordering issue). Pipeline-stage trace order is POSIX-unspecified,
+##   so this is cosmetic. Proper fix if ever needed: compute a side-effect-free
+##   trace string per stage in the parent (only when every stage's command word
+##   is expansion-free), else accept the racy order.

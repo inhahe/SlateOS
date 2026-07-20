@@ -284,6 +284,19 @@ enum Flow {
     Return,
     /// `exit N` — terminate the shell.
     Exit(i32),
+    /// A non-fatal word-expansion error (a `$(( … ))` arithmetic error, a bad
+    /// array subscript, a `${var:off:len}` substring-expression-<0, a `${…}` bad
+    /// substitution, or a `failglob`/readonly rejection). bash handles these with
+    /// `jump_to_top_level(DISCARD)`: unlike `Exit`, they do **not** terminate the
+    /// shell. They unwind every enclosing loop/function/compound to the nearest
+    /// read-eval loop, abort the rest of the *current top-level parse unit*, and
+    /// resume with the next unit (`echo $((1/0)); echo skipped` on one line
+    /// aborts both, but a following line still runs). Inside a subshell or
+    /// command substitution the unwind is caught at that boundary (the child
+    /// fails with status 1, the parent continues). `last_status` is set to 1 at
+    /// the error site. Only the top-level item loop (`exec_program_top`) resumes
+    /// after it; nested blocks propagate it like `Exit`.
+    Discard,
 }
 
 /// Where a command's standard output should go.
@@ -1147,7 +1160,7 @@ impl Shell {
                 return 2;
             }
         };
-        match self.exec_program(&prog, out, &StdinSrc::Inherit) {
+        match self.exec_program_top(&prog, out, &StdinSrc::Inherit) {
             Flow::Exit(code) => {
                 self.last_status = code;
                 code
@@ -1182,8 +1195,40 @@ impl Shell {
         }
     }
 
+    /// Execute a nested block's items (loop/if/case body, brace group, function
+    /// body). A `Flow::Discard` propagates up like `Exit` — only the top-level
+    /// loop resumes after it.
     fn exec_program(&mut self, prog: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        for item in &prog.items {
+        self.exec_items(&prog.items, out, stdin, false)
+    }
+
+    /// Execute a program at a read-eval-loop top level (script, stdin, `-c`,
+    /// `eval`, `source`). A [`Flow::Discard`] here aborts only the rest of the
+    /// current top-level parse unit — every item sharing the offending item's
+    /// source line — and then resumes with the next unit, matching bash's
+    /// `jump_to_top_level(DISCARD)`.
+    fn exec_program_top(&mut self, prog: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        self.exec_items(&prog.items, out, stdin, true)
+    }
+
+    fn exec_items(
+        &mut self,
+        items: &[crate::ast::Item],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        top_level: bool,
+    ) -> Flow {
+        // After a top-level DISCARD, `skip_line` holds the source line of the
+        // aborted parse unit so the remaining `;`-separated commands on that same
+        // line are swallowed before execution resumes.
+        let mut skip_line: Option<u32> = None;
+        for item in items {
+            if let Some(line) = skip_line {
+                if item.line == line {
+                    continue;
+                }
+                skip_line = None;
+            }
             self.current_line = item.line;
             if item.background {
                 // Only a single external simple command is truly backgrounded;
@@ -1194,6 +1239,13 @@ impl Shell {
             let flow = self.exec_and_or(&item.list, out, stdin);
             match flow {
                 Flow::Next => {}
+                Flow::Discard if top_level => {
+                    // bash DISCARD: abort the rest of this top-level parse unit
+                    // (same source line), then resume with the next unit. The
+                    // diagnostic was already printed and `last_status` set to 1.
+                    skip_line = Some(item.line);
+                    continue;
+                }
                 other => return other,
             }
             // A downstream pipe closed mid-stage (e.g. `… | head`): unwind the
@@ -1774,12 +1826,13 @@ impl Shell {
             }
             None => self.positional.clone(),
         };
-        // `failglob`: an unmatched glob in the word list is a fatal expansion
-        // error — abort the loop before running the body, as bash does.
+        // `failglob`: an unmatched glob in the word list is a word-expansion
+        // error — discard the loop before running the body (bash aborts the
+        // enclosing parse unit but does not exit the shell).
         if let Some(pat) = self.glob_error.take() {
             self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
         // A `for` over an empty list runs no body and has exit status 0.
         // `set -x` prints the (source-form) loop header before *each* iteration,
@@ -4195,27 +4248,27 @@ impl Shell {
             return Flow::Exit(status);
         }
 
-        // An arithmetic error while expanding a command word (`echo $((1/0))`)
-        // is fatal in a non-interactive shell: bash reports it and exits with
-        // status 1 without running the command (it does not fabricate a value),
-        // and never reaches a following command. Arithmetic *commands* (`(( ))`,
-        // `let`, `for ((`) are non-fatal, but they never set this flag — only the
+        // An arithmetic error while expanding a command word (`echo $((1/0))`,
+        // a bad `${a[i]}` subscript, a `${v:o:l}` substring-<0) discards the
+        // command without running it: bash reports it, sets $? to 1, and aborts
+        // the rest of the current top-level parse unit — but does NOT exit the
+        // shell (a following line still runs). Arithmetic *commands* (`(( ))`,
+        // `let`, `for ((`) are non-fatal and never set this flag — only the
         // `$(( … ))`/`$[ … ]` expansion path (`arith_sub`) does. Prefix
         // assignment-value arith errors are checked after their own expansion.
         if self.arith_error {
             self.arith_error = false;
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
 
         // `shopt -s failglob`: a command-word glob that matched nothing is a
-        // fatal expansion error — bash reports `no match: PATTERN` and discards
-        // the command (and, in a non-interactive `-c`, the rest of the list)
-        // without running it.
+        // word-expansion error — bash reports `no match: PATTERN`, discards the
+        // command (and the rest of the current parse unit) and continues.
         if let Some(pat) = self.glob_error.take() {
             self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
 
         // Pure assignment (no command word): persist the variables/arrays.
@@ -4235,12 +4288,13 @@ impl Shell {
                 }
             }
             // A `failglob` miss while expanding an array-literal value
-            // (`arr=(*.nope)`) is fatal, just like the command-word case.
+            // (`arr=(*.nope)`) discards the command, just like the command-word
+            // case (non-fatal: the shell continues with the next parse unit).
             if let Some(pat) = self.glob_error.take() {
                 self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
                 self.arith_error = false;
                 self.last_status = 1;
-                return Flow::Exit(1);
+                return Flow::Discard;
             }
             // A fatal word-expansion error while expanding a *bare* assignment
             // value — a `nounset` reference (`set -u; x=$UNSET`), a `${var:?}`,
@@ -4258,14 +4312,15 @@ impl Shell {
             }
             if !ok || self.arith_error {
                 // A readonly rejection or an arithmetic error in the value of a
-                // *bare* assignment command is fatal in a non-interactive shell:
-                // bash reports it and exits with status 1 (`readonly c=1; c=2;
-                // echo after` and `x=$((1/0)); echo after` never reach `after`).
-                // A temporary assignment *prefix* to a command is not fatal — that
-                // path is handled separately in the command-execution branch.
+                // *bare* assignment command discards the command (status 1) and
+                // aborts the rest of the current top-level parse unit, but does
+                // not exit the shell: `readonly c=1; c=2` on one line and
+                // `x=$((1/0))` both let a *following line* run (bash). A temporary
+                // assignment *prefix* to a command is not fatal at all — that path
+                // is handled separately in the command-execution branch.
                 self.arith_error = false;
                 self.last_status = 1;
-                return Flow::Exit(1);
+                return Flow::Discard;
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
                 self.last_status = 0;
@@ -4283,13 +4338,14 @@ impl Shell {
         }
 
         // An arithmetic error while expanding a prefix assignment value
-        // (`x=$((1/0)) cmd`) is fatal in a non-interactive shell: bash reports
-        // it and exits with status 1 without running the command (matching the
-        // bare-assignment and command-word cases above).
+        // (`x=$((1/0)) cmd`) discards the command without running it: bash reports
+        // it, sets $? to 1, and aborts the rest of the current top-level parse
+        // unit but does not exit the shell (matching the bare-assignment and
+        // command-word cases above; a following line still runs).
         if self.arith_error {
             self.arith_error = false;
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
 
         // A fatal word-expansion error while expanding a prefix value — a
@@ -4305,11 +4361,12 @@ impl Shell {
         }
 
         // A `failglob` miss while expanding a prefix assignment value
-        // (`x=*.nope cmd`) is fatal, mirroring the command-word case.
+        // (`x=*.nope cmd`) discards the command, mirroring the command-word case
+        // (non-fatal: the shell continues with the next parse unit).
         if let Some(pat) = self.glob_error.take() {
             self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
 
         // A readonly variable cannot be set even as a temporary command prefix
@@ -6451,10 +6508,25 @@ impl Shell {
                 length,
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
-                // `${x:off:len}` — a malformed offset/length is fatal (bash).
+                // `${x:off:len}` — a malformed offset/length is fatal (bash), and
+                // a negative length that puts the end before the start is a fatal
+                // "substring expression < 0" word-expansion error (discards the
+                // command, status 1) — the same class as an array-slice negative
+                // length. Route it through `arith_error` so the simple-command
+                // driver discards the command.
                 let off = self.eval_arith_index(offset);
                 let len = length.as_ref().map(|l| self.eval_arith_index(l));
-                param_substr(&value, off, len)
+                match param_substr(&value, off, len) {
+                    Ok(s) => s,
+                    Err(bad_len) => {
+                        self.errln(&format!(
+                            "{}{bad_len}: substring expression < 0",
+                            self.err_prefix()
+                        ));
+                        self.arith_error = true;
+                        String::new()
+                    }
+                }
             }
             WordPart::ParamReplace {
                 name,
@@ -7736,18 +7808,18 @@ impl Shell {
         }
 
         self.last_status = status;
-        // A fatal arithmetic error while binding an integer-attribute value
-        // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`) is
-        // fatal in bash — the shell aborts with status 1 — unlike `let`/`(( ))`,
-        // which only return non-zero. The declare/local builtin sets
-        // `arith_error` via `eval_int_assign`; honour it here exactly as the
-        // simple-command driver does for a bare `k=$((…))` assignment. In a
-        // subshell this `Flow::Exit(1)` yields status 1 without aborting the
-        // parent (see `fatal_abort_status`'s companion subshell boundary).
+        // An arithmetic error while binding an integer-attribute value
+        // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`)
+        // discards the command with status 1 — unlike `let`/`(( ))`, which only
+        // return non-zero — but does not exit the shell (a following line runs).
+        // The declare/local builtin sets `arith_error` via `eval_int_assign`;
+        // honour it here exactly as the simple-command driver does for a bare
+        // `k=$((…))` assignment. In a subshell this discard is caught at the
+        // subshell boundary (status 1, parent continues).
         if self.arith_error {
             self.arith_error = false;
             self.last_status = 1;
-            return Flow::Exit(1);
+            return Flow::Discard;
         }
         flow
     }
@@ -14421,8 +14493,11 @@ fn unescape_echo_b(s: &str) -> (String, bool) {
 }
 
 /// `${name:offset[:length]}` — a negative offset counts from the end; a negative
-/// length is an offset from the end.
-fn param_substr(value: &str, offset: i64, length: Option<i64>) -> String {
+/// length is an offset from the end of the string. When a negative length puts
+/// the computed end before the start (or before 0), bash rejects it as a fatal
+/// "substring expression < 0" word-expansion error; this returns `Err(len)`
+/// carrying the offending length so the caller can emit that diagnostic.
+fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String, i64> {
     let chars: Vec<char> = value.chars().collect();
     let n = chars.len() as i64;
     let mut start = offset;
@@ -14432,11 +14507,20 @@ fn param_substr(value: &str, offset: i64, length: Option<i64>) -> String {
     start = start.clamp(0, n);
     let end = match length {
         None => n,
-        Some(len) if len < 0 => (n + len).max(start),
+        Some(len) if len < 0 => {
+            // bash: the negative length is an absolute end position `n + len`.
+            // If that lands before 0 or before the start offset, it is a fatal
+            // "substring expression < 0" error rather than an empty result.
+            let abs_end = n + len;
+            if abs_end < 0 || abs_end < start {
+                return Err(len);
+            }
+            abs_end
+        }
         Some(len) => (start + len).min(n),
     };
     let end = end.clamp(start, n);
-    chars[start as usize..end as usize].iter().collect()
+    Ok(chars[start as usize..end as usize].iter().collect())
 }
 
 /// `${name/pat/repl}` and friends.
@@ -16604,7 +16688,10 @@ mod tests {
         let prog = parse(src).expect("parse");
         {
             let mut out = Out::Capture(&mut buf);
-            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            // Use the top-level item loop so a `Flow::Discard` (arith error, bad
+            // subscript, substring-<0, failglob) behaves like a real script/stdin
+            // shell: it aborts the current parse unit but continues with the next.
+            sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
@@ -16620,7 +16707,7 @@ mod tests {
         let prog = parse(src).expect("parse");
         {
             let mut out = Out::Capture(&mut buf);
-            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
@@ -17379,6 +17466,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // abort flag onto the following command — it is not fatal.
         let (o3, _) = run("(( 1/0 )) 2>/dev/null; echo ok");
         assert_eq!(o3, "ok\n");
+    }
+
+    #[test]
+    fn arith_error_discards_only_current_parse_unit() {
+        // A `$(( … ))` word-expansion error is DISCARD-class (bash's
+        // `jump_to_top_level(DISCARD)`): it aborts the *current* newline-delimited
+        // parse unit but the shell keeps reading. In a script/stdin the *next
+        // line* still runs (unlike the same-line `;` follow-on, which is dropped
+        // with the aborted unit). Final `$?` reflects the surviving line.
+        let (o, st) = run("echo $((1/0)) 2>/dev/null\necho after");
+        assert_eq!(o, "after\n");
+        assert_eq!(st, 0);
+        // Same line, `;`-joined: the follow-on is discarded together with the
+        // failed command, and the status is 1.
+        let (o2, st2) = run("echo $((1/0)) 2>/dev/null; echo after");
+        assert_eq!(o2, "");
+        assert_eq!(st2, 1);
+        // A subshell is a DISCARD-catch boundary: the child aborts (status 1) but
+        // the parent survives and continues.
+        let (o3, _st3) = run("( echo $((1/0)) ) 2>/dev/null; echo parent");
+        assert_eq!(o3, "parent\n");
     }
 
     #[test]
@@ -20057,6 +20165,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("x=abcdef; echo ${x:2:3}").0, "cde\n");
         assert_eq!(run("x=abcdef; echo ${x: -2}").0, "ef\n");
         assert_eq!(run("x=abcdef; echo ${x:1:-1}").0, "bcde\n");
+        // A negative length whose absolute end lands before the start offset is a
+        // DISCARD-class "substring expression < 0" error (bash): the command is
+        // discarded, `$?` is 1, and — as it's one parse unit — a same-line
+        // follow-on is dropped too.
+        let (o, s) = run("v=abc; echo ${v:2:-10}; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // The offending length appears verbatim in the diagnostic. The error is
+        // emitted during word expansion, before a simple command's `2>&1` is
+        // installed, so wrap in a brace group whose redirect is already active.
+        let err = run("v=abc; { echo ${v:2:-10}; } 2>&1").0;
+        assert!(
+            err.contains("-10: substring expression < 0"),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -21070,9 +21193,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn shopt_failglob_aborts_on_no_match() {
-        // With `failglob`, an unmatched command-word glob is a fatal expansion
-        // error: the command does not run, `$?` is 1, and (as in a single
-        // non-interactive `-c` list) a following command is discarded.
+        // With `failglob`, an unmatched command-word glob is a DISCARD-class
+        // expansion error: the command does not run, `$?` is 1, and the rest of
+        // the *current parse unit* (the same `;`-joined line) is discarded.
+        // A following *line* still runs (see the last case below).
         let (out, st) = run("shopt -s failglob; echo osh_no_such_glob_*.zzz; echo after");
         assert_eq!(out, "");
         assert_eq!(st, 1);
@@ -21082,8 +21206,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (aout, ast) = run("shopt -s failglob; a=(osh_no_such_*.zzz); echo after");
         assert_eq!(aout, "");
         assert_eq!(ast, 1);
-        // A stale marker from an aborted command must not misfire on the next.
-        assert_eq!(run("shopt -s failglob; echo osh_no_*.zzz\necho ok").1, 1);
+        // A failglob error is DISCARD-class: it aborts the rest of the current
+        // parse unit (line), but a following *line* still runs and resets `$?`.
+        // (Matches bash: the script continues, so the final status is 0.)
+        let (nout, nst) = run("shopt -s failglob; echo osh_no_*.zzz\necho ok");
+        assert_eq!(nout, "ok\n");
+        assert_eq!(nst, 0);
     }
 
     #[test]

@@ -8044,7 +8044,7 @@ impl Shell {
             "set" => self.builtin_set(args, out, redir),
             "shift" => self.builtin_shift(args),
             "getopts" => self.builtin_getopts(args),
-            "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir, out),
+            "mapfile" | "readarray" => self.builtin_mapfile(args, stdin, redir, out, name),
             "read" => self.builtin_read(args, stdin, redir),
             "test" | "[" => self.builtin_test(name, args),
             "let" => self.builtin_let(args),
@@ -12633,6 +12633,7 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
         out: &mut Out,
+        tag: &str,
     ) -> i32 {
         let mut strip = false;
         let mut delim = b'\n';
@@ -12642,11 +12643,19 @@ impl Shell {
         let mut callback: Option<String> = None;
         let mut quantum: usize = 5000;
         let mut array = String::from("MAPFILE");
+        // `-u N`: read the array from user-space fd N (opened by `exec N< file`
+        // or a coproc read end) instead of the ambient stdin. The raw spec is
+        // kept so a non-numeric `-u abc` reproduces bash's exact diagnostic.
+        let mut ufd_spec: Option<String> = None;
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
             match a.as_str() {
                 "-t" => strip = true,
+                "-u" => {
+                    i += 1;
+                    ufd_spec = args.get(i).cloned();
+                }
                 "-d" => {
                     i += 1;
                     delim = args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0);
@@ -12676,9 +12685,9 @@ impl Shell {
                 other if other.starts_with('-') && other.len() > 1 => {
                     let opt: String = other.chars().take(2).collect();
                     return self.builtin_invalid_option(
-                        "mapfile",
+                        tag,
                         &opt,
-                        "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+                        &format!("{tag} [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"),
                     );
                 }
                 _ => array = a.clone(),
@@ -12686,7 +12695,52 @@ impl Shell {
             i += 1;
         }
 
-        let data = self.read_all_bytes(stdin, redir);
+        // `-u N` (N ≥ 3): read from the user-space fd table instead of the
+        // ambient input — the same routing `read -u`/`read <&N` uses. A
+        // non-numeric spec and an out-of-range/closed descriptor reproduce
+        // bash's two distinct diagnostics (both status 1).
+        let ufd: Option<i32> = match &ufd_spec {
+            None => None,
+            Some(spec) => match spec.parse::<i32>() {
+                Ok(n) if n >= 0 => Some(n),
+                _ => {
+                    self.errln(&format!(
+                        "{}{tag}: {spec}: invalid file descriptor specification",
+                        self.err_prefix()
+                    ));
+                    return 1;
+                }
+            },
+        };
+        if let Some(n) = ufd
+            && n >= 3
+            && !self.open_fds.contains_key(&n)
+            && !self.coproc_read_fds.contains_key(&n)
+        {
+            self.errln(&format!(
+                "{}{tag}: {n}: invalid file descriptor: Bad file descriptor",
+                self.err_prefix()
+            ));
+            return 1;
+        }
+        let mut ufd_plan = RedirPlan::default();
+        let inherit_src = StdinSrc::Inherit;
+        let ufd_active = ufd.is_some_and(|n| n >= 3);
+        let ufd_stdin = ufd.filter(|&n| n >= 3).and_then(|n| {
+            if self.coproc_read_fds.contains_key(&n) {
+                ufd_plan.stdin_from_fd = Some(n);
+                None
+            } else {
+                self.open_fds.get(&n).map(StdinSrc::Cursor)
+            }
+        });
+        let (mf_stdin, mf_redir): (&StdinSrc, &RedirPlan) = if ufd_active {
+            (ufd_stdin.as_ref().unwrap_or(&inherit_src), &ufd_plan)
+        } else {
+            (stdin, redir)
+        };
+
+        let data = self.read_all_bytes(mf_stdin, mf_redir);
         // Split on the delimiter, keeping the delimiter on each piece (as bash
         // does), except for a trailing empty piece after a final delimiter.
         let mut pieces: Vec<Vec<u8>> = Vec::new();
@@ -15731,8 +15785,8 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("set", "set [-abefuxCo] [--] [arg ...]", "Set or unset shell options and positional parameters."),
     ("shift", "shift [n]", "Shift positional parameters."),
     ("getopts", "getopts optstring name [arg ...]", "Parse option arguments."),
-    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-C callback] [-c quantum] [array]", "Read lines into an indexed array variable."),
-    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-C callback] [-c quantum] [array]", "Read lines into an array (synonym for mapfile)."),
+    ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines into an indexed array variable."),
+    ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines into an array (synonym for mapfile)."),
     ("command", "command [-pVv] name [arg ...]", "Execute a command bypassing shell functions."),
     ("builtin", "builtin [shell-builtin [arg ...]]", "Execute a shell builtin."),
     ("read", "read [-raspd delim] [-nN count] [name ...]", "Read a line from standard input and split it."),
@@ -19806,6 +19860,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "mapfile -t -n 2 arr <<< $'a\\nb\\nc\\nd'\n\
                    echo \"${#arr[@]}\"; echo \"${arr[*]}\"";
         assert_eq!(run(src).0, "2\na b\n");
+    }
+
+    #[test]
+    fn mapfile_reads_from_numbered_fd() {
+        // `-u N` reads the array from a descriptor opened by `exec N< file`,
+        // mirroring `read -u`. Uses a real temp file (the in-memory `run`
+        // harness backs numbered fds with real handles via `exec N<`).
+        let base = std::env::temp_dir();
+        let f = base.join(format!("osh_mapfile_ufd_{}", std::process::id()));
+        std::fs::write(&f, b"one\ntwo\nthree\n").unwrap();
+        let fp = f.to_string_lossy().replace('\\', "/");
+        let (o, s) = run(&format!(
+            "exec 4< \"{fp}\"; mapfile -t -u 4 arr; echo \"${{#arr[@]}}:${{arr[0]}}-${{arr[2]}}\""
+        ));
+        assert_eq!(s, 0, "got {o:?}");
+        assert_eq!(o, "3:one-three\n");
+        let _ = std::fs::remove_file(&f);
+
+        // A closed/out-of-range fd and a non-numeric spec reproduce bash's two
+        // distinct diagnostics, both status 1.
+        let (o, s) = run("mapfile -u 9 arr 2>&1");
+        assert!(o.contains("mapfile: 9: invalid file descriptor: Bad file descriptor"), "got {o:?}");
+        assert_eq!(s, 1);
+        let (o, s) = run("readarray -u abc arr 2>&1");
+        assert!(o.contains("readarray: abc: invalid file descriptor specification"), "got {o:?}");
+        assert_eq!(s, 1);
     }
 
     #[test]

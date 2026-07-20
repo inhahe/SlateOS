@@ -9660,41 +9660,37 @@ impl Shell {
             return self.write_bytes(out, redir, text.as_bytes());
         }
 
-        // Each pattern: collect matching topics (glob against builtin names).
+        // Each pattern: collect matching topics. bash treats a pattern
+        // containing a glob wildcard (`*`/`?`) as a glob matched against the
+        // whole topic name and prints a `Shell commands matching keyword …`
+        // header; a plain pattern is a case-sensitive *prefix* match (so
+        // `help ech` → echo, `help c` → every topic starting with `c`). Matches
+        // are listed alphabetically by topic name, as bash does.
         let mut status = 0;
         let mut text = String::new();
         for pat in &patterns {
-            let mut matched = false;
+            let is_glob = pat.contains(['*', '?']);
             let pat_chars: Vec<char> = pat.chars().collect();
-            for (name, usage, description) in HELP_TABLE {
-                let name_chars: Vec<char> = name.chars().collect();
-                if *name == pat || glob_match(&pat_chars, &name_chars, false) {
-                    matched = true;
-                    if desc_only {
-                        text.push_str(name);
-                        text.push_str(" - ");
-                        text.push_str(description);
-                        text.push('\n');
-                    } else if short {
-                        // bash short form: "NAME: usage".
-                        text.push_str(name);
-                        text.push_str(": ");
-                        text.push_str(usage);
-                        text.push('\n');
-                    } else {
-                        // bash long form: "NAME: usage" line, then indented
-                        // description.
-                        text.push_str(name);
-                        text.push_str(": ");
-                        text.push_str(usage);
-                        text.push('\n');
-                        text.push_str("    ");
-                        text.push_str(description);
-                        text.push('\n');
-                    }
-                }
-            }
-            if !matched {
+            // bash prefers an exact topic-name match: `help for` resolves to the
+            // `for` topic alone, never the longer `for ((` (and `help time` not
+            // `times`). Only when no topic name equals the pattern does it fall
+            // back to glob (`*`/`?`) or case-sensitive prefix matching.
+            let exact = HELP_TABLE.iter().find(|(name, _, _)| *name == pat.as_str());
+            let mut matches: Vec<&(&str, &str, &str)> = if let Some(e) = exact {
+                vec![e]
+            } else {
+                HELP_TABLE
+                    .iter()
+                    .filter(|(name, _, _)| {
+                        if is_glob {
+                            glob_match(&pat_chars, &name.chars().collect::<Vec<_>>(), false)
+                        } else {
+                            name.starts_with(pat.as_str())
+                        }
+                    })
+                    .collect()
+            };
+            if matches.is_empty() {
                 self.emit_stderr(
                     format!(
                         "{}help: no help topics match `{pat}'.  Try `help help' or `man -k {pat}' or `info {pat}'.\n",
@@ -9703,6 +9699,37 @@ impl Shell {
                     .as_bytes(),
                 );
                 status = 1;
+                continue;
+            }
+            matches.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            // bash heads a glob match with a keyword banner (a blank line
+            // follows); a prefix match lists entries directly.
+            if is_glob {
+                text.push_str(&format!("Shell commands matching keyword `{pat}'\n\n"));
+            }
+            for (name, usage, description) in matches {
+                if desc_only {
+                    text.push_str(name);
+                    text.push_str(" - ");
+                    text.push_str(description);
+                    text.push('\n');
+                } else if short {
+                    // bash short form: "NAME: usage".
+                    text.push_str(name);
+                    text.push_str(": ");
+                    text.push_str(usage);
+                    text.push('\n');
+                } else {
+                    // bash long form: "NAME: usage" line, then indented
+                    // description.
+                    text.push_str(name);
+                    text.push_str(": ");
+                    text.push_str(usage);
+                    text.push('\n');
+                    text.push_str("    ");
+                    text.push_str(description);
+                    text.push('\n');
+                }
             }
         }
         if !text.is_empty() {
@@ -15852,41 +15879,41 @@ fn param_replace(
 /// One-line help entries for the `help` builtin: (name, usage synopsis, short
 /// description). Keep in sync with `BUILTIN_NAMES` / the dispatch table.
 const HELP_TABLE: &[(&str, &str, &str)] = &[
-    (":", ": [arguments]", "Null command; expand arguments and return success."),
+    (":", ":", "Null command; expand arguments and return success."),
     ("true", "true", "Return a successful (zero) exit status."),
     ("false", "false", "Return an unsuccessful (non-zero) exit status."),
-    ("cd", "cd [-L|-P] [dir]", "Change the shell working directory."),
-    ("pwd", "pwd [-L|-P]", "Print the name of the current working directory."),
-    ("pushd", "pushd [dir | +N | -N]", "Add a directory to the directory stack."),
-    ("popd", "popd [+N | -N]", "Remove a directory from the directory stack."),
-    ("dirs", "dirs [-clpv] [+N | -N]", "Display the directory stack."),
+    ("cd", "cd [-L|[-P [-e]] [-@]] [dir]", "Change the shell working directory."),
+    ("pwd", "pwd [-LPW]", "Print the name of the current working directory."),
+    ("pushd", "pushd [-n] [+N | -N | dir]", "Add a directory to the directory stack."),
+    ("popd", "popd [-n] [+N | -N]", "Remove a directory from the directory stack."),
+    ("dirs", "dirs [-clpv] [+N] [-N]", "Display the directory stack."),
     ("echo", "echo [-neE] [arg ...]", "Write arguments to standard output."),
     ("printf", "printf [-v var] format [arguments]", "Format and print arguments."),
-    ("export", "export [-p] [name[=value] ...]", "Set export attribute for shell variables."),
-    ("declare", "declare [-aAfFgilnprtux] [name[=value] ...]", "Declare variables and give them attributes."),
-    ("typeset", "typeset [-aAfFgilnprtux] [name[=value] ...]", "Declare variables (synonym for declare)."),
-    ("local", "local [-aAilnrux] name[=value] ...", "Define local variables in a function."),
-    ("readonly", "readonly [-aApf] [name[=value] ...]", "Mark shell variables as unchangeable."),
-    ("shopt", "shopt [-psuq] [optname ...]", "Set and unset shell options."),
-    ("unset", "unset [-fv] name ...", "Unset values and attributes of variables and functions."),
-    ("set", "set [-abefuxCo] [--] [arg ...]", "Set or unset shell options and positional parameters."),
+    ("export", "export [-fn] [name[=value] ...] or export -p", "Set export attribute for shell variables."),
+    ("declare", "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]", "Declare variables and give them attributes."),
+    ("typeset", "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]", "Declare variables (synonym for declare)."),
+    ("local", "local [option] name[=value] ...", "Define local variables in a function."),
+    ("readonly", "readonly [-aAf] [name[=value] ...] or readonly -p", "Mark shell variables as unchangeable."),
+    ("shopt", "shopt [-pqsu] [-o] [optname ...]", "Set and unset shell options."),
+    ("unset", "unset [-f] [-v] [-n] [name ...]", "Unset values and attributes of variables and functions."),
+    ("set", "set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]", "Set or unset shell options and positional parameters."),
     ("shift", "shift [n]", "Shift positional parameters."),
     ("getopts", "getopts optstring name [arg ...]", "Parse option arguments."),
     ("mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines into an indexed array variable."),
     ("readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]", "Read lines into an array (synonym for mapfile)."),
-    ("command", "command [-pVv] name [arg ...]", "Execute a command bypassing shell functions."),
+    ("command", "command [-pVv] command [arg ...]", "Execute a command bypassing shell functions."),
     ("builtin", "builtin [shell-builtin [arg ...]]", "Execute a shell builtin."),
-    ("read", "read [-raspd delim] [-nN count] [name ...]", "Read a line from standard input and split it."),
+    ("read", "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]", "Read a line from standard input and split it."),
     ("test", "test [expr]", "Evaluate a conditional expression."),
-    ("[", "[ expr ]", "Evaluate a conditional expression (test)."),
+    ("[", "[ arg... ]", "Evaluate a conditional expression (test)."),
     ("let", "let arg [arg ...]", "Evaluate arithmetic expressions."),
     ("eval", "eval [arg ...]", "Execute arguments as a shell command."),
     ("source", "source filename [arguments]", "Execute commands from a file in the current shell."),
     (".", ". filename [arguments]", "Execute commands from a file (synonym for source)."),
-    ("type", "type [-afptP] name ...", "Display information about command type."),
+    ("type", "type [-afptP] name [name ...]", "Display information about command type."),
     (
         "compgen",
-        "compgen [-abcdefkv] [-A action] [-W wordlist] [-P prefix] [-S suffix] [-X filterpat] [word]",
+        "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]",
         "Display possible completions depending on the options.",
     ),
     (
@@ -15899,25 +15926,44 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
         "compopt [-o|+o option] [-DEI] [name ...]",
         "Modify or display completion options.",
     ),
-    ("trap", "trap [-lp] [[action] signal_spec ...]", "Trap signals and other events."),
-    ("jobs", "jobs [-lp] [jobspec ...]", "Display status of jobs."),
-    ("wait", "wait [-n] [-p var] [id ...]", "Wait for jobs to complete and report status."),
-    ("disown", "disown [-h] [-ar] [jobspec ...]", "Remove jobs from the current shell."),
-    ("fg", "fg [jobspec]", "Move a job to the foreground."),
-    ("bg", "bg [jobspec ...]", "Move jobs to the background."),
+    ("trap", "trap [-lp] [[arg] signal_spec ...]", "Trap signals and other events."),
+    ("jobs", "jobs [-lnprs] [jobspec ...] or jobs -x command [args]", "Display status of jobs."),
+    ("kill", "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", "Send a signal to a job."),
+    ("wait", "wait [-fn] [-p var] [id ...]", "Wait for jobs to complete and report status."),
+    ("disown", "disown [-h] [-ar] [jobspec ... | pid ...]", "Remove jobs from the current shell."),
+    ("fg", "fg [job_spec]", "Move a job to the foreground."),
+    ("bg", "bg [job_spec ...]", "Move jobs to the background."),
     ("caller", "caller [expr]", "Return the context of the current subroutine call."),
     ("times", "times", "Display process times."),
-    ("hash", "hash [-lr] [-p path] [-dt] [name ...]", "Remember or display program locations."),
-    ("umask", "umask [-Sp] [mode]", "Display or set the file mode creation mask."),
-    ("exec", "exec [command [arguments]]", "Replace the shell with the given command."),
+    ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
+    ("umask", "umask [-p] [-S] [mode]", "Display or set the file mode creation mask."),
+    ("ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Modify shell resource limits."),
+    ("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]", "Replace the shell with the given command."),
     ("exit", "exit [n]", "Exit the shell."),
     ("return", "return [n]", "Return from a shell function."),
     ("break", "break [n]", "Exit for, while, until, or select loops."),
     ("continue", "continue [n]", "Resume for, while, until, or select loops."),
-    ("enable", "enable [-a] [-n] [name ...]", "Enable and disable shell builtins."),
-    ("alias", "alias [-p] [name[=value] ...]", "Define or display aliases."),
+    ("enable", "enable [-a] [-dnps] [-f filename] [name ...]", "Enable and disable shell builtins."),
+    ("alias", "alias [-p] [name[=value] ... ]", "Define or display aliases."),
     ("unalias", "unalias [-a] name [name ...]", "Remove each name from the list of aliases."),
     ("help", "help [-dms] [pattern ...]", "Display information about builtin commands."),
+    // Shell keywords / compound-command constructs. bash's `help` documents
+    // these reserved-word topics alongside the builtins; the names match bash's
+    // internal topic names so `help while`, `help (( `, `help [[`, etc. resolve.
+    ("for", "for NAME [in WORDS ... ] ; do COMMANDS; done", "Execute commands for each member in a list."),
+    ("for ((", "for (( exp1; exp2; exp3 )); do COMMANDS; done", "Arithmetic for loop."),
+    ("while", "while COMMANDS; do COMMANDS-2; done", "Execute commands as long as a test succeeds."),
+    ("until", "until COMMANDS; do COMMANDS-2; done", "Execute commands as long as a test does not succeed."),
+    ("if", "if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi", "Execute commands based on conditional."),
+    ("case", "case WORD in [PATTERN [| PATTERN]...) COMMANDS ;;]... esac", "Execute commands based on pattern matching."),
+    ("select", "select NAME [in WORDS ... ;] do COMMANDS; done", "Select words from a list and execute commands."),
+    ("function", "function name { COMMANDS ; } or name () { COMMANDS ; }", "Define shell function."),
+    ("time", "time [-p] pipeline", "Report time consumed by pipeline's execution."),
+    ("coproc", "coproc [NAME] command [redirections]", "Create a coprocess named NAME."),
+    ("{ ... }", "{ COMMANDS ; }", "Group commands as a unit."),
+    ("(( ... ))", "(( expression ))", "Evaluate arithmetic expression."),
+    ("[[ ... ]]", "[[ expression ]]", "Execute conditional command."),
+    ("variables", "variables - Names and meanings of some shell variables", "Common shell variable names and usage."),
 ];
 
 const BUILTIN_NAMES: &[&str] = &[
@@ -21610,16 +21656,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `help NAME` prints a "NAME: usage" line then an indented description
         // (bash prefixes the synopsis with the builtin name and a colon).
         let out = run("help cd").0;
-        assert!(out.contains("cd: cd [-L|-P] [dir]"), "got: {out:?}");
+        assert!(out.contains("cd: cd [-L|[-P [-e]] [-@]] [dir]"), "got: {out:?}");
         assert!(out.contains("    Change the shell working directory."), "got: {out:?}");
         // `-s` prints only the "NAME: usage" line, no description.
         let out = run("help -s pwd").0;
-        assert_eq!(out, "pwd: pwd [-L|-P]\n");
+        assert_eq!(out, "pwd: pwd [-LPW]\n");
         // `-d` prints only the short description.
         assert_eq!(run("help -d true").0, "true - Return a successful (zero) exit status.\n");
-        // A glob pattern matches multiple topics.
+        // A glob pattern (contains `*`/`?`) matches whole topic names and is
+        // headed by bash's keyword banner.
         let out = run("help -s 'tru*'").0;
-        assert_eq!(out, "true: true\n");
+        assert_eq!(out, "Shell commands matching keyword `tru*'\n\ntrue: true\n");
+        // A plain pattern is a case-sensitive *prefix* match, listed
+        // alphabetically with no banner (bash's `help ech` → echo).
+        assert_eq!(run("help -s ech").0, "echo: echo [-neE] [arg ...]\n");
+        assert_eq!(
+            run("help -s un").0,
+            "unalias: unalias [-a] name [name ...]\nunset: unset [-f] [-v] [-n] [name ...]\nuntil: until COMMANDS; do COMMANDS-2; done\n"
+        );
+        // An exact topic-name match wins over a longer prefix sibling: `help
+        // for` resolves to `for` alone (not `for ((`), `help time` to `time`
+        // (not `times`). Only a non-exact prefix lists every sibling.
+        assert_eq!(run("help -s for").0, "for: for NAME [in WORDS ... ] ; do COMMANDS; done\n");
+        assert_eq!(run("help -s time").0, "time: time [-p] pipeline\n");
+        assert_eq!(
+            run("help -s ti").0,
+            "time: time [-p] pipeline\ntimes: times\n"
+        );
+        // Shell keywords are documented topics too: `help while` etc. resolve.
+        let out = run("help while").0;
+        assert!(out.contains("while: while COMMANDS; do COMMANDS-2; done"), "got: {out:?}");
+        assert_eq!(run("help -s if").0, "if: if COMMANDS; then COMMANDS; [ elif COMMANDS; then COMMANDS; ]... [ else COMMANDS; ] fi\n");
+        // Topic names with punctuation resolve via the prefix rule.
+        assert_eq!(run("help -s '(('").0, "(( ... )): (( expression ))\n");
+        assert_eq!(run("help -s '[['").0, "[[ ... ]]: [[ expression ]]\n");
         // No-arg lists every builtin synopsis (sorted); spot-check a couple.
         let out = run("help").0;
         assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");

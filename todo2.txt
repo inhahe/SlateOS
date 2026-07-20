@@ -4,3 +4,13 @@ the crate is ~15k+ lines with 477 passing tests and is quite mature now. Most ca
 The reason I wanted you to port oils is because of its superset capability. Can you port all of it?
 
 I have an idea: Continue porting a bash-compatible shell from oils, then once we get our C++ toolchain in, you can 
+
+make draggable margins' and sliders' clickable regions wider than the norm
+  [DONE 2026-07-20 — documented in roadmap-detailed.md §3.5 "Generous hit-regions
+   for draggable control handles (sliders too)", extending the existing "Forgiving
+   drag margins" item to cover slider thumbs/tracks and any small draggable handle.]
+
+write in roadmap-detailed.md that the file explorer can allow you to rearrange the order of files and persist it (but when order by whatever is enabled it'll temporarily order by that)
+  [DONE 2026-07-20 — documented in roadmap-detailed.md §4.1 "Manual (custom) file
+   ordering with persistence", incl. the precedence rule that column sorts are a
+   non-destructive temporary override of the persisted manual order.]

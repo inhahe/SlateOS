@@ -3214,9 +3214,19 @@ verified against MSYS bash). Still **missing** relative to bash:
 - **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
   `std::process` doesn't expose it portably on the host and the SlateOS syscall
   isn't wired. Deferred until a `getppid`-equivalent exists.
-- **`HOSTNAME`** — bash sets it from the host; osh's prompt helper already falls
-  back to `localhost`. Whether to seed a fixed default (`localhost`/`slateos`) is
-  a low-stakes naming choice bundled into the same open question as EUID/UID.
+- **`HOSTNAME`** — **RESOLVED 2026-07-20.** Now synthesized inside
+  `import_environment` (after the `SHLVL` block) via the free function
+  `system_hostname()`: on unix it reads `/proc/sys/kernel/hostname` then
+  `/etc/hostname` (trimmed, first non-empty); on the host Windows build it reads
+  `%COMPUTERNAME%`. Uses `contains_key` guard so an inherited `HOSTNAME` from the
+  environment wins over synthesis, and a preset shell var wins over both (env
+  import uses `or_insert`). On the SlateOS target neither procfs path exists yet,
+  so `system_hostname()` returns `None` and `HOSTNAME` stays unset — a graceful
+  fallback that never lies. This was the low-stakes naming half of the Q28 open
+  question; per the operator's own framing ("`$HOSTNAME`'s default … is a
+  low-stakes naming choice that can ride along") it was implemented as a
+  defensible, overridable default. The genuine operator decision (root vs.
+  non-root identity for `$EUID`/`$UID`) remains open and untouched.
 
 **Proper fix:** once SlateOS credential/`getuid`/`getppid` syscalls exist, wire
 `EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly). The identity

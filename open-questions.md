@@ -94,17 +94,29 @@ where seed vars would be inserted.
 
 ---
 
-## Q28 — What user identity should `osh` report via `$EUID`/`$UID` (and `$HOSTNAME`)?
+## Q28 — What user identity should `osh` report via `$EUID`/`$UID`?
 
-**Status:** OPEN (heads-up + genuinely blocks these vars; not currently set).
+**Status:** OPEN (heads-up + genuinely blocks `$EUID`/`$UID`; not currently set).
+The `$HOSTNAME` half of this question is **resolved** — see the update note below.
 
 **Question.** bash always defines readonly `$EUID` and `$UID` (numeric effective
-/real user id) and `$HOSTNAME`. Real scripts lean on them constantly — the
+/real user id). Real scripts lean on them constantly — the
 canonical root check `if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`, and
-many installers gate on `$UID`. `osh` currently leaves all three unset, so those
+many installers gate on `$UID`. `osh` currently leaves both unset, so those
 comparisons error on an empty operand. To set `$EUID`/`$UID` we must decide *what
 identity `osh` reports* — and there is no SlateOS `getuid`-equivalent wired into
 either the host or target build yet, so it can't just read a real credential.
+
+**Update 2026-07-20 — `$HOSTNAME` half resolved (Claude, autonomous).** The
+low-stakes naming half is now implemented: `osh` synthesizes `$HOSTNAME` from
+the real host in `import_environment` (unix: `/proc/sys/kernel/hostname` then
+`/etc/hostname`; host Windows: `%COMPUTERNAME%`), with an inherited-env value
+winning over synthesis and a preset shell var winning over both. On the SlateOS
+target (no procfs yet) it gracefully stays unset rather than lying. Per the
+operator's own framing below ("`$HOSTNAME`'s default … can ride along"), this
+was a defensible, trivially-overridable default and did not need to wait on the
+`$EUID`/`$UID` identity call. The security-sensitive identity decision (A/B/C
+below) remains genuinely open and untouched.
 
 **Options.**
 - **(A) Report root (`EUID=UID=0`) as the default.**

@@ -194,6 +194,7 @@ struct VarSnapshot {
     integer: bool,
     lower: bool,
     upper: bool,
+    capcase: bool,
     nameref: bool,
     readonly: bool,
     array_valued: bool,
@@ -468,6 +469,11 @@ pub struct Shell {
     /// Names with the uppercase attribute (`declare -u`). Assigned values are
     /// converted to uppercase before storing. Inherited by subshell clones.
     upper_attr: HashSet<String>,
+    /// Names with the capitalize attribute (`declare -c`). Assigned values have
+    /// their first character uppercased and the remainder lowercased before
+    /// storing (bash's `att_capcase`). Mutually exclusive with `-l`/`-u`.
+    /// Inherited by subshell clones.
+    capcase_attr: HashSet<String>,
     /// Names with the nameref attribute (`declare -n`/`local -n`). The variable's
     /// *value* is the name of another variable; reads and writes of the nameref
     /// are transparently redirected to that target (following chains, with a
@@ -605,6 +611,7 @@ impl Shell {
             array_valued: HashSet::new(),
             lower_attr: HashSet::new(),
             upper_attr: HashSet::new(),
+            capcase_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
             dir_stack: Vec::new(),
             disabled_builtins: HashSet::new(),
@@ -2421,6 +2428,7 @@ impl Shell {
             array_valued: self.array_valued.clone(),
             lower_attr: self.lower_attr.clone(),
             upper_attr: self.upper_attr.clone(),
+            capcase_attr: self.capcase_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
             dir_stack: self.dir_stack.clone(),
             disabled_builtins: self.disabled_builtins.clone(),
@@ -2457,12 +2465,15 @@ impl Shell {
     /// elements (`name[i]=v`), whole arrays (`name=(a b c)`), and append (`+=`).
     /// Apply a variable/array assignment. Returns `false` (and reports) if the
     /// target is readonly, leaving the existing value intact; `true` otherwise.
-    /// Apply the `declare -l`/`-u` case attribute (if any) of `name` to a value
-    /// about to be stored. Lowercase (`-l`) and uppercase (`-u`) are mutually
-    /// exclusive in bash; if both are somehow set, uppercase wins here.
+    /// Apply the `declare -l`/`-u`/`-c` case attribute (if any) of `name` to a
+    /// value about to be stored. Lowercase (`-l`), uppercase (`-u`) and
+    /// capitalize (`-c`) are mutually exclusive in bash; if several are somehow
+    /// set, uppercase wins, then capitalize, then lowercase.
     fn fold_case_attr(&self, name: &str, val: String) -> String {
         if self.upper_attr.contains(name) {
             val.to_uppercase()
+        } else if self.capcase_attr.contains(name) {
+            capcase(&val)
         } else if self.lower_attr.contains(name) {
             val.to_lowercase()
         } else {
@@ -3222,6 +3233,10 @@ impl Shell {
         if self.exported.contains(name) {
             s.push('x');
         }
+        // bash orders the capitalize flag after i/r/x (`-ic`→`ic`, `-cx`→`xc`).
+        if self.capcase_attr.contains(name) {
+            s.push('c');
+        }
         s
     }
 
@@ -3512,6 +3527,7 @@ impl Shell {
             || self.integer_attr.contains(name)
             || self.lower_attr.contains(name)
             || self.upper_attr.contains(name)
+            || self.capcase_attr.contains(name)
             || self.nameref_attr.contains(name);
         // Both the plain (`name='value'`) and attributed (`declare -r name='value'`)
         // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
@@ -4139,6 +4155,7 @@ impl Shell {
             integer: self.integer_attr.contains(name),
             lower: self.lower_attr.contains(name),
             upper: self.upper_attr.contains(name),
+            capcase: self.capcase_attr.contains(name),
             nameref: self.nameref_attr.contains(name),
             readonly: self.readonly.contains(name),
             array_valued: self.array_valued.contains(name),
@@ -4169,6 +4186,7 @@ impl Shell {
         Self::restore_flag(&mut self.integer_attr, name, snap.integer);
         Self::restore_flag(&mut self.lower_attr, name, snap.lower);
         Self::restore_flag(&mut self.upper_attr, name, snap.upper);
+        Self::restore_flag(&mut self.capcase_attr, name, snap.capcase);
         Self::restore_flag(&mut self.nameref_attr, name, snap.nameref);
         Self::restore_flag(&mut self.readonly, name, snap.readonly);
         Self::restore_flag(&mut self.array_valued, name, snap.array_valued);
@@ -4208,6 +4226,7 @@ impl Shell {
         self.integer_attr.remove(name);
         self.lower_attr.remove(name);
         self.upper_attr.remove(name);
+        self.capcase_attr.remove(name);
         self.nameref_attr.remove(name);
         self.array_valued.remove(name);
         true
@@ -8901,6 +8920,7 @@ impl Shell {
                 'n' => sh.nameref_attr.contains(name),
                 'l' => sh.lower_attr.contains(name),
                 'u' => sh.upper_attr.contains(name),
+                'c' => sh.capcase_attr.contains(name),
                 _ => false,
             })
         };
@@ -8984,6 +9004,10 @@ impl Shell {
         }
         if self.exported.contains(name) {
             s.push('x');
+        }
+        // bash orders `-c` after i/r/x (`declare -rc`, `declare -xc`, `declare -ic`).
+        if self.capcase_attr.contains(name) {
+            s.push('c');
         }
         if s.is_empty() { "--".to_string() } else { format!("-{s}") }
     }
@@ -9083,9 +9107,13 @@ impl Shell {
         let mut integer = false;
         let mut unset_integer = false;
         // Case attribute directive, updated in flag order so the last one wins
-        // (`-l`/`-u` are mutually exclusive; `+l`/`+u` clear). `None` = untouched,
-        // `Some(0)` = clear, `Some(1)` = lowercase, `Some(2)` = uppercase.
+        // (`-l`/`-u`/`-c` are mutually exclusive; `+l`/`+u`/`+c` clear). `None` =
+        // untouched, `Some(0)` = clear, `Some(1)` = lowercase, `Some(2)` =
+        // uppercase, `Some(3)` = capitalize. When two *different* enable
+        // directions are given together bash cancels them all (stores unchanged,
+        // no attribute); `case_conflict` records that so we clear instead.
         let mut case_dir: Option<u8> = None;
+        let mut case_conflict = false;
         // Nameref attribute: `-n` sets it, `+n` removes it.
         let mut nameref = false;
         let mut unset_nameref = false;
@@ -9116,8 +9144,21 @@ impl Shell {
                                 unset_integer = true;
                             }
                         }
-                        'l' => case_dir = Some(if enable { 1 } else { 0 }),
-                        'u' => case_dir = Some(if enable { 2 } else { 0 }),
+                        'l' | 'u' | 'c' => {
+                            let dir = match c {
+                                'l' => 1,
+                                'u' => 2,
+                                _ => 3,
+                            };
+                            if enable {
+                                if matches!(case_dir, Some(prev) if prev != 0 && prev != dir) {
+                                    case_conflict = true;
+                                }
+                                case_dir = Some(dir);
+                            } else {
+                                case_dir = Some(0);
+                            }
+                        }
                         'n' => {
                             if enable {
                                 nameref = true;
@@ -9189,21 +9230,32 @@ impl Shell {
             } else if unset_nameref {
                 self.nameref_attr.remove(name);
             }
+            // Conflicting enable directions (e.g. `-lc`, `-lu`) cancel to none.
+            let case_dir = if case_conflict { Some(0) } else { case_dir };
             match case_dir {
                 Some(1) => {
-                    // `-l`: lowercase (mutually exclusive with uppercase).
+                    // `-l`: lowercase (mutually exclusive with uppercase/capitalize).
                     self.lower_attr.insert(name.to_string());
                     self.upper_attr.remove(name);
+                    self.capcase_attr.remove(name);
                 }
                 Some(2) => {
                     // `-u`: uppercase.
                     self.upper_attr.insert(name.to_string());
                     self.lower_attr.remove(name);
+                    self.capcase_attr.remove(name);
                 }
-                Some(_) => {
-                    // `+l`/`+u`: clear both case attributes.
+                Some(3) => {
+                    // `-c`: capitalize first char, lowercase the rest.
+                    self.capcase_attr.insert(name.to_string());
                     self.lower_attr.remove(name);
                     self.upper_attr.remove(name);
+                }
+                Some(_) => {
+                    // `+l`/`+u`/`+c`: clear all case attributes.
+                    self.lower_attr.remove(name);
+                    self.upper_attr.remove(name);
+                    self.capcase_attr.remove(name);
                 }
                 None => {}
             }
@@ -9290,6 +9342,7 @@ impl Shell {
         let mut integer = false;
         let mut unset_integer = false;
         let mut case_dir: Option<u8> = None;
+        let mut case_conflict = false;
         // `readonly`/`export` imply the corresponding attribute on every name.
         let mut readonly = cmd == "readonly";
         let mut export = cmd == "export";
@@ -9310,8 +9363,21 @@ impl Shell {
                     'g' => global = enable,
                     'i' if enable => integer = true,
                     'i' => unset_integer = true,
-                    'l' => case_dir = Some(if enable { 1 } else { 0 }),
-                    'u' => case_dir = Some(if enable { 2 } else { 0 }),
+                    'l' | 'u' | 'c' => {
+                        let dir = match c {
+                            'l' => 1,
+                            'u' => 2,
+                            _ => 3,
+                        };
+                        if enable {
+                            if matches!(case_dir, Some(prev) if prev != 0 && prev != dir) {
+                                case_conflict = true;
+                            }
+                            case_dir = Some(dir);
+                        } else {
+                            case_dir = Some(0);
+                        }
+                    }
                     'r' if enable => readonly = true,
                     'x' if enable => export = true,
                     'n' if enable => nameref = true,
@@ -9357,18 +9423,27 @@ impl Shell {
             } else if unset_integer {
                 self.integer_attr.remove(&a.name);
             }
+            let case_dir = if case_conflict { Some(0) } else { case_dir };
             match case_dir {
                 Some(1) => {
                     self.lower_attr.insert(a.name.clone());
                     self.upper_attr.remove(&a.name);
+                    self.capcase_attr.remove(&a.name);
                 }
                 Some(2) => {
                     self.upper_attr.insert(a.name.clone());
                     self.lower_attr.remove(&a.name);
+                    self.capcase_attr.remove(&a.name);
+                }
+                Some(3) => {
+                    self.capcase_attr.insert(a.name.clone());
+                    self.lower_attr.remove(&a.name);
+                    self.upper_attr.remove(&a.name);
                 }
                 Some(_) => {
                     self.lower_attr.remove(&a.name);
                     self.upper_attr.remove(&a.name);
+                    self.capcase_attr.remove(&a.name);
                 }
                 None => {}
             }
@@ -9809,6 +9884,7 @@ impl Shell {
             self.integer_attr.remove(a);
             self.lower_attr.remove(a);
             self.upper_attr.remove(a);
+            self.capcase_attr.remove(a);
             self.nameref_attr.remove(a);
             self.array_valued.remove(a);
         }
@@ -12441,6 +12517,22 @@ fn single_quote(s: &str) -> String {
         }
     }
     out.push('\'');
+    out
+}
+
+/// Apply bash's capitalize attribute (`declare -c`, `att_capcase`): the first
+/// character is uppercased and every remaining character lowercased, so
+/// `hELLO` → `Hello` and `hello world` → `Hello world`. Uses Unicode-aware
+/// case mapping (a single source char may map to several).
+fn capcase(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        out.extend(first.to_uppercase());
+        for c in chars {
+            out.extend(c.to_lowercase());
+        }
+    }
     out
 }
 
@@ -18024,16 +18116,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("declare -u y; y=HeLLo; echo $y").0, "HELLO\n");
         // The initializer on the declare itself is folded too.
         assert_eq!(run("declare -u z=abc; echo $z").0, "ABC\n");
-        // `-u` and `-l` are mutually exclusive; the later flag wins.
+        // Across separate `declare` commands the later flag wins (`-u` replaces
+        // the earlier `-l`).
         assert_eq!(run("declare -l w; declare -u w; w=AbC; echo $w").0, "ABC\n");
-        // Within one cluster the last case flag wins (`-ul` → lowercase).
-        assert_eq!(run("declare -ul v=AbC; echo $v").0, "abc\n");
+        // But *within one cluster* two conflicting case flags cancel to none
+        // (bash: `-ul`/`-lu`/`-cl`… store the value unchanged, no attribute).
+        assert_eq!(run("declare -ul v=AbC; echo $v").0, "AbC\n");
+        assert_eq!(run("declare -ul v=AbC; declare -p v").0, "declare -- v=\"AbC\"\n");
         // `+u` removes the attribute.
         assert_eq!(run("declare -u q=abc; declare +u q; q=def; echo $q").0, "def\n");
         // Array elements are folded too.
         assert_eq!(run("declare -u arr; arr[0]=xy; echo ${arr[0]}").0, "XY\n");
         // `declare -p` reflects the case attribute.
         assert_eq!(run("declare -l s=Hi; declare -p s").0, "declare -l s=\"hi\"\n");
+    }
+
+    #[test]
+    fn declare_capcase_attribute() {
+        // `declare -c` (bash's att_capcase): uppercase the first character and
+        // lowercase the rest. Verified byte-for-byte against bash 5.x.
+        assert_eq!(run("declare -c x=hELLO; echo $x").0, "Hello\n");
+        assert_eq!(run("declare -c x='hello world'; echo \"$x\"").0, "Hello world\n");
+        assert_eq!(run("declare -c x=HELLO; echo $x").0, "Hello\n");
+        assert_eq!(run("declare -c x=a; echo $x").0, "A\n");
+        // A leading non-letter blocks capitalization; the rest is lowercased.
+        assert_eq!(run("declare -c x=123abc; echo $x").0, "123abc\n");
+        // The attribute persists across reassignment.
+        assert_eq!(run("declare -c x=foo; x=bAR; echo $x").0, "Bar\n");
+        // Array elements are capitalized too.
+        assert_eq!(run("declare -c a; a=(oNE tWO); echo \"${a[@]}\"").0, "One Two\n");
+        // `typeset -c` and `local -c` behave identically.
+        assert_eq!(run("typeset -c x=wORLD; echo $x").0, "World\n");
+        assert_eq!(run("f() { local -c y=hELLO; echo \"$y\"; }; f").0, "Hello\n");
+        // A function-local `-c` does not leak to the caller's variable.
+        assert_eq!(run("f() { local -c y=hi; }; y=OUTER; f; echo $y").0, "OUTER\n");
+        // `declare -p` shows `-c`, ordered after i/r/x (`-rc`, `-xc`, `-ic`).
+        assert_eq!(run("declare -c x=foo; declare -p x").0, "declare -c x=\"Foo\"\n");
+        assert_eq!(run("declare -cr x=foo; declare -p x").0, "declare -rc x=\"Foo\"\n");
+        // `${x@a}` reports the `c` flag (after i/r/x).
+        assert_eq!(run("declare -c x=Ab; echo ${x@a}").0, "c\n");
+        assert_eq!(run("declare -cx x=Ab; echo ${x@a}").0, "xc\n");
+        // `+c` removes the attribute.
+        assert_eq!(run("declare -c x=foo; declare +c x; x=bAR; echo $x").0, "bAR\n");
     }
 
     #[test]

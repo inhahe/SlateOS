@@ -232,6 +232,73 @@ struct TrapSuppress {
     err: bool,
 }
 
+/// Which command(s) a programmable-completion spec applies to (see
+/// [`Shell::comp_specs`]). `Name` is an ordinary command name; the three
+/// specials mirror bash's `complete -D` (default, applied when no other spec
+/// matches), `-E` (empty command line) and `-I` (initial non-assignment word).
+#[derive(Clone, PartialEq, Eq)]
+enum CompKey {
+    Name(String),
+    Default,
+    Empty,
+    Initial,
+}
+
+/// One `complete`/`compopt` completion specification. osh's line-oriented REPL
+/// has no interactive tab-completion, so these specs are stored, printed
+/// (`complete -p`) and mutated (`compopt`) purely for script compatibility —
+/// sourcing a `bash_completion` file registers hundreds of them and must not
+/// error. The generator side (`-F`/`-C`/…) is never actually invoked. Fields
+/// map 1:1 onto bash's compspec so `complete -p` reproduces the definition.
+#[derive(Clone, Default)]
+struct CompSpec {
+    /// `-o` option names present, e.g. `nospace`, `dirnames` (see `COMP_O_ORDER`).
+    o_opts: Vec<String>,
+    /// `-A`/shortcut action names present, e.g. `function`, `alias` (see `COMP_ACTIONS`).
+    actions: Vec<String>,
+    globpat: Option<String>,   // -G
+    wordlist: Option<String>,  // -W
+    prefix: Option<String>,    // -P
+    suffix: Option<String>,    // -S
+    filterpat: Option<String>, // -X
+    command: Option<String>,   // -C
+    function: Option<String>,  // -F
+}
+
+/// Canonical print order of `complete -o` option names (bash `pcomplete.c`).
+const COMP_O_ORDER: &[&str] =
+    &["bashdefault", "default", "dirnames", "filenames", "noquote", "nosort", "nospace", "plusdirs"];
+
+/// Completion actions and their single-letter shortcut (`'\0'` = `-A name` only).
+/// Order matches bash's `compacts[]`; `complete -p` prints shortcut actions
+/// first (in this order), then the `-A`-only actions (also in this order).
+const COMP_ACTIONS: &[(&str, char)] = &[
+    ("alias", 'a'),
+    ("arrayvar", '\0'),
+    ("binding", '\0'),
+    ("builtin", 'b'),
+    ("command", 'c'),
+    ("directory", 'd'),
+    ("disabled", '\0'),
+    ("enabled", '\0'),
+    ("export", 'e'),
+    ("file", 'f'),
+    ("function", '\0'),
+    ("group", 'g'),
+    ("helptopic", '\0'),
+    ("hostname", '\0'),
+    ("job", 'j'),
+    ("keyword", 'k'),
+    ("running", '\0'),
+    ("service", 's'),
+    ("setopt", '\0'),
+    ("shopt", '\0'),
+    ("signal", '\0'),
+    ("stopped", '\0'),
+    ("user", 'u'),
+    ("variable", 'v'),
+];
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
@@ -492,6 +559,13 @@ pub struct Shell {
     /// options present with `true` are enabled; absent/`false` = default off.
     /// Inherited by subshell clones.
     shopt: HashMap<String, bool>,
+    /// Programmable-completion specifications registered by `complete` (and
+    /// mutated by `compopt`), keyed by target command. Stored in insertion
+    /// order; `complete -p` reproduces each definition verbatim. osh has no
+    /// interactive completion, so these are never invoked — they exist so that
+    /// scripts sourcing bash completion files run without error. Not inherited
+    /// by subshell clones (bash does not propagate compspecs to subshells).
+    comp_specs: Vec<(CompKey, CompSpec)>,
     /// Names with the integer attribute (`declare -i`). Assignments to these are
     /// evaluated as arithmetic before storing (`x=5+3` stores `8`, `x+=2` adds).
     /// Inherited by subshell clones.
@@ -659,6 +733,7 @@ impl Shell {
             loop_depth: 0,
             readonly: HashSet::new(),
             shopt: HashMap::new(),
+            comp_specs: Vec::new(),
             integer_attr: HashSet::new(),
             array_valued: HashSet::new(),
             lower_attr: HashSet::new(),
@@ -2552,6 +2627,8 @@ impl Shell {
             loop_depth: 0,
             readonly: self.readonly.clone(),
             shopt: self.shopt.clone(),
+            // Completion specs are not propagated to subshells (bash parity).
+            comp_specs: Vec::new(),
             integer_attr: self.integer_attr.clone(),
             array_valued: self.array_valued.clone(),
             lower_attr: self.lower_attr.clone(),
@@ -7115,6 +7192,8 @@ impl Shell {
             "source" | "." => self.builtin_source(args),
             "type" => self.builtin_type(args, out, redir),
             "compgen" => self.builtin_compgen(args, out, redir),
+            "complete" => self.builtin_complete(args, out, redir),
+            "compopt" => self.builtin_compopt(args),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
             "wait" => self.builtin_wait(args),
@@ -11268,6 +11347,327 @@ impl Shell {
         out
     }
 
+    /// Look up a stored completion spec by target.
+    fn comp_get(&self, key: &CompKey) -> Option<&CompSpec> {
+        self.comp_specs.iter().find(|(k, _)| k == key).map(|(_, s)| s)
+    }
+
+    /// Mutable lookup of a stored completion spec by target.
+    fn comp_get_mut(&mut self, key: &CompKey) -> Option<&mut CompSpec> {
+        self.comp_specs.iter_mut().find(|(k, _)| k == key).map(|(_, s)| s)
+    }
+
+    /// Insert `spec` for `key`, replacing any existing spec in place (so the
+    /// insertion order — which drives `complete -p` listing order — is stable
+    /// across redefinition, as in bash's hash table).
+    fn comp_set(&mut self, key: CompKey, spec: CompSpec) {
+        if let Some(slot) = self.comp_specs.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = spec;
+        } else {
+            self.comp_specs.push((key, spec));
+        }
+    }
+
+    /// Remove the completion spec for `key` (no-op if absent).
+    fn comp_remove(&mut self, key: &CompKey) {
+        self.comp_specs.retain(|(k, _)| k != key);
+    }
+
+    /// `complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action]
+    /// [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat]
+    /// [-P prefix] [-S suffix] [name ...]` — register, print (`-p`) or remove
+    /// (`-r`) programmable-completion specifications.
+    ///
+    /// osh's line-oriented REPL has no interactive tab-completion, so a
+    /// registered spec is never used to generate matches. The builtin exists so
+    /// that scripts sourcing bash completion files (which call `complete`
+    /// hundreds of times) run without error, and so `complete -p` round-trips a
+    /// definition byte-for-byte. `-D`/`-E`/`-I` target the special
+    /// default/empty/initial-word specs. Returns 2 on a usage error, 1 when
+    /// `-p` names an unknown spec, else 0.
+    ///
+    /// Note: with multiple specs, `complete -p` (list all) emits them in
+    /// insertion order; bash uses its internal hash-table order, which is not
+    /// reproducible. Each individual definition still matches bash exactly.
+    fn builtin_complete(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Option letters that take an argument (the rest of the cluster, or the
+        // next word). Everything else is a no-argument flag.
+        const ARG_LETTERS: &str = "oAGWFCXPS";
+        const USAGE: &[u8] = b"complete: usage: complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [name ...]\n";
+
+        let mut spec = CompSpec::default();
+        let mut names: Vec<String> = Vec::new();
+        let mut targets: Vec<CompKey> = Vec::new();
+        let mut do_print = false;
+        let mut do_remove = false;
+        let mut has_def = false; // any spec-defining option seen
+
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "--" {
+                i += 1;
+                while i < args.len() {
+                    names.push(args[i].clone());
+                    i += 1;
+                }
+                break;
+            }
+            if a.len() > 1 && a.starts_with('-') {
+                let chars: Vec<char> = a[1..].chars().collect();
+                let mut ci = 0;
+                while ci < chars.len() {
+                    let c = chars[ci];
+                    if ARG_LETTERS.contains(c) {
+                        // Value: remainder of the cluster if any, else next word.
+                        let val = if ci + 1 < chars.len() {
+                            chars[ci + 1..].iter().collect::<String>()
+                        } else {
+                            i += 1;
+                            match args.get(i) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    self.errln(&format!(
+                                        "{}complete: -{c}: option requires an argument",
+                                        self.err_prefix()
+                                    ));
+                                    self.emit_stderr(USAGE);
+                                    return 2;
+                                }
+                            }
+                        };
+                        has_def = true;
+                        match c {
+                            'o' => {
+                                if !COMP_O_ORDER.contains(&val.as_str()) {
+                                    self.errln(&format!(
+                                        "{}complete: {val}: invalid option name",
+                                        self.err_prefix()
+                                    ));
+                                    return 2;
+                                }
+                                if !spec.o_opts.contains(&val) {
+                                    spec.o_opts.push(val);
+                                }
+                            }
+                            'A' => {
+                                if !COMP_ACTIONS.iter().any(|(n, _)| *n == val) {
+                                    self.errln(&format!(
+                                        "{}complete: {val}: invalid action name",
+                                        self.err_prefix()
+                                    ));
+                                    return 2;
+                                }
+                                if !spec.actions.contains(&val) {
+                                    spec.actions.push(val);
+                                }
+                            }
+                            'G' => spec.globpat = Some(val),
+                            'W' => spec.wordlist = Some(val),
+                            'F' => spec.function = Some(val),
+                            'C' => spec.command = Some(val),
+                            'X' => spec.filterpat = Some(val),
+                            'P' => spec.prefix = Some(val),
+                            'S' => spec.suffix = Some(val),
+                            _ => {}
+                        }
+                        ci = chars.len(); // consumed the remainder of the cluster
+                    } else {
+                        let action = comp_short_action(c);
+                        if let Some(act) = action {
+                            has_def = true;
+                            if !spec.actions.iter().any(|x| x == act) {
+                                spec.actions.push(act.to_string());
+                            }
+                        } else {
+                            match c {
+                                'p' => do_print = true,
+                                'r' => do_remove = true,
+                                'D' => targets.push(CompKey::Default),
+                                'E' => targets.push(CompKey::Empty),
+                                'I' => targets.push(CompKey::Initial),
+                                _ => {
+                                    self.errln(&format!(
+                                        "{}complete: -{c}: invalid option",
+                                        self.err_prefix()
+                                    ));
+                                    self.emit_stderr(USAGE);
+                                    return 2;
+                                }
+                            }
+                        }
+                        ci += 1;
+                    }
+                }
+                i += 1;
+            } else {
+                names.push(a.clone());
+                i += 1;
+            }
+        }
+
+        // ---- remove mode (`-r`) ----
+        if do_remove {
+            if names.is_empty() && targets.is_empty() {
+                self.comp_specs.clear();
+            } else {
+                for n in &names {
+                    self.comp_remove(&CompKey::Name(n.clone()));
+                }
+                for t in &targets {
+                    self.comp_remove(t);
+                }
+            }
+            return 0;
+        }
+
+        // ---- print mode (`-p`, and bare `complete`) ----
+        if do_print || (!has_def && names.is_empty() && targets.is_empty()) {
+            if names.is_empty() && targets.is_empty() {
+                let mut s = String::new();
+                for (k, sp) in &self.comp_specs {
+                    s.push_str(&format_compspec(k, sp));
+                }
+                return self.write_bytes(out, redir, s.as_bytes());
+            }
+            let mut keys: Vec<CompKey> = Vec::new();
+            keys.extend(targets.iter().cloned());
+            keys.extend(names.iter().map(|n| CompKey::Name(n.clone())));
+            let mut status = 0;
+            for k in keys {
+                match self.comp_get(&k).map(|sp| format_compspec(&k, sp)) {
+                    Some(line) => {
+                        self.write_bytes(out, redir, line.as_bytes());
+                    }
+                    None => {
+                        self.errln(&format!(
+                            "{}complete: {}: no completion specification",
+                            self.err_prefix(),
+                            comp_key_label(&k)
+                        ));
+                        status = 1;
+                    }
+                }
+            }
+            return status;
+        }
+
+        // ---- define mode ----
+        if names.is_empty() && targets.is_empty() {
+            // Defining options given but nowhere to attach them.
+            self.emit_stderr(USAGE);
+            return 2;
+        }
+        // With -D/-E/-I present, bash ignores any command names.
+        if targets.is_empty() {
+            for n in &names {
+                self.comp_set(CompKey::Name(n.clone()), spec.clone());
+            }
+        } else {
+            for t in &targets {
+                self.comp_set(t.clone(), spec.clone());
+            }
+        }
+        0
+    }
+
+    /// `compopt [-o|+o option] [-DEI] [name ...]` — modify the `-o` options of an
+    /// existing completion spec (`-o` adds, `+o` removes). With no name, bash
+    /// errors unless invoked from within a running completion function; osh has
+    /// no such context, so a nameless `compopt` always reports that error.
+    /// Returns 2 on a usage error, 1 when a named spec does not exist, else 0.
+    fn builtin_compopt(&mut self, args: &[String]) -> i32 {
+        const USAGE: &[u8] = b"compopt: usage: compopt [-o|+o option] [-DEI] [name ...]\n";
+        let mut add: Vec<String> = Vec::new();
+        let mut del: Vec<String> = Vec::new();
+        let mut targets: Vec<CompKey> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+
+        let mut i = 0;
+        while i < args.len() {
+            let a = &args[i];
+            match a.as_str() {
+                "--" => {
+                    i += 1;
+                    while i < args.len() {
+                        names.push(args[i].clone());
+                        i += 1;
+                    }
+                    break;
+                }
+                "-o" | "+o" => {
+                    i += 1;
+                    let Some(v) = args.get(i) else {
+                        self.errln(&format!(
+                            "{}compopt: {a}: option requires an argument",
+                            self.err_prefix()
+                        ));
+                        self.emit_stderr(USAGE);
+                        return 2;
+                    };
+                    if !COMP_O_ORDER.contains(&v.as_str()) {
+                        self.errln(&format!(
+                            "{}compopt: {v}: invalid option name",
+                            self.err_prefix()
+                        ));
+                        return 2;
+                    }
+                    if a == "-o" {
+                        add.push(v.clone());
+                    } else {
+                        del.push(v.clone());
+                    }
+                }
+                "-D" => targets.push(CompKey::Default),
+                "-E" => targets.push(CompKey::Empty),
+                "-I" => targets.push(CompKey::Initial),
+                other if other.len() > 1 && other.starts_with('-') => {
+                    let c = other.chars().nth(1).unwrap_or('?');
+                    self.errln(&format!("{}compopt: -{c}: invalid option", self.err_prefix()));
+                    self.emit_stderr(USAGE);
+                    return 2;
+                }
+                _ => names.push(a.clone()),
+            }
+            i += 1;
+        }
+
+        let mut keys: Vec<CompKey> = Vec::new();
+        keys.extend(targets.iter().cloned());
+        keys.extend(names.iter().map(|n| CompKey::Name(n.clone())));
+
+        if keys.is_empty() {
+            // osh is never inside a completion function.
+            self.errln(&format!(
+                "{}compopt: not currently executing completion function",
+                self.err_prefix()
+            ));
+            return 1;
+        }
+
+        let mut status = 0;
+        for k in keys {
+            if self.comp_get(&k).is_none() {
+                self.errln(&format!(
+                    "{}compopt: {}: no completion specification",
+                    self.err_prefix(),
+                    comp_key_label(&k)
+                ));
+                status = 1;
+                continue;
+            }
+            if let Some(sp) = self.comp_get_mut(&k) {
+                for o in &add {
+                    if !sp.o_opts.contains(o) {
+                        sp.o_opts.push(o.clone());
+                    }
+                }
+                sp.o_opts.retain(|o| !del.contains(o));
+            }
+        }
+        status
+    }
+
     fn builtin_type(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Shell keywords recognized by `type` (reserved words that introduce or
         // punctuate compound commands).
@@ -12903,6 +13303,92 @@ fn single_quote(s: &str) -> String {
     out
 }
 
+/// The canonical completion-action name for a single-letter `complete` flag
+/// (`-a` → `alias`, `-v` → `variable`, …), or `None` if the letter is not an
+/// action shortcut.
+fn comp_short_action(c: char) -> Option<&'static str> {
+    COMP_ACTIONS.iter().find(|(_, flag)| *flag == c).map(|(name, _)| *name)
+}
+
+/// The label used for a completion target in diagnostics (`complete -p foo`
+/// error → `foo`; the specials print as their flag).
+fn comp_key_label(k: &CompKey) -> String {
+    match k {
+        CompKey::Name(n) => n.clone(),
+        CompKey::Default => "-D".to_string(),
+        CompKey::Empty => "-E".to_string(),
+        CompKey::Initial => "-I".to_string(),
+    }
+}
+
+/// Render a completion spec as a re-executable `complete …` line (matching
+/// bash's `complete -p` output), terminated by a newline. Option groups are
+/// emitted in bash's fixed print order: `-o` options, shortcut actions, `-A`
+/// actions, then `-G -W -P -S -X -C -F`, then the target (`name` or `-D/-E/-I`).
+fn format_compspec(key: &CompKey, sp: &CompSpec) -> String {
+    let mut s = String::from("complete");
+    // -o options, in canonical order.
+    for o in COMP_O_ORDER {
+        if sp.o_opts.iter().any(|x| x == o) {
+            s.push_str(" -o ");
+            s.push_str(o);
+        }
+    }
+    // Actions: shortcut-flag actions first (in table order), then -A-only ones.
+    for &(name, flag) in COMP_ACTIONS {
+        if flag != '\0' && sp.actions.iter().any(|x| x == name) {
+            s.push_str(" -");
+            s.push(flag);
+        }
+    }
+    for &(name, flag) in COMP_ACTIONS {
+        if flag == '\0' && sp.actions.iter().any(|x| x == name) {
+            s.push_str(" -A ");
+            s.push_str(name);
+        }
+    }
+    if let Some(v) = &sp.globpat {
+        s.push_str(" -G ");
+        s.push_str(&single_quote(v));
+    }
+    if let Some(v) = &sp.wordlist {
+        s.push_str(" -W ");
+        s.push_str(&single_quote(v));
+    }
+    if let Some(v) = &sp.prefix {
+        s.push_str(" -P ");
+        s.push_str(&single_quote(v));
+    }
+    if let Some(v) = &sp.suffix {
+        s.push_str(" -S ");
+        s.push_str(&single_quote(v));
+    }
+    if let Some(v) = &sp.filterpat {
+        s.push_str(" -X ");
+        s.push_str(&single_quote(v));
+    }
+    if let Some(v) = &sp.command {
+        s.push_str(" -C ");
+        s.push_str(&single_quote(v));
+    }
+    // bash prints the -F function name unquoted.
+    if let Some(v) = &sp.function {
+        s.push_str(" -F ");
+        s.push_str(v);
+    }
+    match key {
+        CompKey::Name(n) => {
+            s.push(' ');
+            s.push_str(n);
+        }
+        CompKey::Default => s.push_str(" -D"),
+        CompKey::Empty => s.push_str(" -E"),
+        CompKey::Initial => s.push_str(" -I"),
+    }
+    s.push('\n');
+    s
+}
+
 /// Apply bash's capitalize attribute (`declare -c`, `att_capcase`): the first
 /// character is uppercased and every remaining character lowercased, so
 /// `hELLO` → `Hello` and `hello world` → `Hello world`. Uses Unicode-aware
@@ -13362,6 +13848,16 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
         "compgen [-abcdefkv] [-A action] [-W wordlist] [-P prefix] [-S suffix] [-X filterpat] [word]",
         "Display possible completions depending on the options.",
     ),
+    (
+        "complete",
+        "complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [name ...]",
+        "Specify how arguments are to be completed by Readline.",
+    ),
+    (
+        "compopt",
+        "compopt [-o|+o option] [-DEI] [name ...]",
+        "Modify or display completion options.",
+    ),
     ("trap", "trap [-lp] [[action] signal_spec ...]", "Trap signals and other events."),
     ("jobs", "jobs [-lp] [jobspec ...]", "Display status of jobs."),
     ("wait", "wait [-n] [-p var] [id ...]", "Wait for jobs to complete and report status."),
@@ -13390,6 +13886,7 @@ const BUILTIN_NAMES: &[&str] = &[
     ".", "type", "trap", "jobs", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
     "ulimit", "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
+    "complete", "compopt",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -18052,6 +18549,108 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
         // `--` with no following word offers every candidate.
         assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
+    }
+
+    #[test]
+    fn complete_register_and_print() {
+        // A registered spec round-trips through `complete -p NAME` verbatim.
+        assert_eq!(run("complete -W 'x y z' foo; complete -p foo").0, "complete -W 'x y z' foo\n");
+        // `-F` function name is printed unquoted; other values are single-quoted.
+        assert_eq!(
+            run("complete -F _f -o bashdefault prog; complete -p prog").0,
+            "complete -o bashdefault -F _f prog\n"
+        );
+        // Redefinition replaces the previous spec (keeps its slot).
+        assert_eq!(run("complete -W a c; complete -W b c; complete -p c").0, "complete -W 'b' c\n");
+        // A bare name stores an empty spec.
+        assert_eq!(run("complete cmd; complete -p cmd").0, "complete cmd\n");
+    }
+
+    #[test]
+    fn complete_canonical_option_order() {
+        // Options are emitted in bash's fixed print order regardless of input
+        // order: -o opts, shortcut actions, -A actions, then -G -W -P -S -X -C -F.
+        let src = "complete -o nospace -o bashdefault -A function -S SUF -P PRE \
+                   -X '*.x' -W 'w1 w2' -G '*.g' -C mycmd -F myf cmd; complete -p cmd";
+        assert_eq!(
+            run(src).0,
+            "complete -o bashdefault -o nospace -A function -G '*.g' -W 'w1 w2' \
+             -P 'PRE' -S 'SUF' -X '*.x' -C 'mycmd' -F myf cmd\n"
+        );
+        // Shortcut actions print before -A-only actions; each group in table order.
+        assert_eq!(
+            run("complete -A signal -v -a cmd; complete -p cmd").0,
+            "complete -a -v -A signal cmd\n"
+        );
+        // Clustered shortcut flags expand in canonical order.
+        assert_eq!(
+            run("complete -abcdefgjksuv cmd; complete -p cmd").0,
+            "complete -a -b -c -d -e -f -g -j -k -s -u -v cmd\n"
+        );
+    }
+
+    #[test]
+    fn complete_quotes_embedded_single_quotes() {
+        // Values are single-quoted with the POSIX `'\''` escape for embedded quotes.
+        assert_eq!(
+            run("complete -W \"a 'b' c\" cmd; complete -p cmd").0,
+            "complete -W 'a '\\''b'\\'' c' cmd\n"
+        );
+    }
+
+    #[test]
+    fn complete_remove_and_special_targets() {
+        // `-r NAME` removes just that spec; `-r` with no args clears all.
+        assert_eq!(run("complete -W a x; complete -r x; complete -p x; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("complete -W a x; complete -W b y; complete -r; complete -p").0, "");
+        // `-D`/`-E`/`-I` store the special default/empty/initial specs.
+        assert_eq!(run("complete -F _d -D; complete -pD").0, "complete -F _d -D\n");
+        // With -D present, command names are ignored.
+        assert_eq!(run("complete -D -W x -F _f name; complete -p").0, "complete -W 'x' -F _f -D\n");
+    }
+
+    #[test]
+    fn complete_error_status_codes() {
+        // `-p` on an unknown spec is status 1 (message goes to stderr).
+        assert_eq!(run("complete -p nope; echo rc=$?").0, "rc=1\n");
+        // Invalid option / option name / action name are usage errors (status 2).
+        assert_eq!(run("complete -Z cmd; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("complete -o badopt cmd; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("complete -A badaction cmd; echo rc=$?").0, "rc=2\n");
+        // Defining options with no name/target is a usage error.
+        assert_eq!(run("complete -o nospace; echo rc=$?").0, "rc=2\n");
+        // A missing required argument is a usage error.
+        assert_eq!(run("complete -F; echo rc=$?").0, "rc=2\n");
+        // Bare `complete` and `complete -r nope` succeed.
+        assert_eq!(run("complete; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("complete -r nope; echo rc=$?").0, "rc=0\n");
+    }
+
+    #[test]
+    fn compopt_modifies_options() {
+        // `-o` adds an option, `+o` removes it, both preserving canonical order.
+        assert_eq!(
+            run("complete -W a cmd; compopt -o nospace -o plusdirs cmd; complete -p cmd").0,
+            "complete -o nospace -o plusdirs -W 'a' cmd\n"
+        );
+        assert_eq!(
+            run("complete -o nospace -o dirnames -W a cmd; compopt +o nospace cmd; complete -p cmd").0,
+            "complete -o dirnames -W 'a' cmd\n"
+        );
+        // A nameless compopt (no completion function running) is status 1.
+        assert_eq!(run("compopt -o nospace; echo rc=$?").0, "rc=1\n");
+        // compopt on an unknown spec is status 1.
+        assert_eq!(run("compopt -o nospace nope; echo rc=$?").0, "rc=1\n");
+        // An invalid compopt option is a usage error (status 2).
+        assert_eq!(run("compopt -Z; echo rc=$?").0, "rc=2\n");
+    }
+
+    #[test]
+    fn complete_is_a_builtin() {
+        // Both builtins are recognised by `type -t` and `compgen -b`.
+        assert_eq!(run("type -t complete").0, "builtin\n");
+        assert_eq!(run("type -t compopt").0, "builtin\n");
+        assert_eq!(run("compgen -b complete").0, "complete\n");
     }
 
     #[test]

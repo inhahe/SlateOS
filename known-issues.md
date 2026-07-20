@@ -2465,6 +2465,40 @@ deciding word boundaries), then feed that subscript through the same fatal
 subscript is almost always a typo), so parked here rather than reworking the
 element tokenizer now.
 
+### TD-OILS-COMPLETE-NOOP. `complete`/`compopt` register/print/remove completion specs but never generate completions (osh has no interactive tab-completion), and multi-spec `complete -p` lists in insertion order, not bash's hash order — MINOR, by design 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_complete` / `builtin_compopt`,
+the `CompSpec`/`CompKey` types, the `comp_specs: Vec<(CompKey, CompSpec)>` field,
+and the `format_compspec` renderer.
+
+**What:** the `complete` and `compopt` builtins are implemented for *script
+compatibility* — a sourced `bash_completion` file (or any script) calls
+`complete …` hundreds of times, and previously each errored with `complete:
+command not found` (status 127), aborting the source. Now they parse fully,
+store the spec, print it re-executably (`complete -p`, byte-matching bash for a
+single spec, including the fixed option print order and `'\''` quoting), mutate
+it (`compopt -o`/`+o`), and remove it (`complete -r`). Two intentional
+limitations remain:
+
+1. **Specs are never *used*.** osh's REPL is line-oriented with no Readline tab
+   completion, so a registered `-F func`/`-C cmd`/`-W list` generator is stored
+   but never invoked to produce candidates. `compgen` (which *does* generate
+   candidates on demand) is the functional half; `complete` is the registration
+   half with no completion engine behind it.
+2. **`complete -p` (list all) uses insertion order**, whereas bash iterates its
+   internal hash table (an order that depends on bash's string-hash + bucket
+   layout and is not reproducible without replicating those internals). Each
+   *individual* `complete -p NAME` line matches bash exactly; only the relative
+   order of *unrelated* specs in a full listing can differ.
+
+**Why by design:** (1) is blocked on there being an interactive line editor with
+completion at all (a much larger, separate feature); until then a stored-but-unused
+spec is the correct bash-compatible behavior for non-interactive scripts. (2) is a
+deliberate trade — matching bash's hash-bucket order byte-for-byte has no practical
+value (scripts that care read `complete -p NAME`, not the unordered full dump) and
+would require hard-coding bash's hash function. Fixing (1) would also make (2)
+moot in practice (real completion never depends on listing order).
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

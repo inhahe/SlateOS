@@ -389,12 +389,46 @@ impl Parser {
             }
             return Ok(Command::Function(FunctionDef { name, body, redirects }));
         }
+        // `function NAME [()] body` — bash keyword form of a function
+        // definition (recognised only at command start).
+        if self.bare_word_here().as_deref() == Some("function") {
+            return self.parse_function_keyword();
+        }
         // `coproc [NAME] command` — bash reserved word, recognised only at
         // command start.
         if self.bare_word_here().as_deref() == Some("coproc") {
             return self.parse_coproc();
         }
         self.parse_simple()
+    }
+
+    /// Parse the bash keyword form of a function definition:
+    /// `function NAME [( )] compound-body`. Unlike the POSIX `NAME ( )` form,
+    /// the parentheses are optional and bash permits function names that are
+    /// not valid identifiers (e.g. `function foo-bar { …; }`), so the name is
+    /// taken verbatim from the following word.
+    fn parse_function_keyword(&mut self) -> Result<Command, ParseError> {
+        self.pos += 1; // consume `function`
+        let Some(name) = self.bare_word_here() else {
+            return Err(self.unexpected_here());
+        };
+        self.pos += 1; // consume the name word
+        // Optional `()` after the name.
+        if self.at_op(Op::LParen) {
+            if !matches!(self.toks.get(self.pos + 1), Some(Tok::Op(Op::RParen))) {
+                return Err(self.unexpected_here());
+            }
+            self.pos += 2;
+        }
+        self.skip_newlines();
+        let body = self.parse_compound_body()?;
+        // bash allows redirections after the body (`function f { …; } >log`);
+        // they are stored with the function and applied on every invocation.
+        let mut redirects = Vec::new();
+        while self.at_redirect_start() {
+            redirects.push(self.parse_redirect()?);
+        }
+        Ok(Command::Function(FunctionDef { name, body, redirects }))
     }
 
     /// Parse a `coproc [NAME] command`. Grammar (matches bash):
@@ -490,7 +524,11 @@ impl Parser {
         {
             return Ok(p);
         }
-        Err(ParseError("expected function body".into()))
+        // Not a valid compound body. bash diagnoses this positionally: at EOF
+        // (`f()` / `function f` with no body) it reports "unexpected end of
+        // file"; otherwise it names the offending token (`f() echo hi` →
+        // "unexpected token `echo'"), matching both function-definition forms.
+        Err(self.unexpected_here())
     }
 
     fn parse_brace_group(&mut self) -> Result<Command, ParseError> {
@@ -2118,6 +2156,64 @@ mod tests {
             panic!("expected function");
         };
         assert_eq!(f.name, "greet");
+    }
+
+    #[test]
+    fn function_keyword_forms() {
+        // bash keyword form without parentheses.
+        let prog = parse("function greet { echo hi; }").unwrap();
+        let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(f.name, "greet");
+
+        // bash keyword form WITH parentheses.
+        let prog = parse("function greet() { echo hi; }").unwrap();
+        let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(f.name, "greet");
+
+        // A non-identifier name is permitted in the keyword form.
+        let prog = parse("function foo-bar { echo hi; }").unwrap();
+        let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(f.name, "foo-bar");
+
+        // Multi-line body and a subshell body.
+        assert!(parse("function f {\necho a\necho b\n}").is_ok());
+        let prog = parse("function f() ( echo sub )").unwrap();
+        let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(f.name, "f");
+
+        // Trailing redirection is attached to the definition.
+        let prog = parse("function f { echo a; } >/dev/null").unwrap();
+        let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(f.redirects.len(), 1);
+    }
+
+    #[test]
+    fn function_missing_body_errors_like_bash() {
+        // At EOF, both the keyword form and the POSIX form report bash's
+        // canonical "unexpected end of file" (not a bespoke message).
+        assert_eq!(
+            parse("function f").unwrap_err().0,
+            "syntax error: unexpected end of file"
+        );
+        assert_eq!(
+            parse("f()").unwrap_err().0,
+            "syntax error: unexpected end of file"
+        );
+        // A non-body token after the header names the offending token.
+        assert_eq!(
+            parse("f() echo hi").unwrap_err().0,
+            "syntax error near unexpected token `echo'"
+        );
     }
 
     #[test]

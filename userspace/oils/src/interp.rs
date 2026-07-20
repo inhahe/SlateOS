@@ -10520,7 +10520,27 @@ impl Shell {
                 .format_var_assignment(name)
                 .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "")));
         }
-        None
+        // Scalar dynamic special variables (`BASHPID`, `RANDOM`, …) have no
+        // entry in `self.vars` but still respond to `declare -p NAME` in bash —
+        // it prints the live value with the variable's fixed attributes. Match
+        // that so `declare -p BASH_SUBSHELL` no longer reports "not found" while
+        // `$BASH_SUBSHELL` expands fine. (The attribute-only bulk `declare -p`
+        // listing of these is a separate, lower-value gap — see known-issues.md.)
+        self.format_scalar_dynamic_declare(name)
+    }
+
+    /// `declare -p` line for a scalar dynamic special variable (integer-typed
+    /// counters like `BASHPID`/`RANDOM`/`SECONDS` print with `-i`; the rest with
+    /// `--`), or `None` if `name` is not one of them. Values are read live via
+    /// [`Self::param_value`].
+    fn format_scalar_dynamic_declare(&self, name: &str) -> Option<String> {
+        let flags = match name {
+            "BASHPID" | "RANDOM" | "SECONDS" => "-i",
+            "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
+            _ => return None,
+        };
+        let val = self.param_value(name)?;
+        Some(format!("declare {flags} {name}=\"{val}\""))
     }
 
     /// Format a variable as a re-inputtable `name=value` / `name=([i]="v" …)`
@@ -18412,6 +18432,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(r#"old=$IFS; IFS=:; IFS=$old; x="a b c"; for w in $x; do echo "<$w>"; done"#).0,
             "<a>\n<b>\n<c>\n"
         );
+    }
+
+    #[test]
+    fn declare_p_names_scalar_dynamic_specials() {
+        // `declare -p NAME` for a scalar dynamic special variable prints its
+        // live value with the fixed bash attributes, rather than "not found" —
+        // the value counters (`BASHPID`/`RANDOM`/`SECONDS`) carry `-i`, the rest
+        // print `--`. Previously osh errored here even though `$NAME` expanded.
+        assert_eq!(run("declare -p BASH_SUBSHELL").0, "declare -- BASH_SUBSHELL=\"0\"\n");
+        assert_eq!(run("declare -p LINENO").0, "declare -- LINENO=\"1\"\n");
+        assert_eq!(run("declare -p SECONDS").0, "declare -i SECONDS=\"0\"\n");
+        // BASHPID / EPOCHSECONDS have runtime-dependent values, so just assert
+        // the flag+name shape and a non-error status.
+        let (out, st) = run("declare -p BASHPID");
+        assert_eq!(st, 0);
+        assert!(out.starts_with("declare -i BASHPID=\""), "got {out:?}");
+        let (out, st) = run("declare -p EPOCHSECONDS");
+        assert_eq!(st, 0);
+        assert!(out.starts_with("declare -- EPOCHSECONDS=\""), "got {out:?}");
+        // A genuinely-unset name still errors with status 1.
+        assert_eq!(run("declare -p NoSuchVar_xyz").1, 1);
     }
 
     #[test]

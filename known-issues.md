@@ -126,6 +126,35 @@ mirroring `refresh_shellopts` (readonly stored var, recomputed on every
 modeling the completion-related shopts, which only makes sense once osh
 has a completion subsystem. Until then the honest state is "unset".
 
+### TD-OILS-DECLARE-P-BULK-DYNAMICS. bulk `declare -p` (no names) omits the dynamic special variables — 2026-07-19 — OPEN (very low priority)
+
+**What:** `declare -p NAME` for a scalar dynamic special variable now
+matches bash (e.g. `declare -i BASHPID="12345"`, `declare -- LINENO="1"`
+— implemented via `format_scalar_dynamic_declare` in `interp.rs`). But the
+*bulk* listing `declare -p` with no name operands still only enumerates
+`self.vars` / `self.arrays` / `self.assoc`, so it does not print the
+special variables at all. bash lists them there in an attribute-only form
+(no value), e.g. `declare -i BASHPID`, `declare -- LINENO`,
+`declare -a BASH_LINENO=()`, `declare -i SRANDOM`.
+
+**Reproduce:** `bash -c 'declare -p' | grep BASHPID` prints
+`declare -i BASHPID`; `osh -c 'declare -p' | grep BASHPID` prints nothing.
+
+**Why deferred (not a band-aid):** matching the bulk listing byte-for-byte
+means enumerating bash's full set of always-present special variables
+(including ones osh does not model at all, e.g. `SRANDOM`, `SHLVL`
+attribute quirks, `PIPESTATUS`, `COMP_*`) and reproducing the
+attribute-only "invisible variable" form (name with flags but no `=`).
+That is a large surface for a listing that scripts almost never parse
+(callers use `declare -p NAME`, which is now correct). Emitting a partial
+subset would diverge from bash in a *different* way than omitting them.
+
+**Proper fix:** add a curated table of always-present special variables
+with their fixed attribute flags and "has a live value vs. attribute-only"
+status, and have the no-names branch of `declare_print` merge that table
+into the enumeration (skipping any that are shadowed by a real `self.vars`
+entry). Verify the union and ordering against `bash -c 'declare -p'`.
+
 ### TD-OILS-COPROC. `osh` does not implement `coproc` — RESOLVED 2026-07-19
 
 **RESOLVED (2026-07-19).** `coproc` is now implemented following the

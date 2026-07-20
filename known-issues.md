@@ -68,6 +68,32 @@ The common transforms (`@Q`/`@U`/`@u`/`@L`/`@E`/`@a`/`@k`/`@K`) and the common
 bad-substitution forms (`${x!}`, `${!x*junk}`, `${#a[i]extra}`, `${!$}`,
 `${!!}`) all match bash exactly.
 
+### TD-OILS-SUBSCRIPT-QUOTED-BRACKET. `osh` lexer chokes on a quoted `]` inside a `${name[...]}` subscript — 2026-07-19 — OPEN (very low priority)
+
+**What:** When an associative-array key contains a literal `]` and is *read
+back* with the key quoted inside the expansion — `"${h["with]bracket"]}"` or
+`"${h['with]bracket']}"` — osh's lexer fails with `unexpected EOF while looking
+for matching '"'` (or `'`). bash accepts it: the quoted `]` inside the subscript
+is not the subscript terminator. The *assignment* side is fine —
+`declare -A h=(["with]bracket"]=1)` stores and `declare -p` round-trips the key
+correctly (fixed alongside the quoted-key array-literal support). Only the
+retrieval expansion with a nested-quoted `]` trips the lexer.
+
+**Where:** `userspace/oils/src/lexer.rs` — the `${...}` scanner treats the first
+unquoted-looking `]` as the subscript close and does not track quote state
+*inside* the subscript, so a quoted `]` is mistaken for the terminator and the
+trailing `"` is left unbalanced. Also relevant: `parser.rs`
+`matching_subscript_close` / `split_name_subscript`.
+
+**Repro:** `osh -c 'declare -A h=(["with]bracket"]=1); echo "${h["with]bracket"]}"'`
+→ lexer EOF error; bash → `1`.
+
+**Proper fix:** make the `${...}` subscript scanner quote-aware — when scanning
+for the closing `]` of a `name[...]` subscript, skip over single/double-quoted
+runs so a quoted `]` is not treated as the terminator. Very low value: a literal
+`]` inside an associative key is exotic, and the assignment/`declare -p` paths
+already work.
+
 ### TD-OILS-BASHOPTS. `osh` does not expose `$BASHOPTS` — 2026-07-19 — OPEN (low priority)
 
 **What:** bash exposes `$BASHOPTS`, a readonly colon-separated list of the

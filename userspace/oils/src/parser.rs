@@ -1219,6 +1219,43 @@ fn parse_array_elem(segs: &[Seg]) -> Result<ArrayElem, ParseError> {
             value: word_from_segs(&value_segs)?,
         });
     }
+    // General keyed element: the subscript spans quoted or expansion segments,
+    // so the closing `]=` is not in the same literal as the opening `[`
+    // (`["k v"]=1`, `['k']=1`, `[$x]=1`). The opening `[` is the start of the
+    // first literal; everything up to the first unquoted `]=` (which lands in a
+    // later literal segment) is the key — intervening quoted/expansion segments
+    // belong to it and are copied verbatim.
+    if let Some(Seg::Lit(first)) = segs.first()
+        && first.starts_with('[')
+        && !first.contains("]=")
+    {
+        let mut key_segs: Vec<Seg> = Vec::new();
+        let head = &first[1..];
+        if !head.is_empty() {
+            key_segs.push(Seg::Lit(head.to_string()));
+        }
+        for (i, seg) in segs.iter().enumerate().skip(1) {
+            if let Seg::Lit(s) = seg
+                && let Some(pos) = s.find("]=")
+            {
+                if !s[..pos].is_empty() {
+                    key_segs.push(Seg::Lit(s[..pos].to_string()));
+                }
+                let index = word_from_segs(&key_segs)?;
+                let mut value_segs: Vec<Seg> = Vec::new();
+                let after = &s[pos + 2..];
+                if !after.is_empty() {
+                    value_segs.push(Seg::Lit(after.to_string()));
+                }
+                value_segs.extend_from_slice(&segs[i + 1..]);
+                return Ok(ArrayElem::Keyed {
+                    index,
+                    value: word_from_segs(&value_segs)?,
+                });
+            }
+            key_segs.push(seg.clone());
+        }
+    }
     Ok(ArrayElem::Positional(word_from_segs(segs)?))
 }
 

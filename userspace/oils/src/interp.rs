@@ -22696,6 +22696,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn assoc_literal_quoted_key() {
+        // A keyed array-literal element whose subscript is *quoted* — so the
+        // closing `]=` lands in a later segment than the opening `[` — must
+        // still parse as a keyed element (bash: `(["k v"]=1)` stores under the
+        // key `k v`). Regression: osh previously treated any quoted-key element
+        // as positional and errored with "must use subscript".
+        assert_eq!(
+            run("declare -A h=([\"k v\"]=1); echo \"[${h[k v]}]\"").0,
+            "[1]\n"
+        );
+        // Single-quoted key, and a quoted key containing a literal `]`.
+        assert_eq!(
+            run("declare -A h=(['a b']=2); echo \"[${h[a b]}]\"").0,
+            "[2]\n"
+        );
+        assert_eq!(
+            run("declare -A h=([\"x]y\"]=3); declare -p h").0,
+            "declare -A h=([\"x]y\"]=\"3\" )\n"
+        );
+        // Mixed bare and quoted keys in one literal, plus an expansion key.
+        assert_eq!(
+            run("k=dk; declare -A h=([p]=1 [\"q u\"]=2 [$k]=3); echo \"${h[p]}${h[q u]}${h[dk]}\"").0,
+            "123\n"
+        );
+    }
+
+    #[test]
     fn assoc_key_preserves_surrounding_whitespace() {
         // bash never trims an associative subscript: `h[ x ]=v` keys on the
         // literal " x " (with surrounding spaces), on both the store and the read

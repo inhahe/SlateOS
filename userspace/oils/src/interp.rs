@@ -11490,6 +11490,11 @@ impl Shell {
             }
         };
         let silent = optstring.starts_with(':');
+        // bash suppresses getopts' own diagnostics when `OPTERR` is exactly
+        // "0" (default 1), independently of the leading-colon "silent" mode —
+        // silent mode also changes the *reported* value (`?`→`:`, sets OPTARG),
+        // whereas OPTERR=0 only mutes the message and keeps non-silent values.
+        let report_errors = self.vars.get("OPTERR").is_none_or(|v| v != "0");
         // Arguments to scan: explicit args after `name`, else the positionals.
         let pos: Vec<String> = if args.len() > 2 {
             args[2..].to_vec()
@@ -11566,7 +11571,9 @@ impl Shell {
                 if silent {
                     self.vars.insert("OPTARG".to_string(), opt.to_string());
                 } else {
-                    self.errln(&format!("{}: illegal option -- {opt}", self.name));
+                    if report_errors {
+                        self.errln(&format!("{}: illegal option -- {opt}", self.name));
+                    }
                     self.vars.remove("OPTARG");
                 }
                 if arg_exhausted {
@@ -11599,7 +11606,9 @@ impl Shell {
                         self.vars.insert(name.clone(), ":".to_string());
                         self.vars.insert("OPTARG".to_string(), opt.to_string());
                     } else {
-                        self.errln(&format!("{}: option requires an argument -- {opt}", self.name));
+                        if report_errors {
+                            self.errln(&format!("{}: option requires an argument -- {opt}", self.name));
+                        }
                         self.vars.insert(name.clone(), "?".to_string());
                         self.vars.remove("OPTARG");
                     }
@@ -18199,6 +18208,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Missing option-argument diagnostic uses the same `$0` prefix.
         let (o2, _) = run("set -- -a; getopts 'a:' o 2>&1; echo done");
         assert_eq!(o2, "osh: option requires an argument -- a\ndone\n");
+    }
+
+    #[test]
+    fn getopts_opterr_zero_suppresses_message() {
+        // bash: OPTERR=0 mutes getopts' own diagnostics even when the optstring
+        // does not start with `:`, but keeps the non-silent reported value
+        // (`?`, OPTARG unset) — unlike the leading-colon silent mode.
+        let (o, _) = run("OPTERR=0; set -- -q; getopts ab o 2>&1; echo \"[$o]\"");
+        assert_eq!(o, "[?]\n");
+        // A missing required argument is likewise silent under OPTERR=0, still
+        // reporting `?` (not the silent-mode `:`).
+        let (o2, _) = run("OPTERR=0; set -- -a; getopts 'a:' o 2>&1; echo \"[$o]\"");
+        assert_eq!(o2, "[?]\n");
+        // OPTERR back at its default (1) restores the diagnostic.
+        let (o3, _) = run("OPTERR=1; set -- -q; getopts ab o 2>&1; echo done");
+        assert_eq!(o3, "osh: illegal option -- q\ndone\n");
     }
 
     #[test]

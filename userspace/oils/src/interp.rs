@@ -4679,6 +4679,15 @@ impl Shell {
         Flow::Next
     }
 
+    /// The active `FUNCNEST` ceiling as a positive frame count, or `None` when
+    /// the check is disabled (variable unset, empty, `0`/negative, or not a
+    /// valid integer). Read live from the variable each call, as bash does.
+    fn funcnest_limit(&self) -> Option<usize> {
+        let raw = self.param_value("FUNCNEST")?;
+        let n: i64 = raw.trim().parse().ok()?;
+        if n > 0 { usize::try_from(n).ok() } else { None }
+    }
+
     fn call_function(
         &mut self,
         name: &str,
@@ -4692,6 +4701,27 @@ impl Shell {
             self.last_status = 127;
             return Flow::Next;
         };
+        // Honour `FUNCNEST`: when set to a positive integer, bash refuses to
+        // call a function that would exceed that many nested frames, printing
+        // `<caller-source>: line N: <name>: maximum function nesting level
+        // exceeded (LIMIT)` and failing the call with status 1 rather than
+        // recursing (which would eventually overflow the stack). A zero, empty,
+        // or non-numeric value disables the check (unlimited), matching bash.
+        if let Some(limit) = self.funcnest_limit()
+            && self.fn_stack.len() >= limit
+        {
+            self.errln(&format!(
+                "{}{name}: maximum function nesting level exceeded ({limit})",
+                self.err_prefix()
+            ));
+            self.last_status = 1;
+            // bash treats this as a fatal `jump_to_top_level(DISCARD)`: it aborts
+            // the rest of the current top-level command (bypassing `&&`/`||`/`;`)
+            // rather than merely failing the call, then resumes at the next
+            // top-level parse unit. `Flow::Discard` carries exactly those
+            // semantics and is bounded by the nearest subshell.
+            return Flow::Discard;
+        }
         // Temporarily apply assignments and swap positionals.
         let saved_pos = std::mem::replace(&mut self.positional, args.to_vec());
         let saved: Vec<(String, Option<String>)> = assigns
@@ -20050,6 +20080,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo [${FUNCNAME[@]}]").0, "[]\n");
         // Restored after the function returns.
         assert_eq!(run("f() { :; }; f; echo [$FUNCNAME]").0, "[]\n");
+    }
+
+    #[test]
+    fn funcnest_caps_recursion_like_bash() {
+        // With `FUNCNEST=N`, the (N+1)th nested call is refused (with bash's
+        // error to stderr, which the harness does not capture) and — like bash's
+        // `jump_to_top_level(DISCARD)` — the rest of the offending top-level
+        // command is aborted rather than recursing until the native stack
+        // overflows. Exactly N frames run; the recursion increments a global
+        // counter, and a probe on a *later source line* (which survives the
+        // discard) confirms the depth reached. `c=5` proves the graceful cap
+        // replaced a crash and that exactly 5 bodies executed.
+        let (out, st) = run("FUNCNEST=5\nc=0\nf(){ c=$((c+1)); f; }\nf\necho \"c=$c\"");
+        assert_eq!(st, 0); // the discard resumes at the next line; echo runs
+        assert_eq!(out, "c=5\n");
+        // The DISCARD aborts the *whole* offending top-level command, bypassing
+        // `&&`/`||`/`;` on the same line (bash does not let `|| echo` catch it),
+        // then resumes at the next line.
+        assert_eq!(
+            run("FUNCNEST=2\ng(){ g; }\ng || echo CAUGHT\necho AFTER").0,
+            "AFTER\n"
+        );
+        // A zero / unset / non-numeric FUNCNEST disables the ceiling: a bounded
+        // recursion of modest depth must run to completion with no error.
+        assert_eq!(
+            run("FUNCNEST=0; f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
+            "ok\n"
+        );
+        assert_eq!(
+            run("f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
+            "ok\n"
+        );
     }
 
     #[test]

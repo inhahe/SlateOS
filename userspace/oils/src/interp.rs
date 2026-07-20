@@ -3743,7 +3743,8 @@ impl Shell {
                 replacement,
             } => {
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
-                let repl = self.expand_to_string(replacement);
+                let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
+                let repl = self.expand_replacement(replacement, patsub);
                 param_replace(value, &pat, &repl, *all, *anchor, extglob)
             }
             BulkOp::Case {
@@ -7026,6 +7027,82 @@ impl Shell {
         s
     }
 
+    /// Expand the replacement half of `${var/pat/repl}` into a token stream
+    /// where [`ReplTok::Amp`] marks a position that stands for the matched text
+    /// and [`ReplTok::Lit`] a literal character. This encodes bash's
+    /// `patsub_replacement` rules:
+    ///
+    /// * An **unquoted** `&` (from literal text or an unquoted expansion) is
+    ///   `Amp`; a **quoted** `&` (single/double quotes, or `\&`) is a literal
+    ///   `&`. Quoting therefore suppresses the match substitution.
+    /// * `\&` → literal `&` and `\\` → literal `\`, whether the escape is in the
+    ///   literal source (the replacement lexer preserved it) or produced by an
+    ///   unquoted expansion (so `r='\&'; ${x/b/$r}` yields a literal `&`, like
+    ///   bash). Every other backslash inside an unquoted expansion is kept
+    ///   verbatim (`r='\n'` stays `\n`).
+    /// * When `patsub` is off, `&` is an ordinary literal everywhere and
+    ///   unquoted expansions are copied verbatim (no `&`/`\&` rewriting).
+    fn expand_replacement(&mut self, word: &Word, patsub: bool) -> Vec<ReplTok> {
+        let mut out: Vec<ReplTok> = Vec::new();
+        for part in &word.parts {
+            match part {
+                WordPart::Literal(s) => {
+                    // Unquoted literal text. The replacement lexer preserved
+                    // `\&`/`\\`; collapse them here so a following scan cannot
+                    // mistake the resulting `&`/`\` for an active ampersand.
+                    let cs: Vec<char> = s.chars().collect();
+                    let mut i = 0;
+                    while i < cs.len() {
+                        let c = cs[i];
+                        if c == '\\' && matches!(cs.get(i + 1), Some('&' | '\\')) {
+                            out.push(ReplTok::Lit(cs[i + 1]));
+                            i += 2;
+                        } else if c == '&' && patsub {
+                            out.push(ReplTok::Amp);
+                            i += 1;
+                        } else {
+                            out.push(ReplTok::Lit(c));
+                            i += 1;
+                        }
+                    }
+                }
+                WordPart::SingleQuoted(s) => {
+                    // Single-quoted: fully literal, including any `&`.
+                    out.extend(s.chars().map(ReplTok::Lit));
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    // Double-quoted: the expansion is quoted, so `&` is literal.
+                    let s = self.expand_double_quoted(parts);
+                    out.extend(s.chars().map(ReplTok::Lit));
+                }
+                other => {
+                    // Unquoted parameter/command/arithmetic expansion.
+                    let s = self.expand_dynamic(other);
+                    if patsub {
+                        let cs: Vec<char> = s.chars().collect();
+                        let mut i = 0;
+                        while i < cs.len() {
+                            let c = cs[i];
+                            if c == '\\' && matches!(cs.get(i + 1), Some('&' | '\\')) {
+                                out.push(ReplTok::Lit(cs[i + 1]));
+                                i += 2;
+                            } else if c == '&' {
+                                out.push(ReplTok::Amp);
+                                i += 1;
+                            } else {
+                                out.push(ReplTok::Lit(c));
+                                i += 1;
+                            }
+                        }
+                    } else {
+                        out.extend(s.chars().map(ReplTok::Lit));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Expand a dynamic word part (parameter/command/arithmetic) to a string.
     fn expand_dynamic(&mut self, part: &WordPart) -> String {
         match part {
@@ -7104,7 +7181,13 @@ impl Shell {
             } => {
                 let value = self.param_elem_value(name, index).unwrap_or_default();
                 let pat: Vec<char> = self.expand_to_string(pattern).chars().collect();
-                let repl = self.expand_to_string(replacement);
+                // bash's `patsub_replacement` (default on) makes an unquoted `&`
+                // in the replacement stand for the matched text. Expand the
+                // replacement into `&`/literal tokens so the substitution can
+                // splice the match per occurrence; when the shopt is off, `&`
+                // is an ordinary literal.
+                let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
+                let repl = self.expand_replacement(replacement, patsub);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_replace(&value, &pat, &repl, *all, *anchor, extglob)
             }
@@ -15925,11 +16008,35 @@ fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String,
     Ok(chars[start as usize..end as usize].iter().collect())
 }
 
-/// `${name/pat/repl}` and friends.
+/// One unit of an expanded `${var/pat/repl}` replacement. [`ReplTok::Amp`]
+/// stands for the text matched by the pattern (bash's `&`); [`ReplTok::Lit`]
+/// is a literal character. See [`Shell::expand_replacement`].
+#[derive(Clone, Debug)]
+enum ReplTok {
+    /// The matched text (an active `&`).
+    Amp,
+    /// A literal character.
+    Lit(char),
+}
+
+/// Build one replacement instance, splicing `matched` in for each `&` token.
+fn build_repl(replacement: &[ReplTok], matched: &[char]) -> String {
+    let mut s = String::new();
+    for tok in replacement {
+        match tok {
+            ReplTok::Amp => s.extend(matched.iter()),
+            ReplTok::Lit(c) => s.push(*c),
+        }
+    }
+    s
+}
+
+/// `${name/pat/repl}` and friends. `replacement` is a token stream so an
+/// unquoted `&` can expand to the matched text at each occurrence.
 fn param_replace(
     value: &str,
     pattern: &[char],
-    replacement: &str,
+    replacement: &[ReplTok],
     all: bool,
     anchor: ReplaceAnchor,
     extglob: bool,
@@ -15938,7 +16045,7 @@ fn param_replace(
     match anchor {
         ReplaceAnchor::Start => {
             if let Some(end) = glob_match_at(pattern, &v, 0, extglob) {
-                let mut s = replacement.to_string();
+                let mut s = build_repl(replacement, &v[..end]);
                 s.extend(v[end..].iter());
                 return s;
             }
@@ -15948,7 +16055,7 @@ fn param_replace(
             for i in 0..=v.len() {
                 if glob_match(pattern, &v[i..], extglob) {
                     let mut s: String = v[..i].iter().collect();
-                    s.push_str(replacement);
+                    s.push_str(&build_repl(replacement, &v[i..]));
                     return s;
                 }
             }
@@ -15965,7 +16072,7 @@ fn param_replace(
                 {
                     if end > i {
                         // Non-empty match: consume the matched span.
-                        result.push_str(replacement);
+                        result.push_str(&build_repl(replacement, &v[i..end]));
                         i = end;
                         done = true;
                         continue;
@@ -15976,8 +16083,9 @@ fn param_replace(
                         // replacement, then advances one character so the scan
                         // makes progress — the literal char is preserved. An
                         // *empty* pattern (`${x//​/-}`) is exempt: bash treats it
-                        // as a no-op, so it falls through to the literal copy.
-                        result.push_str(replacement);
+                        // as a no-op, so it falls through to the literal copy. A
+                        // zero-width match makes `&` expand to the empty string.
+                        result.push_str(&build_repl(replacement, &[]));
                         result.push(v[i]);
                         i += 1;
                         done = true;
@@ -22091,6 +22199,59 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("shopt -s extglob; x=abc; echo ${x/?(z)/-}").0, "-abc\n");
         // Empty pattern stays a no-op (regression guard for the fix).
         assert_eq!(run("x=abc; echo ${x///-}").0, "abc\n");
+    }
+
+    #[test]
+    fn param_replace_ampersand_matched_text() {
+        // bash's `patsub_replacement` (default on): an unquoted `&` in the
+        // replacement stands for the text matched by the pattern.
+        assert_eq!(run("x=abc; echo \"${x/b/[&]}\"").0, "a[b]c\n");
+        assert_eq!(run("x=abc; echo \"${x/b/&}\"").0, "abc\n");
+        assert_eq!(run("x=abc; echo \"${x/b/&&}\"").0, "abbc\n");
+        // Each match in a global replace expands `&` to its own matched text.
+        assert_eq!(run("x=abcabc; echo \"${x//b/<&>}\"").0, "a<b>ca<b>c\n");
+        assert_eq!(run("x=hello; echo \"${x//[aeiou]/[&]}\"").0, "h[e]ll[o]\n");
+        // `#`/`%` anchored replaces expand `&` to the anchored match.
+        assert_eq!(run("x=abc; echo \"${x/#a/[&]}\"").0, "[a]bc\n");
+        assert_eq!(run("x=abc; echo \"${x/%c/[&]}\"").0, "ab[c]\n");
+        // A `*` match captures the whole span.
+        assert_eq!(run("x=fooXbar; echo \"${x/o*a/<&>}\"").0, "f<ooXba>r\n");
+        // Array bulk replace applies per element.
+        assert_eq!(
+            run("a=(one two three); echo \"${a[@]/t/[&]}\"").0,
+            "one [t]wo [t]hree\n"
+        );
+    }
+
+    #[test]
+    fn param_replace_ampersand_escaping_and_quoting() {
+        // `\&` is a literal ampersand (escaped, never the match) — whether the
+        // escape is in the literal source or produced by an unquoted expansion.
+        assert_eq!(run("x=abc; echo \"${x/b/\\&}\"").0, "a&c\n");
+        assert_eq!(run("x=abc; r='\\&'; echo \"${x/b/$r}\"").0, "a&c\n");
+        // `\\` is a literal backslash; other backslashes in an unquoted
+        // expansion stay verbatim (`\n` is kept, not stripped).
+        assert_eq!(run("x=abc; r='\\n'; echo \"${x/b/$r}\"").0, "a\\nc\n");
+        // Quoting (single or double) makes `&` an ordinary literal.
+        assert_eq!(run("x=abc; echo \"${x/b/'&'}\"").0, "a&c\n");
+        assert_eq!(run("x=abc; echo \"${x/b/\"&\"}\"").0, "a&c\n");
+        // A quoted expansion is not scanned for `&` either.
+        assert_eq!(run("x=abc; r='[&]'; echo \"${x/b/\"$r\"}\"").0, "a[&]c\n");
+        // With the shopt off, `&` is a plain literal everywhere.
+        assert_eq!(
+            run("shopt -u patsub_replacement; x=abc; echo \"${x/b/[&]}\"").0,
+            "a[&]c\n"
+        );
+        // …but a literal `\&` still collapses to `&` (normal quote removal),
+        // while an unquoted expansion is copied verbatim when the shopt is off.
+        assert_eq!(
+            run("shopt -u patsub_replacement; x=abc; echo \"${x/b/\\&}\"").0,
+            "a&c\n"
+        );
+        assert_eq!(
+            run("shopt -u patsub_replacement; x=abc; r='\\&'; echo \"${x/b/$r}\"").0,
+            "a\\&c\n"
+        );
     }
 
     #[test]

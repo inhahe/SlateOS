@@ -195,7 +195,28 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
         cond_depth: 0,
         regex_next: false,
     };
-    lx.read_word_verbatim()
+    lx.read_word_verbatim(false)
+}
+
+/// Lex the *replacement* of `${var/pat/repl}` verbatim, like
+/// [`lex_word_verbatim`] but preserving a literal backslash before `&` or `\`
+/// (`\&` and `\\`) so the replacement's `&`-scan can later distinguish an
+/// escaped ampersand (a literal `&`) from an active one (the matched text).
+/// Every other backslash escape is still consumed at lex time (`\n` → `n`),
+/// matching bash's replacement quote-removal.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_replacement_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer {
+        chars: src.chars().collect(),
+        pos: 0,
+        line: 1,
+        pending_heredocs: Vec::new(),
+        cond_depth: 0,
+        regex_next: false,
+    };
+    lx.read_word_verbatim(true)
 }
 
 /// Reserved words after which a new simple command begins — so a following
@@ -789,7 +810,7 @@ impl Lexer {
     /// Used for the pattern and replacement of `${var/pat/repl}`, where bash
     /// applies expansion and quote removal but neither word-splitting nor
     /// operator tokenization, so embedded/leading/trailing spaces are literal.
-    fn read_word_verbatim(&mut self) -> Result<Vec<Seg>, LexError> {
+    fn read_word_verbatim(&mut self, repl_escapes: bool) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
         while let Some(c) = self.peek() {
@@ -817,6 +838,14 @@ impl Lexer {
                     if let Some(next) = self.bump()
                         && next != '\n'
                     {
+                        // In replacement context, keep `\&` and `\\` intact so
+                        // the later `&`-scan can tell an escaped ampersand (a
+                        // literal `&`) from an active one. Any other escape —
+                        // and every escape outside replacement context — is
+                        // consumed here, dropping the backslash.
+                        if repl_escapes && (next == '&' || next == '\\') {
+                            lit.push('\\');
+                        }
                         lit.push(next);
                     }
                 }

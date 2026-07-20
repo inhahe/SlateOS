@@ -1766,7 +1766,7 @@ fn parse_replace_pieces(
         all,
         anchor,
         Box::new(word_verbatim_from_source(&pattern)?),
-        Box::new(word_verbatim_from_source(&replacement)?),
+        Box::new(word_replacement_from_source(&replacement)?),
     ))
 }
 
@@ -1845,6 +1845,22 @@ fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
         return Ok(Word::default());
     }
     let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError(e.0))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        parts.push(seg_to_part(seg)?);
+    }
+    Ok(Word { parts })
+}
+
+/// Like [`word_verbatim_from_source`] but for the *replacement* half of
+/// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
+/// time) so the runtime `&`-substitution can distinguish an escaped ampersand
+/// from an active one. See [`crate::lexer::lex_replacement_verbatim`].
+fn word_replacement_from_source(s: &str) -> Result<Word, ParseError> {
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError(e.0))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg)?);

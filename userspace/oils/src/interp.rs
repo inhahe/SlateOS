@@ -502,6 +502,11 @@ pub struct Shell {
     /// child environment — staying deterministic and host-independent.
     env_imported: bool,
     funcs: HashMap<String, Program>,
+    /// Redirections attached to a function *definition* (`f() { …; } >log`).
+    /// bash applies these on every invocation of the function, wrapping the
+    /// body execution. Kept as a parallel map (rather than folding into
+    /// `funcs`) so the many `self.funcs.get()` sites stay unchanged.
+    func_redirects: HashMap<String, Vec<Redirect>>,
     positional: Vec<String>,
     name: String,
     last_status: i32,
@@ -885,6 +890,7 @@ impl Shell {
             exported: HashSet::new(),
             env_imported: false,
             funcs: HashMap::new(),
+            func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: "osh".to_string(),
             last_status: 0,
@@ -1726,6 +1732,14 @@ impl Shell {
                     self.last_status = 1;
                 } else {
                     self.funcs.insert(f.name.clone(), f.body.clone());
+                    // Redirections attached to the definition apply on every
+                    // invocation (bash semantics). Store them, or clear a
+                    // prior set when the function is redefined without any.
+                    if f.redirects.is_empty() {
+                        self.func_redirects.remove(&f.name);
+                    } else {
+                        self.func_redirects.insert(f.name.clone(), f.redirects.clone());
+                    }
                     self.last_status = 0;
                 }
                 Flow::Next
@@ -2849,6 +2863,7 @@ impl Shell {
             exported: self.exported.clone(),
             env_imported: self.env_imported,
             funcs: self.funcs.clone(),
+            func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
             last_status: self.last_status,
@@ -4635,7 +4650,24 @@ impl Shell {
         if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
             self.fire_trap("DEBUG");
         }
-        let flow = self.exec_program(&body, out, stdin);
+        // Redirections attached to the function definition (`f() { …; } >log`)
+        // wrap the whole body on every invocation. Resolve and install them
+        // exactly like compound-command redirects; on a resolution error bash
+        // reports it and skips the body with status 1.
+        let flow = if let Some(rs) = self.func_redirects.get(name).cloned() {
+            match self.resolve_redirects(&rs) {
+                Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
+                    sh.exec_program(&body, o, s)
+                }),
+                Err(msg) => {
+                    self.errln(&format!("{}{msg}", self.err_prefix()));
+                    self.last_status = 1;
+                    Flow::Next
+                }
+            }
+        } else {
+            self.exec_program(&body, out, stdin)
+        };
         self.loop_depth = saved_loop_depth;
         // The RETURN trap fires when the function returns, before its locals are
         // torn down (so the handler still sees the function's scope), matching
@@ -9985,7 +10017,7 @@ impl Shell {
                     listing.push_str(&format!("declare {flags} {name}\n"));
                 } else if let Some(body) = self.funcs.get(name) {
                     // `declare -f` — print every function's reconstructed source.
-                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             }
             return self.write_bytes(out, redir, listing.as_bytes());
@@ -9999,7 +10031,7 @@ impl Shell {
                     listing.push('\n');
                 } else {
                     // `declare -f NAME` prints the function's reconstructed source.
-                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             } else {
                 status = 1;
@@ -10763,7 +10795,7 @@ impl Shell {
             let mut listing = String::new();
             for name in ro {
                 if let Some(body) = self.funcs.get(name) {
-                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                     listing.push_str(&format!("declare -fr {name}\n"));
                 }
             }
@@ -11121,7 +11153,7 @@ impl Shell {
             fns.sort();
             for name in fns {
                 if let Some(body) = self.funcs.get(name) {
-                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             }
             return self.write_bytes(out, redir, listing.as_bytes());
@@ -12691,7 +12723,7 @@ impl Shell {
                 if is_fn {
                     let _ = self.write_line(out, redir, &format!("{name} is a function"));
                     if let Some(body) = self.funcs.get(name) {
-                        let src = crate::unparse::unparse_function(name, body);
+                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice));
                         let _ = self.write_bytes(out, redir, src.as_bytes());
                     }
                 }
@@ -12710,7 +12742,7 @@ impl Shell {
                     // reconstructed function source.
                     let _ = self.write_line(out, redir, &format!("{name} is a function"));
                     if let Some(body) = self.funcs.get(name) {
-                        let src = crate::unparse::unparse_function(name, body);
+                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice));
                         let _ = self.write_bytes(out, redir, src.as_bytes());
                     }
                 } else if is_bi {
@@ -23911,6 +23943,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
         );
+    }
+
+    #[test]
+    fn function_definition_redirect_applies_each_call() {
+        // `f() { …; } >> file` attaches the redirect to the definition; bash
+        // applies it on every invocation, so both calls' stdout append to the
+        // file rather than reaching the terminal. (Append, not truncate, so the
+        // second call's output is additive and proves per-call application.)
+        assert_eq!(
+            run_exec_redirect("f() { echo hi; } >> \"{FILE}\"\nf\nf"),
+            "hi\nhi\n"
+        );
+    }
+
+    #[test]
+    fn function_definition_redirect_folds_stderr() {
+        // `f() { …; } > file 2>&1` routes both the body's stdout and a `>&2`
+        // diagnostic to the file on each call.
+        assert_eq!(
+            run_exec_redirect("f() { echo out; echo err >&2; } > \"{FILE}\" 2>&1\nf"),
+            "out\nerr\n"
+        );
+    }
+
+    #[test]
+    fn function_definition_redirect_cleared_on_redefine() {
+        // Redefining the function without redirects drops the stored ones, so a
+        // later call writes to normal stdout (nothing reaches the file).
+        assert_eq!(
+            run_exec_redirect("f() { echo one; } > \"{FILE}\"\nf() { echo two; }\nf"),
+            ""
+        );
+    }
+
+    #[test]
+    fn function_definition_redirect_renders_in_declare_f() {
+        // `declare -f` reconstructs the definition redirect on the closing-brace
+        // line, spaced like bash (`} > log`, `} 2>&1`).
+        let (out, code) = run("f() { echo hi; } >log 2>&1; declare -f f 2>&1");
+        assert_eq!(code, 0);
+        assert!(out.contains("} > log 2>&1"), "out: {out:?}");
     }
 
     #[test]

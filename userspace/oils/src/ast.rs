@@ -299,6 +299,11 @@ pub struct ForArithClause {
 pub struct FunctionDef {
     pub name: String,
     pub body: Program,
+    /// Redirections attached to the function definition itself, e.g.
+    /// `f() { …; } >log`. bash applies these every time the function is invoked,
+    /// wrapping the body's execution (they are stored with the function, not run
+    /// at definition time). Empty for the common redirect-less definition.
+    pub redirects: Vec<Redirect>,
 }
 
 /// `case WORD in … esac` — match `word` against each item's patterns in order,

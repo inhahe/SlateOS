@@ -381,7 +381,13 @@ impl Parser {
             self.pos += 3;
             self.skip_newlines();
             let body = self.parse_compound_body()?;
-            return Ok(Command::Function(FunctionDef { name, body }));
+            // bash allows redirections after the body (`f() { …; } >log`); they
+            // are stored with the function and applied on every invocation.
+            let mut redirects = Vec::new();
+            while self.at_redirect_start() {
+                redirects.push(self.parse_redirect()?);
+            }
+            return Ok(Command::Function(FunctionDef { name, body, redirects }));
         }
         // `coproc [NAME] command` — bash reserved word, recognised only at
         // command start.

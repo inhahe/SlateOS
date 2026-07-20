@@ -46,7 +46,7 @@ fn ind(level: usize) -> String {
 /// }
 /// ```
 #[must_use]
-pub fn unparse_function(name: &str, body: &Program) -> String {
+pub fn unparse_function(name: &str, body: &Program, redirects: &[Redirect]) -> String {
     let mut s = String::new();
     s.push_str(name);
     // bash prints the opening brace on its own line with a trailing space
@@ -64,7 +64,14 @@ pub fn unparse_function(name: &str, body: &Program) -> String {
             s.push('\n');
         }
     }
-    s.push_str("}\n");
+    // Redirections attached to the definition (`f() { …; } >log`) render on
+    // the closing-brace line: `} > log`, matching bash's `declare -f`.
+    s.push('}');
+    for r in redirects {
+        s.push(' ');
+        s.push_str(&redirect_src(r));
+    }
+    s.push('\n');
     s
 }
 
@@ -265,6 +272,10 @@ fn command_block(cmd: &Command, level: usize) -> String {
             s.push_str(&program_block(&f.body, level + 1, false));
             s.push_str(&ind(level));
             s.push('}');
+            for r in &f.redirects {
+                s.push(' ');
+                s.push_str(&redirect_src(r));
+            }
             s
         }
         Command::Case(c) => {
@@ -398,6 +409,10 @@ fn command_inline(cmd: &Command) -> String {
             let mut s = format!("{} () {{ ", f.name);
             s.push_str(&program_inline(&f.body));
             s.push_str("; }");
+            for r in &f.redirects {
+                s.push(' ');
+                s.push_str(&redirect_src(r));
+            }
             s
         }
         Command::Case(c) => {
@@ -497,34 +512,42 @@ fn redirect_src(r: &Redirect) -> String {
     // A varfd prefix `{name}` replaces the numeric fd on the operators that
     // accept one (`{fd}>`, `{fd}>>`, `{fd}<`, `{fd}>&…`).
     if let Some(name) = &r.varfd {
-        let op = match r.op {
-            RedirectOp::Write => ">",
-            RedirectOp::Clobber => ">|",
-            RedirectOp::Append => ">>",
-            RedirectOp::Read => "<",
-            RedirectOp::DupOut => ">&",
-            RedirectOp::DupIn => "<&",
+        // File-target operators take a space before the target (`{fd}> log`);
+        // fd-duplication operators stay tight (`{fd}>&2`).
+        let (op, sep) = match r.op {
+            RedirectOp::Write => (">", " "),
+            RedirectOp::Clobber => (">|", " "),
+            RedirectOp::Append => (">>", " "),
+            RedirectOp::Read => ("<", " "),
+            RedirectOp::DupOut => (">&", ""),
+            RedirectOp::DupIn => ("<&", ""),
             // `{name}` never pairs with here-docs / `&>`; fall back to the plain
             // form for those (unreachable in practice).
             _ => return redirect_src_plain(r),
         };
-        return format!("{{{name}}}{op}{}", word_src(&r.target));
+        return format!("{{{name}}}{op}{sep}{}", word_src(&r.target));
     }
     redirect_src_plain(r)
 }
 
 fn redirect_src_plain(r: &Redirect) -> String {
+    // bash's `declare -f` deparser separates a redirection operator from a
+    // *file/word* target with a single space (`> log`, `2>> err`, `&> both`,
+    // `< in`), but writes fd-*duplication* operators tight against their fd
+    // (`1>&2`, `0<&3`). Here-strings already carry their own space.
     match r.op {
-        RedirectOp::Write => fd_prefixed(r.fd, 1, ">", &word_src(&r.target)),
-        RedirectOp::Clobber => fd_prefixed(r.fd, 1, ">|", &word_src(&r.target)),
-        RedirectOp::Append => fd_prefixed(r.fd, 1, ">>", &word_src(&r.target)),
-        RedirectOp::WriteBoth => format!("&>{}", word_src(&r.target)),
-        RedirectOp::AppendBoth => format!("&>>{}", word_src(&r.target)),
-        RedirectOp::Read => fd_prefixed(r.fd, 0, "<", &word_src(&r.target)),
-        RedirectOp::DupOut => fd_prefixed(r.fd, 1, ">&", &word_src(&r.target)),
-        // bash always renders an input dup with its explicit source fd
-        // (`0<&3`, never `<&3`), so pass a default that never elides it.
-        RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", &word_src(&r.target)),
+        RedirectOp::Write => fd_prefixed(r.fd, 1, ">", " ", &word_src(&r.target)),
+        RedirectOp::Clobber => fd_prefixed(r.fd, 1, ">|", " ", &word_src(&r.target)),
+        RedirectOp::Append => fd_prefixed(r.fd, 1, ">>", " ", &word_src(&r.target)),
+        RedirectOp::WriteBoth => format!("&> {}", word_src(&r.target)),
+        RedirectOp::AppendBoth => format!("&>> {}", word_src(&r.target)),
+        RedirectOp::Read => fd_prefixed(r.fd, 0, "<", " ", &word_src(&r.target)),
+        // bash always shows the explicit source fd on an output dup, including
+        // the default (`>&2` → `1>&2`), so pass a default that never elides it.
+        RedirectOp::DupOut => fd_prefixed(r.fd, -1, ">&", "", &word_src(&r.target)),
+        // Likewise an input dup renders with its explicit source fd
+        // (`0<&3`, never `<&3`).
+        RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", "", &word_src(&r.target)),
         // Here-docs are re-emitted as here-strings (same bytes to stdin); a
         // here-string is likewise `<<<`. See the module docs / TD-OILS16.
         RedirectOp::HereDoc | RedirectOp::HereStr => {
@@ -534,12 +557,14 @@ fn redirect_src_plain(r: &Redirect) -> String {
     }
 }
 
-/// `fd` prefix only when it differs from the operator's default (`>`→1, `<`→0).
-fn fd_prefixed(fd: i32, default: i32, op: &str, target: &str) -> String {
+/// `fd` prefix only when it differs from the operator's default (`>`→1, `<`→0);
+/// `sep` is inserted between the operator and target (a space for file targets,
+/// empty for fd-duplication operators).
+fn fd_prefixed(fd: i32, default: i32, op: &str, sep: &str, target: &str) -> String {
     if fd == default {
-        format!("{op}{target}")
+        format!("{op}{sep}{target}")
     } else {
-        format!("{fd}{op}{target}")
+        format!("{fd}{op}{sep}{target}")
     }
 }
 
@@ -812,7 +837,7 @@ mod tests {
                 if let Command::Function(f) = cmd
                     && f.name == name
                 {
-                    return unparse_function(&f.name, &f.body);
+                    return unparse_function(&f.name, &f.body, &f.redirects);
                 }
             }
         }
@@ -834,7 +859,7 @@ mod tests {
                 _ => None,
             })
             .expect("function in dump");
-        let second = unparse_function(&f.name, &f.body);
+        let second = unparse_function(&f.name, &f.body, &f.redirects);
         assert_eq!(first, second, "round-trip differs for {name}");
     }
 
@@ -910,8 +935,24 @@ mod tests {
     fn redirects_and_assignments() {
         let d = dump_fn("r() { local n=5; echo hi > out.txt 2>&1; }", "r");
         assert!(d.contains("local n=5"), "dump: {d:?}");
-        assert!(d.contains(">out.txt"), "dump: {d:?}");
+        assert!(d.contains("> out.txt"), "dump: {d:?}");
         assert!(d.contains("2>&1"), "dump: {d:?}");
+    }
+
+    #[test]
+    fn output_dup_shows_explicit_default_fd() {
+        // bash's deparser always shows an output dup's source fd, even the
+        // default (`>&2` → `1>&2`), and writes fd-dups tight (no space).
+        let d = dump_fn("r() { echo x >&2; }", "r");
+        assert!(d.contains("1>&2"), "dump: {d:?}");
+    }
+
+    #[test]
+    fn function_definition_redirect_renders_on_brace() {
+        // A redirect attached to the definition itself renders on the closing
+        // brace, spaced like bash: `} > log 2>&1`.
+        let d = dump_fn("r() { echo hi; } >log 2>&1", "r");
+        assert!(d.contains("} > log 2>&1"), "dump: {d:?}");
     }
 
     #[test]

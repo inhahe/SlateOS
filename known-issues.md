@@ -4426,14 +4426,35 @@ Phase 5 progresses:
   socket server (below) will replace it with an edge-triggered readiness signal.
   Proper fix for the remaining gap: async ring completions + a real readiness
   signal (eventfd/completion port) when the always-on socket server lands.
-- **Server sockets: daemon+ring done, socket-fd wiring pending.** The daemon and
-  the ring client now support the passive side — `NetstackConn::listen`/`accept`
-  drive ring `OP_LISTEN`/`OP_ACCEPT`, and both ends of a connection can live in one
-  daemon session (validated by the loopback `self_test_listen_accept`). What is
-  *not* yet wired is the AF_INET socket-fd layer: `sys_bind`/`sys_listen`/
-  `sys_accept4` do not route to the daemon and `net::socket` has no
-  `SockState::Listening`, so a userspace `listen(2)`/`accept(2)` on a daemon-backed
-  socket still isn't served. That syscall wiring is the remaining follow-on.
+- **Server sockets: now wired end-to-end (Q23 Option A).** The passive side is
+  complete through the socket-fd layer. `net::socket` grew `SockState::Listening`,
+  `bind_stream`/`listen`/`accept`/`is_listening`/`stream_local_port`, and a shared
+  ring session (`SessionRef::Owned`→`Shared`): a listening socket keeps its daemon
+  session behind an `Arc<Mutex<NetstackConn>>` addressed under `LISTENER_ID` (100),
+  and each `accept` installs a **new** socket that shares that same session/ring
+  under its own `conn_id` (`ACCEPT_ID_BASE` = 101+), so no daemon-ABI change is
+  needed (Q23 Option A). The Linux syscall layer routes `bind(2)` on a stream fd →
+  `bind_stream` (`socket_stream_bind_from_user`, records the port kernel-side for
+  the later `OP_LISTEN`), `listen(2)` → `net::socket::listen` (`OP_LISTEN` +
+  Owned→Shared conversion), `accept(2)`/`accept4(2)` → `net::socket::accept`
+  (`socket_accept_from_user`: installs the accepted socket as a new fd, honours
+  `accept4`'s `SOCK_CLOEXEC`/`SOCK_NONBLOCK`, writes the peer `sockaddr_in`/`_in6`
+  when the addr ptr is non-NULL, and maps an empty backlog → `EAGAIN`; a *blocking*
+  listener retries via `yield_now` since the object-layer `accept` is single-shot),
+  and `getsockname(2)` on a listener reports `0.0.0.0`/`[::]`:`port` from
+  `stream_local_port`. Accepted-connection teardown sends a per-`conn_id` `OP_CLOSE`
+  (`NetstackConn::close_conn` via `SharedConn::Drop`) so a server that accepts+closes
+  many connections doesn't leak daemon-side state; the listener's session `OP_STOP`
+  still fires on the final `Arc` drop. Boot-validated: the ring-level data path by
+  `netstack_client::self_test_listen_accept` and the object-layer state machine
+  (bind→listen→accept, port reporting, idempotent re-listen, empty-backlog EAGAIN,
+  dgram/listening op rejection) by `net::socket::self_test_server`.
+  **Interim concurrency limitation (deliberate, Q23 Option A):** because the
+  listener and all its accepted connections share ONE SPSC daemon session serialized
+  by a single `Arc<Mutex<>>`, concurrent I/O across accepted connections is
+  serialized — one slow/blocked connection can head-of-line-block the others. This
+  is acceptable for the interim synchronous-socket path; the future async socket
+  server (per-connection completion rings) removes it.
 - **UDP `SOCK_DGRAM`: complete end-to-end (daemon+ring+client+socket-fd wiring).**
   The daemon hosts a fixed table of bound connectionless datagram sockets
   (`UdpSock`/`UdpSocks` in `services/netstack/src/main.rs`) served by ring ops

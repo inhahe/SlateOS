@@ -56,6 +56,19 @@ fn alloc_socket_id() -> SocketId {
     NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// `AF_INET6` — the address family whose accept path reads the 18-byte peer form.
+const AF_INET6: u16 = 10;
+
+/// Session-local id under which a listening socket's daemon-side listener is
+/// registered. Each listening socket owns its own ring session, so a single fixed
+/// id is unique within that session (mirrors the boot self-test's `LISTENER_ID`).
+const LISTENER_ID: u32 = 100;
+
+/// First id handed to an accepted connection on a listener's session. Accepted ids
+/// increase from here; the daemon demuxes by 4-tuple, so they need only be unique
+/// within the one session.
+const ACCEPT_ID_BASE: u32 = 101;
+
 /// Opaque handle to a stream socket. Stored as `FdEntry::raw_handle` (a `u64`)
 /// by the Linux fd-table dispatch layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -90,11 +103,18 @@ pub enum SockState {
     /// [`Failed`](SockState::Failed) on a later [`poll_ready`]. Linux reports this
     /// state's `connect` as `EINPROGRESS` and a repeated `connect` as `EALREADY`.
     Connecting,
-    /// A `connect()` succeeded; the daemon holds a live TCP connection.
+    /// A `connect()` succeeded; the daemon holds a live TCP connection. Also the
+    /// state of a **server-side accepted** connection (see [`accept`]), which is
+    /// live from birth.
     Connected,
     /// A prior `connect()` failed, or the peer/connection is gone. Terminal for
     /// this handle (Linux would require a fresh socket to retry).
     Failed,
+    /// A passive `listen()` was issued: the socket is a server listener with a
+    /// daemon-side listener registered on its ring session. Accepted connections
+    /// ([`accept`]) share this socket's ring session under their own connection ids
+    /// (see [`SessionRef`]). A listener never sends/receives data itself.
+    Listening,
 }
 
 /// The socket's transport type. A stream socket (`SOCK_STREAM`) is driven by the
@@ -148,11 +168,69 @@ pub enum ConnectOutcome {
     InProgress,
 }
 
+/// A server-side connection (or listener) that **shares** a listener's ring
+/// session with the listener and any sibling accepted connections, addressed by
+/// its own `conn_id` (Q23 Option A: one refcounted session, no daemon-ABI change).
+///
+/// The shared [`NetstackConn`] lives behind its own `Arc<Mutex<…>>` so the listener
+/// and every accepted socket — each in a *separate* [`SocketInner`] mutex — can
+/// reach the one ring session. The daemon session is single-producer/
+/// single-consumer, so this inner mutex serialises all ops on that session (the
+/// documented Option-A concurrency limitation; see `known-issues` D-NETSOCK-SYNC).
+///
+/// On drop, an accepted connection tells the daemon to close *just* its `conn_id`
+/// (`OP_CLOSE`), leaving the shared session — and the listener — alive. The
+/// listener itself closes nothing here; the session is torn down (`OP_STOP`) only
+/// when the last `Arc` reference drops, running [`NetstackConn`]'s own `Drop`.
+struct SharedConn {
+    /// The shared ring session (listener + all its accepted connections).
+    session: Arc<Mutex<NetstackConn>>,
+    /// The connection id this socket drives on the shared session — the listener's
+    /// [`LISTENER_ID`] for a listener, or a per-accept id for an accepted socket.
+    conn_id: u32,
+    /// Whether this handle is the listener (whose id is a listener id, not a live
+    /// connection). A listener does not `OP_CLOSE` a connection on drop.
+    is_listener: bool,
+}
+
+impl Drop for SharedConn {
+    fn drop(&mut self) {
+        if self.is_listener {
+            // The listener owns no connection to close; the session teardown
+            // (OP_STOP on the final Arc drop) tears the listener down.
+            return;
+        }
+        // Best-effort: close only this accepted connection id, leaving the shared
+        // listener session alive for its siblings. Runs outside the table lock
+        // (SharedConn is dropped when the owning SocketInner drops).
+        let mut guard = self.session.lock();
+        let _ = guard.close_conn(self.conn_id);
+    }
+}
+
+/// How a socket reaches its daemon ring session.
+///
+/// Client stream sockets and datagram sockets own their session outright
+/// ([`Owned`](SessionRef::Owned)); a listener and its accepted connections share
+/// one session ([`Shared`](SessionRef::Shared), Q23 Option A). [`Taken`](SessionRef::Taken)
+/// is a transient sentinel used only while `listen()` moves an owned session into a
+/// shared one — no operation ever observes it.
+enum SessionRef {
+    /// A uniquely-owned ring session (client stream socket, datagram socket, or a
+    /// listener before its session is published as shared).
+    Owned(NetstackConn),
+    /// A shared listener session addressed by a specific `conn_id`.
+    Shared(SharedConn),
+    /// Transient placeholder held only during `listen()`'s Owned→Shared move.
+    Taken,
+}
+
 /// Per-socket mutable state. Guarded by its own mutex (see module lock
 /// discipline) so a blocking daemon round-trip never holds the table lock.
 struct SocketInner {
-    /// The daemon-backed connection driving this socket.
-    conn: NetstackConn,
+    /// The daemon-backed session driving this socket (owned, or a shared listener
+    /// session addressed by a `conn_id`).
+    session: SessionRef,
     /// Stream vs datagram transport.
     kind: SockKind,
     /// The address family the socket was created with (`AF_INET` = 2 /
@@ -185,6 +263,47 @@ struct SocketInner {
     /// `getsockopt(SO_ERROR)` read. `SO_ERROR` is one-shot in Linux: the first read
     /// after a failed connect returns the errno, subsequent reads return `0`.
     so_error_read: bool,
+    /// Listener sockets only: the next connection id to hand an accepted connection
+    /// on this listener's session (starts at [`ACCEPT_ID_BASE`], bumped per
+    /// successful [`accept`]). Meaningless for a non-listener.
+    next_accept_id: u32,
+}
+
+impl SocketInner {
+    /// Borrow the underlying [`NetstackConn`] of an **owned** session. Datagram
+    /// sockets, client `connect`, and listener setup only ever run on owned
+    /// sessions, so a shared (accepted/listener) session is a caller/logic error and
+    /// reports `InvalidArgument`.
+    fn owned_conn_mut(&mut self) -> KernelResult<&mut NetstackConn> {
+        match &mut self.session {
+            SessionRef::Owned(c) => Ok(c),
+            SessionRef::Shared(_) | SessionRef::Taken => Err(KernelError::InvalidArgument),
+        }
+    }
+
+    /// Run `f` against the socket's stream connection and its effective `conn_id`.
+    ///
+    /// Works for both an owned client stream socket (the [`NetstackConn`]'s own
+    /// [`conn_id`](NetstackConn::conn_id)) and a shared accepted connection (its
+    /// per-accept id, under the shared session lock). Used by the stream ops that
+    /// apply to both — `send`/`recv`/`poll`/`shutdown`/`getsockname`.
+    fn with_stream_conn<R>(
+        &mut self,
+        f: impl FnOnce(&mut NetstackConn, u32) -> KernelResult<R>,
+    ) -> KernelResult<R> {
+        match &mut self.session {
+            SessionRef::Owned(c) => {
+                let cid = c.conn_id();
+                f(c, cid)
+            }
+            SessionRef::Shared(s) => {
+                let cid = s.conn_id;
+                let mut guard = s.session.lock();
+                f(&mut guard, cid)
+            }
+            SessionRef::Taken => Err(KernelError::InvalidHandle),
+        }
+    }
 }
 
 /// One entry in the global socket table: the shared per-socket state plus the
@@ -236,7 +355,7 @@ pub fn create_dgram(domain: u16) -> KernelResult<SocketHandle> {
 fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
     let conn = NetstackConn::open()?;
     let inner = SocketInner {
-        conn,
+        session: SessionRef::Owned(conn),
         kind,
         domain,
         bound: false,
@@ -247,6 +366,7 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
         peer_ip6: None,
         peer_port: 0,
         so_error_read: false,
+        next_accept_id: ACCEPT_ID_BASE,
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
@@ -342,7 +462,7 @@ pub fn connect(
         SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
         _ => {}
     }
-    let res = guard.conn.connect(ip, port, nonblock)?;
+    let res = guard.owned_conn_mut()?.connect(ip, port, nonblock)?;
     if res == netipc::ring::ERR_IN_PROGRESS {
         // Non-blocking handshake pending: remember the peer now so getpeername works
         // once it resolves, and enter Connecting.
@@ -388,7 +508,7 @@ pub fn connect6(
         SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
         _ => {}
     }
-    let res = guard.conn.connect6(ip6, port, nonblock)?;
+    let res = guard.owned_conn_mut()?.connect6(ip6, port, nonblock)?;
     if res == netipc::ring::ERR_IN_PROGRESS {
         // Non-blocking handshake pending: remember the peer now so getpeername works
         // once it resolves, and enter Connecting.
@@ -426,7 +546,7 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.send(buf, nonblock)
+    guard.with_stream_conn(|c, cid| c.send_on(cid, buf, nonblock))
 }
 
 /// Receive up to `buf.len()` bytes on a connected socket. Returns the number of
@@ -456,7 +576,7 @@ pub fn recv(
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.recv(buf, nonblock, peek)
+    guard.with_stream_conn(|c, cid| c.recv_on(cid, buf, nonblock, peek))
 }
 
 /// Non-destructively probe a stream socket's readiness for the poll/epoll engine.
@@ -493,14 +613,14 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
     // `sendto`); report writable-only, nothing to read, no error.
     if guard.kind == SockKind::Dgram {
         if guard.bound {
-            return guard.conn.poll_ready();
+            return guard.owned_conn_mut()?.poll_ready();
         }
         return Ok((false, true, false));
     }
     match guard.state {
-        SockState::Connected => guard.conn.poll_ready(),
+        SockState::Connected => guard.with_stream_conn(|c, cid| c.poll_on(cid)),
         SockState::Connecting => {
-            let (readable, writable, error) = guard.conn.poll_ready()?;
+            let (readable, writable, error) = guard.with_stream_conn(|c, cid| c.poll_on(cid))?;
             // Resolve the pending handshake: an error latches Failed; becoming
             // writable (with no error) means ESTABLISHED. Otherwise stay Connecting.
             if error {
@@ -516,6 +636,15 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
         // Created but never connected: a connect may still proceed (writable),
         // nothing to read, no error.
         SockState::Created => Ok((false, true, false)),
+        // A listener is "readable" (→ POLLIN) when a completed connection waits in
+        // the backlog, so a poll-driven `accept` wakes. The daemon reports this via
+        // OP_POLL on the listener id; a `NotConnected` means it has no such state to
+        // report yet — treat as not-ready rather than an error.
+        SockState::Listening => match guard.with_stream_conn(|c, cid| c.poll_on(cid)) {
+            Ok(ready) => Ok(ready),
+            Err(KernelError::NotConnected) => Ok((false, false, false)),
+            Err(e) => Err(e),
+        },
     }
 }
 
@@ -605,7 +734,7 @@ pub fn local(handle: SocketHandle) -> KernelResult<crate::net::netstack_client::
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.local_addr()
+    guard.with_stream_conn(|c, cid| c.local_addr_on(cid))
 }
 
 /// Half- or full-close a connected stream socket per `shutdown(2)`.
@@ -625,7 +754,7 @@ pub fn shutdown(handle: SocketHandle, how: u64) -> KernelResult<()> {
     if guard.state != SockState::Connected {
         return Err(KernelError::NotConnected);
     }
-    guard.conn.shutdown(how)
+    guard.with_stream_conn(|c, cid| c.shutdown_on(cid, how))
 }
 
 /// Explicitly `bind(2)` a datagram socket to `port` (host byte order; `0` asks the
@@ -651,7 +780,7 @@ pub fn dgram_bind(handle: SocketHandle, port: u16) -> KernelResult<u16> {
     if guard.bound {
         return Err(KernelError::InvalidArgument); // EINVAL — already bound
     }
-    let local = guard.conn.udp_bind(port)?;
+    let local = guard.owned_conn_mut()?.udp_bind(port)?;
     guard.bound = true;
     guard.local_port = local;
     Ok(local)
@@ -662,7 +791,7 @@ pub fn dgram_bind(handle: SocketHandle, port: u16) -> KernelResult<u16> {
 /// the first `sendto`/`recvfrom`). No-op if already bound. Caller holds the guard.
 fn ensure_bound(guard: &mut SocketInner) -> KernelResult<()> {
     if !guard.bound {
-        let local = guard.conn.udp_bind(0)?;
+        let local = guard.owned_conn_mut()?.udp_bind(0)?;
         guard.bound = true;
         guard.local_port = local;
     }
@@ -692,7 +821,7 @@ pub fn dgram_send_to(
         return Err(KernelError::InvalidArgument);
     }
     ensure_bound(&mut guard)?;
-    guard.conn.udp_send_to(ip, port, buf)
+    guard.owned_conn_mut()?.udp_send_to(ip, port, buf)
 }
 
 /// Send `buf` as a single datagram to `[ip6]:port` over IPv6 from a datagram
@@ -719,7 +848,7 @@ pub fn dgram_send_to6(
         return Err(KernelError::InvalidArgument);
     }
     ensure_bound(&mut guard)?;
-    guard.conn.udp_send_to6(ip6, port, buf)
+    guard.owned_conn_mut()?.udp_send_to6(ip6, port, buf)
 }
 
 /// Receive one datagram into `buf` from a datagram socket. Returns the payload
@@ -758,7 +887,7 @@ pub fn dgram_recv_from(
     // `WouldBlock` (→ `EAGAIN`) once the queue holds no matching datagram; on a
     // blocking socket it waits for the next one, matching a connected UDP `recv`.
     loop {
-        let got = guard.conn.udp_recv_any(buf, nonblock)?;
+        let got = guard.owned_conn_mut()?.udp_recv_any(buf, nonblock)?;
         match peer {
             None => return Ok(got),
             Some(p) => {
@@ -851,8 +980,8 @@ pub fn dgram_send_connected(handle: SocketHandle, buf: &[u8]) -> KernelResult<i3
     let peer = guard.dgram_peer.ok_or(KernelError::NotConnected)?;
     ensure_bound(&mut guard)?;
     match peer {
-        DgramPeer::V4(ip, port) => guard.conn.udp_send_to(&ip, port, buf),
-        DgramPeer::V6(ip6, port) => guard.conn.udp_send_to6(&ip6, port, buf),
+        DgramPeer::V4(ip, port) => guard.owned_conn_mut()?.udp_send_to(&ip, port, buf),
+        DgramPeer::V6(ip6, port) => guard.owned_conn_mut()?.udp_send_to6(&ip6, port, buf),
     }
 }
 
@@ -898,6 +1027,226 @@ pub fn domain(handle: SocketHandle) -> KernelResult<u16> {
     let inner = inner_of(handle)?;
     let guard = inner.lock();
     Ok(guard.domain)
+}
+
+/// The peer address returned by [`accept`], carrying its address family so the
+/// syscall layer writes back the matching `sockaddr_in` / `sockaddr_in6`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedPeer {
+    /// IPv4 peer `(addr, port)`.
+    V4([u8; 4], u16),
+    /// IPv6 peer `(addr, port)`.
+    V6([u8; 16], u16),
+}
+
+/// `bind(2)` a stream socket to local `port` (host byte order).
+///
+/// A stream `bind` is recorded kernel-side only: the daemon has no separate
+/// stream-bind op — the port is carried into the daemon on [`listen`] (`OP_LISTEN`).
+/// A socket may be bound only once, and only before `connect`/`listen`.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a stream socket, already bound, or not in the
+///   `Created` state (Linux `EINVAL`).
+pub fn bind_stream(handle: SocketHandle, port: u16) -> KernelResult<()> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Stream {
+        return Err(KernelError::InvalidArgument);
+    }
+    if guard.bound || guard.state != SockState::Created {
+        return Err(KernelError::InvalidArgument); // EINVAL — already bound/connected/listening
+    }
+    guard.bound = true;
+    guard.local_port = port;
+    Ok(())
+}
+
+/// `listen(2)` on a stream socket: register a passive daemon-side listener and make
+/// the socket a server that [`accept`] can dequeue connections from.
+///
+/// The backlog is currently advisory — the daemon manages its own backlog — so
+/// `_backlog` is accepted for ABI shape but not forwarded. Listening moves the
+/// socket's owned ring session into a **shared** session ([`SharedConn`]) so
+/// accepted connections address the same session under their own ids (Q23 Option A).
+/// A repeated `listen` on an already-listening socket is a no-op (Linux tolerates
+/// re-`listen`).
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a stream socket, or already connected/connecting
+///   (Linux `EINVAL`).
+/// - `AddrInUse` — the daemon rejected the listener (port/id already in use).
+/// - protocol faults propagated from [`NetstackConn::listen`].
+pub fn listen(handle: SocketHandle, _backlog: i32) -> KernelResult<()> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Stream {
+        return Err(KernelError::InvalidArgument); // ENOTSUP-ish: listen on a dgram socket
+    }
+    match guard.state {
+        SockState::Created => {}
+        SockState::Listening => return Ok(()), // already listening — idempotent
+        _ => return Err(KernelError::InvalidArgument), // connected/connecting/failed → EINVAL
+    }
+    let port = guard.local_port; // 0 if never bound (wildcard local port)
+    // Move the owned session out to issue OP_LISTEN, then republish it as a shared
+    // session so accepted connections can reach the same ring.
+    let mut conn = match core::mem::replace(&mut guard.session, SessionRef::Taken) {
+        SessionRef::Owned(c) => c,
+        other => {
+            // Not an owned session (shouldn't happen given the state check above);
+            // restore and reject.
+            guard.session = other;
+            return Err(KernelError::InvalidArgument);
+        }
+    };
+    let res = match conn.listen(LISTENER_ID, port) {
+        Ok(r) => r,
+        Err(e) => {
+            guard.session = SessionRef::Owned(conn);
+            return Err(e);
+        }
+    };
+    if res != 0 {
+        guard.session = SessionRef::Owned(conn);
+        return Err(KernelError::AddrInUse);
+    }
+    guard.session = SessionRef::Shared(SharedConn {
+        session: Arc::new(Mutex::new(conn)),
+        conn_id: LISTENER_ID,
+        is_listener: true,
+    });
+    guard.state = SockState::Listening;
+    Ok(())
+}
+
+/// `accept(2)` one established connection from a listening socket.
+///
+/// Dequeues a completed connection from the daemon's backlog and installs it as a
+/// **new** socket that shares the listener's ring session under a fresh `conn_id`
+/// (Q23 Option A). Returns the new socket handle and the peer address. This is a
+/// single, non-blocking daemon round-trip: an empty backlog reports
+/// [`KernelError::WouldBlock`] (→ `EAGAIN`), which a blocking `accept(2)` caller
+/// retries.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — the socket is not listening.
+/// - `WouldBlock` — no completed connection waiting (→ `EAGAIN`).
+/// - `InternalError` — the daemon rejected the accept (unknown listener / id clash).
+/// - protocol faults propagated from [`NetstackConn::accept`].
+pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.state != SockState::Listening {
+        return Err(KernelError::InvalidArgument); // EINVAL — not listening
+    }
+    let domain = guard.domain;
+    let new_id = guard.next_accept_id;
+    let (arc, listener_id) = match &guard.session {
+        SessionRef::Shared(s) if s.is_listener => (s.session.clone(), s.conn_id),
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    // Issue OP_ACCEPT on the shared session under its lock. The listener's domain
+    // selects the peer form (an AF_INET6 listener reads the 18-byte peer window).
+    let (res, peer) = {
+        let mut c = arc.lock();
+        if domain == AF_INET6 {
+            let mut p = [0u8; 18];
+            let r = c.accept6(listener_id, new_id, &mut p)?;
+            let ip6: [u8; 16] = p
+                .get(..16)
+                .and_then(|s| <[u8; 16]>::try_from(s).ok())
+                .ok_or(KernelError::InternalError)?;
+            let port = u16::from_be_bytes([
+                p.get(16).copied().unwrap_or(0),
+                p.get(17).copied().unwrap_or(0),
+            ]);
+            (r, AcceptedPeer::V6(ip6, port))
+        } else {
+            let mut p = [0u8; 6];
+            let r = c.accept(listener_id, new_id, &mut p)?;
+            let ip4: [u8; 4] = p
+                .get(..4)
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                .ok_or(KernelError::InternalError)?;
+            let port = u16::from_be_bytes([
+                p.get(4).copied().unwrap_or(0),
+                p.get(5).copied().unwrap_or(0),
+            ]);
+            (r, AcceptedPeer::V4(ip4, port))
+        }
+    };
+    if res == netipc::ring::ERR_WOULD_BLOCK {
+        return Err(KernelError::WouldBlock); // EAGAIN — nothing in the backlog
+    }
+    if res != 0 {
+        return Err(KernelError::InternalError); // -1 unknown listener / id install failed
+    }
+    // Consume the id only now that the accept has succeeded.
+    guard.next_accept_id = new_id.checked_add(1).ok_or(KernelError::InternalError)?;
+    let (peer_ip, peer_ip6, peer_port) = match peer {
+        AcceptedPeer::V4(ip, port) => (ip, None, port),
+        AcceptedPeer::V6(ip6, port) => ([0; 4], Some(ip6), port),
+    };
+    let accepted = SocketInner {
+        session: SessionRef::Shared(SharedConn {
+            session: arc,
+            conn_id: new_id,
+            is_listener: false,
+        }),
+        kind: SockKind::Stream,
+        domain,
+        bound: false,
+        local_port: 0,
+        dgram_peer: None,
+        state: SockState::Connected,
+        peer_ip,
+        peer_ip6,
+        peer_port,
+        so_error_read: false,
+        next_accept_id: ACCEPT_ID_BASE,
+    };
+    let id = alloc_socket_id();
+    let slot = SocketSlot {
+        inner: Arc::new(Mutex::new(accepted)),
+        refcount: 1,
+    };
+    SOCKET_TABLE.lock().insert(id, slot);
+    Ok((SocketHandle(id), peer))
+}
+
+/// Whether a socket handle refers to a listening (server) socket. Lets the syscall
+/// layer route `accept` and reject `connect`/`send` on a listener.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn is_listening(handle: SocketHandle) -> KernelResult<bool> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    Ok(guard.state == SockState::Listening)
+}
+
+/// The bound local port of a stream socket (`getsockname` on a bound/listening
+/// socket whose local address is otherwise only a port). `0` if never bound.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a stream socket.
+pub fn stream_local_port(handle: SocketHandle) -> KernelResult<u16> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    if guard.kind != SockKind::Stream {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(guard.local_port)
 }
 
 /// Number of live sockets (test/introspection helper).
@@ -971,4 +1320,116 @@ pub fn self_test() -> KernelResult<()> {
 
     crate::serial_println!("[net::socket] Stream-socket self-test PASSED");
     Ok(())
+}
+
+/// Object-layer server-socket self-test: exercises the `bind_stream` → `listen`
+/// → `accept` state machine that the `bind(2)`/`listen(2)`/`accept(2)` syscalls
+/// drive (Q23 Option A). This is the object-layer companion to
+/// [`crate::net::netstack_client::self_test_listen_accept`], which already proves
+/// the full ring-level data path (a loopback connection accepted and echoed both
+/// ways within one daemon session).
+///
+/// The object layer keeps the listener and any client on **separate** daemon
+/// sessions, so a full client→listener data loopback is not reachable here (the
+/// daemon's per-session loopback divert routes within a single session). This
+/// test therefore validates the state transitions, the `Owned`→`Shared` session
+/// conversion on `listen`, `getsockname`-style port reporting, idempotent
+/// re-`listen`, and the empty-backlog `WouldBlock`/`EAGAIN` path — the exact
+/// object-layer surface the new syscalls call into.
+///
+/// Returns `Ok(None)` when no daemon session can be opened (networking down), so
+/// the caller can log a skip rather than a failure.
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] if any state transition or error mapping
+/// diverges from the Option A contract; daemon faults are propagated.
+pub fn self_test_server() -> KernelResult<Option<()>> {
+    /// A high, unlikely-to-clash loopback listen port for the object-layer test.
+    const PORT: u16 = 9098;
+
+    // A listener needs a live daemon session. If we cannot open one, the network
+    // is down — skip rather than fail (mirrors the netstack_client self-tests).
+    let listener = match create(2) {
+        Ok(h) => h,
+        Err(_) => return Ok(None),
+    };
+
+    // Guard so every early return still tears the listener down (no session leak).
+    let cleanup = |h: SocketHandle, msg: &str| -> KernelResult<Option<()>> {
+        close(h);
+        crate::serial_println!("[net::socket] FAIL(server): {}", msg);
+        Err(KernelError::InternalError)
+    };
+
+    // bind_stream records the port kernel-side and requires the Created state.
+    if bind_stream(listener, PORT).is_err() {
+        return cleanup(listener, "bind_stream on a fresh stream socket failed");
+    }
+    // A second bind is rejected (already bound) — EINVAL.
+    if bind_stream(listener, PORT).is_ok() {
+        return cleanup(listener, "double bind_stream unexpectedly succeeded");
+    }
+    // Not listening yet.
+    if is_listening(listener).unwrap_or(true) {
+        return cleanup(listener, "socket reported Listening before listen()");
+    }
+
+    // listen() registers the passive listener with the daemon and converts the
+    // owned session into the shared server session.
+    if listen(listener, 8).is_err() {
+        return cleanup(listener, "listen() on a bound stream socket failed");
+    }
+    if !is_listening(listener).unwrap_or(false) {
+        return cleanup(listener, "socket did not report Listening after listen()");
+    }
+    // getsockname-style port reporting must echo the bound port.
+    if stream_local_port(listener).unwrap_or(0) != PORT {
+        return cleanup(listener, "stream_local_port did not report the bound port");
+    }
+    // Re-listen is idempotent (Linux tolerates a repeat listen).
+    if listen(listener, 8).is_err() {
+        return cleanup(listener, "idempotent re-listen() failed");
+    }
+
+    // An empty backlog must surface as WouldBlock (→ EAGAIN), the single-shot
+    // accept contract the syscall layer's blocking policy relies on.
+    match accept(listener) {
+        Err(KernelError::WouldBlock) => {}
+        Ok((accepted, _peer)) => {
+            close(accepted);
+            return cleanup(listener, "accept() dequeued a connection from an empty backlog");
+        }
+        Err(_) => {
+            return cleanup(listener, "accept() on an empty backlog returned a non-WouldBlock error");
+        }
+    }
+
+    // connect on a listening socket must be rejected (it is not Created).
+    // (connect() routes through owned_conn_mut, which errors on a Shared session.)
+    if connect(listener, &[127, 0, 0, 1], PORT, true).is_ok() {
+        return cleanup(listener, "connect() on a listening socket unexpectedly succeeded");
+    }
+
+    close(listener);
+
+    // A datagram socket rejects bind_stream/listen (stream-only ops).
+    let dgram = match create_dgram(2) {
+        Ok(h) => h,
+        Err(_) => return Ok(None),
+    };
+    if bind_stream(dgram, PORT).is_ok() {
+        close(dgram);
+        crate::serial_println!("[net::socket] FAIL(server): bind_stream on a dgram socket succeeded");
+        return Err(KernelError::InternalError);
+    }
+    if listen(dgram, 8).is_ok() {
+        close(dgram);
+        crate::serial_println!("[net::socket] FAIL(server): listen on a dgram socket succeeded");
+        return Err(KernelError::InternalError);
+    }
+    close(dgram);
+
+    crate::serial_println!("[net::socket] Server-socket (bind/listen/accept) self-test PASSED");
+    Ok(Some(()))
 }

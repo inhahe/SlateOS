@@ -3358,6 +3358,26 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // Object-layer server-socket parity (Q23 Option A): drive the
+    // `net::socket::bind_stream`/`listen`/`accept` state machine that the
+    // `bind(2)`/`listen(2)`/`accept(2)` syscalls call into. The ring-level test
+    // above proves the full data path; this proves the object-layer wrapper
+    // (Owned→Shared session conversion, getsockname port reporting, idempotent
+    // re-listen, empty-backlog EAGAIN, and dgram/listening op rejection).
+    match crate::net::socket::self_test_server() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   net::socket server object layer: bind→listen→accept state machine, \
+             port reporting and empty-backlog EAGAIN all correct — syscall server-socket path proven"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   net::socket server object layer: no daemon session — check skipped"
+        ),
+        Err(e) => serial_println!(
+            "[spawn]   WARNING: net::socket server object-layer error ({:?})",
+            e
+        ),
+    }
+
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,

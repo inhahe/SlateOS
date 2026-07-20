@@ -36268,8 +36268,53 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
         if crate::net::socket::is_dgram(h).unwrap_or(false) {
             return socket_dgram_bind_from_user(h, args.arg1, addr_len);
         }
+        // A real daemon-backed stream socket records its local port kernel-side;
+        // the daemon receives it later on `listen(2)` (`OP_LISTEN`). See
+        // `crate::net::socket::bind_stream` (Q23 Option A server-socket path).
+        return socket_stream_bind_from_user(h, args.arg1, addr_len);
     }
     linux_err(errno::EBADF)
+}
+
+/// Parse a user `struct sockaddr_in` / `sockaddr_in6` and `bind(2)` a **stream**
+/// socket to its local port.
+///
+/// Identical parsing to [`socket_dgram_bind_from_user`] — the port sits at `[2..4]`
+/// (network order) in both `sockaddr_in` and `sockaddr_in6` — but routes to
+/// [`crate::net::socket::bind_stream`], which records the port kernel-side for the
+/// later `listen(2)`. A port of 0 asks the daemon for an ephemeral port at listen
+/// time. Any family other than `AF_INET`/`AF_INET6` is `EAFNOSUPPORT`.
+fn socket_stream_bind_from_user(
+    h: crate::net::socket::SocketHandle,
+    addr_ptr: u64,
+    addr_len: i32,
+) -> SyscallResult {
+    let mut fam = [0u8; 2];
+    // SAFETY: the gate validated >= 2 bytes readable at addr_ptr; copy_from_user
+    // re-checks under SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, fam.as_mut_ptr(), 2) } {
+        return linux_err(linux_errno_for(e));
+    }
+    let family = u16::from_ne_bytes(fam);
+    #[allow(clippy::cast_sign_loss)] // addr_len >= 2 here (gate-checked).
+    let min_len = match family {
+        2 => 16,
+        10 => 28,
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    };
+    if (addr_len as usize) < min_len {
+        return linux_err(errno::EINVAL);
+    }
+    let mut sa = [0u8; 4];
+    // SAFETY: the gate validated `addr_len` (>= min_len >= 4) bytes readable; SMAP re-check.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(addr_ptr, sa.as_mut_ptr(), 4) } {
+        return linux_err(linux_errno_for(e));
+    }
+    let port = u16::from_be_bytes([sa[2], sa[3]]);
+    match crate::net::socket::bind_stream(h, port) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// Parse a user `struct sockaddr_in` / `sockaddr_in6` and `bind(2)` a datagram
@@ -36338,6 +36383,24 @@ fn sys_listen(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // Batch 464-equivalent: Linux silently clamps a huge/negative backlog to
+    // somaxconn. We pass it through advisory (the daemon manages its own
+    // backlog), so a raw i32 is fine.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let backlog = args.arg1 as i32;
+    // Path B userspace-netstack cutover: `listen(2)` on a real daemon-backed
+    // stream socket registers a passive listener (`OP_LISTEN`) and moves the
+    // socket into the shared-session server state (Q23 Option A).
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+        return match crate::net::socket::listen(h, backlog) {
+            Ok(_) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
     linux_err(errno::EBADF)
 }
 
@@ -36403,6 +36466,14 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    // Path B: a real daemon-backed listening socket dequeues a connection.
+    // `accept(2)` is `accept4(2)` with flags == 0.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        return socket_accept_from_user(entry, args.arg1, args.arg2, 0);
+    }
     linux_err(errno::EBADF)
 }
 
@@ -36460,7 +36531,114 @@ fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
+    // Path B: a real daemon-backed listening socket dequeues a connection,
+    // honouring accept4's SOCK_CLOEXEC / SOCK_NONBLOCK on the new fd.
+    if crate::net::netstack_client::userspace_enabled()
+        && let Ok(entry) = lookup_caller_fd(fd)
+        && entry.kind == HandleKind::Socket
+    {
+        return socket_accept_from_user(entry, args.arg1, args.arg2, flags);
+    }
     linux_err(errno::EBADF)
+}
+
+/// Dequeue one established connection from a daemon-backed listening socket and
+/// install it as a new fd, writing the peer address back to userspace.
+///
+/// Shared by [`sys_accept`] (flags == 0) and [`sys_accept4`] (validated
+/// `SOCK_CLOEXEC` / `SOCK_NONBLOCK`). [`crate::net::socket::accept`] is a single,
+/// non-blocking daemon round-trip; an empty backlog surfaces as
+/// [`KernelError::WouldBlock`] → `EAGAIN`, which a blocking `accept(2)` caller
+/// (`O_NONBLOCK` clear on the *listening* fd) retries. The blocking-vs-nonblocking
+/// policy lives here in the syscall layer: the object-layer `accept` is always
+/// single-shot.
+///
+/// `flags` carries only `SOCK_NONBLOCK` (0o4000) and `SOCK_CLOEXEC` (0o2_000_000),
+/// already validated by [`sys_accept4`]; they set the *new* socket's status/fd
+/// flags (they do not affect the listener). The peer sockaddr is written only when
+/// `addr_ptr != 0`, honouring the caller's `*addrlen` (short buffers truncate).
+fn socket_accept_from_user(
+    entry: FdEntry,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+    flags: u32,
+) -> SyscallResult {
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    // Blocking-accept policy: if the listening fd is not O_NONBLOCK, retry the
+    // single-shot object-layer accept until a connection is ready (yielding the
+    // CPU between attempts) rather than returning EAGAIN to userspace. A
+    // non-blocking listener returns EAGAIN immediately.
+    let listener_nonblock = entry.status_flags & oflags::O_NONBLOCK != 0;
+    let (new_handle, peer) = loop {
+        match crate::net::socket::accept(h) {
+            Ok(pair) => break pair,
+            Err(KernelError::WouldBlock) => {
+                if listener_nonblock {
+                    return linux_err(errno::EAGAIN);
+                }
+                // Yield and re-poll: the daemon completes handshakes asynchronously.
+                crate::sched::yield_now();
+            }
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+    };
+    // Install the accepted socket as a new fd (same shape as sys_socket).
+    let nonblock = flags & 0o4000 != 0;
+    let cloexec = flags & 0o2_000_000 != 0;
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::NetSocket,
+        new_handle.raw(),
+    );
+    let status_flags = oflags::O_RDWR | if nonblock { oflags::O_NONBLOCK } else { 0 };
+    let fd_flags = if cloexec {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let new_entry =
+        crate::proc::linux_fd::FdEntry::socket(new_handle.raw(), fd_flags, status_flags);
+    let new_fd = match pcb::linux_fd_install(caller, new_entry, 0) {
+        Ok(f) => f,
+        Err(e) => {
+            // Install failed (table full): unwind the just-created socket so the
+            // next fork doesn't see a phantom handle.
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::NetSocket,
+                new_handle.raw(),
+            );
+            crate::net::socket::close(new_handle);
+            return linux_err(linux_errno_for(e));
+        }
+    };
+    // Write the peer sockaddr back only when the caller wants it (addr_ptr != 0).
+    // A failure here must not leak the freshly-installed fd, so on error we close
+    // it and report the fault (matching Linux, which unwinds newfd on
+    // move_addr_to_user failure).
+    if addr_ptr != 0 {
+        let wr = match peer {
+            crate::net::socket::AcceptedPeer::V4(ip, port) => {
+                socket_write_peer_addr(addr_ptr, addrlen_ptr, &ip, port)
+            }
+            crate::net::socket::AcceptedPeer::V6(ip6, port) => {
+                socket_write_peer_addr6(addr_ptr, addrlen_ptr, &ip6, port)
+            }
+        };
+        if wr.value < 0 {
+            // Roll back the installed fd: take it back out of the table and
+            // release the underlying socket handle (no other fd references it).
+            if let Some(taken) = pcb::linux_fd_take(caller, new_fd) {
+                let _ = close_handle(taken);
+            }
+            return wr;
+        }
+    }
+    SyscallResult::ok(i64::from(new_fd))
 }
 
 /// `connect(sockfd, addr*, addrlen)`.
@@ -36781,6 +36959,18 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => return linux_err(linux_errno_for(e)),
             };
             // AF_INET6 == 10 → sockaddr_in6 with the unspecified address (::).
+            if crate::net::socket::domain(h).unwrap_or(2) == 10 {
+                return socket_write_peer_addr6(args.arg1, args.arg2, &[0u8; 16], port);
+            }
+            return socket_write_peer_addr(args.arg1, args.arg2, &[0, 0, 0, 0], port);
+        }
+        // A listening (server) stream socket has no daemon-assigned connection
+        // endpoint — `OP_LOCALADDR` targets a connected conn. Report the
+        // kernel-side bound port with the wildcard local address (the common
+        // `bind(PORT); listen()` server case; a `bind(0)` listener reports the
+        // ephemeral port as 0 — see known-issues D-NETSOCK-SYNC).
+        if crate::net::socket::is_listening(h).unwrap_or(false) {
+            let port = crate::net::socket::stream_local_port(h).unwrap_or(0);
             if crate::net::socket::domain(h).unwrap_or(2) == 10 {
                 return socket_write_peer_addr6(args.arg1, args.arg2, &[0u8; 16], port);
             }

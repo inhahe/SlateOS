@@ -182,6 +182,17 @@ impl NetstackConn {
         })
     }
 
+    /// The fixed connection id this client drives.
+    ///
+    /// A client stream/datagram socket drives [`CONN_ID`]; a server-side accepted
+    /// connection is addressed by its own id via the `*_on` methods. Exposed so the
+    /// socket object layer ([`crate::net::socket`]) can record the effective id for a
+    /// socket that shares a listener's ring session.
+    #[must_use]
+    pub fn conn_id(&self) -> u32 {
+        self.conn_id
+    }
+
     /// Re-attach the ring driver view from the shared-memory handle.
     ///
     /// Attaching is stateless — the free-running SQ/CQ indices live in the shared
@@ -322,7 +333,7 @@ impl NetstackConn {
     /// # Errors
     ///
     /// Same as [`send`](Self::send).
-    fn send_on(&mut self, conn_id: u32, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
+    pub fn send_on(&mut self, conn_id: u32, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
         let ring = self.attach_ring()?;
         let send_aux = if nonblock { netipc::ring::SEND_NONBLOCK } else { 0 };
         let mut total: i32 = 0;
@@ -419,7 +430,7 @@ impl NetstackConn {
     /// # Errors
     ///
     /// Same as [`recv`](Self::recv).
-    fn recv_on(
+    pub fn recv_on(
         &mut self,
         conn_id: u32,
         buf: &mut [u8],
@@ -715,11 +726,27 @@ impl NetstackConn {
     /// [`KernelError::NotConnected`] if the daemon reports no such connection
     /// (the socket was never connected or has been torn down).
     pub fn poll_ready(&mut self) -> KernelResult<(bool, bool, bool)> {
+        let cid = self.conn_id;
+        self.poll_on(cid)
+    }
+
+    /// Non-destructively poll an explicit connection (or listener) id
+    /// (see [`poll_ready`](Self::poll_ready)).
+    ///
+    /// The server-side counterpart to [`poll_ready`](Self::poll_ready): reports the
+    /// readiness of an accepted connection — or a listener, for which `readable`
+    /// signals a pending connection in the backlog — whose id differs from the
+    /// client's fixed [`CONN_ID`] within one ring session.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`poll_ready`](Self::poll_ready).
+    pub fn poll_on(&mut self, conn_id: u32) -> KernelResult<(bool, bool, bool)> {
         let ring = self.attach_ring()?;
         let ud = self.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_POLL,
-            conn_id: self.conn_id,
+            conn_id,
             user_data: ud,
             ..netipc::ring::Sqe::default()
         };
@@ -854,12 +881,27 @@ impl NetstackConn {
     /// - a control-protocol fault (see [`connect`](Self::connect)), or a failure to
     ///   read back the address window / an unexpected length.
     pub fn local_addr(&mut self) -> KernelResult<LocalEndpoint> {
+        let cid = self.conn_id;
+        self.local_addr_on(cid)
+    }
+
+    /// Query an explicit connection id's **local** endpoint for `getsockname`
+    /// (see [`local_addr`](Self::local_addr)).
+    ///
+    /// The server-side counterpart to [`local_addr`](Self::local_addr): reports the
+    /// local address of an accepted connection whose id differs from the client's
+    /// fixed [`CONN_ID`] within one ring session.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`local_addr`](Self::local_addr).
+    pub fn local_addr_on(&mut self, conn_id: u32) -> KernelResult<LocalEndpoint> {
         let ring = self.attach_ring()?;
         let ud = self.next_ud();
         // Ask for the 18-byte (v6) form; the daemon writes 6 for a v4 connection.
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_LOCALADDR,
-            conn_id: self.conn_id,
+            conn_id,
             data_off: RCV_OFF,
             data_len: 18,
             user_data: ud,
@@ -909,11 +951,26 @@ impl NetstackConn {
     /// - [`KernelError::NotConnected`] — the daemon has no such connection.
     /// - transport/resource faults from the underlying ring round-trip.
     pub fn shutdown(&mut self, how: u64) -> KernelResult<()> {
+        let cid = self.conn_id;
+        self.shutdown_on(cid, how)
+    }
+
+    /// Half- or full-close an explicit connection id per `shutdown(2)`
+    /// (see [`shutdown`](Self::shutdown)).
+    ///
+    /// The server-side counterpart to [`shutdown`](Self::shutdown): shuts down an
+    /// accepted connection whose id differs from the client's fixed [`CONN_ID`]
+    /// within one ring session.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`shutdown`](Self::shutdown).
+    pub fn shutdown_on(&mut self, conn_id: u32, how: u64) -> KernelResult<()> {
         let ring = self.attach_ring()?;
         let ud = self.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_SHUTDOWN,
-            conn_id: self.conn_id,
+            conn_id,
             data_off: 0,
             data_len: 0,
             user_data: ud,
@@ -923,6 +980,37 @@ impl NetstackConn {
             0 => Ok(()),
             _ => Err(KernelError::NotConnected), // -1 → unknown connection
         }
+    }
+
+    /// Close a single connection id on this session (daemon
+    /// [`OP_CLOSE`](netipc::ring::OP_CLOSE)), leaving the session — and any other
+    /// connections or listeners sharing its ring — alive.
+    ///
+    /// This is how a server releases one accepted connection when its socket closes,
+    /// without tearing down the shared listener session (which happens only on the
+    /// final [`close`](Self::close)/teardown). A no-op if the daemon never opened a
+    /// session for this ring.
+    ///
+    /// # Errors
+    ///
+    /// Returns a control-protocol fault (see [`connect`](Self::connect)). A daemon
+    /// `-1` (unknown connection) is treated as success — the connection is already
+    /// gone, which is the desired end state.
+    pub fn close_conn(&mut self, conn_id: u32) -> KernelResult<()> {
+        if !self.session_open {
+            return Ok(());
+        }
+        let ring = self.attach_ring()?;
+        let ud = self.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_CLOSE,
+            conn_id,
+            user_data: ud,
+            ..netipc::ring::Sqe::default()
+        };
+        // A `-1` (unknown connection) is fine: the connection is already gone.
+        let _ = self.submit_and_reap(&ring, &sqe)?;
+        Ok(())
     }
 
     /// Close the connection and end the daemon session.

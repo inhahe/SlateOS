@@ -7350,11 +7350,11 @@ impl Shell {
                     if !has_names && has_attr {
                         self.declare_list_filtered(args, out, redir)
                     } else {
-                        self.builtin_declare(args, false)
+                        self.builtin_declare(args, false, name)
                     }
                 }
             }
-            "local" => self.builtin_declare(args, true),
+            "local" => self.builtin_declare(args, true, "local"),
             "readonly" => self.builtin_readonly(args, out, redir),
             "shopt" => self.builtin_shopt(args, out, redir),
             "unset" => self.builtin_unset(args),
@@ -9319,6 +9319,7 @@ impl Shell {
             return self.export_list(out, redir);
         }
         let _ = print; // `-p` with operands behaves like plain `export`.
+        let mut status = 0;
         for a in operands {
             if let Some(eq) = a.find('=') {
                 // Support the `NAME+=value` append form alongside `NAME=value`.
@@ -9327,6 +9328,16 @@ impl Shell {
                 } else {
                     (a[..eq].to_string(), false, a[eq + 1..].to_string())
                 };
+                // `export NAME=value` is an assignment: a readonly target is an
+                // error, and — as in bash — the value is left unchanged and the
+                // export attribute is not applied for that operand.
+                if self.readonly.contains(&k) {
+                    self.emit_stderr(
+                        format!("{}{k}: readonly variable\n", self.err_prefix()).as_bytes(),
+                    );
+                    status = 1;
+                    continue;
+                }
                 let stored = if append {
                     let mut cur = self.vars.get(&k).cloned().unwrap_or_default();
                     cur.push_str(&v);
@@ -9346,7 +9357,7 @@ impl Shell {
                 self.exported.insert(a.clone());
             }
         }
-        0
+        status
     }
 
     /// List every exported variable in bash's `export -p` form, sorted by name:
@@ -9730,7 +9741,7 @@ impl Shell {
         None
     }
 
-    fn builtin_declare(&mut self, args: &[String], is_local: bool) -> i32 {
+    fn builtin_declare(&mut self, args: &[String], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
             return 1;
@@ -9838,8 +9849,12 @@ impl Shell {
                 continue;
             }
             // Reassigning a value to an existing readonly variable is an error.
+            // bash tags the diagnostic with the invoking builtin's name
+            // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
             if value.is_some() && self.readonly.contains(name) {
-                self.emit_stderr(format!("{}{name}: readonly variable\n", self.err_prefix()).as_bytes());
+                self.emit_stderr(
+                    format!("{}{tag}: {name}: readonly variable\n", self.err_prefix()).as_bytes(),
+                );
                 status = 1;
                 continue;
             }
@@ -10071,7 +10086,7 @@ impl Shell {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
             "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
             "readonly" | "export" => 0,
-            _ => self.builtin_declare(&argv[1..], is_local),
+            _ => self.builtin_declare(&argv[1..], is_local, cmd),
         };
         // Mark each array name's kind + attributes before applying the literal,
         // so `apply_assignment` routes to the right store and (for `-i`)
@@ -18661,6 +18676,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run("readonly x=hi; unset x; echo $x");
         assert_eq!(o, "hi\n");
         assert_eq!(run("readonly x=hi; unset x").1, 1);
+    }
+
+    #[test]
+    fn export_respects_readonly() {
+        // Regression: `export NAME=value` used to bypass the readonly check,
+        // silently mutating the variable. bash reports an error, leaves the
+        // value unchanged, and returns status 1.
+        let (o, _) = run("readonly y=1; export y=2; echo \"$y\"");
+        assert_eq!(o, "1\n", "readonly value must not be mutated by export");
+        assert_eq!(run("readonly y=1; export y=2").1, 1);
+        // The append form is likewise blocked.
+        let (o, _) = run("readonly y=1; export y+=x; echo \"$y\"");
+        assert_eq!(o, "1\n");
+    }
+
+    #[test]
+    fn declare_readonly_error_carries_builtin_tag() {
+        // bash tags the readonly-reassignment error with the invoking builtin's
+        // name: `declare: y: readonly variable`, `typeset: …`, `local: …`.
+        // (`2>&1` routes the command's stderr to the captured stdout.)
+        let (o, s) = run("readonly y=1; declare y=2 2>&1");
+        assert_eq!(o, "osh: declare: y: readonly variable\n");
+        assert_eq!(s, 1);
+        let (o, _) = run("readonly y=1; typeset y=2 2>&1");
+        assert_eq!(o, "osh: typeset: y: readonly variable\n");
+        let (o, _) = run("f(){ local y=1; readonly y; local y=2 2>&1; }; f");
+        assert_eq!(o, "osh: local: y: readonly variable\n");
     }
 
     #[test]

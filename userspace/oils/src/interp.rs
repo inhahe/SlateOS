@@ -444,6 +444,26 @@ struct TrapSuppress {
     err: bool,
 }
 
+/// Snapshot of the `set`-controlled shell options, captured by `local -` and
+/// restored on function return. Covers exactly the toggles osh models for
+/// `set`/`set -o` (see [`Shell::set_short_option`] / [`Shell::set_named_option`]);
+/// `shopt`-only options are intentionally excluded, matching bash (`local -`
+/// restores `set` options, not `shopt` options).
+#[derive(Clone, Copy)]
+struct SetOpts {
+    errexit: bool,
+    nounset: bool,
+    xtrace: bool,
+    noglob: bool,
+    allexport: bool,
+    noclobber: bool,
+    noexec: bool,
+    functrace: bool,
+    errtrace: bool,
+    braceexpand: bool,
+    pipefail: bool,
+}
+
 /// Which command(s) a programmable-completion spec applies to (see
 /// [`Shell::comp_specs`]). `Name` is an ordinary command name; the three
 /// specials mirror bash's `complete -D` (default, applied when no other spec
@@ -756,6 +776,14 @@ pub struct Shell {
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
+    /// Per-function-call save slot for `local -`. Pushed (as `None`) in lockstep
+    /// with `local_frames` on function entry and popped on return. The first
+    /// `local -` executed in a given call captures the current `set`-option state
+    /// into its slot; on return that snapshot is restored, so option changes made
+    /// *after* the `local -` (via `set`) are undone while earlier ones persist —
+    /// matching bash's documented `local -` semantics. `None` means no `local -`
+    /// ran in that frame, so nothing is restored.
+    local_opt_saves: Vec<Option<SetOpts>>,
     /// Names of the functions currently executing, innermost last. Drives the
     /// `FUNCNAME` array (bash: `FUNCNAME[0]` is the current function, then its
     /// callers, then `main`). Non-empty exactly while inside a function body;
@@ -976,6 +1004,7 @@ impl Shell {
             arith_cmd: None,
             glob_error: None,
             local_frames: Vec::new(),
+            local_opt_saves: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
             source_depth: 0,
@@ -3069,6 +3098,7 @@ impl Shell {
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
+            local_opt_saves: Vec::new(),
             // A subshell inherits the enclosing function context, so `FUNCNAME`
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),
@@ -4787,6 +4817,9 @@ impl Shell {
         // Push a fresh local scope so `local` declarations inside the body are
         // restored on return.
         self.local_frames.push(Vec::new());
+        // Parallel `local -` save slot for this call (empty until a `local -`
+        // runs). Kept in lockstep with `local_frames`.
+        self.local_opt_saves.push(None);
         // Track the function name for `FUNCNAME` while the body runs, plus the
         // line at the call site (the item currently executing) for `BASH_LINENO`.
         self.fn_stack.push(name.to_string());
@@ -4862,6 +4895,11 @@ impl Shell {
             for (name, snap) in frame.into_iter().rev() {
                 self.restore_var(&name, snap);
             }
+        }
+        // If a `local -` ran in this frame, restore the `set`-option state it
+        // captured, undoing any `set` changes made after the `local -` call.
+        if let Some(Some(saved)) = self.local_opt_saves.pop() {
+            self.restore_set_opts(saved);
         }
         // Pop this call from the `FUNCNAME` stack.
         self.fn_stack.pop();
@@ -4996,6 +5034,40 @@ impl Shell {
         self.arrays.insert("FUNCNAME".to_string(), names);
         self.arrays.insert("BASH_LINENO".to_string(), linenos);
         self.arrays.insert("BASH_SOURCE".to_string(), sources);
+    }
+
+    /// Capture the current `set`-option state for `local -`.
+    fn capture_set_opts(&self) -> SetOpts {
+        SetOpts {
+            errexit: self.errexit,
+            nounset: self.nounset,
+            xtrace: self.xtrace,
+            noglob: self.noglob,
+            allexport: self.allexport,
+            noclobber: self.noclobber,
+            noexec: self.noexec,
+            functrace: self.functrace,
+            errtrace: self.errtrace,
+            braceexpand: self.braceexpand,
+            pipefail: self.pipefail,
+        }
+    }
+
+    /// Restore a `set`-option snapshot captured by `local -`, then refresh the
+    /// derived `$SHELLOPTS` variable so listings stay truthful.
+    fn restore_set_opts(&mut self, s: SetOpts) {
+        self.errexit = s.errexit;
+        self.nounset = s.nounset;
+        self.xtrace = s.xtrace;
+        self.noglob = s.noglob;
+        self.allexport = s.allexport;
+        self.noclobber = s.noclobber;
+        self.noexec = s.noexec;
+        self.functrace = s.functrace;
+        self.errtrace = s.errtrace;
+        self.braceexpand = s.braceexpand;
+        self.pipefail = s.pipefail;
+        self.refresh_shellopts();
     }
 
     /// Capture the complete current state of a variable name (scalar / indexed /
@@ -11129,6 +11201,23 @@ impl Shell {
         let make_local = is_local || (!global && !self.local_frames.is_empty());
         let mut status = 0;
         for name_val in &args[i..] {
+            // `local -`: make the shell's `set` options local to this function.
+            // The first `local -` in a call captures the current option state;
+            // it is restored on return (`call_function`), so any `set` changes
+            // made afterwards are undone. Handled as a special "name", not a
+            // variable, so it neither shadows nor creates a var called `-`.
+            if is_local && name_val == "-" {
+                // Only the first `local -` in the frame captures; a later one
+                // must not overwrite the earlier baseline (bash restores to the
+                // state at the first `local -`).
+                if matches!(self.local_opt_saves.last(), Some(None)) {
+                    let snap = self.capture_set_opts();
+                    if let Some(last) = self.local_opt_saves.last_mut() {
+                        *last = Some(snap);
+                    }
+                }
+                continue;
+            }
             // Split `NAME=value` / `NAME+=value`; the `+=` form appends to (or
             // numerically adds, under `-i`) the variable's current value.
             let (name, append, value) = match name_val.find('=') {
@@ -21016,6 +21105,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // later global `g=5+5` is evaluated arithmetically.
         let src = "declare -i g=1; f() { local g; g=9+9; echo $g; }; f; g=5+5; echo $g";
         assert_eq!(run(src).0, "9+9\n10\n");
+    }
+
+    #[test]
+    fn local_dash_saves_and_restores_set_options() {
+        // `local -` makes the `set` options local to the function: options
+        // changed after the `local -` are reverted on return, matching bash.
+        // xtrace enabled inside must not persist after the function returns.
+        let src = "f(){ local -; set -x; :; }; f; echo \"$-\" | grep -q x && echo leaked || echo clean";
+        assert_eq!(run(src).0, "clean\n");
+        // The `$-` letters visible after the call must not include `x`.
+        let src2 = "f(){ local -; set -x; :; }; f; case $- in *x*) echo has;; *) echo none;; esac";
+        assert_eq!(run(src2).0, "none\n");
+    }
+
+    #[test]
+    fn local_dash_first_call_baseline_wins() {
+        // An option set *before* the first `local -` is part of the saved
+        // baseline and persists after return; a second `local -` does not move
+        // the baseline. Here `-u` (set before `local -`) survives, while `-e`
+        // and `-x` (set after) are reverted.
+        let src = "f(){ set -u; local -; set -e; local -; set -x; :; }; f; \
+                   for o in u e x; do case $- in *$o*) echo \"$o:on\";; *) echo \"$o:off\";; esac; done";
+        assert_eq!(run(src).0, "u:on\ne:off\nx:off\n");
+    }
+
+    #[test]
+    fn local_dash_restores_set_o_pipefail() {
+        // `local -` also covers `set -o` options such as pipefail.
+        let src = "f(){ local -; set -o pipefail; :; }; f; \
+                   case $(set -o | grep pipefail) in *on*) echo on;; *) echo off;; esac";
+        assert_eq!(run(src).0, "off\n");
+    }
+
+    #[test]
+    fn local_dash_coexists_with_named_local() {
+        // `local - x=5` both saves options and declares a normal local `x`.
+        let src = "f(){ local - x=5; set -x; echo \"x=$x\"; }; f; \
+                   case $- in *x*) echo leaked;; *) echo clean;; esac";
+        assert_eq!(run(src).0, "x=5\nclean\n");
     }
 
     #[test]

@@ -381,6 +381,13 @@ pub struct Shell {
     /// `set -C` (noclobber): a plain `>` refuses to truncate an existing regular
     /// file; `>|` overrides. Consulted in `resolve_redirects`.
     noclobber: bool,
+    /// `set -n` (noexec): read and parse commands but do not execute them — the
+    /// syntax-check mode used by `bash -n script`. Once enabled it latches: the
+    /// `set -n` that turns it on still runs (noexec is off when it is reached),
+    /// but every command afterwards is skipped, so a later `set +n` can never
+    /// re-enable execution (matching bash). Consulted at the top of
+    /// [`Shell::exec_pipeline`].
+    noexec: bool,
     /// The shell was invoked as `osh -c COMMAND`. Bash reports a `c` flag in
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
@@ -593,6 +600,7 @@ impl Shell {
             noglob: false,
             allexport: false,
             noclobber: false,
+            noexec: false,
             command_mode: false,
             script_mode: false,
             errexit_suppress: 0,
@@ -689,6 +697,14 @@ impl Shell {
     /// (bash behaviour). Called once by the binary before running the command.
     pub fn set_command_mode(&mut self) {
         self.command_mode = true;
+    }
+
+    /// Enable noexec (`set -n`) from the command line (`osh -n …`): parse the
+    /// input for syntax errors but execute nothing. Called once by the binary
+    /// before running the source, matching `bash -n`.
+    pub fn set_noexec(&mut self) {
+        self.noexec = true;
+        self.refresh_shellopts();
     }
 
     /// Mark the shell as executing a script *file* (`osh SCRIPT`). Enables the
@@ -899,6 +915,15 @@ impl Shell {
     }
 
     fn exec_pipeline(&mut self, pipe: &Pipeline, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // noexec (`set -n` / the command-line `-n` flag): parse but do not run.
+        // The `set -n` that enables it is reached while noexec is still off, so
+        // it executes and latches skipping for every later pipeline — including
+        // `&&`/`||` continuations and compound-command bodies. This is the sole
+        // execution chokepoint every command flows through, so a single guard
+        // here covers simple commands, pipelines, and compounds alike.
+        if self.noexec {
+            return Flow::Next;
+        }
         let start = if pipe.timed {
             Some(std::time::Instant::now())
         } else {
@@ -2408,6 +2433,7 @@ impl Shell {
             noglob: self.noglob,
             allexport: self.allexport,
             noclobber: self.noclobber,
+            noexec: self.noexec,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
             // A subshell starts outside any condition/negation context.
@@ -6305,11 +6331,12 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 8] = [
+        let flags: [(char, bool); 9] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
             ('h', true),
+            ('n', self.noexec),
             ('u', self.nounset),
             ('x', self.xtrace),
             ('B', true),
@@ -10023,6 +10050,7 @@ impl Shell {
             'f' => self.noglob = enable,
             'a' => self.allexport = enable,
             'C' => self.noclobber = enable,
+            'n' => self.noexec = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10039,6 +10067,7 @@ impl Shell {
             "noglob" => self.noglob = enable,
             "allexport" => self.allexport = enable,
             "noclobber" => self.noclobber = enable,
+            "noexec" => self.noexec = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10065,6 +10094,9 @@ impl Shell {
         }
         if self.noclobber {
             opts.push("noclobber");
+        }
+        if self.noexec {
+            opts.push("noexec");
         }
         if self.noglob {
             opts.push("noglob");
@@ -10093,6 +10125,7 @@ impl Shell {
             "allexport",
             "errexit",
             "noclobber",
+            "noexec",
             "noglob",
             "nounset",
             "pipefail",
@@ -10126,6 +10159,7 @@ impl Shell {
             "noglob" => self.noglob,
             "allexport" => self.allexport,
             "noclobber" => self.noclobber,
+            "noexec" => self.noexec,
             _ => false,
         }
     }
@@ -16933,6 +16967,35 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%(%R)T\\n' 1000000000").0, "01:46\n");
         // A negative argument means "now"; just check it produces 4-digit year.
         assert_eq!(run("printf '%(%Y)T\\n' -1").0.trim().len(), 4);
+    }
+
+    #[test]
+    fn set_noexec_skips_execution() {
+        // `set -n` (noexec) runs, then latches: every later command is parsed
+        // but not executed. The `set -n` itself executes because noexec is off
+        // when it is reached.
+        assert_eq!(run("echo before; set -n; echo after; echo also").0, "before\n");
+        // Assignments and expansions after noexec do not run either.
+        assert_eq!(run("set -n; x=5; echo $x").0, "");
+    }
+
+    #[test]
+    fn set_noexec_latches_and_ignores_plus_n() {
+        // Under noexec, `set +n` cannot re-enable execution: it is itself
+        // skipped, so the flag stays on (bash parity).
+        assert_eq!(run("set -n; set +n; echo nope").0, "");
+        // A `&&` continuation after `set -n` is also skipped.
+        assert_eq!(run("set -n && echo x").0, "");
+    }
+
+    #[test]
+    fn set_noexec_reported_in_options() {
+        // `[[ -o noexec ]]` reflects the flag, and it appears in `set -o`.
+        assert_eq!(run("[[ -o noexec ]] && echo on || echo off").0, "off\n");
+        // `set -n` inside a condition still evaluates the condition itself
+        // (noexec latches only for subsequent commands).
+        assert_eq!(run("set -n; [[ -o noexec ]] && echo on").0, "");
+        assert!(run("set -o").0.contains("noexec         \toff\n"));
     }
 
     #[test]

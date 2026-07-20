@@ -31,7 +31,27 @@ fn run(args: &[String]) -> i32 {
     // prefix matching (`${!P*}`), and `set` listings behave like bash.
     sh.import_environment();
 
-    let code = match args.get(1).map(String::as_str) {
+    // Consume leading `set`-style short-option flags (currently `-n`, noexec,
+    // the `bash -n` syntax-check mode). `base` advances past them so the mode
+    // token (`-c`, a script path, …) and its arguments keep their normal
+    // relative positions. `--` ends option processing; `-c` and the long
+    // options are handled by the dispatch below, so we stop at them.
+    let mut base = 1;
+    while let Some(arg) = args.get(base) {
+        match arg.as_str() {
+            "-n" => {
+                sh.set_noexec();
+                base += 1;
+            }
+            "--" => {
+                base += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    let code = match args.get(base).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{VERSION}");
             0
@@ -41,15 +61,17 @@ fn run(args: &[String]) -> i32 {
             0
         }
         Some("-c") => {
-            let Some(command) = args.get(2) else {
+            let Some(command) = args.get(base + 1) else {
                 eprintln!("osh: -c: option requires an argument");
                 return 2;
             };
             // `osh -c cmd [name [arg…]]`
             sh.set_command_mode();
-            if let Some(name) = args.get(3) {
+            if let Some(name) = args.get(base + 2) {
                 sh.set_name(name.clone());
-                sh.set_positional(args.get(4..).map(<[String]>::to_vec).unwrap_or_default());
+                sh.set_positional(
+                    args.get(base + 3..).map(<[String]>::to_vec).unwrap_or_default(),
+                );
             }
             sh.run_source(command)
         }
@@ -58,7 +80,9 @@ fn run(args: &[String]) -> i32 {
                 Ok(src) => {
                     sh.set_name(path.to_string());
                     sh.set_script_mode();
-                    sh.set_positional(args.get(2..).map(<[String]>::to_vec).unwrap_or_default());
+                    sh.set_positional(
+                        args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
+                    );
                     sh.run_source(&src)
                 }
                 Err(e) => {
@@ -144,6 +168,7 @@ fn print_help() {
     println!("  osh                          Start an interactive shell.");
     println!("  osh -c COMMAND [NAME ARG…]   Execute COMMAND and exit.");
     println!("  osh SCRIPT [ARG…]            Execute commands from SCRIPT.");
+    println!("  osh -n …                     Check syntax without executing (noexec).");
     println!("  osh --version                Print version and exit.");
     println!("  osh --help                   Print this help and exit.");
     println!();

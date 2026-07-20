@@ -13904,7 +13904,7 @@ fn format_conversion(
     let mut num_prefix = String::new();
     // Set when a `%b` argument's `\c` truncates output.
     let mut stop = false;
-    let rendered = match conv {
+    let mut rendered = match conv {
         's' => {
             let mut s = next_arg(arg_i);
             if let Some(p) = prec_n {
@@ -13971,12 +13971,9 @@ fn format_conversion(
                 errors.push(format!("{raw}: {kind}"));
             }
             let v = n.cast_unsigned();
-            let s = format!("{v:o}");
-            // `#` forces a leading `0` on octal (a bare `0` is left as-is).
-            if hash && !s.starts_with('0') {
-                num_prefix.push('0');
-            }
-            s
+            // `#` forces a leading `0` on octal; applied after precision below
+            // so `%#.1o 8` → `010` (precision body `10`, then forced `0`).
+            format!("{v:o}")
         }
         'f' | 'F' => {
             let raw = next_arg(arg_i);
@@ -14036,6 +14033,32 @@ fn format_conversion(
             return false;
         }
     };
+
+    // Integer conversions treat precision as a *minimum digit count*: the
+    // magnitude body is zero-padded on the left to `prec` digits (this is
+    // independent of, and combines with, field width). A precision of 0 applied
+    // to the value 0 yields no digits at all (C/bash: `printf %.0d 0` → ``).
+    // When a precision is present the `0` flag is ignored for integers, so
+    // width is space-padded (`%08.3d 42` → `     042`).
+    if matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
+        if let Some(p) = prec_n {
+            zero = false;
+            let cur = rendered.chars().count();
+            if p == 0 && rendered == "0" {
+                rendered.clear();
+            } else if cur < p {
+                let mut padded = String::with_capacity(p);
+                padded.extend(std::iter::repeat_n('0', p - cur));
+                padded.push_str(&rendered);
+                rendered = padded;
+            }
+        }
+        // `#` on octal forces the (precision-padded) body to begin with a `0`,
+        // even when precision-0 emptied it (`printf %#.0o 0` → `0`).
+        if hash && conv == 'o' && !rendered.starts_with('0') {
+            rendered.insert(0, '0');
+        }
+    }
 
     // Apply field width padding. The sign/base prefix and the digit body are
     // padded as a unit; for zero-padding the zeros go between them.
@@ -16413,6 +16436,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%-5d|' 42").0, "42   |");
         assert_eq!(run("printf '%05d' 42").0, "00042");
         assert_eq!(run("printf '%.2s' abcd").0, "ab");
+    }
+
+    #[test]
+    fn printf_integer_precision() {
+        // For integer conversions, precision is the *minimum digit count*: the
+        // body is zero-padded on the left (independent of field width). Verified
+        // byte-for-byte against bash 5.x.
+        assert_eq!(run("printf '[%.3d]' 7").0, "[007]");
+        assert_eq!(run("printf '[%.5d]' 42").0, "[00042]");
+        assert_eq!(run("printf '[%.3o]' 8").0, "[010]");
+        assert_eq!(run("printf '[%.4x]' 255").0, "[00ff]");
+        assert_eq!(run("printf '[%.4X]' 255").0, "[00FF]");
+        assert_eq!(run("printf '[%.3u]' 7").0, "[007]");
+        // A precision of 0 applied to the value 0 yields no digits at all.
+        assert_eq!(run("printf '[%.0d]' 0").0, "[]");
+        assert_eq!(run("printf '[%.0d]' 5").0, "[5]");
+        assert_eq!(run("printf '[%.0x]' 0").0, "[]");
+        // Precision disables the `0` flag → width is space-padded.
+        assert_eq!(run("printf '[%08.3d]' 42").0, "[     042]");
+        assert_eq!(run("printf '[%8.3d]' 42").0, "[     042]");
+        assert_eq!(run("printf '[%-8.3d]' 42").0, "[042     ]");
+        // Sign/space flags sit outside the zero-padded body.
+        assert_eq!(run("printf '[%+.3d]' 42").0, "[+042]");
+        assert_eq!(run("printf '[% .3d]' 42").0, "[ 042]");
+        assert_eq!(run("printf '[%.3d]' -42").0, "[-042]");
+        assert_eq!(run("printf '[%-8.3d]' -42").0, "[-042    ]");
+        // `#` on octal forces a leading `0` after precision is applied.
+        assert_eq!(run("printf '[%#.0o]' 0").0, "[0]");
+        assert_eq!(run("printf '[%#.1o]' 8").0, "[010]");
+        assert_eq!(run("printf '[%#.4x]' 255").0, "[0x00ff]");
+        // Dynamic precision via `.*`.
+        assert_eq!(run("printf '[%.*d]' 4 7").0, "[0007]");
     }
 
     #[test]

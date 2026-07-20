@@ -3853,6 +3853,21 @@ impl Shell {
         if let BulkOp::Transform { op: t @ ('A' | 'a') } = op {
             return self.bulk_attr_transform(name, *t);
         }
+        // An empty/unknown/multi-char `@` transform over `[@]`/`[*]` (or the
+        // positionals): empty when the collection has no elements, but a "bad
+        // substitution" when it has ≥1 element (matches bash's set/unset split
+        // for scalars, generalised to "the collection is non-empty").
+        if let BulkOp::BadTransform { raw } = op {
+            let count = if name == "@" || name == "*" {
+                self.positional.len()
+            } else {
+                self.array_elements(name).len()
+            };
+            if count > 0 {
+                self.bad_substitution(raw);
+            }
+            return Vec::new();
+        }
         let elems: Vec<String> = if name == "@" || name == "*" {
             self.positional.clone()
         } else {
@@ -3972,6 +3987,9 @@ impl Shell {
                 param_case(value, &pat, *mode, *all, extglob)
             }
             BulkOp::Transform { op } => Self::transform_value(value, *op),
+            // Handled collection-wide in `bulk_elements` before per-element
+            // dispatch; it never reaches the per-element mapper.
+            BulkOp::BadTransform { .. } => value.to_string(),
         }
     }
 
@@ -4514,14 +4532,9 @@ impl Shell {
                     None => String::new(),
                 }
             }
-            'l' => {
-                // `@l` lowercases only the first character (mirror of `@u`).
-                let mut cs = value.chars();
-                match cs.next() {
-                    Some(f) => f.to_lowercase().chain(cs).collect(),
-                    None => String::new(),
-                }
-            }
+            // NB: there is no `@l` — bash has no lowercase-first operator
+            // (`${x@l}` is a "bad substitution"), so the parser never routes it
+            // here (see `is_valid_transform_op`).
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
             'E' => ansi_c_unescape(value),
             // `K`/`k` on a *scalar* or single array element behave like `@Q`:
@@ -7536,6 +7549,15 @@ impl Shell {
             }
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op)
+            }
+            WordPart::BadTransform { name, index, raw } => {
+                // Empty/unknown/multi-char `@` operator: empty for an unset
+                // parameter (status 0), "bad substitution" for a set one.
+                if self.param_elem_value(name, index).is_some() {
+                    self.bad_substitution(raw)
+                } else {
+                    String::new()
+                }
             }
             WordPart::ArraySlice {
                 name,
@@ -22727,9 +22749,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("x=hello; echo \"${x@U}\"").0, "HELLO\n");
         assert_eq!(run("x=hello; echo \"${x@u}\"").0, "Hello\n");
         assert_eq!(run("x=HeLLo; echo \"${x@L}\"").0, "hello\n");
-        // @l lowercases only the first character (mirror of @u).
-        assert_eq!(run("x=HeLLo; echo \"${x@l}\"").0, "heLLo\n");
-        assert_eq!(run("x=HELLO; echo \"${x@l}\"").0, "hELLO\n");
+        // There is no `@l`: bash has no lowercase-first operator, so `${x@l}`
+        // on a *set* variable is a "bad substitution" (fatal, empty output).
+        assert_eq!(
+            run("x=HeLLo; { echo \"${x@l}\"; } 2>&1").0,
+            "osh: ${x@l}: bad substitution\n"
+        );
+        // ...but an *unset* variable yields empty with no error.
+        assert_eq!(run("unset x; echo \"[${x@l}]\"; echo done").0, "[]\ndone\n");
         // bash single-quotes every set value under @Q, even a plain word.
         assert_eq!(run("x=word; echo \"${x@Q}\"").0, "'word'\n");
         // An unset variable yields empty; a set-but-empty one yields `''`.
@@ -22745,6 +22772,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("v=$'a\\tb\\x01c'; echo \"${v@Q}\"").0, "$'a\\tb\\001c'\n");
         assert_eq!(run("printf '%q\\n' $'\\x01'").0, "$'\\001'\n");
         assert_eq!(run("printf '%q\\n' $'\\x1b'").0, "$'\\E'\n");
+    }
+
+    #[test]
+    fn param_transform_invalid_op_bad_substitution() {
+        // An empty (`@`), unknown (`@Z`), or multi-char (`@QU`) transform
+        // operator is deferred to expansion: empty for an UNSET parameter
+        // (status 0), but a fatal "bad substitution" for a SET one.
+        assert_eq!(run("echo \"[${x@Z}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(run("echo \"[${x@}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(run("echo \"[${x@QU}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(
+            run("x=hi; { echo \"${x@Z}\"; } 2>&1").0,
+            "osh: ${x@Z}: bad substitution\n"
+        );
+        assert_eq!(
+            run("x=hi; { echo \"${x@}\"; } 2>&1").0,
+            "osh: ${x@}: bad substitution\n"
+        );
+        assert_eq!(
+            run("x=hi; { echo \"${x@QU}\"; } 2>&1").0,
+            "osh: ${x@QU}: bad substitution\n"
+        );
+        // Element form: unset element → empty; set element → bad substitution.
+        assert_eq!(run("a=(p q); echo \"[${a[9]@Z}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(
+            run("a=(p q); { echo \"${a[0]@Z}\"; } 2>&1").0,
+            "osh: ${a[0]@Z}: bad substitution\n"
+        );
+        // Bulk form: an empty array/positional set → empty; ≥1 element → error.
+        assert_eq!(run("a=(); echo \"[${a[@]@Z}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(
+            run("a=(1 2 3); { echo \"${a[@]@Z}\"; } 2>&1").0,
+            "osh: ${a[@]@Z}: bad substitution\n"
+        );
+        assert_eq!(run("set --; echo \"[${@@Z}]\"; echo done").0, "[]\ndone\n");
+        assert_eq!(
+            run("set -- x y; { echo \"${@@Z}\"; } 2>&1").0,
+            "osh: ${@@Z}: bad substitution\n"
+        );
     }
 
     #[test]

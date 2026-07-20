@@ -88,28 +88,41 @@ broader fd-model refactor touching `open_fds`/`open_write_fds` and every
 builtin that reads/writes user-space fds — deferred until there is a concrete
 need beyond `<>`.
 
-### TD-OILS-BADSUBST-AT. `osh` reports `${x@}` (bare `@` transform) as a bad substitution — 2026-07-19 — OPEN (very low priority)
+### TD-OILS-BADSUBST-AT. Invalid `@` transform operator — set-vs-unset "bad substitution" — 2026-07-19 — ✅ RESOLVED 2026-07-20
 
-**What:** bash's handling of a `${name@}` with an *empty* transform operator is
-internally inconsistent: unquoted `echo ${x@}` on an unset `x` yields an empty
-field with status 0, but quoted `echo "[${x@}]"` (and `x=hi; echo "[${x@}]"`)
-reports `${x@}: bad substitution`. osh uniformly treats a bare/unknown `@`
-transform as a runtime bad substitution (status 1) — matching bash's *quoted*
-case but not its unquoted-empty case.
+**What (original bug):** the true bash rule for an *invalid* `${name@OP}`
+transform operator — an EMPTY (`@`), UNKNOWN (`@Z`), or MULTI-CHAR (`@QU`) one —
+is a **set-vs-unset** split, not a quoted-vs-unquoted one as this entry
+previously claimed: bash yields an empty field (status 0) when `name` is
+**unset**, but a fatal `${…}: bad substitution` (status 1) when it is **set**.
+The same rule generalises to every reference form — scalar (`${x@Z}`), single
+element (`${a[0]@Z}`), whole-array (`${a[@]@Z}`), and positional (`${@@Z}`) —
+where "set" for the bulk forms means the array/positional list has ≥1 element
+(an empty array/`set --` yields empty with no error). osh previously always
+errored (matching only bash's *set* case) and, worse, silently returned the
+value unchanged for an *unknown* single-char op like `@Z`.
 
-**Where:** `userspace/oils/src/parser.rs` (the `@` transform arm of
-`parse_braced_param`, which now returns `WordPart::BadSubst` when
-`rest.len() != 2`); the runtime diagnostic is `Shell::bad_substitution` in
-`interp.rs`.
+**Also fixed:** osh had wrongly accepted `@l` as a valid transform. Bash has no
+lowercase-first operator; its valid set (5.2) is exactly `Q E P A a K k U u L`.
+`${x@l}` on a set variable is a "bad substitution" — now matched.
 
-**Repro:** `osh -c 'echo ${x@}'` → `bad substitution` (rc 1); bash → empty
-(rc 0). The quoted form matches.
+**Fix:** added `WordPart::BadTransform { name, index, raw }` and
+`BulkOp::BadTransform { raw }` (ast.rs). The parser routes any invalid `@`
+operator to these, carrying the raw inner source. At expansion the scalar/
+element arm checks `param_elem_value(name, index).is_some()` (set → error, unset
+→ empty); the bulk arm in `bulk_elements` checks the element/positional count
+(≥1 → error, else empty). Both call `Shell::bad_substitution(raw)`. Valid ops
+gated by `is_valid_transform_op` in parser.rs (no `l`). Verified against
+`bash 5.2.37` across scalar/element/bulk/positional forms; regression test
+`param_transform_invalid_op_bad_substitution` in interp.rs.
 
-**Proper fix:** only worth doing if faithfully replicating bash's quoted-vs-
-unquoted inconsistency for the empty-`@` case is deemed important; low value.
-The common transforms (`@Q`/`@U`/`@u`/`@L`/`@E`/`@a`/`@k`/`@K`) and the common
-bad-substitution forms (`${x!}`, `${!x*junk}`, `${#a[i]extra}`, `${!$}`,
-`${!!}`) all match bash exactly.
+**Remaining (separate, cosmetic, out of scope):** when the bad expansion appears
+inside a larger word (e.g. `echo "[${x@Z}]"`), bash's diagnostic quotes the
+whole word — `[${x@Z}]: bad substitution` — whereas osh quotes only the failing
+`${…}` — `${x@Z}: bad substitution`. osh's form is arguably cleaner and it
+affects *all* osh bad-substitution diagnostics uniformly (e.g. `${x!}` shows the
+same), so it is a shared cosmetic divergence tracked separately rather than
+here.
 
 ### TD-OILS-SUBSCRIPT-QUOTED-BRACKET. `osh` lexer chokes on a quoted `]` inside a `${name[...]}` subscript — 2026-07-19 — OPEN (very low priority)
 

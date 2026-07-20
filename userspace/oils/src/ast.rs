@@ -482,6 +482,17 @@ pub enum WordPart {
         index: Option<Box<Word>>,
         op: char,
     },
+    /// `${name@}` (empty operator), `${name@Z}` (unknown operator), or
+    /// `${name@QU}` (multi-char operator) — an *invalid* parameter
+    /// transformation. bash defers the decision to expansion time: if the
+    /// parameter is **unset** the result is empty (status 0), but if it is
+    /// **set** it is a runtime "bad substitution". `raw` is the exact source
+    /// text between `${` and `}` (e.g. `x@`, `a[0]@Z`) for the diagnostic.
+    BadTransform {
+        name: String,
+        index: Option<Box<Word>>,
+        raw: String,
+    },
     /// `${name[@]:off:len}` / `${name[*]:off:len}` — array slice, and the
     /// positional-parameter forms `${@:off:len}` / `${*:off:len}`. Selects a
     /// contiguous run of elements (by position, 0-based) rather than a substring.
@@ -568,6 +579,13 @@ pub enum BulkOp {
     },
     /// `${a[@]@Q}` etc. — parameter transformation per element.
     Transform { op: char },
+    /// `${a[@]@}` / `${a[@]@Z}` / `${a[@]@QU}` — an *invalid* per-element
+    /// transform (empty, unknown, or multi-char operator). Like the scalar
+    /// [`WordPart::BadTransform`], bash defers it: a whole-array/positional
+    /// reference with **no elements** expands empty, but with one or more
+    /// elements it is a runtime "bad substitution". `raw` is the source text
+    /// between `${` and `}` for the diagnostic.
+    BadTransform { raw: String },
 }
 
 /// An array subscript inside `${name[…]}`.

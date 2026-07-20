@@ -1602,6 +1602,18 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                     op,
                 });
             }
+            // `${a[@]@Z}` / `${a[@]@}` — an empty/unknown/multi-char `@`
+            // transform operator: empty for an empty array (or unset), but a
+            // "bad substitution" when the array has ≥1 element.
+            if rest.first() == Some(&'@') {
+                return Ok(WordPart::ArrayBulk {
+                    name,
+                    star: matches!(index, ArrayIndex::Star),
+                    op: BulkOp::BadTransform {
+                        raw: raw.to_string(),
+                    },
+                });
+            }
             // `${a[@]:-x}` / `${a[*]:+x}` / `${a[@]:?msg}` — use/alternate/error
             // operators on a whole-array reference. Bash treats `[@]`/`[*]` like
             // `$@`: substitute the elements when active, else the operand word.
@@ -1661,6 +1673,17 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
             op,
         });
     }
+    // `${@@Z}` / `${@@}` — invalid `@` transform over the positionals: empty
+    // when there are no positional parameters, "bad substitution" otherwise.
+    if (name == "@" || name == "*") && rest.first() == Some(&'@') {
+        return Ok(WordPart::ArrayBulk {
+            name: name.clone(),
+            star: name == "*",
+            op: BulkOp::BadTransform {
+                raw: raw.to_string(),
+            },
+        });
+    }
     if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
@@ -1699,15 +1722,22 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         }
         // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
         '@' => {
-            if rest.len() != 2 {
-                // bash accepts this at parse time and rejects it only during
-                // expansion as a runtime "bad substitution" (DISCARD-class).
-                return Ok(WordPart::BadSubst(raw.to_string()));
+            // An empty (`${x@}`), unknown (`${x@Z}`), or multi-char
+            // (`${x@QU}`) operator is *not* a parse-time error in bash: it is
+            // deferred to expansion, where it yields empty for an unset
+            // parameter but a "bad substitution" for a set one. `BadTransform`
+            // carries the raw source so the runtime can reproduce that split.
+            if rest.len() == 2 && is_valid_transform_op(rest[1]) {
+                return Ok(WordPart::ParamTransform {
+                    name,
+                    index: elem_index,
+                    op: rest[1],
+                });
             }
-            Ok(WordPart::ParamTransform {
+            Ok(WordPart::BadTransform {
                 name,
                 index: elem_index,
-                op: rest[1],
+                raw: raw.to_string(),
             })
         }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
@@ -1872,9 +1902,25 @@ fn parse_bulk_op(rest: &[char]) -> Result<Option<BulkOp>, ParseError> {
                 replacement,
             }))
         }
-        '@' if rest.len() == 2 => Ok(Some(BulkOp::Transform { op: rest[1] })),
+        // Only a valid single-char operator is a real per-element transform.
+        // An empty (`@`), unknown (`@Z`), or multi-char (`@QU`) operator is
+        // left to the caller, which builds a `BulkOp::BadTransform` (bash
+        // defers the empty/invalid case to expansion time — see below).
+        '@' if rest.len() == 2 && is_valid_transform_op(rest[1]) => {
+            Ok(Some(BulkOp::Transform { op: rest[1] }))
+        }
         _ => Ok(None),
     }
+}
+
+/// The single-character operators accepted by a `${var@OP}` transform. Any
+/// other operator (or an empty/multi-char one) is an *invalid* transform: bash
+/// treats it as empty for an unset parameter but a "bad substitution" for a set
+/// one (see [`WordPart::BadTransform`] / [`BulkOp::BadTransform`]).
+fn is_valid_transform_op(op: char) -> bool {
+    // Bash's set (5.2): Q E P A a K k U u L. Note there is no lowercase-first
+    // `@l` — `${x@l}` is a "bad substitution", so `l` is deliberately absent.
+    matches!(op, 'Q' | 'U' | 'u' | 'L' | 'E' | 'K' | 'k' | 'A' | 'a' | 'P')
 }
 
 /// Build a single [`Word`] from arbitrary source text (used for the argument of

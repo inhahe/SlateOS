@@ -764,6 +764,11 @@ fn part_src(p: &WordPart) -> String {
         WordPart::ParamTransform { name, index, op } => {
             format!("${{{}@{op}}}", name_sub(name, index))
         }
+        WordPart::BadTransform { raw, .. } => {
+            // The raw source already includes the name, any subscript, and the
+            // (empty/unknown/multi-char) operator, e.g. `x@`, `a[0]@Z`.
+            format!("${{{raw}}}")
+        }
         WordPart::ArraySlice { name, star, offset, length } => {
             let sub = if name == "@" || name == "*" {
                 name.clone()
@@ -779,6 +784,11 @@ fn part_src(p: &WordPart) -> String {
             s
         }
         WordPart::ArrayBulk { name, star, op } => {
+            // `BadTransform` carries the full raw inner source, so reproduce it
+            // verbatim rather than re-synthesising a subscript + operator.
+            if let BulkOp::BadTransform { raw } = op {
+                return format!("${{{raw}}}");
+            }
             let sub = if name == "@" || name == "*" {
                 name.clone()
             } else {
@@ -812,6 +822,8 @@ fn part_src(p: &WordPart) -> String {
                     format!("{}{}", case_op_src(*mode, *all), word_src(pattern))
                 }
                 BulkOp::Transform { op } => format!("@{op}"),
+                // Short-circuited via the early return above.
+                BulkOp::BadTransform { .. } => String::new(),
             };
             format!("${{{sub}{opstr}}}")
         }

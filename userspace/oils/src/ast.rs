@@ -519,6 +519,14 @@ pub enum WordPart {
         colon: bool,
         arg: Box<Word>,
     },
+    /// A `${…}` whose inner form the parser recognised as a brace expansion but
+    /// could not otherwise interpret (`${x!}`, `${!x*junk}`, `${#a[i]extra}`, …).
+    /// bash accepts such text at *parse* time and only rejects it during
+    /// expansion as a runtime "bad substitution" (a DISCARD-class word-expansion
+    /// error: it prints `${raw}: bad substitution`, sets `$?`=1, and aborts the
+    /// current parse unit without exiting the shell). The stored string is the
+    /// text *between* the braces, so the diagnostic reproduces `${raw}`.
+    BadSubst(String),
     /// Process substitution `<(cmd)` (input) / `>(cmd)` (output). Expands to the
     /// pathname of a file the shell connects to `cmd`: for `<(cmd)` the file holds
     /// `cmd`'s output (read by the enclosing command); for `>(cmd)` the file's

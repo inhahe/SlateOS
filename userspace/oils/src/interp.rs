@@ -6629,10 +6629,25 @@ impl Shell {
                 self.expand_dynamic(&renamed)
             }
             WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
+            WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
         }
+    }
+
+    /// Report a runtime "bad substitution" (bash: an unrecognised `${…}` form
+    /// caught during word expansion). Emits `${raw}: bad substitution` and sets
+    /// the shared word-expansion discard signal (`arith_error`) so the
+    /// simple-command driver aborts the command without running it — a
+    /// DISCARD-class error: `$?`=1, the rest of the current parse unit is
+    /// dropped, but the shell keeps reading (a following line still runs).
+    fn bad_substitution(&mut self, raw: &str) -> String {
+        self.emit_stderr(
+            format!("{}${{{raw}}}: bad substitution\n", self.err_prefix()).as_bytes(),
+        );
+        self.arith_error = true;
+        String::new()
     }
 
     fn expand_param_op(
@@ -18293,10 +18308,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `${!-}` — indirect through `$-` (option flags); those flag letters are
         // not a set variable, so it expands empty without error.
         assert_eq!(run("echo [${!-}]").0, "[]\n");
-        // `$` and `!` are NOT valid indirect referents (bash: "bad
-        // substitution"); osh rejects them at parse time.
-        assert!(parse("echo ${!$}").is_err());
-        assert!(parse("echo ${!!}").is_err());
+        // `$` and `!` are NOT valid indirect referents. Like bash, osh parses
+        // the form and reports a *runtime* "bad substitution" (DISCARD-class,
+        // status 1) at expansion time rather than a parse error.
+        assert!(parse("echo ${!$}").is_ok());
+        assert!(parse("echo ${!!}").is_ok());
+        let (o1, s1) = run("echo ${!$} 2>/dev/null; echo after");
+        assert_eq!((o1.as_str(), s1), ("", 1));
+        assert_eq!(run("{ echo ${!!}; } 2>&1").0, "osh: ${!!}: bad substitution\n");
     }
 
     #[test]
@@ -20211,6 +20230,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             err.contains("-10: substring expression < 0"),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn unrecognized_brace_form_is_runtime_bad_substitution() {
+        // An unrecognised `${…}` form is not a parse error (bash accepts it at
+        // parse time); it is a runtime "bad substitution" — a DISCARD-class
+        // word-expansion error printing `${raw}: bad substitution`, status 1,
+        // aborting the current parse unit but not exiting the shell.
+        assert!(parse("echo ${x!}").is_ok());
+        let (o, s) = run("echo ${x!} 2>/dev/null; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 1);
+        // The raw inner text is reproduced verbatim in the diagnostic.
+        // (The `run` harness is stdin/interactive-like, so `err_prefix` carries
+        // no `line N:` — that appears only in `-c`/script mode.)
+        assert_eq!(
+            run("{ echo ${x!}; } 2>&1").0,
+            "osh: ${x!}: bad substitution\n"
+        );
+        assert_eq!(
+            run("x=hi; { echo ${!x*junk}; } 2>&1").0,
+            "osh: ${!x*junk}: bad substitution\n"
+        );
+        // A trailing remnant after a `${#name[i]}` length is also bad.
+        assert_eq!(
+            run("{ echo ${#a[0]extra}; } 2>&1").0,
+            "osh: ${#a[0]extra}: bad substitution\n"
+        );
+        // DISCARD semantics: a following *line* still runs (not fatal).
+        let (o2, s2) = run("echo ${x!} 2>/dev/null\necho after");
+        assert_eq!(o2, "after\n");
+        assert_eq!(s2, 0);
+        // A subshell contains the error; the parent survives.
+        assert_eq!(run("( echo ${x!} ) 2>/dev/null; echo parent").0, "parent\n");
     }
 
     #[test]

@@ -714,6 +714,7 @@ fn part_src(p: &WordPart) -> String {
             format!("{}({})", if *input { '<' } else { '>' }, program_inline(body))
         }
         WordPart::ArithSub(text) => format!("$(( {text} ))"),
+        WordPart::BadSubst(raw) => format!("${{{raw}}}"),
         WordPart::Length(name) => format!("${{#{name}}}"),
         WordPart::ArrayRef { name, index, length } => {
             let idx = match index {

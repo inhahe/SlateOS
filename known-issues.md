@@ -14,6 +14,29 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-BADSUBST-AT. `osh` reports `${x@}` (bare `@` transform) as a bad substitution — 2026-07-19 — OPEN (very low priority)
+
+**What:** bash's handling of a `${name@}` with an *empty* transform operator is
+internally inconsistent: unquoted `echo ${x@}` on an unset `x` yields an empty
+field with status 0, but quoted `echo "[${x@}]"` (and `x=hi; echo "[${x@}]"`)
+reports `${x@}: bad substitution`. osh uniformly treats a bare/unknown `@`
+transform as a runtime bad substitution (status 1) — matching bash's *quoted*
+case but not its unquoted-empty case.
+
+**Where:** `userspace/oils/src/parser.rs` (the `@` transform arm of
+`parse_braced_param`, which now returns `WordPart::BadSubst` when
+`rest.len() != 2`); the runtime diagnostic is `Shell::bad_substitution` in
+`interp.rs`.
+
+**Repro:** `osh -c 'echo ${x@}'` → `bad substitution` (rc 1); bash → empty
+(rc 0). The quoted form matches.
+
+**Proper fix:** only worth doing if faithfully replicating bash's quoted-vs-
+unquoted inconsistency for the empty-`@` case is deemed important; low value.
+The common transforms (`@Q`/`@U`/`@u`/`@L`/`@E`/`@a`/`@k`/`@K`) and the common
+bad-substitution forms (`${x!}`, `${!x*junk}`, `${#a[i]extra}`, `${!$}`,
+`${!!}`) all match bash exactly.
+
 ### TD-OILS-BASHOPTS. `osh` does not expose `$BASHOPTS` — 2026-07-19 — OPEN (low priority)
 
 **What:** bash exposes `$BASHOPTS`, a readonly colon-separated list of the

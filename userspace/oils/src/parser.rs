@@ -1378,9 +1378,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         let (name, subscript, remaining) = split_name_subscript(&bytes)?;
         if let Some(index) = subscript {
             if !remaining.is_empty() {
-                return Err(ParseError(format!(
-                    "unsupported parameter expansion '${{{raw}}}'"
-                )));
+                // bash accepts this at parse time and rejects it only during
+                // expansion as a runtime "bad substitution" (DISCARD-class).
+                return Ok(WordPart::BadSubst(raw.to_string()));
             }
             // `${#name[@]}` / `${#name[i]}` — array element count / element length.
             return Ok(WordPart::ArrayRef {
@@ -1460,9 +1460,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 }
             }
         }
-        return Err(ParseError(format!(
-            "unsupported parameter expansion '${{{raw}}}'"
-        )));
+        // bash accepts this at parse time and rejects it only during expansion
+        // as a runtime "bad substitution" (DISCARD-class).
+        return Ok(WordPart::BadSubst(raw.to_string()));
     }
     let bytes: Vec<char> = raw.chars().collect();
     let (name, subscript, rest) = split_name_subscript(&bytes)?;
@@ -1526,9 +1526,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 '+' => ParamOp::UseAlternate,
                 '?' => ParamOp::ErrorIfUnset,
                 _ => {
-                    return Err(ParseError(format!(
-                        "unsupported parameter expansion '${{{raw}}}'"
-                    )));
+                    // bash accepts this at parse time and rejects it only during
+                    // expansion as a runtime "bad substitution" (DISCARD-class).
+                    return Ok(WordPart::BadSubst(raw.to_string()));
                 }
             };
             return Ok(WordPart::ArrayOp {
@@ -1607,9 +1607,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
         // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
         '@' => {
             if rest.len() != 2 {
-                return Err(ParseError(format!(
-                    "unsupported parameter expansion '${{{raw}}}'"
-                )));
+                // bash accepts this at parse time and rejects it only during
+                // expansion as a runtime "bad substitution" (DISCARD-class).
+                return Ok(WordPart::BadSubst(raw.to_string()));
             }
             Ok(WordPart::ParamTransform {
                 name,
@@ -1647,9 +1647,9 @@ pub(crate) fn parse_braced_param(raw: &str) -> Result<WordPart, ParseError> {
                 '+' => ParamOp::UseAlternate,
                 '?' => ParamOp::ErrorIfUnset,
                 _ => {
-                    return Err(ParseError(format!(
-                        "unsupported parameter expansion '${{{raw}}}'"
-                    )));
+                    // bash accepts this at parse time and rejects it only during
+                    // expansion as a runtime "bad substitution" (DISCARD-class).
+                    return Ok(WordPart::BadSubst(raw.to_string()));
                 }
             };
             Ok(WordPart::ParamOp {

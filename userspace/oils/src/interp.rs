@@ -192,6 +192,29 @@ fn shopt_line(name: &str, on: bool, reinput: bool) -> String {
     }
 }
 
+/// Render an `io::Error` the way bash renders `strerror(errno)` — e.g.
+/// "No such file or directory" rather than the host `std::io::Error` Display,
+/// which on Windows reads "The system cannot find the file specified. (os error
+/// 2)". Mapping by `ErrorKind` (not the raw OS code) keeps the text stable and
+/// bash-compatible on both the Windows dev host and the SlateOS target. Kinds
+/// without a canonical POSIX spelling fall back to the platform message.
+fn io_error_message(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => "No such file or directory".to_string(),
+        ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        ErrorKind::AlreadyExists => "File exists".to_string(),
+        ErrorKind::NotADirectory => "Not a directory".to_string(),
+        ErrorKind::IsADirectory => "Is a directory".to_string(),
+        ErrorKind::DirectoryNotEmpty => "Directory not empty".to_string(),
+        ErrorKind::ReadOnlyFilesystem => "Read-only file system".to_string(),
+        ErrorKind::BrokenPipe => "Broken pipe".to_string(),
+        ErrorKind::TimedOut => "Connection timed out".to_string(),
+        ErrorKind::WouldBlock => "Resource temporarily unavailable".to_string(),
+        _ => e.to_string(),
+    }
+}
+
 /// Non-local control flow produced while executing statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -2061,7 +2084,7 @@ impl Shell {
             match std::fs::read(map_device_path(path)) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -2084,7 +2107,7 @@ impl Shell {
             match open_out(path, *append) {
                 Ok(f) => stdout_file = Some(Arc::new(f)),
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -2124,7 +2147,7 @@ impl Shell {
                     pushed_stderr = true;
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -2361,7 +2384,7 @@ impl Shell {
                         self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                        self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                         self.last_status = 1;
                     }
                 },
@@ -4930,7 +4953,7 @@ impl Shell {
                         cmd.stdin(Stdio::from(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                        self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                         self.last_status = 1;
                         return;
                     }
@@ -5000,7 +5023,7 @@ impl Shell {
                     cmd.stdout(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     self.last_status = 1;
                     return;
                 }
@@ -5105,7 +5128,7 @@ impl Shell {
                     cmd.stderr(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     self.last_status = 1;
                     return;
                 }
@@ -5449,7 +5472,7 @@ impl Shell {
             RedirectOp::Read => {
                 let path = self.expand_to_string(&r.target);
                 let bytes = std::fs::read(map_device_path(&path))
-                    .map_err(|e| format!("{path}: {e}"))?;
+                    .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 if fd == 0 {
                     self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                 } else if fd >= 3 {
@@ -5475,7 +5498,7 @@ impl Shell {
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
                 let target = self.expand_to_string(&r.target);
                 let append = matches!(r.op, RedirectOp::AppendBoth);
-                let f = open_out(&target, append).map_err(|e| format!("{target}: {e}"))?;
+                let f = open_out(&target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
                 let a = std::sync::Arc::new(f);
                 self.exec_stdout = Some(a.clone());
@@ -5492,7 +5515,7 @@ impl Shell {
                 {
                     return Err(format!("{target}: cannot overwrite existing file"));
                 }
-                let f = open_out(&target, append).map_err(|e| format!("{target}: {e}"))?;
+                let f = open_out(&target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 let a = std::sync::Arc::new(f);
                 match fd {
                     0 | 1 => self.exec_stdout = Some(a),
@@ -5531,7 +5554,7 @@ impl Shell {
                                 Some(h) => h,
                                 None => std::sync::Arc::new(
                                     dup_std_handle(n == 1)
-                                        .map_err(|e| format!("{fd}: {e}"))?,
+                                        .map_err(|e| format!("{fd}: {}", io_error_message(&e)))?,
                                 ),
                             };
                             self.open_write_fds.insert(fd, handle);
@@ -5631,7 +5654,7 @@ impl Shell {
                             Ok(bytes) => {
                                 plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
                             }
-                            Err(e) => return Err(format!("{path}: {e}")),
+                            Err(e) => return Err(format!("{path}: {}", io_error_message(&e))),
                         }
                     }
                 }
@@ -7374,7 +7397,7 @@ impl Shell {
                                 self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                                 rc = 1;
                             }
                         }
@@ -7388,7 +7411,7 @@ impl Shell {
                                 self.exec_stdout = Some(std::sync::Arc::new(f));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                                 rc = 1;
                             }
                         }
@@ -7400,7 +7423,7 @@ impl Shell {
                                 self.exec_stderr = Some(std::sync::Arc::new(f));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                                 rc = 1;
                             }
                         }
@@ -7459,7 +7482,7 @@ impl Shell {
                                             self.open_fds.remove(fd);
                                         }
                                         Err(e) => {
-                                            self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                                            self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                                             rc = 1;
                                         }
                                     }
@@ -7633,7 +7656,7 @@ impl Shell {
         let old = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .ok();
-        std::env::set_current_dir(path).map_err(|e| e.to_string())?;
+        std::env::set_current_dir(path).map_err(|e| io_error_message(&e))?;
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string());
@@ -11409,7 +11432,14 @@ impl Shell {
                 code
             }
             Err(e) => {
-                self.errln(&format!("{}source: {path}: {e}", self.err_prefix()));
+                // bash reports a *missing* source file without the builtin
+                // label — "bash: line N: FILE: No such file or directory" — but
+                // keeps the "source:" label for other open failures.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                } else {
+                    self.errln(&format!("{}source: {path}: {}", self.err_prefix(), io_error_message(&e)));
+                }
                 1
             }
         }
@@ -12213,7 +12243,7 @@ impl Shell {
                     0
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {e}", self.err_prefix()));
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                     1
                 }
             }
@@ -20530,6 +20560,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ],
             "got {o:?}"
         );
+    }
+
+    #[test]
+    fn io_error_message_maps_posix_strerror() {
+        // The mapper renders bash/POSIX strerror text rather than the host
+        // `std::io::Error` Display (which on Windows reads e.g. "The system
+        // cannot find the file specified. (os error 2)").
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            io_error_message(&Error::from(ErrorKind::NotFound)),
+            "No such file or directory"
+        );
+        assert_eq!(
+            io_error_message(&Error::from(ErrorKind::PermissionDenied)),
+            "Permission denied"
+        );
+        assert_eq!(
+            io_error_message(&Error::from(ErrorKind::AlreadyExists)),
+            "File exists"
+        );
+        // No host `os error NN` suffix leaks through for a mapped kind.
+        assert!(!io_error_message(&Error::from(ErrorKind::NotFound)).contains("os error"));
     }
 
     #[test]

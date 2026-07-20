@@ -806,6 +806,24 @@ pub struct Shell {
     /// `call_line_stack[k]` is the line where `fn_stack[k]` was invoked. Drives
     /// `BASH_LINENO` and the `caller` builtin. Kept in lockstep with `fn_stack`.
     call_line_stack: Vec<u32>,
+    /// The `BASH_ARGC` stack (only populated under `shopt -s extdebug`).
+    /// `bash_argc[0]` is the *innermost* frame's argument count, then outward.
+    /// The base frame (index last) is the shell's own positional-parameter count,
+    /// captured once at the extdebug OFF→ON transition; each function call made
+    /// while extdebug is on pushes its own arg count to the front. Materialised
+    /// into `arrays["BASH_ARGC"]` by `refresh_bash_arg_arrays`.
+    bash_argc: Vec<usize>,
+    /// The `BASH_ARGV` stack: a single flat, reversed list of every argument
+    /// across all frames in `bash_argc`, innermost-frame-last-arg first. For a
+    /// frame with count `c` at the front of `bash_argc`, its arguments occupy the
+    /// first `c` entries of `bash_argv` (reversed within the frame). Materialised
+    /// into `arrays["BASH_ARGV"]` by `refresh_bash_arg_arrays`.
+    bash_argv: Vec<String>,
+    /// Parallel to `fn_stack`: whether each active call pushed an arg frame onto
+    /// `bash_argc`/`bash_argv` (true iff extdebug was on at call time). A call's
+    /// return pops its arg frame only when its recorded flag is true, so toggling
+    /// extdebug mid-call cannot desynchronise the stacks.
+    arg_frame_pushed: Vec<bool>,
     /// Nesting depth of `source`/`.` invocations currently executing. `return`
     /// is only valid inside a function *or* a sourced script; this lets the
     /// `return` builtin distinguish a legal source-level return from an illegal
@@ -1024,6 +1042,9 @@ impl Shell {
             local_opt_saves: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
+            bash_argc: Vec::new(),
+            bash_argv: Vec::new(),
+            arg_frame_pushed: Vec::new(),
             source_depth: 0,
             loop_depth: 0,
             readonly: HashSet::new(),
@@ -3158,6 +3179,12 @@ impl Shell {
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),
             call_line_stack: self.call_line_stack.clone(),
+            // A subshell does not push its own arg frame, but it inherits (clones)
+            // the parent's BASH_ARGC/BASH_ARGV stack so `${BASH_ARGV[@]}` reads the
+            // same inside `( … )` as outside, matching bash.
+            bash_argc: self.bash_argc.clone(),
+            bash_argv: self.bash_argv.clone(),
+            arg_frame_pushed: self.arg_frame_pushed.clone(),
             // A subshell starts a fresh `source` nesting (it is not itself a
             // sourced script), though it inherits the function context above.
             source_depth: 0,
@@ -4907,6 +4934,16 @@ impl Shell {
         self.fn_stack.push(name.to_string());
         self.call_line_stack.push(self.current_line);
         self.refresh_funcname();
+        // Under `extdebug`, each function call pushes its argument count/values
+        // onto the BASH_ARGC/BASH_ARGV stack. Record whether we pushed (per
+        // frame) so the matching return pops only frames that were actually
+        // pushed — extdebug can be toggled mid-call, so we cannot re-check it at
+        // return time.
+        let pushed_arg_frame = self.extdebug_on();
+        if pushed_arg_frame {
+            self.push_arg_frame(args);
+        }
+        self.arg_frame_pushed.push(pushed_arg_frame);
         // The `DEBUG`/`RETURN`/`ERR` traps are, by default, NOT inherited by a
         // called function. bash propagates DEBUG/RETURN into a function only when
         // `functrace` (`set -T`) is on or the function carries the trace
@@ -4987,6 +5024,10 @@ impl Shell {
         self.fn_stack.pop();
         self.call_line_stack.pop();
         self.refresh_funcname();
+        // Pop this call's BASH_ARGC/BASH_ARGV frame iff we pushed one on entry.
+        if self.arg_frame_pushed.pop() == Some(true) {
+            self.pop_arg_frame();
+        }
 
         self.positional = saved_pos;
         for (k, old) in saved {
@@ -5116,6 +5157,63 @@ impl Shell {
         self.arrays.insert("FUNCNAME".to_string(), names);
         self.arrays.insert("BASH_LINENO".to_string(), linenos);
         self.arrays.insert("BASH_SOURCE".to_string(), sources);
+    }
+
+    /// Whether the `extdebug` shell option is currently enabled.
+    fn extdebug_on(&self) -> bool {
+        self.shopt.get("extdebug").copied().unwrap_or(false)
+    }
+
+    /// Push an argument frame onto the `BASH_ARGC`/`BASH_ARGV` stack: the frame's
+    /// count goes to the front of `bash_argc`, and its arguments — reversed — are
+    /// prepended to `bash_argv` (so `bash_argv[0]` is the innermost frame's last
+    /// argument). Only called while `extdebug` is on.
+    fn push_arg_frame(&mut self, args: &[String]) {
+        self.bash_argc.insert(0, args.len());
+        // Prepend args in reverse: iterate forward and insert each at the front so
+        // the last arg ends up first, matching bash's reversed BASH_ARGV layout.
+        for a in args {
+            self.bash_argv.insert(0, a.clone());
+        }
+        self.refresh_bash_arg_arrays();
+    }
+
+    /// Pop the innermost argument frame pushed by [`push_arg_frame`], removing its
+    /// count from the front of `bash_argc` and its arguments from the front of
+    /// `bash_argv`.
+    fn pop_arg_frame(&mut self) {
+        if self.bash_argc.is_empty() {
+            return;
+        }
+        let count = self.bash_argc.remove(0);
+        let drain = count.min(self.bash_argv.len());
+        self.bash_argv.drain(0..drain);
+        self.refresh_bash_arg_arrays();
+    }
+
+    /// Materialise `bash_argc`/`bash_argv` into the `BASH_ARGC`/`BASH_ARGV`
+    /// indexed arrays. When both stacks are empty the arrays are removed (bash
+    /// leaves them unset until `extdebug` first captures a base frame).
+    fn refresh_bash_arg_arrays(&mut self) {
+        if self.bash_argc.is_empty() && self.bash_argv.is_empty() {
+            self.arrays.remove("BASH_ARGC");
+            self.arrays.remove("BASH_ARGV");
+            return;
+        }
+        let argc: BTreeMap<usize, String> = self
+            .bash_argc
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.to_string()))
+            .collect();
+        let argv: BTreeMap<usize, String> = self
+            .bash_argv
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i, a.clone()))
+            .collect();
+        self.arrays.insert("BASH_ARGC".to_string(), argc);
+        self.arrays.insert("BASH_ARGV".to_string(), argv);
     }
 
     /// Capture the current `set`-option state for `local -`.
@@ -12069,6 +12167,10 @@ impl Shell {
         // Set/unset mode (names present with `-s` or `-u`).
         let mut status = 0;
         let mut changed = false;
+        // Track extdebug across this call: when it turns from off to on, bash
+        // captures a static "base" argument frame equal to the current positional
+        // parameters (see the extdebug base-frame handling below).
+        let extdebug_before = self.extdebug_on();
         for name in names {
             if !shopt_is_known(name) {
                 self.emit_stderr(
@@ -12079,6 +12181,15 @@ impl Shell {
             }
             self.shopt.insert(name.clone(), set);
             changed = true;
+        }
+        // On an extdebug OFF→ON transition, seed the BASH_ARGC/BASH_ARGV stack
+        // with a base frame holding the shell's *current* positional parameters.
+        // This base is a static snapshot — a later `set --` does not change it —
+        // and disabling extdebug does not clear it (matching bash). Subsequent
+        // function calls push their own frames on top of this base.
+        if !extdebug_before && self.extdebug_on() {
+            let base = self.positional.clone();
+            self.push_arg_frame(&base);
         }
         // Keep `$BASHOPTS` current (bash recomputes it on every shopt change).
         if changed {
@@ -21675,6 +21786,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(src).0, "2 3\n");
         // Parallel arrays are all unset outside any function.
         assert_eq!(run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0, "[][]\n");
+    }
+
+    #[test]
+    fn bash_argc_argv_extdebug_stack() {
+        // Under `shopt -s extdebug`, enabling extdebug captures a base frame from
+        // the current positional parameters (none in the harness → count 0), then
+        // each function call pushes its argument count (front of BASH_ARGC) and
+        // its args reversed (front of BASH_ARGV). BASH_ARGV is a single flat,
+        // reversed stack across all frames.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"; }; f q r").0,
+            "[2 0][r q]\n"
+        );
+        // Nested calls stack innermost-first; BASH_ARGV concatenates each frame's
+        // reversed args (g's "3 2 1", then f's "a", then the empty base).
+        assert_eq!(
+            run("shopt -s extdebug; f(){ g 1 2 3; }; g(){ echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"; }; f a").0,
+            "[3 1 0][3 2 1 a]\n"
+        );
+        // Returning from a call pops only the frame it pushed; the static base
+        // frame (count 0) survives.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ :; }; f a b c; echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"").0,
+            "[0][]\n"
+        );
+        // Without extdebug, osh leaves BASH_ARGC/BASH_ARGV unset. (bash exposes an
+        // undocumented top-level base frame here via a lazy-materialisation
+        // artifact; osh follows the documented "extended debugging mode only"
+        // contract — see known-issues.md TD-OILS-MISSING-SPECIAL-ARRAYS.)
+        assert_eq!(run("f(){ echo \"[${BASH_ARGC[@]:-U}]\"; }; f a b").0, "[U]\n");
+        // Enabling extdebug inside a function captures that function's positional
+        // params as the base frame, then a nested call pushes on top.
+        assert_eq!(
+            run("f(){ shopt -s extdebug; g z; }; g(){ echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"; }; f a b").0,
+            "[1 2][z b a]\n"
+        );
     }
 
     #[test]

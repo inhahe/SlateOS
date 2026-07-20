@@ -533,31 +533,57 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
-### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`, `BASH_ARGC`/`BASH_ARGV`) — 2026-07-19
+### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`) — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` variable seeding
 (`seed_shell_vars`) and the dynamic-array materialisers (cf.
 `refresh_funcname` for FUNCNAME/BASH_SOURCE, `refresh_dirstack` for
-DIRSTACK).
+DIRSTACK, `refresh_bash_arg_arrays` for BASH_ARGC/BASH_ARGV).
 
 **What:** bash predefines several dynamic array variables that osh does
-not. Confirmed missing (each `${VAR+set}` is empty in osh, `set` in
-bash): `GROUPS` (the invoking user's supplementary group IDs),
-`BASH_ARGC` and `BASH_ARGV` (the extended-debug call-argument stack).
-`declare -a` with no name therefore lists fewer arrays than bash. DIRSTACK
-is now implemented (see `refresh_dirstack`); FUNCNAME, BASH_SOURCE,
-BASH_LINENO already were.
+not. Confirmed missing (`${VAR+set}` empty in osh, `set` in bash):
+`GROUPS` (the invoking user's supplementary group IDs). DIRSTACK is now
+implemented (see `refresh_dirstack`); FUNCNAME, BASH_SOURCE, BASH_LINENO
+already were; **`BASH_ARGC`/`BASH_ARGV` are now implemented — RESOLVED
+2026-07-20** (see below).
 
 **Why deferred:** `GROUPS` needs a host notion of Unix supplementary
 groups, which the Windows host build and the current slateos user model
-do not expose; `BASH_ARGC`/`BASH_ARGV` are only populated under
-`shopt -s extdebug` and are used almost exclusively by the `caller`
-builtin / debuggers. Low value; no known script depends on them.
+do not expose. Low value; no known script depends on it.
 
 **Proper fix:** when the process/identity layer exposes supplementary
-groups, materialise `GROUPS` from it (like `refresh_dirstack`). Wire
-`BASH_ARGC`/`BASH_ARGV` alongside the existing FUNCNAME call-stack
-machinery when `extdebug` support is added.
+groups, materialise `GROUPS` from it (like `refresh_dirstack`).
+
+**BASH_ARGC / BASH_ARGV — RESOLVED 2026-07-20.** Implemented as the
+extended-debugging call-argument stack (`bash_argc: Vec<usize>`,
+`bash_argv: Vec<String>`, `arg_frame_pushed: Vec<bool>` on `Shell`;
+helpers `extdebug_on`, `push_arg_frame`, `pop_arg_frame`,
+`refresh_bash_arg_arrays`). Semantics matched against bash: enabling
+`shopt -s extdebug` captures a base frame from the *current* positional
+params (count → BASH_ARGC front, params reversed → BASH_ARGV front); each
+function call made while extdebug is on pushes its arg count/values on
+top; a call's return pops **only** the frame it actually pushed (recorded
+per-frame in `arg_frame_pushed`, so toggling extdebug mid-call cannot
+desync the stacks); disabling extdebug does not clear the stack; the base
+snapshot is static (a later `set --` does not change it); subshells
+inherit (clone) the parent stack but push no frame of their own. All of
+these cases were verified equal to MSYS bash, plus enabling extdebug
+*inside* a function (base = that function's positional). Regression test:
+`bash_argc_argv_extdebug_stack`.
+
+*Deliberate divergence (documented, not a bug):* **without** `extdebug`,
+bash still exposes an undocumented top-level base frame — e.g.
+`echo ${BASH_ARGC[@]:-U}` at a `-c` top level prints `0` in bash but `U`
+(unset) in osh. bash builds this via a lazy-materialisation artifact whose
+observable behaviour is self-contradictory (referencing `BASH_ARGV` before
+a `set --` freezes it at the *pre-set* value; not referencing it first
+yields the *post-set* value; and a non-extdebug function call leaves
+`BASH_ARGC` unset *inside* the call yet materialises the base *after*
+return). bash's own man page says "The shell sets BASH_ARGC only when in
+extended debugging mode", so osh follows that documented contract and
+populates BASH_ARGC/BASH_ARGV only under `extdebug`. Replicating the
+undocumented non-extdebug quirk was judged not worth the bug risk for a
+behaviour no real script relies on.
 
 ### TD-OILS-COND-PAREN-REGEX. `[[ … =~ ( … ]]` — bash treats `(` as conditional grouping, osh treats it as regex — 2026-07-19
 
@@ -2813,8 +2839,8 @@ verified against MSYS bash). Still **missing** relative to bash:
 *default* (for host runs and pre-login target state) needs the operator's call.
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
-diverges from bash because osh does not define `BASH_ALIASES`, `BASH_ARGC`,
-`BASH_ARGV`, `BASH_CMDS`, or `BASH_LOADABLES_PATH`.
+diverges from bash because osh does not define `BASH_ALIASES`, `BASH_CMDS`, or
+`BASH_LOADABLES_PATH`.
 (`BASH_EXECUTION_STRING` — the `-c` command string — is now defined, seeded via
 `Shell::set_execution_string` from `main.rs`'s `-c` path, so it reads correctly
 and appears in `${!BASH*}`. `BASH_ARGV0` is now defined too — **RESOLVED
@@ -2823,12 +2849,14 @@ and appears in `${!BASH*}`. `BASH_ARGV0` is now defined too — **RESOLVED
 and `declare -p`. One deliberate divergence: bash's `+=` on `BASH_ARGV0` relies
 on an obscure lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b` yields
 `b`, not `ab`, unless a read intervened — so osh uses the predictable append
-(`ab`) instead; `BASH_ARGV0+=` is vanishingly rare in real scripts.) The
-remainder are bash-internal (the call-stack arrays `BASH_ARGC`/`BASH_ARGV`, the
-dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`, etc.); implementing them
-faithfully is a larger, separate task. `BASH_LOADABLES_PATH` is meaningless on
-SlateOS (no loadable builtins) and is intentionally omitted. Low priority —
-scripts rarely enumerate `BASH*`.
+(`ab`) instead; `BASH_ARGV0+=` is vanishingly rare in real scripts.
+`BASH_ARGC`/`BASH_ARGV` — the extdebug call-argument stack — are now defined too,
+**RESOLVED 2026-07-20**; see TD-OILS-MISSING-SPECIAL-ARRAYS for the full
+semantics and the one documented non-extdebug divergence.) The remainder are
+bash-internal (the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`, etc.);
+implementing them faithfully is a larger, separate task. `BASH_LOADABLES_PATH` is
+meaningless on SlateOS (no loadable builtins) and is intentionally omitted. Low
+priority — scripts rarely enumerate `BASH*`.
 
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
 `param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)

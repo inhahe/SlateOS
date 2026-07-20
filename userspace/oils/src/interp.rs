@@ -4370,14 +4370,25 @@ impl Shell {
         }
 
         // A readonly variable cannot be set even as a temporary command prefix
-        // (`readonly x; x=1 cmd` → error, command not run, status 1). Guard
-        // before dispatch so no path (function/builtin/external) mutates it.
-        for (k, _) in &assigns {
-            let target = self.resolve_ref_name(k);
-            if self.readonly.contains(&target) {
-                self.emit_stderr(format!("{}{target}: readonly variable\n", self.err_prefix()).as_bytes());
-                self.last_status = 1;
-                return Flow::Next;
+        // (`readonly x; x=1 cmd`). bash (non-POSIX) reports the error but STILL
+        // runs the command: the failed assignment is simply dropped from the
+        // temporary environment and the command's own exit status stands (so a
+        // succeeding command yields 0, not 1). Filter the offending assignments
+        // out — no dispatch path can then mutate the readonly var — and emit one
+        // diagnostic per hit before continuing.
+        let ro_targets: Vec<String> =
+            assigns.iter().map(|(k, _)| self.resolve_ref_name(k)).collect();
+        if ro_targets.iter().any(|t| self.readonly.contains(t)) {
+            let mut i = 0;
+            assigns.retain(|_| {
+                let keep = !self.readonly.contains(&ro_targets[i]);
+                i += 1;
+                keep
+            });
+            for t in ro_targets.iter().filter(|t| self.readonly.contains(*t)) {
+                self.emit_stderr(
+                    format!("{}{t}: readonly variable\n", self.err_prefix()).as_bytes(),
+                );
             }
         }
 
@@ -19471,6 +19482,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn readonly_temporary_prefix_reports_but_runs_command() {
+        // A readonly var used as a *temporary* command prefix (`readonly x; x=2 cmd`)
+        // differs from a bare reassignment: bash (non-POSIX) reports the error but
+        // STILL runs the command, dropping the failed assignment from the temporary
+        // environment. The command's own status stands (so a success yields 0).
+        let (o, s) = run("readonly c=1; c=2 echo hi 2>/dev/null; echo \"rc=$?\"");
+        assert_eq!(o, "hi\nrc=0\n");
+        assert_eq!(s, 0);
+        // The command's failure status is preserved, not overridden by the error.
+        assert_eq!(run("readonly c=1; c=2 false 2>/dev/null; echo \"rc=$?\"").0, "rc=1\n");
+        // The readonly var is left unchanged; a *non*-readonly sibling prefix on
+        // the same command still takes effect in the child environment.
+        let (o2, _) = run("readonly c=1; c=2 export d=5 2>/dev/null; echo \"c=$c d=$d\"");
+        assert_eq!(o2, "c=1 d=5\n");
+        // The diagnostic still names the readonly variable.
+        let err = run("readonly c=1; { c=2 echo hi; } 2>&1").0;
+        assert!(err.contains("c: readonly variable"), "got: {err:?}");
+    }
+
+    #[test]
     fn readonly_blocks_unset() {
         let (o, _) = run("readonly x=hi; unset x; echo $x");
         assert_eq!(o, "hi\n");
@@ -24007,10 +24038,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn env_prefix_readonly_var_errors() {
-        // `readonly y; y=1 cmd` cannot temporarily override a readonly variable:
-        // the command is not run and the status is 1, y keeps its value.
-        let (out, _) = run("readonly y=5; y=9 :; echo \"$y|$?\"");
-        assert_eq!(out, "5|1\n");
+        // `readonly y; y=1 cmd` cannot temporarily override a readonly variable,
+        // but bash (non-POSIX) reports the error and STILL runs the command (here
+        // the `:` no-op, status 0); y keeps its value. The error goes to stderr,
+        // so with it discarded the captured stdout is just "5|0".
+        let (out, _) = run("readonly y=5; y=9 : 2>/dev/null; echo \"$y|$?\"");
+        assert_eq!(out, "5|0\n");
     }
 
     #[test]

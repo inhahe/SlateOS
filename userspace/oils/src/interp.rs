@@ -1269,6 +1269,15 @@ impl Shell {
         // *later* caller-frame command, run after the trap now exists globally,
         // does fire). Armed = an ERR trap exists and is not inheritance-masked.
         let err_armed_at_start = self.traps.contains_key("ERR") && !self.trap_suppressed("ERR");
+        // Snapshot the errexit flag *before* each executed command, keeping the
+        // value in effect just before the final-executed command. bash decides
+        // whether a failure is fatal using the errexit state as it was when that
+        // command *began*, not afterwards: `set -e -Z` enables errexit and then
+        // fails in the same builtin, but because errexit was off when the command
+        // started its own failure is not fatal (bash continues). A *later*
+        // command in the same list — including one enabled mid-list, e.g.
+        // `true && set -e && false` — does see errexit on and does exit.
+        let mut errexit_before_last = self.errexit;
         let flow = self.exec_pipeline(&ao.first, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
@@ -1283,6 +1292,7 @@ impl Shell {
                 AndOrOp::Or => self.last_status != 0,
             };
             if run {
+                errexit_before_last = self.errexit;
                 let flow = self.exec_pipeline(pipe, out, stdin);
                 if !matches!(flow, Flow::Next) {
                     return flow;
@@ -1309,7 +1319,7 @@ impl Shell {
             // function does not fire the caller's ERR trap.
             self.fire_trap("ERR");
         }
-        if self.errexit && failed_unexempt {
+        if errexit_before_last && failed_unexempt {
             return Flow::Exit(self.last_status);
         }
         Flow::Next
@@ -11028,7 +11038,15 @@ impl Shell {
                 "-o" | "+o" => {
                     let enable = arg.starts_with('-');
                     if let Some(opt) = args.get(i + 1) {
-                        self.set_named_option(opt, enable);
+                        if !self.set_named_option(opt, enable) {
+                            // bash: `set: NAME: invalid option name`, status 2,
+                            // stopping before any later options are applied.
+                            self.emit_stderr(
+                                format!("{}set: {opt}: invalid option name\n", self.err_prefix())
+                                    .as_bytes(),
+                            );
+                            return 2;
+                        }
                         i += 2;
                     } else {
                         // Bare `set -o` lists options in `name  on/off` columns;
@@ -11050,7 +11068,16 @@ impl Shell {
                         if c == 'o' {
                             match args.get(i + 1 + extra_words) {
                                 Some(opt) => {
-                                    self.set_named_option(opt, enable);
+                                    if !self.set_named_option(opt, enable) {
+                                        self.emit_stderr(
+                                            format!(
+                                                "{}set: {opt}: invalid option name\n",
+                                                self.err_prefix()
+                                            )
+                                            .as_bytes(),
+                                        );
+                                        return 2;
+                                    }
                                     extra_words += 1;
                                 }
                                 None => {
@@ -11058,8 +11085,18 @@ impl Shell {
                                     return self.write_bytes(out, redir, text.as_bytes());
                                 }
                             }
-                        } else {
-                            self.set_short_option(c, enable);
+                        } else if !self.set_short_option(c, enable) {
+                            // bash: `set: -X: invalid option` + usage, status 2,
+                            // stopping before later cluster letters are applied.
+                            let sign = if enable { '-' } else { '+' };
+                            self.emit_stderr(
+                                format!("{}set: {sign}{c}: invalid option\n", self.err_prefix())
+                                    .as_bytes(),
+                            );
+                            self.emit_stderr(
+                                b"set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n",
+                            );
+                            return 2;
                         }
                     }
                     i += 1 + extra_words;
@@ -11073,9 +11110,12 @@ impl Shell {
         0
     }
 
-    /// Apply a single-letter `set` option (`-e`/`-u`/`-x`/…). Unknown letters are
-    /// accepted and ignored for compatibility.
-    fn set_short_option(&mut self, c: char, enable: bool) {
+    /// Apply a single-letter `set` option (`-e`/`-u`/`-x`/…). Returns `false` for
+    /// a letter bash does not accept (so the caller can report `set: -X: invalid
+    /// option`). Letters bash accepts but osh does not model (`b h k m p t v H P`
+    /// — history/job-control/hashing/verbose/privileged and friends) are accepted
+    /// as no-ops so `set -m`, `set -h`, … don't spuriously fail.
+    fn set_short_option(&mut self, c: char, enable: bool) -> bool {
         match c {
             'e' => self.errexit = enable,
             'u' => self.nounset = enable,
@@ -11087,14 +11127,18 @@ impl Shell {
             'T' => self.functrace = enable,
             'E' => self.errtrace = enable,
             'B' => self.braceexpand = enable,
-            _ => {}
+            // Accepted by bash (`-abefhkmnptuvxBCEHPT`) but not modelled here.
+            'b' | 'h' | 'k' | 'm' | 'p' | 't' | 'v' | 'H' | 'P' => {}
+            _ => return false,
         }
         self.refresh_shellopts();
+        true
     }
 
-    /// Apply a `set -o NAME` / `set +o NAME` long option. Unknown names are
-    /// accepted and ignored.
-    fn set_named_option(&mut self, name: &str, enable: bool) {
+    /// Apply a `set -o NAME` / `set +o NAME` long option. Returns `false` for an
+    /// unrecognised name (so the caller can report `set: NAME: invalid option
+    /// name`, matching bash).
+    fn set_named_option(&mut self, name: &str, enable: bool) -> bool {
         match name {
             "pipefail" => self.pipefail = enable,
             "errexit" => self.errexit = enable,
@@ -11107,9 +11151,17 @@ impl Shell {
             "functrace" => self.functrace = enable,
             "errtrace" => self.errtrace = enable,
             "braceexpand" => self.braceexpand = enable,
-            _ => {}
+            // Standard bash option names osh does not model (line-editing
+            // `emacs`/`vi`, `history`/`histexpand`, job-control `monitor`/
+            // `notify`, `posix`, `privileged`, `verbose`, …). bash accepts them
+            // without error; accept them as no-ops so scripts that toggle them
+            // don't spuriously fail. Only a name outside the standard set is a
+            // "invalid option name".
+            _ if STANDARD_SET_O_OPTIONS.contains(&name) => {}
+            _ => return false,
         }
         self.refresh_shellopts();
+        true
     }
 
     /// Recompute `$SHELLOPTS` from the current option state and store it as a
@@ -19210,6 +19262,53 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("set -e; true && false; echo after");
         assert_eq!(o, "");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn set_errexit_enabled_and_failing_same_command_is_exempt() {
+        // bash decides errexit-fatality from the flag state at the command's
+        // *start*: a `set` that both enables `-e` and fails in one invocation
+        // (`set -e -Z`, invalid option) is not fatal to itself — the shell
+        // continues. `-Z` is reported but the following command still runs.
+        let (o, s) = run("set -e -Z 2>/dev/null; echo after");
+        assert_eq!(o, "after\n");
+        assert_eq!(s, 0);
+        // But a *separate* later command failing under the now-enabled errexit
+        // is fatal (`set -Z` here begins with errexit already on).
+        let (o2, s2) = run("set -e; set -Z 2>/dev/null; echo after");
+        assert_eq!(o2, "");
+        assert_eq!(s2, 2);
+        // errexit enabled mid-AND-list still governs a later element of the
+        // same list: `true && set -e && false` exits on the final `false`.
+        let (o3, s3) = run("true && set -e && false; echo after");
+        assert_eq!(o3, "");
+        assert_eq!(s3, 1);
+    }
+
+    #[test]
+    fn set_rejects_invalid_options() {
+        // `set -o BADNAME`: status 2, `invalid option name`, and no later
+        // options applied. The `run` harness is stdin-like (no line number).
+        let (o, s) = run("set -o badoption 2>&1");
+        assert_eq!(o, "osh: set: badoption: invalid option name\n");
+        assert_eq!(s, 2);
+        // A bad short option: status 2, `invalid option` + the usage line.
+        let (o2, s2) = run("set -q 2>&1");
+        assert_eq!(
+            o2,
+            "osh: set: -q: invalid option\n\
+             set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n"
+        );
+        assert_eq!(s2, 2);
+        // `set` stops at the first invalid option: `-e` before `-Z` is applied
+        // (errexit on) but processing aborts at `-Z` with status 2.
+        assert_eq!(run("set -e -Z 2>&1 | head -1; echo x").1, 0);
+        // Standard bash `-o` names osh does not model are accepted as no-ops.
+        assert_eq!(run("set -o vi; set -o posix; set -o emacs; echo ok").0, "ok\n");
+        assert_eq!(run("set -o vi; set -o posix; set -o emacs; echo ok").1, 0);
+        // Short flags bash accepts but osh does not model are no-ops too.
+        assert_eq!(run("set -h; set -m; set -b; echo ok").0, "ok\n");
+        assert_eq!(run("set -h; set -m; set -b; echo ok").1, 0);
     }
 
     #[test]

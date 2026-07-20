@@ -220,6 +220,18 @@ struct Job {
     no_hup: bool,
 }
 
+/// One function frame's trap-inheritance mask (see [`Shell::trap_suppress`]).
+/// A `true` field means the correspondingly-named trap is currently inherited
+/// but suppressed: it exists in `self.traps` (so `trap -p` still shows it and it
+/// persists globally) but must not fire while this frame is the innermost
+/// function. Cleared per-name when the body reassigns that trap.
+#[derive(Clone, Copy, Default)]
+struct TrapSuppress {
+    debug: bool,
+    ret: bool,
+    err: bool,
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, String>,
@@ -395,6 +407,13 @@ pub struct Shell {
     /// trace attribute (`declare -ft name`, tracked in [`Shell::fn_trace_attr`]).
     /// Consulted on function entry in [`Shell::call_function`].
     functrace: bool,
+    /// `set -E` (errtrace / `set -o errtrace`): make the `ERR` trap be inherited
+    /// by shell functions, command substitutions, and subshells. When off (bash
+    /// default), a failing command inside a called function does NOT fire the
+    /// caller's ERR trap (only the function call itself failing does, at the
+    /// caller level). Unlike DEBUG/RETURN this is not affected by the function
+    /// trace attribute. Consulted on function entry in [`Shell::call_function`].
+    errtrace: bool,
     /// The shell was invoked as `osh -c COMMAND`. Bash reports a `c` flag in
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
@@ -497,6 +516,18 @@ pub struct Shell {
     /// function inherits the caller's `DEBUG` and `RETURN` traps even when
     /// `functrace` (`set -T`) is off. Inherited by subshell clones.
     fn_trace_attr: HashSet<String>,
+    /// Per-function-frame trap-inheritance suppression, pushed on every function
+    /// entry and popped on return (kept in lockstep with `fn_stack`). Each frame
+    /// names the traps that the caller installed but that this frame does NOT
+    /// inherit, so they must not fire while this frame is the innermost function.
+    /// DEBUG/RETURN are suppressed when neither `functrace` nor the function's
+    /// trace attribute is set; ERR is suppressed when `errtrace` is off. A trap
+    /// stops being suppressed for the current frame as soon as the body reassigns
+    /// it via the `trap` builtin — bash: a body-installed trap fires normally and
+    /// persists globally, whereas an inherited one is only masked, never removed
+    /// from `self.traps`. Consulted at each trap fire site via
+    /// [`Shell::trap_suppressed`]; cleared per-name by the `trap` builtin.
+    trap_suppress: Vec<TrapSuppress>,
     /// Array names (indexed or associative) that have been *assigned a value*
     /// at least once — via a literal (`a=(…)`, including the empty `a=()`), an
     /// element assignment (`a[i]=v`), an append, or a value-carrying `declare`.
@@ -613,6 +644,7 @@ impl Shell {
             noclobber: false,
             noexec: false,
             functrace: false,
+            errtrace: false,
             command_mode: false,
             script_mode: false,
             errexit_suppress: 0,
@@ -634,6 +666,7 @@ impl Shell {
             capcase_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
             fn_trace_attr: HashSet::new(),
+            trap_suppress: Vec::new(),
             dir_stack: Vec::new(),
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
@@ -876,6 +909,15 @@ impl Shell {
 
     fn exec_and_or(&mut self, ao: &AndOr, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let n_rest = ao.rest.len();
+        // Snapshot whether the ERR trap is *armed for this frame* at the moment
+        // this list starts. bash fires ERR for a failing command based on the
+        // trap state when the command began — not afterwards. This matters when
+        // the command is a function call that installs its own ERR trap and then
+        // fails: at the caller frame the trap did not yet exist when the call
+        // started, so the call's own non-zero return must not fire it (whereas a
+        // *later* caller-frame command, run after the trap now exists globally,
+        // does fire). Armed = an ERR trap exists and is not inheritance-masked.
+        let err_armed_at_start = self.traps.contains_key("ERR") && !self.trap_suppressed("ERR");
         let flow = self.exec_pipeline(&ao.first, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
@@ -907,8 +949,13 @@ impl Shell {
             && ran_final
             && !final_pipe.negated
             && self.last_status != 0;
-        if failed_unexempt {
-            // The ERR trap fires regardless of whether `set -e` is on.
+        if failed_unexempt && err_armed_at_start {
+            // The ERR trap fires regardless of whether `set -e` is on, but only
+            // when it was armed for this frame at the command's start (see the
+            // `err_armed_at_start` snapshot above). Suppression inside an
+            // untraced function that merely inherited it is already folded into
+            // that snapshot: without `errtrace` (`set -E`) a failure inside the
+            // function does not fire the caller's ERR trap.
             self.fire_trap("ERR");
         }
         if self.errexit && failed_unexempt {
@@ -943,7 +990,11 @@ impl Shell {
         // subshell resets the trap, so without functrace only these parent-side
         // firings are observable. A single-command "pipeline" fires DEBUG via
         // the normal `exec_simple` path instead, so handle only `len > 1` here.
-        if pipe.commands.len() > 1 && !self.in_trap && self.traps.contains_key("DEBUG") {
+        if pipe.commands.len() > 1
+            && !self.in_trap
+            && self.traps.contains_key("DEBUG")
+            && !self.trap_suppressed("DEBUG")
+        {
             for cmd in &pipe.commands {
                 if let Some(sc) = Self::stage_simple(cmd) {
                     self.vars
@@ -2476,6 +2527,7 @@ impl Shell {
             noclobber: self.noclobber,
             noexec: self.noexec,
             functrace: self.functrace,
+            errtrace: self.errtrace,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
             // A subshell starts outside any condition/negation context.
@@ -2507,15 +2559,28 @@ impl Shell {
             capcase_attr: self.capcase_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
             fn_trace_attr: self.fn_trace_attr.clone(),
+            // Keep the suppression stack in lockstep with the cloned `fn_stack`.
+            // A subshell resets non-ignored traps, so most suppression flags are
+            // moot there, but preserving the stack keeps nested function calls
+            // inside the subshell correctly aligned.
+            trap_suppress: self.trap_suppress.clone(),
             dir_stack: self.dir_stack.clone(),
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
-            // (bash). Ignored ('') traps are inherited; keep only those.
+            // (bash). Ignored ('') traps are always inherited. Additionally, a
+            // subshell inherits the DEBUG/RETURN traps when `functrace` is on and
+            // the ERR trap when `errtrace` is on — matching bash, which
+            // propagates these pseudo-signal traps into subshells only under the
+            // corresponding trace option.
             traps: self
                 .traps
                 .iter()
-                .filter(|(_, v)| v.is_empty())
+                .filter(|(k, v)| {
+                    v.is_empty()
+                        || (self.functrace && (k.as_str() == "DEBUG" || k.as_str() == "RETURN"))
+                        || (self.errtrace && k.as_str() == "ERR")
+                })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             // A subshell fires its *own* EXIT trap when it exits (bash). The
@@ -3756,8 +3821,9 @@ impl Shell {
                 .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
         }
         // The DEBUG trap runs before each simple command (guarded so a handler's
-        // own commands don't recurse).
-        if !self.in_trap && self.traps.contains_key("DEBUG") {
+        // own commands don't recurse). Suppressed inside an untraced function
+        // frame that merely inherited the caller's DEBUG trap (bash).
+        if !self.in_trap && self.traps.contains_key("DEBUG") && !self.trap_suppressed("DEBUG") {
             self.fire_trap("DEBUG");
         }
         // Expand the command words into argv (with the current variable values,
@@ -4091,23 +4157,22 @@ impl Shell {
         self.fn_stack.push(name.to_string());
         self.call_line_stack.push(self.current_line);
         self.refresh_funcname();
-        // The `DEBUG` and `RETURN` traps are, by default, NOT inherited by a
-        // called function: bash only propagates them into a function when
-        // `functrace` (`set -T` / `set -o functrace`) is on or the function
-        // carries the trace attribute (`declare -ft name`). When neither holds,
-        // save and remove both for the duration of the body — so `DEBUG` does
-        // not fire on the body's commands and `RETURN` does not fire on this
-        // return unless the body installs its own. They are restored on exit,
-        // which also discards any `DEBUG`/`RETURN` trap the body set for itself
-        // (bash: such a trap is local to that function invocation).
+        // The `DEBUG`/`RETURN`/`ERR` traps are, by default, NOT inherited by a
+        // called function. bash propagates DEBUG/RETURN into a function only when
+        // `functrace` (`set -T`) is on or the function carries the trace
+        // attribute (`declare -ft name`); it propagates ERR only when `errtrace`
+        // (`set -E`) is on. Rather than removing the traps (which would hide them
+        // from `trap -p` and lose them globally), we *mask* them for this frame:
+        // they stay in `self.traps` but are suppressed from firing while this is
+        // the innermost function. A trap the body reassigns via `trap` clears its
+        // own mask (`unsuppress_trap`) and then fires normally and persists after
+        // return — matching bash, where a body-installed trap is global.
         let trace_this = self.functrace || self.fn_trace_attr.contains(name);
-        let saved_traps: Option<(Option<String>, Option<String>)> = if trace_this {
-            None
-        } else {
-            let d = self.traps.remove("DEBUG");
-            let r = self.traps.remove("RETURN");
-            Some((d, r))
-        };
+        self.trap_suppress.push(TrapSuppress {
+            debug: !trace_this,
+            ret: !trace_this,
+            err: !self.errtrace,
+        });
         // A function body starts a fresh loop-nesting context: a `break`/
         // `continue` in the body must not escape to a loop at the call site
         // (bash resets loop_level on function entry). Save and reset.
@@ -4124,9 +4189,10 @@ impl Shell {
         self.loop_depth = saved_loop_depth;
         // The RETURN trap fires when the function returns, before its locals are
         // torn down (so the handler still sees the function's scope), matching
-        // bash. With tracing off this is only the trap the body installed for
-        // itself; with tracing on it is the inherited caller trap.
-        if self.traps.contains_key("RETURN") {
+        // bash. It fires when this frame inherits RETURN (tracing on) or when the
+        // body installed its own RETURN (which cleared the mask); a merely-
+        // inherited-but-masked RETURN stays suppressed.
+        if self.traps.contains_key("RETURN") && !self.trap_suppressed("RETURN") {
             // Under tracing, bash fires DEBUG once more immediately before the
             // RETURN trap action, with `$BASH_COMMAND` still the last body
             // command. (This extra firing only appears when a RETURN trap is
@@ -4136,18 +4202,9 @@ impl Shell {
             }
             self.fire_trap("RETURN");
         }
-        // Restore the caller's saved DEBUG/RETURN dispositions (and drop any the
-        // body installed), now that the RETURN trap has had its chance to fire.
-        if let Some((debug, ret)) = saved_traps {
-            self.traps.remove("DEBUG");
-            self.traps.remove("RETURN");
-            if let Some(d) = debug {
-                self.traps.insert("DEBUG".to_string(), d);
-            }
-            if let Some(r) = ret {
-                self.traps.insert("RETURN".to_string(), r);
-            }
-        }
+        // Drop this frame's trap mask. Any trap the body installed remains in
+        // `self.traps` (persisting globally, matching bash's `trap -p`).
+        self.trap_suppress.pop();
         if let Some(frame) = self.local_frames.pop() {
             // Restore shadowed variables in reverse declaration order.
             for (name, snap) in frame.into_iter().rev() {
@@ -6419,7 +6476,7 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 10] = [
+        let flags: [(char, bool); 11] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
@@ -6429,8 +6486,10 @@ impl Shell {
             ('x', self.xtrace),
             ('B', true),
             ('C', self.noclobber),
-            // bash's `shell_flags[]` orders `T` (functrace) after `C` (and after
-            // the unmodeled `E`/`H`/`P`), so it trails the other letters.
+            // bash's `shell_flags[]` orders `E` (errtrace) and `T` (functrace)
+            // after `C`: the table is …,B,C,E,H,P,T, so `E` precedes `T` (with
+            // the unmodeled `H`/`P` between them).
+            ('E', self.errtrace),
             ('T', self.functrace),
         ];
         for (c, on) in flags {
@@ -6539,6 +6598,19 @@ impl Shell {
         // and the exit status ($?) propagate back.
         let mut buf = Vec::new();
         let mut sub = self.clone_for_subshell();
+        // A command substitution does not run the caller's DEBUG/RETURN/ERR
+        // traps for its internal commands. `clone_for_subshell` would otherwise
+        // propagate them under `functrace`/`errtrace`, but bash's behaviour for
+        // these pseudo-signal traps inside `$( … )` is quirky and inconsistent
+        // (it captures the trap's own output into the result and fires on the
+        // sub's overall status rather than per-command). Rather than replicate
+        // that ill-defined behaviour, drop the (non-ignored) trace traps here so
+        // the substitution only propagates its captured stdout and exit status.
+        for k in ["DEBUG", "RETURN", "ERR"] {
+            if sub.traps.get(k).is_some_and(|v| !v.is_empty()) {
+                sub.traps.remove(k);
+            }
+        }
         {
             let mut out = Out::Capture(&mut buf);
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
@@ -7657,6 +7729,11 @@ impl Shell {
         for spec in specs {
             match normalize_sigspec(spec) {
                 Some(norm) => {
+                    // The body has explicitly touched this trap, so it is no
+                    // longer a merely-inherited trap for the current function
+                    // frame: clear any inheritance mask so it fires normally
+                    // (and, once set, persists globally after return).
+                    self.unsuppress_trap(&norm);
                     if reset {
                         self.traps.remove(&norm);
                     } else {
@@ -8710,6 +8787,35 @@ impl Shell {
             buf.extend_from_slice(ulimit_line(spec, v).as_bytes());
         }
         self.write_bytes(out, redir, &buf)
+    }
+
+    /// Whether the named trap (`DEBUG`/`RETURN`/`ERR`) is currently *suppressed*
+    /// by trap-inheritance masking — i.e. it exists in `self.traps` but was
+    /// installed by a caller and this innermost untraced function frame does not
+    /// inherit it, so it must not fire here. Only the innermost frame matters
+    /// (a nested function re-evaluates inheritance from its own attributes).
+    fn trap_suppressed(&self, name: &str) -> bool {
+        self.trap_suppress.last().is_some_and(|s| match name {
+            "DEBUG" => s.debug,
+            "RETURN" => s.ret,
+            "ERR" => s.err,
+            _ => false,
+        })
+    }
+
+    /// Clear the suppression of the named trap for the innermost function frame.
+    /// Called by the `trap` builtin when the body (re)assigns a DEBUG/RETURN/ERR
+    /// trap: a body-installed trap fires normally from that point on (bash), so
+    /// it is no longer treated as a merely-inherited, masked trap.
+    fn unsuppress_trap(&mut self, name: &str) {
+        if let Some(s) = self.trap_suppress.last_mut() {
+            match name {
+                "DEBUG" => s.debug = false,
+                "RETURN" => s.ret = false,
+                "ERR" => s.err = false,
+                _ => {}
+            }
+        }
     }
 
     /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
@@ -10208,6 +10314,7 @@ impl Shell {
             'C' => self.noclobber = enable,
             'n' => self.noexec = enable,
             'T' => self.functrace = enable,
+            'E' => self.errtrace = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10226,6 +10333,7 @@ impl Shell {
             "noclobber" => self.noclobber = enable,
             "noexec" => self.noexec = enable,
             "functrace" => self.functrace = enable,
+            "errtrace" => self.errtrace = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10249,6 +10357,9 @@ impl Shell {
         }
         if self.errexit {
             opts.push("errexit");
+        }
+        if self.errtrace {
+            opts.push("errtrace");
         }
         if self.functrace {
             opts.push("functrace");
@@ -10285,6 +10396,7 @@ impl Shell {
         let opts = [
             "allexport",
             "errexit",
+            "errtrace",
             "functrace",
             "noclobber",
             "noexec",
@@ -10323,6 +10435,7 @@ impl Shell {
             "noclobber" => self.noclobber,
             "noexec" => self.noexec,
             "functrace" => self.functrace,
+            "errtrace" => self.errtrace,
             _ => false,
         }
     }
@@ -17194,10 +17307,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
-    fn return_trap_set_inside_function_fires_then_discarded() {
-        // A RETURN trap set inside a function fires once on that function's
-        // return and is then discarded (the caller's disposition is restored),
-        // so a later untraced function does not re-fire it.
+    fn return_trap_set_inside_function_fires_then_masked() {
+        // A RETURN trap set inside a function fires once on that function's own
+        // return. It then persists globally (bash: `trap -p` still shows it), but
+        // a later *untraced* function does not inherit it, so it does not re-fire
+        // on g's return. Net: IR is incremented exactly once.
         assert_eq!(
             trap_var(
                 "f(){ trap 'IR=$((IR+1))' RETURN; :; }\nf\ng(){ :; }\ng",
@@ -17206,6 +17320,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn trap_set_inside_function_persists_globally() {
+        // A DEBUG trap installed inside a function is not discarded on return
+        // (bash): it stays in `self.traps` and fires for subsequent top-level
+        // commands. `f` installs DEBUG; after `f` returns the two top-level
+        // `:`/`echo` commands each fire it. `trap -p` output confirms persistence.
+        let mut sh = Shell::new();
+        sh.run_source("f(){ trap 'D=$((D+1))' DEBUG; }\nf\n:\n:");
+        // Two top-level simple commands after the definition fire the persisted
+        // DEBUG trap. (The `f` call itself fired it once before the body ran, but
+        // the trap was not yet installed at that point, so it starts counting at
+        // the first `:`.)
+        assert_eq!(sh.vars.get("D").map(String::as_str), Some("2"));
     }
 
     #[test]
@@ -17305,6 +17434,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(run("set -o").0.contains("functrace      \toff\n"));
         // Enabled functrace is listed in SHELLOPTS.
         assert!(run("set -T; echo \"$SHELLOPTS\"").0.contains("functrace"));
+    }
+
+    #[test]
+    fn errtrace_reported_in_options() {
+        // `[[ -o errtrace ]]`, `$-` (letter `E`), `set -o`, and SHELLOPTS all
+        // reflect the flag, both short (`-E`) and long (`-o errtrace`) spellings.
+        assert_eq!(run("[[ -o errtrace ]] && echo on || echo off").0, "off\n");
+        assert_eq!(run("set -E; [[ -o errtrace ]] && echo on").0, "on\n");
+        assert_eq!(run("set -o errtrace; [[ -o errtrace ]] && echo on").0, "on\n");
+        assert!(run("set -E; echo \"$-\"").0.contains('E'));
+        // bash orders `E` before `T` in `$-` (…,C,E,H,P,T).
+        let dollar_dash = run("set -ET; echo \"$-\"").0;
+        let e = dollar_dash.find('E');
+        let t = dollar_dash.find('T');
+        assert!(e.is_some() && t.is_some() && e < t);
+        assert!(run("set -o").0.contains("errtrace       \toff\n"));
+        assert!(run("set -E; echo \"$SHELLOPTS\"").0.contains("errtrace"));
+    }
+
+    #[test]
+    fn err_trap_not_inherited_without_errtrace() {
+        // Without `errtrace`, a failing command inside a called function does not
+        // fire the caller's ERR trap; only the function call itself failing at
+        // the caller level does. So ERR fires exactly once.
+        assert_eq!(
+            trap_var("trap 'E=$((E+1))' ERR\nf(){ false; }\nf", "E").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn err_trap_inherited_under_errtrace() {
+        // Under `set -E`, the ERR trap is inherited into the function: `false`
+        // inside fires it, and the function call failing at the top fires it
+        // again — two firings total.
+        assert_eq!(
+            trap_var("set -E\ntrap 'E=$((E+1))' ERR\nf(){ false; }\nf", "E").as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn err_trap_installed_in_function_not_double_fired() {
+        // When a function installs its OWN ERR trap and then fails, with no ERR
+        // trap present at the caller when the call started, the call's own
+        // non-zero return must not fire it again (bash): the trap did not exist
+        // at the caller frame when the call began. So ERR fires exactly once.
+        assert_eq!(
+            trap_var("f(){ trap 'E=$((E+1))' ERR; false; }\nf", "E").as_deref(),
+            Some("1")
+        );
     }
 
     #[test]

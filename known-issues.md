@@ -358,6 +358,53 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
+### TD-OILS-COND-PAREN-REGEX. `[[ … =~ ( … ]]` — bash treats `(` as conditional grouping, osh treats it as regex — 2026-07-19
+
+**Where:** `userspace/oils/src/parser.rs` conditional-expression parsing
+and `userspace/oils/src/interp.rs` `cond_regex`.
+
+**What:** `[[ abc =~ ( ]]` — bash parses `(`/`)` inside `[[ ]]` as
+expression-grouping operators (`[[ ( a || b ) && c ]]`), so a bare `(`
+with no closing `)` is a *shell parse error* ("unexpected EOF while
+looking for matching `)'"). osh instead treats everything after `=~` up
+to `]]` as the regex RHS, so `(` becomes an (invalid) regex and `[[`
+returns 2. The common invalid-regex path (`[[ x =~ [ ]]`) now matches
+bash exactly (status 2, no message); only the paren-as-grouping vs
+paren-as-regex distinction diverges.
+
+**Why deferred:** correctly disambiguating `(` between conditional
+grouping and a regex metacharacter requires bash's context-sensitive
+`[[` tokenizer (bash special-cases `(`/`)` only *outside* the `=~` RHS,
+and the RHS boundary itself depends on word splitting). This is a rare
+construct — a literal unbalanced `(` immediately after `=~`. The
+exit-code for genuinely-invalid regexes already matches.
+
+**Proper fix:** teach the `[[` parser bash's grouping rules and have the
+`=~` RHS consume a single word (bash reads the RHS as one word unless
+parenthesized), so `( )` grouping and regex parens are distinguished by
+position.
+
+### TD-OILS-PROCSUB-DEVFD. Process substitution as a *word* expands to a temp-file path, not `/dev/fd/N`, on the Windows dev host — 2026-07-19
+
+**Where:** `userspace/oils/src/interp.rs` process-substitution expansion
+(the `osh_psub_*.tmp` temp-file backing).
+
+**What:** `echo <(echo hi)` prints `/dev/fd/63` on Linux/bash but
+`C:/Users/…/Temp/osh_psub_<pid>_0.tmp` on osh's Windows dev host. The
+*content* is correct — reading the path yields `hi` — only the path
+*format* differs. This only manifests when a script inspects the
+substitution's filename itself (rare); using it as an input file works.
+
+**Why deferred:** `/dev/fd/N` requires a `/dev/fd` filesystem and real
+fd-passing, which the Windows host lacks; osh backs process substitution
+with temp files there. On the slateos target (which has proper fd
+support) this should present as `/dev/fd/N` and match bash. This is a
+host-platform artifact, not a shell-logic bug.
+
+**Proper fix:** on slateos, back `<()`/`>()` with anonymous pipes exposed
+via `/dev/fd/N` rather than temp files; the Windows dev host keeps the
+temp-file fallback.
+
 ### TD-OILS-DECLARE-BADID. `osh` `declare NAME[a b]=v` silently no-ops; bash errors "not a valid identifier" — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` `builtin_declare` argument

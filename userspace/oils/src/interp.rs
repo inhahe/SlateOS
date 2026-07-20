@@ -696,6 +696,11 @@ pub struct Shell {
     /// expansion, matching bash (which discards the command on an arithmetic
     /// error rather than running it with a bogus value).
     arith_error: bool,
+    /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
+    /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
+    /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
+    /// after evaluating the expression and overrides the status to 2.
+    cond_regex_error: bool,
     /// The name of the builtin whose execution should prefix an arithmetic
     /// diagnostic — bash's `this_command_name`. bash reports arithmetic errors
     /// raised while a builtin runs as `<name>: line N: <builtin>: <expr>: …`
@@ -912,6 +917,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             arith_error: false,
+            cond_regex_error: false,
             arith_cmd: None,
             glob_error: None,
             local_frames: Vec::new(),
@@ -2569,8 +2575,11 @@ impl Shell {
 
     /// Execute a `[[ … ]]` conditional expression: exit 0 if true, 1 if false.
     fn exec_cond(&mut self, e: &CondExpr) -> Flow {
+        self.cond_regex_error = false;
         let ok = self.cond_eval(e);
-        self.last_status = i32::from(!ok);
+        // A `=~` RHS that failed to compile as a regex makes bash return 2, not
+        // the ordinary 1 "expression false" — surface that distinct status.
+        self.last_status = if self.cond_regex_error { 2 } else { i32::from(!ok) };
         Flow::Next
     }
 
@@ -2610,8 +2619,9 @@ impl Shell {
     /// Evaluate `lhs =~ rhs` (POSIX-ERE match). On success, populate the
     /// `BASH_REMATCH` indexed array (element 0 = whole match, i = capture i;
     /// unmatched groups become empty strings) and return true. A malformed
-    /// pattern reports an error to stderr and yields false (matching bash,
-    /// which returns status 2 — we surface false without aborting the shell).
+    /// pattern sets `cond_regex_error` and yields false; `exec_cond` then reports
+    /// status 2 (matching bash, which prints nothing and returns 2 rather than
+    /// the ordinary 1 "no match").
     fn cond_regex(&mut self, l: &Word, r: &Word) -> bool {
         let subject = self.expand_to_string(l);
         // Quote-aware RHS: bash treats *unquoted* portions of the pattern as
@@ -2624,8 +2634,12 @@ impl Shell {
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
         let re = match crate::ere::Regex::new_flags(&pattern, ci) {
             Ok(re) => re,
-            Err(e) => {
-                self.errln(&format!("{}[[: =~: invalid regex: {}", self.err_prefix(), e.0));
+            Err(_) => {
+                // bash: an uncompilable `=~` RHS makes `[[` exit 2 (distinct from
+                // 1 "no match") and prints nothing. Signal the status override to
+                // `exec_cond`; the boolean result is false so `&&`/`||` chaining
+                // short-circuits as a non-match would.
+                self.cond_regex_error = true;
                 return false;
             }
         };
@@ -2916,6 +2930,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             arith_error: false,
+            cond_regex_error: false,
             arith_cmd: None,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
@@ -20755,8 +20770,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn cond_regex_invalid_pattern() {
-        // A malformed regex yields false (non-zero status), not a crash.
-        assert_ne!(run("[[ x =~ ( ]]").1, 0);
+        // A malformed regex makes `[[` exit with status 2 (bash's distinct
+        // "regex error" status), not 1 "no match", and prints nothing.
+        let (o, s) = run("[[ x =~ [ ]] 2>&1");
+        assert_eq!(o, "");
+        assert_eq!(s, 2);
+        // The status-2 propagates: `&&` short-circuits, `||` sees a non-match.
+        assert_eq!(run("[[ x =~ [ ]] && echo y || echo n").0, "n\n");
+        assert_eq!(run("[[ x =~ [ ]] && echo y || echo n").1, 0);
+        // A valid regex that fails to match still returns the ordinary 1.
+        assert_eq!(run("[[ x =~ ^z ]]").1, 1);
     }
 
     #[test]

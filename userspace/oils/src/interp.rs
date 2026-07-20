@@ -8393,9 +8393,10 @@ impl Shell {
     /// `call_line_stack[len-1-i]`, in source `$0`.
     fn builtin_caller(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         let depth = self.fn_stack.len();
-        // Not inside any function → no call context.
+        // Not inside any function → no call context. bash returns 1 *silently*
+        // here (the empty-stack check runs before any argument validation, so
+        // even `caller badarg` at top level just returns 1 with no message).
         if depth == 0 {
-            self.emit_stderr(format!("{}caller: no such frame\n", self.err_prefix()).as_bytes());
             return 1;
         }
         // bash prints the source label of the *caller's* frame — BASH_SOURCE[n+1]
@@ -8416,10 +8417,14 @@ impl Shell {
             }
             Some(expr) => {
                 let Ok(n) = expr.parse::<usize>() else {
+                    // bash: a non-numeric expr prints the invalid-number error
+                    // (with the shell location prefix) followed by the
+                    // unprefixed usage line, and returns 2.
                     self.emit_stderr(
                         format!("{}caller: {expr}: invalid number\n", self.err_prefix()).as_bytes(),
                     );
-                    return 1;
+                    self.emit_stderr(b"caller: usage: caller [expr]\n");
+                    return 2;
                 };
                 // Frame n reports BASH_LINENO[n] + FUNCNAME[n+1] (the caller of
                 // the function at depth n). Out of range when the caller frame
@@ -18417,8 +18422,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, c) = run("f() { caller 5; }\nf");
         assert_eq!(o, "");
         assert_eq!(c, 1);
-        // Outside any function → status 1.
-        assert_eq!(run("caller").1, 1);
+        // Outside any function → status 1, and crucially *silent* (bash prints
+        // no "no such frame" message). Even a bogus argument at top level is
+        // swallowed because the empty-stack check precedes arg validation.
+        let (o, c) = run("caller");
+        assert_eq!(o, "");
+        assert_eq!(c, 1);
+        assert_eq!(run("caller bogus").1, 1);
+        // A non-numeric argument *inside* a function → invalid-number error plus
+        // the usage line, status 2 (matching bash's builtin_usage path).
+        let (o, c) = run("f() { caller abc; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 2);
     }
 
     #[test]

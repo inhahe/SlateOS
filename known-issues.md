@@ -930,7 +930,16 @@ fatal unset-pointer / invalid-name errors), then apply the modifier to the
 target's value. Add tests: `ptr=missing; echo ${!ptr:-fb}` -> `fb`;
 `x=hello; p=x; echo ${!p:2:3}` -> `llo`; `x=FOO; p=x; echo ${!p,,}` -> `foo`.
 
-### TD-OILS-INDIRECT-ARITH. `osh` indirect-expansion error inside a `(( ))`/arith command is not fatal — 2026-07-19
+### TD-OILS-INDIRECT-ARITH. `osh` indirect-expansion error inside a `(( ))`/arith command is not fatal — 2026-07-19 — ✅ FIXED 2026-07-20 (stale; now fatal, matching bash)
+
+**Status:** FIXED. Verified byte-for-byte against bash 5.2:
+`(( ${!nonexist} )); echo after` — osh prints `line 1: nonexist: invalid
+indirect expansion`, aborts the arith command, does not run `after`, and exits
+1, exactly as bash does. The `${!ptr}` bad-pointer path now sets the fatal
+word-expansion error inside arithmetic-command expansion. Regression-guarded by
+an arith-command assertion added to `indirect_expansion_bad_pointer_is_fatal`.
+
+**Where (original):** `userspace/oils/src/interp.rs` — `eval_arith_raw` (~line 1198) and
 
 **Where:** `userspace/oils/src/interp.rs` — `eval_arith_raw` (~line 1198) and
 its callers (`exec_arith_command`, `builtin_let`, `exec_for_arith`, array
@@ -952,9 +961,16 @@ bad pointer), and — since `unbound_error` is not save/restored around
 `expand_arith_params` — the following simple command's driver check will then
 abort as bash does. Add test: `(( ${!nonexist} )); echo after` -> `("", 1)`.
 
-### TD-OILS-PREFIX-RO. `osh` aborts a command with a readonly temp-assignment prefix; bash runs it anyway — 2026-07-19
+### TD-OILS-PREFIX-RO. `osh` aborts a command with a readonly temp-assignment prefix; bash runs it anyway — 2026-07-19 — ✅ FIXED 2026-07-20 (stale; already resolved and regression-tested)
 
-**Where:** `userspace/oils/src/interp.rs`, the simple-command execution path
+**Status:** FIXED. `readonly x; x=1 echo mid; echo after` — osh prints
+`x: readonly variable` to stderr but still runs `echo mid` and `echo after`,
+exit 0, byte-for-byte matching bash 5.2. The readonly-prefix rejection now emits
+the warning and drops the failed assignment from the temporary environment
+without aborting the command. Regression-guarded by
+`readonly_temporary_prefix_reports_but_runs_command`.
+
+**Where (original):** `userspace/oils/src/interp.rs`, the simple-command execution path
 (~line 3009), the loop that rejects a readonly variable used as a temporary
 assignment prefix:
 ```rust

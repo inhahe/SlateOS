@@ -21445,6 +21445,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A valid-but-unset target is fine (empty, non-fatal):
         let (o, _) = run("p=missing; echo [${!p}]; echo after");
         assert_eq!(o, "[]\nafter\n");
+        // Arithmetic *command* context (TD-OILS-INDIRECT-ARITH): a bad pointer
+        // inside `(( … ))` is likewise fatal — the arith command aborts, `after`
+        // never runs, status 1. Matches bash 5.2.
+        let (o, s) = run("(( ${!nope} )); echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
     }
 
     #[test]

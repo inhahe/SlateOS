@@ -11087,29 +11087,41 @@ impl Shell {
             self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
             return 2;
         };
-        // Collect per-argument "invalid number" diagnostics (bash writes each to
-        // stderr and makes printf exit non-zero, but still emits the output with
-        // the best-effort numeric value).
-        let mut errors: Vec<String> = Vec::new();
-        // Overflow "warnings" (`Numerical result out of range`) are emitted to
-        // stderr like errors but, unlike them, leave printf's exit status at 0.
-        let mut warnings: Vec<String> = Vec::new();
-        // A malformed conversion directive (invalid/missing format character)
-        // aborts printf entirely with status 1, unlike the per-argument
-        // `errors` which keep processing the rest of the format.
-        let mut fatal: Option<String> = None;
-        let text = format_printf(fmt, &args[i + 1..], &mut errors, &mut warnings, &mut fatal);
-        for e in &errors {
-            self.emit_stderr(format!("{}printf: {e}\n", self.err_prefix()).as_bytes());
-        }
-        for w in &warnings {
-            self.emit_stderr(format!("{}printf: warning: {w}\n", self.err_prefix()).as_bytes());
-        }
-        if let Some(msg) = &fatal {
-            self.emit_stderr(format!("{}printf: {msg}\n", self.err_prefix()).as_bytes());
-        }
+        // Render the format, collecting per-argument "invalid number" errors
+        // (printf exits non-zero but keeps going, emitting the best-effort
+        // value), overflow warnings (emitted to stderr but leaving the exit
+        // status at 0), and at most one fatal malformed-conversion error (which
+        // aborts printf). Each carries the byte offset at which it arose.
+        let mut diags = PrintfDiags::default();
+        let text = format_printf(fmt, &args[i + 1..], &mut diags);
+        let PrintfDiags { errors, warnings, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
+        // Merge errors and warnings into one offset-ordered message stream so
+        // they can be written *interleaved* with stdout. bash flushes pending
+        // stdout before each printf error, so `printf '%d\n' 1 bad 2` yields
+        // `1`, then the error, then `0`, then `2` — not all output then all
+        // errors. A stable sort keeps an error ahead of a warning at the same
+        // offset (matching the order they were generated).
+        let mut messages: Vec<(usize, String)> =
+            Vec::with_capacity(errors.len() + warnings.len() + 1);
+        for (off, e) in &errors {
+            messages.push((*off, format!("{}printf: {e}\n", self.err_prefix())));
+        }
+        for (off, w) in &warnings {
+            messages.push((*off, format!("{}printf: warning: {w}\n", self.err_prefix())));
+        }
+        messages.sort_by_key(|(off, _)| *off);
+        if let Some(msg) = &fatal {
+            // A fatal directive truncates the output at its position, so its
+            // message follows everything produced before it.
+            messages.push((text.len(), format!("{}printf: {msg}\n", self.err_prefix())));
+        }
         if let Some(name) = assign_var {
+            // `-v` captures stdout into a variable; diagnostics still go to
+            // stderr, in the order they occurred.
+            for (_, msg) in &messages {
+                self.emit_stderr(msg.as_bytes());
+            }
             // `-v` may target an array element: `printf -v 'arr[2]' …`.
             let (base, index) = match (name.find('['), name.strip_suffix(']')) {
                 (Some(open), Some(inner)) => (
@@ -11127,7 +11139,21 @@ impl Shell {
             self.assign_elem(&base, &index, text);
             num_status
         } else {
-            let write_status = self.write_bytes(out, redir, text.as_bytes());
+            // Interleave stdout and stderr the way bash does (see
+            // `printf_output_segments`): emit each ordered segment to its stream.
+            let bytes = text.as_bytes();
+            let mut write_status = 0;
+            for seg in printf_output_segments(bytes, &messages) {
+                match seg {
+                    PrintfSeg::Out(b) => {
+                        let s = self.write_bytes(out, redir, b);
+                        if s != 0 {
+                            write_status = s;
+                        }
+                    }
+                    PrintfSeg::Err(m) => self.emit_stderr(m.as_bytes()),
+                }
+            }
             // A write error dominates; otherwise report the numeric-parse status.
             if write_status != 0 { write_status } else { num_status }
         }
@@ -17693,13 +17719,21 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 }
 
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
-fn format_printf(
-    fmt: &str,
-    args: &[String],
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-    fatal: &mut Option<String>,
-) -> String {
+/// Diagnostics accumulated while rendering a `printf` format. Each error and
+/// warning is tagged with the byte offset in the output at which it arose, so
+/// `builtin_printf` can interleave stderr with stdout the way bash does.
+/// `base` is the running offset of the current format pass (updated per pass by
+/// [`format_printf`]); `field_off = base + out.len()` gives a conversion's
+/// absolute position.
+#[derive(Default)]
+struct PrintfDiags {
+    errors: Vec<(usize, String)>,
+    warnings: Vec<(usize, String)>,
+    fatal: Option<String>,
+    base: usize,
+}
+
+fn format_printf(fmt: &str, args: &[String], diags: &mut PrintfDiags) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -17707,16 +17741,59 @@ fn format_printf(
     let mut arg_i = 0;
     loop {
         let start = arg_i;
-        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors, warnings, fatal);
+        // Byte offset of this pass's output within the full result, so any
+        // per-argument diagnostic can be tagged with the stdout position at
+        // which it occurred (used to interleave stderr with stdout — see
+        // `builtin_printf`).
+        diags.base = out.len();
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags);
         out.push_str(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
         // recycling included. A malformed conversion (`fatal`) aborts printf
         // entirely, keeping only the text produced before the bad directive.
-        if stop || fatal.is_some() || arg_i >= args.len() || arg_i == start {
+        if stop || diags.fatal.is_some() || arg_i >= args.len() || arg_i == start {
             break;
         }
     }
     out
+}
+
+/// One ordered piece of `printf`'s combined output: a run of stdout bytes or a
+/// single stderr diagnostic. See [`printf_output_segments`].
+enum PrintfSeg<'a> {
+    Out(&'a [u8]),
+    Err(&'a str),
+}
+
+/// Split `printf`'s produced `text` and its offset-tagged `diags` into the
+/// order they must reach the terminal, matching bash.
+///
+/// bash writes printf's stdout *line-buffered* (flushed at each newline) while
+/// stderr is unbuffered, so a diagnostic raised at byte offset `off` appears
+/// after the complete lines emitted so far but *before* any pending partial
+/// line. We reproduce that by flushing stdout only up to the last newline
+/// at-or-before each diagnostic's offset, then emitting the diagnostic, with any
+/// remaining text following the final diagnostic. `diags` must be sorted by
+/// offset (which the caller guarantees).
+fn printf_output_segments<'a>(text: &'a [u8], diags: &'a [(usize, String)]) -> Vec<PrintfSeg<'a>> {
+    let mut segs = Vec::with_capacity(diags.len() * 2 + 1);
+    let mut cursor = 0usize;
+    for (off, msg) in diags {
+        let off = (*off).min(text.len());
+        let flush = text[..off]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |p| p + 1);
+        if flush > cursor {
+            segs.push(PrintfSeg::Out(&text[cursor..flush]));
+            cursor = flush;
+        }
+        segs.push(PrintfSeg::Err(msg));
+    }
+    if cursor < text.len() {
+        segs.push(PrintfSeg::Out(&text[cursor..]));
+    }
+    segs
 }
 
 /// Render one pass over the format string. Returns the produced text and whether
@@ -17725,9 +17802,7 @@ fn format_printf_once(
     fmt: &str,
     args: &[String],
     arg_i: &mut usize,
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-    fatal: &mut Option<String>,
+    diags: &mut PrintfDiags,
 ) -> (String, bool) {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
@@ -17739,11 +17814,11 @@ fn format_printf_once(
                 decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
             }
             '%' => {
-                if format_conversion(&mut chars, args, arg_i, &mut out, errors, warnings, fatal) {
+                if format_conversion(&mut chars, args, arg_i, &mut out, diags) {
                     return (out, true);
                 }
                 // A malformed conversion aborts the rest of this pass too.
-                if fatal.is_some() {
+                if diags.fatal.is_some() {
                     return (out, false);
                 }
             }
@@ -17762,9 +17837,7 @@ fn format_conversion(
     args: &[String],
     arg_i: &mut usize,
     out: &mut String,
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-    fatal: &mut Option<String>,
+    diags: &mut PrintfDiags,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&'%') {
@@ -17943,7 +18016,7 @@ fn format_conversion(
         // No conversion character before the end of the format: bash aborts with
         // `` `%…': missing format character `` and exit status 1, keeping any
         // text produced before this directive.
-        *fatal = Some(format!("`{}': missing format character", partial_spec()));
+        diags.fatal = Some(format!("`{}': missing format character", partial_spec()));
         return false;
     };
 
@@ -17953,6 +18026,12 @@ fn format_conversion(
         v
     };
 
+    // Byte offset in the overall printf output at which this field begins: any
+    // diagnostic this conversion raises is tagged with it so `builtin_printf`
+    // can flush the stdout produced *before* the field, then the error, then the
+    // field — matching bash's ordering. `out` holds only text emitted before
+    // this `%…` in the current pass; `base` accounts for prior format passes.
+    let field_off = diags.base + out.len();
     // Sign/base prefix rendered separately from the digit body so that
     // zero-padding can insert zeros *between* the prefix and the body
     // (e.g. `%+05d` on 5 → `+0005`, `%#06x` on 255 → `0x00ff`).
@@ -17980,10 +18059,10 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             if n.signed_overflow {
-                warnings.push(format!("{raw}: Numerical result out of range"));
+                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
             }
             let (p, b) = split_sign(n.signed.to_string(), plus, space);
             num_prefix = p;
@@ -17993,10 +18072,10 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             if n.unsigned_overflow {
-                warnings.push(format!("{raw}: Numerical result out of range"));
+                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
             }
             n.unsigned.to_string()
         }
@@ -18004,10 +18083,10 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             if n.unsigned_overflow {
-                warnings.push(format!("{raw}: Numerical result out of range"));
+                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
             }
             let v = n.unsigned;
             // `#` prefixes nonzero hex with `0x` (bash/C: zero gets no prefix).
@@ -18020,10 +18099,10 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             if n.unsigned_overflow {
-                warnings.push(format!("{raw}: Numerical result out of range"));
+                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
             }
             let v = n.unsigned;
             if hash && v != 0 {
@@ -18035,10 +18114,10 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             if n.unsigned_overflow {
-                warnings.push(format!("{raw}: Numerical result out of range"));
+                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
             }
             let v = n.unsigned;
             // `#` forces a leading `0` on octal; applied after precision below
@@ -18049,7 +18128,7 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             let (p, b) = split_sign(format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
             num_prefix = p;
@@ -18059,7 +18138,7 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
             let s = normalize_exp(&s);
@@ -18072,7 +18151,7 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             let s = format_g(f, prec_n.unwrap_or(6), conv == 'G', hash);
             let (p, b) = split_sign(s, plus, space);
@@ -18083,7 +18162,7 @@ fn format_conversion(
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                errors.push(format!("{raw}: {kind}"));
+                diags.errors.push((field_off, format!("{raw}: {kind}")));
             }
             let s = format_a(f, prec_n, conv == 'A');
             let (p, b) = split_sign(s, plus, space);
@@ -18094,7 +18173,7 @@ fn format_conversion(
             // An unrecognized conversion character is a fatal error in bash:
             // `` `X': invalid format character ``, exit 1, and the rest of the
             // format is abandoned (only text before this directive is kept).
-            *fatal = Some(format!("`{other}': invalid format character"));
+            diags.fatal = Some(format!("`{other}': invalid format character"));
             return false;
         }
     };
@@ -21229,6 +21308,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Floats: leading numeric prefix, invalid trailing junk.
         assert_eq!(run("printf '%.1f\\n' 3.5x"), ("3.5\n".to_string(), 1));
         assert_eq!(run("printf '%.1f\\n' xyz"), ("0.0\n".to_string(), 1));
+    }
+
+    #[test]
+    fn printf_diagnostics_interleave_with_stdout() {
+        // `printf_output_segments` models bash's ordering: printf's stdout is
+        // line-buffered (flushed at each newline) and its stderr unbuffered, so
+        // a diagnostic at byte offset `off` lands after the complete lines
+        // produced so far but before any pending partial line. Flatten the
+        // segments back into the merged byte stream the terminal would see.
+        // (The `run` harness captures stdout/stderr into *separate* buffers, so
+        // it cannot exercise this ordering — hence a direct unit test.)
+        fn merged(text: &str, diags: &[(usize, &str)]) -> String {
+            let owned: Vec<(usize, String)> =
+                diags.iter().map(|(o, m)| (*o, (*m).to_string())).collect();
+            let mut s = String::new();
+            for seg in printf_output_segments(text.as_bytes(), &owned) {
+                match seg {
+                    PrintfSeg::Out(b) => s.push_str(std::str::from_utf8(b).unwrap()),
+                    PrintfSeg::Err(m) => s.push_str(m),
+                }
+            }
+            s
+        }
+        // `printf '%d\n' 1 bad 2` → text "1\n0\n2\n", error tagged at offset 2
+        // (start of the 2nd field, just after the flushed "1\n").
+        assert_eq!(
+            merged("1\n0\n2\n", &[(2, "E:bad\n")]),
+            "1\nE:bad\n0\n2\n"
+        );
+        // `printf '%d %d %d\n' 1 bad 3` → text "1 0 3\n"; error at offset 2 has
+        // no preceding newline, so it precedes the whole (buffered) line.
+        assert_eq!(merged("1 0 3\n", &[(2, "E:bad\n")]), "E:bad\n1 0 3\n");
+        // `printf 'x%dy' foo` → text "x0y" (no newline): error precedes it all.
+        assert_eq!(merged("x0y", &[(1, "E:foo\n")]), "E:foo\nx0y");
+        // Two bad fields on one line: both errors, then the buffered line.
+        assert_eq!(
+            merged("0 0\n", &[(0, "E:bad1\n"), (2, "E:bad2\n")]),
+            "E:bad1\nE:bad2\n0 0\n"
+        );
+        // Fatal at end of a partial line ("X5Y", no newline): message first.
+        assert_eq!(merged("X5Y", &[(3, "F:y\n")]), "F:y\nX5Y");
+        // A completed line before the fatal directive is flushed first.
+        assert_eq!(merged("X5\n", &[(3, "F:y\n")]), "X5\nF:y\n");
     }
 
     #[test]

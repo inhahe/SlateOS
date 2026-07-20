@@ -1496,10 +1496,37 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
 /// nested `${…}`/`$(…)` are themselves balanced, so plain depth counting over
 /// `[`/`]` handles those correctly too.
 fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
+    // Scan for the `]` that closes the subscript opened at `open`, tracking
+    // `[`/`]` nesting and *skipping quoted spans* so a quoted `]` inside an
+    // associative key (`${h["a]b"]}`, `${h['a]b']}`) is not mistaken for the
+    // terminator — matching bash's subscript scanner, which does not treat a
+    // quoted `]` as the close. Without this the subscript would split mid-quote
+    // (`"a` for `"a]b"`), leaving an unbalanced quote that trips the re-lexer
+    // (`unexpected EOF while looking for matching '"'`). See known-issues
+    // TD-OILS-SUBSCRIPT-QUOTED-BRACKET.
     let mut depth = 0usize;
     let mut i = open;
     while i < bytes.len() {
         match bytes[i] {
+            // A backslash escapes the next character (skip both).
+            '\\' => i += 1,
+            // Single-quoted run: verbatim to the closing quote (no escapes).
+            '\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != '\'' {
+                    i += 1;
+                }
+            }
+            // Double-quoted run: to the closing quote, honoring `\`.
+            '"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != '"' {
+                    if bytes[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
             '[' => depth += 1,
             ']' => {
                 depth -= 1;

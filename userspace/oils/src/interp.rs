@@ -26226,6 +26226,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn assoc_read_quoted_bracket_in_subscript() {
+        // TD-OILS-SUBSCRIPT-QUOTED-BRACKET: reading an associative element whose
+        // key contains a literal `]` with the subscript *quoted*
+        // (`${h["a]b"]}`) must not mistake the quoted `]` for the subscript
+        // terminator. Previously the subscript scanner split mid-quote, leaving
+        // an unbalanced quote that failed with `unexpected EOF … matching '"'`.
+        // Double-quoted key with an embedded `]`.
+        assert_eq!(
+            run("declare -A h=([\"with]bracket\"]=1); echo \"${h[\"with]bracket\"]}\"").0,
+            "1\n"
+        );
+        // Single-quoted key with an embedded `]`.
+        assert_eq!(
+            run("declare -A h=(['a]b']=2); echo \"${h['a]b']}\"").0,
+            "2\n"
+        );
+        // A key containing a *balanced* `[...]` inside the quotes: the nested
+        // brackets are skipped as quoted content, so depth tracking still finds
+        // the real close.
+        assert_eq!(
+            run("declare -A h=([\"a[b]c\"]=3); echo \"${h[\"a[b]c\"]}\"").0,
+            "3\n"
+        );
+        // Regression guard: a plain quoted key without `]` and an ordinary
+        // indexed read still resolve correctly.
+        assert_eq!(run("declare -A h=([\"k\"]=4); echo \"${h[\"k\"]}\"").0, "4\n");
+        assert_eq!(run("a=(7 8 9); echo \"${a[2]}\"").0, "9\n");
+    }
+
+    #[test]
     fn assoc_key_preserves_surrounding_whitespace() {
         // bash never trims an associative subscript: `h[ x ]=v` keys on the
         // literal " x " (with surrounding spaces), on both the store and the read

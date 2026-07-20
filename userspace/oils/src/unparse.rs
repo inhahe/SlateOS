@@ -88,15 +88,28 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Stri
     let mut out = String::new();
     let n = prog.items.len();
     for (i, item) in prog.items.iter().enumerate() {
-        out.push_str(&ind(level));
+        // bash keeps a backgrounded statement and the one that follows it on the
+        // same line (`a & b & c`), using ` & ` as an inline connector. So only
+        // indent an item that begins a fresh line: the first, or one whose
+        // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
+        if i == 0 || !prog.items[i - 1].background {
+            out.push_str(&ind(level));
+        }
         out.push_str(&item_stmt(item, level));
         let is_last = i + 1 == n;
-        // `&` already terminates a backgrounded statement; otherwise separate
-        // with `;`, and terminate the last one only in clause-body context.
-        if !item.background && (!is_last || terminate_last) {
-            out.push(';');
+        if item.background {
+            // `item_stmt` already emitted the trailing ` &`; connect the next
+            // statement inline with a space, and only break the line when this
+            // backgrounded item is the last in the block.
+            out.push(if is_last { '\n' } else { ' ' });
+        } else {
+            // Separate with `;`, terminating the last one only in clause-body
+            // context (`then`/`else`/`do`); group bodies leave it unterminated.
+            if !is_last || terminate_last {
+                out.push(';');
+            }
+            out.push('\n');
         }
-        out.push('\n');
     }
     out
 }

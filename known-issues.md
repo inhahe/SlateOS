@@ -553,7 +553,7 @@ project. The still-open (4) items each need a targeted grammar change
 model, or bash's `[[ ]]`/bad-substitution deferral) — behaviour-shifting
 and best done one class at a time with a focused test sweep.
 
-### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — items 1 (elif) & 4 (nested-fn keyword) ✅ RESOLVED 2026-07-20; two remain (subshell layout, inline background)
+### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — items 1 (elif), 3 (inline background) & 4 (nested-fn keyword) ✅ RESOLVED 2026-07-20; one remains (subshell layout)
 
 **Where:** `userspace/oils/src/unparse.rs` `command_block` (`If` elif branch,
 `Subshell`, `Function` nested case) and `item_stmt`/`program_block`
@@ -579,9 +579,15 @@ only the exact whitespace/keyword layout differs:
 2. **Subshell layout.** bash prints `( echo a;\n echo b );` (first statement
    glued to the `(`, continuation dedented). osh uses a clean indented block
    (`(\n    echo a;\n    echo b\n)`).
-3. **Backgrounded statement in a list.** bash keeps `sleep 1 & echo b` on one
+3. ~~**Backgrounded statement in a list.** bash keeps `sleep 1 & echo b` on one
    line (`&` as an inline connector). osh puts each `Item` on its own line, so
-   `sleep 1 &` and `echo b` split across two lines.
+   `sleep 1 &` and `echo b` split across two lines.~~ **RESOLVED 2026-07-20.**
+   `program_block` now treats ` & ` as an inline connector: an item whose
+   predecessor was backgrounded is not re-indented and continues on the same
+   line, so `a & b & c` stays on one line while a `;`-separated tail still
+   breaks. A trailing backgrounded statement ends the block with ` &` (no `;`).
+   Verified byte-identical against MSYS bash across inline/mixed/clause/trailing
+   cases. Regression test `interp::declare_f_keeps_backgrounded_statement_inline`.
 4. ~~**`function` keyword on nested definitions.** bash prints a function
    defined *inside* another function as `function nested () ` (with the
    `function` keyword); top-level defs use `nested () `. osh always omits

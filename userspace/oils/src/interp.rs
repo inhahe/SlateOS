@@ -27744,6 +27744,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn declare_f_keeps_backgrounded_statement_inline() {
+        // bash keeps a backgrounded statement and the one after it on the same
+        // line, using ` & ` as an inline connector (`a & b & c`), rather than
+        // breaking each onto its own line (TD-OILS-DECLAREF-QUIRKS item 3).
+        let (o, s) = run("f() { a & b & c; }; declare -f f");
+        assert_eq!(s, 0);
+        assert_eq!(o, "f () \n{ \n    a & b & c\n}\n", "inline background mismatch");
+        // A `;`-separated tail after a background item still breaks the line.
+        let (o2, _) = run("f() { a & b; c; }; declare -f f");
+        assert_eq!(o2, "f () \n{ \n    a & b;\n    c\n}\n", "mixed &/; mismatch");
+        // A backgrounded final statement in a group body ends with ` &`, no `;`.
+        let (o3, _) = run("f() { echo a; b & }; declare -f f");
+        assert_eq!(o3, "f () \n{ \n    echo a;\n    b &\n}\n", "trailing-& mismatch");
+    }
+
+    #[test]
     fn bare_set_lists_functions() {
         // Bare `set` prints functions after the variables.
         let (o, _) = run("foo() { echo hi; }; set");

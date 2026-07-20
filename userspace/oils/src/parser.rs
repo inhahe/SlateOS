@@ -993,8 +993,13 @@ impl Parser {
         let target = match self.bump() {
             Some(Tok::Word(segs)) => self.word_from_segs(&segs)?,
             // The lexer emits the here-doc body as its own token right after the
-            // `<<`/`<<-` operator.
-            Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
+            // `<<`/`<<-` operator. Its body lines were swallowed without
+            // producing `Newline` tokens, so advance the line counter past them
+            // to keep later error line numbers accurate.
+            Some(Tok::HereDoc(segs, lines)) => {
+                self.line += lines;
+                self.word_from_segs(&segs)?
+            }
             _ => return Err(ParseError("expected redirection target".into())),
         };
         // `>&file` (non-numeric *literal* target, no explicit/var fd) means

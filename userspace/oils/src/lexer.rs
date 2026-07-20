@@ -97,8 +97,12 @@ pub enum Tok {
     Op(Op),
     Newline,
     /// A here-document body, captured after its introducing line. Emitted
-    /// immediately after the `<<`/`<<-` operator token that owns it.
-    HereDoc(Vec<Seg>),
+    /// immediately after the `<<`/`<<-` operator token that owns it. The `u32`
+    /// is the number of physical source lines the body (including the closing
+    /// delimiter line) consumed, so the parser can keep its line counter in
+    /// sync for later diagnostics — those body lines produce no `Newline`
+    /// tokens of their own.
+    HereDoc(Vec<Seg>, u32),
     /// `(( … ))` — an arithmetic command, holding the raw expression text.
     ArithCmd(String),
     /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
@@ -1404,7 +1408,7 @@ impl Lexer {
         let (delim, expand) = self.read_heredoc_delim();
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
-        out.push(Tok::HereDoc(Vec::new()));
+        out.push(Tok::HereDoc(Vec::new(), 0));
         self.pending_heredocs.push(PendingHeredoc {
             delim,
             strip,
@@ -1463,6 +1467,11 @@ impl Lexer {
         let pending = core::mem::take(&mut self.pending_heredocs);
         for ph in pending {
             let mut body = String::new();
+            // Count the physical lines this here-document consumes (body lines
+            // plus the closing delimiter line). These lines are swallowed here
+            // and never become `Newline` tokens, so the parser must be told how
+            // many there were to keep its line counter accurate.
+            let mut lines: u32 = 0;
             loop {
                 if self.pos >= self.chars.len() {
                     break; // EOF before the delimiter: accept what we have.
@@ -1474,6 +1483,7 @@ impl Lexer {
                 let mut line: String = self.chars[start..self.pos].iter().collect();
                 if self.peek() == Some('\n') {
                     self.pos += 1;
+                    lines = lines.saturating_add(1);
                 }
                 if line.ends_with('\r') {
                     line.pop();
@@ -1491,7 +1501,7 @@ impl Lexer {
             }
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
-                *slot = Tok::HereDoc(segs);
+                *slot = Tok::HereDoc(segs, lines);
             }
         }
         Ok(())
@@ -1714,11 +1724,14 @@ mod tests {
         let toks = tokenize("cat <<EOF\nline one\nline two\nEOF\n").unwrap();
         // Op::DLess followed by a HereDoc token carrying the body.
         let hd = toks.iter().find_map(|t| match t {
-            Tok::HereDoc(segs) => Some(segs.clone()),
+            Tok::HereDoc(segs, lines) => Some((segs.clone(), *lines)),
             _ => None,
         });
-        let segs = hd.expect("here-doc token");
+        let (segs, lines) = hd.expect("here-doc token");
         assert_eq!(segs, vec![Seg::Lit("line one\nline two\n".to_string())]);
+        // Two body lines + the closing `EOF` line = 3 physical lines consumed;
+        // the parser relies on this to keep later line numbers accurate.
+        assert_eq!(lines, 3);
     }
 
     #[test]
@@ -1727,7 +1740,7 @@ mod tests {
         let segs = toks
             .iter()
             .find_map(|t| match t {
-                Tok::HereDoc(segs) => Some(segs.clone()),
+                Tok::HereDoc(segs, _) => Some(segs.clone()),
                 _ => None,
             })
             .expect("here-doc token");

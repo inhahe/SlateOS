@@ -16595,6 +16595,14 @@ mod tests {
             run_cmd("getopts 2>&1"),
             "getopts: usage: getopts optstring name [arg ...]\n"
         );
+        // A here-document's body lines are consumed by the lexer without
+        // emitting Newline tokens; the parser must still count them so a later
+        // error reports the correct physical line. Here the failing command is
+        // on line 4 (heredoc opens L1, body L2, delimiter L3), matching bash.
+        assert_eq!(
+            run_cmd("cat <<EOF\nbody\nEOF\nno_such_cmd_xyz 2>&1"),
+            "body\nosh: line 4: no_such_cmd_xyz: command not found\n"
+        );
     }
 
     #[test]

@@ -583,6 +583,11 @@ pub struct Shell {
     /// Only ever set on a per-stage subshell clone, never the top-level shell.
     pipe_broken: bool,
     pid: u32,
+    /// Parent process id, backing `$PPID`. Determined once at shell startup (as
+    /// bash does) and carried unchanged into subshell clones, so `$PPID` stays
+    /// constant across `( … )`/`$( … )` like bash. `0` when the platform cannot
+    /// report a parent (see `parent_pid`).
+    ppid: u32,
     /// 1-based source line of the item currently executing, backing `$LINENO`.
     /// Updated by [`Shell::exec_program`] before each item runs.
     current_line: u32,
@@ -968,6 +973,7 @@ impl Shell {
             pipefail: false,
             pipe_broken: false,
             pid: std::process::id(),
+            ppid: parent_pid(),
             current_line: 1,
             stderr_stack: Vec::new(),
             exec_stdout: None,
@@ -3042,6 +3048,7 @@ impl Shell {
             pipefail: self.pipefail,
             pipe_broken: false,
             pid: self.pid,
+            ppid: self.ppid,
             current_line: self.current_line,
             // A subshell inherits fd 2 = the shell's real stderr; any active
             // compound-command stderr redirect does not carry into a pipeline
@@ -4370,6 +4377,7 @@ impl Shell {
         "BASH_SOURCE",
         "BASH_SUBSHELL",
         "LINENO",
+        "PPID",
         "RANDOM",
         "SECONDS",
         "EPOCHSECONDS",
@@ -7659,6 +7667,7 @@ impl Shell {
             "0" => Some(self.name.clone()),
             "-" => Some(self.option_flags()),
             "BASHPID" => Some(self.pid.to_string()),
+            "PPID" => Some(self.ppid.to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
             "LINENO" => Some(self.current_line.to_string()),
             "RANDOM" => Some(self.next_random().to_string()),
@@ -11177,6 +11186,8 @@ impl Shell {
     /// [`Self::param_value`].
     fn format_scalar_dynamic_declare(&self, name: &str) -> Option<String> {
         let flags = match name {
+            // `$PPID` is a readonly integer in bash (`declare -ir`).
+            "PPID" => "-ir",
             "BASHPID" | "RANDOM" | "SECONDS" => "-i",
             "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
             _ => return None,
@@ -16572,6 +16583,95 @@ fn pipe_writer_into_file(w: io::PipeWriter) -> std::fs::File {
     std::fs::File::from(std::os::windows::io::OwnedHandle::from(w))
 }
 
+/// The parent process id of the shell, for `$PPID`. Determined once at startup
+/// (bash does the same and never updates it). Returns `0` when the platform
+/// cannot report a parent.
+///
+/// bash exposes `$PPID` on every platform, so osh matches by querying the OS:
+/// on Windows via `NtQueryInformationProcess`
+/// (`ProcessBasicInformation.InheritedFromUniqueProcessId`), and on unix-family
+/// targets (the real host and SlateOS, whose target spec is `unix`/`linux`) via
+/// libc `getppid` — the same libc std already links against.
+#[cfg(windows)]
+fn parent_pid() -> u32 {
+    use core::ffi::c_void;
+    // PROCESS_BASIC_INFORMATION on x64: ExitStatus(4)+pad(4), PebBaseAddress(8),
+    // AffinityMask(8), BasePriority(4)+pad(4), UniqueProcessId(8),
+    // InheritedFromUniqueProcessId(8) = 48 bytes. We only read the last field.
+    #[repr(C)]
+    struct ProcessBasicInformation {
+        exit_status: i32,
+        _pad0: u32,
+        peb_base_address: *mut c_void,
+        affinity_mask: usize,
+        base_priority: i32,
+        _pad1: u32,
+        unique_process_id: usize,
+        inherited_from_unique_process_id: usize,
+    }
+    // SAFETY: standard NT/kernel32 signatures. `GetCurrentProcess` returns the
+    // (-1) pseudo-handle; `NtQueryInformationProcess` writes exactly
+    // `size_of::<ProcessBasicInformation>()` bytes into `info` (which we pass
+    // with a matching length) and returns a negative NTSTATUS on failure.
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn NtQueryInformationProcess(
+            process_handle: *mut c_void,
+            process_information_class: u32,
+            process_information: *mut c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+    const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+    let mut info = ProcessBasicInformation {
+        exit_status: 0,
+        _pad0: 0,
+        peb_base_address: core::ptr::null_mut(),
+        affinity_mask: 0,
+        base_priority: 0,
+        _pad1: 0,
+        unique_process_id: 0,
+        inherited_from_unique_process_id: 0,
+    };
+    // SAFETY: `info` is a live, correctly-sized local; the call only writes into
+    // it and reads nothing we own. A non-zero (negative) status means failure,
+    // in which case `info` may be untouched and we fall back to 0.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            GetCurrentProcess(),
+            PROCESS_BASIC_INFORMATION_CLASS,
+            (&raw mut info).cast::<c_void>(),
+            u32::try_from(core::mem::size_of::<ProcessBasicInformation>()).unwrap_or(0),
+            core::ptr::null_mut(),
+        )
+    };
+    if status < 0 {
+        return 0;
+    }
+    u32::try_from(info.inherited_from_unique_process_id).unwrap_or(0)
+}
+
+/// Unix / SlateOS parent-pid query (see the Windows sibling for rationale).
+#[cfg(unix)]
+fn parent_pid() -> u32 {
+    // SAFETY: `getppid` is a libc function taking no arguments and returning the
+    // parent pid as a `pid_t` (int); it has no failure mode and no side effects.
+    unsafe extern "C" {
+        fn getppid() -> i32;
+    }
+    // SAFETY: nullary call into libc; the returned pid is always non-negative.
+    let ppid = unsafe { getppid() };
+    u32::try_from(ppid).unwrap_or(0)
+}
+
+/// Fallback for any target that is neither Windows nor unix-family: report `0`
+/// (parent unknown) rather than failing to build.
+#[cfg(not(any(windows, unix)))]
+fn parent_pid() -> u32 {
+    0
+}
+
 /// Monotonic synthetic pid source for in-process background bodies (`coproc`
 /// and thread-backed background jobs) which run as threads, not OS processes.
 /// Starts high to avoid colliding with real OS pids; shared so every synthetic
@@ -21799,6 +21899,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo $MACHTYPE").0, "x86_64-slateos\n");
         // Ordinary shell variables: reassignable, unlike readonly BASH_VERSINFO.
         assert_eq!(run("OSTYPE=custom; echo $OSTYPE").0, "custom\n");
+    }
+
+    #[test]
+    fn special_var_ppid() {
+        // `$PPID` expands to a numeric parent pid (bash always defines it). The
+        // exact value is environment-dependent, so assert it is all-digits and
+        // stable within a single shell (bash fixes PPID at startup).
+        let (out, st) = run("echo $PPID");
+        assert_eq!(st, 0);
+        let v = out.trim_end();
+        assert!(!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()), "got {out:?}");
+        // Constant across two reads, and across a subshell (bash carries the
+        // startup value into `( … )` unchanged).
+        assert_eq!(run("a=$PPID; b=$( echo $PPID ); [ \"$a\" = \"$b\" ] && echo same").0, "same\n");
+        // Prefix listing includes it, and `declare -p` reports it readonly-int.
+        assert!(run("echo ${!P*}").0.split_whitespace().any(|n| n == "PPID"));
+        assert!(run("declare -p PPID").0.starts_with("declare -ir PPID="));
     }
 
     #[test]

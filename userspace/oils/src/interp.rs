@@ -5111,6 +5111,7 @@ impl Shell {
                 }
                 other => {
                     self.emit_cmd_stderr(out, redir, &format!("{}command: {other}: invalid option", self.err_prefix()));
+                    self.emit_cmd_stderr(out, redir, "command: usage: command [-pVv] command [arg ...]");
                     self.last_status = 2;
                     return Flow::Next;
                 }
@@ -7999,7 +8000,7 @@ impl Shell {
             ":" | "true" => 0,
             "false" => 1,
             "cd" => self.builtin_cd(args),
-            "pwd" => self.builtin_pwd(out, redir),
+            "pwd" => self.builtin_pwd(args, out, redir),
             "pushd" => self.builtin_pushd(args, out, redir),
             "popd" => self.builtin_popd(args, out, redir),
             "dirs" => self.builtin_dirs(args, out, redir),
@@ -8051,7 +8052,7 @@ impl Shell {
                 let joined = args.join(" ");
                 self.run_source(&joined)
             }
-            "source" | "." => self.builtin_source(args),
+            "source" | "." => self.builtin_source(args, name),
             "type" => self.builtin_type(args, out, redir),
             "compgen" => self.builtin_compgen(args, out, redir),
             "complete" => self.builtin_complete(args, out, redir),
@@ -8398,16 +8399,37 @@ impl Shell {
         let mut physical = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            match a.as_str() {
-                "-L" => physical = false,
-                "-P" => physical = true,
-                "--" => {
-                    i += 1;
-                    break;
-                }
-                _ => break,
+            if a == "--" {
+                i += 1;
+                break;
             }
-            i += 1;
+            // A bare `-` is the `$OLDPWD` target, not an option.
+            if a == "-" {
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-')
+                && !flags.is_empty()
+            {
+                // bash's cd accepts only -L/-P/-e/-@; any other letter is a
+                // usage error (reported on the first offending flag).
+                if let Some(c) = flags.chars().find(|c| !matches!(c, 'L' | 'P' | 'e' | '@')) {
+                    return self.builtin_invalid_option(
+                        "cd",
+                        &format!("-{c}"),
+                        "cd [-L|[-P [-e]] [-@]] [dir]",
+                    );
+                }
+                for c in flags.chars() {
+                    match c {
+                        'L' => physical = false,
+                        'P' => physical = true,
+                        _ => {} // -e/-@: accepted, no effect here.
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
         }
         let rest = &args[i..];
 
@@ -8717,6 +8739,16 @@ impl Shell {
                 "-lp" | "-pl" => {
                     print = true;
                     list = true;
+                }
+                // A bare `-` is the reset *action*, not an option.
+                "-" => break,
+                other if other.starts_with('-') => {
+                    let opt: String = other.chars().take(2).collect();
+                    return self.builtin_invalid_option(
+                        "trap",
+                        &opt,
+                        "trap [-lp] [[arg] signal_spec ...]",
+                    );
                 }
                 _ => break,
             }
@@ -9062,10 +9094,27 @@ impl Shell {
         let mut long = false;
         let mut pids_only = false;
         for a in args {
-            match a.as_str() {
-                "-l" => long = true,
-                "-p" => pids_only = true,
-                _ => {}
+            if a == "--" {
+                break;
+            }
+            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+                continue; // jobspec operand (not yet filtered)
+            };
+            // Valid jobs options are -lnprsx; -l/-p change output, the rest
+            // (filters / -x command) are accepted but not yet honored here.
+            if let Some(c) = flags.chars().find(|c| !matches!(c, 'l' | 'n' | 'p' | 'r' | 's' | 'x')) {
+                return self.builtin_invalid_option(
+                    "jobs",
+                    &format!("-{c}"),
+                    "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
+                );
+            }
+            for c in flags.chars() {
+                match c {
+                    'l' => long = true,
+                    'p' => pids_only = true,
+                    _ => {}
+                }
             }
         }
         let mut buf = String::new();
@@ -9723,13 +9772,21 @@ impl Shell {
         // Consume leading `-p` / `--`; other operands begin the name list.
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            match a.as_str() {
-                "-p" => i += 1,
-                "--" => {
-                    i += 1;
-                    break;
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.chars().find(|c| *c != 'p') {
+                    return self.builtin_invalid_option(
+                        "alias",
+                        &format!("-{c}"),
+                        "alias [-p] [name[=value] ... ]",
+                    );
                 }
-                _ => break,
+                i += 1;
+            } else {
+                break;
             }
         }
         let operands = &args[i..];
@@ -9766,20 +9823,41 @@ impl Shell {
     /// `unalias [-a] name ...` — remove aliases. `-a` removes every alias; an
     /// unknown name is a status-1 error.
     fn builtin_unalias(&mut self, args: &[String]) -> i32 {
-        if args.is_empty() {
+        // Parse leading options: only `-a` (remove all) is valid; any other
+        // `-`-flag is a usage error (bash reports the first offending letter).
+        let mut all = false;
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.chars().find(|c| *c != 'a') {
+                    return self.builtin_invalid_option(
+                        "unalias",
+                        &format!("-{c}"),
+                        "unalias [-a] name [name ...]",
+                    );
+                }
+                all = true;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if all {
+            self.aliases.clear();
+            return 0;
+        }
+        let names = &args[i..];
+        if names.is_empty() {
             // Pure usage message — unprefixed (see `trap` usage above).
             self.emit_stderr(b"unalias: usage: unalias [-a] name [name ...]\n");
             return 2;
         }
-        if args.iter().any(|a| a == "-a") {
-            self.aliases.clear();
-            return 0;
-        }
         let mut status = 0;
-        for name in args {
-            if name == "--" {
-                continue;
-            }
+        for name in names {
             if self.aliases.remove(name).is_none() {
                 self.emit_stderr(format!("{}unalias: {name}: not found\n", self.err_prefix()).as_bytes());
                 status = 1;
@@ -9817,8 +9895,14 @@ impl Shell {
             }
             if let Some(flags) = arg.strip_prefix('-')
                 && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 'r' | 'd' | 't' | 'l'))
             {
+                if let Some(c) = flags.chars().find(|c| !matches!(c, 'r' | 'd' | 't' | 'l')) {
+                    return self.builtin_invalid_option(
+                        "hash",
+                        &format!("-{c}"),
+                        "hash [-lr] [-p pathname] [-dt] [name ...]",
+                    );
+                }
                 for c in flags.chars() {
                     match c {
                         'r' => clear = true,
@@ -10205,10 +10289,40 @@ impl Shell {
         }
     }
 
-    fn builtin_pwd(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_pwd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // bash's pwd accepts -L (logical, default), -P (physical: resolve
+        // symlinks), and -W (Cygwin/Windows path); any other letter is a usage
+        // error. Flags may be clustered; the last of -L/-P wins.
+        let mut physical = false;
+        for a in args {
+            if a == "--" {
+                break;
+            }
+            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+                break;
+            };
+            if let Some(c) = flags.chars().find(|c| !matches!(c, 'L' | 'P' | 'W')) {
+                return self.builtin_invalid_option("pwd", &format!("-{c}"), "pwd [-LPW]");
+            }
+            for c in flags.chars() {
+                match c {
+                    'L' => physical = false,
+                    'P' => physical = true,
+                    _ => {} // -W: accepted, no effect here.
+                }
+            }
+        }
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // `-P` reports the canonical, symlink-resolved path.
+        let cwd = if physical {
+            std::fs::canonicalize(&cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(cwd)
+        } else {
+            cwd
+        };
         self.write_line(out, redir, &cwd)
     }
 
@@ -10796,6 +10910,21 @@ impl Shell {
             return Some(format!("{name}={}", quote_set_value(v)));
         }
         None
+    }
+
+    /// Emit bash's standard invalid-option diagnostic for a builtin and return
+    /// its usage-error status (2). Prints two lines: the located
+    /// `<builtin>: <opt>: invalid option` diagnostic (carrying the shell/line
+    /// prefix) followed by the unprefixed `<builtin>: usage: <synopsis>` line —
+    /// exactly bash's `builtin_usage`/`sh_invalidopt` pair. `opt` is the offending
+    /// flag as bash reports it (e.g. `-Z` or `+Z`); `usage` is the synopsis body
+    /// after `usage:`.
+    fn builtin_invalid_option(&self, builtin: &str, opt: &str, usage: &str) -> i32 {
+        self.emit_stderr(
+            format!("{}{builtin}: {opt}: invalid option\n", self.err_prefix()).as_bytes(),
+        );
+        self.emit_stderr(format!("{builtin}: usage: {usage}\n").as_bytes());
+        2
     }
 
     /// Usage synopsis for the `declare`/`typeset`/`local` family, matching bash's
@@ -11609,8 +11738,16 @@ impl Shell {
             }
             if let Some(flags) = a.strip_prefix('-')
                 && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 'v' | 'f' | 'n'))
             {
+                // An option-looking token with an unknown letter is a usage
+                // error (bash reports the first offending flag), not a name.
+                if let Some(c) = flags.chars().find(|c| !matches!(c, 'v' | 'f' | 'n')) {
+                    return self.builtin_invalid_option(
+                        "unset",
+                        &format!("-{c}"),
+                        "unset [-f] [-v] [-n] [name ...]",
+                    );
+                }
                 for c in flags.chars() {
                     match c {
                         'f' => funcs_only = true,
@@ -12537,8 +12674,12 @@ impl Shell {
                     origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
                 other if other.starts_with('-') && other.len() > 1 => {
-                    self.errln(&format!("{}mapfile: {other}: invalid option", self.err_prefix()));
-                    return 2;
+                    let opt: String = other.chars().take(2).collect();
+                    return self.builtin_invalid_option(
+                        "mapfile",
+                        &opt,
+                        "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]",
+                    );
                 }
                 _ => array = a.clone(),
             }
@@ -12600,9 +12741,27 @@ impl Shell {
         0
     }
 
-    fn builtin_source(&mut self, args: &[String]) -> i32 {
+    fn builtin_source(&mut self, args: &[String], tag: &str) -> i32 {
+        // `source`/`.` take no options: a leading `-x`-style token is a usage
+        // error (bash reports it with the invoking name — `.` or `source`).
+        // `--` ends option processing and is skipped.
+        if let Some(first) = args.first()
+            && first != "--"
+            && let Some(flags) = first.strip_prefix('-').filter(|f| !f.is_empty())
+        {
+            let opt: String = std::iter::once('-').chain(flags.chars().take(1)).collect();
+            return self.builtin_invalid_option(tag, &opt, &format!("{tag} filename [arguments]"));
+        }
+        let args = if args.first().map(String::as_str) == Some("--") {
+            &args[1..]
+        } else {
+            args
+        };
         let Some(path) = args.first() else {
-            self.errln(&format!("{}source: filename argument required", self.err_prefix()));
+            self.emit_stderr(
+                format!("{}{tag}: filename argument required\n", self.err_prefix()).as_bytes(),
+            );
+            self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return 2;
         };
         match std::fs::read_to_string(path) {
@@ -12629,7 +12788,7 @@ impl Shell {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                 } else {
-                    self.errln(&format!("{}source: {path}: {}", self.err_prefix(), io_error_message(&e)));
+                    self.errln(&format!("{}{tag}: {path}: {}", self.err_prefix(), io_error_message(&e)));
                 }
                 1
             }
@@ -13215,8 +13374,14 @@ impl Shell {
             }
             if let Some(flags) = a.strip_prefix('-')
                 && !flags.is_empty()
-                && flags.chars().all(|c| "tpPaf".contains(c))
             {
+                if let Some(c) = flags.chars().find(|c| !"tpPaf".contains(*c)) {
+                    return self.builtin_invalid_option(
+                        "type",
+                        &format!("-{c}"),
+                        "type [-afptP] name [name ...]",
+                    );
+                }
                 for c in flags.chars() {
                     match c {
                         't' => mode_t = true,
@@ -24898,6 +25063,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 0, "got {o:?}");
         let (_, s) = run("readonly -a arr=(1 2)");
         assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn more_builtins_reject_invalid_options() {
+        // A second batch of builtins that previously silently ignored unknown
+        // options (or misclassified them as name operands): each now prints the
+        // bash `<builtin>: -<opt>: invalid option` line, its usage synopsis, and
+        // exits 2. Verified against bash 5.x.
+        let cases: &[(&str, &str, &str)] = &[
+            ("unset -x v", "unset: -x: invalid option", "unset: usage: unset [-f] [-v] [-n]"),
+            ("mapfile -Z arr", "mapfile: -Z: invalid option", "mapfile: usage: mapfile [-d delim]"),
+            ("type -Z ls", "type: -Z: invalid option", "type: usage: type [-afptP]"),
+            ("hash -Z", "hash: -Z: invalid option", "hash: usage: hash [-lr]"),
+            ("cd -Z", "cd: -Z: invalid option", "cd: usage: cd [-L|[-P [-e]] [-@]]"),
+            ("pwd -Z", "pwd: -Z: invalid option", "pwd: usage: pwd [-LPW]"),
+            ("alias -Z", "alias: -Z: invalid option", "alias: usage: alias [-p]"),
+            ("unalias -Z", "unalias: -Z: invalid option", "unalias: usage: unalias [-a]"),
+            ("jobs -Z", "jobs: -Z: invalid option", "jobs: usage: jobs [-lnprs]"),
+            ("trap -Z", "trap: -Z: invalid option", "trap: usage: trap [-lp]"),
+            ("command -Z ls", "command: -Z: invalid option", "command: usage: command [-pVv]"),
+        ];
+        for (src, diag, usage) in cases {
+            let (o, s) = run(&format!("{src} 2>&1"));
+            assert!(o.contains(diag), "{src}: missing {diag:?} in {o:?}");
+            assert!(o.contains(usage), "{src}: missing {usage:?} in {o:?}");
+            assert_eq!(s, 2, "{src}: expected exit 2, got {s} ({o:?})");
+        }
+
+        // No false positives: valid options on each of these still succeed.
+        for src in ["unset -v x", "cd -P .", "pwd -L", "hash -r", "alias -p", "type -t echo", "jobs -l"] {
+            let (o, s) = run(src);
+            assert_eq!(s, 0, "{src}: expected success, got {s} ({o:?})");
+        }
+
+        // source/. : missing filename and a bogus option both print the usage
+        // synopsis tagged with the *invoking* name (`.` vs `source`), exit 2.
+        let (o, s) = run("source 2>&1");
+        assert!(o.contains("source: filename argument required"), "got {o:?}");
+        assert!(o.contains("source: usage: source filename [arguments]"), "got {o:?}");
+        assert_eq!(s, 2);
+        let (o, s) = run(". 2>&1");
+        assert!(o.contains(".: filename argument required"), "got {o:?}");
+        assert!(o.contains(".: usage: . filename [arguments]"), "got {o:?}");
+        assert_eq!(s, 2);
+        let (o, s) = run("source -x 2>&1");
+        assert!(o.contains("source: -x: invalid option"), "got {o:?}");
+        assert!(o.contains("source: usage: source filename [arguments]"), "got {o:?}");
+        assert_eq!(s, 2);
     }
 
     #[test]

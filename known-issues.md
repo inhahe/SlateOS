@@ -2580,12 +2580,27 @@ dynamic-variable names (a static name list checked alongside the maps).
 Low-value (prefix enumeration of `BASH*` is rare in scripts) and coupled to the
 broader "define the missing `BASH*` vars" work above, so parked here.
 
-### TD-OILS-BUILTIN-USAGE. `osh` builtins omit bash's second `NAME: usage: …` synopsis line on a usage error — OPEN (low priority, cosmetic stderr text) 2026-07-19
+### TD-OILS-BUILTIN-USAGE. `osh` builtins omit bash's second `NAME: usage: …` synopsis line on a usage error — ✅ LARGELY RESOLVED 2026-07-20
 
-**Where:** `userspace/oils/src/interp.rs` — the usage-error paths of
-`builtin_getopts`, `builtin_source`, `builtin_mapfile`, `exec_command_builtin`,
-`builtin_printf` (`-v`), etc. Each emits only the one-line diagnostic
-(`osh: NAME: <problem>`).
+**Update (2026-07-20):** a shared `Shell::builtin_invalid_option(builtin, opt,
+usage)` helper now emits bash's two-line pair (the located
+`NAME: -OPT: invalid option` diagnostic + the unprefixed `NAME: usage: …`
+synopsis) and returns status 2. It (and inline equivalents) are wired into every
+builtin that previously silently ignored or misclassified unknown options:
+`declare`/`typeset`/`local`, `read`, `readonly`, `unset`, `type`, `hash`, `cd`,
+`pwd`, `alias`, `unalias`, `jobs`, `trap`, `mapfile`, `command`, `printf`
+(no-format), and `source`/`.` (missing-filename **and** bogus-option, tagged with
+the invoking name). All verified byte-for-byte against bash 5.x via the CLI probe
+and covered by the `builtin_invalid_option_diagnostics` and
+`more_builtins_reject_invalid_options` regression tests. `getopts` already matched.
+No remaining known builtin silently swallows an invalid option; this entry stays
+listed only as a pointer to the helper and the wording convention.
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_invalid_option`
+(shared helper) and the per-builtin flag loops listed above. (Historically the
+usage-error paths of `builtin_getopts`, `builtin_source`, `builtin_mapfile`,
+`exec_command_builtin`, `builtin_printf` (`-v`), etc. emitted only the one-line
+diagnostic `osh: NAME: <problem>`.)
 
 **What:** on a usage/argument error bash prints **two** lines to stderr — the
 diagnostic *and* a synopsis, e.g.
@@ -2609,6 +2624,25 @@ bash's exact wording) and, on a usage error, emit it as a second line through th
 same redirect-aware sink (`errln` for in-`run_builtin` builtins, `emit_cmd_stderr`
 for the `command`/`builtin` wrappers). Mechanical but must match bash's synopsis
 text byte-for-byte per builtin.
+
+### TD-OILS-MAPFILE-UFD. `mapfile`/`readarray` does not implement `-u fd` (read from a numbered descriptor) — MINOR FEATURE GAP 2026-07-20
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_mapfile`. Its option loop
+handles `-t -d -n -c -C -s -O` and the array operand, but has no `-u` case, so
+`mapfile -u 3 arr` now hits the invalid-option path and fails with status 2. bash
+reads the array from descriptor `fd` (e.g. one opened by `exec 3< file` or a
+coproc read end).
+
+**Repro:** `exec 3< <(printf 'a\nb\n'); mapfile -t -u 3 arr; echo "${arr[@]}"` →
+bash prints `a b`; osh prints `mapfile: -u: invalid option` + usage, exit 2.
+
+**Proper fix:** mirror `builtin_read`'s `-u` handling — accept `-u N`, and when
+`N >= 3` route the read through `open_fds` (byte cursor) / `coproc_read_fds`
+(live pipe) instead of the ambient `stdin`/`redir`. `mapfile` already takes
+`stdin`/`redir`; add a `ufd: Option<i32>` and build a masking `RedirPlan` /
+`StdinSrc` exactly as `read` does before calling `read_all_bytes`. The usage
+synopsis already advertises `-u fd`, so no wording change is needed. Note
+`readarray` shares this code path (same gap).
 
 ### TD-OILS-HELP-FORMAT. `osh help` no-arg listing and per-builtin synopsis *text* don't byte-match bash — PARTIALLY ADDRESSED 2026-07-19
 

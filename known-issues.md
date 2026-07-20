@@ -2414,6 +2414,19 @@ probed cases (name-normalized).
   osh echoes `a[9/0]` (the full atom). A yacc reduction artifact.
 - **Recursion-limit prefix:** on `expression recursion level exceeded` bash
   echoes the innermost value, osh echoes the top-level expression.
+- **Recursively-expanded `<expr>` subject:** when the failing operand is a bare
+  variable whose *value* is itself invalid arithmetic, bash echoes the
+  recursively-expanded value while osh echoes the outer source. E.g.
+  `x=3.5; echo $((x))` → bash `... line 1: 3.5: syntax error: invalid arithmetic
+  operator (error token is ".5")`, osh `... x: syntax error ...`. Likewise
+  `x=3.5; echo $((x+1))` (bash `3.5` / osh `x+1`), `x="1 2"; echo $((x))`
+  (bash `1 2` / osh `x`), and `x=3.5; y=x; echo $((y))` (bash `3.5` / osh `y`).
+  The **error token** (`.5`, etc.) already matches bash in every case — only the
+  `<expr>` subject differs, because osh's `emit_arith_error` receives the outer
+  `$(())` source rather than bash's inner recursively-expanded string. Matching
+  bash here would require threading the recursively-expanded operand text out of
+  arith eval into the diagnostic; purely cosmetic, essentially no script depends
+  on it.
 - **Function-scope name:** in a function body bash's `<name>` becomes
   `environment`; osh keeps `$0` (= `osh`) per design §74.
 

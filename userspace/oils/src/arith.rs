@@ -692,8 +692,16 @@ impl AParser<'_> {
             if hex.is_empty() {
                 return Ok(0);
             }
-            return i64::from_str_radix(&hex, 16)
-                .map_err(|_| ArithError::new(format!("bad hex literal '0x{hex}'")));
+            // A hex literal that overflows i64 wraps rather than erroring
+            // (`$((0xFFFFFFFFFFFFFFFFF))` → -1), matching bash. Every char is a
+            // valid hex digit here (the run above only consumed hex digits).
+            let mut val: i64 = 0;
+            for c in hex.chars() {
+                if let Some(d) = c.to_digit(16) {
+                    val = val.wrapping_mul(16).wrapping_add(i64::from(d));
+                }
+            }
+            return Ok(val);
         }
         // Collect the leading decimal run. It is either the whole number, an
         // octal literal (leading zero), or the base of a `base#num` literal.
@@ -754,13 +762,33 @@ impl AParser<'_> {
         }
         let text: String = self.chars[start..self.pos].iter().collect();
         // A leading zero (other than bare "0") denotes octal. bash reports a
-        // non-octal digit (`099`, `0778`) as "value too great for base".
+        // non-octal digit (`099`, `0778`) as "value too great for base", but an
+        // octal literal that overflows i64 *wraps* rather than erroring
+        // (`$((077777777777777777777777777))` → -1), matching C accumulation.
         if text.len() > 1 && text.starts_with('0') {
-            return i64::from_str_radix(&text, 8)
-                .map_err(|_| ArithError::lexeme_error("value too great for base", text.clone()));
+            let mut val: i64 = 0;
+            for c in text.chars() {
+                let Some(d) = c.to_digit(8) else {
+                    return Err(ArithError::lexeme_error(
+                        "value too great for base",
+                        text.clone(),
+                    ));
+                };
+                val = val.wrapping_mul(8).wrapping_add(i64::from(d));
+            }
+            return Ok(val);
         }
-        text.parse::<i64>()
-            .map_err(|_| ArithError::new(format!("bad number '{text}'")))
+        // Decimal. bash accumulates digits with i64 wraparound rather than
+        // erroring on overflow (`$((9999999999999999999999))` →
+        // 1864712049423024127), so reproduce that instead of a parse error.
+        // The lexer only consumed ASCII digits, so every char is a valid digit.
+        let mut val: i64 = 0;
+        for c in text.chars() {
+            if let Some(d) = c.to_digit(10) {
+                val = val.wrapping_mul(10).wrapping_add(i64::from(d));
+            }
+        }
+        Ok(val)
     }
 }
 
@@ -1166,6 +1194,19 @@ mod tests {
         // bash: `$(( ))` and, after expansion, `$(( $unset ))` → 0.
         assert_eq!(ev(""), 0);
         assert_eq!(ev("   "), 0);
+    }
+
+    #[test]
+    fn oversized_literal_wraps_like_bash() {
+        // A decimal literal exceeding i64 accumulates with wraparound rather
+        // than erroring, matching bash (`$((9999999999999999999999))`).
+        assert_eq!(ev("9999999999999999999999"), 1_864_712_049_423_024_127);
+        // Octal literals wrap too (`$((0777…))` → -1 once it overflows).
+        assert_eq!(ev("077777777777777777777777777"), -1);
+        // Hex literals wrap as well (`$((0xF…F))` → -1).
+        assert_eq!(ev("0xFFFFFFFFFFFFFFFFF"), -1);
+        // A non-octal digit in a leading-zero literal is still an error.
+        assert!(eval("099", &mut Map::default()).is_err());
     }
 
     #[test]

@@ -15002,12 +15002,27 @@ fn param_replace(
                 let can_replace = !done || all;
                 if can_replace
                     && let Some(end) = glob_match_at(pattern, &v, i, extglob)
-                    && end > i
                 {
-                    result.push_str(replacement);
-                    i = end;
-                    done = true;
-                    continue;
+                    if end > i {
+                        // Non-empty match: consume the matched span.
+                        result.push_str(replacement);
+                        i = end;
+                        done = true;
+                        continue;
+                    } else if !pattern.is_empty() {
+                        // Zero-width match by a *non-empty* pattern (e.g. the
+                        // extglob quantifiers `?(x)` / `*(x)` matching the empty
+                        // string at this position). bash still inserts the
+                        // replacement, then advances one character so the scan
+                        // makes progress — the literal char is preserved. An
+                        // *empty* pattern (`${x//​/-}`) is exempt: bash treats it
+                        // as a no-op, so it falls through to the literal copy.
+                        result.push_str(replacement);
+                        result.push(v[i]);
+                        i += 1;
+                        done = true;
+                        continue;
+                    }
                 }
                 result.push(v[i]);
                 i += 1;
@@ -20792,6 +20807,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("x=abcabc; echo ${x/#abc/Z}").0, "Zabc\n");
         assert_eq!(run("x=abcabc; echo ${x/%abc/Z}").0, "abcZ\n");
         assert_eq!(run("x=hello; echo ${x//l/}").0, "heo\n");
+    }
+
+    #[test]
+    fn param_replace_empty_extglob_match() {
+        // Extglob quantifiers that can match the empty string (`?(x)`, `*(x)`)
+        // produce zero-width matches in `${var//pat/repl}`: bash inserts the
+        // replacement at each such position and advances one character. An
+        // *empty* pattern (`${x///-}`) is a no-op, so it must NOT trigger this.
+        assert_eq!(run("shopt -s extglob; x=aXbXc; echo ${x//?(X)/-}").0, "-a--b--c\n");
+        assert_eq!(run("shopt -s extglob; x=aXbXc; echo ${x//*(X)/-}").0, "-a--b--c\n");
+        assert_eq!(run("shopt -s extglob; x=abc; echo ${x//?(z)/-}").0, "-a-b-c\n");
+        // Single (non-global) replace inserts at the first position only.
+        assert_eq!(run("shopt -s extglob; x=abc; echo ${x/?(z)/-}").0, "-abc\n");
+        // Empty pattern stays a no-op (regression guard for the fix).
+        assert_eq!(run("x=abc; echo ${x///-}").0, "abc\n");
     }
 
     #[test]

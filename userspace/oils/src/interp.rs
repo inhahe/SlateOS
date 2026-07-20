@@ -4517,6 +4517,22 @@ impl Shell {
             }
             // Otherwise `command_sub` already left the last substitution's status
             // in `self.last_status`.
+
+            // A null command (`> f`, `2> e`, `x=1 > f`) still performs its
+            // redirections: bash creates/truncates the output target and reports
+            // an unreadable input target as an error (status 1), even though no
+            // program runs. Resolve and materialise them here so the file side
+            // effects and error status match bash. A redirect failure overrides
+            // the assignment's status but does not undo the assignment itself.
+            if !sc.redirects.is_empty() {
+                match self.resolve_redirects(&sc.redirects) {
+                    Ok(redir) => self.materialize_output_files(&redir),
+                    Err(msg) => {
+                        self.errln(&format!("{}{msg}", self.err_prefix()));
+                        self.last_status = 1;
+                    }
+                }
+            }
             return Flow::Next;
         }
 
@@ -6409,6 +6425,40 @@ impl Shell {
         Ok(plan)
     }
 
+    /// Perform a command's *output-file* redirections for their create/truncate
+    /// side effect, independent of whether the command writes anything.
+    ///
+    /// bash opens each `>`/`>>` target when the command executes, so `: > f`,
+    /// `true 2> e`, `cd .. > log`, and a bare `> f` all create (and, for `>`,
+    /// truncate) the file even though the command produces no output. osh opens
+    /// redirect targets lazily at write time — which is correct for commands
+    /// that *do* write, but leaves the file untouched for no-output builtins and
+    /// the null command. Call this for those paths so the file side effect
+    /// matches bash. Dup/stream targets (`>&N`, `2>&1`, `1>&2`) name no file and
+    /// need nothing here; here-doc/here-string/`<` stdin were already validated
+    /// in `resolve_redirects`.
+    fn materialize_output_files(&self, redir: &RedirPlan) {
+        if let Some((path, append)) = &redir.stdout {
+            // Create/truncate the target for its side effect; we write nothing,
+            // so the resulting empty (or appended-to) file is the whole point.
+            // A failure here (permission, directory, …) is reported by the same
+            // path when the command would actually write, so ignoring it keeps
+            // the no-output case aligned with bash's silent success on a
+            // writable target while not masking a genuinely broken redirect for
+            // output-producing commands.
+            let _ = open_out(path, *append);
+        }
+        // Only touch a *separate* stderr file. When stderr shares stdout's file
+        // description (`&>f`), the file was already created above; re-opening a
+        // shared target would needlessly re-truncate it (harmless when nothing
+        // is written, but avoided for clarity).
+        if !redir.stderr_shares_stdout
+            && let Some((path, append)) = &redir.stderr
+        {
+            let _ = open_out(path, *append);
+        }
+    }
+
     /// Apply a redirection-only `exec`'s redirects to the shell's *persistent*
     /// fd table, in strict left-to-right source order.
     ///
@@ -7894,6 +7944,17 @@ impl Shell {
                     }
                 }
             }
+        }
+
+        // Perform this builtin's output-file redirections up front so that a
+        // builtin producing no stdout (`:`, `true`, `false`, `cd`, `unset`,
+        // `shift`, …) still creates/truncates its target, as bash does. Output-
+        // producing builtins (`echo`, `printf`, …) re-open the same target when
+        // they write; a redundant create/truncate here is harmless. `exec`
+        // manages the persistent fd table itself and must not have its targets
+        // pre-opened (its redirect-only form never reaches `run_builtin`).
+        if name != "exec" {
+            self.materialize_output_files(redir);
         }
 
         let mut flow = Flow::Next;
@@ -18834,7 +18895,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn command_not_found_handle_skipped_for_path_names() {
         // A name containing a slash bypasses the handler (bash: a slash path that
         // does not exist is a spawn error, not a "command not found" lookup).
-        let src = "command_not_found_handle() { echo caught; }; ./no_such_cmd_xyz123; echo $?";
+        // Use an *absolute* non-existent path: a `./`-relative path would resolve
+        // against the process cwd, which a parallel test's `cd` can retarget to a
+        // directory holding a non-executable entry (yielding 126 instead of 127)
+        // — a test-isolation flake, since `cd` mutates the process-global cwd.
+        let src = "command_not_found_handle() { echo caught; }; \
+                   /no_such_dir_osh_xyz123/no_such_cmd; echo $?";
         assert_eq!(run(src).0, "127\n");
     }
 
@@ -24594,6 +24660,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // syntax errors (exit 2), not silent success.
         assert_eq!(run("[ a b c ]; echo $?").0, "2\n");
         assert_eq!(run("[ -n a -n b ]; echo $?").0, "2\n");
+    }
+
+    #[test]
+    fn no_output_command_still_performs_output_redirect() {
+        // bash opens (creates/truncates) a `>` target when the command runs,
+        // even if the command writes nothing: `: > f`, `true > f`, `cd . > f`,
+        // and a bare null `> f` all create/truncate the file. osh opened
+        // redirect targets lazily at write time, so these left the file
+        // untouched — verified against bash 5.x during the redirect probe
+        // session. See `materialize_output_files`.
+        let base = std::env::temp_dir();
+        let uniq = format!("osh_noout_redir_{}", std::process::id());
+
+        // `:` truncates an existing non-empty file to zero bytes.
+        let p_colon = base.join(format!("{uniq}_colon"));
+        std::fs::write(&p_colon, b"abc").unwrap();
+        let ps = p_colon.to_string_lossy().replace('\\', "/");
+        run(&format!(": > \"{ps}\""));
+        assert_eq!(std::fs::read(&p_colon).unwrap(), b"", "colon should truncate");
+        let _ = std::fs::remove_file(&p_colon);
+
+        // `true` likewise truncates.
+        let p_true = base.join(format!("{uniq}_true"));
+        std::fs::write(&p_true, b"abc").unwrap();
+        let ps = p_true.to_string_lossy().replace('\\', "/");
+        run(&format!("true > \"{ps}\""));
+        assert_eq!(std::fs::read(&p_true).unwrap(), b"", "true should truncate");
+        let _ = std::fs::remove_file(&p_true);
+
+        // A bare null command creates a fresh empty file.
+        let p_null = base.join(format!("{uniq}_null"));
+        let _ = std::fs::remove_file(&p_null);
+        let ps = p_null.to_string_lossy().replace('\\', "/");
+        run(&format!("> \"{ps}\""));
+        assert!(p_null.exists(), "null command should create the file");
+        assert_eq!(std::fs::read(&p_null).unwrap(), b"");
+        let _ = std::fs::remove_file(&p_null);
+
+        // `cd .` (a no-output builtin) truncates its `>` target.
+        let p_cd = base.join(format!("{uniq}_cd"));
+        std::fs::write(&p_cd, b"abc").unwrap();
+        let ps = p_cd.to_string_lossy().replace('\\', "/");
+        run(&format!("cd . > \"{ps}\""));
+        assert_eq!(std::fs::read(&p_cd).unwrap(), b"", "cd should truncate");
+        let _ = std::fs::remove_file(&p_cd);
+
+        // A `2>` target on a no-output command is created too.
+        let p_err = base.join(format!("{uniq}_err"));
+        let _ = std::fs::remove_file(&p_err);
+        let ps = p_err.to_string_lossy().replace('\\', "/");
+        run(&format!(": 2> \"{ps}\""));
+        assert!(p_err.exists(), "2> target should be created");
+        let _ = std::fs::remove_file(&p_err);
+
+        // A null command's assignment still applies even when a `<` input
+        // redirect fails; the failed redirect yields status 1.
+        let (o, _) = run("x=7 < /nonexistent_osh_probe_path; echo \"st=$? x=$x\"");
+        assert!(o.contains("st=1"), "input-redirect failure should be status 1: {o:?}");
+        assert!(o.contains("x=7"), "assignment should still apply: {o:?}");
     }
 
     #[test]

@@ -16,13 +16,41 @@ use crate::ast::{
 use crate::lexer::{Op, Seg, Tok, expand_aliases, tokenize, tokenize_spanned};
 use std::collections::BTreeMap;
 
-/// A parse error with a human-readable message.
+/// A parse error with a human-readable message and, when known, the 1-based
+/// source line the error occurred on.
+///
+/// `line` mirrors the number bash prints in `<name>: line N:`: for a
+/// grammar error it is the line of the offending token; for an
+/// unexpected-end-of-file error it is one past the last token's line (bash's
+/// EOF quirk). It is stamped centrally in [`parse_tokens`] and is `None` for
+/// lexer-originated errors (unclosed quotes/substitutions), where the caller
+/// falls back to the current execution line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseError(pub String);
+pub struct ParseError {
+    pub msg: String,
+    pub line: Option<u32>,
+}
+
+impl ParseError {
+    /// A parse error with no known line (the common construction site inside
+    /// the grammar; [`parse_tokens`] stamps the line afterwards).
+    pub fn new(msg: String) -> Self {
+        Self { msg, line: None }
+    }
+
+    /// Attach a source line, but only if one is not already set — so an inner
+    /// site that knows its precise line wins over the central fallback.
+    fn or_line(mut self, line: u32) -> Self {
+        if self.line.is_none() {
+            self.line = Some(line);
+        }
+        self
+    }
+}
 
 impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.msg)
     }
 }
 
@@ -31,7 +59,7 @@ impl core::fmt::Display for ParseError {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError(e.0))?;
+    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
     parse_tokens(toks, lines)
 }
 
@@ -43,7 +71,7 @@ pub fn parse_with_aliases(
     src: &str,
     aliases: &BTreeMap<String, String>,
 ) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError(e.0))?;
+    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
     let (toks, lines) = if aliases.is_empty() {
         (toks, lines)
     } else {
@@ -54,13 +82,24 @@ pub fn parse_with_aliases(
 
 fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>) -> Result<Program, ParseError> {
     let mut p = Parser { toks, lines, pos: 0 };
-    let prog = p.parse_program(&[], true)?;
-    if p.pos != p.toks.len() {
-        // Leftover tokens — typically an unmatched `)` or a stray reserved
-        // word. bash names the offending token (`near unexpected token \`)'`).
-        return Err(p.unexpected_here());
-    }
-    Ok(prog)
+    let parsed = match p.parse_program(&[], true) {
+        Ok(_prog) if p.pos != p.toks.len() => {
+            // Leftover tokens — typically an unmatched `)` or a stray reserved
+            // word. bash names the offending token (`near unexpected token \`)'`).
+            Err(p.unexpected_here())
+        }
+        other => other,
+    };
+    // Stamp the offending line centrally. `pos` is not advanced past a failing
+    // token, so the parser's cursor still points at the error site. bash reports
+    // the token's own line for a grammar error, but for an *unexpected end of
+    // file* error (cursor at EOF) it reports one line past the last token — the
+    // position where the missing terminator would go. Detect that via
+    // `peek().is_none()` and add 1.
+    parsed.map_err(|e| {
+        let line = p.cur_line().saturating_add(u32::from(p.peek().is_none()));
+        e.or_line(line)
+    })
 }
 
 struct Parser {
@@ -160,9 +199,9 @@ impl Parser {
     /// offending token with a leading backtick and a trailing single quote.
     fn unexpected_here(&self) -> ParseError {
         if self.peek().is_none() {
-            ParseError("syntax error: unexpected end of file".to_string())
+            ParseError::new("syntax error: unexpected end of file".to_string())
         } else {
-            ParseError(format!(
+            ParseError::new(format!(
                 "syntax error near unexpected token `{}'",
                 self.token_display()
             ))
@@ -544,7 +583,7 @@ impl Parser {
         self.pos += 1;
         let body = self.parse_program(&[], false)?;
         if !self.at_op(Op::RParen) {
-            return Err(ParseError("expected ')'".into()));
+            return Err(ParseError::new("expected ')'".into()));
         }
         self.pos += 1;
         Ok(Command::Subshell(body))
@@ -602,7 +641,7 @@ impl Parser {
             return Err(self.unexpected_here());
         };
         if !is_valid_name(&var) {
-            return Err(ParseError(format!("`{var}': not a valid identifier")));
+            return Err(ParseError::new(format!("`{var}': not a valid identifier")));
         }
         self.pos += 1;
         self.skip_newlines();
@@ -640,7 +679,7 @@ impl Parser {
             return Err(self.unexpected_here());
         };
         if !is_valid_name(&var) {
-            return Err(ParseError(format!("`{var}': not a valid identifier")));
+            return Err(ParseError::new(format!("`{var}': not a valid identifier")));
         }
         self.pos += 1;
         self.skip_newlines();
@@ -676,7 +715,7 @@ impl Parser {
     fn parse_for_arith(&mut self, raw: &str) -> Result<Command, ParseError> {
         let parts: Vec<&str> = raw.split(';').collect();
         if parts.len() != 3 {
-            return Err(ParseError(
+            return Err(ParseError::new(
                 "C-style for loop requires 'for (( init; cond; update ))'".into(),
             ));
         }
@@ -699,7 +738,7 @@ impl Parser {
     fn parse_case(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("case")?;
         let Some(Tok::Word(segs)) = self.peek() else {
-            return Err(ParseError("expected word after 'case'".into()));
+            return Err(ParseError::new("expected word after 'case'".into()));
         };
         let word = self.word_from_segs(&segs.clone())?;
         self.pos += 1;
@@ -721,7 +760,7 @@ impl Parser {
             let mut patterns = Vec::new();
             loop {
                 let Some(Tok::Word(segs)) = self.peek() else {
-                    return Err(ParseError("expected pattern in 'case'".into()));
+                    return Err(ParseError::new("expected pattern in 'case'".into()));
                 };
                 patterns.push(self.word_from_segs(&segs.clone())?);
                 self.pos += 1;
@@ -732,7 +771,7 @@ impl Parser {
                 break;
             }
             if !self.at_op(Op::RParen) {
-                return Err(ParseError("expected ')' after 'case' pattern".into()));
+                return Err(ParseError::new("expected ')' after 'case' pattern".into()));
             }
             self.pos += 1;
             let body = self.parse_case_body()?;
@@ -802,7 +841,7 @@ impl Parser {
         self.pos += 1;
         let expr = self.parse_cond_or()?;
         if self.bare_word_here().as_deref() != Some("]]") {
-            return Err(ParseError("expected ']]' to close '[['".into()));
+            return Err(ParseError::new("expected ']]' to close '[['".into()));
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -843,7 +882,7 @@ impl Parser {
             self.pos += 1;
             let inner = self.parse_cond_or()?;
             if !self.at_op(Op::RParen) {
-                return Err(ParseError("expected ')' in '[[ … ]]'".into()));
+                return Err(ParseError::new("expected ')' in '[[ … ]]'".into()));
             }
             self.pos += 1;
             return Ok(inner);
@@ -881,12 +920,12 @@ impl Parser {
             if let [Seg::Lit(s)] = segs.as_slice()
                 && s == "]]"
             {
-                return Err(ParseError("unexpected ']]' (expected operand)".into()));
+                return Err(ParseError::new("unexpected ']]' (expected operand)".into()));
             }
             self.pos += 1;
             return self.word_from_segs(&segs);
         }
-        Err(ParseError("expected operand in '[[ … ]]'".into()))
+        Err(ParseError::new("expected operand in '[[ … ]]'".into()))
     }
 
     /// Peek at a binary operator following an operand, without consuming.
@@ -950,7 +989,7 @@ impl Parser {
                     // anywhere else it's a syntax error.
                     let is_decl_operand = seen_word && is_declaration_command(&cmd.words);
                     if seen_word && !is_decl_operand {
-                        return Err(ParseError(
+                        return Err(ParseError::new(
                             "array assignment is only valid before the command word".into(),
                         ));
                     }
@@ -1046,7 +1085,7 @@ impl Parser {
             Some(Tok::Op(Op::AmpDGreat)) => RedirectOp::AppendBoth,
             Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,
             Some(Tok::Op(Op::TLess)) => RedirectOp::HereStr,
-            _ => return Err(ParseError("expected redirection operator".into())),
+            _ => return Err(ParseError::new("expected redirection operator".into())),
         };
         let fd = explicit_fd.unwrap_or(match op {
             RedirectOp::Read
@@ -1062,7 +1101,7 @@ impl Parser {
             // `<<`/`<<-` operator. (Its swallowed body lines are already
             // accounted for by the lexer's per-token line stamping.)
             Some(Tok::HereDoc(segs)) => self.word_from_segs(&segs)?,
-            _ => return Err(ParseError("expected redirection target".into())),
+            _ => return Err(ParseError::new("expected redirection target".into())),
         };
         // `>&file` (non-numeric *literal* target, no explicit/var fd) means
         // "both fds to file". A `{v}>&…` form keeps its dup semantics (varfd is
@@ -1406,7 +1445,7 @@ fn split_name_subscript(
     bytes: &[char],
 ) -> Result<(String, Option<ArrayIndex>, Vec<char>), ParseError> {
     if bytes.is_empty() {
-        return Err(ParseError("empty '${}' expansion".into()));
+        return Err(ParseError::new("empty '${}' expansion".into()));
     }
     let mut i = 0;
     if bytes[0].is_ascii_digit() {
@@ -1429,7 +1468,7 @@ fn split_name_subscript(
         let index = match inner.as_str() {
             "@" => ArrayIndex::All,
             "*" => ArrayIndex::Star,
-            "" => return Err(ParseError("empty array subscript '[]'".into())),
+            "" => return Err(ParseError::new("empty array subscript '[]'".into())),
             // Verbatim so an associative read `${h[ x ]}` keys on the literal
             // ` x ` (bash preserves subscript whitespace); indexed reads
             // arithmetic-evaluate, which ignores the whitespace.
@@ -1933,7 +1972,7 @@ fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError(e.0))?;
+    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(e.0))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg)?);
@@ -1949,7 +1988,7 @@ fn word_replacement_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError(e.0))?;
+    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(e.0))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg)?);
@@ -1961,7 +2000,7 @@ fn word_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let toks = tokenize(s).map_err(|e| ParseError(e.0))?;
+    let toks = tokenize(s).map_err(|e| ParseError::new(e.0))?;
     let mut parts: Vec<WordPart> = Vec::new();
     let mut first = true;
     for t in &toks {
@@ -2255,16 +2294,16 @@ mod tests {
         // At EOF, both the keyword form and the POSIX form report bash's
         // canonical "unexpected end of file" (not a bespoke message).
         assert_eq!(
-            parse("function f").unwrap_err().0,
+            parse("function f").unwrap_err().msg,
             "syntax error: unexpected end of file"
         );
         assert_eq!(
-            parse("f()").unwrap_err().0,
+            parse("f()").unwrap_err().msg,
             "syntax error: unexpected end of file"
         );
         // A non-body token after the header names the offending token.
         assert_eq!(
-            parse("f() echo hi").unwrap_err().0,
+            parse("f() echo hi").unwrap_err().msg,
             "syntax error near unexpected token `echo'"
         );
     }

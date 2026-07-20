@@ -746,6 +746,11 @@ pub struct Shell {
     /// execution; `-c` and interactive shells omit it. Set once at startup by
     /// the binary. See `refresh_funcname`.
     script_mode: bool,
+    /// Nesting depth of `eval` (and `eval`-like) execution. While `> 0`, a
+    /// syntax error is tagged with bash's `eval:` input-source token
+    /// (`<name>: eval: line N: …`) instead of the outer `-c`/script token.
+    /// Incremented around the `eval` builtin's parse+execute.
+    eval_depth: u32,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -1032,6 +1037,7 @@ impl Shell {
             monitor: false,
             command_mode: false,
             script_mode: false,
+            eval_depth: 0,
             errexit_suppress: 0,
             unbound_error: None,
             arith_error: false,
@@ -1329,7 +1335,7 @@ impl Shell {
         let prog = match parsed {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format_parse_error(&e, &self.err_prefix()));
+                self.errln(&self.format_parse_error(&e, src));
                 self.last_status = 2;
                 return Flow::Next;
             }
@@ -1353,7 +1359,7 @@ impl Shell {
         let prog = match parsed {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format_parse_error(&e, &self.err_prefix()));
+                self.errln(&self.format_parse_error(&e, src));
                 self.last_status = 2;
                 return 2;
             }
@@ -3213,6 +3219,7 @@ impl Shell {
             monitor: self.monitor,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
+            eval_depth: self.eval_depth,
             // A subshell inherits the parent's errexit-ignore depth: per POSIX a
             // compound command (including `( … )`) executed where `set -e` is
             // being ignored — an if/while/until condition, a non-final `&&`/`||`
@@ -8615,7 +8622,14 @@ impl Shell {
             "let" => self.builtin_let(args),
             "eval" => {
                 let joined = args.join(" ");
-                self.run_source(&joined)
+                // bash tags a syntax error inside `eval` with the `eval:`
+                // input-source token; `eval_depth` drives that in the parse-error
+                // prefix. Restore on every exit path (the borrow of `self` ends
+                // before this returns, so a plain inc/dec is sufficient).
+                self.eval_depth = self.eval_depth.saturating_add(1);
+                let rc = self.run_source(&joined);
+                self.eval_depth = self.eval_depth.saturating_sub(1);
+                rc
             }
             "source" | "." => self.builtin_source(args, name),
             "type" => self.builtin_type(args, out, redir),
@@ -10955,7 +10969,7 @@ impl Shell {
                     let _ = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
-                    self.errln(&format_parse_error(&e, &self.err_prefix()));
+                    self.errln(&self.format_parse_error(&e, &action));
                 }
             }
             self.last_status = saved;
@@ -14877,6 +14891,63 @@ impl Shell {
         }
     }
 
+    /// The diagnostic prefix bash prepends to a **syntax error**: like
+    /// [`Shell::err_prefix`] but (a) it uses the offending token's line (passed
+    /// in from the parser) rather than the current execution line, and (b) it
+    /// inserts bash's *input-source* token between the name and `line N` —
+    /// `-c` for a `-c` command string, `eval` while inside `eval`, and nothing
+    /// for a script file or interactive input. bash prints, e.g.,
+    /// `bash: -c: line 2: syntax error…` and `bash: eval: line 1: …`; osh
+    /// mirrors the shape with its own `$0` name.
+    fn syntax_error_prefix(&self, line: u32) -> String {
+        let name = if self.fn_stack.is_empty() {
+            self.name.clone()
+        } else {
+            self.frame_source()
+        };
+        // `eval` wins over the outer `-c`/script token (bash reports `eval:`
+        // even for an `eval` run from a script).
+        let token = if self.eval_depth > 0 {
+            Some("eval")
+        } else if self.command_mode {
+            Some("-c")
+        } else {
+            None
+        };
+        if self.command_mode || self.script_mode || self.eval_depth > 0 {
+            match token {
+                Some(t) => format!("{name}: {t}: line {line}: "),
+                None => format!("{name}: line {line}: "),
+            }
+        } else {
+            // Interactive: bash still shows `line N` for piped stdin, but osh's
+            // REPL is line-at-a-time and never accumulates a multi-line compound,
+            // so it keeps the bare `<name>: ` form here.
+            format!("{name}: ")
+        }
+    }
+
+    /// Format a parse error for display the way bash does: `<prefix><message>`,
+    /// followed — for an `near unexpected token` error — by a second line that
+    /// echoes the offending source line (`<prefix>\`<line text>'`). The line
+    /// number comes from the [`ParseError`] (the offending token's line, or one
+    /// past EOF); lexer-originated errors carry no line, so we fall back to the
+    /// current execution line.
+    fn format_parse_error(&self, e: &crate::parser::ParseError, src: &str) -> String {
+        let line = e.line.unwrap_or_else(|| self.current_line.max(1));
+        let prefix = self.syntax_error_prefix(line);
+        let first = wrap_parse_message(&e.msg, &prefix);
+        // bash echoes the physical source line on a second diagnostic line only
+        // for the `near unexpected token` family — not for `unexpected end of
+        // file` or the lexer's `unexpected EOF while looking for matching` form.
+        if e.msg.starts_with("syntax error near unexpected token")
+            && let Some(text) = nth_source_line(src, line)
+        {
+            return format!("{first}\n{prefix}`{text}'");
+        }
+        first
+    }
+
     /// Emit an arithmetic diagnostic in bash's form: `<name>: line N:
     /// [<builtin>: ]<expr>: <body> (error token is "…")`. `expr` is the
     /// (already parameter-expanded) arithmetic source; bash echoes it with
@@ -17002,19 +17073,16 @@ fn map_device_path(path: &str) -> &str {
     path
 }
 
-/// Format a parse error for display the way bash does. bash's unexpected-token
-/// diagnostic is itself `syntax error near unexpected token '…'`, so blindly
-/// prefixing every parser message with `syntax error: ` would double the phrase
-/// (`syntax error: syntax error near …`). Only add the prefix for the
-/// fragment-style messages (`expected ')'`, `empty command`, …); pass through a
-/// message that already opens with `syntax error`.
-fn format_parse_error(e: &crate::parser::ParseError, prefix: &str) -> String {
-    let msg = e.to_string();
-    // Some parser diagnostics are already complete bash messages and must not be
-    // re-wrapped: the `syntax error …` family, the `\`NAME': not a valid
-    // identifier` message, and the `unexpected EOF while looking for matching
-    // \`C'` unclosed-quote/substitution diagnostic (bash emits these last two
-    // with no `syntax error:` tag).
+/// Wrap a raw parser message with `prefix`, adding bash's `syntax error: ` tag
+/// only for fragment-style messages. bash's unexpected-token diagnostic is
+/// itself `syntax error near unexpected token '…'`, so blindly prefixing every
+/// parser message with `syntax error: ` would double the phrase (`syntax error:
+/// syntax error near …`). Some parser diagnostics are already complete bash
+/// messages and must not be re-wrapped: the `syntax error …` family, the
+/// `\`NAME': not a valid identifier` message, and the `unexpected EOF while
+/// looking for matching \`C'` unclosed-quote/substitution diagnostic (bash
+/// emits these last two with no `syntax error:` tag).
+fn wrap_parse_message(msg: &str, prefix: &str) -> String {
     if msg.starts_with("syntax error")
         || msg.starts_with("unexpected EOF")
         || msg.ends_with("not a valid identifier")
@@ -17023,6 +17091,14 @@ fn format_parse_error(e: &crate::parser::ParseError, prefix: &str) -> String {
     } else {
         format!("{prefix}syntax error: {msg}")
     }
+}
+
+/// The 1-based `line`th physical line of `src` (verbatim, minus a trailing
+/// `\r`), or `None` if out of range. Used to echo the offending source line the
+/// way bash does on its second diagnostic line.
+fn nth_source_line(src: &str, line: u32) -> Option<&str> {
+    let idx = usize::try_from(line).ok()?.checked_sub(1)?;
+    src.split('\n').nth(idx).map(|l| l.strip_suffix('\r').unwrap_or(l))
 }
 
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
@@ -19228,16 +19304,91 @@ mod tests {
         // A parser message that already opens with "syntax error" (bash's
         // canonical unexpected-token phrasing) must NOT get a second
         // "syntax error: " prefix.
-        let e = ParseError("syntax error near unexpected token '--'".into());
+        let e = ParseError::new("syntax error near unexpected token '--'".into());
         assert_eq!(
-            format_parse_error(&e, "osh: "),
+            wrap_parse_message(&e.msg, "osh: "),
             "osh: syntax error near unexpected token '--'"
         );
         // A fragment-style message still gets the prefix.
-        let e2 = ParseError("expected ')'".into());
+        let e2 = ParseError::new("expected ')'".into());
         assert_eq!(
-            format_parse_error(&e2, "osh: "),
+            wrap_parse_message(&e2.msg, "osh: "),
             "osh: syntax error: expected ')'"
+        );
+    }
+
+    #[test]
+    fn syntax_error_prefix_carries_source_token_line_and_echo() {
+        // bash tags a syntax error with `<name>: <src>: line N: <msg>`, uses the
+        // offending token's line (one past EOF for an end-of-file error), and
+        // echoes the offending source line on a second diagnostic line for the
+        // `near unexpected token` family. osh mirrors all three with its `$0`.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+
+        // near-token, single line: `-c` token, line 1, second-line echo.
+        let src = "echo hello world (";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 1: syntax error near unexpected token `('\n\
+             osh: -c: line 1: `echo hello world ('"
+        );
+
+        // near-token, line 3: the reported line and echoed text follow the token.
+        let src = ":\n:\necho a | | b";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 3: syntax error near unexpected token `|'\n\
+             osh: -c: line 3: `echo a | | b'"
+        );
+
+        // end-of-file error: one line past the last token, and NO second line.
+        let src = "if true";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 2: syntax error: unexpected end of file"
+        );
+
+        // EOF quirk with trailing blank lines: bash reports the EOF position line.
+        let src = "if true\n\n\n";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 4: syntax error: unexpected end of file"
+        );
+
+        // Inside `eval`, the input-source token is `eval`, not `-c`.
+        sh.eval_depth = 1;
+        let src = "echo (";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: eval: line 1: syntax error near unexpected token `('\n\
+             osh: eval: line 1: `echo ('"
+        );
+        sh.eval_depth = 0;
+
+        // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
+        // still driven by `err_prefix`, which omits it.
+        assert_eq!(sh.err_prefix(), "osh: line 1: ");
+    }
+
+    #[test]
+    fn lexer_error_gets_source_token_with_fallback_line() {
+        // A lexer-originated error (unclosed construct) carries no parser line, so
+        // the prefix falls back to the current execution line — but it still gains
+        // bash's input-source token.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        let src = "a=(1 2";
+        let e = parse(src).unwrap_err();
+        assert_eq!(e.line, None, "lexer errors carry no parser line");
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
     }
 
@@ -19258,7 +19409,7 @@ mod tests {
         ] {
             let err = parse(src).expect_err("should fail to parse");
             assert_eq!(
-                err.0,
+                err.msg,
                 format!("unexpected EOF while looking for matching `{close}'"),
                 "src {src:?}"
             );
@@ -19270,17 +19421,17 @@ mod tests {
         // A stray extra pipe: bash prints `syntax error near unexpected token `|'`.
         let err = parse("echo a | | echo b").expect_err("should fail");
         assert!(
-            err.0.starts_with("syntax error near unexpected token"),
+            err.msg.starts_with("syntax error near unexpected token"),
             "got {:?}",
-            err.0
+            err.msg
         );
         // An invalid `for` loop variable: bash prints `\`1abc': not a valid
         // identifier` with no `syntax error:` tag.
         let err = parse("for 1abc in x; do :; done").expect_err("should fail");
-        assert_eq!(err.0, "`1abc': not a valid identifier");
-        // The interp-level formatter must pass both through without wrapping.
+        assert_eq!(err.msg, "`1abc': not a valid identifier");
+        // The interp-level message wrapper must pass both through without wrapping.
         assert_eq!(
-            format_parse_error(&crate::parser::ParseError(err.0), "osh: "),
+            wrap_parse_message(&err.msg, "osh: "),
             "osh: `1abc': not a valid identifier"
         );
     }

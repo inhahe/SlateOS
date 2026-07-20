@@ -432,56 +432,72 @@ is set. Covered by `nounset_abort_under_errexit_is_one`.
 
 ---
 
-### TD-OILS-PARSE-ERR-LOC. `osh` syntax-error diagnostics differ from bash in source-token, line number, and partial output — 2026-07-19 — OPEN (low priority, error-path cosmetics)
+### TD-OILS-PARSE-ERR-LOC. `osh` syntax-error diagnostics differ from bash in source-token, line number, and partial output — 2026-07-19 — MOSTLY RESOLVED 2026-07-20 (two sub-divergences remain: partial output + token identity)
 
 **Where:** `userspace/oils/src/parser.rs` (`ParseError`, `unexpected_here`,
-`cur_line`), `userspace/oils/src/lexer.rs` (`LexError`, which carries no
-line), `userspace/oils/src/interp.rs` `format_parse_error` (~15450) and the
-`err_prefix`-based prefix it is handed, and the whole-program parse-then-exec
-model in `run_source*`.
+`cur_line`, `parse_tokens`), `userspace/oils/src/lexer.rs` (`LexError`, which
+carries no line), `userspace/oils/src/interp.rs` `format_parse_error` /
+`syntax_error_prefix` / `wrap_parse_message` / `nth_source_line` and the
+whole-program parse-then-exec model in `run_source*`.
 
-**What:** three related divergences on the *syntax-error* path (all
-stderr-only; runtime-error messages already match bash):
+**What:** the original entry listed three divergences on the *syntax-error*
+path (all stderr-only; runtime-error messages already match bash):
 
-1. **Missing input-source token.** bash tags a syntax error with the current
-   input source between `$0` and `line N`: `bash: -c: line N: …` for `-c`,
-   `bash: eval: line N: …` for `eval`, and just `<script>: line N: …` /
-   `bash: line N: …` for a script file / stdin. osh emits only
-   `<name>: line N: …` (no `-c:`/`eval:` token). Repro: `bash -c 'if true'`
-   → `bash: -c: line 2: syntax error…`; `osh -c 'if true'` → `osh: line 1:
-   syntax error…`.
+1. **✅ RESOLVED 2026-07-20 — Missing input-source token.** bash tags a
+   syntax error with the current input source between `$0` and `line N`:
+   `bash: -c: line N: …` for `-c`, `bash: eval: line N: …` for `eval`, and
+   just `<script>: line N: …` for a script file. osh now emits the same
+   token via `Shell::syntax_error_prefix`: `-c` when `command_mode`, `eval`
+   while `eval_depth > 0` (a new counter bumped around the `eval` builtin,
+   winning over the outer token even from a script), and none for a script
+   file / interactive input. Runtime (non-parse) diagnostics keep going
+   through `err_prefix`, which omits the token — matching bash (`bash: line
+   1: cmd: command not found`, no `-c:`).
 
-2. **Wrong line number.** osh's parse-error prefix takes its line from
-   `self.current_line` (≈1 at parse time, before execution) rather than the
-   offending token's line, so *every* syntax error reports line 1 regardless
-   of where it is. bash reports the real line — and for *end-of-file* errors
-   uses (last-content-line + 1) (e.g. one-line `if true` → line 2). The
-   parser already knows the right line via `cur_line()`; the fix is to stamp
-   it onto `ParseError`/`LexError` at the point of failure (pos is not reset
-   on error, so a central capture in `parse_tokens` works) and to add the
-   EOF `+1` quirk.
+2. **✅ RESOLVED 2026-07-20 — Wrong line number + second-line echo.**
+   `ParseError` now carries `line: Option<u32>`, stamped centrally in
+   `parse_tokens` from `p.cur_line()` (pos is not advanced past a failing
+   token, so the cursor still points at the error site). bash's *unexpected
+   end of file* quirk — it reports the line one past the last token (`if
+   true` → line 2, `if true\n\n\n` → line 4) — is reproduced by adding 1
+   when `p.peek().is_none()`. For the `near unexpected token` family bash
+   also echoes the offending physical source line on a second diagnostic
+   line (`osh: -c: line 1: \`echo hello world ('`); `format_parse_error`
+   now emits that via `nth_source_line`. Lexer-originated errors (unclosed
+   quotes/subs) still carry no parser line, so they fall back to
+   `current_line` — but they now gain the input-source token too. Covered by
+   `syntax_error_prefix_carries_source_token_line_and_echo` and
+   `lexer_error_gets_source_token_with_fallback_line`.
 
-3. **No partial output before the error.** bash parses-and-executes a script
-   one command at a time, so `echo a; echo b; echo (` prints `a` and `b`
-   before the line-3 syntax error. osh parses the whole program up front, so
-   nothing runs when any part fails to parse.
+3. **STILL OPEN — No partial output before the error.** bash parses-and-
+   executes a script one command at a time, so `echo a; echo b; echo (`
+   prints `a` and `b` before the line-3 syntax error (and the same happens
+   inside a multi-line `eval` string). osh parses the whole program up
+   front, so nothing runs when any part fails to parse. This is an
+   architectural change (incremental parse/execute) that interacts with
+   here-docs, function definitions spanning commands, and `$LINENO`. The
+   second-line echo (from #2) is still emitted correctly even when the
+   preceding output is missing, so single-statement syntax errors — the
+   common case — now match bash byte-for-byte.
 
-**Why deferred:** (1) and (2) are a bounded refactor (thread a line + a
-source-source-description through `ParseError`/`LexError`, convert ~24
-construction sites, replicate bash's token-vs-EOF line rule), but the payoff
-is purely syntax-error stderr cosmetics, and a *partial* fix still mismatches
-bash on the other axis. (3) is an architectural change (incremental
-parse/execute) that is much larger and interacts with here-docs, function
-definitions spanning commands, and `$LINENO`. Not worth the regression risk
-mid-compat-pass.
+4. **STILL OPEN — Token identity for `(`-in-command-position.** For a `(`
+   that appears where a command word is expected (`echo a; echo (`, `echo
+   hello (`), bash reports `near unexpected token \`newline'` (it scans past
+   the `(` to the following token), while osh reports `near unexpected token
+   \`('` (it errors at the `(` itself). Same for `for`/`select` reaching a
+   bare newline before the loop variable: bash reports the `newline` token,
+   osh reaches EOF and reports `unexpected end of file`. These are
+   parser-strategy differences (which token is named as the culprit), not a
+   prefix/line issue; the source-token, line number, and second-line echo
+   are all correct. Aligning them would require reworking where the grammar
+   raises the error (report at the *following* token rather than at the
+   offending one / EOF) — higher risk, deferred.
 
-**Proper fix (if pursued):** convert `ParseError` to `{ msg, line:
-Option<u32> }` with an `at(line)` builder; give `LexError` a line too (the
-lexer tracks the current line while scanning); stamp the line centrally in
-`parse_tokens` from `p.cur_line()` (and add `+1` for the EOF family); add a
-per-source-kind token (`-c`/`eval`/none) threaded from the `run_source`
-callers into `format_parse_error`. Tackle (3) separately as an
-incremental-execution project if ever needed.
+**Remaining fix (if pursued):** (3) is a separate incremental-execution
+project. (4) means changing the for/select/command-position grammar to
+consume the offending token and error at the *next* token so the named
+culprit matches bash — a localized but behaviour-shifting parser change best
+done with a focused test sweep.
 
 ### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19
 

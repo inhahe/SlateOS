@@ -2585,9 +2585,29 @@ aliased to an `Out::Pipe` (`3>&1` where fd 1 is the capture pipe) with the
 compound path's separate stderr routing (`stderr_stack`), which does not
 consult `open_write_fds[3]` the way the simple-command paths do.
 
+**Re-verified 2026-07-20** (still OPEN, genuine — not stale). Root cause
+pinned: `install_extra_fds`'s `AliasStd(n)` branch only special-cases
+`(1, Out::Pipe(w)) => pipe_writer_to_file(w)`; when the enclosing `out` is
+`Out::Capture(buf)` (a command substitution's in-memory `Vec<u8>`, which has
+no OS fd) it falls through to `snapshot_std_fd(1)` and aliases the scratch fd
+to the shell's *real* stdout instead of the capture. Both the stderr-route
+(`r=$({ echo o; echo e >&2; } 3>&1 2>&3)` → osh `r="o"`, "e" leaks) and the
+direct-write (`r=$({ echo hi >&3; } 3>&1)` → osh `r=""`, "hi" leaks) variants
+still fail; the `Out::Pipe` pipeline form (`… 3>&1 2>&3 | cat`) works. The
+impedance mismatch is fundamental: `open_write_fds` maps fd→`Arc<File>` but a
+capture is a buffer, so a scratch fd can't be stored there.
+
 **Why deferred:** rare edge-of-an-edge (a brace/subshell group that dups
 stderr through a user scratch fd, *and* is itself inside a capturing command
-substitution). The simple-command case — the common one — is fixed.
+substitution). The simple-command case — the common one — is fixed. A narrow
+buffer-table patch (parallel `open_write_bufs: HashMap<i32, Arc<Mutex<Vec<u8>>>>`
+consulted by every `>&N`/`exec_dup_source` write site + merged into the capture
+after the body) would work but is another band-aid on the collapsed-`RedirPlan`
+model — deliberately avoided per the "watch for band-aid accumulation" rule.
+The alternative uniform fix (back command substitution with a real OS pipe +
+drainer thread so fd 1 always has an OS fd) risks deadlock/regression on the
+hottest, most-tested path (large-output command subs). Neither is worth it for
+this obscure case ahead of the real refactor below.
 
 **Proper fix:** unify the compound redirect executor onto the same
 `install_extra_fds`/`restore_extra_fds` + `open_write_fds`-consulting stderr

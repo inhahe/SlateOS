@@ -1375,6 +1375,23 @@ impl Shell {
             .max(1);
         self.vars.insert("SHLVL".to_string(), next_lvl.to_string());
         self.exported.insert("SHLVL".to_string());
+        // HOSTNAME: bash sets this from gethostname(2) at startup, but only when
+        // the environment does not already supply it (an inherited HOSTNAME
+        // wins). We match that precedence by synthesising *after* the import
+        // with `or_insert` semantics, so an env/init-provided value is kept and
+        // we fall back to the OS hostname otherwise. Unlike bash, this stays a
+        // plain (non-exported) shell variable, matching bash which does not
+        // export HOSTNAME. We only insert when a non-empty hostname is found, so
+        // a hostless environment leaves HOSTNAME unset rather than empty (bash
+        // still sets an empty string, but an empty HOSTNAME is indistinguishable
+        // from unset for `${HOSTNAME:-…}` idioms and avoids papering over a
+        // genuinely unknown host).
+        if !self.vars.contains_key("HOSTNAME")
+            && let Some(host) = system_hostname()
+            && !host.is_empty()
+        {
+            self.vars.insert("HOSTNAME".to_string(), host);
+        }
         self.env_imported = true;
     }
 
@@ -17294,6 +17311,37 @@ fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
     }
 }
 
+/// The OS hostname, used to synthesise `$HOSTNAME` when the environment does not
+/// supply it (mirroring bash's `gethostname(2)` startup behaviour).
+///
+/// On SlateOS/Linux the kernel exposes the hostname through
+/// `/proc/sys/kernel/hostname` (the canonical live source) with `/etc/hostname`
+/// as a static fallback for early boot before procfs is populated. On the
+/// Windows test host there is no procfs, so we read the `COMPUTERNAME`
+/// environment variable, which Windows always sets to the machine name.
+///
+/// Returns `None` (leaving `$HOSTNAME` unset) when no source yields a value, so
+/// callers can distinguish "unknown host" from an empty string.
+#[cfg(not(windows))]
+fn system_hostname() -> Option<String> {
+    for path in ["/proc/sys/kernel/hostname", "/etc/hostname"] {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let name = contents.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// See the Unix variant above. The Windows test host has no procfs, so we read
+/// the machine name from `COMPUTERNAME`.
+#[cfg(windows)]
+fn system_hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok().filter(|s| !s.is_empty())
+}
+
 /// A unique temp-file path under the system temp dir, using the process id plus
 /// a monotonic counter so concurrent expansions never collide. Used for process
 /// substitution (`<(cmd)`/`>(cmd)`); the caller creates and later removes it.
@@ -19635,6 +19683,61 @@ mod tests {
             assert_eq!(status, 0, "unterminated heredoc should still execute");
         }
         assert_eq!(String::from_utf8_lossy(&buf), "partial\n");
+    }
+
+    /// Serializes tests that mutate the process-global `HOSTNAME`/`COMPUTERNAME`
+    /// environment variables so their set/remove/read races never interleave.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `$HOSTNAME` precedence, matching bash's gethostname-at-startup rule:
+    /// (1) a value already set before import wins over both env and synthesis;
+    /// (2) an inherited environment `HOSTNAME` wins over synthesis;
+    /// (3) with no env value, HOSTNAME is synthesised from the OS hostname.
+    #[test]
+    fn hostname_synthesis_precedence() {
+        // (1) A pre-set shell var is never overridden by import/synthesis.
+        {
+            let _g = env_guard();
+            let mut sh = Shell::new();
+            sh.vars.insert("HOSTNAME".to_string(), "preset.local".to_string());
+            sh.import_environment();
+            assert_eq!(sh.vars.get("HOSTNAME").map(String::as_str), Some("preset.local"));
+        }
+        // (2) An inherited environment HOSTNAME wins over OS synthesis.
+        {
+            let _g = env_guard();
+            // SAFETY: process-global env mutation is serialised by `env_guard`.
+            unsafe {
+                std::env::set_var("HOSTNAME", "env.example.com");
+            }
+            let mut sh = Shell::new();
+            sh.import_environment();
+            let got = sh.vars.get("HOSTNAME").map(String::as_str);
+            // SAFETY: serialised by `env_guard`; restore before releasing the lock.
+            unsafe {
+                std::env::remove_var("HOSTNAME");
+            }
+            assert_eq!(got, Some("env.example.com"));
+        }
+        // (3) With no env HOSTNAME, synthesise from the OS hostname (both the
+        // Windows test host, via COMPUTERNAME, and Linux/SlateOS, via
+        // /proc/sys/kernel/hostname, yield a value here).
+        {
+            let _g = env_guard();
+            // SAFETY: serialised by `env_guard`.
+            unsafe {
+                std::env::remove_var("HOSTNAME");
+            }
+            let mut sh = Shell::new();
+            sh.import_environment();
+            assert_eq!(sh.vars.get("HOSTNAME").cloned(), system_hostname());
+        }
     }
 
     /// Like [`run`] but in `-c` command mode (`set_command_mode`). The default

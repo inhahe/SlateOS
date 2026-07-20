@@ -286,7 +286,13 @@ fn command_block(cmd: &Command, level: usize) -> String {
             s
         }
         Command::Function(f) => {
-            let mut s = format!("{} () \n", f.name);
+            // A function defined *inside* another function body reaches
+            // `command_block` (top-level definitions go through
+            // `unparse_function`). bash's deparser prefixes every such nested
+            // definition with the `function` keyword — regardless of the source
+            // syntax — while top-level defs omit it. See known-issues.md
+            // TD-OILS-DECLAREF-QUIRKS item 4.
+            let mut s = format!("function {} () \n", f.name);
             s.push_str(&ind(level));
             s.push_str("{ \n");
             s.push_str(&program_block(&f.body, level + 1, false));

@@ -553,7 +553,7 @@ project. The still-open (4) items each need a targeted grammar change
 model, or bash's `[[ ]]`/bad-substitution deferral) — behaviour-shifting
 and best done one class at a time with a focused test sweep.
 
-### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — item 1 (elif) ✅ RESOLVED 2026-07-20; three remain
+### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — items 1 (elif) & 4 (nested-fn keyword) ✅ RESOLVED 2026-07-20; two remain (subshell layout, inline background)
 
 **Where:** `userspace/oils/src/unparse.rs` `command_block` (`If` elif branch,
 `Subshell`, `Function` nested case) and `item_stmt`/`program_block`
@@ -582,10 +582,15 @@ only the exact whitespace/keyword layout differs:
 3. **Backgrounded statement in a list.** bash keeps `sleep 1 & echo b` on one
    line (`&` as an inline connector). osh puts each `Item` on its own line, so
    `sleep 1 &` and `echo b` split across two lines.
-4. **`function` keyword on nested definitions.** bash prints a function
+4. ~~**`function` keyword on nested definitions.** bash prints a function
    defined *inside* another function as `function nested () ` (with the
    `function` keyword); top-level defs use `nested () `. osh always omits
-   `function`.
+   `function`.~~ **RESOLVED 2026-07-20.** The `command_block` `Function` arm
+   (only ever reached for nested definitions — top-level defs go through
+   `unparse_function`) now prefixes `function `, matching bash regardless of
+   the source syntax (`g()` or `function g`). Top-level output unchanged.
+   Verified byte-identical against MSYS bash. Regression test
+   `interp::declare_f_prefixes_nested_function_with_keyword`.
 
 **Why deferred:** these are rare constructs (subshell/background/nested-fn in
 a function body) or a purely cosmetic restructuring (elif), and osh's output

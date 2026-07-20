@@ -27728,6 +27728,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn declare_f_prefixes_nested_function_with_keyword() {
+        // bash's deparser prefixes a function defined *inside* another function
+        // with the `function` keyword (regardless of source syntax); top-level
+        // definitions omit it (TD-OILS-DECLAREF-QUIRKS item 4).
+        let (o, s) = run("f() { g() { echo inner; }; echo outer; }; declare -f f");
+        assert_eq!(s, 0);
+        let expected =
+            "f () \n{ \n    function g () \n    { \n        echo inner\n    };\n    echo outer\n}\n";
+        assert_eq!(o, expected, "nested function deparse mismatch");
+        // Top-level definition must NOT gain a `function` prefix.
+        let (o2, _) = run("top() { echo t; }; declare -f top");
+        assert!(o2.starts_with("top () "), "top-level deparse: {o2:?}");
+        assert!(!o2.contains("function"), "top-level gained keyword: {o2:?}");
+    }
+
+    #[test]
     fn bare_set_lists_functions() {
         // Bare `set` prints functions after the variables.
         let (o, _) = run("foo() { echo hi; }; set");

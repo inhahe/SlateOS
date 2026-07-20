@@ -1412,10 +1412,19 @@ incomplete:
    implemented as far as is meaningful without terminal job control: `fg` prints
    the job's command line and *waits* for it (it cannot resume a stopped job or
    move the terminal foreground process group), and `bg` is a spec-resolving
-   *reporting* form (the job is already running in the background). There is no
-   process-group / controlling-terminal machinery, so jobs cannot be *stopped*
-   (Ctrl-Z / `SIGTSTP`) — the "Stopped" state never occurs — and `fg` cannot
-   grant a job the terminal.
+   form. There is no process-group / controlling-terminal machinery, so jobs
+   cannot be *stopped* (Ctrl-Z / `SIGTSTP`) — the "Stopped" state never occurs —
+   and `fg` cannot grant a job the terminal. **Diagnostics now match bash's
+   mode-dependent behavior (2026-07-20):** `fg`/`bg` are gated on job control,
+   which (as in bash) is on for interactive shells and off for non-interactive
+   `-c`/script shells, with `set -m` / `set -o monitor` toggling it explicitly
+   (osh tracks this via the `Shell::monitor` flag and `job_control_enabled()`).
+   When job control is off, `fg`/`bg` print `fg: no job control` / `bg: no job
+   control` on stderr and return 1, exactly like bash — even when a background
+   job is running. When it is on and a target resolves, because osh never has a
+   *stopped* job (every tracked job is already running), `bg` matches bash's
+   already-running case: `bg: job N already in background` on stderr, exit 0
+   (previously osh printed a non-bash `[id] cmd &` line on stdout).
 
 **Proper fix (remaining):** once the kernel provides process groups +
 job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/

@@ -728,6 +728,14 @@ pub struct Shell {
     /// caller level). Unlike DEBUG/RETURN this is not affected by the function
     /// trace attribute. Consulted on function entry in [`Shell::call_function`].
     errtrace: bool,
+    /// `set -m` (monitor / `set -o monitor`): enable job control. bash turns
+    /// this on automatically for interactive shells and off for non-interactive
+    /// `-c`/script shells. osh has no controlling-terminal job control (no
+    /// stop/resume — see known-issues TD-OILS13), but the flag still governs
+    /// whether `fg`/`bg` operate at all: with job control disabled bash reports
+    /// `fg: no job control` / `bg: no job control` and fails, so osh gates its
+    /// (waiting/reporting) `fg`/`bg` subset on [`Shell::job_control_enabled`].
+    monitor: bool,
     /// The shell was invoked as `osh -c COMMAND`. Bash reports a `c` flag in
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
@@ -1001,6 +1009,9 @@ impl Shell {
             noexec: false,
             functrace: false,
             errtrace: false,
+            // Job control defaults off; the binary enables it for the REPL and
+            // `set -m` toggles it. See `job_control_enabled`.
+            monitor: false,
             command_mode: false,
             script_mode: false,
             errexit_suppress: 0,
@@ -3124,6 +3135,7 @@ impl Shell {
             noexec: self.noexec,
             functrace: self.functrace,
             errtrace: self.errtrace,
+            monitor: self.monitor,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
             // A subshell inherits the parent's errexit-ignore depth: per POSIX a
@@ -9700,6 +9712,16 @@ impl Shell {
         0
     }
 
+    /// Whether job control is enabled. bash turns it on for interactive shells
+    /// and off for non-interactive `-c`/script shells, and `set -m` toggles it
+    /// explicitly. osh has no controlling-terminal job control, but this flag
+    /// still governs whether `fg`/`bg` operate at all (bash reports `no job
+    /// control` when it is off). An osh shell is interactive when it is neither
+    /// in `-c` command mode nor running a script file (i.e. the REPL).
+    fn job_control_enabled(&self) -> bool {
+        self.monitor || (!self.command_mode && !self.script_mode)
+    }
+
     /// `fg [jobspec]` — bring a background job into the foreground: print its
     /// command line (as bash does) and block until it terminates, returning its
     /// exit status. With no jobspec the current (most recently backgrounded) job
@@ -9710,6 +9732,13 @@ impl Shell {
     /// *stopped* job; it simply waits for a still-running background job. This is
     /// the meaningful subset of `fg` for a shell without terminal job control.
     fn builtin_fg(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        // Without job control (a non-interactive shell that has not enabled
+        // `set -m`), bash refuses `fg` outright with `fg: no job control`,
+        // regardless of any running background job. Match that.
+        if !self.job_control_enabled() {
+            self.emit_stderr(format!("{}fg: no job control\n", self.err_prefix()).as_bytes());
+            return 1;
+        }
         self.poll_jobs();
         // Skip a leading `--` separator; the first remaining operand is the spec.
         let spec = args.iter().find(|a| a.as_str() != "--");
@@ -9745,11 +9774,17 @@ impl Shell {
 
     /// `bg [jobspec ...]` — resume stopped jobs in the background. Because we
     /// have no terminal job control (no SIGTSTP/SIGCONT — see known-issues
-    /// TD-OILS13), backgrounded jobs are already running; `bg` therefore reports
-    /// each targeted job in bash's `[id] cmd &` form and returns 0. With no
-    /// jobspec the current (most recently backgrounded) job is used. Returns 1
-    /// when a named/current job does not exist.
-    fn builtin_bg(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    /// TD-OILS13), every tracked job is already running in the background, so a
+    /// resolvable target matches bash's "already running" case: `bg: job N
+    /// already in background` on stderr, exit 0. With no jobspec the current
+    /// (most recently backgrounded) job is used. Returns 1 when job control is
+    /// disabled (`bg: no job control`) or a named/current job does not exist.
+    fn builtin_bg(&mut self, args: &[String], _out: &mut Out, _redir: &RedirPlan) -> i32 {
+        // As with `fg`, no job control ⇒ bash prints `bg: no job control`.
+        if !self.job_control_enabled() {
+            self.emit_stderr(format!("{}bg: no job control\n", self.err_prefix()).as_bytes());
+            return 1;
+        }
         self.poll_jobs();
         let specs: Vec<&String> = args.iter().filter(|a| a.as_str() != "--").collect();
         let idxs: Vec<usize> = if specs.is_empty() {
@@ -9771,12 +9806,17 @@ impl Shell {
             }
             v
         };
-        let mut buf = String::new();
+        // bash's `bg` resumes a *stopped* job; a job already running in the
+        // background yields `bg: job N already in background` (on stderr, exit
+        // 0). osh never has stopped jobs — every tracked job is already running
+        // — so a resolvable target always takes that path.
         for &idx in &idxs {
-            let job = &self.jobs[idx];
-            buf.push_str(&format!("[{}] {} &\n", job.id, job.cmd));
+            let id = self.jobs[idx].id;
+            self.emit_stderr(
+                format!("{}bg: job {id} already in background\n", self.err_prefix()).as_bytes(),
+            );
         }
-        self.write_bytes(out, redir, buf.as_bytes())
+        0
     }
 
     /// `caller [expr]` — report the context of an active subroutine call.
@@ -12364,8 +12404,10 @@ impl Shell {
             'T' => self.functrace = enable,
             'E' => self.errtrace = enable,
             'B' => self.braceexpand = enable,
+            // `set -m`: job control (equivalent to `set -o monitor`).
+            'm' => self.monitor = enable,
             // Accepted by bash (`-abefhkmnptuvxBCEHPT`) but not modelled here.
-            'b' | 'h' | 'k' | 'm' | 'p' | 't' | 'v' | 'H' | 'P' => {}
+            'b' | 'h' | 'k' | 'p' | 't' | 'v' | 'H' | 'P' => {}
             _ => return false,
         }
         self.refresh_shellopts();
@@ -12388,9 +12430,13 @@ impl Shell {
             "functrace" => self.functrace = enable,
             "errtrace" => self.errtrace = enable,
             "braceexpand" => self.braceexpand = enable,
+            // `set -m` / `set -o monitor`: job control. osh has no terminal job
+            // control, but the flag still gates whether `fg`/`bg` operate (see
+            // `job_control_enabled`), so it must track its real state.
+            "monitor" => self.monitor = enable,
             // Standard bash option names osh does not model (line-editing
-            // `emacs`/`vi`, `history`/`histexpand`, job-control `monitor`/
-            // `notify`, `posix`, `privileged`, `verbose`, …). bash accepts them
+            // `emacs`/`vi`, `history`/`histexpand`, job-control `notify`,
+            // `posix`, `privileged`, `verbose`, …). bash accepts them
             // without error; accept them as no-ops so scripts that toggle them
             // don't spuriously fail. Only a name outside the standard set is a
             // "invalid option name".
@@ -12448,6 +12494,9 @@ impl Shell {
         if self.xtrace {
             opts.push("xtrace");
         }
+        if self.monitor {
+            opts.push("monitor");
+        }
         opts.sort_unstable();
         self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
     }
@@ -12492,6 +12541,7 @@ impl Shell {
             "noexec" => self.noexec,
             "functrace" => self.functrace,
             "errtrace" => self.errtrace,
+            "monitor" => self.monitor,
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).
@@ -25571,9 +25621,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[cfg(windows)]
     #[test]
-    fn bg_reports_job_in_bash_form() {
-        // `bg` reports the targeted job in `[id] cmd &` form and returns 0.
-        // (Jobs already run in the background here — bg is a reporting no-op.)
+    fn bg_reports_already_in_background() {
+        // osh has no stopped jobs — every tracked job is already running in the
+        // background — so `bg` on a resolvable target matches bash's "already
+        // running" case: `bg: job N already in background` on stderr, exit 0.
+        // (The stdout capture stays empty; the message goes to real stderr.)
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 0 &");
         let mut buf = Vec::new();
@@ -25582,11 +25634,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let mut out = Out::Capture(&mut buf);
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
-        let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("[1]"), "bg output: {s:?}");
-        assert!(s.contains("cmd /c exit 0 &"), "bg output: {s:?}");
+        assert!(buf.is_empty(), "bg writes to stderr, not stdout: {buf:?}");
         assert_eq!(sh.last_status, 0);
         sh.run_source("wait");
+    }
+
+    #[test]
+    fn fg_bg_require_job_control() {
+        // In `-c`/command mode (job control off, no `set -m`), bash refuses
+        // `fg`/`bg` outright with `no job control` and returns 1 — even when a
+        // background job is running. `set -m` re-enables job control.
+        let (out, code) = run_cmd_mode("fg 2>&1");
+        assert_eq!(code, 1);
+        assert!(out.contains("fg: no job control"), "fg output: {out:?}");
+        let (out, code) = run_cmd_mode("bg 2>&1");
+        assert_eq!(code, 1);
+        assert!(out.contains("bg: no job control"), "bg output: {out:?}");
+        // With `set -m`, job control is on, so `fg` gets past the guard and
+        // instead reports the empty job table.
+        let (out, _) = run_cmd_mode("set -m; fg 2>&1");
+        assert!(out.contains("no such job"), "fg output: {out:?}");
     }
 
     #[test]

@@ -15072,6 +15072,12 @@ fn ansi_c_unescape(s: &str) -> String {
         }
         decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
     }
+    // A NUL byte terminates the ANSI-C string (a shell word cannot hold a NUL),
+    // so bytes produced after the first NUL are dropped — matching bash's
+    // `$'…'` / `${x@E}` behaviour. See `Lexer::read_ansi_c_quote`.
+    if let Some(nul) = out.find('\0') {
+        out.truncate(nul);
+    }
     out
 }
 
@@ -19085,6 +19091,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%s' $'\\q'").0, "\\q");
         // Concatenation with adjacent text.
         assert_eq!(run("echo pre$'\\t'post").0, "pre\tpost\n");
+        // A NUL byte terminates the ANSI-C string: bytes decoded after the
+        // first NUL are dropped (a shell word cannot hold a NUL), matching
+        // bash. `$'a\0b'` is just `a`. The scan still finds the closing quote
+        // (escape-aware), so an escaped quote after the NUL does not close it.
+        assert_eq!(run("printf '%s' $'a\\0b' | wc -c").0.trim(), "1");
+        assert_eq!(run("printf '%s' $'\\x00tail' | wc -c").0.trim(), "0");
+        assert_eq!(run("printf '%s' $'\\c@after' | wc -c").0.trim(), "0");
+        assert_eq!(run("printf '%s' $'keep\\0\\'q\\'' | wc -c").0.trim(), "4");
     }
 
     #[test]

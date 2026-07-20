@@ -1027,6 +1027,14 @@ impl Lexer {
                 return Err(eof_matching('\''));
             };
             if c == '\'' {
+                // bash: a NUL byte terminates the ANSI-C string. A shell word
+                // cannot hold a NUL, so any bytes the escapes produced after the
+                // first NUL are dropped — `$'a\0b'` is just `a`. Scanning still
+                // ran (escape-aware) through this closing quote, so the token
+                // stream stays correct; only the decoded value is truncated.
+                if let Some(nul) = s.find('\0') {
+                    s.truncate(nul);
+                }
                 return Ok(s);
             }
             if c != '\\' {

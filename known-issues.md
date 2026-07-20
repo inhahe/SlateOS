@@ -2366,6 +2366,25 @@ parser stricter. **Proper fix (if ever wanted):** have the lexer treat `X(` as a
 extended group only when a parse-time `extglob` flag is set, and surface a syntax
 error otherwise — but this buys only bug-for-bug parity on invalid input.
 
+### TD-OILS-BRACE-CHARRANGE-BACKSLASH. MSYS reference bash mishandles `{A..z}`-style char ranges crossing ASCII `\` (92); `osh` follows real (Linux) bash — INTENTIONAL, `osh` is correct 2026-07-20
+
+**Where:** `userspace/oils/src/brace.rs` (single-char range expansion).
+
+**What:** For a `{c..d}` range whose endpoints straddle the punctuation gap
+between `Z` (90) and `a` (97) — which contains `[ \ ] ^ _ `` — `osh`
+expands the **full inclusive ASCII range**, e.g. `echo {A..z}` →
+`… X Y Z [ \ ] ^ _ ` a b …` and `echo {Z..^}` → `Z [ \ ] ^`. This matches
+real Linux bash's documented sequence-expression semantics (each character
+between the two endpoints, inclusive). The **MSYS reference bash on this
+dev box is inconsistent/buggy** here: `echo {A..z}` expands but silently
+**drops the `\`** (emits an empty slot at position 92), while
+`echo {Z..^}` and `echo {[..]}` are left **unexpanded** (literal). Only the
+MSYS build shows this; osh's output is the correct one.
+
+**Why not "fixed":** matching the MSYS quirk would mean *removing* correct
+behavior to reproduce a host-libc bug on invalid-ish input. Documented as a
+reference-artifact divergence; osh keeps the correct inclusive char range.
+
 ### TD-OILS-COMPOUND-SCRATCHFD-PIPE. A compound command's `2>&N` dup through a scratch fd aliased to a *pipe* (command substitution) leaks stderr to the real terminal — MINOR, obscure 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — the compound-command redirect path

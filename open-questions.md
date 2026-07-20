@@ -149,9 +149,73 @@ TD-OILS-IDVARS.
 
 ---
 
+## Q29 — fastpy → SlateOS integration (initiative F): what target strategy, and how to handle the CPython bridge?
+
+**Status:** OPEN (blocks starting initiative F the *right* way; heads-up +
+genuine fork). Initiative A (Oils/OSH + coreutils) has reached high maturity, so
+per the Q25 order (A → **F** → B → C → D → E) fastpy build-system integration is
+the next initiative. Before starting it I scoped fastpy's architecture and found
+a real fork that gates *how* to begin.
+
+**Background (what fastpy is).** fastpy (`D:\visual studio projects\fastpy`) is an
+AOT Python→LLVM-IR→native compiler (via llvmlite) that links a **C runtime**
+(`runtime/`: `gc.c`, `objects.c`, `bigint.c`, `threading.c`, `runtime.c`) plus a
+**CPython bridge** (`cpython_bridge.c` + bundled `py311`–`py314`): programs that
+use unsupported stdlib fall back to a real embedded CPython (`python313.dll`).
+Today it targets **host** x64 Windows/Linux only. The roadmap task (Phase 0) is
+"Python AOT → native executables **for OS components**" — i.e. binaries that run
+**on SlateOS**, not on the dev host.
+
+**The fork.** Making fastpy emit SlateOS binaries needs three things: (1) a
+`x86_64-slateos` LLVM target/data-layout (modest — llvmlite can target an
+arbitrary triple), (2) the **C runtime ported** to SlateOS syscalls/libc (gated
+on the Phase 2.5 POSIX layer, currently `[-]`), and (3) a decision about the
+**CPython bridge**, which is the crux:
+
+- **(A) Pure-mode only (no bridge) for SlateOS.** Compile only programs fastpy
+  supports natively; the CPython fallback is disabled on the SlateOS target.
+  - *Pro:* startable soonest — no CPython port needed; the runtime port is
+    self-contained C that only needs the POSIX layer. Matches how OS components
+    (package manager, settings, indexer) would be written — plain typed Python.
+    *Con:* any component using an unsupported stdlib module won't compile until
+    fastpy grows native support for it; "any valid Python is valid fastpy" no
+    longer holds *on SlateOS* until the gap closes.
+- **(B) Require a CPython port first (bridge works on SlateOS).** Full stdlib
+  compatibility via the embedded interpreter.
+  - *Pro:* no restriction — every Python program compiles. *Con:* gated on
+    porting CPython to SlateOS (Phase 4.4, a huge effort) — F would stall for a
+    long time; also drags libpython into every fastpy binary.
+- **(C) Host-side build tooling first.** Use fastpy to compile *build-time* OS
+  tooling that runs on the **dev host** (build scripts, codegen, the package
+  manager's build side), deferring the on-SlateOS runtime port.
+  - *Pro:* works today with zero runtime porting; establishes the build
+    plumbing. *Con:* doesn't deliver the roadmap's actual goal (components that
+    run *on* SlateOS); low near-term value since interpreted Python already does
+    these host tasks fine.
+
+**Claude's recommendation / meanwhile.** Lean **(A)** — it's the only path that
+both starts soon *and* delivers the roadmap's stated goal (native components that
+run on SlateOS), with the CPython bridge added later as an enhancement if/when
+CPython is ported (B becomes a superset of A, not a competing design). Sequenced:
+first mature the POSIX layer enough to host the C runtime, then add the
+`x86_64-slateos` fastpy target + port the runtime in pure mode, then pick one
+real OS component (e.g. the package manager) as the first fastpy-compiled
+SlateOS binary. But this commits the project to a multi-step effort with a real
+prerequisite chain (POSIX layer → runtime port → first component) and a
+user-visible capability restriction (pure-mode) on SlateOS, so I've **deferred**
+rather than started, to confirm scope/priority and the bridge policy. No fastpy
+code changed yet.
+
+**Where it bites.** `roadmap.md` Phase 0 line 24 (the F task); fastpy
+`compiler/toolchain.py` + `compiler/codegen.py` (target triple / data layout),
+fastpy `runtime/*.c` (syscall/libc surface to port), and SlateOS `posix/`
+(Phase 2.5 libc coverage the runtime will link against).
+
+---
+
 Earlier deferred operator decisions (Q1–Q25) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q29 …`.
+full rationale. New decisions should be appended above this line as `## Q30 …`.
 
 ---
 

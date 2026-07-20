@@ -180,33 +180,53 @@ fn pipeline_src(pl: &Pipeline) -> String {
     s
 }
 
+/// Render an `if`/`elif`/`else` chain in bash's `declare -f` block form.
+///
+/// bash's deparser does **not** emit `elif`: it rewrites every `elif` into a
+/// nested `else { if … fi; }`, indenting one level deeper per `elif` and
+/// terminating each inner `fi` with `;` (the outermost `fi` is left for the
+/// caller to terminate). This matches `declare -f`/`type` byte-for-byte. See
+/// known-issues.md TD-OILS-DECLAREF-QUIRKS item 1.
+fn render_if(
+    cond: &Program,
+    body: &Program,
+    elifs: &[(Program, Program)],
+    else_body: Option<&Program>,
+    level: usize,
+) -> String {
+    let mut s = String::from("if ");
+    s.push_str(&program_inline(cond));
+    s.push_str("; then\n");
+    s.push_str(&program_block(body, level + 1, true));
+    if let Some(((econd, ebody), rest)) = elifs.split_first() {
+        // `elif …` becomes `else\n  if … fi;` one indent level deeper.
+        s.push_str(&ind(level));
+        s.push_str("else\n");
+        s.push_str(&ind(level + 1));
+        s.push_str(&render_if(econd, ebody, rest, else_body, level + 1));
+        s.push_str(";\n");
+        s.push_str(&ind(level));
+        s.push_str("fi");
+    } else if let Some(eb) = else_body {
+        s.push_str(&ind(level));
+        s.push_str("else\n");
+        s.push_str(&program_block(eb, level + 1, true));
+        s.push_str(&ind(level));
+        s.push_str("fi");
+    } else {
+        s.push_str(&ind(level));
+        s.push_str("fi");
+    }
+    s
+}
+
 /// Render a command as a (possibly multi-line) block. The first line has no
 /// leading indent; continuation lines are indented at `level`, bodies at
 /// `level + 1`.
 fn command_block(cmd: &Command, level: usize) -> String {
     match cmd {
         Command::Simple(sc) => simple_src(sc),
-        Command::If(c) => {
-            let mut s = String::from("if ");
-            s.push_str(&program_inline(&c.cond));
-            s.push_str("; then\n");
-            s.push_str(&program_block(&c.body, level + 1, true));
-            for (econd, ebody) in &c.elifs {
-                s.push_str(&ind(level));
-                s.push_str("elif ");
-                s.push_str(&program_inline(econd));
-                s.push_str("; then\n");
-                s.push_str(&program_block(ebody, level + 1, true));
-            }
-            if let Some(eb) = &c.else_body {
-                s.push_str(&ind(level));
-                s.push_str("else\n");
-                s.push_str(&program_block(eb, level + 1, true));
-            }
-            s.push_str(&ind(level));
-            s.push_str("fi");
-            s
-        }
+        Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), level),
         Command::Loop(c) => {
             // `while`/`until` keep `do` on the same line as the condition
             // (`while COND; do`), unlike `for`/`select` (see below).

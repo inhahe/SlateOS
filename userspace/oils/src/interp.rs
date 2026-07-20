@@ -27708,6 +27708,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn declare_f_rewrites_elif_as_nested_else_if() {
+        // bash's deparser never emits `elif`: it rewrites each `elif` into a
+        // nested `else { if … fi; }`, one indent level deeper, terminating the
+        // inner `fi`s with `;`. Match that byte-for-byte (TD-OILS-DECLAREF-QUIRKS
+        // item 1) so `declare -f` output compares equal to bash's.
+        let (o, s) = run("f() { if a; then echo x; elif c; then echo y; else echo w; fi; }; declare -f f");
+        assert_eq!(s, 0);
+        let expected = "f () \n{ \n    if a; then\n        echo x;\n    else\n        if c; then\n            echo y;\n        else\n            echo w;\n        fi;\n    fi\n}\n";
+        assert_eq!(o, expected, "declare -f elif deparse mismatch");
+        // The rewritten form must still round-trip through eval.
+        let (o2, _) = run(
+            "f() { if false; then echo x; elif true; then echo y; else echo w; fi; }; \
+             eval \"$(declare -f f)\"; f",
+        );
+        assert_eq!(o2, "y\n");
+        // No `elif` keyword survives in the deparse.
+        assert!(!o.contains("elif"), "declare -f still emits elif: {o:?}");
+    }
+
+    #[test]
     fn bare_set_lists_functions() {
         // Bare `set` prints functions after the variables.
         let (o, _) = run("foo() { echo hi; }; set");

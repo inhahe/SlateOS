@@ -553,7 +553,7 @@ project. The still-open (4) items each need a targeted grammar change
 model, or bash's `[[ ]]`/bad-substitution deferral) — behaviour-shifting
 and best done one class at a time with a focused test sweep.
 
-### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19
+### TD-OILS-DECLAREF-QUIRKS. `osh` `declare -f`/`type` deparse differs from bash for four idiosyncratic constructs — 2026-07-19 — item 1 (elif) ✅ RESOLVED 2026-07-20; three remain
 
 **Where:** `userspace/oils/src/unparse.rs` `command_block` (`If` elif branch,
 `Subshell`, `Function` nested case) and `item_stmt`/`program_block`
@@ -566,9 +566,16 @@ nested brace groups). Four bash deparser idiosyncrasies remain unmatched;
 all four still emit **valid, re-parsable bash** with equivalent semantics —
 only the exact whitespace/keyword layout differs:
 
-1. **`elif` → nested `else if`.** bash rewrites `if a; then …; elif c; then
+1. ~~**`elif` → nested `else if`.** bash rewrites `if a; then …; elif c; then
    …; fi` into `else\n if c; then …; fi` (deeper indentation, extra `fi`).
-   osh prints a literal `elif …; then` clause.
+   osh prints a literal `elif …; then` clause.~~ **RESOLVED 2026-07-20.**
+   `unparse.rs` now has a recursive `render_if` that rewrites every `elif` into
+   a nested `else { if … fi; }`, indenting one level deeper per `elif` and
+   terminating each inner `fi` with `;` (outermost `fi` left for the caller),
+   exactly matching bash's `declare -f`/`type`. Verified byte-identical against
+   MSYS bash across elif+else, elif-without-else, nested-if-in-elif-body, and
+   loop-embedded cases; plain `if`/`if-else` (no elif) unchanged. Regression
+   test `interp::declare_f_rewrites_elif_as_nested_else_if`.
 2. **Subshell layout.** bash prints `( echo a;\n echo b );` (first statement
    glued to the `(`, continuation dedented). osh uses a clean indented block
    (`(\n    echo a;\n    echo b\n)`).

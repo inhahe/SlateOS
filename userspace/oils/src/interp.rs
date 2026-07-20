@@ -388,6 +388,13 @@ pub struct Shell {
     /// re-enable execution (matching bash). Consulted at the top of
     /// [`Shell::exec_pipeline`].
     noexec: bool,
+    /// `set -T` (functrace / `set -o functrace`): make the `DEBUG` and `RETURN`
+    /// traps be inherited by shell functions, command substitutions, and
+    /// subshells. When off (bash default), a called function does NOT see the
+    /// caller's DEBUG/RETURN traps unless the function individually carries the
+    /// trace attribute (`declare -ft name`, tracked in [`Shell::fn_trace_attr`]).
+    /// Consulted on function entry in [`Shell::call_function`].
+    functrace: bool,
     /// The shell was invoked as `osh -c COMMAND`. Bash reports a `c` flag in
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
@@ -486,6 +493,10 @@ pub struct Shell {
     /// are transparently redirected to that target (following chains, with a
     /// depth guard against cycles). Inherited by subshell clones.
     nameref_attr: HashSet<String>,
+    /// Function names carrying the trace attribute (`declare -ft name`). Such a
+    /// function inherits the caller's `DEBUG` and `RETURN` traps even when
+    /// `functrace` (`set -T`) is off. Inherited by subshell clones.
+    fn_trace_attr: HashSet<String>,
     /// Array names (indexed or associative) that have been *assigned a value*
     /// at least once — via a literal (`a=(…)`, including the empty `a=()`), an
     /// element assignment (`a[i]=v`), an append, or a value-carrying `declare`.
@@ -601,6 +612,7 @@ impl Shell {
             allexport: false,
             noclobber: false,
             noexec: false,
+            functrace: false,
             command_mode: false,
             script_mode: false,
             errexit_suppress: 0,
@@ -621,6 +633,7 @@ impl Shell {
             upper_attr: HashSet::new(),
             capcase_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
+            fn_trace_attr: HashSet::new(),
             dir_stack: Vec::new(),
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
@@ -2434,6 +2447,7 @@ impl Shell {
             allexport: self.allexport,
             noclobber: self.noclobber,
             noexec: self.noexec,
+            functrace: self.functrace,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
             // A subshell starts outside any condition/negation context.
@@ -2464,6 +2478,7 @@ impl Shell {
             upper_attr: self.upper_attr.clone(),
             capcase_attr: self.capcase_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
+            fn_trace_attr: self.fn_trace_attr.clone(),
             dir_stack: self.dir_stack.clone(),
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
@@ -4048,17 +4063,62 @@ impl Shell {
         self.fn_stack.push(name.to_string());
         self.call_line_stack.push(self.current_line);
         self.refresh_funcname();
+        // The `DEBUG` and `RETURN` traps are, by default, NOT inherited by a
+        // called function: bash only propagates them into a function when
+        // `functrace` (`set -T` / `set -o functrace`) is on or the function
+        // carries the trace attribute (`declare -ft name`). When neither holds,
+        // save and remove both for the duration of the body — so `DEBUG` does
+        // not fire on the body's commands and `RETURN` does not fire on this
+        // return unless the body installs its own. They are restored on exit,
+        // which also discards any `DEBUG`/`RETURN` trap the body set for itself
+        // (bash: such a trap is local to that function invocation).
+        let trace_this = self.functrace || self.fn_trace_attr.contains(name);
+        let saved_traps: Option<(Option<String>, Option<String>)> = if trace_this {
+            None
+        } else {
+            let d = self.traps.remove("DEBUG");
+            let r = self.traps.remove("RETURN");
+            Some((d, r))
+        };
         // A function body starts a fresh loop-nesting context: a `break`/
         // `continue` in the body must not escape to a loop at the call site
         // (bash resets loop_level on function entry). Save and reset.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        // With tracing on, bash fires the DEBUG trap once more on *entry* to the
+        // function body — before the first body command and with `$BASH_COMMAND`
+        // still the call word — in addition to the per-command firings. Reproduce
+        // that extra entry firing so the DEBUG count matches bash under
+        // `functrace`/`declare -ft`.
+        if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
+            self.fire_trap("DEBUG");
+        }
         let flow = self.exec_program(&body, out, stdin);
         self.loop_depth = saved_loop_depth;
         // The RETURN trap fires when the function returns, before its locals are
         // torn down (so the handler still sees the function's scope), matching
-        // bash.
+        // bash. With tracing off this is only the trap the body installed for
+        // itself; with tracing on it is the inherited caller trap.
         if self.traps.contains_key("RETURN") {
+            // Under tracing, bash fires DEBUG once more immediately before the
+            // RETURN trap action, with `$BASH_COMMAND` still the last body
+            // command. (This extra firing only appears when a RETURN trap is
+            // actually present.)
+            if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
+                self.fire_trap("DEBUG");
+            }
             self.fire_trap("RETURN");
+        }
+        // Restore the caller's saved DEBUG/RETURN dispositions (and drop any the
+        // body installed), now that the RETURN trap has had its chance to fire.
+        if let Some((debug, ret)) = saved_traps {
+            self.traps.remove("DEBUG");
+            self.traps.remove("RETURN");
+            if let Some(d) = debug {
+                self.traps.insert("DEBUG".to_string(), d);
+            }
+            if let Some(r) = ret {
+                self.traps.insert("RETURN".to_string(), r);
+            }
         }
         if let Some(frame) = self.local_frames.pop() {
             // Restore shadowed variables in reverse declaration order.
@@ -6331,7 +6391,7 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 9] = [
+        let flags: [(char, bool); 10] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
@@ -6341,6 +6401,9 @@ impl Shell {
             ('x', self.xtrace),
             ('B', true),
             ('C', self.noclobber),
+            // bash's `shell_flags[]` orders `T` (functrace) after `C` (and after
+            // the unmodeled `E`/`H`/`P`), so it trails the other letters.
+            ('T', self.functrace),
         ];
         for (c, on) in flags {
             if on {
@@ -6907,10 +6970,13 @@ impl Shell {
             "declare" | "typeset" => {
                 let lead: String =
                     args.iter().take_while(|a| a.starts_with('-')).flat_map(|a| a.chars()).collect();
-                // `declare -F`/`-f` operate on functions (name listing);
-                // `declare -p [names]` prints variable definitions; otherwise
-                // declare/assign variables.
-                if lead.contains('F') || lead.contains('f') {
+                // `declare -ft name` / `+ft name` toggles a function's trace
+                // attribute (so it inherits DEBUG/RETURN traps); it is a
+                // mutation, not a listing, and accepts a `+` sign.
+                if let Some((enable, start)) = Self::func_trace_op(args) {
+                    self.set_func_trace(enable, &args[start..])
+                } else if lead.contains('F') || lead.contains('f') {
+                    // `declare -F`/`-f` operate on functions (name listing).
                     self.declare_functions(args, lead.contains('F'), out, redir)
                 } else if lead.contains('p') {
                     self.declare_print(args, out, redir)
@@ -8893,6 +8959,66 @@ impl Shell {
     /// (status 0 iff every name is a function) so idioms like
     /// `declare -f fn >/dev/null` work; printing the function *body* awaits an
     /// AST source pretty-printer (see known-issues TD-OILS18).
+    /// Detect a `declare`/`typeset` function trace-attribute operation
+    /// (`-ft name…`, `-f +t name…`, …). Returns `Some((enable, names_start))`
+    /// when the leading flags select functions and toggle the trace flag (`t`);
+    /// `enable` is the sign of the `t` flag (true = `-t` set, false = `+t`
+    /// clear), and `names_start` is the index of the first name operand.
+    ///
+    /// Function mode is entered ONLY by a minus-signed `-f`/`-F`: bash never
+    /// selects functions from a plus-signed `+f`, so e.g. `declare +ft name`
+    /// does NOT touch the function's trace attribute (it falls through to the
+    /// variable path). Returns `None` for any non-trace invocation.
+    fn func_trace_op(args: &[String]) -> Option<(bool, usize)> {
+        let mut func = false;
+        let mut trace: Option<bool> = None;
+        let mut i = 0;
+        while let Some(arg) = args.get(i) {
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            let enable = arg.starts_with('-');
+            let Some(flags) = arg.strip_prefix(['-', '+']).filter(|f| !f.is_empty()) else {
+                break;
+            };
+            for c in flags.chars() {
+                match c {
+                    // Only a `-f`/`-F` (minus) enters function mode.
+                    'f' | 'F' if enable => func = true,
+                    't' => trace = Some(enable),
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        match (func, trace) {
+            (true, Some(enable)) => Some((enable, i)),
+            _ => None,
+        }
+    }
+
+    /// Apply (`enable`) or remove (`+t`) the trace attribute on each named
+    /// function, so it inherits the caller's `DEBUG`/`RETURN` traps even when
+    /// `functrace` is off. A name that is not a defined function is an error
+    /// (bash: `not found`, exit 1), matching `declare -f` on an unknown name.
+    fn set_func_trace(&mut self, enable: bool, names: &[String]) -> i32 {
+        let mut status = 0;
+        for name in names {
+            if self.funcs.contains_key(name) {
+                if enable {
+                    self.fn_trace_attr.insert(name.clone());
+                } else {
+                    self.fn_trace_attr.remove(name);
+                }
+            } else {
+                self.errln(&format!("{}{name}: not found", self.err_prefix()));
+                status = 1;
+            }
+        }
+        status
+    }
+
     fn declare_functions(
         &mut self,
         args: &[String],
@@ -9880,6 +10006,7 @@ impl Shell {
         for a in &args[i..] {
             if funcs_only {
                 self.funcs.remove(a);
+                self.fn_trace_attr.remove(a);
                 continue;
             }
             // `unset -n ref` removes the nameref binding itself.
@@ -9932,6 +10059,7 @@ impl Shell {
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
                 self.funcs.remove(a);
+                self.fn_trace_attr.remove(a);
                 continue;
             }
             self.vars.remove(a);
@@ -10051,6 +10179,7 @@ impl Shell {
             'a' => self.allexport = enable,
             'C' => self.noclobber = enable,
             'n' => self.noexec = enable,
+            'T' => self.functrace = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10068,6 +10197,7 @@ impl Shell {
             "allexport" => self.allexport = enable,
             "noclobber" => self.noclobber = enable,
             "noexec" => self.noexec = enable,
+            "functrace" => self.functrace = enable,
             _ => {}
         }
         self.refresh_shellopts();
@@ -10091,6 +10221,9 @@ impl Shell {
         }
         if self.errexit {
             opts.push("errexit");
+        }
+        if self.functrace {
+            opts.push("functrace");
         }
         if self.noclobber {
             opts.push("noclobber");
@@ -10124,6 +10257,7 @@ impl Shell {
         let opts = [
             "allexport",
             "errexit",
+            "functrace",
             "noclobber",
             "noexec",
             "noglob",
@@ -10160,6 +10294,7 @@ impl Shell {
             "allexport" => self.allexport,
             "noclobber" => self.noclobber,
             "noexec" => self.noexec,
+            "functrace" => self.functrace,
             _ => false,
         }
     }
@@ -16998,6 +17133,127 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(run("set -o").0.contains("noexec         \toff\n"));
     }
 
+    // Trap-handler output is written through `run_source` (real stdout), not
+    // the captured `out`, so these tests observe trap firing via a counter/flag
+    // variable in `sh.vars` — the same convention as the existing DEBUG/RETURN
+    // trap tests. (Whether a trap's *output* is captured by an enclosing command
+    // substitution is a separate, subtler behaviour — see known-issues.)
+    fn trap_var(src: &str, var: &str) -> Option<String> {
+        let mut sh = Shell::new();
+        sh.run_source(src);
+        sh.vars.get(var).cloned()
+    }
+
+    #[test]
+    fn return_trap_not_inherited_without_functrace() {
+        // A RETURN trap set at the top level does NOT fire when a called
+        // function returns (bash: functrace off is the default).
+        assert_eq!(trap_var("trap 'RET=1' RETURN\nf(){ :; }\nf", "RET"), None);
+    }
+
+    #[test]
+    fn return_trap_inherited_under_functrace() {
+        // `set -T` (functrace) makes the RETURN trap fire on function return.
+        assert_eq!(
+            trap_var("set -T\ntrap 'RET=1' RETURN\nf(){ :; }\nf", "RET").as_deref(),
+            Some("1")
+        );
+        // `set -o functrace` is the long spelling of the same option.
+        assert_eq!(
+            trap_var("set -o functrace\ntrap 'RET=1' RETURN\nf(){ :; }\nf", "RET").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn return_trap_set_inside_function_fires_then_discarded() {
+        // A RETURN trap set inside a function fires once on that function's
+        // return and is then discarded (the caller's disposition is restored),
+        // so a later untraced function does not re-fire it.
+        assert_eq!(
+            trap_var(
+                "f(){ trap 'IR=$((IR+1))' RETURN; :; }\nf\ng(){ :; }\ng",
+                "IR"
+            )
+            .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn debug_trap_not_inherited_without_functrace() {
+        // Without functrace the DEBUG trap fires only before top-level commands
+        // (the `f` call), not before the function-body commands. Here: the `f`
+        // call fires once; the two body colons do not.
+        assert_eq!(
+            trap_var("trap 'D=$((D+1))' DEBUG\nf(){ :; :; }\nf", "D").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn debug_trap_inherited_under_functrace() {
+        // Under functrace the DEBUG trap also fires inside the function, plus an
+        // extra entry firing on function entry. For `f(){ echo x; echo y; }; f`
+        // that is: f-call, entry, echo x, echo y = 4 firings (matches bash).
+        assert_eq!(
+            trap_var(
+                "set -T\ntrap 'D=$((D+1))' DEBUG\nf(){ echo x; echo y; }\nf",
+                "D"
+            )
+            .as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn declare_ft_sets_and_clears_function_trace() {
+        // `declare -ft NAME` makes just that function inherit RETURN traps even
+        // with functrace off; other functions stay uninherited (R fires once).
+        assert_eq!(
+            trap_var(
+                "trap 'R=$((R+1))' RETURN\nf(){ :; }\ng(){ :; }\ndeclare -ft f\nf\ng",
+                "R"
+            )
+            .as_deref(),
+            Some("1")
+        );
+        // `declare -f +t NAME` clears the trace attribute again (R never fires).
+        assert_eq!(
+            trap_var(
+                "trap 'R=1' RETURN\nf(){ :; }\ndeclare -ft f\ndeclare -f +t f\nf",
+                "R"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn declare_plus_ft_does_not_clear_trace() {
+        // bash only enters function mode from a minus-signed `-f`; a plus-signed
+        // `+ft` does NOT touch the function's trace attribute, so RETURN still
+        // fires after it.
+        assert_eq!(
+            trap_var(
+                "trap 'R=1' RETURN\nf(){ :; }\ndeclare -ft f\ndeclare +ft f\nf",
+                "R"
+            )
+            .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn functrace_reported_in_options() {
+        // `[[ -o functrace ]]`, `$-`, and `set -o` all reflect the flag.
+        assert_eq!(run("[[ -o functrace ]] && echo on || echo off").0, "off\n");
+        assert_eq!(run("set -T; [[ -o functrace ]] && echo on").0, "on\n");
+        assert!(run("set -T; echo \"$-\"").0.contains('T'));
+        assert!(run("set -o").0.contains("functrace      \toff\n"));
+        // Enabled functrace is listed in SHELLOPTS.
+        assert!(run("set -T; echo \"$SHELLOPTS\"").0.contains("functrace"));
+    }
+
     #[test]
     fn set_errexit_exits_on_failure() {
         // A failing command aborts the script under `set -e`.
@@ -19093,8 +19349,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn trap_return_fires_on_function_return() {
+        // A RETURN trap fires on function return only when the trap is inherited
+        // by the function — i.e. under `functrace` (`set -T`), the function's
+        // trace attribute, or when the trap is installed inside the function.
+        // Without any of those it does NOT fire (bash's default); see the
+        // `return_trap_*` tests for the full matrix.
         let mut sh = Shell::new();
-        sh.run_source("trap 'RET=1' RETURN\nf() { :; }\nf");
+        sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf");
         assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
     }
 

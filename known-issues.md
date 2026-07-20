@@ -871,7 +871,12 @@ prints/lists/resets them correctly. The **synchronous** traps are now all
 fired: `EXIT` (once on top-level shell exit), `ERR` (on a failing command
 outside an exempt context — same rule as `errexit`, independent of `set -e`),
 `DEBUG` (before each simple command), and `RETURN` (on function return, in the
-function's scope). What remains unimplemented is **async signal delivery** —
+function's scope). The `DEBUG`/`RETURN` traps now honour **functrace**
+(`set -T`/`set -o functrace`) and the per-function trace attribute
+(`declare -ft NAME`): with tracing off they are NOT inherited into a called
+function (matching bash), and a trap installed inside a function fires on that
+function's return and is then discarded. What remains unimplemented is **async
+signal delivery** —
 handlers for real signals (`INT`/Ctrl-C, `TERM`, `HUP`, …) are stored and
 printed faithfully but never invoked, because there is no OS-level signal
 delivery on the host and SlateOS uses IPC/exceptions rather than Unix signals.
@@ -888,6 +893,18 @@ script** (only function returns), and an `exit N` *inside* an `ERR`/`DEBUG`/
 `RETURN`/`EXIT` handler does not propagate to actually exit the shell (the
 handler runs via a nested `run_source` whose `Flow::Exit` is swallowed). Both
 are edge cases; the fix is to thread the handler's flow out of `fire_trap`.
+
+**Also (TD-OILS-TRAP-CAPTURE, minor):** synchronous trap handler *output* is
+written through `fire_trap` → `run_source` (a fresh `Out::Inherit`, i.e. the
+real stdout), so it is NOT captured by an enclosing command substitution.
+bash's behaviour here is subtle and inconsistent — it *does* capture a `RETURN`
+trap's output inside `x=$(f)` (under functrace) but writes an inner `DEBUG`
+trap's output to the terminal even inside `$(…)`. Because faithfully matching
+that split would require per-trap routing decisions, `osh` currently sends all
+synchronous-trap output to the terminal. Proper fix: thread the active `out`
+into `fire_trap` and reproduce bash's per-trap capture rules (RETURN/ERR/EXIT
+captured by the enclosing substitution; DEBUG to the terminal). Low priority —
+trap handlers that mutate variables (the common case) already work correctly.
 
 ### TD-OILS-BUILTINS. `osh` is missing several bash builtins: `kill`, `ulimit`, and the interactive-only set — OPEN (each gated on OS infrastructure or interactive-shell support)
 

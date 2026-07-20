@@ -5,8 +5,13 @@
 //! Usage:
 //!   osh                      Interactive REPL (reads commands from stdin).
 //!   osh -c COMMAND [NAME ARG…]   Run COMMAND, with NAME as `$0` and ARG… as `$1…`.
+//!   osh -s [ARG…]            Read commands from stdin, with ARG… as `$1…`.
 //!   osh SCRIPT [ARG…]        Run SCRIPT, with ARG… as positional parameters.
 //!   osh --version | --help
+//!
+//! Leading `set` options (`-e`, `-x`, …) and `-i`/`+i` may be bundled with the
+//! `-c`/`-s` mode letter into a single cluster, getopt-style (`-ec`, `-ic`,
+//! `-cx`), matching bash.
 //!
 //! See `design-decisions.md §72` for why this is a Rust reimplementation of the
 //! OSH language rather than a cross-compile of upstream Oils.
@@ -34,6 +39,19 @@ const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
 /// no-ops. Mode letters (`c`, `s`, `i`, `l`, `r`) are deliberately excluded so
 /// clusters containing them fall through to the mode dispatch.
 const SET_OPTION_LETTERS: &str = "euxfaCnTEBmbhkptvHP";
+
+/// The shell's operating mode, selected by the leading `-c`/`-s` invocation
+/// letters (which may appear bundled with `set` options, e.g. `-ec`, `-ic`).
+/// `Repl` is the default when no mode letter is given: run a script file if one
+/// is named, else read commands interactively/from stdin.
+enum InvokeMode {
+    /// Default: script file, or interactive/piped REPL.
+    Repl,
+    /// `-c COMMAND`: run COMMAND with the following operands as `$0`/`$1…`.
+    Command,
+    /// `-s`: read commands from stdin, with the operands as positional params.
+    Stdin,
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -79,29 +97,18 @@ fn run(args: &[String]) -> i32 {
     // `-i` / `+i` force interactivity on/off, overriding tty detection for the
     // REPL (bash's `--force-interactive`). `None` = decide by isatty.
     let mut force_interactive: Option<bool> = None;
+    // The mode selected by a `-c`/`-s` letter (default: REPL / script). bash
+    // parses these getopt-style, so they may be bundled with `set` options and
+    // `-i` in a single cluster (`-ec`, `-ic`, `-cs`); the mode letter can sit
+    // anywhere in the cluster and the command/operands still come from the
+    // following words.
+    let mut mode = InvokeMode::Repl;
     while let Some(arg) = args.get(base) {
         match arg.as_str() {
             "--" => {
                 base += 1;
                 opts_ended = true;
                 break;
-            }
-            // `-i` / `+i`: force the REPL interactive / non-interactive. Only
-            // meaningful on the REPL path (`-c`/script shells are never
-            // interactive); it is consumed here so it does not fall through to
-            // the mode dispatch as an unrecognised option.
-            "-i" => {
-                force_interactive = Some(true);
-                base += 1;
-            }
-            "+i" => {
-                force_interactive = Some(false);
-                base += 1;
-            }
-            // `-n` keeps its dedicated latch path (see `Shell::set_noexec`).
-            "-n" => {
-                sh.set_noexec();
-                base += 1;
             }
             // `-o NAME` / `+o NAME` (long `set` option), `-O NAME` / `+O NAME`
             // (shopt option). Each consumes the following word as its name.
@@ -127,33 +134,58 @@ fn run(args: &[String]) -> i32 {
                 }
                 base += 2;
             }
-            // A `-`/`+` cluster made up entirely of single-letter `set` options
-            // (`-e`, `-x`, `-eux`, `+x`). Clusters containing a mode letter
-            // (`-c`, `-s`, …) or an unknown letter fall through to the dispatch.
+            // A `-`/`+` cluster of single-letter invocation options: `set`
+            // letters (`-e`, `-x`, `-eux`, `+x`), `-i`/`+i` (force
+            // interactivity), and — for `-` — the mode letters `-c`/`-s`, which
+            // may be bundled (`-ec`, `-ic`, `-cs`). A cluster containing any
+            // other letter is *not* an options cluster: it falls through to the
+            // dispatch so `osh -V` (version) and an unknown `-z` are handled
+            // there, preserving their existing behaviour.
             s if (s.starts_with('-') || s.starts_with('+'))
                 && s.len() > 1
-                && s[1..].chars().all(|c| SET_OPTION_LETTERS.contains(c)) =>
+                && !s.starts_with("--")
+                && s[1..].chars().all(|c| {
+                    SET_OPTION_LETTERS.contains(c)
+                        || c == 'i'
+                        || (s.starts_with('-') && (c == 'c' || c == 's'))
+                }) =>
             {
                 let enable = s.starts_with('-');
-                // Every letter was validated by the guard above.
-                let _ = sh.apply_short_options(&s[1..], enable);
+                let mut set_letters = String::new();
+                let mut found_mode = false;
+                for c in s[1..].chars() {
+                    match c {
+                        'i' => force_interactive = Some(enable),
+                        // Mode letters only appear with `-` (guarded above).
+                        'c' => {
+                            mode = InvokeMode::Command;
+                            found_mode = true;
+                        }
+                        's' => {
+                            mode = InvokeMode::Stdin;
+                            found_mode = true;
+                        }
+                        _ => set_letters.push(c),
+                    }
+                }
+                if !set_letters.is_empty() {
+                    // Every letter was validated by the guard above.
+                    let _ = sh.apply_short_options(&set_letters, enable);
+                }
                 base += 1;
+                // A mode letter ends option processing: the following words are
+                // its command/operands, not more options.
+                if found_mode {
+                    break;
+                }
             }
             _ => break,
         }
     }
 
-    let code = match args.get(base).map(String::as_str) {
-        Some("--version" | "-V") if !opts_ended => {
-            println!("{VERSION}");
-            0
-        }
-        Some("--help" | "-h") if !opts_ended => {
-            print_help();
-            0
-        }
-        Some("-c") if !opts_ended => {
-            let Some(command) = args.get(base + 1) else {
+    let code = match mode {
+        InvokeMode::Command => {
+            let Some(command) = args.get(base) else {
                 eprintln!("osh: -c: option requires an argument");
                 return 2;
             };
@@ -161,44 +193,64 @@ fn run(args: &[String]) -> i32 {
             sh.set_command_mode();
             // bash exposes the `-c` command string as $BASH_EXECUTION_STRING.
             sh.set_execution_string(command.clone());
-            if let Some(name) = args.get(base + 2) {
+            if let Some(name) = args.get(base + 1) {
                 sh.set_name(name.clone());
                 sh.set_positional(
-                    args.get(base + 3..).map(<[String]>::to_vec).unwrap_or_default(),
+                    args.get(base + 2..).map(<[String]>::to_vec).unwrap_or_default(),
                 );
             }
             sh.run_source(command)
         }
-        Some(path) if opts_ended || !path.starts_with('-') => {
-            match std::fs::read_to_string(path) {
-                Ok(src) => {
-                    sh.set_name(path.to_string());
-                    sh.set_script_mode();
-                    sh.set_positional(
-                        args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
-                    );
-                    sh.run_source(&src)
-                }
-                Err(e) => {
-                    eprintln!("osh: {path}: {e}");
-                    127
-                }
-            }
-        }
-        Some(other) => {
-            eprintln!("osh: unrecognized option '{other}'");
-            2
-        }
-        None => {
-            // Interactive iff `-i` forced it, else bash's rule: stdin AND
-            // stderr are both terminals. A piped/redirected REPL
-            // (`echo cmd | osh`, `osh < file`) is non-interactive — no prompts,
-            // aliases off by default, `line N:` shown in errors.
+        InvokeMode::Stdin => {
+            // `osh -s [arg…]`: read commands from stdin like the bare REPL, but
+            // with the operands bound as positional parameters ($1, $2, …).
+            // Interactivity is still decided by `-i`/isatty, matching bash.
+            sh.set_positional(args.get(base..).map(<[String]>::to_vec).unwrap_or_default());
             let interactive = force_interactive
                 .unwrap_or_else(|| io::stdin().is_terminal() && io::stderr().is_terminal());
             sh.set_repl_interactive(interactive);
             repl(&mut sh)
         }
+        InvokeMode::Repl => match args.get(base).map(String::as_str) {
+            Some("--version" | "-V") if !opts_ended => {
+                println!("{VERSION}");
+                0
+            }
+            Some("--help" | "-h") if !opts_ended => {
+                print_help();
+                0
+            }
+            Some(path) if opts_ended || !path.starts_with('-') => {
+                match std::fs::read_to_string(path) {
+                    Ok(src) => {
+                        sh.set_name(path.to_string());
+                        sh.set_script_mode();
+                        sh.set_positional(
+                            args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
+                        );
+                        sh.run_source(&src)
+                    }
+                    Err(e) => {
+                        eprintln!("osh: {path}: {e}");
+                        127
+                    }
+                }
+            }
+            Some(other) => {
+                eprintln!("osh: unrecognized option '{other}'");
+                2
+            }
+            None => {
+                // Interactive iff `-i` forced it, else bash's rule: stdin AND
+                // stderr are both terminals. A piped/redirected REPL
+                // (`echo cmd | osh`, `osh < file`) is non-interactive — no
+                // prompts, aliases off by default, `line N:` shown in errors.
+                let interactive = force_interactive
+                    .unwrap_or_else(|| io::stdin().is_terminal() && io::stderr().is_terminal());
+                sh.set_repl_interactive(interactive);
+                repl(&mut sh)
+            }
+        },
     };
     // Fire the EXIT trap (if any) once, on true shell exit. It preserves the
     // pending exit status, so `code` remains the shell's final status.
@@ -302,6 +354,7 @@ fn print_help() {
     println!("Usage:");
     println!("  osh                          Start an interactive shell.");
     println!("  osh -c COMMAND [NAME ARG…]   Execute COMMAND and exit.");
+    println!("  osh -s [ARG…]                Read commands from stdin, ARG… as $1….");
     println!("  osh SCRIPT [ARG…]            Execute commands from SCRIPT.");
     println!("  osh -n …                     Check syntax without executing (noexec).");
     println!("  osh --version                Print version and exit.");
@@ -309,6 +362,7 @@ fn print_help() {
     println!();
     println!("Leading options (applied before the command/script, as in bash):");
     println!("  -e -x -u -f -C …             Single-letter `set` options (clusters OK).");
+    println!("  -i / +i                      Force interactive / non-interactive REPL.");
     println!("  -o NAME / +o NAME            Enable/disable a `set -o` option (e.g. pipefail).");
     println!("  -O NAME / +O NAME            Enable/disable a shopt option (e.g. extglob).");
     println!("  --                           End option processing.");

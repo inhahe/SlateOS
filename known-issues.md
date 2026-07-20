@@ -137,7 +137,17 @@ runs so a quoted `]` is not treated as the terminator. Very low value: a literal
 `]` inside an associative key is exotic, and the assignment/`declare -p` paths
 already work.
 
-### TD-OILS-BASHOPTS. `osh` does not expose `$BASHOPTS` — 2026-07-19 — OPEN (low priority)
+### TD-OILS-BASHOPTS. `osh` does not expose `$BASHOPTS` — RESOLVED 2026-07-20
+
+**Resolved 2026-07-20** (superseded by later work — this entry was stale).
+`osh` now seeds `$BASHOPTS` and byte-matches bash's full default set:
+`echo $BASHOPTS` prints
+`checkwinsize:cmdhist:complete_fullquote:extquote:force_fignore:globasciiranges:globskipdots:hostcomplete:interactive_comments:patsub_replacement:progcomp:promptvars:sourcepath`,
+identical to `bash -c 'echo $BASHOPTS'`. The "honest state is unset" reasoning
+below is obsolete: rather than materialize from osh's tiny live shopt inventory,
+the default set is seeded directly (like `$SHELLOPTS`). Verified via probe.
+
+<details><summary>Original entry (obsolete, for history)</summary>
 
 **What:** bash exposes `$BASHOPTS`, a readonly colon-separated list of the
 enabled `shopt` options (analogous to `$SHELLOPTS` for `set -o` options).
@@ -168,6 +178,7 @@ mirroring `refresh_shellopts` (readonly stored var, recomputed on every
 `shopt -s`/`-u`). Byte-matching bash's full default set also requires
 modeling the completion-related shopts, which only makes sense once osh
 has a completion subsystem. Until then the honest state is "unset".
+</details>
 
 ### TD-OILS-DECLARE-P-BULK-DYNAMICS. bulk `declare -p` (no names) omits the dynamic special variables — 2026-07-19 — OPEN (very low priority)
 
@@ -632,7 +643,35 @@ host-platform artifact, not a shell-logic bug.
 via `/dev/fd/N` rather than temp files; the Windows dev host keeps the
 temp-file fallback.
 
-### TD-OILS-DECLARE-BADID. `osh` `declare NAME[a b]=v` silently no-ops; bash errors "not a valid identifier" — 2026-07-19
+### TD-OILS-DECLARE-BADID. `osh` `declare NAME[a b]=v` silently no-ops; bash errors "not a valid identifier" — RESOLVED 2026-07-20
+
+**Resolved 2026-07-20** — and the fix uncovered/closed a larger adjacent gap:
+`declare "NAME[sub]=value"` (a *quoted*, single-arg subscripted target) was not
+handled at all — osh stored a scalar literally named `NAME[sub]` and `declare -p
+NAME` reported "not found". `builtin_declare` now:
+- splits each target into a base name + optional `[subscript]`;
+- validates the **base** as an identifier, emitting `{tag}: \`ARG': not a valid
+  identifier` (status 1, quoting the original arg) for `bad@name=v`, `1x=v`, or
+  an unbalanced `h[a` — this also fixes the original non-subscript case;
+- auto-creates an **indexed** array for a subscripted name (never clobbering an
+  existing associative array), matching bash's `declare "x[5]"` → `declare -a x`;
+- routes the element assignment through the normal array machinery via a directly
+  constructed `Assignment` AST (NOT by re-parsing a `base[sub]=value` string,
+  which would word-split an unquoted-space value like `x[0]="2 x"`), so the
+  subscript is arith-evaluated for indexed arrays / literal for associative, and
+  a bad `-i` **value** stays fatal.
+
+Faithful error tagging: a bad **subscript** is reported untagged (`a b: syntax
+error in expression`, like a command-position `a[x y]=v`, even under `-i`) by
+clearing `arith_cmd` only while resolving the subscript, whereas a bad `-i`
+**value** keeps the `declare:` tag. Verified against bash across `x[5]=v`,
+`x[2+3]=v`, `-i x[0]=2+3`, `-i a[0]="2 x"` (fatal, tagged), `x[a b]=v` (fatal,
+untagged), `-A m[k]=v`, `x[5]` (empty array), `x[3]+=b`, `bad@name=v`, `1x=v`.
+Regression test `declare_subscripted_target_and_bad_identifier`; 684 tests,
+clippy clean, host + slateos build green. `is_valid_name` was made
+`pub(crate)` in `parser.rs`.
+
+<details><summary>Original entry (for history)</summary>
 
 **Where:** `userspace/oils/src/interp.rs` `builtin_declare` argument
 parsing (the per-arg assignment/attribute handling).
@@ -652,6 +691,29 @@ the correct incantation `declare "h[a b]=v"` works in both shells.
 attribute flag nor a well-formed `name[sub]?=value` assignment, emit
 `osh: declare: \`ARG': not a valid identifier` to stderr and set the exit
 status to 1 (accumulating the worst status across args).
+</details>
+
+### TD-OILS-BAD-ARRAY-SUBSCRIPT. `osh` "bad array subscript" names the base, not the full `name[sub]`, and is non-fatal — 2026-07-20 — OPEN (very low priority)
+
+**Where:** `userspace/oils/src/interp.rs` `apply_assignment`, the indexed
+element path (~3527): `let Some(idx) = Self::resolve_index(raw, bound) else {
+self.errln(&format!("{}{}: bad array subscript", …, a.name)); return true; }`.
+
+**What:** When a negative array subscript underflows (e.g. `x[-1]=z` on an
+empty/short indexed array), bash reports the diagnostic naming the **full**
+reference `x[-1]: bad array subscript` and treats it as **fatal** (aborts the
+command; `x[-1]=z; echo done` prints nothing, status 1). osh names only the base
+(`x: bad array subscript`) and is **non-fatal** (continues; `echo done` runs).
+Pre-existing (not introduced by the TD-OILS-DECLARE-BADID fix — the same
+divergence shows in command position). Reproduce: `bash -c 'x[-1]=z; echo done'`
+vs `osh -c 'x[-1]=z; echo done'`.
+
+**Proper fix:** carry the original subscript source into the error (reconstruct
+`{name}[{sub_src}]`, matching bash's echoed reference) and set the fatal
+expansion flag (`self.unbound_error`/`arith_error` equivalent) so the command
+aborts with status 1 rather than returning `true`. Verify both command-position
+and `declare "x[-1]=v"` paths, and that a *valid* negative index (`x[-1]` on a
+populated array) still overwrites the last element.
 
 ### TD-OILS-RO-ARRAY. `osh` `readonly -p` uses `readonly name=val` and can't format array vars — 2026-07-19 — ✅ FIXED 2026-07-19
 

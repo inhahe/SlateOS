@@ -11712,12 +11712,35 @@ impl Shell {
             if name.is_empty() {
                 continue;
             }
+            // A subscripted target (`name[sub]=value` / `name[sub]`) assigns (or
+            // declares) an array element; attributes still apply to the *base*
+            // name. A well-formed subscript is `BASE[...]` with a closing `]` at
+            // the very end and a valid identifier `BASE`. Anything else (an
+            // unbalanced `h[a`, or a bad base) fails identifier validation below.
+            let (base_name, subscript): (&str, Option<&str>) = match name.find('[') {
+                Some(p) if p > 0 && name.ends_with(']') => {
+                    (&name[..p], Some(&name[p + 1..name.len() - 1]))
+                }
+                _ => (name, None),
+            };
+            // Every declare target must be a valid identifier (bash rejects
+            // `bad@name=v`, `1x=v`, `h[a` with `\`ARG': not a valid identifier`
+            // and status 1, quoting the *original* argument).
+            if !crate::parser::is_valid_name(base_name) {
+                self.emit_stderr(
+                    format!("{}{tag}: `{name_val}': not a valid identifier\n", self.err_prefix())
+                        .as_bytes(),
+                );
+                status = 1;
+                continue;
+            }
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
-            if value.is_some() && self.readonly.contains(name) {
+            if value.is_some() && self.readonly.contains(base_name) {
                 self.emit_stderr(
-                    format!("{}{tag}: {name}: readonly variable\n", self.err_prefix()).as_bytes(),
+                    format!("{}{tag}: {base_name}: readonly variable\n", self.err_prefix())
+                        .as_bytes(),
                 );
                 status = 1;
                 continue;
@@ -11725,54 +11748,108 @@ impl Shell {
             // Shadow the name (snapshot + clear) before (re)binding it when this
             // declaration is function-local.
             if make_local {
-                self.declare_local(name);
+                self.declare_local(base_name);
             }
             if assoc {
-                self.assoc.entry(name.to_string()).or_default();
-            } else if indexed {
-                self.arrays.entry(name.to_string()).or_default();
+                self.assoc.entry(base_name.to_string()).or_default();
+            } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
+                // A subscripted name auto-creates an *indexed* array (bash) even
+                // with no explicit `-a` and no value — but never clobbers an
+                // existing associative array of the same name.
+                self.arrays.entry(base_name.to_string()).or_default();
             }
             // Apply/remove the integer and case attributes before binding the
             // value, so a `declare -i x=5+3` initial value is evaluated
             // arithmetically and `declare -u x=abc` is folded to uppercase.
+            // Attributes attach to the *base* name (so `declare -i x[0]=2+3`
+            // makes `x` an integer array).
             if integer {
-                self.integer_attr.insert(name.to_string());
+                self.integer_attr.insert(base_name.to_string());
             } else if unset_integer {
-                self.integer_attr.remove(name);
+                self.integer_attr.remove(base_name);
             }
             if nameref {
-                self.nameref_attr.insert(name.to_string());
+                self.nameref_attr.insert(base_name.to_string());
             } else if unset_nameref {
-                self.nameref_attr.remove(name);
+                self.nameref_attr.remove(base_name);
             }
             // Conflicting enable directions (e.g. `-lc`, `-lu`) cancel to none.
             let case_dir = if case_conflict { Some(0) } else { case_dir };
             match case_dir {
                 Some(1) => {
                     // `-l`: lowercase (mutually exclusive with uppercase/capitalize).
-                    self.lower_attr.insert(name.to_string());
-                    self.upper_attr.remove(name);
-                    self.capcase_attr.remove(name);
+                    self.lower_attr.insert(base_name.to_string());
+                    self.upper_attr.remove(base_name);
+                    self.capcase_attr.remove(base_name);
                 }
                 Some(2) => {
                     // `-u`: uppercase.
-                    self.upper_attr.insert(name.to_string());
-                    self.lower_attr.remove(name);
-                    self.capcase_attr.remove(name);
+                    self.upper_attr.insert(base_name.to_string());
+                    self.lower_attr.remove(base_name);
+                    self.capcase_attr.remove(base_name);
                 }
                 Some(3) => {
                     // `-c`: capitalize first char, lowercase the rest.
-                    self.capcase_attr.insert(name.to_string());
-                    self.lower_attr.remove(name);
-                    self.upper_attr.remove(name);
+                    self.capcase_attr.insert(base_name.to_string());
+                    self.lower_attr.remove(base_name);
+                    self.upper_attr.remove(base_name);
                 }
                 Some(_) => {
                     // `+l`/`+u`/`+c`: clear all case attributes.
-                    self.lower_attr.remove(name);
-                    self.upper_attr.remove(name);
-                    self.capcase_attr.remove(name);
+                    self.lower_attr.remove(base_name);
+                    self.upper_attr.remove(base_name);
+                    self.capcase_attr.remove(base_name);
                 }
                 None => {}
+            }
+            // A subscripted assignment (`name[sub]=value`) routes through the
+            // normal array-element machinery: the subscript is arith-evaluated
+            // for an indexed array (a malformed expression is a fatal "syntax
+            // error in expression", matching a command-position `a[x y]=v`) or a
+            // literal key for an associative array. The array kind was registered
+            // above, so `apply_assignment` selects the right one.
+            if let Some(sub) = subscript {
+                if let Some(v) = value {
+                    // Build the element assignment directly (not by re-parsing a
+                    // `base[sub]=value` string — an unquoted-space value like
+                    // `x[0]="2 x"` would word-split). The subscript is resolved
+                    // here with the `declare:` arith tag CLEARED, because bash
+                    // reports a bad *subscript* like a command-position
+                    // `a[x y]=v` (untagged) even under `-i`; only a bad `-i`
+                    // *value* is tagged `declare:` (handled inside
+                    // `apply_assignment`, where the tag is still set).
+                    let index_word = if self.assoc.contains_key(base_name) {
+                        // Associative key: a literal string, no arith eval.
+                        Word::literal(sub)
+                    } else {
+                        let saved = self.arith_cmd.take();
+                        let raw = self.eval_arith_index(&Word::literal(sub));
+                        let fatal = self.arith_error;
+                        self.arith_cmd = saved;
+                        if fatal {
+                            // The untagged diagnostic is already emitted and
+                            // `arith_error` stays set so the command driver
+                            // aborts; skip the (invalid) element assignment.
+                            continue;
+                        }
+                        Word::literal(raw.to_string())
+                    };
+                    let assignment = Assignment {
+                        name: base_name.to_string(),
+                        index: Some(index_word),
+                        append,
+                        value: AssignRhs::Scalar(Word::literal(v)),
+                    };
+                    self.apply_assignment(&assignment, false);
+                }
+                // `-x`/`-r` on a subscripted target attach to the base array.
+                if export {
+                    self.exported.insert(base_name.to_string());
+                }
+                if readonly {
+                    self.readonly.insert(base_name.to_string());
+                }
+                continue;
             }
             if let Some(v) = value {
                 if self.nameref_attr.contains(name) {
@@ -22347,6 +22424,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `get_name_for_error`): `main` in the harness's stdin-like mode.
         let (o, _) = run("f(){ local y=1; readonly y; local y=2 2>&1; }; f");
         assert_eq!(o, "main: local: y: readonly variable\n");
+    }
+
+    #[test]
+    fn declare_subscripted_target_and_bad_identifier() {
+        // `declare name[sub]=value` assigns an array element, auto-creating an
+        // indexed array (bash) — previously osh stored a scalar literally named
+        // `name[sub]` and `declare -p` reported "not found".
+        assert_eq!(
+            run("declare \"x[5]=v\"; declare -p x").0,
+            "declare -a x=([5]=\"v\")\n"
+        );
+        // The subscript is arith-evaluated for an indexed array.
+        assert_eq!(
+            run("declare \"x[2+3]=v\"; declare -p x").0,
+            "declare -a x=([5]=\"v\")\n"
+        );
+        // `-i` makes the base an integer array; the value is arith-evaluated.
+        assert_eq!(
+            run("declare -i \"x[0]=2+3\"; declare -p x").0,
+            "declare -ai x=([0]=\"5\")\n"
+        );
+        // An explicit `-A` makes the subscript a literal key.
+        assert_eq!(
+            run("declare -A \"m[k]=v\"; declare -p m").0,
+            "declare -A m=([k]=\"v\" )\n"
+        );
+        // A subscripted name with no value auto-creates the (empty) array.
+        assert_eq!(run("declare \"a[5]\"; declare -p a").0, "declare -a a\n");
+        // Append to an element.
+        assert_eq!(
+            run("declare \"x[3]=a\"; declare \"x[3]+=b\"; declare -p x").0,
+            "declare -a x=([3]=\"ab\")\n"
+        );
+        // A malformed *subscript* arith expression is a fatal, UNtagged syntax
+        // error (like a command-position `a[x y]=v`), unlike a bad `-i` value
+        // which bash tags `declare:`. The fatal expansion aborts the command.
+        let (o, _) = run("declare \"x[a b]=v\" 2>&1");
+        assert_eq!(o, "osh: a b: syntax error in expression (error token is \"b\")\n");
+        // A non-identifier declare target is rejected with status 1, quoting the
+        // original argument (`bad@name=v`, `1x=v`, unbalanced `h[a`).
+        let (o, s) = run("declare bad@name=v 2>&1");
+        assert_eq!(o, "osh: declare: `bad@name=v': not a valid identifier\n");
+        assert_eq!(s, 1);
+        let (o, _) = run("declare 1x=v 2>&1");
+        assert_eq!(o, "osh: declare: `1x=v': not a valid identifier\n");
     }
 
     #[test]

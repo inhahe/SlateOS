@@ -1940,7 +1940,7 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn is_valid_name(s: &str) -> bool {
+pub(crate) fn is_valid_name(s: &str) -> bool {
     let mut it = s.chars();
     match it.next() {
         Some(c) if is_name_start(c) => {}

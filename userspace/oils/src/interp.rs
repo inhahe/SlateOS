@@ -10326,9 +10326,10 @@ impl Shell {
             return if w != 0 { w } else { status };
         }
         if names.is_empty() {
-            // Print the table (nothing when empty, matching bash).
+            // Print the table. bash reports an empty table with the message
+            // `hash: hash table empty` (on stdout, exit 0) rather than nothing.
             if self.cmd_hash.is_empty() {
-                return 0;
+                return self.write_bytes(out, redir, b"hash: hash table empty\n");
             }
             let mut entries: Vec<(&String, &(std::path::PathBuf, u64))> =
                 self.cmd_hash.iter().collect();
@@ -26406,8 +26407,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // `-r` forgets everything; `-t` then fails.
         assert_eq!(run("hash -p /x foo; hash -r; hash -t foo").1, 1);
-        // Empty table prints nothing.
-        assert_eq!(run("hash").0, "");
+        // An empty table reports `hash: hash table empty` (bash), exit 0.
+        assert_eq!(run("hash -r; hash"), ("hash: hash table empty\n".to_string(), 0));
     }
 
     #[test]

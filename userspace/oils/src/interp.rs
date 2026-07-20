@@ -22524,6 +22524,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn cond_regex_inline_backslash_escapes_metachar() {
+        // A backslash in the inline `=~` regex escapes the metacharacter for the
+        // ERE engine (bash passes `\X` through to regcomp), so `\+`/`\.`/`\(`
+        // match a *literal* `+`/`.`/`(` — exactly as a variable-supplied regex
+        // does. Previously osh stripped the backslash, turning `\+` into a `+`
+        // quantifier and `\.` into any-char. (Root-caused in read_word_regex.)
+        assert_eq!(run("[[ a+b =~ a\\+b ]]").1, 0); // literal + matches
+        assert_eq!(run("[[ axb =~ a\\+b ]]").1, 1); // no literal + present
+        assert_eq!(run("[[ aXb =~ a\\.b ]]").1, 1); // \. is a literal dot
+        assert_eq!(run("[[ a.b =~ a\\.b ]]").1, 0);
+        assert_eq!(run("[[ 'a(b' =~ a\\(b ]]").1, 0); // literal paren, not a group
+        // Consistency: inline and variable-supplied regex agree.
+        assert_eq!(run("re='a\\+b'; [[ a+b =~ $re ]]").1, 0);
+    }
+
+    #[test]
     fn cond_regex_quoted_var_is_literal() {
         // Quoted expansion is literal; unquoted expansion is a live pattern.
         assert_eq!(run("p='a.b'; [[ a.b =~ \"$p\" ]]").1, 0);

@@ -749,10 +749,19 @@ impl Lexer {
                     segs.push(Seg::CmdSub(raw));
                 }
                 '\\' => {
+                    // In the inline `=~` regex, a backslash escapes the next
+                    // character *for the regex engine* — bash passes `\X` through
+                    // to `regcomp`, so `\+`/`\.`/`\(` match a literal `+`/`.`/`(`.
+                    // Keep the backslash (don't strip it as ordinary quote
+                    // removal would) so the inline regex behaves exactly like one
+                    // supplied via a variable (`re='a\+b'; [[ a+b =~ $re ]]`),
+                    // whose backslashes already survive to the ERE. A trailing
+                    // `\<newline>` is still a line continuation and is dropped.
                     self.pos += 1;
                     if let Some(next) = self.bump()
                         && next != '\n'
                     {
+                        lit.push('\\');
                         lit.push(next);
                     }
                 }

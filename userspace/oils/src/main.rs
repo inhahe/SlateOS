@@ -11,7 +11,7 @@
 //! See `design-decisions.md §72` for why this is a Rust reimplementation of the
 //! OSH language rather than a cross-compile of upstream Oils.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
 use osh::Shell;
@@ -76,12 +76,27 @@ fn run(args: &[String]) -> i32 {
     // `base` is a script path even if it begins with `-` (`osh -- -c` opens a
     // *file* named `-c`, matching bash), and the flag arms below are skipped.
     let mut opts_ended = false;
+    // `-i` / `+i` force interactivity on/off, overriding tty detection for the
+    // REPL (bash's `--force-interactive`). `None` = decide by isatty.
+    let mut force_interactive: Option<bool> = None;
     while let Some(arg) = args.get(base) {
         match arg.as_str() {
             "--" => {
                 base += 1;
                 opts_ended = true;
                 break;
+            }
+            // `-i` / `+i`: force the REPL interactive / non-interactive. Only
+            // meaningful on the REPL path (`-c`/script shells are never
+            // interactive); it is consumed here so it does not fall through to
+            // the mode dispatch as an unrecognised option.
+            "-i" => {
+                force_interactive = Some(true);
+                base += 1;
+            }
+            "+i" => {
+                force_interactive = Some(false);
+                base += 1;
             }
             // `-n` keeps its dedicated latch path (see `Shell::set_noexec`).
             "-n" => {
@@ -174,7 +189,16 @@ fn run(args: &[String]) -> i32 {
             eprintln!("osh: unrecognized option '{other}'");
             2
         }
-        None => repl(&mut sh),
+        None => {
+            // Interactive iff `-i` forced it, else bash's rule: stdin AND
+            // stderr are both terminals. A piped/redirected REPL
+            // (`echo cmd | osh`, `osh < file`) is non-interactive — no prompts,
+            // aliases off by default, `line N:` shown in errors.
+            let interactive = force_interactive
+                .unwrap_or_else(|| io::stdin().is_terminal() && io::stderr().is_terminal());
+            sh.set_repl_interactive(interactive);
+            repl(&mut sh)
+        }
     };
     // Fire the EXIT trap (if any) once, on true shell exit. It preserves the
     // pending exit status, so `code` remains the shell's final status.
@@ -188,10 +212,16 @@ fn run(args: &[String]) -> i32 {
 /// physical line. Multi-line compound commands typed across separate prompts
 /// are not yet joined (a grow-phase item).
 fn repl(sh: &mut Shell) -> i32 {
+    // Prompts (`PS1`/`PS2`) and the EOF newline are only emitted for a
+    // terminal-attached interactive shell; a piped/redirected REPL stays silent
+    // so its output byte-matches bash reading the same stream.
+    let interactive = sh.is_interactive();
     let stdin = io::stdin();
     let mut lock = stdin.lock();
     loop {
-        print_prompt(sh);
+        if interactive {
+            print_prompt(sh);
+        }
         let mut buffer = String::new();
         let done = loop {
             let mut line = String::new();
@@ -207,7 +237,9 @@ fn repl(sh: &mut Shell) -> i32 {
             if let Some(cont) = trimmed.strip_suffix('\\') {
                 buffer.push_str(cont);
                 buffer.push('\n');
-                print_continuation();
+                if interactive {
+                    print_continuation();
+                }
             } else {
                 buffer.push_str(trimmed);
                 break false;
@@ -218,7 +250,9 @@ fn repl(sh: &mut Shell) -> i32 {
             sh.run_source(&buffer);
         }
         if done {
-            println!();
+            if interactive {
+                println!();
+            }
             return sh.last_status();
         }
     }

@@ -3004,7 +3004,7 @@ descendants inherit the enforced limit. Keep the current table as the Windows-ho
 and pre-seed fallback. Unit conversions (bash's block/kbyte display units vs. the
 kernel's byte-granular `rlim_t`) must be applied at the FFI boundary.
 
-### TD-OILS-INTERACTIVE-DETECT. Non-tty stdin is treated as interactive — OPEN 2026-07-19
+### TD-OILS-INTERACTIVE-DETECT. Non-tty stdin is treated as interactive — FIXED 2026-07-20
 
 **Where:** `userspace/oils/src/interp.rs` — `shopt_default`/`aliases_enabled`
 (the `expand_aliases` default gate) and, more broadly, everywhere `osh`
@@ -3039,6 +3039,31 @@ TD-OILS-ERRLINE `line N:` gate (bash omits the line number only for *interactive
 input, and piped-stdin is non-interactive there too). Until then, the
 mode-flag approximation is correct for the common `-c`/script/tty-REPL cases and
 only wrong for the rarer piped-/redirected-stdin REPL.
+
+**Fix (2026-07-20):** added a `repl_interactive` flag on `Shell` plus a single
+`is_interactive()` predicate = `!command_mode && !script_mode && repl_interactive`
+(mirrors bash's `interactive` global). The binary (`main.rs`) sets the flag from
+`std::io::IsTerminal` — interactive iff `stdin.is_terminal() && stderr.is_terminal()`
+— before entering the REPL, with `-i` / `+i` command-line overrides
+(`force_interactive`). `is_interactive()` now drives all four divergent
+behaviours in one place: (a) `shopt_default("expand_aliases")` returns it, so a
+piped REPL no longer expands aliases by default; (b) the REPL prints `PS1`/`PS2`
+and the EOF newline only when interactive, so `echo pwd | osh` emits no prompt;
+(c) `job_control_enabled()` uses it; and (d) `err_prefix`/`syntax_error_prefix`
+now show the `line N:` token for *any* non-interactive input (piped stdin
+included), not just `-c`/script. Default is `true` so the unit-test harness
+(which builds a `Shell` directly, no mode) stays interactive-like. Regression
+tests: `noninteractive_repl_disables_alias_default`,
+`command_and_script_modes_are_never_interactive`,
+`noninteractive_repl_shows_line_number_in_errors`.
+
+**Residual caveat (host vs. SlateOS target):** tty detection uses
+`std::io::IsTerminal`, which is accurate on the host (where osh's bash-fidelity
+tests run). On the SlateOS target, `IsTerminal` is only as good as std's port of
+`isatty`/`GetFileType` for that platform; if it reports `false` on a real SlateOS
+console, an on-target interactive `osh` would lose its prompt/alias default. When
+osh is deployed as a SlateOS shell, verify the target's `isatty` wiring (or pass
+`-i`). This does not affect the host fidelity this item was about.
 
 ### TD-OILS-STDERR-INTERLEAVE. Same-sink stdout+stderr redirects flush in the wrong order — FIXED 2026-07-19 (all subcases resolved; the capture+subshell+`2>&1` subcase was later fixed by the compound fd-dup routing work)
 

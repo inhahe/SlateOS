@@ -767,6 +767,19 @@ pub struct Shell {
     /// execution; `-c` and interactive shells omit it. Set once at startup by
     /// the binary. See `refresh_funcname`.
     script_mode: bool,
+    /// Whether the REPL's stdin (and stderr) is a real terminal. bash decides
+    /// *interactivity* by `isatty(0) && isatty(2)` (plus the `-i` flag), and an
+    /// interactive shell differs observably from one reading a pipe/redirected
+    /// file: it expands aliases by default, prints `PS1`/`PS2` prompts, enables
+    /// job control, and omits the `line N:` token from error messages. Only the
+    /// REPL path can be interactive (`-c` and script files never are), so this
+    /// flag is meaningful only when neither `command_mode` nor `script_mode` is
+    /// set; the binary sets it from tty detection (or the `-i` override) before
+    /// entering the REPL. Defaults `true` so the unit-test harness (which builds
+    /// a `Shell` directly and runs source without a mode) behaves interactively,
+    /// matching bash's tty-attached default. See [`Shell::is_interactive`] and
+    /// known-issues TD-OILS-INTERACTIVE-DETECT.
+    repl_interactive: bool,
     /// Nesting depth of `eval` (and `eval`-like) execution. While `> 0`, a
     /// syntax error is tagged with bash's `eval:` input-source token
     /// (`<name>: eval: line N: …`) instead of the outer `-c`/script token.
@@ -1058,6 +1071,7 @@ impl Shell {
             monitor: false,
             command_mode: false,
             script_mode: false,
+            repl_interactive: true,
             eval_depth: 0,
             errexit_suppress: 0,
             unbound_error: None,
@@ -1301,6 +1315,27 @@ impl Shell {
         self.refresh_bashopts();
     }
 
+    /// Record whether the REPL is attached to a terminal (bash's `isatty(0) &&
+    /// isatty(2)`), or force-interactivity via `-i`. Called once by the binary
+    /// before entering the REPL. Recomputes `BASHOPTS` because the
+    /// `expand_aliases` default is interactivity-dependent. Has no effect on
+    /// `-c`/script shells, which are never interactive regardless of this flag
+    /// (see [`Self::is_interactive`]).
+    pub fn set_repl_interactive(&mut self, interactive: bool) {
+        self.repl_interactive = interactive;
+        self.refresh_bashopts();
+    }
+
+    /// Whether this shell is *interactive* in bash's sense: not a `-c` command
+    /// and not a script file, and its REPL stdin/stderr is a terminal (or `-i`
+    /// forced it). Governs alias-expansion default, prompt printing, job
+    /// control, and the `line N:` error token. Mirrors bash's `interactive`
+    /// global. See known-issues TD-OILS-INTERACTIVE-DETECT.
+    #[must_use]
+    pub fn is_interactive(&self) -> bool {
+        !self.command_mode && !self.script_mode && self.repl_interactive
+    }
+
     /// Set a shell variable.
     pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.vars.insert(name.into(), value.into());
@@ -1357,7 +1392,7 @@ impl Shell {
     /// alias-expansion rule.
     fn shopt_default(&self, name: &str) -> bool {
         match name {
-            "expand_aliases" => !self.command_mode && !self.script_mode,
+            "expand_aliases" => self.is_interactive(),
             _ => SHOPT_TABLE.iter().find(|(n, _)| *n == name).map(|(_, d)| *d).unwrap_or(false),
         }
     }
@@ -3284,6 +3319,7 @@ impl Shell {
             monitor: self.monitor,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
+            repl_interactive: self.repl_interactive,
             eval_depth: self.eval_depth,
             // A subshell inherits the parent's errexit-ignore depth: per POSIX a
             // compound command (including `( … )`) executed where `set -e` is
@@ -10131,7 +10167,7 @@ impl Shell {
     /// control` when it is off). An osh shell is interactive when it is neither
     /// in `-c` command mode nor running a script file (i.e. the REPL).
     fn job_control_enabled(&self) -> bool {
-        self.monitor || (!self.command_mode && !self.script_mode)
+        self.monitor || self.is_interactive()
     }
 
     /// `fg [jobspec]` — bring a background job into the foreground: print its
@@ -15008,10 +15044,14 @@ impl Shell {
         } else {
             self.frame_source()
         };
-        if self.command_mode || self.script_mode {
-            format!("{src}: line {}: ", self.current_line)
-        } else {
+        // bash shows the `line N:` token for every *non-interactive* input —
+        // `-c`, a script file, *and* piped/redirected stdin — omitting it only
+        // for a tty-attached interactive shell. `is_interactive()` folds all
+        // three non-interactive cases into one predicate.
+        if self.is_interactive() {
             format!("{src}: ")
+        } else {
+            format!("{src}: line {}: ", self.current_line)
         }
     }
 
@@ -15038,15 +15078,18 @@ impl Shell {
         } else {
             None
         };
-        if self.command_mode || self.script_mode || self.eval_depth > 0 {
+        // Any non-interactive input (`-c`, script file, or piped/redirected
+        // stdin) carries the `line N` token; an `eval` body always does too.
+        // Only a tty-attached interactive shell drops it.
+        if !self.is_interactive() || self.eval_depth > 0 {
             match token {
                 Some(t) => format!("{name}: {t}: line {line}: "),
                 None => format!("{name}: line {line}: "),
             }
         } else {
-            // Interactive: bash still shows `line N` for piped stdin, but osh's
-            // REPL is line-at-a-time and never accumulates a multi-line compound,
-            // so it keeps the bare `<name>: ` form here.
+            // Interactive tty REPL: bash shows just `<name>: `. (osh's REPL is
+            // line-at-a-time, so even were it non-interactive `line` would reset
+            // per logical line rather than accumulate across a compound.)
             format!("{name}: ")
         }
     }
@@ -19943,6 +19986,70 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Opting in flips the gate on.
         sh.run_source("shopt -s expand_aliases");
         assert!(sh.aliases_enabled(), "shopt -s expand_aliases should enable expansion");
+    }
+
+    #[test]
+    fn noninteractive_repl_disables_alias_default() {
+        // TD-OILS-INTERACTIVE-DETECT: a REPL reading a *pipe* (non-tty stdin)
+        // is non-interactive in bash, so `expand_aliases` defaults OFF there —
+        // just like `-c`/script mode, and unlike a tty REPL. Simulate the
+        // piped-stdin case with `set_repl_interactive(false)` (no `-c`/script).
+        let mut sh = Shell::new();
+        // Default (tty-like) REPL: interactive, aliases on.
+        assert!(sh.is_interactive(), "default REPL should be interactive");
+        assert!(sh.aliases_enabled(), "interactive REPL expands aliases by default");
+        // Flip to non-interactive (piped stdin): aliases now default off.
+        sh.set_repl_interactive(false);
+        assert!(!sh.is_interactive(), "piped-stdin REPL is non-interactive");
+        assert!(
+            !sh.aliases_enabled(),
+            "non-interactive REPL should not expand aliases by default"
+        );
+        // Opting in still flips the gate on, matching bash.
+        sh.run_source("shopt -s expand_aliases");
+        assert!(sh.aliases_enabled(), "shopt -s expand_aliases enables expansion");
+    }
+
+    #[test]
+    fn command_and_script_modes_are_never_interactive() {
+        // `-c` and script shells are non-interactive regardless of the tty flag.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        sh.set_repl_interactive(true); // force flag is ignored for `-c`
+        assert!(!sh.is_interactive(), "`-c` shell is never interactive");
+        let mut sh2 = Shell::new();
+        sh2.set_script_mode();
+        sh2.set_repl_interactive(true);
+        assert!(!sh2.is_interactive(), "script shell is never interactive");
+    }
+
+    #[test]
+    fn noninteractive_repl_shows_line_number_in_errors() {
+        // bash omits the `line N:` token only for an interactive tty shell; a
+        // piped/redirected REPL keeps it, exactly like `-c`/script mode. A
+        // readonly-reassignment error is a convenient trigger; `2>&1` routes the
+        // stderr diagnostic into the captured stdout buffer.
+        fn run_repl(interactive: bool, src: &str) -> String {
+            let mut sh = Shell::new();
+            sh.set_repl_interactive(interactive);
+            let mut buf = Vec::new();
+            let prog = parse(src).expect("parse");
+            {
+                let mut out = Out::Capture(&mut buf);
+                sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        // Interactive tty REPL → bare `<name>: ` prefix (no line number).
+        assert_eq!(
+            run_repl(true, "readonly r=1\n{ r=2; } 2>&1"),
+            "osh: r: readonly variable\n"
+        );
+        // Non-interactive (piped/redirected) REPL → `line N:` present.
+        assert_eq!(
+            run_repl(false, "readonly r=1\n{ r=2; } 2>&1"),
+            "osh: line 2: r: readonly variable\n"
+        );
     }
 
     #[test]

@@ -13158,21 +13158,104 @@ impl Shell {
                 return 2;
             }
         }
-        // `-v NAME` needs shell state (is the variable set?), which the free
-        // `eval_test` helper cannot see — handle it here.
-        if a.len() == 2 && a[0] == "-v" {
-            return i32::from(!self.var_is_set(a[1]));
-        }
-        // `-o OPTNAME` likewise needs shell state (the option flags).
-        if a.len() == 2 && a[0] == "-o" {
-            return i32::from(!self.shell_option_enabled(a[1]));
-        }
-        match eval_test(&a) {
+        match self.eval_test_expr(&a) {
             Ok(b) => i32::from(!b),
             Err(body) => {
                 self.errln(&format!("{}{name}: {body}", self.err_prefix()));
                 2
             }
+        }
+    }
+
+    /// Evaluate a `test`/`[` argument vector (with any `[`/`]` already stripped).
+    /// The ≤3-argument forms follow POSIX's fixed special cases (which bash's
+    /// `posixtest` honours — e.g. `[ ! = x ]` is a string comparison, `[ -a ]`
+    /// tests the string `-a`); four-or-more arguments are parsed by a
+    /// recursive-descent grammar mirroring bash's `expr()` with `-o` (OR, lowest
+    /// precedence), `-a` (AND), `!` (NOT) and `( … )` grouping. Being a method,
+    /// it resolves the state-dependent unary primaries `-v`/`-o`/`-R` against the
+    /// live shell in *every* position, not just the bare two-argument form.
+    fn eval_test_expr(&self, a: &[&str]) -> Result<bool, String> {
+        match a.len() {
+            0 => Ok(false),
+            1 => Ok(!a[0].is_empty()),
+            2 => {
+                // Unary operator: `test -f FILE`, `test ! ARG`, etc. bash requires
+                // the first word to be `!` or a recognised unary operator;
+                // anything else (e.g. `[ 1 -eq ]`, where `-eq` lands here) is a
+                // "unary operator expected" error, not a silent success.
+                let (op, x) = (a[0], a[1]);
+                if op == "!" {
+                    return Ok(x.is_empty());
+                }
+                if is_test_unary_op(op) {
+                    return Ok(self.eval_test_unary(op, x));
+                }
+                Err(format!("{op}: unary operator expected"))
+            }
+            3 => {
+                let (l, op, r) = (a[0], a[1], a[2]);
+                // POSIX 3-argument rules, in bash's `three_arguments` order: a
+                // binary primary in the middle wins first (so `[ ! = x ]` is a
+                // string comparison); then a middle `-a`/`-o` is the AND/OR
+                // connective of the two *one-argument* (non-empty string) tests
+                // — this precedes the leading-`!` rule, so `[ ! -a "" ]` is
+                // `one_argument("!") -a one_argument("")` = false, not a negated
+                // unary test; then a leading `!` negates the 2-argument test of
+                // the remaining operands (so `[ ! -L path ]` works); then
+                // `( expr )` grouping.
+                if is_test_binary_op(op) {
+                    return eval_binary(l, op, r);
+                }
+                if op == "-a" {
+                    return Ok(!l.is_empty() && !r.is_empty());
+                }
+                if op == "-o" {
+                    return Ok(!l.is_empty() || !r.is_empty());
+                }
+                if l == "!" {
+                    return Ok(!self.eval_test_expr(&a[1..])?);
+                }
+                if l == "(" && r == ")" {
+                    return Ok(!op.is_empty());
+                }
+                eval_binary(l, op, r)
+            }
+            4 if a[0] == "!" => {
+                // bash's `posixtest` special-cases a four-argument leading `!`:
+                // it negates the *three-argument* test of the rest, so `!` binds
+                // looser here than the general expression parser's `!term` (e.g.
+                // `[ ! foo -o bar ]` is `!(foo -o bar)` = false, not `(!foo) -o bar`).
+                Ok(!self.eval_test_expr(&a[1..])?)
+            }
+            _ => {
+                // Four-or-more arguments: bash's full recursive expression parser.
+                self.eval_test_parser(a)
+            }
+        }
+    }
+
+    /// Run bash's full recursive `test` expression parser over `a`, erroring on
+    /// any operands left unconsumed after a complete expression (bash's
+    /// "syntax error: `X' unexpected").
+    fn eval_test_parser(&self, a: &[&str]) -> Result<bool, String> {
+        let mut p = TestExpr { toks: a, pos: 0 };
+        let v = p.or_expr(self)?;
+        if p.pos != a.len() {
+            return Err(format!("syntax error: `{}' unexpected", a[p.pos]));
+        }
+        Ok(v)
+    }
+
+    /// Evaluate a `test`/`[` *unary* primary, resolving the three primaries that
+    /// need live shell state (`-v NAME` set?, `-o OPT` enabled?, `-R NAME`
+    /// nameref?) and delegating the filesystem/string ones to [`eval_unary`].
+    fn eval_test_unary(&self, op: &str, x: &str) -> bool {
+        match op {
+            "-v" => self.var_is_set(x),
+            "-o" => self.shell_option_enabled(x),
+            "-R" => self.nameref_attr.contains(x),
+            _ => eval_unary(op, x),
         }
     }
 
@@ -17070,49 +17153,99 @@ fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
 /// is the full diagnostic body (after the `NAME: ` prefix), e.g. `x: integer
 /// expression expected` or `-q: unary operator expected`. The caller prints
 /// `NAME: msg` and exits 2, as bash does.
-fn eval_test(a: &[&str]) -> Result<bool, String> {
-    match a.len() {
-        0 => Ok(false),
-        1 => Ok(!a[0].is_empty()),
-        2 => {
-            // Unary operator: `test -f FILE`, `test ! ARG`, etc. bash requires
-            // the first word to be `!` or a recognised unary operator; anything
-            // else (e.g. `[ 1 -eq ]`, where `-eq` lands here as a "unary" op) is
-            // a "unary operator expected" error rather than a silent success.
-            let (op, x) = (a[0], a[1]);
-            if op == "!" {
-                return Ok(x.is_empty());
-            }
-            if is_test_unary_op(op) {
-                return Ok(eval_unary(op, x));
-            }
-            Err(format!("{op}: unary operator expected"))
+/// Recursive-descent parser for the general (four-or-more argument) `test`/`[`
+/// expression grammar, mirroring bash's `expr()`:
+///
+/// ```text
+/// or_expr  := and_expr ( '-o' and_expr )*     // OR, lowest precedence
+/// and_expr := term     ( '-a' term )*         // AND
+/// term     := '!' term | '(' or_expr ')' | primary
+/// primary  := operand binary_op operand       // 3-token dyadic
+///           | unary_op operand                // 2-token monadic
+///           | operand                          // 1-token: non-empty test
+/// ```
+///
+/// `-a`/`-o` are ambiguous — they are also the *unary* primaries "file exists"
+/// / "option set". The grammar resolves this by position: a `-a`/`-o` seen by
+/// `and_expr`/`or_expr` *after* a complete term is the connective, while one at
+/// the start of a `term` (reached via `primary`'s unary branch) is the operator.
+/// Unary primaries are evaluated shell-aware via [`Shell::eval_test_unary`].
+struct TestExpr<'a> {
+    toks: &'a [&'a str],
+    pos: usize,
+}
+
+impl<'a> TestExpr<'a> {
+    fn peek(&self) -> Option<&'a str> {
+        self.toks.get(self.pos).copied()
+    }
+
+    fn or_expr(&mut self, sh: &Shell) -> Result<bool, String> {
+        let mut v = self.and_expr(sh)?;
+        while self.peek() == Some("-o") {
+            self.pos += 1;
+            // Evaluate both sides (test primaries are side-effect free); OR them.
+            let rhs = self.and_expr(sh)?;
+            v = v || rhs;
         }
-        3 => {
-            let (l, op, r) = (a[0], a[1], a[2]);
-            // POSIX 3-argument rules, in order: a binary primary in the middle
-            // wins first (so `[ ! = x ]` is a string comparison), then a leading
-            // `!` negates the 2-argument test of the remaining operands (so
-            // `[ ! -L path ]` / `[ ! -f path ]` work), then `( expr )` grouping.
-            if is_test_binary_op(op) {
-                return eval_binary(l, op, r);
-            }
-            if l == "!" {
-                return Ok(!eval_test(&a[1..])?);
-            }
-            if l == "(" && r == ")" {
-                return Ok(!op.is_empty());
-            }
-            eval_binary(l, op, r)
+        Ok(v)
+    }
+
+    fn and_expr(&mut self, sh: &Shell) -> Result<bool, String> {
+        let mut v = self.term(sh)?;
+        while self.peek() == Some("-a") {
+            self.pos += 1;
+            let rhs = self.term(sh)?;
+            v = v && rhs;
         }
-        _ => {
-            // Handle a leading `!`; otherwise fall back to the first 3 args.
-            if a[0] == "!" {
-                Ok(!eval_test(&a[1..])?)
-            } else {
-                eval_binary(a[0], a[1], a[2])
+        Ok(v)
+    }
+
+    fn term(&mut self, sh: &Shell) -> Result<bool, String> {
+        match self.peek() {
+            None => Err("argument expected".to_string()),
+            Some("!") => {
+                self.pos += 1;
+                Ok(!self.term(sh)?)
             }
+            Some("(") => {
+                self.pos += 1;
+                let v = self.or_expr(sh)?;
+                if self.peek() == Some(")") {
+                    self.pos += 1;
+                    Ok(v)
+                } else {
+                    Err("`)' expected".to_string())
+                }
+            }
+            Some(_) => self.primary(sh),
         }
+    }
+
+    fn primary(&mut self, sh: &Shell) -> Result<bool, String> {
+        let rem = self.toks.len() - self.pos;
+        // Dyadic primary first (bash checks a binary operator in the second
+        // position before treating the first token as a unary op), so e.g.
+        // `-n = x` is the string comparison `"-n" == "x"`.
+        if rem >= 3 && is_test_binary_op(self.toks[self.pos + 1]) {
+            let (l, op, r) = (
+                self.toks[self.pos],
+                self.toks[self.pos + 1],
+                self.toks[self.pos + 2],
+            );
+            self.pos += 3;
+            return eval_binary(l, op, r);
+        }
+        // Monadic primary: a recognised unary op with an operand following.
+        if rem >= 2 && is_test_unary_op(self.toks[self.pos]) {
+            let (op, x) = (self.toks[self.pos], self.toks[self.pos + 1]);
+            self.pos += 2;
+            return Ok(sh.eval_test_unary(op, x));
+        }
+        // Bare operand: true when non-empty.
+        let v = !self.toks[self.pos].is_empty();
+        self.pos += 1;
+        Ok(v)
     }
 }
 
@@ -17316,7 +17449,11 @@ fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
             })
         }
         "-nt" | "-ot" | "-ef" => Ok(file_cmp(op, l, r)),
-        _ => Ok(false),
+        // Reached only from the three-argument fallback `[ a b c ]` where the
+        // middle token is not a binary operator; bash reports it as such rather
+        // than silently succeeding. (The parser paths guard with
+        // `is_test_binary_op` before calling here.)
+        _ => Err(format!("{op}: binary operator expected")),
     }
 }
 
@@ -24317,6 +24454,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.contains("noclobber"), "set -o list: {o:?}");
         assert_eq!(run("set -C; [ -o noclobber ]; echo $?").0, "0\n");
         assert_eq!(run("[ -o noclobber ]; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn bracket_and_or_connectives_match_bash() {
+        // `-a`/`-o` are AND/OR connectives in `[ … ]` — the pre-refactor code
+        // ignored everything past the third argument, so these silently failed.
+        // Values verified against bash 5.x (see the test/[ probe session).
+
+        // Three-argument connective: bash's `three_arguments` treats a middle
+        // `-a`/`-o` as the AND/OR of the two *one-argument* (non-empty string)
+        // tests, taking precedence over the leading-`!` rule.
+        assert_eq!(run("[ foo -o bar ]; echo $?").0, "0\n");
+        assert_eq!(run("[ \"\" -o bar ]; echo $?").0, "0\n");
+        assert_eq!(run("[ foo -a bar ]; echo $?").0, "0\n");
+        assert_eq!(run("[ \"\" -o \"\" ]; echo $?").0, "1\n");
+        assert_eq!(run("[ foo -a \"\" ]; echo $?").0, "1\n");
+        // `[ ! -a "" ]` = `one_argument("!") -a one_argument("")` = false, NOT a
+        // negated unary `-a ""` test (which would be true).
+        assert_eq!(run("[ ! -a \"\" ]; echo $?").0, "1\n");
+
+        // Four-argument leading `!` negates the three-argument test of the rest,
+        // so `!` binds looser than the general parser's `!term`.
+        assert_eq!(run("[ ! foo -o bar ]; echo $?").0, "1\n");
+        assert_eq!(run("[ ! foo -a bar ]; echo $?").0, "1\n");
+
+        // Genuine multi-term expressions through the recursive parser.
+        assert_eq!(run("[ -n a -a -n b ]; echo $?").0, "0\n");
+        assert_eq!(run("[ 1 -eq 1 -a 2 -eq 2 ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -n \"abc\" -a -z \"\" ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -z \"\" -o -z \"\" -o -z x ]; echo $?").0, "0\n");
+        assert_eq!(run("[ ! ! x ]; echo $?").0, "0\n");
+        // Parenthesised grouping.
+        assert_eq!(run("[ \\( -n x \\) -a \\( -z \"\" \\) ]; echo $?").0, "0\n");
+
+        // Error paths: a non-operator middle token and leftover operands are
+        // syntax errors (exit 2), not silent success.
+        assert_eq!(run("[ a b c ]; echo $?").0, "2\n");
+        assert_eq!(run("[ -n a -n b ]; echo $?").0, "2\n");
     }
 
     #[test]

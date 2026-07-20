@@ -8557,6 +8557,13 @@ impl Shell {
                 i += 1;
                 continue;
             }
+            if a == "-f" {
+                // `-f`: wait for the job to *terminate* rather than merely change
+                // state. osh's `wait` already blocks until termination, so this is
+                // a no-op; accept it so scripts using `wait -f` don't error.
+                i += 1;
+                continue;
+            }
             if a == "-p" {
                 let Some(v) = args.get(i + 1) else {
                     self.emit_stderr(format!("{}wait: -p: option requires an argument\n", self.err_prefix()).as_bytes());
@@ -8572,6 +8579,19 @@ impl Shell {
                 pid_var = Some(rest.to_string());
                 i += 1;
                 continue;
+            }
+            // bash parses any leading-`-` token as options, so an unrecognised
+            // one (e.g. `wait -1`, `wait -x`) is an invalid option — not a
+            // negative pid — and aborts with status 2 plus the usage line.
+            if a.len() > 1
+                && a.starts_with('-')
+                && let Some(optch) = a[1..].chars().next()
+            {
+                self.emit_stderr(
+                    format!("{}wait: -{optch}: invalid option\n", self.err_prefix()).as_bytes(),
+                );
+                self.emit_stderr(b"wait: usage: wait [-fn] [-p var] [id ...]\n");
+                return 2;
             }
             // First non-flag token: the rest are operands.
             operands.extend_from_slice(&args[i..]);
@@ -8604,8 +8624,7 @@ impl Shell {
         let mut last = 0;
         for spec in &operands {
             let Some(idx) = self.resolve_job_spec(spec) else {
-                self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
-                last = 127;
+                last = self.wait_bad_operand(spec);
                 continue;
             };
             let pid = self.jobs[idx].pid;
@@ -8621,6 +8640,40 @@ impl Shell {
             }
         }
         last
+    }
+
+    /// Report a plain-`wait` operand that did not resolve to a known job, using
+    /// bash's argument-classification and returning the status bash assigns:
+    /// a `%…` job spec or a bare integer PID that isn't a child → `no such job`
+    /// / `pid N is not a child of this shell`, both status 127; anything that is
+    /// neither a PID nor a valid job spec → `` `X': not a pid or valid job spec ``
+    /// with status 1. (bash's `wait -n` path uses the simpler "no such job" text
+    /// for every bad id, so it does not go through here.)
+    fn wait_bad_operand(&mut self, spec: &str) -> i32 {
+        if spec.starts_with('%') {
+            self.emit_stderr(
+                format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes(),
+            );
+            127
+        } else if !spec.is_empty() && spec.bytes().all(|b| b.is_ascii_digit()) {
+            self.emit_stderr(
+                format!(
+                    "{}wait: pid {spec} is not a child of this shell\n",
+                    self.err_prefix()
+                )
+                .as_bytes(),
+            );
+            127
+        } else {
+            self.emit_stderr(
+                format!(
+                    "{}wait: `{spec}': not a pid or valid job spec\n",
+                    self.err_prefix()
+                )
+                .as_bytes(),
+            );
+            1
+        }
     }
 
     /// `wait -n [ids…]` — block until the *next* job in the candidate set (the
@@ -22881,6 +22934,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("cmd /c exit 4 &");
         assert_eq!(sh.run_source("wait %1"), 4);
         assert!(sh.jobs.is_empty());
+    }
+
+    #[test]
+    fn wait_bad_operand_classification() {
+        // bash classifies a failed `wait` operand three ways, each with its own
+        // message and status. A bare integer that is not a child → status 127.
+        let (o, s) = run("wait 99999 2>&1");
+        assert_eq!(o, "osh: wait: pid 99999 is not a child of this shell\n");
+        assert_eq!(s, 127);
+        // A `%…` job spec that does not exist → `no such job`, status 127.
+        let (o2, s2) = run("wait %99 2>&1");
+        assert_eq!(o2, "osh: wait: %99: no such job\n");
+        assert_eq!(s2, 127);
+        // Neither a pid nor a valid job spec → status *1* (not 127).
+        let (o3, s3) = run("wait abc 2>&1");
+        assert_eq!(o3, "osh: wait: `abc': not a pid or valid job spec\n");
+        assert_eq!(s3, 1);
+        // A leading-`-` token is an invalid option (status 2 + usage), never a
+        // negative pid.
+        let (o4, s4) = run("wait -1 2>&1");
+        assert_eq!(
+            o4,
+            "osh: wait: -1: invalid option\n\
+             wait: usage: wait [-fn] [-p var] [id ...]\n"
+        );
+        assert_eq!(s4, 2);
+        // `-f` (wait-for-termination) is accepted as a no-op.
+        assert_eq!(run("wait -f 2>&1").1, 0);
     }
 
     #[cfg(windows)]

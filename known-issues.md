@@ -4638,7 +4638,15 @@ wired end-to-end through the socket-fd layer** (`sys_connect`/`getpeername` on
 `AF_INET6` → `NetstackConn::connect6`). Remaining before the 5.7 default-flip:
 route the AF_INET/AF_INET6 socket-fd server path's `bind`/`listen`/`accept` to the
 daemon (`SockState::Listening` + `sys_bind`/`sys_listen`/`sys_accept4`) — the last
-socket-fd gap (blocked on operator Q23).
+socket-fd gap. **Q23 is now RESOLVED (2026-07-18, §71 → Option A:** shared,
+refcounted session; no daemon-ABI change — an accepted connection shares the
+listener socket's ring/session under a distinct `conn_id`, exactly the model the
+private `NetstackConn::send_on(conn_id,…)` already uses for the loopback
+self-test), with the standing guideline **do not gold-plate this interim path**
+(server sockets get Option A only; the concurrency limitation is documented and
+temporary, since the whole per-op synchronous socket path is a stepping stone to
+the async socket server that will replace the ring-per-op model wholesale). So
+this server-path wiring is **unblocked** and is the active task, not operator-gated.
 
 ### B-FAULT-SERIALSTORM. Unconditional per-page-fault `serial_println!` saturated the (slow) serial port during demand-paging bursts, starving the hard-lockup kick and making boots crawl / appear hung — FIXED 2026-07-14
 

@@ -14726,7 +14726,15 @@ fn map_device_path(path: &str) -> &str {
 /// message that already opens with `syntax error`.
 fn format_parse_error(e: &crate::parser::ParseError, prefix: &str) -> String {
     let msg = e.to_string();
-    if msg.starts_with("syntax error") {
+    // Some parser diagnostics are already complete bash messages and must not be
+    // re-wrapped: the `syntax error …` family, the `\`NAME': not a valid
+    // identifier` message, and the `unexpected EOF while looking for matching
+    // \`C'` unclosed-quote/substitution diagnostic (bash emits these last two
+    // with no `syntax error:` tag).
+    if msg.starts_with("syntax error")
+        || msg.starts_with("unexpected EOF")
+        || msg.ends_with("not a valid identifier")
+    {
         format!("{prefix}{msg}")
     } else {
         format!("{prefix}syntax error: {msg}")
@@ -16500,6 +16508,50 @@ mod tests {
         assert_eq!(
             format_parse_error(&e2, "osh: "),
             "osh: syntax error: expected ')'"
+        );
+    }
+
+    #[test]
+    fn unterminated_constructs_report_matching_eof_message() {
+        // bash reports unclosed quotes/substitutions as
+        // `unexpected EOF while looking for matching `C'` where C is the single
+        // closing delimiter. Verify the lexer emits that exact phrasing so the
+        // `osh: ` prefix produces a bash-identical diagnostic.
+        for (src, close) in [
+            ("x=$(echo hi", ')'),
+            ("x=${VAR", '}'),
+            ("echo \"open", '"'),
+            ("echo 'open", '\''),
+            ("echo `sub", '`'),
+            ("x=$((1 + 2", ')'),
+            ("a=(1 2 3", ')'),
+        ] {
+            let err = parse(src).expect_err("should fail to parse");
+            assert_eq!(
+                err.0,
+                format!("unexpected EOF while looking for matching `{close}'"),
+                "src {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unexpected_token_and_identifier_errors_match_bash() {
+        // A stray extra pipe: bash prints `syntax error near unexpected token `|'`.
+        let err = parse("echo a | | echo b").expect_err("should fail");
+        assert!(
+            err.0.starts_with("syntax error near unexpected token"),
+            "got {:?}",
+            err.0
+        );
+        // An invalid `for` loop variable: bash prints `\`1abc': not a valid
+        // identifier` with no `syntax error:` tag.
+        let err = parse("for 1abc in x; do :; done").expect_err("should fail");
+        assert_eq!(err.0, "`1abc': not a valid identifier");
+        // The interp-level formatter must pass both through without wrapping.
+        assert_eq!(
+            format_parse_error(&crate::parser::ParseError(err.0), "osh: "),
+            "osh: `1abc': not a valid identifier"
         );
     }
 

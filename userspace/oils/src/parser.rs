@@ -56,11 +56,9 @@ fn parse_tokens(toks: Vec<Tok>) -> Result<Program, ParseError> {
     let mut p = Parser { toks, pos: 0, line: 1 };
     let prog = p.parse_program(&[], true)?;
     if p.pos != p.toks.len() {
-        // Leftover tokens — typically an unmatched `)` or reserved word.
-        return Err(ParseError(format!(
-            "unexpected token near position {}",
-            p.pos
-        )));
+        // Leftover tokens — typically an unmatched `)` or a stray reserved
+        // word. bash names the offending token (`near unexpected token \`)'`).
+        return Err(p.unexpected_here());
     }
     Ok(prog)
 }
@@ -141,6 +139,21 @@ impl Parser {
         }
     }
 
+    /// Build bash's canonical "unexpected" parser diagnostic for the current
+    /// position: at end of input it is `syntax error: unexpected end of file`;
+    /// otherwise `syntax error near unexpected token \`TOKEN'` — bash quotes the
+    /// offending token with a leading backtick and a trailing single quote.
+    fn unexpected_here(&self) -> ParseError {
+        if self.peek().is_none() {
+            ParseError("syntax error: unexpected end of file".to_string())
+        } else {
+            ParseError(format!(
+                "syntax error near unexpected token `{}'",
+                self.token_display()
+            ))
+        }
+    }
+
     fn skip_newlines(&mut self) {
         while matches!(self.peek(), Some(Tok::Newline)) {
             self.pos += 1;
@@ -182,10 +195,7 @@ impl Parser {
                 break;
             }
             if self.at_op(Op::Semi) || self.at_op(Op::Amp) {
-                return Err(ParseError(format!(
-                    "syntax error near unexpected token '{}'",
-                    self.token_display()
-                )));
+                return Err(self.unexpected_here());
             }
             // Stamp the line on which this item begins (before parsing consumes
             // any interior newlines of a multi-line and-or list).
@@ -224,10 +234,7 @@ impl Parser {
                         .reserved_here()
                         .is_some_and(|w| stops.contains(&w.as_str()));
                 if !at_terminator {
-                    return Err(ParseError(format!(
-                        "syntax error near unexpected token '{}'",
-                        self.token_display()
-                    )));
+                    return Err(self.unexpected_here());
                 }
             }
         }
@@ -235,14 +242,7 @@ impl Parser {
             // A compound condition/body reduced to nothing (`if ; then`, `( )`,
             // `then fi`). bash reports the token that follows (the stop keyword,
             // `)`, or EOF).
-            return Err(ParseError(if self.peek().is_none() {
-                "syntax error: unexpected end of file".to_string()
-            } else {
-                format!(
-                    "syntax error near unexpected token '{}'",
-                    self.token_display()
-                )
-            }));
+            return Err(self.unexpected_here());
         }
         Ok(Program { items })
     }
@@ -338,8 +338,11 @@ impl Parser {
                 "select" => self.parse_select()?,
                 "case" => self.parse_case()?,
                 "{" => self.parse_brace_group()?,
-                other => {
-                    return Err(ParseError(format!("unexpected reserved word '{other}'")));
+                _ => {
+                    // A command that begins with a stray closing/continuation
+                    // keyword (`then`, `do`, `fi`, `done`, `esac`, `else`, …):
+                    // bash reports it as an unexpected token.
+                    return Err(self.unexpected_here());
                 }
             };
             return self.with_redirects(cmd);
@@ -538,11 +541,13 @@ impl Parser {
             self.pos += 1;
             return self.parse_for_arith(&raw);
         }
-        let var = self
-            .bare_word_here()
-            .ok_or_else(|| ParseError("expected variable name after 'for'".into()))?;
+        let Some(var) = self.bare_word_here() else {
+            // `for` with no loop variable (`for; do …`, `for` at EOF, `for |`):
+            // bash names the unexpected token / reports end of input.
+            return Err(self.unexpected_here());
+        };
         if !is_valid_name(&var) {
-            return Err(ParseError(format!("invalid for-loop variable '{var}'")));
+            return Err(ParseError(format!("`{var}': not a valid identifier")));
         }
         self.pos += 1;
         self.skip_newlines();
@@ -576,11 +581,11 @@ impl Parser {
     /// the word-list `for` loop; the runtime difference is the interactive menu.
     fn parse_select(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("select")?;
-        let var = self
-            .bare_word_here()
-            .ok_or_else(|| ParseError("expected variable name after 'select'".into()))?;
+        let Some(var) = self.bare_word_here() else {
+            return Err(self.unexpected_here());
+        };
         if !is_valid_name(&var) {
-            return Err(ParseError(format!("invalid select variable '{var}'")));
+            return Err(ParseError(format!("`{var}': not a valid identifier")));
         }
         self.pos += 1;
         self.skip_newlines();
@@ -649,7 +654,9 @@ impl Parser {
         let mut items = Vec::new();
         while self.reserved_here().as_deref() != Some("esac") {
             if self.peek().is_none() {
-                return Err(ParseError("unterminated 'case' (expected 'esac')".into()));
+                // Unterminated `case` at end of input: bash reports
+                // `syntax error: unexpected end of file`.
+                return Err(self.unexpected_here());
             }
             // Optional leading '(' before the pattern list.
             if self.at_op(Op::LParen) {
@@ -933,7 +940,10 @@ impl Parser {
             }
         }
         if cmd.words.is_empty() && cmd.assignments.is_empty() && cmd.redirects.is_empty() {
-            return Err(ParseError("empty command".into()));
+            // A command position that reduced to nothing — e.g. the right side of
+            // a dangling pipe (`echo a | | echo b`) or a stray operator. bash
+            // names the offending token / reports end of input.
+            return Err(self.unexpected_here());
         }
         Ok(Command::Simple(cmd))
     }
@@ -1016,7 +1026,11 @@ impl Parser {
             self.pos += 1;
             Ok(())
         } else {
-            Err(ParseError(format!("expected '{w}'")))
+            // A missing closing keyword (`fi`/`done`/`then`/`esac`/`}`): bash
+            // does not name the *expected* word — it reports the token actually
+            // found (`syntax error near unexpected token \`done'`) or, at end of
+            // input, `unexpected end of file`.
+            Err(self.unexpected_here())
         }
     }
 

@@ -16,6 +16,14 @@ impl core::fmt::Display for LexError {
     }
 }
 
+/// bash's end-of-input diagnostic for an unclosed quote, substitution, or group.
+/// bash names the delimiter it was scanning for, e.g. `unexpected EOF while
+/// looking for matching `)'` — a single backtick, the closing char, then a
+/// single quote — so a `$(`/`(` reports `)`, `${` reports `}`, `"` reports `"`.
+fn eof_matching(close: char) -> LexError {
+    LexError(format!("unexpected EOF while looking for matching `{close}'"))
+}
+
 /// Shell operators recognised outside of words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -601,9 +609,7 @@ impl Lexer {
                     break;
                 }
                 None => {
-                    return Err(LexError(
-                        "unterminated array assignment (expected ')')".into(),
-                    ));
+                    return Err(eof_matching(')'));
                 }
                 Some('#') => {
                     while !matches!(self.peek(), None | Some('\n')) {
@@ -934,7 +940,7 @@ impl Lexer {
             match self.bump() {
                 Some('\'') => return Ok(s),
                 Some(c) => s.push(c),
-                None => return Err(LexError("unterminated single quote".into())),
+                None => return Err(eof_matching('\'')),
             }
         }
     }
@@ -950,7 +956,7 @@ impl Lexer {
         let mut s = String::new();
         loop {
             let Some(c) = self.bump() else {
-                return Err(LexError("unterminated $'…' quote".into()));
+                return Err(eof_matching('\''));
             };
             if c == '\'' {
                 return Ok(s);
@@ -960,7 +966,7 @@ impl Lexer {
                 continue;
             }
             let Some(e) = self.bump() else {
-                return Err(LexError("unterminated $'…' quote".into()));
+                return Err(eof_matching('\''));
             };
             match e {
                 'a' => s.push('\u{07}'),
@@ -1052,7 +1058,7 @@ impl Lexer {
         let mut lit = String::new();
         loop {
             let Some(c) = self.peek() else {
-                return Err(LexError("unterminated double quote".into()));
+                return Err(eof_matching('"'));
             };
             match c {
                 '"' => {
@@ -1176,7 +1182,7 @@ impl Lexer {
         let mut raw = String::new();
         loop {
             let Some(c) = self.bump() else {
-                return Err(LexError(format!("unterminated '{open}{close}' expansion")));
+                return Err(eof_matching(close));
             };
             if c == '\'' {
                 raw.push(c);
@@ -1188,7 +1194,7 @@ impl Lexer {
                             break;
                         }
                         Some(q) => raw.push(q),
-                        None => return Err(LexError("unterminated single quote".into())),
+                        None => return Err(eof_matching('\'')),
                     }
                 }
                 continue;
@@ -1208,7 +1214,7 @@ impl Lexer {
                             break;
                         }
                         Some(q) => raw.push(q),
-                        None => return Err(LexError("unterminated double quote".into())),
+                        None => return Err(eof_matching('"')),
                     }
                 }
                 continue;
@@ -1243,7 +1249,7 @@ impl Lexer {
         let mut raw = String::new();
         loop {
             let Some(c) = self.bump() else {
-                return Err(LexError("unterminated '{}' expansion".into()));
+                return Err(eof_matching('}'));
             };
             match c {
                 // First unescaped, unquoted, non-nested `}` closes the span.
@@ -1266,7 +1272,7 @@ impl Lexer {
                                 break;
                             }
                             Some(q) => raw.push(q),
-                            None => return Err(LexError("unterminated single quote".into())),
+                            None => return Err(eof_matching('\'')),
                         }
                     }
                 }
@@ -1286,7 +1292,7 @@ impl Lexer {
                                 break;
                             }
                             Some(q) => raw.push(q),
-                            None => return Err(LexError("unterminated double quote".into())),
+                            None => return Err(eof_matching('"')),
                         }
                     }
                 }
@@ -1307,7 +1313,7 @@ impl Lexer {
                                 break;
                             }
                             Some(q) => raw.push(q),
-                            None => return Err(LexError("unterminated backtick".into())),
+                            None => return Err(eof_matching('`')),
                         }
                     }
                 }
@@ -1360,7 +1366,7 @@ impl Lexer {
         let mut raw = String::new();
         loop {
             let Some(c) = self.bump() else {
-                return Err(LexError("unterminated arithmetic expansion".into()));
+                return Err(eof_matching(')'));
             };
             match c {
                 '(' => {
@@ -1507,7 +1513,7 @@ impl Lexer {
                     }
                 }
                 Some(c) => raw.push(c),
-                None => return Err(LexError("unterminated backtick".into())),
+                None => return Err(eof_matching('`')),
             }
         }
     }

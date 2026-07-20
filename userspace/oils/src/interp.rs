@@ -26217,6 +26217,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn array_literal_spaced_subscript() {
+        // TD-OILS-ARRAYLIT-SPACED-SUBSCRIPT: a keyed array-literal subscript that
+        // contains whitespace is scanned as a *single* `[ … ]=` unit (up to the
+        // matching `]`), not split at the space — matching bash. A spaced-but-valid
+        // arithmetic subscript evaluates normally; an invalid one is fatal with
+        // bash's exact arith diagnostic; an associative key keeps its literal
+        // spaces. All three verified byte-for-byte against bash 5.2.
+        assert_eq!(run("a=([1 + 2]=99); declare -p a").0, "declare -a a=([3]=\"99\")\n");
+        // The invalid arith subscript is fatal; route its stderr into the capture
+        // via a redirected group so the diagnostic text can be asserted.
+        let (o, s) = run("{ a=([3 x]=99); } 2>&1");
+        assert_eq!(o, "osh: 3 x: syntax error in expression (error token is \"x\")\n");
+        assert_eq!(s, 1);
+        assert_eq!(
+            run("declare -A m; m=([a b]=v); declare -p m").0,
+            "declare -A m=([\"a b\"]=\"v\" )\n"
+        );
+    }
+
+    #[test]
     fn array_quoted_all_preserves_fields() {
         // "${a[@]}" keeps element boundaries even with embedded spaces.
         let out = run(r#"a=("a b" c); for w in "${a[@]}"; do echo "[$w]"; done"#).0;

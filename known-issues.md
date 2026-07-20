@@ -3458,7 +3458,17 @@ needs bash's exact rule reverse-engineered per error-kind × invocation-mode, pl
 possibly making arithmetic `$((1/0))` non-fatal in script mode. Low value
 (pathological error paths, exit code only), so parked here rather than guessed.
 
-### TD-OILS-ARRAYLIT-SPACED-SUBSCRIPT. `osh` tokenizes a *space-containing* array-literal subscript (`a=([3 x]=99)`) into two positional words instead of one keyed element — MINOR PARSER DIVERGENCE 2026-07-19
+### TD-OILS-ARRAYLIT-SPACED-SUBSCRIPT. `osh` tokenizes a *space-containing* array-literal subscript (`a=([3 x]=99)`) into two positional words instead of one keyed element — ✅ FIXED 2026-07-20 (stale; array-literal tokenizer already scans `[ … ]=` as one unit)
+
+**Status:** FIXED. The array-literal element tokenizer now scans a leading
+`[ … ]=` as a single unit (up to the matching `]`) before deciding word
+boundaries, so a whitespace-containing subscript is one keyed element, matching
+bash. Verified byte-for-byte against bash 5.2: `a=([1 + 2]=99)` → index 3;
+`a=([3 x]=99)` → fatal `3 x: syntax error in expression (error token is "x")`
+(status 1); `declare -A m; m=([a b]=v)` → key `a b` preserved. Regression-guarded
+by `array_literal_spaced_subscript`.
+
+**Original report (for reference):**
 
 **Where:** `userspace/oils/src/parser.rs` (array-literal element tokenizer) —
 the code that splits the words inside `a=( … )` and recognises `[subscript]=value`

@@ -8612,7 +8612,13 @@ impl Shell {
                 }
             }
             if !matched {
-                self.emit_stderr(format!("{}help: no help topics match `{pat}'\n", self.err_prefix()).as_bytes());
+                self.emit_stderr(
+                    format!(
+                        "{}help: no help topics match `{pat}'.  Try `help help' or `man -k {pat}' or `info {pat}'.\n",
+                        self.err_prefix()
+                    )
+                    .as_bytes(),
+                );
                 status = 1;
             }
         }

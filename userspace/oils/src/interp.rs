@@ -641,6 +641,10 @@ pub struct Shell {
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
     readonly: HashSet<String>,
+    /// Function names marked `readonly -f` (`declare -fr`). A readonly function
+    /// cannot be redefined or `unset -f`. Distinct from `readonly` (which tracks
+    /// variables); copied into subshell clones so the attribute is inherited.
+    readonly_funcs: HashSet<String>,
     /// `shopt` option toggles (e.g. `nullglob`, `dotglob`, `nocaseglob`). Only
     /// options present with `true` are enabled; absent/`false` = default off.
     /// Inherited by subshell clones.
@@ -818,6 +822,7 @@ impl Shell {
             source_depth: 0,
             loop_depth: 0,
             readonly: HashSet::new(),
+            readonly_funcs: HashSet::new(),
             shopt: HashMap::new(),
             comp_specs: Vec::new(),
             integer_attr: HashSet::new(),
@@ -1529,8 +1534,17 @@ impl Shell {
             Command::ForArith(c) => self.in_loop(|s| s.exec_for_arith(c, out, stdin)),
             Command::Select(c) => self.in_loop(|s| s.exec_select(c, out, stdin)),
             Command::Function(f) => {
-                self.funcs.insert(f.name.clone(), f.body.clone());
-                self.last_status = 0;
+                // A `readonly -f` function cannot be redefined (bash reports the
+                // attempt and fails the command, leaving the definition intact).
+                if self.readonly_funcs.contains(&f.name) {
+                    self.emit_stderr(
+                        format!("{}{}: readonly function\n", self.err_prefix(), f.name).as_bytes(),
+                    );
+                    self.last_status = 1;
+                } else {
+                    self.funcs.insert(f.name.clone(), f.body.clone());
+                    self.last_status = 0;
+                }
                 Flow::Next
             }
             Command::Case(c) => self.exec_case(c, out, stdin),
@@ -2750,6 +2764,7 @@ impl Shell {
             // subshell, so `(break)` inside a loop is an error, not a break.
             loop_depth: 0,
             readonly: self.readonly.clone(),
+            readonly_funcs: self.readonly_funcs.clone(),
             shopt: self.shopt.clone(),
             // Completion specs are not propagated to subshells (bash parity).
             comp_specs: Vec::new(),
@@ -9363,15 +9378,36 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> i32 {
+        // `declare -fr NAME…` / `declare -Fr NAME…`: mark each named function
+        // readonly. Unlike `readonly -f`, a nonexistent function fails *silently*
+        // (status 1, no diagnostic) — matching bash's `declare` semantics.
+        let readonly = args
+            .iter()
+            .take_while(|a| a.starts_with('-'))
+            .flat_map(|a| a.chars())
+            .any(|c| c == 'r');
         let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
+        if readonly && !names.is_empty() {
+            let mut status = 0;
+            for name in &names {
+                if self.funcs.contains_key(name.as_str()) {
+                    self.readonly_funcs.insert((*name).clone());
+                } else {
+                    status = 1;
+                }
+            }
+            return status;
+        }
         if names.is_empty() {
             let mut all: Vec<&String> = self.funcs.keys().collect();
             all.sort();
             let mut listing = String::new();
             for name in all {
                 if name_only {
-                    // `declare -F` — list each function as a `declare -f NAME` line.
-                    listing.push_str(&format!("declare -f {name}\n"));
+                    // `declare -F` — list each function as a `declare -f NAME`
+                    // line (`-fr` when the function is readonly).
+                    let flags = if self.readonly_funcs.contains(name) { "-fr" } else { "-f" };
+                    listing.push_str(&format!("declare {flags} {name}\n"));
                 } else if let Some(body) = self.funcs.get(name) {
                     // `declare -f` — print every function's reconstructed source.
                     listing.push_str(&crate::unparse::unparse_function(name, body));
@@ -10001,6 +10037,7 @@ impl Shell {
         let mut assoc = false;
         let mut indexed = false;
         let mut print_only = false;
+        let mut func_mode = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg == "--" {
@@ -10015,7 +10052,8 @@ impl Shell {
                         'A' => assoc = true,
                         'a' => indexed = true,
                         'p' => print_only = true,
-                        _ => {} // -f/-g: accepted, no effect here.
+                        'f' => func_mode = true, // operate on the function namespace
+                        _ => {} // -g: accepted, no effect here.
                     }
                 }
                 i += 1;
@@ -10024,6 +10062,10 @@ impl Shell {
             }
         }
         names.extend(&args[i..]);
+        // `readonly -f`: operate on shell functions rather than variables.
+        if func_mode {
+            return self.readonly_functions(&names, out, redir);
+        }
         if names.is_empty() || print_only {
             let mut ro: Vec<String> = self.readonly.iter().cloned().collect();
             ro.sort();
@@ -10091,6 +10133,38 @@ impl Shell {
                 self.vars.insert(name.to_string(), stored);
             }
             self.readonly.insert(name.to_string());
+        }
+        status
+    }
+
+    /// `readonly -f [name …]` — operate on the function namespace. With names,
+    /// mark each named function readonly (error if it is not a defined
+    /// function). With no names, list every readonly function as its
+    /// reconstructed definition followed by a `declare -fr NAME` line, matching
+    /// bash. A readonly function cannot later be redefined or `unset -f`.
+    fn readonly_functions(&mut self, names: &[&String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        if names.is_empty() {
+            let mut ro: Vec<&String> = self.readonly_funcs.iter().collect();
+            ro.sort();
+            let mut listing = String::new();
+            for name in ro {
+                if let Some(body) = self.funcs.get(name) {
+                    listing.push_str(&crate::unparse::unparse_function(name, body));
+                    listing.push_str(&format!("declare -fr {name}\n"));
+                }
+            }
+            return self.write_bytes(out, redir, listing.as_bytes());
+        }
+        let mut status = 0;
+        for name in names {
+            if self.funcs.contains_key(name.as_str()) {
+                self.readonly_funcs.insert((*name).clone());
+            } else {
+                self.emit_stderr(
+                    format!("{}readonly: {name}: not a function\n", self.err_prefix()).as_bytes(),
+                );
+                status = 1;
+            }
         }
         status
     }
@@ -10353,6 +10427,12 @@ impl Shell {
         }
         for a in &args[i..] {
             if funcs_only {
+                if self.readonly_funcs.contains(a) {
+                    self.emit_stderr(
+                        format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
+                    );
+                    return 1;
+                }
                 self.funcs.remove(a);
                 self.fn_trace_attr.remove(a);
                 continue;
@@ -10406,6 +10486,12 @@ impl Shell {
                 || self.assoc.contains_key(a);
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
+                if self.readonly_funcs.contains(a) {
+                    self.emit_stderr(
+                        format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
+                    );
+                    return 1;
+                }
                 self.funcs.remove(a);
                 self.fn_trace_attr.remove(a);
                 continue;
@@ -18843,6 +18929,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // $BASH is defined and, unlike $BASHOPTS, is reassignable.
         assert!(!run("echo $BASH").0.trim().is_empty());
         assert_eq!(run("BASH=foo; echo $BASH").0, "foo\n");
+    }
+
+    #[test]
+    fn readonly_functions() {
+        // `readonly -f NAME` marks a function readonly: it can't be redefined or
+        // `unset -f`, and `declare -F` reports it with the `-fr` flag.
+        assert_eq!(
+            run("foo() { echo hi; }; readonly -f foo; foo() { echo bye; }; echo rc=$?").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("foo() { echo hi; }; readonly -f foo; unset -f foo; echo rc=$?").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("foo() { :; }; readonly -f foo; declare -F").0,
+            "declare -fr foo\n"
+        );
+        // `readonly -f` on a non-function is an error (status 1); `declare -fr`
+        // fails silently on a non-function.
+        assert_eq!(run("readonly -f nofn; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("declare -fr nofn; echo rc=$?").0, "rc=1\n");
+        // `declare -fr NAME` marks readonly just like `readonly -f`.
+        assert_eq!(
+            run("foo() { :; }; declare -fr foo; foo() { echo x; }; echo rc=$?").0,
+            "rc=1\n"
+        );
+        // The listing form prints the body then a `declare -fr NAME` line.
+        assert_eq!(
+            run("foo() { echo hi; }; readonly -f foo; readonly -f").0,
+            "foo () \n{ \n    echo hi\n}\ndeclare -fr foo\n"
+        );
     }
 
     #[test]

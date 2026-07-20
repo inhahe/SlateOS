@@ -46,6 +46,27 @@ impl ParseError {
         }
         self
     }
+
+    /// True when this error is caused by the input *ending before a construct
+    /// was closed* — an unterminated quote/substitution (`echo "…`, `$(…`), an
+    /// unfinished compound command (`if …` with no `fi`, `{ …` with no `}`), or
+    /// a line ending on a binary operator (`&& `, `| `). Supplying more input
+    /// could complete the command, so the interactive REPL keeps reading
+    /// continuation lines (PS2) instead of reporting a syntax error on a command
+    /// the user is still typing. A genuine syntax error that more input cannot
+    /// fix (e.g. a stray `)`) returns `false`.
+    ///
+    /// This keys off bash's two canonical end-of-input diagnostics, which are
+    /// the *only* messages produced when the parser or lexer runs out of tokens
+    /// while still expecting more: `unexpected end of file` (grammar reached
+    /// EOF) and `unexpected EOF while looking for …` (lexer hit EOF inside an
+    /// open quote/substitution). Every other diagnostic names an offending
+    /// token and is not continuable.
+    #[must_use]
+    pub fn is_incomplete(&self) -> bool {
+        self.msg.contains("unexpected end of file")
+            || self.msg.contains("unexpected EOF while looking for")
+    }
 }
 
 impl core::fmt::Display for ParseError {
@@ -60,6 +81,21 @@ impl core::fmt::Display for ParseError {
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+    parse_tokens(toks, lines)
+}
+
+/// Parse shell source with strict here-document lexing: an unterminated
+/// here-document (delimiter never reached before EOF) is reported as an
+/// incomplete-input [`ParseError`] rather than leniently accepted. Used only by
+/// the interactive REPL's [`crate::Shell::parse_incomplete`] check so a here-doc
+/// body typed across continuation lines keeps prompting until its delimiter.
+///
+/// # Errors
+/// Returns [`ParseError`] on a lexing or grammar error (including an
+/// unterminated here-document).
+pub fn parse_strict_heredoc(src: &str) -> Result<Program, ParseError> {
+    let (toks, lines) =
+        crate::lexer::tokenize_spanned_strict(src).map_err(|e| ParseError::new(e.0))?;
     parse_tokens(toks, lines)
 }
 

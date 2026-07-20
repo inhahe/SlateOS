@@ -134,6 +134,14 @@ struct Lexer {
     /// Set immediately after emitting a `=~` word inside `[[ … ]]`; the next
     /// word is read in regex mode.
     regex_next: bool,
+    /// When `true`, a here-document whose delimiter is never reached before the
+    /// input ends is reported as a [`LexError`] (an "unexpected EOF" incomplete
+    /// signal) instead of being lenient-accepted with the partial body. The
+    /// interactive REPL uses this mode (via [`tokenize_spanned_strict`]) so a
+    /// `cat <<EOF` typed with no body yet keeps prompting for the body rather
+    /// than executing an empty here-doc. The normal (lenient) mode matches bash's
+    /// script/`-c` behaviour of accepting a here-doc cut off by real EOF.
+    strict_heredoc_eof: bool,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -173,6 +181,28 @@ pub fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
+        strict_heredoc_eof: false,
+    };
+    lx.run()
+}
+
+/// Like [`tokenize_spanned`] but reports an unterminated here-document (its
+/// delimiter never reached before the input ends) as a [`LexError`] instead of
+/// leniently accepting the partial body. Used only by the interactive REPL's
+/// incompleteness check ([`crate::Shell::parse_incomplete`]) so `cat <<EOF`
+/// with no body yet keeps reading the here-doc body across continuation lines.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote, substitution, or here-document.
+pub fn tokenize_spanned_strict(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+    let mut lx = Lexer {
+        chars: src.chars().collect(),
+        pos: 0,
+        line: 1,
+        pending_heredocs: Vec::new(),
+        cond_depth: 0,
+        regex_next: false,
+        strict_heredoc_eof: true,
     };
     lx.run()
 }
@@ -194,6 +224,7 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
+        strict_heredoc_eof: false,
     };
     lx.read_word_verbatim(false)
 }
@@ -215,6 +246,7 @@ pub fn lex_replacement_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
+        strict_heredoc_eof: false,
     };
     lx.read_word_verbatim(true)
 }
@@ -1617,7 +1649,19 @@ impl Lexer {
             let mut body = String::new();
             loop {
                 if self.pos >= self.chars.len() {
-                    break; // EOF before the delimiter: accept what we have.
+                    // EOF before the delimiter. In strict mode (REPL
+                    // incompleteness check) this is *incomplete input* — the
+                    // here-doc body is still being typed — so surface an
+                    // "unexpected EOF" that the REPL treats as "keep reading".
+                    // In lenient mode (script/`-c`) bash accepts the partial
+                    // body, so we do too.
+                    if self.strict_heredoc_eof {
+                        return Err(LexError(format!(
+                            "unexpected EOF while looking for `{}'",
+                            ph.delim
+                        )));
+                    }
+                    break;
                 }
                 let start = self.pos;
                 while !matches!(self.peek(), None | Some('\n')) {
@@ -1700,6 +1744,7 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
+        strict_heredoc_eof: false,
     };
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = String::new();

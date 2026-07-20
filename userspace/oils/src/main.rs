@@ -208,9 +208,15 @@ fn run(args: &[String]) -> i32 {
 
 /// Interactive read-eval-print loop.
 ///
-/// Reads a logical line at a time; a trailing backslash continues onto the next
-/// physical line. Multi-line compound commands typed across separate prompts
-/// are not yet joined (a grow-phase item).
+/// Reads a logical command at a time, joining physical lines two ways: a
+/// trailing backslash is an explicit continuation (`\<newline>`), and an
+/// otherwise-incomplete command — an open quote/substitution, an unfinished
+/// `if`/`while`/`for`/`case`/`{`/`(` compound, or a line ending on `&&`/`||`/`|`
+/// — keeps reading with a `PS2` continuation prompt until it parses as a
+/// complete command (see [`Shell::parse_incomplete`]). This matches bash's
+/// multi-line editing. Unterminated here-documents are the one gap: the lexer
+/// treats `<<EOF` with no body as an empty here-doc rather than requesting more
+/// input, so a here-doc body is not prompted for across separate lines.
 fn repl(sh: &mut Shell) -> i32 {
     // Prompts (`PS1`/`PS2`) and the EOF newline are only emitted for a
     // terminal-attached interactive shell; a piped/redirected REPL stays silent
@@ -234,16 +240,32 @@ fn repl(sh: &mut Shell) -> i32 {
                 }
             }
             let trimmed = line.trim_end_matches(['\n', '\r']);
+            // A trailing backslash is an explicit line continuation: drop it and
+            // join the next physical line (bash's lexer-level `\<newline>`).
             if let Some(cont) = trimmed.strip_suffix('\\') {
                 buffer.push_str(cont);
                 buffer.push('\n');
                 if interactive {
                     print_continuation();
                 }
-            } else {
-                buffer.push_str(trimmed);
-                break false;
+                continue;
             }
+            buffer.push_str(trimmed);
+            // If the command so far is only *incomplete* — an unterminated quote
+            // or substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(`
+            // compound command, or a line ending on `&&`/`||`/`|` — keep reading
+            // continuation lines (PS2) so a multi-line command typed across
+            // several prompts is joined into one logical command, as in bash. A
+            // complete command, or a genuine (non-continuable) syntax error, both
+            // fall through to execution below.
+            if !buffer.trim().is_empty() && sh.parse_incomplete(&buffer) {
+                buffer.push('\n');
+                if interactive {
+                    print_continuation();
+                }
+                continue;
+            }
+            break false;
         };
 
         if !buffer.trim().is_empty() {

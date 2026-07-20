@@ -1413,6 +1413,53 @@ impl Shell {
         self.run_source_out(src, &mut out)
     }
 
+    /// Returns `true` if `src` is an *incomplete* command — it fails to parse
+    /// only because the input ends mid-construct (an unterminated quote or
+    /// substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(` compound
+    /// command, or a line ending on a `&&`/`||`/`|` operator). The interactive
+    /// REPL calls this after each physical line to decide whether to keep
+    /// reading continuation lines (a `PS2` prompt) before executing, so a
+    /// multi-line compound command typed across several prompts is joined into
+    /// one logical command — matching bash. A complete command, or a genuine
+    /// syntax error that more input cannot fix, both return `false` (the REPL
+    /// then executes the buffer, surfacing any error).
+    ///
+    /// Parsing mirrors [`Shell::run_source`]: alias expansion is applied only
+    /// when `expand_aliases` is in effect, so incompleteness is judged on the
+    /// same token stream that would actually run. (Unterminated here-documents
+    /// are treated as complete-with-empty-body by the lexer, so `<<EOF` with no
+    /// body does not trigger continuation — a documented limitation.)
+    #[must_use]
+    pub fn parse_incomplete(&self, src: &str) -> bool {
+        // Alias-aware grammar/quote check, mirroring `run_source`: catches open
+        // quotes/substitutions and unfinished compound commands / trailing
+        // operators (all surfaced as bash's "unexpected end of file" / "unexpected
+        // EOF while looking for …" diagnostics).
+        let parsed = if self.aliases_enabled() {
+            parse_with_aliases(src, &self.aliases)
+        } else {
+            parse(src)
+        };
+        if matches!(&parsed, Err(e) if e.is_incomplete()) {
+            return true;
+        }
+        // A dangling here-document (`cat <<EOF` with the delimiter not yet typed)
+        // lexes as a *complete* command-with-empty-body in the normal lenient
+        // mode (bash's script/`-c` behaviour). For the REPL we instead keep
+        // reading the body, so re-check with strict here-doc lexing, which
+        // reports the unterminated here-doc as incomplete input. The lexer only
+        // scans a here-doc body when it reaches the newline ending the operator
+        // line, so terminate the buffer with a newline first (each REPL line is
+        // Enter-terminated) — otherwise a just-typed `… <<EOF` never triggers the
+        // body scan and would be misjudged complete.
+        let mut strict_src = String::with_capacity(src.len().saturating_add(1));
+        strict_src.push_str(src);
+        if !src.ends_with('\n') {
+            strict_src.push('\n');
+        }
+        matches!(crate::parser::parse_strict_heredoc(&strict_src), Err(e) if e.is_incomplete())
+    }
+
     /// Like [`Shell::run_source`] but returns the control-flow outcome instead of
     /// collapsing a `Flow::Exit` into a status code. Used by signal-trap delivery
     /// so an `exit` inside a trap body unwinds the shell rather than being
@@ -19495,6 +19542,99 @@ mod tests {
             }
         }
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+    }
+
+    /// The REPL's multi-line continuation gate ([`Shell::parse_incomplete`]):
+    /// a command that ends mid-construct must be reported *incomplete* so the
+    /// interactive loop keeps reading continuation lines, while a complete
+    /// command and a genuine (non-continuable) syntax error must both report
+    /// *not incomplete* so the loop executes and surfaces any error. Regression
+    /// coverage for the multi-line REPL grow-phase feature.
+    #[test]
+    fn parse_incomplete_classifies_repl_continuation() {
+        let sh = Shell::new();
+        // --- incomplete: unfinished compound commands (keep reading) ---
+        for src in [
+            "if true",
+            "if true; then",
+            "if true; then echo hi",
+            "while :; do",
+            "until false; do echo x",
+            "for i in 1 2 3",
+            "for i in 1 2 3; do echo $i",
+            "case foo in",
+            "case foo in foo)",
+            "{ echo a",
+            "( echo a",
+            "select x in a b; do",
+        ] {
+            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+        }
+        // --- incomplete: open quotes / substitutions ---
+        for src in [
+            "echo \"unterminated",
+            "echo 'unterminated",
+            "x=$(echo hi",
+            "echo `date",
+            "echo $((1 +",
+        ] {
+            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+        }
+        // --- incomplete: line ends on a binary/pipe operator ---
+        for src in ["echo a &&", "echo a ||", "echo a |", "echo a |&"] {
+            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+        }
+        // --- incomplete: dangling here-document (body not yet typed) ---
+        for src in [
+            "cat <<EOF",
+            "cat <<EOF\nbody line",
+            "cat <<-END",
+            "cat <<'Q'",
+            "while read x; do echo $x; done <<IN",
+        ] {
+            assert!(sh.parse_incomplete(src), "should be incomplete (heredoc): {src:?}");
+        }
+        // --- complete: a full command must NOT be flagged incomplete ---
+        for src in [
+            "echo hi",
+            "if true; then echo hi; fi",
+            "for i in 1 2; do echo $i; done",
+            "{ echo a; }",
+            "( echo a )",
+            "cat <<EOF\nbody\nEOF",
+            "echo a; echo b",
+            "x=$(echo hi)",
+            "echo \"quoted string\"",
+            "case foo in foo) echo m;; esac",
+            "",
+            "   ",
+        ] {
+            assert!(!sh.parse_incomplete(src), "should be complete: {src:?}");
+        }
+        // --- genuine syntax errors: NOT incomplete (more input can't fix) ---
+        for src in ["echo )", "echo a; ; echo b", "done", "fi", "esac"] {
+            assert!(
+                !sh.parse_incomplete(src),
+                "genuine error must not be treated as incomplete: {src:?}"
+            );
+        }
+    }
+
+    /// A dangling here-document must stay *lenient* outside the REPL: a script
+    /// or `-c` command whose here-doc is cut off by real EOF is accepted with the
+    /// partial body (bash's behaviour), so the strict-mode incompleteness check
+    /// must not leak into ordinary execution.
+    #[test]
+    fn unterminated_heredoc_lenient_in_run_source() {
+        let mut sh = Shell::new();
+        let mut buf = Vec::new();
+        {
+            let mut out = Out::Capture(&mut buf);
+            // No terminating `EOF` line: bash runs `cat` with the partial body.
+            let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out);
+            assert_eq!(status, 0, "unterminated heredoc should still execute");
+        }
+        assert_eq!(String::from_utf8_lossy(&buf), "partial\n");
     }
 
     /// Like [`run`] but in `-c` command mode (`set_command_mode`). The default

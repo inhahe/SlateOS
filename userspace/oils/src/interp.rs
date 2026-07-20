@@ -7588,11 +7588,34 @@ impl Shell {
         // simple command with no assignments, no words, and a fd-0 read redirect,
         // then slurp the file directly.
         if let Some(path) = self.comsub_read_file(prog) {
-            let mut s = String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()).into_owned();
-            while s.ends_with('\n') {
-                s.pop();
+            // bash opens a *directory* read-only successfully: `$(< dir)` yields
+            // the empty string with $? = 0 (no bytes, no error). `std::fs::read`
+            // instead fails on a directory, so detect it first and mirror bash.
+            if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                self.last_status = 0;
+                return String::new();
             }
-            return s;
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let mut s = String::from_utf8_lossy(&bytes).into_owned();
+                    while s.ends_with('\n') {
+                        s.pop();
+                    }
+                    self.last_status = 0;
+                    return s;
+                }
+                Err(e) => {
+                    // bash reports the failed open ("bash: line N: FILE: <msg>")
+                    // to the shell's stderr and sets $? = 1, substituting the
+                    // empty string. The diagnostic escapes any `2>…` on the null
+                    // command because the input redirect is opened (and fails)
+                    // before the stderr redirect takes effect — matching the
+                    // plain `< file` redirect-error path.
+                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    self.last_status = 1;
+                    return String::new();
+                }
+            }
         }
         // Command substitution runs in its own subshell (bash semantics): a
         // clone of the shell state so variable/cwd/function mutations made
@@ -18783,6 +18806,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
         assert_eq!(o2, "<hello world\nsecond line>\n");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn command_sub_read_file_missing_reports_error() {
+        // `$(< missing)` must mirror bash: the failed open sets $? = 1 and the
+        // substitution is the empty string (previously osh silently yielded ""
+        // with status 0). The diagnostic goes to the shell's real stderr during
+        // expansion, so it is not part of the captured stdout.
+        let (o, _) = run("v=$(< /no_such_osh_file_xyz); echo \"[$v] e=$?\"");
+        assert_eq!(o, "[] e=1\n");
+    }
+
+    #[test]
+    fn command_sub_read_file_directory_is_empty_success() {
+        // bash opens a directory read-only successfully: `$(< dir)` yields the
+        // empty string with status 0. Use the OS temp dir (guaranteed to exist).
+        let dir = std::env::temp_dir();
+        let p = dir.to_string_lossy().replace('\\', "/");
+        let (o, _) = run(&format!("v=$(< '{p}'); echo \"[$v] e=$?\""));
+        assert_eq!(o, "[] e=0\n");
     }
 
     #[test]

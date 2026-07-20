@@ -433,8 +433,12 @@ impl AParser<'_> {
         self.pos += 1; // consume '?'
         self.skip_ws();
         let then_start = self.pos;
-        // The middle may itself be an assignment (`c ? x = 1 : y`).
-        let then_e = self.parse_assign()?;
+        // The middle branch is a full expression: bash parses it with
+        // EXP_HIGHEST (expcomma), so it may be an assignment or even a comma
+        // expression (`1 ? 2,3 : 4` → 3, `c ? x = 1 : y`). The else branch, by
+        // contrast, recurses at ternary level (right-associative), so a trailing
+        // comma there belongs to the enclosing expression (`1 ? 2 : 4,5` → 5).
+        let then_e = self.parse_comma()?;
         self.skip_ws();
         if self.peek() != Some(':') {
             // bash: "`:' expected for conditional expression"; the error token is
@@ -1378,6 +1382,18 @@ mod tests {
         assert_eq!(ev("0 ? 1 : 1 ? 2 : 3"), 2);
         // Nested in a larger expression / parentheses.
         assert_eq!(ev("(1 ? 2 : 3) + 4"), 6);
+        // The true branch is a full expression (bash EXP_HIGHEST), so a comma
+        // expression is allowed there and yields its last value.
+        assert_eq!(ev("1 ? 2,3 : 4"), 3);
+        assert_eq!(ev("0 ? 2,3 : 4"), 4);
+        // A comma-separated assignment sequence works in the true branch too.
+        let mut m = Map::default();
+        assert_eq!(eval("1 ? a=1, b=2, a+b : 0", &mut m).unwrap(), 3);
+        assert_eq!(m.get("a"), Some(1));
+        assert_eq!(m.get("b"), Some(2));
+        // The else branch recurses at ternary level, so a trailing comma binds
+        // to the enclosing expression: `1 ? 2 : 4,5` == `(1?2:4),5` == 5.
+        assert_eq!(ev("1 ? 2 : 4,5"), 5);
         // Missing ':' is a syntax error.
         assert!(eval("1 ? 2", &mut Map::default()).is_err());
     }

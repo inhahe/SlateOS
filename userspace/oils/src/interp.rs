@@ -25327,6 +25327,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (nout, nst) = run("shopt -s failglob; echo osh_no_*.zzz\necho ok");
         assert_eq!(nout, "ok\n");
         assert_eq!(nst, 0);
+        // Multi-line script (TD-OILS-FAILGLOB-SCRIPT): the discard scope is the
+        // offending line only. A same-line trailing command is swallowed, but a
+        // command on the *next* line still runs — bash discards only the failing
+        // line, not the whole script. Verified byte-for-byte against bash 5.2.
+        let (mout, mst) =
+            run("shopt -s failglob\necho osh_no_*.zzz; echo also_skipped\necho done");
+        assert_eq!(mout, "done\n");
+        assert_eq!(mst, 0);
     }
 
     #[test]

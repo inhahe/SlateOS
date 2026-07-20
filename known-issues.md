@@ -866,10 +866,21 @@ group, exactly as `declare -p` does. Update `readonly_print_lists_vars` and
 add array coverage. (Note bash uses `declare -r`, not `readonly`, as the
 keyword in this listing.)
 
-### TD-OILS-FAILGLOB-SCRIPT. `osh` `failglob` aborts the whole script, not just the current line — 2026-07-19
+### TD-OILS-FAILGLOB-SCRIPT. `osh` `failglob` aborts the whole script, not just the current line — 2026-07-19 — ✅ FIXED 2026-07-20 (stale; the `Flow::Discard` execution-model change described below was landed after this entry was written)
 
-**Where:** `userspace/oils/src/interp.rs` — the `glob_error` fatal-expansion
-handlers return `Flow::Exit(1)`, which `run_source` (~564) turns into
+**Status:** FIXED. The proper fix described below — a non-shell-exiting
+`Flow::Discard` variant that unwinds only to the nearest top-level parse-unit
+boundary — was implemented (see `Flow::Discard`, `exec_program_top`/`exec_items`
+`skip_line` logic in `interp.rs`). The `glob_error` handlers now return
+`Flow::Discard`, not `Flow::Exit(1)`. Verified byte-for-byte against bash 5.2:
+a multi-line script `shopt -s failglob\necho *.nope; echo skipped\necho done`
+discards only the offending line (`skipped` swallowed) and continues to `done`
+(exit 0), while a single-line `-c 'shopt -s failglob; echo *.nope; echo notrun'`
+discards the rest of that line (`notrun` not run, exit 1) — both matching bash.
+Regression-guarded in `shopt_failglob_aborts_on_no_match`.
+
+**Where (original diagnosis, now obsolete):** `userspace/oils/src/interp.rs` — the `glob_error` fatal-expansion
+handlers returned `Flow::Exit(1)`, which `run_source` (~564) turned into
 "stop executing the whole parsed program." bash, by contrast, does a
 per-line top-level discard.
 

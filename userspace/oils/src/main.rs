@@ -67,6 +67,8 @@ fn run(args: &[String]) -> i32 {
             };
             // `osh -c cmd [name [arg…]]`
             sh.set_command_mode();
+            // bash exposes the `-c` command string as $BASH_EXECUTION_STRING.
+            sh.set_execution_string(command.clone());
             if let Some(name) = args.get(base + 2) {
                 sh.set_name(name.clone());
                 sh.set_positional(

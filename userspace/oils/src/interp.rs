@@ -961,6 +961,14 @@ impl Shell {
         self.vars.insert(name.into(), value.into());
     }
 
+    /// Record the command string the shell was invoked with under `-c`, exposed
+    /// as `$BASH_EXECUTION_STRING`. bash sets this only for `-c` invocations
+    /// (unset for scripts and interactive shells); it is an ordinary,
+    /// reassignable variable, so we simply seed it into the variable namespace.
+    pub fn set_execution_string(&mut self, src: impl Into<String>) {
+        self.vars.insert("BASH_EXECUTION_STRING".to_string(), src.into());
+    }
+
     /// Import the real process environment into the shell variable namespace,
     /// marking every imported name exported (bash: environment variables *are*
     /// shell variables). Called once by the binary at startup. After this, the
@@ -18395,6 +18403,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(src).0, "2 3\n");
         // Parallel arrays are all unset outside any function.
         assert_eq!(run("echo [${BASH_LINENO[@]}][${BASH_SOURCE[@]}]").0, "[][]\n");
+    }
+
+    #[test]
+    fn bash_execution_string_set_for_dash_c() {
+        // `set_execution_string` seeds $BASH_EXECUTION_STRING; the value is an
+        // ordinary reassignable variable and appears under `${!BASH*}`.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        sh.set_execution_string("echo hi");
+        let mut buf = Vec::new();
+        let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
+        {
+            let mut out = Out::Capture(&mut buf);
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
+        }
+        let text = String::from_utf8_lossy(&buf);
+        assert_eq!(text.lines().next(), Some("[echo hi]"));
+        assert!(text.contains("BASH_EXECUTION_STRING"), "listing: {text}");
     }
 
     #[test]

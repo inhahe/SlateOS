@@ -2288,11 +2288,14 @@ verified against MSYS bash). Still **missing** relative to bash:
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
 diverges from bash because osh does not define `BASH_ALIASES`, `BASH_ARGC`,
-`BASH_ARGV`, `BASH_ARGV0`, `BASH_CMDS`, `BASH_EXECUTION_STRING`, or
-`BASH_LOADABLES_PATH`. These are bash-internal (the call-stack arrays
-`BASH_ARGC`/`BASH_ARGV`, the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`,
-etc.); implementing them faithfully is a larger, separate task. Low priority —
-scripts rarely enumerate `BASH*`.
+`BASH_ARGV`, `BASH_ARGV0`, `BASH_CMDS`, or `BASH_LOADABLES_PATH`.
+(`BASH_EXECUTION_STRING` — the `-c` command string — is now defined, seeded via
+`Shell::set_execution_string` from `main.rs`'s `-c` path, so it reads correctly
+and appears in `${!BASH*}`.) The remainder are bash-internal (the call-stack
+arrays `BASH_ARGC`/`BASH_ARGV`, the dynamic assoc arrays `BASH_ALIASES`/`BASH_CMDS`,
+etc.); implementing them faithfully is a larger, separate task.
+`BASH_LOADABLES_PATH` is meaningless on SlateOS (no loadable builtins) and is
+intentionally omitted. Low priority — scripts rarely enumerate `BASH*`.
 
 **Sub-issue — dynamic vars are readable but not *enumerated*.** The dynamic
 `param_value` cases (`BASHPID`, `BASH_SUBSHELL`, and any future `EUID`/…)

@@ -9504,9 +9504,15 @@ impl Shell {
         // stderr and makes printf exit non-zero, but still emits the output with
         // the best-effort numeric value).
         let mut errors: Vec<String> = Vec::new();
-        let text = format_printf(fmt, &args[i + 1..], &mut errors);
+        // Overflow "warnings" (`Numerical result out of range`) are emitted to
+        // stderr like errors but, unlike them, leave printf's exit status at 0.
+        let mut warnings: Vec<String> = Vec::new();
+        let text = format_printf(fmt, &args[i + 1..], &mut errors, &mut warnings);
         for e in &errors {
             self.emit_stderr(format!("{}printf: {e}\n", self.err_prefix()).as_bytes());
+        }
+        for w in &warnings {
+            self.emit_stderr(format!("{}printf: warning: {w}\n", self.err_prefix()).as_bytes());
         }
         let num_status = i32::from(!errors.is_empty());
         if let Some(name) = assign_var {
@@ -15337,7 +15343,12 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 }
 
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
-fn format_printf(fmt: &str, args: &[String], errors: &mut Vec<String>) -> String {
+fn format_printf(
+    fmt: &str,
+    args: &[String],
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> String {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -15345,7 +15356,7 @@ fn format_printf(fmt: &str, args: &[String], errors: &mut Vec<String>) -> String
     let mut arg_i = 0;
     loop {
         let start = arg_i;
-        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors);
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, errors, warnings);
         out.push_str(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
         // recycling included.
@@ -15363,6 +15374,7 @@ fn format_printf_once(
     args: &[String],
     arg_i: &mut usize,
     errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
 ) -> (String, bool) {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
@@ -15374,7 +15386,7 @@ fn format_printf_once(
                 decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
             }
             '%' => {
-                if format_conversion(&mut chars, args, arg_i, &mut out, errors) {
+                if format_conversion(&mut chars, args, arg_i, &mut out, errors, warnings) {
                     return (out, true);
                 }
             }
@@ -15394,6 +15406,7 @@ fn format_conversion(
     arg_i: &mut usize,
     out: &mut String,
     errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&'%') {
@@ -15585,29 +15598,38 @@ fn format_conversion(
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
         'd' | 'i' => {
             let raw = next_arg(arg_i);
-            let (n, err) = parse_printf_int_checked(&raw);
-            if let Some(kind) = err {
+            let n = parse_printf_int_checked(&raw);
+            if let Some(kind) = n.invalid {
                 errors.push(format!("{raw}: {kind}"));
             }
-            let (p, b) = split_sign(n.to_string(), plus, space);
+            if n.signed_overflow {
+                warnings.push(format!("{raw}: Numerical result out of range"));
+            }
+            let (p, b) = split_sign(n.signed.to_string(), plus, space);
             num_prefix = p;
             b
         }
         'u' => {
             let raw = next_arg(arg_i);
-            let (n, err) = parse_printf_int_checked(&raw);
-            if let Some(kind) = err {
+            let n = parse_printf_int_checked(&raw);
+            if let Some(kind) = n.invalid {
                 errors.push(format!("{raw}: {kind}"));
             }
-            n.cast_unsigned().to_string()
+            if n.unsigned_overflow {
+                warnings.push(format!("{raw}: Numerical result out of range"));
+            }
+            n.unsigned.to_string()
         }
         'x' => {
             let raw = next_arg(arg_i);
-            let (n, err) = parse_printf_int_checked(&raw);
-            if let Some(kind) = err {
+            let n = parse_printf_int_checked(&raw);
+            if let Some(kind) = n.invalid {
                 errors.push(format!("{raw}: {kind}"));
             }
-            let v = n.cast_unsigned();
+            if n.unsigned_overflow {
+                warnings.push(format!("{raw}: Numerical result out of range"));
+            }
+            let v = n.unsigned;
             // `#` prefixes nonzero hex with `0x` (bash/C: zero gets no prefix).
             if hash && v != 0 {
                 num_prefix.push_str("0x");
@@ -15616,11 +15638,14 @@ fn format_conversion(
         }
         'X' => {
             let raw = next_arg(arg_i);
-            let (n, err) = parse_printf_int_checked(&raw);
-            if let Some(kind) = err {
+            let n = parse_printf_int_checked(&raw);
+            if let Some(kind) = n.invalid {
                 errors.push(format!("{raw}: {kind}"));
             }
-            let v = n.cast_unsigned();
+            if n.unsigned_overflow {
+                warnings.push(format!("{raw}: Numerical result out of range"));
+            }
+            let v = n.unsigned;
             if hash && v != 0 {
                 num_prefix.push_str("0X");
             }
@@ -15628,11 +15653,14 @@ fn format_conversion(
         }
         'o' => {
             let raw = next_arg(arg_i);
-            let (n, err) = parse_printf_int_checked(&raw);
-            if let Some(kind) = err {
+            let n = parse_printf_int_checked(&raw);
+            if let Some(kind) = n.invalid {
                 errors.push(format!("{raw}: {kind}"));
             }
-            let v = n.cast_unsigned();
+            if n.unsigned_overflow {
+                warnings.push(format!("{raw}: Numerical result out of range"));
+            }
+            let v = n.unsigned;
             // `#` forces a leading `0` on octal; applied after precision below
             // so `%#.1o 8` → `010` (precision body `10`, then forced `0`).
             format!("{v:o}")
@@ -15945,7 +15973,7 @@ struct StrftimeCtx {
 }
 
 fn parse_printf_int(s: &str) -> i64 {
-    parse_printf_int_checked(s).0
+    parse_printf_int_checked(s).signed
 }
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
@@ -15956,16 +15984,47 @@ fn parse_printf_int(s: &str) -> i64 {
 /// the whole argument was consumed, or `Some(kind)` — the bash diagnostic tail
 /// (`"invalid number"` / `"invalid octal number"` / `"invalid hex number"`) —
 /// when trailing junk (including trailing whitespace) or a bad digit remains.
-fn parse_printf_int_checked(s: &str) -> (i64, Option<&'static str>) {
+/// Parsed result of a `printf` integer argument. bash interprets the same
+/// textual argument differently per conversion signedness: `%d`/`%i` go through
+/// `strtoimax` (saturating to `INTMAX_MIN`/`INTMAX_MAX` on overflow) while
+/// `%u`/`%x`/`%X`/`%o` go through `strtoumax` (saturating to `UINTMAX_MAX`, and
+/// wrapping a negative in range via two's complement). Overflow past the
+/// destination type is a *warning* — `printf: warning: <arg>: Numerical result
+/// out of range` — that does NOT change printf's exit status, distinct from the
+/// hard `invalid number` error. We compute both interpretations plus the
+/// per-signedness overflow flags so each conversion arm picks the matching one.
+struct PrintfInt {
+    /// Saturated signed value for `%d`/`%i`.
+    signed: i64,
+    /// Saturated / two's-complement-wrapped unsigned value for `%u`/`%x`/`%X`/`%o`.
+    unsigned: u64,
+    /// Magnitude exceeded the signed range (drives the `%d`/`%i` warning).
+    signed_overflow: bool,
+    /// Magnitude exceeded the unsigned range (drives the `%u`/`%x`/`%X`/`%o` warning).
+    unsigned_overflow: bool,
+    /// A hard "invalid number" error (exit status 1) carrying bash's message kind.
+    invalid: Option<&'static str>,
+}
+
+fn parse_printf_int_checked(s: &str) -> PrintfInt {
+    let plain = |signed: i64, unsigned: u64| PrintfInt {
+        signed,
+        unsigned,
+        signed_overflow: false,
+        unsigned_overflow: false,
+        invalid: None,
+    };
     // strtoimax skips *leading* whitespace but treats trailing whitespace as
     // junk, so trim only the front. An empty/blank argument is a valid 0.
     let t = s.trim_start();
     if t.is_empty() {
-        return (0, None);
+        return plain(0, 0);
     }
-    // `'c` / `"c` yields the numeric code of the first character (always valid).
+    // `'c` / `"c` yields the numeric code of the first character (always valid,
+    // always a non-negative scalar value that fits both i64 and u64).
     if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
-        return (rest.chars().next().map_or(0, |c| i64::from(u32::from(c))), None);
+        let cp = rest.chars().next().map_or(0u32, u32::from);
+        return plain(i64::from(cp), u64::from(cp));
     }
     let (neg, body) = match t.strip_prefix('-') {
         Some(r) => (true, r),
@@ -15987,14 +16046,54 @@ fn parse_printf_int_checked(s: &str) -> (i64, Option<&'static str>) {
     let valid_len = digits.chars().take_while(|c| c.is_digit(radix)).count();
     let consumed = &digits[..valid_len];
     let remaining = &digits[valid_len..];
-    let magnitude = i64::from_str_radix(consumed, radix).unwrap_or(0);
-    let value = if neg { magnitude.wrapping_neg() } else { magnitude };
-    let err = if consumed.is_empty() || !remaining.is_empty() {
+    let invalid = if consumed.is_empty() || !remaining.is_empty() {
         Some(kind)
     } else {
         None
     };
-    (value, err)
+    // Accumulate the magnitude in u128 so we can detect (and clamp on) overflow
+    // past u64 without wrapping. `consumed` holds only radix-valid digits.
+    let u64_max = u128::from(u64::MAX);
+    let mut mag: u128 = 0;
+    for ch in consumed.chars() {
+        let d = u128::from(ch.to_digit(radix).unwrap_or(0));
+        mag = mag.saturating_mul(u128::from(radix)).saturating_add(d);
+        if mag > u64_max {
+            // Clamp to a sentinel just past u64::MAX; the exact magnitude beyond
+            // this point is irrelevant (both types have overflowed).
+            mag = u64_max + 1;
+        }
+    }
+    // Signed bounds expressed as unsigned magnitudes (avoids i64→u128 sign-loss
+    // casts): |INTMAX_MAX| and |INTMAX_MIN|.
+    let i64_max_mag = u128::from(i64::MAX.unsigned_abs());
+    let i64_min_mag = u128::from(i64::MIN.unsigned_abs());
+    let unsigned_overflow = mag > u64_max;
+    let signed_overflow = if neg { mag > i64_min_mag } else { mag > i64_max_mag };
+    let signed = if neg {
+        if mag >= i64_min_mag {
+            i64::MIN
+        } else {
+            i64::try_from(mag).map_or(i64::MIN, |m| -m)
+        }
+    } else if mag > i64_max_mag {
+        i64::MAX
+    } else {
+        i64::try_from(mag).unwrap_or(i64::MAX)
+    };
+    let unsigned = if unsigned_overflow {
+        u64::MAX
+    } else {
+        let m = u64::try_from(mag).unwrap_or(u64::MAX);
+        if neg { m.wrapping_neg() } else { m }
+    };
+    PrintfInt {
+        signed,
+        unsigned,
+        signed_overflow,
+        unsigned_overflow,
+        invalid,
+    }
 }
 
 /// Parse a floating-point `printf` argument with C/bash `strtod` semantics and
@@ -18338,6 +18437,59 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Floats: leading numeric prefix, invalid trailing junk.
         assert_eq!(run("printf '%.1f\\n' 3.5x"), ("3.5\n".to_string(), 1));
         assert_eq!(run("printf '%.1f\\n' xyz"), ("0.0\n".to_string(), 1));
+    }
+
+    #[test]
+    fn printf_integer_overflow_saturates() {
+        // bash parses signed conversions (`%d`/`%i`) with strtoimax — on overflow
+        // it saturates to INTMAX_MIN/MAX and emits a *warning* (not an error), so
+        // the exit status stays 0. Verified byte-for-byte against bash 5.x.
+        assert_eq!(
+            run("printf '%d' 99999999999999999999"),
+            ("9223372036854775807".to_string(), 0)
+        );
+        assert_eq!(
+            run("printf '%d' -99999999999999999999"),
+            ("-9223372036854775808".to_string(), 0)
+        );
+        // i64::MAX is exact (no overflow); MAX+1 saturates.
+        assert_eq!(
+            run("printf '%d' 9223372036854775807"),
+            ("9223372036854775807".to_string(), 0)
+        );
+        assert_eq!(
+            run("printf '%d' 9223372036854775808"),
+            ("9223372036854775807".to_string(), 0)
+        );
+        // i64::MIN is exact.
+        assert_eq!(
+            run("printf '%d' -9223372036854775808"),
+            ("-9223372036854775808".to_string(), 0)
+        );
+        // Unsigned conversions (`%u`/`%x`/`%X`/`%o`) use strtoumax: overflow
+        // saturates to UINTMAX_MAX, and a negative in range wraps two's-complement.
+        assert_eq!(
+            run("printf '%u' 99999999999999999999"),
+            ("18446744073709551615".to_string(), 0)
+        );
+        assert_eq!(
+            run("printf '%u' -99999999999999999999"),
+            ("18446744073709551615".to_string(), 0)
+        );
+        assert_eq!(run("printf '%x' 99999999999999999999"), ("ffffffffffffffff".to_string(), 0));
+        assert_eq!(run("printf '%o' -1").0, "1777777777777777777777");
+        // u64::MAX is exact; MAX+1 saturates.
+        assert_eq!(
+            run("printf '%u' 18446744073709551615"),
+            ("18446744073709551615".to_string(), 0)
+        );
+        assert_eq!(
+            run("printf '%u' 18446744073709551616"),
+            ("18446744073709551615".to_string(), 0)
+        );
+        // In-range negatives still wrap (unchanged behaviour).
+        assert_eq!(run("printf '%u' -1"), ("18446744073709551615".to_string(), 0));
+        assert_eq!(run("printf '%x' -1"), ("ffffffffffffffff".to_string(), 0));
     }
 
     #[test]

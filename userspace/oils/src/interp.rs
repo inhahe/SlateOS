@@ -215,6 +215,25 @@ fn io_error_message(e: &std::io::Error) -> String {
     }
 }
 
+/// Diagnostic + exit status for a failed `PCommand::spawn` of a command word.
+///
+/// bash distinguishes two cases:
+///   * a word with no slash is a `$PATH` lookup; if nothing spawns it is
+///     `command not found` (127).
+///   * a word containing a slash is a direct pathname execution; a failure
+///     reports the underlying OS error — `No such file or directory` (127) for
+///     ENOENT, `Permission denied` / `Is a directory` etc. (126) otherwise.
+///
+/// The returned string has no `err_prefix`; the caller prepends it.
+fn spawn_error_message(word: &str, e: &std::io::Error) -> (String, i32) {
+    let is_path = word.contains('/') || word.contains('\\');
+    if e.kind() == std::io::ErrorKind::NotFound && !is_path {
+        return (format!("{word}: command not found"), 127);
+    }
+    let status = if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 };
+    (format!("{word}: {}", io_error_message(e)), status)
+}
+
 /// Non-local control flow produced while executing statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -1526,15 +1545,10 @@ impl Shell {
                     children.push(child);
                 }
                 Err(e) => {
-                    if e.kind() == io::ErrorKind::NotFound {
-                        self.errln(&format!("{}{program}: command not found", self.err_prefix()));
-                    } else {
-                        self.errln(&format!("{}{program}: {e}", self.err_prefix()));
-                    }
+                    let (msg, status) = spawn_error_message(program, &e);
+                    self.errln(&format!("{}{msg}", self.err_prefix()));
                     prev_stdout = None;
-                    // A stage that fails to spawn reports 127 (not found) / 126.
-                    stage_status[i] =
-                        if e.kind() == io::ErrorKind::NotFound { 127 } else { 126 };
+                    stage_status[i] = status;
                 }
             }
         }
@@ -5239,13 +5253,9 @@ impl Shell {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    self.emit_cmd_stderr(out, redir, &format!("{}{}: command not found", self.err_prefix(), argv[0]));
-                    self.last_status = 127;
-                } else {
-                    self.emit_cmd_stderr(out, redir, &format!("{}{}: {e}", self.err_prefix(), argv[0]));
-                    self.last_status = 126;
-                }
+                let (msg, status) = spawn_error_message(&argv[0], &e);
+                self.emit_cmd_stderr(out, redir, &format!("{}{msg}", self.err_prefix()));
+                self.last_status = status;
                 return;
             }
         };
@@ -11052,7 +11062,38 @@ impl Shell {
     }
 
     fn builtin_shift(&mut self, args: &[String]) -> i32 {
-        let n = args.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+        // `shift [n]`: default 1. A non-numeric count is a hard error, as is a
+        // negative count ("out of range"); a count larger than `$#` silently
+        // returns 1 (bash). More than one operand is "too many arguments".
+        let n = match args.first() {
+            None => 1i64,
+            Some(s) => {
+                // bash parses the count as a signed integer, accepting a leading
+                // `+`/`-`; anything else is "numeric argument required".
+                let Ok(v) = s.parse::<i64>() else {
+                    self.emit_stderr(
+                        format!("{}shift: {s}: numeric argument required\n", self.err_prefix())
+                            .as_bytes(),
+                    );
+                    return 1;
+                };
+                if args.len() > 1 {
+                    self.emit_stderr(
+                        format!("{}shift: too many arguments\n", self.err_prefix()).as_bytes(),
+                    );
+                    return 1;
+                }
+                if v < 0 {
+                    self.emit_stderr(
+                        format!("{}shift: {s}: shift count out of range\n", self.err_prefix())
+                            .as_bytes(),
+                    );
+                    return 1;
+                }
+                v
+            }
+        };
+        let Ok(n) = usize::try_from(n) else { return 1 };
         if n <= self.positional.len() {
             self.positional.drain(..n);
             0
@@ -12397,8 +12438,8 @@ impl Shell {
         }
         match eval_test(&a) {
             Ok(b) => i32::from(!b),
-            Err(operand) => {
-                self.errln(&format!("{}{name}: {operand}: integer expression expected", self.err_prefix()));
+            Err(body) => {
+                self.errln(&format!("{}{name}: {body}", self.err_prefix()));
                 2
             }
         }
@@ -16096,20 +16137,27 @@ fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
 }
 
 /// Evaluate a `test`/`[` expression. Returns `Ok(true)`/`Ok(false)` for the
-/// boolean result, or `Err(operand)` when an arithmetic comparison was given a
-/// non-integer operand (the caller reports `integer expression expected` and
-/// exits 2, as bash does).
+/// boolean result, or `Err(msg)` when the expression is malformed — where `msg`
+/// is the full diagnostic body (after the `NAME: ` prefix), e.g. `x: integer
+/// expression expected` or `-q: unary operator expected`. The caller prints
+/// `NAME: msg` and exits 2, as bash does.
 fn eval_test(a: &[&str]) -> Result<bool, String> {
     match a.len() {
         0 => Ok(false),
         1 => Ok(!a[0].is_empty()),
         2 => {
-            // Unary operator.
+            // Unary operator: `test -f FILE`, `test ! ARG`, etc. bash requires
+            // the first word to be `!` or a recognised unary operator; anything
+            // else (e.g. `[ 1 -eq ]`, where `-eq` lands here as a "unary" op) is
+            // a "unary operator expected" error rather than a silent success.
             let (op, x) = (a[0], a[1]);
             if op == "!" {
                 return Ok(x.is_empty());
             }
-            Ok(eval_unary(op, x))
+            if is_test_unary_op(op) {
+                return Ok(eval_unary(op, x));
+            }
+            Err(format!("{op}: unary operator expected"))
         }
         3 => {
             let (l, op, r) = (a[0], a[1], a[2]);
@@ -16270,15 +16318,54 @@ fn is_test_binary_op(op: &str) -> bool {
 /// comparison (`-eq`, `-lt`, …). bash accepts optional surrounding whitespace
 /// and a leading sign, but *only* base 10 — `0x10` is rejected here (unlike
 /// `[[ … ]]`, which evaluates a full arithmetic expression). On failure the
-/// operand is returned verbatim so the caller can report `integer expression
-/// expected`, matching bash's diagnostic (and exit status 2).
+/// full `OPERAND: integer expression expected` diagnostic body is returned so
+/// the caller can print `NAME: OPERAND: integer expression expected`, matching
+/// bash's diagnostic (and exit status 2).
 fn test_parse_int(s: &str) -> Result<i64, String> {
-    s.trim().parse::<i64>().map_err(|_| s.to_string())
+    s.trim()
+        .parse::<i64>()
+        .map_err(|_| format!("{s}: integer expression expected"))
 }
 
-/// Evaluate a `test`/`[` binary primary. Returns `Err(operand)` when an
-/// arithmetic comparison is given a non-integer operand (bash prints
-/// `integer expression expected` and exits 2 in that case).
+/// Whether `op` is a recognised `test`/`[` *unary* primary. bash's unary
+/// operators are all a single letter after `-`; an unrecognised two-argument
+/// operator (e.g. a binary op like `-eq` used with a missing operand) is an
+/// error, not a silent success. Kept in sync with `eval_unary`.
+fn is_test_unary_op(op: &str) -> bool {
+    matches!(
+        op,
+        "-a" | "-b"
+            | "-c"
+            | "-d"
+            | "-e"
+            | "-f"
+            | "-g"
+            | "-h"
+            | "-k"
+            | "-n"
+            | "-o"
+            | "-p"
+            | "-r"
+            | "-s"
+            | "-t"
+            | "-u"
+            | "-v"
+            | "-w"
+            | "-x"
+            | "-z"
+            | "-G"
+            | "-L"
+            | "-N"
+            | "-O"
+            | "-R"
+            | "-S"
+    )
+}
+
+/// Evaluate a `test`/`[` binary primary. Returns `Err(msg)` (the full
+/// diagnostic body) when an arithmetic comparison is given a non-integer
+/// operand (bash prints `integer expression expected` and exits 2 in that
+/// case).
 fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(l == r),
@@ -17502,6 +17589,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The `builtin` wrapper's own "not a shell builtin" diagnostic:
         let (o3, _) = run("builtin no_such_builtin_xyz 2>&1; echo done");
         assert_eq!(o3, "osh: builtin: no_such_builtin_xyz: not a shell builtin\ndone\n");
+    }
+
+    #[test]
+    fn test_malformed_two_arg_reports_unary_operator_expected() {
+        // `[ 1 -eq ]` collapses to a two-word test where the first word `1` is
+        // neither `!` nor a unary operator, so bash reports "unary operator
+        // expected" (naming the first word) and exits 2 — it must not silently
+        // succeed. Verified against bash: `[: 1: unary operator expected`.
+        let (o, rc) = run("[ 1 -eq ] 2>&1; echo rc=$?");
+        assert_eq!(o, "osh: [: 1: unary operator expected\nrc=2\n");
+        assert_eq!(rc, 0); // rc is from the final `echo`
+        // A genuine unary operator with one argument still works.
+        assert_eq!(run("[ -n x ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -z x ]; echo $?").0, "1\n");
     }
 
     #[test]

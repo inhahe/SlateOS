@@ -21,7 +21,7 @@ _No dependencies. Do this first._
   - [x] Standard kernel benchmarks: page alloc, heap alloc, compression
   - [x] Baselines in bench/baselines.toml with Linux/Fuchsia references
   - [x] Self-test verifying TSC frequency and conversion accuracy
-- [ ] Integrate fastpy compiler into build system (Python AOT → native executables for OS components)
+- [-] Integrate fastpy compiler into build system (Python AOT → native executables for OS components) — **initiative F, in progress.** Strategy set by Q29 (§80): **pure-mode native compile first (A)**, CPython bridge later as a superset (B). **First increment done (2026-07-21):** fastpy's codegen toolchain (`D:\visual studio projects\fastpy\compiler\toolchain.py`) can now emit objects for the `x86_64-slateos` target — `compile_ir_to_obj(..., target=SLATEOS_TARGET)` produces an x86-64 ET_REL ELF whose triple (`x86_64-unknown-linux-musl`), data-layout, static relocation, large code model, and `+sse,+sse2` match `toolchain/x86_64-slateos.json`, so the object is ABI-compatible with the Rust sysroot's `libc.a` (the `posix` crate staticlib). Verified by `tests/test_cross_target.py`. **Remaining:** cross-compile fastpy's C runtime (`runtime/*.c`) to `x86_64-slateos` against SlateOS libc headers, wire a gnu-lld/rust-lld link step (pure-mode: no libpython), then compile one real OS component (e.g. the package manager) as the first fastpy SlateOS binary.
 
 ---
 

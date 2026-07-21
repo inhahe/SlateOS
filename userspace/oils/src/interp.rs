@@ -105,7 +105,57 @@ use crate::parser::{parse, parse_with_aliases};
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
 /// we report a 5.2 compatibility level with `slateos` as the vendor field.
+///
+/// We deliberately report **5.2** (the level `osh` is differentially tested
+/// against — MSYS bash 5.2.37) rather than upstream Oils' bare `"5.3"`, so we
+/// never claim a bash-5.3-only feature we don't actually implement. Upstream
+/// Oils sets these two variables under a `bash_compat` flag that defaults on
+/// for `osh`; see [`bash_compat_enabled`] for our equivalent per-session toggle.
 const BASH_VERSION: &str = "5.2.0(1)-release";
+
+/// Whether `osh` advertises a bash-compatible `$BASH_VERSION`/`$BASH_VERSINFO`
+/// (open-questions Q27). Defaults to **on** — option A — so scripts that
+/// feature-detect bash (`[ -n "$BASH_VERSION" ]`, `${BASH_VERSINFO[0]} -ge N`)
+/// take their bash code path. This mirrors upstream Oils, which sets the same
+/// two variables under a `bash_compat` flag that defaults on for `osh` (and off
+/// for `ysh`, its honest non-bash language).
+///
+/// The operator asked for a per-user opt-out that defaults to A: a session sets
+/// `OSH_BASH_COMPAT` to a falsey value (`0`/`off`/`false`/`no`, case-insensitive)
+/// to run in honest, non-masquerading mode (neither variable defined). Read from
+/// the inherited process environment so a per-user login profile can set it.
+fn bash_compat_enabled() -> bool {
+    match std::env::var("OSH_BASH_COMPAT") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// The `(uid, euid)` identity `osh` reports via readonly `$UID`/`$EUID`
+/// (open-questions Q28). Defaults to `(0, 0)` — **root**, option A — for the
+/// current single-user, pre-privilege-model bring-up, so root-gated scripts
+/// (`if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`) correctly take their
+/// privileged path while the shell genuinely *is* the all-powerful system.
+///
+/// The operator asked for the reported identity to be per-user configurable: a
+/// session provides numeric `OSH_UID` (and optionally `OSH_EUID`, which defaults
+/// to `OSH_UID`) in the environment. Once SlateOS exposes a real
+/// `getuid`/`geteuid` credential, that should be preferred over this env
+/// override (tracked in known-issues TD-OILS-IDVARS).
+fn reported_identity() -> (u32, u32) {
+    let uid = std::env::var("OSH_UID")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let euid = std::env::var("OSH_EUID")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(uid);
+    (uid, euid)
+}
 
 /// The complete `shopt` option inventory (bash 5.2), in bash's own listing
 /// order (roughly, but not strictly, alphabetical — it mirrors bash's internal
@@ -1125,8 +1175,17 @@ impl Shell {
     /// `BASH_VERSINFO` array. We report a bash 5.2 compatibility level (the
     /// language level this shell targets) with `slateos` as the vendor field.
     fn seed_shell_vars(&mut self) {
-        self.vars
-            .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+        // Whether to advertise ourselves as bash (BASH_VERSION / BASH_VERSINFO).
+        // Upstream Oils gates this on a `bash_compat` flag that defaults on for
+        // `osh`; we mirror that with the per-user `OSH_BASH_COMPAT` toggle
+        // (default on). When off, scripts that probe `$BASH_VERSION` to detect
+        // bash see it unset — matching Oils' `ysh`, which is honest about not
+        // being bash. Computed once so both the string and the array agree.
+        let advertise_bash = bash_compat_enabled();
+        if advertise_bash {
+            self.vars
+                .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+        }
         // IFS is a *real* variable in bash, initialised to the default
         // space-tab-newline, not merely an implicit splitting default. Scripts
         // read it (`"$IFS"`), test it (`${IFS+set}`), and — critically — save
@@ -1147,26 +1206,48 @@ impl Shell {
         ] {
             self.vars.insert(name.to_string(), val.to_string());
         }
+        // UID / EUID: bash defines these as readonly integer shell variables
+        // (`declare -ir`) reporting the real and effective user IDs. They are
+        // NOT exported (they're recomputed by each shell), so seeding them here
+        // — before `import_environment`, whose `or_insert` cannot override and
+        // whose export-marking therefore never touches them — matches bash: an
+        // inherited `UID=…` in the environment neither wins nor becomes
+        // exported. The reported identity defaults to root (0/0); the per-user
+        // `OSH_UID` / `OSH_EUID` toggles let a login session inject a different
+        // identity (see `reported_identity`). Marked integer + readonly so
+        // `declare -p` renders `declare -ir` and reassignment is rejected,
+        // matching bash exactly.
+        let (uid, euid) = reported_identity();
+        self.vars.insert("UID".to_string(), uid.to_string());
+        self.vars.insert("EUID".to_string(), euid.to_string());
+        self.integer_attr.insert("UID".to_string());
+        self.integer_attr.insert("EUID".to_string());
+        self.readonly.insert("UID".to_string());
+        self.readonly.insert("EUID".to_string());
         // BASH_VERSINFO: (major, minor, patch, build, status, machtype). bash
         // marks it readonly; matching that guards scripts that probe the level.
-        let versinfo = [
-            (0usize, "5"),
-            (1, "2"),
-            (2, "0"),
-            (3, "1"),
-            (4, "release"),
-            (5, "x86_64-slateos"),
-        ];
-        let mut arr = BTreeMap::new();
-        for (i, v) in versinfo {
-            arr.insert(i, v.to_string());
+        // Gated on the same `advertise_bash` toggle as BASH_VERSION so the two
+        // never disagree (bash-detection scripts read either one).
+        if advertise_bash {
+            let versinfo = [
+                (0usize, "5"),
+                (1, "2"),
+                (2, "0"),
+                (3, "1"),
+                (4, "release"),
+                (5, "x86_64-slateos"),
+            ];
+            let mut arr = BTreeMap::new();
+            for (i, v) in versinfo {
+                arr.insert(i, v.to_string());
+            }
+            self.arrays.insert("BASH_VERSINFO".to_string(), arr);
+            // bash marks BASH_VERSINFO readonly; match that so scripts probing
+            // the level can't clobber it. The `readonly -p` / `declare -p`
+            // listing now renders readonly arrays correctly (TD-OILS-RO-ARRAY
+            // fixed), so this no longer surfaces malformed output.
+            self.readonly.insert("BASH_VERSINFO".to_string());
         }
-        self.arrays.insert("BASH_VERSINFO".to_string(), arr);
-        // bash marks BASH_VERSINFO readonly; match that so scripts probing the
-        // level can't clobber it. The `readonly -p` / `declare -p` listing now
-        // renders readonly arrays correctly (TD-OILS-RO-ARRAY fixed), so this no
-        // longer surfaces malformed output.
-        self.readonly.insert("BASH_VERSINFO".to_string());
         // SHELLOPTS: bash exposes the enabled `set -o` options as a readonly,
         // colon-separated list. Seed it from the current (default) option state
         // and mark it readonly so scripts can't clobber it; `refresh_shellopts`
@@ -4572,9 +4653,15 @@ impl Shell {
                     chars.next();
                 }
                 '$' => {
-                    // `#` for the super-user, `$` otherwise. We infer root from
-                    // the user name (no UID model on-target yet).
-                    let root = self.prompt_username() == "root";
+                    // `#` for the super-user, `$` otherwise. bash keys this on
+                    // the *effective* UID (`\$` is `#` iff `$EUID == 0`), so we
+                    // read our seeded EUID rather than guessing from the name.
+                    // Falls back to the name-based heuristic only if EUID is
+                    // somehow unset (it is always seeded in `seed_shell_vars`).
+                    let root = self
+                        .vars
+                        .get("EUID")
+                        .map_or_else(|| self.prompt_username() == "root", |e| e == "0");
                     out.push(if root { '#' } else { '$' });
                     chars.next();
                 }
@@ -23771,6 +23858,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn special_var_identity_uid_euid() {
+        // Default reported identity is root (0/0) per the operator's Q28
+        // decision — SlateOS runs single-user-as-root until a login/session
+        // layer injects a per-user identity via OSH_UID/OSH_EUID.
+        assert_eq!(run("echo $UID").0, "0\n");
+        assert_eq!(run("echo $EUID").0, "0\n");
+        // The canonical root check scripts use works out to "root".
+        assert_eq!(
+            run("if [ \"$EUID\" -ne 0 ]; then echo notroot; else echo root; fi").0,
+            "root\n"
+        );
+        // bash marks both readonly-integer (`declare -ir`); reassignment fails.
+        assert!(run("declare -p UID").0.starts_with("declare -ir UID="));
+        assert!(run("declare -p EUID").0.starts_with("declare -ir EUID="));
+        // A bare reassignment of a readonly var reports status 1 and (as osh
+        // does non-interactively) aborts the list, so the value is untouched.
+        assert_eq!(run("UID=1000").1, 1);
+        assert_eq!(run("EUID=1000").1, 1);
+        assert_eq!(run("echo $UID").0, "0\n");
+        // The `\\$` prompt escape resolves to `#` for the root EUID.
+        assert_eq!(run("PS1='\\$ '; echo \"${PS1@P}\"").0, "# \n");
+    }
+
+    #[test]
     fn special_var_platform_identity() {
         // bash always defines these; we report SlateOS's own values.
         assert_eq!(run("echo $HOSTTYPE").0, "x86_64\n");
@@ -27651,16 +27762,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n"
         );
 
-        // `declare -i` lists only integer-attributed variables.
+        // `declare -i` lists all integer-attributed variables. Besides the
+        // user's `k`/`k2`, this now includes the always-present readonly-integer
+        // identity vars `EUID`/`UID` (seeded as real `declare -ir` vars, exactly
+        // as bash lists them ahead of user integers in sort order).
         let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");
-        assert_eq!(o2, "declare -i k=\"5\"\ndeclare -i k2=\"9\"\n");
+        assert_eq!(
+            o2,
+            "declare -ir EUID=\"0\"\ndeclare -ir UID=\"0\"\n\
+             declare -i k=\"5\"\ndeclare -i k2=\"9\"\n"
+        );
 
         // Union semantics: `declare -il` lists variables that are integer OR
         // lowercase-attributed (bash), each shown with its full attribute set.
-        // (Avoids bash/osh internal readonly vars like BASH_VERSINFO that a
-        // `-ir` union would also match.)
+        // EUID/UID (integer) are included for the same reason as above; the
+        // `-il` (not `-ir`) union still excludes non-integer internal readonly
+        // vars like BASH_VERSINFO.
         let (o3, _) = run("declare -i ii=1; declare -l low=HELLO; plain=3; declare -il");
-        assert_eq!(o3, "declare -i ii=\"1\"\ndeclare -l low=\"hello\"\n");
+        assert_eq!(
+            o3,
+            "declare -ir EUID=\"0\"\ndeclare -ir UID=\"0\"\n\
+             declare -i ii=\"1\"\ndeclare -l low=\"hello\"\n"
+        );
 
         // A declaration *with* a name operand still declares (not a listing).
         assert_eq!(run("declare -A m=([k]=v); echo ${m[k]}").0, "v\n");

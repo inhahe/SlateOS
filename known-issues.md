@@ -3210,7 +3210,7 @@ verified `x=$( ( echo o; echo e >&2 ) 2>&1 )` now yields `o\ne` matching bash,
 as does the non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )`. No open
 subcases remain for this item.
 
-### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`EUID`/`UID`/`PPID`/`HOSTNAME`; `BASH`/`BASHOPTS` now done) — PARTIALLY ADDRESSED 2026-07-19
+### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`PPID` remaining; `EUID`/`UID`/`HOSTNAME`/`BASH`/`BASHOPTS` now done) — PARTIALLY ADDRESSED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the
 `param_value` dynamic-var match arm around the `BASHPID`/`BASH_SUBSHELL` cases).
@@ -3227,13 +3227,26 @@ the host build's). `BASHPID` and `BASH_SUBSHELL` were already dynamic.
 non-interactive defaults, so the seeded set matches bash byte-for-byte —
 verified against MSYS bash). Still **missing** relative to bash:
 
-- **`EUID` / `UID`** (numeric effective/real user id, readonly in bash). Very
-  commonly read by scripts (`[ "$EUID" -ne 0 ]` root checks); leaving them unset
-  makes such arithmetic comparisons error on an empty operand. **Blocked on a
-  design decision:** what identity should osh report? There is no SlateOS
-  `getuid`-equivalent wired into the host or target build yet, and the *default*
-  identity of a shell during bring-up (root uid 0 vs a regular user) is a
-  user-visible policy call. Logged as an open question (`open-questions.md`).
+- **`EUID` / `UID`** — **RESOLVED 2026-07-21 (Q28, operator).** Both are now
+  seeded in `seed_shell_vars` as real readonly-integer shell vars (`declare -ir`,
+  matching bash's own attributes), defaulting to **root (`0`/`0`)** per the
+  operator's Q28 decision. The reported identity is per-user configurable via the
+  `OSH_UID` / `OSH_EUID` env toggles (resolved once in the free fn
+  `reported_identity`), so a login/session layer can inject a real user identity.
+  Seeded *before* `import_environment` (whose `or_insert` can't override and
+  whose export-marking therefore never touches them), matching bash: an inherited
+  `UID=` in the environment neither wins nor becomes exported. The `\$` prompt
+  escape now keys `#`-vs-`$` on `$EUID == 0` instead of guessing from the name.
+  Unlike the (still dynamic) `PPID`/`BASHPID` specials, these are *real* vars, so
+  readonly reassignment is genuinely rejected and they correctly appear in
+  `declare -i`/`declare -p`/`set`/`${!prefix*}` listings exactly as bash lists
+  them. **Note / latent inconsistency:** `PPID`/`BASHPID` remain dynamic-only
+  (`param_value` cases, *not* in `self.readonly`), so `PPID=5` is silently
+  accepted-and-shadowed rather than rejected, and they're absent from bulk
+  `declare -i`/`declare -p` listings — a pre-existing divergence from bash now
+  made more visible by the more-faithful real-var model used for EUID/UID. The
+  proper long-term fix is to migrate the remaining readonly-integer specials
+  (`PPID`, and `BASHPID` for readonly-ness) to the same real-var model.
 - **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
   `std::process` doesn't expose it portably on the host and the SlateOS syscall
   isn't wired. Deferred until a `getppid`-equivalent exists.

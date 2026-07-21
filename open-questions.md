@@ -23,203 +23,41 @@ Format for each entry:
 
 ---
 
-## Q26 — Oils (OSH) port strategy: Rust reimplementation now vs. faithful C++ `oils-for-unix` cross-compile later
-
-**Status:** OPEN (proceeding on the prerequisite-forced default; heads-up only).
-
-**Question.** You committed (§69/Q25→A) to porting **Oils (OSH)** — a bash-superset
-shell — as the first large initiative. *How* should it be ported?
-
-**Options.**
-- **(A) Rust reimplementation in-tree (`userspace/oils`)** — a real Rust shell
-  implementing the OSH language that forks/execs on SlateOS, matching the
-  coreutils reimplementation pattern.
-  - *Pro:* only path that builds/runs **today**; consistent with existing
-    userspace; honest use of the Q24 fork/exec de-risking. *Con:* not bit-for-bit
-    upstream OSH; reimplementation effort + fidelity risk on obscure bash corners.
-- **(B) Faithful C++ `oils-for-unix` cross-compile** — build the real upstream.
-  - *Pro:* exact OSH semantics, no reimplementation. *Con:* **blocked** — no
-    C/C++→`x86_64-slateos` toolchain or libc/CRT exists yet; standing that up is a
-    separate massive initiative. Delivers nothing runnable in the near term.
-
-**Claude's recommendation / what I'm doing meanwhile.** Proceeding with **(A)** —
-it is the only prerequisite-satisfiable path and the reversal cost is local (the
-crate is an isolated userspace binary; if a C++/slateos toolchain later lands via
-the Mesa/Chromium/WINE work, swap in the real `oils-for-unix`). Full rationale in
-`design-decisions.md §72`. If you'd rather gate this behind first building the
-C++ toolchain, say so and I'll re-order.
-
-**Where it bites.** `userspace/oils/` (new crate); roadmap.md:1494; the existing
-minimal `userspace/coreutils/src/bin/sh.rs` stays a small POSIX baseline.
-
----
-
-## Q27 — Should `osh` advertise itself as bash via `$BASH_VERSION` / `$BASH_VERSINFO`?
-
-**Status:** OPEN (heads-up only; not currently set).
-
-**Question.** Many real-world scripts feature-detect bash by testing
-`[ -n "$BASH_VERSION" ]` or gate on `${BASH_VERSINFO[0]} -ge N`. `osh` is an
-in-tree Rust reimplementation of the OSH *language* (a bash superset), not bash
-itself, and today sets **neither** variable. Should it set them — and if so, to
-what value?
-
-**Options.**
-- **(A) Set both, reporting a bash-compatible version** (e.g. `BASH_VERSION="5.2.0(1)-release"`,
-  `BASH_VERSINFO=(5 2 0 1 release x86_64-slateos)`).
-  - *Pro:* the widest set of "is this bash?" scripts take their bash code path and
-    run — the whole point of a bash-superset shell. *Con:* it's a lie: a script may
-    then assume a specific bash's behavior/feature that `osh` implements slightly
-    differently or not at all, producing a subtler failure than an honest "not bash".
-- **(B) Set them to an honest `osh`-branded value** (e.g. `BASH_VERSION` unset but a
-  new `OSH_VERSION`/`OILS_VERSION` set, mirroring upstream Oils).
-  - *Pro:* truthful; scripts that specifically want Oils can detect it. *Con:* the
-    common `[ -n "$BASH_VERSION" ]` guard fails, so bash-only script branches are
-    skipped even though `osh` could run them.
-- **(C) Leave both unset (status quo).**
-  - *Pro:* zero risk of masquerade-induced misbehavior. *Con:* bash-detecting
-    scripts silently fall back to a POSIX-sh code path (or bail), losing bash
-    features `osh` actually supports.
-
-**Claude's recommendation / meanwhile.** Leaning **(A)** — the crate's stated goal
-is to be a drop-in bash-superset replacement, and the dominant real-world use of
-`$BASH_VERSION` is exactly the "run the bash branch" gate we *want* to satisfy;
-upstream Oils itself sets `$BASH_VERSION` for this reason. But it's a user-visible
-compatibility *policy* (deliberately claiming to be bash) with a real downside, so
-I've deferred rather than decided. Meanwhile both stay unset.
-
-**Where it bites.** `interp.rs` `param_value` (~4619) and shell init (`new()`
-~454) — where read-only dynamic vars like `BASHPID`/`EPOCHSECONDS` are produced and
-where seed vars would be inserted.
-
----
-
-## Q28 — What user identity should `osh` report via `$EUID`/`$UID`?
-
-**Status:** OPEN (heads-up + genuinely blocks `$EUID`/`$UID`; not currently set).
-The `$HOSTNAME` half of this question is **resolved** — see the update note below.
-
-**Question.** bash always defines readonly `$EUID` and `$UID` (numeric effective
-/real user id). Real scripts lean on them constantly — the
-canonical root check `if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`, and
-many installers gate on `$UID`. `osh` currently leaves both unset, so those
-comparisons error on an empty operand. To set `$EUID`/`$UID` we must decide *what
-identity `osh` reports* — and there is no SlateOS `getuid`-equivalent wired into
-either the host or target build yet, so it can't just read a real credential.
-
-**Update 2026-07-20 — `$HOSTNAME` half resolved (Claude, autonomous).** The
-low-stakes naming half is now implemented: `osh` synthesizes `$HOSTNAME` from
-the real host in `import_environment` (unix: `/proc/sys/kernel/hostname` then
-`/etc/hostname`; host Windows: `%COMPUTERNAME%`), with an inherited-env value
-winning over synthesis and a preset shell var winning over both. On the SlateOS
-target (no procfs yet) it gracefully stays unset rather than lying. Per the
-operator's own framing below ("`$HOSTNAME`'s default … can ride along"), this
-was a defensible, trivially-overridable default and did not need to wait on the
-`$EUID`/`$UID` identity call. The security-sensitive identity decision (A/B/C
-below) remains genuinely open and untouched.
-
-**Options.**
-- **(A) Report root (`EUID=UID=0`) as the default.**
-  - *Pro:* matches the reality that early SlateOS bring-up / init runs as the
-    system with full authority; root checks that *gate* privileged actions will
-    (correctly, for now) see root. *Con:* a "are you root? then it's safe to nuke
-    the system" script would proceed where a real multi-user system wouldn't; masks
-    the absence of a privilege model.
-- **(B) Report a fixed non-root user (e.g. `EUID=UID=1000`).**
-  - *Pro:* the safer default — privileged-action scripts refuse rather than run
-    with assumed root; models the eventual "shell runs in a user session" norm.
-    *Con:* bring-up utilities that legitimately need root would wrongly bail.
-- **(C) Leave unset until a real `getuid`/`geteuid` syscall exists (status quo),**
-  then wire them dynamically to the actual process credential.
-  - *Pro:* never lies about identity. *Con:* keeps breaking the very common
-    `$EUID`/`$UID` script idioms in the meantime.
-
-**Claude's recommendation / meanwhile.** Mild lean to **(A)** for the current
-single-user, pre-privilege-model bring-up state (the shell genuinely *is* the
-all-powerful system right now, and root-gated scripts should take their root
-path), switching to a real credential read once SlateOS exposes `getuid`. But
-this is a user-visible security-adjacent policy with a real footgun, so I've
-deferred rather than decided; all three vars stay unset for now. `$HOSTNAME`'s
-default (`localhost`/`slateos`) is a low-stakes naming choice that can ride along
-with whatever's decided here.
-
-**Where it bites.** `interp.rs` `param_value` (dynamic-var arm near
-`BASHPID`/`BASH_SUBSHELL`) and `seed_shell_vars`; tracked in `known-issues.md`
-TD-OILS-IDVARS.
-
----
-
-## Q29 — fastpy → SlateOS integration (initiative F): what target strategy, and how to handle the CPython bridge?
-
-**Status:** OPEN (blocks starting initiative F the *right* way; heads-up +
-genuine fork). Initiative A (Oils/OSH + coreutils) has reached high maturity, so
-per the Q25 order (A → **F** → B → C → D → E) fastpy build-system integration is
-the next initiative. Before starting it I scoped fastpy's architecture and found
-a real fork that gates *how* to begin.
-
-**Background (what fastpy is).** fastpy (`D:\visual studio projects\fastpy`) is an
-AOT Python→LLVM-IR→native compiler (via llvmlite) that links a **C runtime**
-(`runtime/`: `gc.c`, `objects.c`, `bigint.c`, `threading.c`, `runtime.c`) plus a
-**CPython bridge** (`cpython_bridge.c` + bundled `py311`–`py314`): programs that
-use unsupported stdlib fall back to a real embedded CPython (`python313.dll`).
-Today it targets **host** x64 Windows/Linux only. The roadmap task (Phase 0) is
-"Python AOT → native executables **for OS components**" — i.e. binaries that run
-**on SlateOS**, not on the dev host.
-
-**The fork.** Making fastpy emit SlateOS binaries needs three things: (1) a
-`x86_64-slateos` LLVM target/data-layout (modest — llvmlite can target an
-arbitrary triple), (2) the **C runtime ported** to SlateOS syscalls/libc (gated
-on the Phase 2.5 POSIX layer, currently `[-]`), and (3) a decision about the
-**CPython bridge**, which is the crux:
-
-- **(A) Pure-mode only (no bridge) for SlateOS.** Compile only programs fastpy
-  supports natively; the CPython fallback is disabled on the SlateOS target.
-  - *Pro:* startable soonest — no CPython port needed; the runtime port is
-    self-contained C that only needs the POSIX layer. Matches how OS components
-    (package manager, settings, indexer) would be written — plain typed Python.
-    *Con:* any component using an unsupported stdlib module won't compile until
-    fastpy grows native support for it; "any valid Python is valid fastpy" no
-    longer holds *on SlateOS* until the gap closes.
-- **(B) Require a CPython port first (bridge works on SlateOS).** Full stdlib
-  compatibility via the embedded interpreter.
-  - *Pro:* no restriction — every Python program compiles. *Con:* gated on
-    porting CPython to SlateOS (Phase 4.4, a huge effort) — F would stall for a
-    long time; also drags libpython into every fastpy binary.
-- **(C) Host-side build tooling first.** Use fastpy to compile *build-time* OS
-  tooling that runs on the **dev host** (build scripts, codegen, the package
-  manager's build side), deferring the on-SlateOS runtime port.
-  - *Pro:* works today with zero runtime porting; establishes the build
-    plumbing. *Con:* doesn't deliver the roadmap's actual goal (components that
-    run *on* SlateOS); low near-term value since interpreted Python already does
-    these host tasks fine.
-
-**Claude's recommendation / meanwhile.** Lean **(A)** — it's the only path that
-both starts soon *and* delivers the roadmap's stated goal (native components that
-run on SlateOS), with the CPython bridge added later as an enhancement if/when
-CPython is ported (B becomes a superset of A, not a competing design). Sequenced:
-first mature the POSIX layer enough to host the C runtime, then add the
-`x86_64-slateos` fastpy target + port the runtime in pure mode, then pick one
-real OS component (e.g. the package manager) as the first fastpy-compiled
-SlateOS binary. But this commits the project to a multi-step effort with a real
-prerequisite chain (POSIX layer → runtime port → first component) and a
-user-visible capability restriction (pure-mode) on SlateOS, so I've **deferred**
-rather than started, to confirm scope/priority and the bridge policy. No fastpy
-code changed yet.
-
-**Where it bites.** `roadmap.md` Phase 0 line 24 (the F task); fastpy
-`compiler/toolchain.py` + `compiler/codegen.py` (target triple / data layout),
-fastpy `runtime/*.c` (syscall/libc surface to port), and SlateOS `posix/`
-(Phase 2.5 libc coverage the runtime will link against).
-
----
-
-Earlier deferred operator decisions (Q1–Q25) have been
+Earlier deferred operator decisions (Q1–Q29) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
 full rationale. New decisions should be appended above this line as `## Q30 …`.
 
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):
+
+- Q29 fastpy → SlateOS target strategy (initiative F) — resolved 2026-07-21
+  (§80): **pure-mode native compile first (A); add the CPython bridge later as a
+  superset (B)** — "A at first but eventually B." Unblocks *starting* initiative
+  F. Sequencing: mature the POSIX layer → add the `x86_64-slateos` fastpy target
+  + port the C runtime in pure mode → compile one real OS component. Claude
+  recommended A-first-then-B; operator confirmed.
+
+- Q28 `osh` `$EUID`/`$UID` identity — resolved 2026-07-21 (§79): **default root
+  (`0`/`0`) [option A], made per-user configurable** via `OSH_UID`/`OSH_EUID`.
+  Seeded as real readonly-integer vars (readonly-enforced, bash-faithful
+  listings). Claude recommended A; operator accepted and added the
+  default-plus-per-user-override framing. Implemented; known-issues
+  TD-OILS-IDVARS updated.
+
+- Q27 `osh` advertising as bash (`$BASH_VERSION`/`$BASH_VERSINFO`) — resolved
+  2026-07-21 (§78): **option A (advertise), as a per-user toggle
+  (`OSH_BASH_COMPAT`) defaulting on** — mirrors upstream Oils' own `bash_compat`
+  flag (which defaults on for `osh`, off for `ysh`; upstream sets
+  `BASH_VERSION='5.3'`). osh keeps its level at 5.2 (never claims a 5.3-only
+  feature). Claude recommended A + proposed the toggle; operator chose A and
+  asked for the per-user-default framing.
+
+- Q26 Oils (OSH) port strategy confirmed — resolved 2026-07-21 (§77): **finish
+  the Rust reimplementation (A) now; keep A as a permanent user option even if a
+  faithful C++ `oils-for-unix` port (B) lands later.** Claude recommended
+  finishing A; operator confirmed and added that B is an additive future option,
+  not a replacement.
 
 - Q25 next large initiative + fixed ordering — resolved 2026-07-18 (§69):
   **Option A** (the interactive-shell userland) first, with the explicit

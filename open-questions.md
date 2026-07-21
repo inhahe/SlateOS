@@ -23,6 +23,71 @@ Format for each entry:
 
 ---
 
+## Q30 — C cross-toolchain for fastpy's SlateOS runtime (initiative F)
+
+**Question.** How do we get fastpy's C runtime (`runtime/*.c`) compiled to
+`x86_64-slateos` ELF objects? This is the one remaining prerequisite before a
+fastpy program can be linked into a *runnable* SlateOS binary. It needs a C
+compiler that emits `x86_64-unknown-linux-musl` ELF **and** a set of musl/SlateOS
+C headers to compile against. The dev host currently has **neither**: no `clang`
+on PATH (only `clang-format`/`clang-tidy` in VS, which don't compile), MSVC
+`cl.exe` emits COFF for the MSVC ABI (wrong format and ABI), and the OS sysroot
+(`toolchain/sysroot/lib`) ships only Rust-built archives (`libc.a` = the `posix`
+crate staticlib, `libstubs.a`, `libunwind.a`) — **no C headers at all**.
+
+Note this is a *tooling* gate, not a code gate: the fastpy runtime already has a
+working POSIX code path (it builds via `cc`/`gcc`/`clang` on Linux/macOS today,
+with `#ifdef _WIN32` separation), so the port itself is small once a compiler +
+headers exist. The **codegen** and **link** halves of the pipeline are already
+done and tested — `compile_ir_to_obj(target=SLATEOS_TARGET)` emits ABI-matched
+ELF objects and `link_executable(target=SLATEOS_TARGET)` links them with
+`rust-lld` (verified end-to-end on a self-contained object → SlateOS ET_EXEC).
+
+**Options.**
+
+- **A — Install a clang cross-toolchain + vendor musl headers.** Install LLVM
+  (ships `clang`, which can target `x86_64-unknown-linux-musl` directly) and
+  vendor a musl headers set into the OS repo (e.g. under `toolchain/sysroot`).
+  - *Pros:* the standard, robust way to cross-compile C to musl ELF; clang is
+    the same LLVM family as `rust-lld`/llvmlite already in use; unblocks the
+    runtime port immediately; reusable for any future C-to-SlateOS work.
+  - *Cons:* LLVM is a heavyweight (~2–3 GB), system-wide install → per the
+    tooling rule this needs the operator's go-ahead. Musl headers must be
+    vendored and kept consistent with the SlateOS `posix` crate's ABI.
+
+- **B — Reimplement the pure-mode runtime so fastpy compiles it itself.** Port
+  the small pure-mode runtime (no CPython bridge) to something fastpy's own
+  IR-emitting pipeline can lower — i.e. avoid hand-written C for the SlateOS
+  target entirely, generating the runtime as LLVM IR the way program code is.
+  - *Pros:* no external C toolchain needed; single codegen path; llvmlite
+    already emits SlateOS objects.
+  - *Cons:* substantial rework; the runtime is real C (GC, bigint, threading)
+    and reimplementing it as generated IR is a large, error-prone effort that
+    duplicates the maintained C runtime. Poor cost/benefit vs. A.
+
+- **C — Wait / defer.** Leave the runtime port until CPython is ported for the
+  bridge (initiative F step B), doing other OS work meanwhile.
+  - *Pros:* no new tooling now.
+  - *Cons:* strands the finished codegen+link work; pure-mode-first was the
+    operator's own Q29 choice specifically to *not* wait on the bridge.
+
+**Claude's recommendation.** **A** — install clang and vendor musl headers. It's
+the direct, proper path and matches the pure-mode-first strategy. Because it's a
+heavyweight system-wide install, flagging for the operator's OK rather than
+installing unilaterally. In the meantime the codegen + link plumbing is complete
+and committed; other OS roadmap tasks are unblocked and being worked instead of
+idling on this.
+
+**Where it bites.** fastpy `compiler/toolchain.py` (`_compile_shared_runtime_*`
+would gain a SlateOS branch), `runtime/*.c` (small POSIX-path port), OS
+`toolchain/sysroot` (musl headers to vendor). Downstream: the "first real
+component" milestone (candidate: package manager) can't produce a runnable
+binary until this lands.
+
+**Status.** `OPEN`.
+
+---
+
 Earlier deferred operator decisions (Q1–Q29) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
 full rationale. New decisions should be appended above this line as `## Q30 …`.

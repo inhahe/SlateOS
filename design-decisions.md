@@ -5278,9 +5278,14 @@ program + runtime + sysroot `libc.a` via rust-lld. Pure mode is selected with
 `-DFPY_PURE_MODE` (compiles out the JIT symbol table). A real fastpy program
 (lists/iteration/print) links to a **~2.9 MB SlateOS ET_EXEC ELF with zero
 undefined symbols**. Tests in fastpy `tests/test_cross_target.py` (skip without
-zig/rust-lld/sysroot). Remaining gap (tracked): the link uses `-e main` and no
-crt/`_start`, so proper SlateOS process startup is the next step toward an
-on-target-runnable binary — the "first real component" milestone.
+zig/rust-lld/sysroot). **Crt startup wired (same day):** the link entry is
+`_start` (the real ELF entry), so rust-lld pulls the crt0 from `libc.a` — the
+`posix` crate is built for `x86_64-unknown-none`, so its `#[cfg(target_os =
+"none")]` crt (`_start` → `__libc_start_main` → retrieve argv/envp via kernel
+syscall, init environ/signals, run ELF constructors → `main` → `exit`) is
+present. The ELF's entry is nonzero `_start`, so startup/args/clean-exit are all
+in place. Remaining: compile one real OS component and boot it under the kernel
+to confirm on-target behavior — the "first real component" milestone.
 
 **Where it lives.** fastpy `compiler/toolchain.py`, `runtime/bridge_stub.c` (new),
 `runtime/{runtime,objects,objects.h,threading.h}.c/.h` (pure-mode guard + latent

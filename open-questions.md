@@ -21,11 +21,99 @@ Format for each entry:
 - **Where it bites** — files/symbols affected, so the resolution can be applied.
 - **Status** — `OPEN` until the operator decides.
 
+## Q31 — Where does the SlateOS *native* ABI set up main-thread ELF TLS (thread pointer / `%fs` base) for compiler-emitted `__thread`?
+
+**Context / how this surfaced.** Initiative F's toolchain is complete: fastpy now
+cross-compiles a real program to a ~2.9 MB SlateOS `ET_EXEC` ELF that links
+cleanly against the sysroot `libc.a` (posix crate) with zero undefined symbols
+(`design.md` initiative-F checklist; `tests/test_cross_target.py`). The next
+milestone is booting a fastpy-built binary under the kernel ("first real
+component"). Inspecting the produced ELF shows a **`PT_TLS` segment**
+(filesz 0x10, memsz 0x1b1a0): fastpy's C runtime uses compiler thread-locals
+(`runtime/threading.h`: `#define FPY_THREAD_LOCAL __thread`). The compiler lowers
+`__thread` to `%fs:offset` accesses (x86-64 TLS variant II), which **require an
+`%fs` base (thread pointer) to be established** before any such access — there is
+no alternative lowering.
+
+But on SlateOS today, a *native* static binary gets **no thread pointer**:
+- The kernel deliberately **resets `fs_base` to 0 on exec** and expects userspace
+  to set it up (`kernel/src/proc/spawn.rs` ~L1189-1198, "execve replaces the
+  address space … userspace sets it up") — the Linux/libc model.
+- Linux-ABI binaries do set it up: their crt/ld.so reads the **aux vector**
+  (`AT_PHDR`/`AT_PHNUM`) off the SysV stack the kernel builds and calls
+  `arch_prctl(ARCH_SET_FS)` (wired in `kernel/src/syscall/linux.rs`).
+- **Native binaries have no aux vector** (the posix crt fetches argv/fds via
+  dedicated native syscalls `SYS_PROCESS_GET_ARGS`/`_GET_INITIAL_FDS`, not off the
+  stack), and the posix crt's `__libc_start_main` (`posix/src/crt.rs`) does
+  **not** set up TLS at all. So `fs_base` stays 0 and the first `__thread` access
+  in a fastpy binary faults.
+
+Note this is **additive**, not a reversal of the posix crate's deliberate
+"tid-keyed pthread TSD instead of FS/GS TLS" choice (`posix/src/pthread.rs`
+module doc): that choice is about *library* TSD (`pthread_setspecific`), a
+different mechanism from compiler `__thread`. Supporting compiler `__thread`
+(mandatory to run essentially any real C/C++ on SlateOS — fastpy today, ported C
+libraries later) requires an `%fs` base regardless.
+
+**Options.**
+
+- **Option A — posix crt sets up main-thread TLS (userspace).** In
+  `__libc_start_main`, find the program's `PT_TLS` via the linker-defined
+  `__ehdr_start` symbol (available in static non-PIE links — no aux vector
+  needed), allocate a variant-II TLS block + TCB self-pointer, copy the init
+  image, and set `fs_base`. Setting `fs_base` needs either the existing Linux
+  `arch_prctl` number routed into the native dispatch, or a small **new native
+  syscall** (`SYS_SET_FS_BASE`, calling the kernel's existing
+  `set_current_task_fs_base`).
+  - *Pros:* keeps TLS setup in userspace, matching the kernel's existing "reset
+    to 0, userspace sets it up" design; kernel loader stays minimal; consistent
+    with the native crt already doing its own startup (args/fds/environ/signals/
+    constructors). Child-thread TLS (`pthread_create`) naturally lives in the
+    same userspace layer later.
+  - *Cons:* implements variant-II TLS layout in the posix crate; needs a native
+    `fs_base` setter exposed; more moving parts than C.
+
+- **Option C — kernel ELF loader sets up main-thread TLS.** During spawn, parse
+  `PT_TLS`, allocate a TLS block in the new address space, lay out the TCB, and
+  set the initial thread's `fs_base` directly (instead of leaving it 0).
+  - *Pros:* fewest moving parts, fully self-contained in the loader (already
+    PHDR-aware and already builds the initial stack), no new syscall, no posix
+    change — unblocks immediately.
+  - *Cons:* puts x86-64 TLS-ABI layout knowledge in the microkernel loader
+    (arguably a libc concern) and slightly contradicts the current "userspace
+    sets `fs_base`" comment; child-thread TLS still needs a userspace path later,
+    so responsibility ends up split across kernel + userspace anyway.
+
+- **Option B — fastpy drops `__thread` in SlateOS pure mode** (`FPY_THREAD_LOCAL`
+  → empty). *Pros:* trivial, fastpy-side only, no OS change. *Cons:* a
+  correctness trap — multithreaded fastpy-on-SlateOS programs would silently
+  share "thread-local" state (data races); doesn't solve the general problem
+  (other C `__thread` code still can't run). Recommended **against**.
+
+**Claude's recommendation.** **Option A** (userspace/posix-crt via `__ehdr_start`
++ a native `fs_base` setter). It matches the kernel's existing design intent,
+keeps the microkernel loader minimal, and generalizes cleanly to child-thread TLS
+in the same layer. **Option C** is a defensible simpler alternative if you'd
+rather keep all process-image setup in the loader. Either A or C is correct;
+B is not. In the meantime the toolchain deliverable (Q30) is fully done and
+committed; only on-target *execution* is gated on this. Not proceeding
+autonomously because it's a foundational, costly-to-reverse native-ABI choice.
+
+**Where it bites.** `posix/src/crt.rs` (`__libc_start_main`), `posix/src/syscall.rs`
+(a possible `SYS_SET_FS_BASE`), `kernel/src/proc/spawn.rs` (fs_base reset ~L1189;
+or the TLS-setup site for C), `kernel/src/proc/elf.rs` (`PT_TLS`, currently
+`#[allow(dead_code)]`), `kernel/src/sched/mod.rs` (`set_current_task_fs_base`),
+and fastpy `runtime/threading.h` (`FPY_THREAD_LOCAL`). After it's set up, rebuild
+the sysroot `libc.a`, rebuild the fastpy binary, embed + spawn it (mirror
+`services/hello`), and boot-test.
+
+**Status:** OPEN.
+
 ---
 
 Earlier deferred operator decisions (Q1–Q30) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q30 …`.
+full rationale. New decisions should be appended above this line as `## Q31 …`.
 
 ---
 

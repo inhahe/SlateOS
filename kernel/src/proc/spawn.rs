@@ -7418,6 +7418,186 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-compiled `pkg batch` subcommand — the
+/// **transactional multi-package registry install** (all-or-nothing).
+///
+/// `batch <manifest>` merges every `<name> <digest> <deps>` line onto the
+/// registry, then dependency-checks the *entire result*: it persists the merged
+/// registry only if every dependency is satisfiable, else leaves the registry
+/// completely untouched (exit 1).  This test proves both halves:
+///  1. A satisfiable manifest given in **reverse dependency order** (grep, which
+///     depends on coreutils+libc, listed *before* them) installs all three —
+///     proving all lines are merged before validation, so intra-batch forward
+///     references resolve regardless of order.
+///  2. A manifest adding a package whose dependency is absent (`editor` needs
+///     `libncurses`) is rejected with exit 1 and the registry is unchanged — the
+///     all-or-nothing transactional guarantee.
+pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const MAN_PATH: &str = "/tmp/pkg-manifest.txt";
+    const MAN_ARG: &[u8] = b"/tmp/pkg-manifest.txt";
+    // Reverse dependency order on purpose: grep depends on coreutils+libc, which
+    // appear on *later* lines.  Merge-then-validate must still accept it.
+    const MAN_GOOD: &[u8] =
+        b"grep 0f4143a6 libc,coreutils\ncoreutils 1ee068f8 libc\nlibc 86732e22 -\n";
+    // `editor` depends on `libncurses`, which is nowhere in the registry.
+    const MAN_BAD: &[u8] = b"editor deadbeef libncurses\n";
+
+    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-pkg",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        for p in [DB_PATH, MAN_PATH] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+
+    // Read the registry back and check a record substring is / isn't present.
+    fn db_has(needle: &[u8]) -> KernelResult<bool> {
+        let db = crate::fs::Vfs::read_file(DB_PATH)?;
+        Ok(db.windows(needle.len()).any(|w| w == needle))
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) transactional `batch` test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+
+    // --- Part 1: satisfiable batch (reverse order) installs all three. ---
+    if let Err(e) = crate::fs::Vfs::write_file(MAN_PATH, MAN_GOOD) {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not stage good manifest — {:?}", e);
+        return Err(e);
+    }
+    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
+        Ok(0) => {}
+        Ok(code) => {
+            cleanup();
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg `batch (good)` exited {} (expected 0)",
+                code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-pkg `batch (good)` — {:?}", e);
+            return Err(e);
+        }
+    }
+    let all_installed = match (
+        db_has(b"libc 86732e22 -"),
+        db_has(b"coreutils 1ee068f8 libc"),
+        db_has(b"grep 0f4143a6 libc,coreutils"),
+    ) {
+        (Ok(a), Ok(b), Ok(c)) => a && b && c,
+        _ => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not read back {} after good batch", DB_PATH);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if !all_installed {
+        cleanup();
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg batch (good) did not install all three records"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Part 2: unsatisfiable batch is rejected AND leaves the registry as-is. ---
+    if let Err(e) = crate::fs::Vfs::write_file(MAN_PATH, MAN_BAD) {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not stage bad manifest — {:?}", e);
+        return Err(e);
+    }
+    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
+        Ok(1) => {}
+        Ok(code) => {
+            cleanup();
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg `batch (bad)` exited {} (expected 1)",
+                code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-pkg `batch (bad)` — {:?}", e);
+            return Err(e);
+        }
+    }
+    // Registry must be untouched: editor absent, the three still present.
+    let untouched = match (db_has(b"editor"), db_has(b"grep 0f4143a6 libc,coreutils")) {
+        (Ok(has_editor), Ok(has_grep)) => !has_editor && has_grep,
+        _ => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not read back {} after bad batch", DB_PATH);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    cleanup();
+
+    if !untouched {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg batch (bad) mutated the registry (transaction not atomic)"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: transactional `batch` — reverse-order manifest \
+         installs all three (intra-batch deps resolve order-independently, exit 0), unsatisfiable \
+         manifest rejected leaving registry untouched (exit 1)): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

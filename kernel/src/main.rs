@@ -1679,6 +1679,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the fastpy package manager's transactional `batch`
+    // subcommand: a satisfiable reverse-order manifest installs all packages
+    // (exit 0), and an unsatisfiable one is rejected leaving the registry
+    // untouched (exit 1) — the all-or-nothing guarantee.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_batch() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` batch (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

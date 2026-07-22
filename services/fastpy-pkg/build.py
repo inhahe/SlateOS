@@ -26,6 +26,21 @@ is a comma-separated list of dependency package names, or `-` for none:
         file-unlink, and orphan blobs are harmless in a content-addressed store —
         a future `gc` subcommand can reclaim unreferenced blobs.)
 
+    pkg batch <manifest-path>
+        **transactional multi-package registry install.**  The manifest is one
+        "<name> <digest> <deps>" record per line (content blobs are already in
+        the store — this operates on the registry, the part that needs
+        transactionality; content-addressed blobs are immutable and stored
+        beforehand via install/store).  Every record is merged onto the current
+        registry (upserting existing names), then the *entire resulting registry*
+        is dependency-checked: if any record's declared dependency is unsatisfied
+        the registry is **left completely untouched** and it prints
+        "unsatisfied <dep>" + exit 1 (all-or-nothing — a batch with one bad dep
+        installs nothing).  Otherwise the merged registry is written atomically
+        (one write) and it prints "batch ok" + exit 0.  Because all lines are
+        merged before validation, intra-batch dependencies resolve regardless of
+        line order.
+
     pkg remove <name>
         drop the named record from the registry (read-modify-write).  Prints
         "removed <name>" + exit 0 if it was present, else "not found <name>" +
@@ -307,6 +322,46 @@ SRC = (
     "            acc = acc * 10 + (ch - 48)\n"
     "        i = i + 1\n"
     "    return acc\n"
+    # Apply every "<name> <digest> <deps>" line of a manifest onto `db`,
+    # upserting each record (later lines / existing records replaced), and
+    # return the merged registry.  Pure string ops only (no file I/O), so this
+    # is safe to run in a helper; the caller decides whether to persist it.
+    "def apply_batch(db: str, man: str) -> str:\n"
+    "    n = len(man)\n"
+    "    i = 0\n"
+    "    line = ''\n"
+    "    out = db\n"
+    "    while i <= n:\n"
+    "        if i == n or ord(man[i]) == 10:\n"
+    "            if len(line) > 0:\n"
+    "                nm = field(line, 0)\n"
+    "                dg = field(line, 1)\n"
+    "                dp = field(line, 2)\n"
+    "                out = db_remove(out, nm)\n"
+    "                out = out + nm + ' ' + dg + ' ' + dp + chr(10)\n"
+    "            line = ''\n"
+    "        else:\n"
+    "            line = line + man[i]\n"
+    "        i = i + 1\n"
+    "    return out\n"
+    # Return the first unsatisfied dependency anywhere in `db` ('' if the whole
+    # registry is dependency-consistent): every record's declared deps must
+    # resolve to an installed record.
+    "def batch_validate(db: str) -> str:\n"
+    "    n = len(db)\n"
+    "    i = 0\n"
+    "    line = ''\n"
+    "    while i <= n:\n"
+    "        if i == n or ord(db[i]) == 10:\n"
+    "            if len(line) > 0:\n"
+    "                miss = missing_dep(db, field(line, 2))\n"
+    "                if len(miss) > 0:\n"
+    "                    return miss\n"
+    "            line = ''\n"
+    "        else:\n"
+    "            line = line + db[i]\n"
+    "        i = i + 1\n"
+    "    return ''\n"
     "cmd = sys.argv[1]\n"
     "db_path = '/tmp/pkgdb.txt'\n"
     "if cmd == 'install':\n"
@@ -346,6 +401,24 @@ SRC = (
     "        sys.exit(0)\n"
     "    print('not found ' + name)\n"
     "    sys.exit(1)\n"
+    "if cmd == 'batch':\n"
+    "    man_path = sys.argv[2]\n"
+    "    f = open(man_path, 'r')\n"
+    "    man = f.read()\n"
+    "    f.close()\n"
+    "    f = open(db_path, 'r')\n"
+    "    db = f.read()\n"
+    "    f.close()\n"
+    "    newdb = apply_batch(db, man)\n"
+    "    miss = batch_validate(newdb)\n"
+    "    if len(miss) > 0:\n"
+    "        print('unsatisfied ' + miss)\n"
+    "        sys.exit(1)\n"
+    "    f = open(db_path, 'w')\n"
+    "    f.write(newdb)\n"
+    "    f.close()\n"
+    "    print('batch ok')\n"
+    "    sys.exit(0)\n"
     "if cmd == 'upgrade':\n"
     "    name = sys.argv[2]\n"
     "    src_path = sys.argv[3]\n"
@@ -491,7 +564,7 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|upgrade|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
+    "print('usage: pkg install|upgrade|batch|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

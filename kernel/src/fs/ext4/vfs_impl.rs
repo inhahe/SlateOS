@@ -421,7 +421,12 @@ impl FileSystem for Ext4Fs {
     }
 
     fn rmdir(&mut self, path: &str) -> KernelResult<()> {
-        let ino = self.driver.resolve_path(path)?;
+        // Like `unlink`, `rmdir(2)` never dereferences a trailing symlink:
+        // resolving with follow would let `rmdir("symlink-to-dir")` destroy the
+        // *target* directory while unlinking the symlink's name.  Resolve
+        // no-follow so a final symlink reads as `S_IFLNK` and is rejected with
+        // `NotADirectory` (ENOTDIR), matching POSIX.
+        let ino = self.driver.resolve_path_no_follow(path)?;
         let inode = self.driver.read_inode(ino)?;
 
         // Must be a directory.
@@ -475,8 +480,14 @@ impl FileSystem for Ext4Fs {
     }
 
     fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
-        // Resolve the source inode.
-        let src_ino = self.driver.resolve_path(from)?;
+        // `rename(2)` never dereferences a trailing symlink on either operand:
+        // it renames the *symlink itself* (and replaces an existing symlink
+        // destination, not its target).  Resolve the final components no-follow
+        // — following would rename/replace the wrong inode and mis-stamp the
+        // re-inserted dir entry's type byte (the `S_IFLNK` arm below).  Parent
+        // directories are still resolved with follow (correct: the path *to* a
+        // parent follows intermediate symlinks).
+        let src_ino = self.driver.resolve_path_no_follow(from)?;
         let src_inode = self.driver.read_inode(src_ino)?;
         let src_mode = src_inode.i_mode & file_type::S_IFMT;
 
@@ -490,7 +501,7 @@ impl FileSystem for Ext4Fs {
 
         // POSIX rename semantics: if the destination already exists and is a
         // regular file, replace it.  If it's a directory, return error.
-        if let Ok(dest_ino) = self.driver.resolve_path(to) {
+        if let Ok(dest_ino) = self.driver.resolve_path_no_follow(to) {
             let dest_inode = self.driver.read_inode(dest_ino)?;
             let dest_mode = dest_inode.i_mode & file_type::S_IFMT;
             if dest_mode == file_type::S_IFDIR {

@@ -9433,6 +9433,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
     const LINK: &str = "/mnt/nfl-link";
     const HL_NOFOLLOW: &str = "/mnt/nfl-hl-nofollow";
     const HL_FOLLOW: &str = "/mnt/nfl-hl-follow";
+    const RENAMED: &str = "/mnt/nfl-renamed";
 
     serial_println!("[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...");
 
@@ -9454,6 +9455,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
             }
         }
     };
+    drain(RENAMED);
     drain(HL_FOLLOW);
     drain(HL_NOFOLLOW);
     drain(LINK);
@@ -9471,6 +9473,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
     }
 
     let cleanup = || {
+        drain(RENAMED);
         drain(HL_FOLLOW);
         drain(HL_NOFOLLOW);
         drain(LINK);
@@ -9530,10 +9533,47 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
         }
     }
 
+    // (c) rmdir on a symlink must NOT follow it: POSIX requires ENOTDIR
+    // (the symlink itself is not a directory), and the link must survive.
+    match Vfs::rmdir(LINK) {
+        Err(KernelError::NotADirectory) => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: rmdir(symlink) should be NotADirectory, got {:?}",
+                other
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+    if Vfs::readlink(LINK).as_deref() != Ok(TARGET) {
+        serial_println!("[spawn]   FAIL: rmdir(symlink) destroyed the link");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // (d) rename of a symlink renames the LINK itself (not its target): the
+    // new name must still be a symlink to TARGET, and the old name must be gone.
+    if let Err(e) = Vfs::rename(LINK, RENAMED) {
+        serial_println!("[spawn]   FAIL: rename(symlink) returned {:?}", e);
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if Vfs::readlink(RENAMED).as_deref() != Ok(TARGET) {
+        serial_println!("[spawn]   FAIL: rename(symlink) did not preserve the link");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if Vfs::exists(LINK) || Vfs::lmetadata(LINK).is_ok() {
+        serial_println!("[spawn]   FAIL: rename(symlink) left the old name behind");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
     cleanup();
     serial_println!(
         "[spawn]   link()/linkat no-follow: OK (no-follow hard-links the symlink inode; \
-         follow hard-links the target file)"
+         follow hard-links the target file; rmdir/rename honour no-follow)"
     );
     Ok(())
 }

@@ -8315,6 +8315,24 @@ link count). The self-test's `drain` now removes fixtures via `Vfs::remove`
 (no-follow) in a loop rather than an `exists` guard (which follows symlinks and
 would skip a dangling symlink).
 
+**Same bug class in `rmdir`/`rename` — fixed (2026-07-22):** `Ext4Fs::rmdir` and
+`Ext4Fs::rename` had the identical defect: both re-resolved their final operands
+with `driver.resolve_path` (FOLLOW) even though the VFS layer already resolves
+no-follow. Per POSIX neither call dereferences a trailing symlink: `rmdir(2)` on
+a symlink must return `ENOTDIR` (the symlink itself is not a directory, and
+following it would let it destroy the *target* directory while unlinking the
+symlink's name), and `rename(2)` renames the *symlink itself* on either operand
+(and replaces an existing symlink destination, not its target) — following would
+rename/replace the wrong inode and mis-stamp the re-inserted dirent's type byte.
+Both were changed to `resolve_path_no_follow` for the final components (parents
+still resolved with follow — the path *to* a parent correctly follows
+intermediate symlinks). The ext4 no-follow self-test
+(`self_test_ext4_link_no_follow`) was extended with regression steps: (c)
+`rmdir(symlink)` must return `NotADirectory` and leave the link intact, and (d)
+`rename(symlink)` must preserve the link (new name still a symlink to the target)
+and leave no old name behind. Boot-verified green:
+`link()/linkat no-follow: OK (... rmdir/rename honour no-follow)`.
+
 **Follow-up — `utimensat`/`utimes`/`utime` now wired (2026-06-16):** see
 B-UTIME1 below.
 

@@ -1845,6 +1845,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-getppid`: os.getppid() → getppid() →
+    // SYS_PROCESS_PARENT_ID — a sibling of getpid exercising the *process-
+    // parentage* syscall (a distinct kernel path from self-identity). A
+    // kernel-spawned (parent=0) process reparents to init, so the tool must
+    // report parent PID 1 — distinct from its own PID, proving it reached the
+    // parent syscall and not SYS_PROCESS_ID.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getppid() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `getppid` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

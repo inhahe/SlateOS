@@ -9598,6 +9598,163 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-getppid` utility — a sibling of
+/// `fastpy-getpid` that exercises the **process-parentage** syscall.
+///
+/// Where `fastpy-getpid` asks the kernel about the caller's own identity
+/// (`SYS_PROCESS_ID`), this asks about its *relationship to another process* —
+/// its parent — via a distinct kernel path: `os.getppid()` lowers to native
+/// `fastpy_os_getppid` → posix `getppid()` → kernel `SYS_PROCESS_PARENT_ID`.
+///
+/// False-pass-proof: the harness spawns the tool with `parent = 0` (like every
+/// other ring-3 self-test).  `SYS_PROCESS_PARENT_ID` returns 0 for a process
+/// with no recorded parent, and posix `getppid()` applies the POSIX
+/// reparent-to-init convention (0 → 1), so a correct round-trip yields
+/// **exactly 1**.  This cleanly distinguishes the parent syscall from the self
+/// syscall: had the lowering mistakenly called `getpid` (or otherwise reported
+/// the caller's own PID), the tool would have written the large kernel-assigned
+/// PID, not 1 → the `== 1` assertion fails.  So the test proves `os.getppid()`
+/// is wired to `SYS_PROCESS_PARENT_ID`, not `SYS_PROCESS_ID`.
+pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
+    static FASTPY_GETPPID_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-getppid/fastpy-getppid.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `getppid` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETPPID_ELF.len()
+    );
+
+    // The tool writes its parent PID here (native open('w')/write → SYS_FS_*);
+    // removed up front so a stale value from a prior boot can't masquerade as
+    // this run's output.
+    const OUT_PATH: &str = "/tmp/fastpy-getppid.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE), mirroring the other file-writing ring-3 tools.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-getppid"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-getppid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_GETPPID_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-getppid spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The tool does no blocking work, so a bounded yield loop suffices.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getppid (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.getppid may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (getppid() > 0).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getppid (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.getppid() returned <= 0)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the parent PID the tool wrote must be exactly
+    // 1 — the reparent-to-init result of SYS_PROCESS_PARENT_ID for a
+    // kernel-spawned (parent = 0) process.  Any other value (notably the
+    // caller's own large PID) means os.getppid() did not reach the parent path.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getppid (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the reported parent PID",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // Parse the leading run of ASCII decimal digits (the tool writes the bare
+    // decimal parent PID).
+    let mut reported_ppid: u64 = 0;
+    let mut saw_digit = false;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            reported_ppid = reported_ppid
+                .saturating_mul(10)
+                .saturating_add(u64::from(b - b'0'));
+        } else if saw_digit {
+            break;
+        }
+    }
+
+    if !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getppid (ring 3) — output file held no decimal PID \
+             ({} bytes); os.getppid()/open/write may not have run",
+            written.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if reported_ppid != 1 {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getppid (ring 3) — tool reported parent PID {} but a \
+             kernel-spawned (parent=0) process must reparent to init (ppid 1); os.getppid() \
+             did not reach SYS_PROCESS_PARENT_ID (its own PID was {})",
+            reported_ppid, result.pid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `getppid` (ring 3: os.getppid() → getppid() → \
+         SYS_PROCESS_PARENT_ID; the kernel-spawned tool correctly reported reparent-to-init \
+         parent PID 1, distinct from its own PID {}): OK",
+        result.pid
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

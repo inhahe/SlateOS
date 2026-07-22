@@ -1735,6 +1735,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the fastpy `ftype` utility: reads st_mode's file-type bits
+    // (os.path.isfile/isdir → SYS_FS_STAT) rather than st_size, and doubles as
+    // an on-target regression test that chained os.path.X(...) lowers natively
+    // in assignment form (the codegen fix that shipped with fastpy-size).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_ftype() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `ftype` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

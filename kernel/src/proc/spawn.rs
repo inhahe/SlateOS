@@ -7914,6 +7914,139 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-on-SlateOS `ftype` utility.
+///
+/// Where `fastpy-size` read only `st_size` from the file metadata, this reads
+/// the **file-type bits of `st_mode`**: `ftype <path>` classifies the entry
+/// named by `argv[1]` via `os.path.isfile`/`os.path.isdir` (both → posix
+/// `stat()` → `SYS_FS_STAT`, applying `S_ISREG`/`S_ISDIR` to `st_mode`) and
+/// exits 0 (regular file) / 1 (directory) / 2 (neither).  It is the first
+/// fastpy tool to depend on the posix libc populating `st_mode`'s type bits
+/// from the kernel `fsstat` `entry_type` (`posix/src/stat.rs::fill_from_fsstat`).
+///
+/// It doubles as an on-target regression test for the codegen fix that shipped
+/// with `fastpy-size`: the `os.path.is{file,dir}(p)` calls are in *assignment*
+/// form, which previously bridged chained `os.path.X(...)` to the (pure-mode
+/// stubbed) CPython bridge; building/running it bridge-free proves the fix
+/// generalizes past `getsize`.
+///
+/// The harness stages a regular file and a directory under `/tmp`, runs `ftype`
+/// against each plus a nonexistent path, and asserts the exit codes 0 / 1 / 2 —
+/// so the type distinction flows through the exit code and a stat that ignored
+/// `st_mode` could not false-pass.  `SYS_FS_STAT` gates on `Rights::METADATA`.
+pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
+    static FASTPY_FTYPE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-ftype/fastpy-ftype.elf");
+
+    const FTYPE_FILE: &str = "/tmp/ftype-file.txt";
+    const FTYPE_FILE_ARG: &[u8] = b"/tmp/ftype-file.txt";
+    const FTYPE_DIR: &str = "/tmp/ftype-dir";
+    const FTYPE_DIR_ARG: &[u8] = b"/tmp/ftype-dir";
+    const FTYPE_MISSING_ARG: &[u8] = b"/tmp/ftype-nope";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `ftype` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_FTYPE_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(FTYPE_FILE);
+        let _ = crate::fs::Vfs::rmdir(FTYPE_DIR);
+    };
+    cleanup();
+
+    // Stage a regular file and a directory to classify.
+    if let Err(e) = crate::fs::Vfs::write_file(FTYPE_FILE, b"regular\n") {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", FTYPE_FILE, e);
+        return Err(e);
+    }
+    if let Err(e) = crate::fs::Vfs::mkdir_all(FTYPE_DIR) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", FTYPE_DIR, e);
+        cleanup();
+        return Err(e);
+    }
+
+    // os.path.is{file,dir} → SYS_FS_STAT, which gates on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::METADATA,
+    )];
+
+    // Run `ftype <arg>` once; return the exit code, or None if it failed to
+    // spawn or never became a Zombie (the caller distinguishes those from a
+    // wrong-but-valid exit code).
+    let run = |arg: &[u8]| -> Option<i32> {
+        let argv: &[&[u8]] = &[b"fastpy-ftype", arg];
+        let envp: &[&[u8]] = &[];
+        let options = SpawnOptions {
+            name: "fastpy-ftype",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(FASTPY_FTYPE_ELF, &options).ok()?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie {
+            return None;
+        }
+        code
+    };
+
+    let file_code = run(FTYPE_FILE_ARG);
+    let dir_code = run(FTYPE_DIR_ARG);
+    let missing_code = run(FTYPE_MISSING_ARG);
+
+    cleanup();
+
+    if file_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftype (ring 3) — expected exit 0 for a regular file, got {:?} \
+             (os.path.isfile / SYS_FS_STAT st_mode type bits wrong)",
+            file_code
+        );
+        return Err(KernelError::InternalError);
+    }
+    if dir_code != Some(1) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftype (ring 3) — expected exit 1 for a directory, got {:?} \
+             (os.path.isdir / SYS_FS_STAT st_mode type bits wrong)",
+            dir_code
+        );
+        return Err(KernelError::InternalError);
+    }
+    if missing_code != Some(2) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftype (ring 3) — expected exit 2 for a missing path, got {:?}",
+            missing_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `ftype` (ring 3: file-type via os.path.isfile/isdir → \
+         SYS_FS_STAT st_mode; regular file → 0, directory → 1, missing → 2, all verified): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

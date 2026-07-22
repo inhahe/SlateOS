@@ -9911,6 +9911,142 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-pipe` utility — the first fastpy tool
+/// to exercise the kernel **pipe subsystem** and raw integer fds.
+///
+/// Every other fastpy tool uses high-level `open()`/file-object I/O, which hits
+/// the filesystem syscalls.  This one creates a kernel pipe via `os.pipe()` →
+/// posix `pipe()` → `SYS_PIPE_CREATE`, then round-trips a message through it
+/// with raw-fd I/O: `os.write(w, msg)` → `SYS_PIPE_WRITE` and
+/// `os.read(r, n)` → `SYS_PIPE_READ` (posix `write`/`read` dispatch by fd kind),
+/// closing both ends with `os.close()`.  `SYS_PIPE_CREATE` is a genuinely
+/// distinct kernel path untouched by any prior fastpy tool.
+///
+/// False-pass-proof: the harness knows the exact constant the tool sends
+/// (`"PIPE_OK"`) and asserts the file the tool wrote back contains exactly that.
+/// Because the write end and read end are *separate* fds connected only by the
+/// kernel pipe buffer, the bytes can only come back correct if `SYS_PIPE_CREATE`
+/// really wired a kernel pipe and `write`/`read` really moved data through it —
+/// there is no userspace echo path a mis-lowering could fake.
+pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
+    static FASTPY_PIPE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pipe/fastpy-pipe.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pipe` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_PIPE_ELF.len()
+    );
+
+    // The message the tool round-trips through the pipe and writes back to the
+    // output file.  Must match the `msg` constant in the tool's build.py.
+    const EXPECTED: &[u8] = b"PIPE_OK";
+
+    // The tool writes the round-tripped message here (native open('w')/write);
+    // removed up front so a stale value from a prior boot can't masquerade as
+    // this run's output.
+    const OUT_PATH: &str = "/tmp/fastpy-pipe.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE).  Pipe creation (SYS_PIPE_CREATE) needs no capability.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-pipe"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-pipe",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_PIPE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-pipe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The tool does no unbounded blocking (the pipe write fits the buffer and
+    // the read is immediately satisfiable), so a bounded yield loop suffices.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipe (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.pipe/read/write may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (round-trip matched).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipe (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = the bytes read back from the pipe did not match what was written)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the bytes the tool wrote back must be exactly
+    // the constant it round-tripped through the kernel pipe.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pipe (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the round-tripped message",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipe (ring 3) — round-tripped message was {:?}, expected \
+             {:?}; the kernel pipe did not deliver the bytes intact (SYS_PIPE_CREATE / \
+             SYS_PIPE_WRITE / SYS_PIPE_READ path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pipe` (ring 3: os.pipe() → SYS_PIPE_CREATE, \
+         os.write/os.read → SYS_PIPE_WRITE/READ; the tool round-tripped {} bytes through a \
+         kernel pipe intact): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

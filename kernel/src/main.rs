@@ -1871,6 +1871,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-pipe`: os.pipe() → SYS_PIPE_CREATE plus raw-fd
+    // os.write/os.read → SYS_PIPE_WRITE/READ — the first fastpy tool to touch
+    // the kernel pipe subsystem *and* raw integer fds. The harness knows the
+    // exact constant ("PIPE_OK") the tool round-trips through a kernel pipe and
+    // asserts the file it wrote back holds exactly that. Since the write and
+    // read ends are separate fds joined only by the kernel pipe buffer, a
+    // correct round-trip can't be faked by any userspace echo path.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipe() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pipe` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

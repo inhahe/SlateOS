@@ -8129,7 +8129,7 @@ fn kill_process_group(
     if any_ok {
         SyscallResult::ok(0)
     } else {
-        SyscallResult { value: last_err, value2: 0 }
+        SyscallResult { value: last_err, value2: 0, has_value2: false }
     }
 }
 

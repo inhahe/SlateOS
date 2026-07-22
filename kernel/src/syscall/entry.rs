@@ -363,7 +363,26 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // RAX with the original syscall number — the SYSRET path below reloads the
     // original argument registers from the frame).  Any sentinel that is not
     // restarted is converted to -EINTR so it can never leak to ring 3.
-    super::linux::resolve_syscall_restart(f, result.value)
+    let rax = super::linux::resolve_syscall_restart(f, result.value);
+
+    // Deliver a second return value in RDX for two-value syscalls
+    // (e.g. SYS_PIPE_CREATE / SYS_CHANNEL_CREATE, which return a pair of
+    // handles).  The exit stub restores RDX from `f.arg2`, so overwriting
+    // that slot places `value2` into the user's RDX.  We do this *after*
+    // `resolve_syscall_restart` so a restart (which rewinds RIP and needs
+    // the original RDX arg intact) is never corrupted — but `has_value2`
+    // is only ever set by `ok2`, a success path that is never a restart
+    // sentinel, so the two never collide in practice.  Single-value
+    // syscalls leave `f.arg2` untouched, preserving the user's RDX across
+    // the call as the SysV/musl calling convention requires.
+    if result.has_value2 {
+        #[allow(clippy::cast_sign_loss)]
+        {
+            f.arg2 = result.value2 as u64;
+        }
+    }
+
+    rax
 }
 
 // ---------------------------------------------------------------------------

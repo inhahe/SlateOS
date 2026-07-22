@@ -174,19 +174,32 @@ pub struct SyscallResult {
     pub value: i64,
     /// Secondary return value (`rdx`).  Usually 0.
     pub value2: i64,
+    /// Whether `value2` is a real second return value that must be
+    /// delivered to userspace in `rdx`.  Only set by [`SyscallResult::ok2`].
+    ///
+    /// This discriminant exists because the native SYSCALL exit path
+    /// *preserves* the user's `rdx` (arg2) across a normal syscall — the
+    /// SysV/musl convention callers rely on.  Unconditionally writing
+    /// `value2` into `rdx` would clobber it for every single-value
+    /// syscall.  Only when `has_value2` is set does the return path
+    /// overwrite the frame's `rdx` slot, so two-value syscalls (e.g.
+    /// `SYS_PIPE_CREATE`, `SYS_CHANNEL_CREATE`) deliver their second
+    /// handle without regressing the RDX-preserved guarantee for the
+    /// rest.
+    pub has_value2: bool,
 }
 
 impl SyscallResult {
     /// Success with a single return value.
     #[must_use]
     pub const fn ok(value: i64) -> Self {
-        Self { value, value2: 0 }
+        Self { value, value2: 0, has_value2: false }
     }
 
-    /// Success returning two values.
+    /// Success returning two values (`value` in `rax`, `value2` in `rdx`).
     #[must_use]
     pub const fn ok2(value: i64, value2: i64) -> Self {
-        Self { value, value2 }
+        Self { value, value2, has_value2: true }
     }
 
     /// Error result.
@@ -197,6 +210,7 @@ impl SyscallResult {
         Self {
             value: e.code() as i64,
             value2: 0,
+            has_value2: false,
         }
     }
 }

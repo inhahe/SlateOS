@@ -102,6 +102,7 @@ use super::number::{
     SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
     SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
+    SYS_SET_FS_BASE,
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
     SYS_SEM_WAIT_TIMEOUT,
@@ -441,6 +442,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_THREAD_SUSPEND as usize] = Some(handlers::sys_thread_suspend);
     handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
     handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
+    handlers[SYS_SET_FS_BASE as usize] = Some(handlers::sys_set_fs_base);
     handlers[SYS_PROCESS_CRASH_INFO as usize] = Some(handlers::sys_process_crash_info);
 
     // Filesystem — path-based (600–609).

@@ -6096,6 +6096,115 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that a **native fastpy-compiled binary** boots and
+/// runs to a clean exit on SlateOS — the on-target validation of initiative
+/// F's "first real component" milestone.
+///
+/// The embedded ELF (`services/fastpy-hello/fastpy-hello.elf`) is produced by
+/// the fastpy AOT compiler (`toolchain.compile_ir_to_obj` +
+/// `link_executable` with `target=SLATEOS_TARGET`) from a small Python
+/// program.  It is linked against the OS's own `posix` `libc.a` and uses the
+/// **native** syscall ABI (not the Linux shim).
+///
+/// The reason this test exists — and why it is the gate for the milestone —
+/// is TLS.  The fastpy C runtime declares compiler thread-locals
+/// (`FPY_THREAD_LOCAL __thread`), which the compiler lowers to `%fs:offset`
+/// accesses, and the emitted ELF therefore carries a `PT_TLS` segment.  A
+/// native static binary gets **no thread pointer** from the kernel (exec
+/// zeroes `fs_base`) and has no aux vector to discover `PT_TLS`, so without
+/// the crt's main-thread TLS setup (see `posix/src/crt.rs
+/// ::setup_main_thread_tls`, which walks the program headers via
+/// `__ehdr_start` and installs the thread pointer through the native
+/// `SYS_SET_FS_BASE` syscall) the very first `__thread` access — or the
+/// stack-protector canary at `%fs:0x28` — faults immediately.
+///
+/// Reaching the `Zombie` state therefore proves the whole path worked: the
+/// crt found `PT_TLS`, laid out the variant-II TLS block + TCB, called
+/// `SYS_SET_FS_BASE`, and the runtime then executed `__thread`-using code all
+/// the way to `exit(0)`.  A fault in TLS setup would instead leave the
+/// process killed in a non-zombie state (or exiting with a fault code).
+pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
+    // The fastpy-compiled Python program: builds a list, sums it, prints.
+    // `print` writes to fd 1, which a native process has no console handle
+    // for — the write silently fails, which is fine: we are testing that the
+    // program *runs* (TLS + syscalls), not console plumbing.  Its normal
+    // completion yields exit code 0.
+    static FASTPY_HELLO_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-hello/fastpy-hello.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS TLS (ring 3) integration test ({} bytes ELF)...",
+        FASTPY_HELLO_ELF.len()
+    );
+
+    let argv: &[&[u8]] = &[b"fastpy-hello"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-hello",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_HELLO_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-hello spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // A fastpy binary does real work (runtime init, GC, the loop) before
+    // exiting, so it needs many more scheduler slices than a 3-instruction
+    // exit stub.  Yield until it becomes a zombie, bounded so a hang can't
+    // wedge the boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-hello (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state means the fastpy runtime faulted, most likely on its first %fs-relative \
+             __thread access because main-thread ELF TLS was not set up)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-hello (ring 3) — reached Zombie (so TLS setup worked) but \
+             exit code was {:?}, expected 0",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS TLS (ring 3: native fastpy binary set up main-thread \
+         ELF TLS via SYS_SET_FS_BASE and ran to exit(0)): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

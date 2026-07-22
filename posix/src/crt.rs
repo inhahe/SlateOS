@@ -572,7 +572,138 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
 }
 
 /// C runtime entry point (glibc convention).
+/// Set up main-thread ELF TLS for a native static binary.
 ///
+/// On x86-64 the psABI's variant-II TLS model requires the thread pointer
+/// (`%fs` base) to point at a *thread control block* (TCB) whose first
+/// word self-points, with each module's static TLS block laid out
+/// *immediately below* the thread pointer.  A Linux/glibc crt sets this up
+/// during startup after reading `PT_TLS` from the aux vector.  A **native**
+/// SlateOS static binary gets neither: the kernel zeroes `fs_base` at exec
+/// (expecting userspace to install TLS), and there is no aux vector to
+/// discover `PT_TLS`.  Any compiler `__thread` access (e.g. fastpy's
+/// runtime, which lowers `__thread` to `%fs:offset`) — and even the
+/// stack-protector canary at `%fs:0x28` — would then fault on a null
+/// thread pointer.
+///
+/// This routine reconstructs what the aux vector would have told us by
+/// walking the program headers directly through the linker-defined
+/// `__ehdr_start` symbol (present in static non-PIE links), locating the
+/// `PT_TLS` segment, allocating a block + TCB, copying the `.tdata` init
+/// image and relying on the anonymous mapping's zero-fill for the `.tbss`
+/// tail, writing the TCB self-pointer, and finally installing the thread
+/// pointer via the native `SYS_SET_FS_BASE` syscall (the counterpart of
+/// Linux `arch_prctl(ARCH_SET_FS)`).  If the program has no `PT_TLS` we
+/// still install a minimal TCB so the self-pointer and canary slot are
+/// valid.  Called once, very early in `__libc_start_main`, before any code
+/// that might touch TLS.
+///
+/// Only the main thread is handled here; child threads created via
+/// `pthread_create` get their own TLS setup in the thread-spawn path
+/// (see `posix/src/pthread.rs`).
+///
+/// # Safety
+///
+/// Must be called exactly once at process startup, before any `__thread`
+/// access or stack-protected function runs.  Reads the program's own ELF
+/// header and `PT_TLS` init image, which are always mapped in a static
+/// executable.
+#[cfg(target_os = "none")]
+unsafe fn setup_main_thread_tls() {
+    use crate::syscall::{syscall6, SYS_MMAP, SYS_SET_FS_BASE};
+
+    // Linker-defined: address of the ELF header of this executable.  In a
+    // static non-PIE link this resolves to the load address of the file's
+    // Elf64_Ehdr, letting us find the program headers without an aux vector.
+    unsafe extern "C" {
+        static __ehdr_start: u8;
+    }
+
+    let round_up = |v: u64, a: u64| -> u64 { (v + (a - 1)) & !(a - 1) };
+
+    let ehdr = core::ptr::addr_of!(__ehdr_start);
+    // Elf64_Ehdr field offsets: e_phoff @0x20 (u64), e_phentsize @0x36
+    // (u16), e_phnum @0x38 (u16).  Use unaligned reads — the header is a
+    // packed byte layout at a symbol address of unknown alignment.
+    let e_phoff = unsafe { core::ptr::read_unaligned(ehdr.add(0x20).cast::<u64>()) };
+    let e_phentsize =
+        unsafe { core::ptr::read_unaligned(ehdr.add(0x36).cast::<u16>()) } as usize;
+    let e_phnum = unsafe { core::ptr::read_unaligned(ehdr.add(0x38).cast::<u16>()) } as usize;
+
+    // Scan program headers for PT_TLS (p_type == 7).
+    const PT_TLS: u32 = 7;
+    let mut tls_vaddr: u64 = 0;
+    let mut tls_filesz: u64 = 0;
+    let mut tls_memsz: u64 = 0;
+    let mut tls_align: u64 = 0;
+    let phbase = unsafe { ehdr.add(e_phoff as usize) };
+    for i in 0..e_phnum {
+        let ph = unsafe { phbase.add(i * e_phentsize) };
+        // Elf64_Phdr: p_type@0 (u32), p_vaddr@16, p_filesz@32, p_memsz@40,
+        // p_align@48 (all u64).
+        let p_type = unsafe { core::ptr::read_unaligned(ph.cast::<u32>()) };
+        if p_type == PT_TLS {
+            tls_vaddr = unsafe { core::ptr::read_unaligned(ph.add(16).cast::<u64>()) };
+            tls_filesz = unsafe { core::ptr::read_unaligned(ph.add(32).cast::<u64>()) };
+            tls_memsz = unsafe { core::ptr::read_unaligned(ph.add(40).cast::<u64>()) };
+            tls_align = unsafe { core::ptr::read_unaligned(ph.add(48).cast::<u64>()) };
+            break;
+        }
+    }
+
+    // Alignment: at least 16 bytes (TCB/ABI), honoring a larger PT_TLS
+    // request.  tls_size (the block below TP) is rounded to this alignment
+    // so that, with a page-aligned base, TP - tls_size stays aligned.
+    let align = core::cmp::max(if tls_align == 0 { 1 } else { tls_align }, 16);
+    let tls_size = round_up(tls_memsz, align);
+    // TCB above TP: only the self-pointer (offset 0) and stack-protector
+    // canary (offset 0x28) slots are architecturally required; reserve a
+    // small, aligned TCB covering both.
+    let tcb_size: u64 = 0x40;
+
+    // Allocate TLS block + TCB (+ alignment slack) as an anonymous, zeroed,
+    // private mapping.  PROT_READ|PROT_WRITE = 3, MAP_PRIVATE|MAP_ANONYMOUS
+    // = 0x22, fd = -1.
+    let total = tls_size + tcb_size + align;
+    let base = syscall6(SYS_MMAP, 0, total, 3, 0x22, u64::MAX, 0);
+    if base < 0 {
+        // Out of memory for TLS: leave fs_base = 0.  A program with no
+        // __thread storage and no stack protector still runs; one that
+        // needs TLS will fault, but there is nothing better we can do here
+        // and startup must not itself depend on TLS.
+        return;
+    }
+    let base_addr = base as u64;
+
+    // Variant II: the thread pointer is aligned, the TLS block occupies
+    // [TP - tls_size, TP), and the TCB occupies [TP, TP + tcb_size).
+    let tp = round_up(base_addr + tls_size, align);
+    let block = (tp - tls_size) as *mut u8;
+
+    // Copy the .tdata initialization image (p_filesz bytes at p_vaddr) to
+    // the bottom of the block; the .tbss remainder is already zero (fresh
+    // anonymous pages).
+    if tls_filesz > 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                tls_vaddr as *const u8,
+                block,
+                tls_filesz as usize,
+            );
+        }
+    }
+
+    // The x86-64 psABI requires %fs:0 to hold the thread pointer itself.
+    unsafe {
+        (tp as *mut u64).write(tp);
+    }
+
+    // Install the thread pointer.  Ignore the (always-0-on-success) return:
+    // if this failed the address was rejected as non-canonical, but `tp`
+    // comes from mmap and is by construction a valid user address.
+    let _ = syscall6(SYS_SET_FS_BASE, tp, 0, 0, 0, 0, 0);
+}
+
 /// Called by `_start` (crt0) with:
 /// - `main`: pointer to the program's main function
 /// - `argc`: argument count (0 from `_start` before kernel arg passing)
@@ -602,6 +733,17 @@ pub unsafe extern "C" fn __libc_start_main(
     _rtld_fini: usize, // Unused (glibc compat).
     _stack_end: *mut u8,
 ) -> ! {
+    // Install main-thread ELF TLS first of all.  The kernel gives a native
+    // static binary a null thread pointer (fs_base = 0) and no aux vector,
+    // so until this runs any compiler `__thread` access — and the
+    // stack-protector canary at %fs:0x28 — would fault.  Everything below
+    // (and `main`) may rely on TLS, so it must be set up before anything
+    // else.  On a host (test) build this is a no-op.
+    #[cfg(target_os = "none")]
+    unsafe {
+        setup_main_thread_tls();
+    }
+
     // Retrieve inherited file descriptors from the kernel.
     // The parent's posix_spawn builds an fd_map and passes it to the
     // kernel; we retrieve it here and reinitialize our fd table.

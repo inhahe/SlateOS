@@ -53606,3 +53606,17 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##       reports the line the command finishes on, osh the line it starts on.
 ##       Niche; would need the command node to record its END line as well as
 ##       its start line. Deferred as very low value.
+
+## TODO (initiative-F / native mprotect) — 2026-07-21
+##   Implement a native SYS_MPROTECT handler (kernel native syscall #22,
+##   reserved in kernel/src/syscall/number.rs). Currently unregistered →
+##   native mprotect() returns NotSupported/ENOTSUP (safe stub). The Linux
+##   ABI mprotect (linux.rs::sys_mprotect, Linux #10) is complete and used by
+##   the Linux compat path; only the *native* ABI lacks a handler.
+##   Preferred fix: factor sys_mprotect's core (mprotect_validate_args +
+##   VMA-coverage gap check + per-4KiB PTE flag walk) into a helper returning
+##   KernelResult, then register a native handler at #22 that returns
+##   KernelError codes so posix errno::translate maps it uniformly. See
+##   known-issues.md TD-NATIVE-MPROTECT. Trigger: when a native binary needs
+##   working mprotect (e.g. a fastpy component that mmaps PROT_NONE then
+##   upgrades, or wants W^X page transitions).

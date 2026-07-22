@@ -1568,6 +1568,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux envp[0] deref (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of a native fastpy-compiled binary (initiative
+    // F's "first real component" milestone).  Spawns a real fastpy AOT
+    // executable linked against our posix libc and runs it to exit(0),
+    // proving the crt sets up main-thread ELF TLS (SYS_SET_FS_BASE) so the
+    // fastpy runtime's `__thread` accesses don't fault.  Bounded yield loop,
+    // so it can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_tls() {
+        serial_println!("WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

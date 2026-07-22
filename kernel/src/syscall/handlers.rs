@@ -8845,6 +8845,50 @@ pub fn sys_thread_set_priority(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_SET_FS_BASE` — set the calling thread's `fs_base` (x86-64 thread
+/// pointer / TLS base).
+///
+/// `arg0`: new base address (must be < 2^47, i.e. a canonical user
+///         address).
+///
+/// Native counterpart of the Linux `arch_prctl(ARCH_SET_FS, addr)` shim
+/// (see `linux::sys_arch_prctl`).  A native static binary gets no thread
+/// pointer at exec (the kernel zeroes `fs_base`, expecting userspace to
+/// set up TLS), and has no aux vector to discover its `PT_TLS` the way a
+/// Linux crt would — so its crt allocates the TLS block + TCB itself and
+/// installs the thread pointer through this syscall.  Writes
+/// `IA32_FS_BASE` and persists the value on the current Task so the
+/// scheduler restores it on every switch-in (the FS base is a global CPU
+/// register not saved in the GP context).
+///
+/// Returns: 0 on success, or `InvalidArgument` if the address is out of
+/// range.
+pub fn sys_set_fs_base(args: &SyscallArgs) -> SyscallResult {
+    // 2^47 — the first non-canonical user address on x86-64 (matches
+    // `linux::USER_FS_BASE_MAX`).  A base at or above this would make
+    // `WRMSR` raise #GP, so reject it as an invalid argument.
+    const USER_FS_BASE_MAX: u64 = 1u64 << 47;
+
+    let addr = args.arg0;
+    if addr >= USER_FS_BASE_MAX {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // SAFETY: IA32_FS_BASE is a documented architectural MSR; `addr` has
+    // been validated to be strictly below 1 << 47, so it is a canonical
+    // user address and `WRMSR` will not raise #GP.  This is exactly what
+    // the Linux arch_prctl(ARCH_SET_FS) path does.
+    unsafe {
+        crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, addr);
+    }
+    // Persist the FS base on the current Task so the scheduler restores it
+    // on every switch-in.  IA32_FS_BASE is a global CPU register not saved
+    // in the GP context; without this, a context switch away and back
+    // would leave this thread's TLS pointer clobbered.
+    sched::set_current_task_fs_base(addr);
+    SyscallResult::ok(0)
+}
+
 // ---------------------------------------------------------------------------
 // io_ring handlers (260–269)
 // ---------------------------------------------------------------------------

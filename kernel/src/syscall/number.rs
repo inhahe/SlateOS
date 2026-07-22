@@ -143,6 +143,29 @@ pub const MAP_LAZY: u64    = 1 << 6;
 /// Returns: 0 on success, negative error.
 pub const SYS_MUNMAP: u64 = 21;
 
+/// Change the protection flags on a range of pages (native mprotect).
+///
+/// **Reserved — no native handler is registered yet.**  The Linux-ABI
+/// mprotect (linux.rs, Linux syscall #10) is fully implemented and used
+/// by the Linux compatibility path; a *native* mprotect that returns
+/// `KernelError` codes (so `errno::translate` in posix works uniformly
+/// with the rest of the native ABI) has not been wired up.  Until it is,
+/// a native `mprotect()` call resolves to this number, finds no handler,
+/// and returns `NotSupported` (→ `ENOTSUP`) — safe and honest.
+///
+/// This number is reserved here so it can never be reassigned to an
+/// unrelated syscall and re-create the class of bug where posix's
+/// `SYS_MPROTECT` silently aliased a capability-gated IRQ syscall.
+///
+/// `arg0`: virtual address (4 KiB-aligned).
+/// `arg1`: length in bytes.
+/// `arg2`: prot mask (PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4).
+///
+/// TODO(initiative-F/mprotect): implement a native handler that reuses
+/// the Linux mprotect core (kernel/src/syscall/linux.rs::sys_mprotect)
+/// but returns `KernelError` instead of Linux errno.  See todo.txt.
+pub const SYS_MPROTECT: u64 = 22;
+
 /// Register to receive interrupts from an IOAPIC IRQ line.
 ///
 /// `arg0`: IRQ number (0–23).
@@ -1759,6 +1782,20 @@ pub const SYS_SIGNAL_PENDING: u64 = 526;
 /// Returns: child PID (> 0) to the parent, 0 to the child, or a
 ///          negative `KernelError` code on failure (parent only).
 pub const SYS_PROCESS_FORK: u64 = 527;
+
+/// Set the calling thread's `fs_base` (x86-64 thread pointer / TLS base).
+///
+/// `arg0`: new base address (must be < 2^47).
+///
+/// Writes `IA32_FS_BASE` and persists the value on the current task so it
+/// is restored across context switches.  This is the native counterpart
+/// of the Linux `arch_prctl(ARCH_SET_FS, addr)` shim: it lets a native
+/// (aux-vector-less) static binary's crt install main-thread ELF TLS by
+/// pointing `%fs` at a userspace-allocated TLS block + TCB.
+///
+/// Returns: 0 on success, or `InvalidArgument` if the address is out of
+/// range.
+pub const SYS_SET_FS_BASE: u64 = 528;
 
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)

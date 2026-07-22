@@ -41,10 +41,18 @@ pub const SYS_CONSOLE_READ_CHAR: u64 = 101;
 //         JSON object per line, each terminated with `\n`).  Non-consuming.
 pub const SYS_LOG_READ: u64 = 102;
 
-// Memory management
-pub const SYS_MMAP: u64 = 30;
-pub const SYS_MUNMAP: u64 = 31;
-pub const SYS_MPROTECT: u64 = 32;
+// Memory management.
+//
+// These MUST match the kernel's *native* syscall table
+// (kernel/src/syscall/number.rs), NOT the Linux-ABI numbers.  They were
+// previously mis-numbered 30/31/32, which collide with the kernel's IRQ
+// syscalls (SYS_IRQ_REGISTER=30, SYS_IRQ_WAIT=31, SYS_IRQ_RELEASE=32) —
+// so a native mmap() actually hit the capability-gated IRQ register path
+// and came back PermissionDenied (-400).  That silently broke the crt's
+// main-thread TLS setup on native binaries (the fastpy/initiative-F path).
+pub const SYS_MMAP: u64 = 20;
+pub const SYS_MUNMAP: u64 = 21;
+pub const SYS_MPROTECT: u64 = 22;
 
 // Scheduler / thread
 pub const SYS_SCHED_SET_PROFILE: u64 = 53;
@@ -81,6 +89,17 @@ pub const SYS_SIGNAL_PENDING: u64 = 526;
 /// the parent and 0 to the child, or a negative error code to the
 /// parent on failure.
 pub const SYS_PROCESS_FORK: u64 = 527;
+
+/// Set the calling thread's `fs_base` (the x86-64 thread pointer / TLS
+/// base).  `arg0` is the new base address, which must be < 2^47.  The
+/// kernel writes `IA32_FS_BASE` and persists the value on the task so it
+/// survives context switches.  Native counterpart of Linux
+/// `arch_prctl(ARCH_SET_FS, addr)`.  Used by the crt to install
+/// main-thread ELF TLS on a native (aux-vector-less) static binary.
+///
+/// Returns: 0 on success, or a negative error code (InvalidArgument if
+/// the address is out of range).
+pub const SYS_SET_FS_BASE: u64 = 528;
 
 // Filesystem
 pub const SYS_FS_READ_FILE: u64 = 600;

@@ -14,6 +14,48 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-NATIVE-MMAP-NUM. posix native memory-mgmt syscall numbers aliased kernel IRQ syscalls — 2026-07-21 — ✅ RESOLVED 2026-07-21
+
+**What:** posix/src/syscall.rs numbered `SYS_MMAP=30`, `SYS_MUNMAP=31`,
+`SYS_MPROTECT=32`, but the kernel's *native* table (kernel/src/syscall/
+number.rs) has `SYS_MMAP=20`, `SYS_MUNMAP=21`, and 30/31/32 =
+`SYS_IRQ_REGISTER`/`SYS_IRQ_WAIT`/`SYS_IRQ_RELEASE` (capability-gated). A
+native `mmap()` therefore issued syscall 30 and hit the IRQ-register path,
+which the syscall filter/cap check rejected with `PermissionDenied` (-400) —
+*before* `sys_mmap` ran (hence no `[mmap-diag]` trace).
+
+**Symptom:** The initiative-F fastpy self-test faulted with exit -8: the crt
+`setup_main_thread_tls()` mmap returned -400, so `fs_base` was never set, and
+the first `%fs:tpoff` access (fastpy's shadow-stack `__thread`, tpoff
+-0x1b150) faulted at 0x14d20.
+
+**Fix:** Corrected posix to the kernel's native numbers (MMAP=20, MUNMAP=21,
+MPROTECT=22). Reserved 22 in kernel number.rs so it can't be reassigned.
+See TD-NATIVE-MPROTECT below for the remaining native-mprotect handler work.
+
+### TD-NATIVE-MPROTECT. No native `SYS_MPROTECT` handler — native `mprotect()` returns ENOTSUP — 2026-07-21 — ⚠️ OPEN (safe stub)
+
+**What:** The posix libc's native syscall path exposes `SYS_MPROTECT = 22`
+(kernel/src/syscall/number.rs), but no handler is registered for it in the
+*native* dispatch table (kernel/src/syscall/dispatch.rs). A native
+`mprotect()` therefore resolves to NotSupported → `ENOTSUP`. Only the
+**Linux-ABI** mprotect (linux.rs, Linux syscall #10 — `sys_mprotect`) is
+implemented, and it's fully functional for the Linux compatibility path.
+
+**Proper fix:** Register a native mprotect handler at 22 that reuses the
+Linux mprotect core (`sys_mprotect`'s VMA-coverage + per-4KiB PTE walk) but
+returns `KernelError` codes rather than Linux errno, so posix's
+`errno::translate` maps it uniformly with the rest of the native ABI.
+Options: (a) factor the mprotect core into a `fn -> KernelResult` shared by
+both the Linux and native handlers (cleanest, preferred); or (b) register the
+existing `sys_mprotect` at 22 and switch posix's `mman::mprotect` to a
+Linux-style errno translate (posix errno values already equal Linux errno
+values). Tracked in todo.txt.
+
+**Impact:** Low for current work — the fastpy/initiative-F binaries and the
+crt TLS path do not call mprotect. glibc RELRO / pthread guard pages use the
+Linux ABI path, which is unaffected.
+
 ### TD-OILS-ESCAPED-METACHAR. Backslash-escaped glob/pattern metacharacters in *unquoted* words are treated as live metacharacters — 2026-07-20 — ✅ RESOLVED 2026-07-20 (glob/`case`/`[[ == ]]`/param-expansion/`=~` all fixed; only reserved-word suppression `\if` remains, tracked below)
 
 **Where (root cause):** the two word lexers folded a backslash-escaped
@@ -7188,6 +7230,44 @@ usage stays bounded.
 **Discovered/documented:** 2026-06-30 (already noted as a `// Known
 limitation` in `pthread_detach`'s doc comment; promoted to tracked tech
 debt while implementing per-thread TSD).
+
+### D-NATIVE-CHILD-THREAD-TLS. Native `pthread_create` child threads have no compiler-`__thread` ELF TLS (only the main thread does) — 2026-07-21
+
+**Where:** `posix/src/crt.rs` (`setup_main_thread_tls`, added for
+initiative F / Q31) sets up variant-II ELF TLS + the thread pointer via
+the native `SYS_SET_FS_BASE` syscall **for the main thread only**.
+`posix/src/pthread.rs` `pthread_create` mmaps a child stack and starts the
+thread via `SYS_THREAD_CREATE`, but does **not** allocate a per-thread
+copy of the program's `PT_TLS` block, nor set that child thread's
+`fs_base`. The kernel starts the child with `fs_base = 0` (same as the
+main thread pre-crt).
+
+**Effect:** In a **native** (non-Linux-ABI) fastpy/C binary that uses
+compiler `__thread` storage (fastpy's runtime declares `FPY_THREAD_LOCAL
+__thread` — lowered to `%fs:offset`), any *child* thread's first
+`__thread` access — or its stack-protector canary at `%fs:0x28` — faults
+on the null thread pointer. The **main thread is fine** (the crt sets it
+up), so single-threaded fastpy programs — the current initiative-F
+milestone — work. This only bites native binaries that both (a) use
+compiler `__thread` and (b) spawn threads via `pthread_create`. Note the
+posix crate's *own* pthread TSD (`pthread_getspecific`) is tid-keyed, not
+fs-based, so it is unaffected — this is specifically about *compiler*
+thread-locals in the linked program. (Linux-ABI binaries are also
+unaffected: glibc/musl set up child-thread TLS via `CLONE_SETTLS`, which
+the Linux syscall path already honors — see F13.)
+
+**Proper fix (userspace-only, no kernel change — the `SYS_SET_FS_BASE`
+primitive already exists):** in `pthread_create`, before entering the
+child's start routine, allocate a per-thread TLS block + TCB laid out
+exactly like `setup_main_thread_tls` (copy the same `PT_TLS` init image
+found via `__ehdr_start`; for a single-module static exe every thread's
+image is identical), and have the child call `SYS_SET_FS_BASE(tp)` as the
+first thing it does (before any `__thread`/canary access). Factor the
+main-thread layout code into a shared helper both call. Land it with a
+QEMU boot self-test that spawns a native thread which reads/writes a
+`__thread` variable and joins, asserting no fault. Deferred now because
+the initiative-F milestone (first real fastpy component) is
+single-threaded, so this isn't yet on the critical path.
 
 ### D-CRT-INIT-ARRAY. `.init_array`/`.preinit_array` constructor + `.fini_array` destructor support — MECHANISM LANDED (end-to-end C/C++ validation pending a consumer)
 

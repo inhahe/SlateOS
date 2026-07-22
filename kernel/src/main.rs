@@ -1800,6 +1800,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-getmtime`: os.path.getmtime → SYS_FS_STAT reads the
+    // mtime field back into userspace as a float (first fastpy os.path.* float
+    // return + int() truncation), verified against a kernel-chosen stamp.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getmtime() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `getmtime` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

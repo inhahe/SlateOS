@@ -9372,6 +9372,202 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-getctime` utility — the **trio
+/// completer** that reads the **ctime** field of the stat struct (a *distinct*
+/// timestamp field from getmtime's mtime and getatime's atime).
+///
+/// Unlike atime/mtime, ctime is **not settable via `os.utime`** — the kernel
+/// sets `changed_ns` to the realtime clock at file creation / metadata change,
+/// and utime deliberately leaves it alone.  So this exercises a *different
+/// validation pattern*: instead of reading back a kernel-chosen stamp, the tool
+/// reads whatever the kernel set ctime to, and the harness proves that value
+/// came from the ctime field (not mtime) by (a) stamping atime/mtime to a
+/// year-2023 value (`SECS`) via utime while ctime stays at the real 2026-ish
+/// creation time, so a getctime mis-wired to mtime would read exactly `SECS`,
+/// and (b) independently reading the VFS `changed_ns` and asserting the tool's
+/// written decimal seconds equal `changed_ns / 1e9` (non-zero).
+///
+/// False-pass-proof: the tool itself exits 0 only if `got != SECS` (ctime is not
+/// the stamped mtime) AND `got > 0` (a real value, not the -1.0 stat error or a
+/// 0 stub); the harness additionally cross-checks the exact value against the
+/// VFS `changed_ns`.
+pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
+    static FASTPY_GETCTIME_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-getctime/fastpy-getctime.elf");
+
+    const TARGET: &str = "/tmp/getctime-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/getctime-target.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-getctime.out";
+    // Year-2023 whole-second value the tool stamps onto atime/mtime (NOT ctime).
+    // ctime stays at the real creation realtime (2026-ish), so getctime must
+    // return something != SECS — this distinguishes a correct ctime read from a
+    // getmtime mis-wire.
+    const SECS: u64 = 1_700_000_000;
+    const SECS_ARG: &[u8] = b"1700000000";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `getctime` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETCTIME_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // os.utime → SYS_FS_SET_TIMES and the create/write of the file both need
+    // Rights::WRITE; os.path.getctime → SYS_FS_STAT gates on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-getctime", TARGET_ARG, SECS_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-getctime",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_GETCTIME_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-getctime spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getctime (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.path.getctime may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means getctime returned a real ctime distinct from the stamped
+    // mtime (exit 3 = utime failed, or getctime read the mtime / an error / 0).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getctime (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.utime failed or os.path.getctime returned the mtime/error/zero)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Read the VFS `changed_ns` independently; the tool's written seconds must
+    // equal changed_ns/1e9 (and changed_ns must be non-zero).  This is the exact
+    // ctime the tool returned — a value it could not fabricate.
+    let expected_secs = match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.changed_ns != 0 => m.changed_ns / 1_000_000_000,
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getctime (ring 3) — VFS changed_ns is {} (zero); cannot \
+                 verify the ctime read-back",
+                m.changed_ns
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getctime (ring 3) — could not re-stat {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Guard: the mtime stamp must differ from ctime, else the test can't tell a
+    // correct ctime read from a getmtime mis-wire.  (Sanity — expected to hold
+    // since SECS is 2023 and ctime is the 2026-ish creation realtime.)
+    if expected_secs == SECS {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getctime (ring 3) — VFS ctime seconds ({}) equal the stamped \
+             mtime; test cannot distinguish ctime from mtime",
+            expected_secs
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse the decimal seconds the tool wrote and compare to the VFS value.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            let mut parsed: u64 = 0;
+            let mut ok = !bytes.is_empty();
+            for &b in bytes.iter() {
+                if b.is_ascii_digit() {
+                    parsed = parsed
+                        .saturating_mul(10)
+                        .saturating_add(u64::from(b - b'0'));
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok || parsed != expected_secs {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-getctime (ring 3) — {} held {:?} (parsed {}), expected \
+                     {} (os.path.getctime did not read back the VFS changed_ns)",
+                    OUT_PATH, bytes.as_slice(), parsed, expected_secs
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getctime (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `getctime` (ring 3: os.path.getctime → SYS_FS_STAT read the \
+         ctime field back as a float; int() truncation; the value was distinct from the stamped \
+         mtime and matched the VFS changed_ns): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

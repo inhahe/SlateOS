@@ -1820,6 +1820,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-getctime`: os.path.getctime → SYS_FS_STAT reads the
+    // ctime (changed_ns) field back as a float. Completes the get{a,m,c}time
+    // trio; unlike atime/mtime, ctime is NOT settable via os.utime, so the test
+    // derives the expected value from the VFS changed_ns and asserts it differs
+    // from the stamped mtime (proving getctime read ctime, not mtime).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getctime() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `getctime` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

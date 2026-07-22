@@ -1682,6 +1682,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-rm`: deletes a staged file via os.remove
+    // (SYS_FS_DELETE) — the first fastpy tool to delete a filesystem entry
+    // rather than read a file's contents or enumerate a directory.  The
+    // primitive that unblocks a package-manager `gc` subcommand.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_rm() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `rm` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

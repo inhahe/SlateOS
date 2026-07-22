@@ -7272,6 +7272,139 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-rm` utility — the first fastpy SlateOS
+/// tool to **delete** a filesystem entry rather than read a file's contents or
+/// enumerate a directory.
+///
+/// Prior fastpy tools read file bytes (`SYS_FS_READ`) or listed a directory
+/// (`SYS_FS_LIST_DIR`).  `rm <file>` instead deletes an entry via `os.remove()`
+/// → runtime `fastpy_os_remove` → posix C `remove()` (`stdio.rs`) → `unlink`
+/// (`file.rs`) → kernel `SYS_FS_DELETE` → VFS delete — a distinct kernel path
+/// this exercises from a fastpy program for the first time.  This is the
+/// primitive that unblocks a package-manager `gc` subcommand (reclaiming
+/// unreferenced content-addressed store blobs).
+///
+/// The harness stages a known file `/tmp/rmfile`, asserts via the VFS that it
+/// exists, runs `rm /tmp/rmfile`, asserts the process becomes a `Zombie` and
+/// exits 0, and — the real verification — asserts via the VFS that the file is
+/// now gone.  The before/after VFS check makes the test immune to a no-op
+/// `os.remove` that merely returned 0 without deleting (the false-pass lesson
+/// from `fastpy-ls`'s empty listing).
+pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
+    static FASTPY_RM_ELF: &[u8] = include_bytes!("../../../services/fastpy-rm/fastpy-rm.elf");
+
+    const RM_FILE: &str = "/tmp/rmfile";
+    const RM_FILE_ARG: &[u8] = b"/tmp/rmfile";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `rm` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_RM_ELF.len()
+    );
+
+    // Stage the file to be deleted.
+    if let Err(e) = crate::fs::Vfs::write_file(RM_FILE, b"delete me\n") {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", RM_FILE, e);
+        return Err(e);
+    }
+    // Precondition: it must exist before the delete, or the test proves nothing.
+    if !crate::fs::Vfs::exists(RM_FILE) {
+        serial_println!(
+            "[spawn]   FAIL: staged {} but VFS reports it absent before rm",
+            RM_FILE
+        );
+        let _ = crate::fs::Vfs::remove(RM_FILE);
+        return Err(KernelError::InternalError);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-rm", RM_FILE_ARG];
+    let envp: &[&[u8]] = &[];
+    // Deletion needs Rights::DELETE — SYS_FS_DELETE gates on it (unlike the
+    // read/enumerate tools, which only need READ|WRITE).
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-rm",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_RM_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(RM_FILE);
+            serial_println!("[spawn]   FAIL: fastpy-rm spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    // Capture the post-run existence *before* teardown/cleanup so nothing else
+    // can perturb it.
+    let still_exists = crate::fs::Vfs::exists(RM_FILE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    // Best-effort cleanup in case the delete failed and the file survived.
+    let _ = crate::fs::Vfs::remove(RM_FILE);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rm (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.remove path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // fastpy-rm exits with os.remove's status (0 = success).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rm (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (os.remove success); nonzero => SYS_FS_DELETE failed",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The real verification: the file must actually be gone.  A no-op remove
+    // that returned 0 without deleting would pass the exit check but fail here.
+    if still_exists {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rm (ring 3) — process exited 0 but {} still exists per the \
+             VFS (os.remove did not actually delete)",
+            RM_FILE
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `rm` (ring 3: file deletion via os.remove → SYS_FS_DELETE; \
+         exit 0 and /tmp/rmfile verified gone via the VFS): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

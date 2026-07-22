@@ -10187,6 +10187,136 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-dup2` utility — exercises the
+/// fd-redirection path (`os.dup2` → posix dup2()).
+///
+/// Unlike `dup` (lowest free fd), `dup2` installs a copy of `oldfd` at the
+/// *caller-chosen* `newfd` (closing whatever was there first), sharing the same
+/// kernel handle.  The tool creates a pipe, `os.dup2(w, 9)` to alias the write
+/// end at fd 9, writes `"DUP2_OK"` **through fd 9**, and reads it from the
+/// *original* read end.
+///
+/// False-pass-proof: fd 9 becomes valid only because `dup2` installed the pipe
+/// write handle there.  If `dup2` were mis-lowered, `write(9)` would fail, the
+/// pipe would stay empty and `read(r)` would block — the harness times out (not
+/// a false pass).  The tool also asserts `dup2` returned the requested fd 9, and
+/// the harness asserts the written-back file holds exactly `"DUP2_OK"`.
+pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
+    static FASTPY_DUP2_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-dup2/fastpy-dup2.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `dup2` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_DUP2_ELF.len()
+    );
+
+    // The message the tool round-trips through the dup2 target fd and writes
+    // back.  Must match the `msg` constant in the tool's build.py.
+    const EXPECTED: &[u8] = b"DUP2_OK";
+
+    const OUT_PATH: &str = "/tmp/fastpy-dup2.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE).  Pipe creation and dup2 need no capability.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-dup2"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-dup2",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_DUP2_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-dup2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup2 (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted or blocked; os.dup2 may have mis-lowered so write(9) failed and read(r) \
+             hung)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (round-trip matched,
+    // dup2 returned 9, write returned 7).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup2 (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = round-trip / dup2-return-fd / write-count mismatch)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the bytes written back must be exactly the
+    // constant round-tripped through fd 9 — provable only if dup2 aliased the
+    // pipe write handle at the chosen fd.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-dup2 (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the round-tripped message",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup2 (ring 3) — round-tripped message was {:?}, expected \
+             {:?}; os.dup2 did not alias the pipe write handle at fd 9 (posix dup2() path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `dup2` (ring 3: os.dup2(w, 9) → posix dup2() installing \
+         the pipe write handle at fd 9; the tool wrote {} bytes through fd 9 and read them from \
+         the original read end intact): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-lseek` utility — the first fastpy tool
 /// to exercise the raw-fd file **open** path (`os.open` → posix open() →
 /// `SYS_FS_OPEN`) and the file-offset **seek** path (`os.lseek` → posix

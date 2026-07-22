@@ -1897,6 +1897,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-dup2` utility: exercises the fd-redirection
+    // path (os.dup2 → posix dup2()), which installs a handle at a caller-chosen
+    // fd number. The tool dup2()s a pipe write end onto fd 9, writes "DUP2_OK"
+    // through fd 9, and reads it from the original read end; the harness asserts
+    // the round-tripped file holds "DUP2_OK", so fd 9 can only carry the data if
+    // dup2 aliased the pipe handle there.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_dup2() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `dup2` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-lseek` utility: exercises the raw-fd file open
     // path (os.open → SYS_FS_OPEN) and the file-offset seek path (os.lseek →
     // SYS_FS_SEEK). The tool writes "ABCDEFGH", seeks to offset 4, reads 4

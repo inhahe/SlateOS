@@ -9197,6 +9197,181 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-getatime` utility — the sibling of
+/// `getmtime` that reads the **atime** field of the stat struct (a *distinct*
+/// timestamp field from `getmtime`'s mtime).
+///
+/// `os.utime(path, atime_ns, mtime_ns)` stamps **both** the access and
+/// modification times; `getmtime` validated the mtime half, and this validates
+/// the **atime half** — confirming `os.utime`'s first (atime) argument is
+/// honored and that the atime field is independently readable back into
+/// userspace.  The tool stamps a kernel-chosen whole-second atime (argv-supplied
+/// so nothing is baked into the ELF), reads it back via
+/// `os.path.getatime` → `fastpy_os_path_getatime` → posix `stat()` →
+/// `SYS_FS_STAT` (pulling `st_atim`), truncates with `int()`, and writes the
+/// recovered seconds to `/tmp/fastpy-getatime.out`.
+///
+/// False-pass-proof: the expected seconds arrive via argv (a stub returning
+/// 0.0/const/wall-clock would mismatch and exit 3), whole-second stamps make the
+/// float exact, and the kernel asserts exit 0 AND that the written file equals
+/// the stamped decimal seconds AND that the VFS `accessed_ns` matches the stamp
+/// (the independent atime readout — distinct from `modified_ns`).
+pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
+    static FASTPY_GETATIME_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-getatime/fastpy-getatime.elf");
+
+    const TARGET: &str = "/tmp/getatime-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/getatime-target.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-getatime.out";
+    // Kernel-chosen whole-second atime; passed to the tool as a decimal-seconds
+    // argv so nothing is baked into the ELF.  The tool converts to ns for
+    // os.utime, so accessed_ns must end up at SECS * 1e9.
+    const SECS: u64 = 1_700_000_000;
+    const SECS_ARG: &[u8] = b"1700000000";
+    const EXPECTED_OUT: &[u8] = b"1700000000";
+    const ATIME_NS: u64 = 1_700_000_000_000_000_000;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `getatime` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETATIME_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // os.utime → SYS_FS_SET_TIMES and the create/write of the file both need
+    // Rights::WRITE; os.path.getatime → SYS_FS_STAT gates on Rights::METADATA
+    // (same as getmtime/getsize) — without it stat() returns an error and
+    // getatime reports -1.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-getatime", TARGET_ARG, SECS_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-getatime",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_GETATIME_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-getatime spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getatime (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.path.getatime may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the atime read back equalled what was stamped (exit 3 = utime
+    // failed or the read-back did not match).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getatime (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.utime failed or os.path.getatime read back the wrong atime)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 — independent readout: the file the tool wrote must contain
+    // exactly the decimal seconds we passed in.  This is the value int(getatime)
+    // returned; a stub/mis-wired getatime could not reproduce it.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) if bytes.as_slice() == EXPECTED_OUT => {}
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getatime (ring 3) — {} held {:?}, expected {:?} \
+                 (os.path.getatime read back the wrong atime seconds)",
+                OUT_PATH, bytes.as_slice(), EXPECTED_OUT
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getatime (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    // Guard #3 — confirm via the VFS that os.utime actually stamped accessed_ns
+    // (the atime field, distinct from modified_ns) to SECS * 1e9, so the
+    // read-back path was reading a real, correct value.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.accessed_ns == ATIME_NS => {}
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getatime (ring 3) — accessed_ns={}, expected {} \
+                 (os.utime did not stamp the atime the tool then read back)",
+                m.accessed_ns, ATIME_NS
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getatime (ring 3) — could not re-stat {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `getatime` (ring 3: os.path.getatime → SYS_FS_STAT read the \
+         atime field back as a float; int() truncation; the tool's written seconds matched the \
+         kernel-chosen stamp and the VFS confirmed accessed_ns): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

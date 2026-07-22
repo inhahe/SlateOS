@@ -35,6 +35,17 @@ is a comma-separated list of dependency package names, or `-` for none:
         itself is not installed).  This is the dependency-resolution primitive
         a real package manager needs before an install/upgrade is allowed.
 
+    pkg verify <name>
+        content-integrity check: resolve the named record, read its
+        content-addressed blob /tmp/store-<digest>.blob, re-compute the payload's
+        32-bit FNV-1a digest, and confirm it still equals the recorded digest.
+        Prints "verified <name> <digest>" + exit 0 on a match, else
+        "corrupt <name> <actual-digest>" + exit 1 (the store blob's bytes no
+        longer hash to the name they are filed under), or "not found <name>" +
+        exit 1 if <name> is not installed.  This is the tamper/bit-rot check a
+        content-addressed store gives you for free: a blob is trustworthy iff it
+        hashes to its own address.
+
     pkg commit
         snapshot the current registry as a new immutable **generation**: read the
         current generation number from /tmp/pkg-current.txt, copy the active
@@ -312,6 +323,26 @@ SRC = (
     "        sys.exit(1)\n"
     "    print('ok ' + name)\n"
     "    sys.exit(0)\n"
+    "if cmd == 'verify':\n"
+    "    name = sys.argv[2]\n"
+    "    f = open(db_path, 'r')\n"
+    "    db = f.read()\n"
+    "    f.close()\n"
+    "    line = find_line(db, name)\n"
+    "    if len(line) == 0:\n"
+    "        print('not found ' + name)\n"
+    "        sys.exit(1)\n"
+    "    digest = field(line, 1)\n"
+    "    blob_path = '/tmp/store-' + digest + '.blob'\n"
+    "    f = open(blob_path, 'r')\n"
+    "    body = f.read()\n"
+    "    f.close()\n"
+    "    actual = to_hex8(fnv1a(body))\n"
+    "    if actual == digest:\n"
+    "        print('verified ' + name + ' ' + digest)\n"
+    "        sys.exit(0)\n"
+    "    print('corrupt ' + name + ' ' + actual)\n"
+    "    sys.exit(1)\n"
     "if cmd == 'commit':\n"
     "    f = open('/tmp/pkg-current.txt', 'r')\n"
     "    curs = f.read()\n"
@@ -363,7 +394,7 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|remove|query|deps|check|commit|rollback|current|list')\n"
+    "print('usage: pkg install|remove|query|deps|check|verify|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

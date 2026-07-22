@@ -1649,6 +1649,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 content-integrity test of the fastpy package manager: install a
+    // package, `verify` its store blob hashes to the recorded digest, then
+    // tamper with the blob and assert `verify` detects the corruption.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_verify() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` content-integrity verify (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

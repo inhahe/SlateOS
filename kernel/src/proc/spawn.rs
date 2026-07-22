@@ -7000,6 +7000,158 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-compiled `pkg verify` subcommand — the
+/// content-addressed store's integrity check.
+///
+/// A content-addressed blob is trustworthy iff its bytes hash to the digest it
+/// is filed under.  This test proves the guarantee holds both ways:
+///  1. `install foo` writes the blob `/tmp/store-86732e22.blob` and the record
+///     `foo 86732e22 -`.
+///  2. `verify foo` re-reads that blob, re-hashes it, matches the recorded
+///     digest → prints `verified foo 86732e22`, exit 0.
+///  3. We then *tamper* with the store: overwrite the blob with different bytes
+///     (simulating bit-rot or a malicious swap) while leaving the record's
+///     digest unchanged.
+///  4. `verify foo` now re-hashes the tampered bytes, the digest no longer
+///     matches → prints `corrupt foo <actual>`, exit 1.
+///
+/// This is the check a real package manager runs before trusting a cached
+/// artifact; catching the tamper (step 4) is the whole point of a
+/// content-addressed store.
+pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const FOO_PATH: &str = "/tmp/pkg-foo.txt";
+    const FOO_ARG: &[u8] = b"/tmp/pkg-foo.txt";
+    const FOO_CONTENT: &[u8] = b"libc demo\n"; // digest 86732e22
+    const FOO_BLOB: &str = "/tmp/store-86732e22.blob";
+    // Bytes that do NOT hash to 86732e22 — the simulated tamper/bit-rot.
+    const TAMPERED: &[u8] = b"tampered payload\n";
+
+    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-pkg",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        for p in [DB_PATH, FOO_PATH, FOO_BLOB] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) content-integrity `verify` test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    // Seed an empty registry and the payload to install.
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(FOO_PATH, FOO_CONTENT) {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", FOO_PATH, e);
+        return Err(e);
+    }
+
+    // Step 1+2: install foo, then verify it — the blob's bytes still hash to the
+    // recorded digest, so verify succeeds (exit 0).
+    let good_steps: &[(&[&[u8]], i32, &str)] = &[
+        (&[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"], 0, "install foo"),
+        (&[b"fastpy-pkg", b"verify", b"foo"], 0, "verify foo (intact)"),
+    ];
+    for (argv, want, desc) in good_steps {
+        match run_pkg(FASTPY_PKG_ELF, argv) {
+            Ok(code) if code == *want => {}
+            Ok(code) => {
+                cleanup();
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
+                    desc, code, want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                cleanup();
+                serial_println!("[spawn]   FAIL: fastpy-pkg `{}` — {:?}", desc, e);
+                return Err(e);
+            }
+        }
+    }
+
+    // Step 3: tamper with the store blob (leave the record's digest untouched).
+    if let Err(e) = crate::fs::Vfs::write_file(FOO_BLOB, TAMPERED) {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not tamper {} — {:?}", FOO_BLOB, e);
+        return Err(e);
+    }
+
+    // Step 4: verify now detects the mismatch (blob no longer hashes to its
+    // address) and exits 1.
+    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"verify", b"foo"]) {
+        Ok(1) => {}
+        Ok(code) => {
+            cleanup();
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg `verify foo (tampered)` exited {} (expected 1 — \
+                 the tampered blob should NOT verify)",
+                code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-pkg `verify foo (tampered)` — {:?}", e);
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: content-integrity verify — install foo / \
+         verify intact (exit 0) / tamper store blob / verify detects corruption (exit 1)): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

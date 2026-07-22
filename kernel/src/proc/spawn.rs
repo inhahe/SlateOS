@@ -10047,6 +10047,146 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-dup` utility — the first fastpy tool
+/// to exercise the kernel **fd-duplication** path (`os.dup`).
+///
+/// `os.dup(fd)` lowers to native `fastpy_os_dup` → posix `dup()`.  On SlateOS
+/// the posix `dup()` of a pipe fd creates no new kernel object: it shares the
+/// *same* underlying handle via a fresh fdtable entry
+/// (`posix/src/file.rs` `dup()` → `Pipe` branch →
+/// `fdtable::alloc_fd_with_flags(HandleKind::Pipe, entry.handle, ...)`).  So a
+/// write to the *duplicated* write-end lands in the very same kernel pipe
+/// buffer as the original — a genuinely distinct kernel path from the pipe
+/// create/read/write/close syscalls the `fastpy-pipe` tool drives.
+///
+/// False-pass-proof: the tool writes `"DUP_OK"` **only through the dup** (never
+/// through the original write-end) and reads it from the *original* read-end.
+/// If `os.dup` were mis-lowered — returning a bogus/independent fd, or aliasing
+/// nothing — the bytes would never reach the pipe buffer the read-end drains,
+/// so the round-trip could not match.  The harness knows the exact constant and
+/// asserts the file the tool wrote back contains exactly it; there is no
+/// userspace echo path a mis-lowering could fake.
+pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
+    static FASTPY_DUP_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-dup/fastpy-dup.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `dup` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_DUP_ELF.len()
+    );
+
+    // The message the tool round-trips *through the duplicated write-end* and
+    // writes back to the output file.  Must match the `msg` constant in the
+    // tool's build.py.
+    const EXPECTED: &[u8] = b"DUP_OK";
+
+    // The tool writes the round-tripped message here (native open('w')/write);
+    // removed up front so a stale value from a prior boot can't masquerade as
+    // this run's output.
+    const OUT_PATH: &str = "/tmp/fastpy-dup.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE).  Pipe creation (SYS_PIPE_CREATE) and dup need no capability.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-dup"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-dup",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_DUP_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-dup spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The tool does no unbounded blocking (the pipe write fits the buffer and
+    // the read is immediately satisfiable), so a bounded yield loop suffices.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.dup/pipe/read/write may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (round-trip matched).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = the bytes read from the original read-end did not match what was \
+             written through the duplicated write-end)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the bytes the tool wrote back must be exactly
+    // the constant it round-tripped through the *duplicated* pipe write-end.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-dup (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the round-tripped message",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-dup (ring 3) — round-tripped message was {:?}, expected \
+             {:?}; the duplicated write-end did not alias the same kernel pipe (os.dup / \
+             posix dup() Pipe-handle-sharing path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `dup` (ring 3: os.dup() → posix dup() sharing the pipe \
+         handle; the tool wrote {} bytes through a *duplicated* write-end and read them from \
+         the original read-end intact): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

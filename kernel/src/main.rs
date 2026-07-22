@@ -1885,6 +1885,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-dup` utility: exercises the kernel
+    // fd-duplication path (os.dup → posix dup() sharing a pipe handle). The
+    // tool writes "DUP_OK" through a *duplicated* write-end and reads it from
+    // the original read-end; the harness asserts the round-tripped file holds
+    // exactly that, so the bytes can only survive if dup truly aliased the pipe.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_dup() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `dup` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

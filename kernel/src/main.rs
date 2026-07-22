@@ -1591,6 +1591,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 end-to-end test of the FIRST SHIPPING fastpy SlateOS utility:
+    // `fastpy-cat`, a real `cat`(1) that reads its argv[1] file and echoes it
+    // to stdout.  Ties together argv delivery + pure-mode file I/O + stdout
+    // (SYS_CONSOLE_WRITE) in one native Python-via-fastpy binary.  Bounded
+    // yield loop; can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_cat() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `cat` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

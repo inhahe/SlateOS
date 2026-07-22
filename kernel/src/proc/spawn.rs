@@ -6125,10 +6125,12 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
 /// process killed in a non-zombie state (or exiting with a fault code).
 pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     // The fastpy-compiled Python program: builds a list, sums it, prints,
-    // then `sys.exit(len(sys.argv))`.  `print` writes to fd 1, which a native
-    // process has no console handle for — the write silently fails, which is
-    // fine: we are testing that the program *runs* (TLS + syscalls), not
-    // console plumbing.  Exiting with `argc` lets us verify two things at once
+    // then `sys.exit(len(sys.argv))`.  (`print` does reach the console — the
+    // posix libc pre-installs fds 0/1/2 as Console handles, so a native
+    // process's `write(1, ...)` routes to `SYS_CONSOLE_WRITE`; the sibling
+    // `self_test_fastpy_slateos_cat` proves stdout end-to-end.  This test
+    // ignores the print output and asserts only on the exit code.)  Exiting
+    // with `argc` lets us verify two things at once
     // on-target: (a) TLS setup worked (it reached user code at all), and
     // (b) the argv delivery path — kernel `SYS_PROCESS_GET_ARGS` -> crt ->
     // runtime `fpy_argv` -> `sys.argv` — carried the exact argument vector we
@@ -6312,6 +6314,118 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
         "[spawn]   fastpy-on-SlateOS pure-mode file I/O (ring 3: open/write/close then \
          open/read/close on the /tmp memfs via fastpy -> C stdio -> SYS_FS_* -> VFS, exited \
          with the {}-byte read count): OK",
+        EXPECTED_BYTES
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of the **first shipping fastpy SlateOS utility**:
+/// `services/fastpy-cat`, a minimal `cat`(1).
+///
+/// This is the milestone the earlier fastpy increments were building toward —
+/// a real, useful Python-via-fastpy program running natively on SlateOS.  It
+/// ties together all three on-target paths at once:
+///   * **argv** — the utility reads its target path from `sys.argv[1]`,
+///   * **file I/O** — it `open()`/`read()`/`close()`s that file (pure-mode
+///     native file object -> posix `libc.a` -> `SYS_FS_*` -> VFS),
+///   * **stdout** — it `print(..., end='')`s the contents (runtime
+///     `printf`/`fflush` -> posix `write(1, ...)` -> Console handle ->
+///     `SYS_CONSOLE_WRITE`, which mirrors to serial).
+///
+/// The harness stages a known file in the writable `/tmp` memfs, spawns
+/// `fastpy-cat` with that path as `argv[1]` and a File capability, and asserts
+/// the process becomes a `Zombie` and exits with the file's byte count.  The
+/// echoed contents also appear on the serial console (via `SYS_CONSOLE_WRITE`),
+/// which the boot harness can grep for — proving stdout works end-to-end for a
+/// native fastpy binary.
+pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
+    static FASTPY_CAT_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-cat/fastpy-cat.elf");
+
+    // Staged input file + its exact contents.  The exit code is the byte
+    // count, so keep the length obvious: "SlateOS fastpy cat OK\n" = 22 bytes.
+    const CAT_PATH: &str = "/tmp/cat-input.txt";
+    const CAT_PATH_ARG: &[u8] = b"/tmp/cat-input.txt";
+    const CAT_CONTENT: &[u8] = b"SlateOS fastpy cat OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = CAT_CONTENT.len() as i32; // 22
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `cat` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_CAT_ELF.len()
+    );
+
+    // Stage the input file the utility will read.
+    if let Err(e) = crate::fs::Vfs::write_file(CAT_PATH, CAT_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", CAT_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-cat", CAT_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-cat",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_CAT_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(CAT_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-cat spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-cat (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted somewhere on the argv/open/read/print path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-cat (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged file). A wrong count means argv[1] delivery or \
+             the read path is off; exit 1 means an uncaught exception (e.g. the open failed)",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `cat` (ring 3: first shipping fastpy utility — read \
+         argv[1] file off /tmp and echoed it to stdout via SYS_CONSOLE_WRITE, exited with the \
+         {}-byte count): OK",
         EXPECTED_BYTES
     );
     Ok(())

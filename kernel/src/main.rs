@@ -1672,6 +1672,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-ls` utility: `ls <dir>` enumerates a directory
+    // via os.listdir (SYS_FS_LIST_DIR) — the first fastpy tool to list a
+    // directory rather than read a file's contents.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_ls() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `ls` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

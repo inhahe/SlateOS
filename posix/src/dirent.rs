@@ -152,12 +152,17 @@ pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
     // SAFETY: alloc_dir returned a valid, exclusively-owned Dir pointer.
     let dir = unsafe { &mut *dir_ptr };
 
-    // Issue SYS_FS_LIST_DIR to get all entries at once.
-    let ret = syscall3(
+    // Issue SYS_FS_LIST_DIR to get all entries at once.  The kernel writes
+    // fixed-size dir entries into `buf` and needs the buffer *capacity* in
+    // arg3 — it computes `max_entries = buf_cap / FS_DIR_ENTRY_SIZE`.  Omitting
+    // arg3 (a former syscall3 call) left buf_cap = 0, so the kernel returned
+    // zero entries no matter how many the directory held.
+    let ret = syscall4(
         SYS_FS_LIST_DIR,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         dir.buf.as_mut_ptr() as u64,
+        dir.buf.len() as u64,
     );
 
     if ret < 0 {
@@ -626,12 +631,14 @@ pub extern "C" fn fdopendir(fd: i32) -> *mut Dir {
     // SAFETY: alloc_dir returned a valid, exclusively-owned Dir pointer.
     let dir = unsafe { &mut *dir_ptr };
 
-    // Issue SYS_FS_LIST_DIR with the stored path.
-    let ret = syscall3(
+    // Issue SYS_FS_LIST_DIR with the stored path.  arg3 must carry the buffer
+    // capacity so the kernel can compute max_entries (see `opendir`).
+    let ret = syscall4(
         SYS_FS_LIST_DIR,
         path_buf.as_ptr() as u64,
         path_len as u64,
         dir.buf.as_mut_ptr() as u64,
+        dir.buf.len() as u64,
     );
 
     if ret < 0 {

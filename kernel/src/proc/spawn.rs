@@ -7143,6 +7143,135 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-ls` utility — the first fastpy SlateOS
+/// tool to **enumerate a directory** rather than read a file's contents.
+///
+/// Every prior fastpy tool (cat/grep/wc/head/uniq/tail/sort/freq) opened a file
+/// and read its bytes (`SYS_FS_READ`).  `ls <dir>` instead lists a directory's
+/// entry names via `os.listdir()` → runtime `fastpy_os_listdir` → posix
+/// `opendir`/`readdir` (`dirent.rs`) → kernel `SYS_FS_LIST_DIR` → VFS `readdir`
+/// — a distinct kernel path this exercises from a fastpy program for the first
+/// time.  The returned names are held in the now-proven native `list`.
+///
+/// The harness stages a dedicated directory `/tmp/lsdir` (so the listing is
+/// deterministic — only our files) containing three known files, runs
+/// `ls /tmp/lsdir`, and asserts the process becomes a `Zombie` and exits 0.
+/// Because directory order is an implementation detail, the boot harness
+/// verifies the *set* of printed names (`LS_alpha`, `LS_beta`, `LS_gamma`) in
+/// the serial log rather than their order.
+pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
+    static FASTPY_LS_ELF: &[u8] = include_bytes!("../../../services/fastpy-ls/fastpy-ls.elf");
+
+    const LS_DIR: &str = "/tmp/lsdir";
+    const LS_DIR_ARG: &[u8] = b"/tmp/lsdir";
+    const LS_FILES: [&str; 3] = [
+        "/tmp/lsdir/LS_alpha",
+        "/tmp/lsdir/LS_beta",
+        "/tmp/lsdir/LS_gamma",
+    ];
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `ls` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_LS_ELF.len()
+    );
+
+    // Stage a dedicated directory with three known files.
+    if let Err(e) = crate::fs::Vfs::mkdir_all(LS_DIR) {
+        serial_println!("[spawn]   FAIL: could not mkdir {} — {:?}", LS_DIR, e);
+        return Err(e);
+    }
+    for f in LS_FILES {
+        if let Err(e) = crate::fs::Vfs::write_file(f, b"x\n") {
+            serial_println!("[spawn]   FAIL: could not stage {} — {:?}", f, e);
+            for g in LS_FILES {
+                let _ = crate::fs::Vfs::remove(g);
+            }
+            return Err(e);
+        }
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-ls", LS_DIR_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-ls",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let cleanup = || {
+        for g in LS_FILES {
+            let _ = crate::fs::Vfs::remove(g);
+        }
+        let _ = crate::fs::Vfs::remove(LS_DIR);
+    };
+
+    let result = match spawn_process(FASTPY_LS_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-ls spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    cleanup();
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ls (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.listdir/readdir path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // fastpy-ls exits with the entry count (`sys.exit(count)`), so a correct
+    // listing of our three staged files must yield exit code 3.  Asserting the
+    // exact count — not merely exit 0 — is what makes this test immune to the
+    // empty-listing false-pass: the original posix `opendir` passed no buffer
+    // capacity in arg3, so the kernel returned 0 entries and the program still
+    // exited cleanly.  Exit 3 proves os.listdir → SYS_FS_LIST_DIR returned all
+    // three names end-to-end.
+    if exit_code != Some(3) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ls (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 3 (the entry count).  0 => empty listing (opendir arg3/buf_cap bug); \
+             other nonzero => an uncaught exception on the listdir path",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `ls` (ring 3: directory enumeration via os.listdir → \
+         SYS_FS_LIST_DIR; exit code 3 == entry count, names LS_alpha/LS_beta/LS_gamma above): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

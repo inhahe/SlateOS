@@ -6539,6 +6539,106 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-wc` utility — a `wc`(1) that reads
+/// the file named by `argv[1]` and prints `"<lines> <words> <bytes>"`.
+///
+/// Where `fastpy-cat` echoes a file and `fastpy-grep` filters lines, this one
+/// *computes over* the whole file: it counts newline bytes (lines),
+/// whitespace-delimited runs (words), and total bytes.  The count is done in a
+/// `str`-typed helper (native `fastpy_str_index` subscripts) that returns a
+/// freshly built string; `main` reads the file inline and passes it in.
+///
+/// The staged file is chosen so its counts are known by hand: content
+/// `"hello world\nfoo bar baz\n\nquux\n"` → 4 lines, 6 words, 30 bytes.  The
+/// harness asserts the utility becomes a `Zombie` and exits 0; the printed
+/// `"4 6 30"` line is mirrored to serial (via `SYS_CONSOLE_WRITE`) so the boot
+/// harness can grep it for the actual count values.
+pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
+    static FASTPY_WC_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-wc/fastpy-wc.elf");
+
+    const WC_PATH: &str = "/tmp/wc-input.txt";
+    const WC_PATH_ARG: &[u8] = b"/tmp/wc-input.txt";
+    // 4 lines (newlines), 6 words (hello world foo bar baz quux), 30 bytes.
+    const WC_CONTENT: &[u8] = b"hello world\nfoo bar baz\n\nquux\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `wc` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_WC_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(WC_PATH, WC_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", WC_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-wc", WC_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-wc",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_WC_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(WC_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-wc spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(WC_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-wc (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/open/read/count path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-wc (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `wc` (ring 3: counted lines/words/bytes of argv[1] via a \
+         str-typed helper and printed the report — expect `4 6 30` above): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

@@ -4239,6 +4239,43 @@ re-entrancy guard (6fb1597aa). Boot-validated: BOOT_OK 104s, no false-positive
 `CRITICAL` logs (all legitimate callbacks validate as `.text`), hrtimer/ktimer
 self-tests still pass. Still WATCH for the underlying corruption.
 
+**Fresh spontaneous occurrence 2026-07-22 — first catch in a *normal boot test*
+(not a soak), and on a *different* Path-Z rung.** During routine boot-test
+validation of an unrelated change (adding the `fastpy-wc` ring-3 self-test), the
+null-jump fired during the **`REAL glibc dynamic-execution (ring 3, Path Z)`**
+test — *not* the tcc-signal rung of the original catch. Serial (build/serial-test.txt):
+```
+[spawn] Running REAL glibc dynamic-execution (ring 3, Path Z) test...
+EXCEPTION: Page Fault (#PF) at 0x0, address=0x0, error=0x10   <- kernel I-fetch @ 0x0
+  Cause: not-present, read, kernel
+  CS=0x8 RFLAGS=0x10646 RSP=0xffffc100000270a0 SS=0x10
+NESTED #PF during fatal diagnostics: rip=0xffffffff815da4de cr2=0x2fccaee1d6 err=0x0 — halting.
+```
+Confirms this bug's exact signature (`#PF at 0x0, addr=0x0, error=0x10`, kernel
+instruction-fetch through a null code pointer, same `RFLAGS=0x10646` /
+`RSP=0xffffc100000270a0` as iter40) and that it is **not** tcc-signal-specific —
+it strikes at *any* Path-Z spawn/teardown boundary, supporting the
+zombie-cleanup→next-spawn-race hypothesis over any per-test cause. This
+reproduction is **unrelated to the `fastpy-wc` change** (the wc + grep self-tests
+both ran and passed cleanly far earlier — wc printed `4 6 30` and exited 0; this
+is a *later* test). A subsequent boot-test re-run passed clean to BOOT_OK,
+consistent with the ~1-in-120 intermittency.
+
+- **Good:** the idt.rs re-entrancy guard (6fb1597aa) worked — a single clean halt
+  line, **no** #DF/#UD stack-overflow storm (contrast iter40's 4400-line cascade).
+- **Gap exposed:** the nested `#PF` fired at `rip=0xffffffff815da4de` (inside the
+  fatal-fault diagnostics) *before* the safe `dump_stack_scan` could print, so we
+  **again got no stack-scan naming the null pointer's caller.** The intended
+  evidence (return-address candidates) still didn't reach serial. The 2026-07-16
+  fix reordered `dump_stack_scan` *before* `print_current`, but *something earlier*
+  in the fatal branch (before the scan) is itself faulting on this path — likely a
+  deref of the trapframe/CR2-region during the initial fault-line formatting. To
+  actually capture the caller next time, the stack-scan must run **first thing** in
+  the fatal-`#PF` branch (before any other diagnostic that can fault), or the
+  scan's own output must be flushed line-by-line so a mid-scan nested-#PF still
+  yields the candidates gathered so far. Logged as the concrete next diagnostic
+  step; still WATCH for the root cause.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

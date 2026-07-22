@@ -1613,6 +1613,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-wc` utility: reads argv[1], counts
+    // lines/words/bytes in a str-typed helper, and prints "<lines> <words>
+    // <bytes>". First fastpy tool that computes over the whole file.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_wc() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `wc` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

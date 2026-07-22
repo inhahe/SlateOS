@@ -1922,6 +1922,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-pos` utility: exercises positioned file I/O
+    // (os.pwrite/os.pread → posix pwrite()/pread()) — read/write at an explicit
+    // offset without moving the fd offset. The tool pwrites "XY" at offset 2,
+    // confirms SEEK_CUR is still 8, then preads "BXYE" at offset 1; the harness
+    // asserts the round-tripped file holds "BXYE", proving both offset
+    // preservation and correct positioning.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pos() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pos` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

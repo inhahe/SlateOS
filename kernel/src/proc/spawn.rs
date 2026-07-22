@@ -10460,6 +10460,141 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-pos` utility — the first fastpy tool
+/// to exercise **positioned file I/O** (`os.pwrite` / `os.pread` → posix
+/// pwrite()/pread()).
+///
+/// Positioned I/O reads/writes at an explicit absolute file offset *without*
+/// moving the fd's current file offset — a distinct path from write/read +
+/// lseek.  The tool raw-opens a file, sequentially writes `"ABCDEFGH"` (fd
+/// offset now 8), `os.pwrite`s `"XY"` at offset 2 (overwriting in place, offset
+/// must stay 8), confirms via `SEEK_CUR` the offset is still 8, then `os.pread`s
+/// 4 bytes at offset 1 → `"BXYE"`.
+///
+/// False-pass-proof: if `os.pwrite` illegally advanced the fd offset the
+/// `SEEK_CUR` check (== 8) would fail; if either positioned op ignored its
+/// `offset` argument the read bytes would not be `"BXYE"`.  The harness asserts
+/// the tool wrote back exactly `"BXYE"`, so both the offset-preservation and the
+/// correct positioning are proven end-to-end.
+pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
+    static FASTPY_POS_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pos/fastpy-pos.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pos` (positioned I/O) utility (ring 3) integration \
+         test ({} bytes ELF)...",
+        FASTPY_POS_ELF.len()
+    );
+
+    // The bytes the tool reads back via os.pread(offset=1) after the positioned
+    // write; "ABXYEFGH"[1..5] == "BXYE".
+    const EXPECTED: &[u8] = b"BXYE";
+
+    const OUT_PATH: &str = "/tmp/fastpy-pos.out";
+    const DAT_PATH: &str = "/tmp/fastpy-pos.dat";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    // The tool loads its image (File READ), raw-opens+writes its scratch data
+    // file, and creates+writes its output file (File WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-pos"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-pos",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_POS_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-pos spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pos (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.pwrite/os.pread may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (pread matched, the fd
+    // offset stayed 8 after pwrite, write returned 8).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pos (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = pread bytes / post-pwrite SEEK_CUR / write count mismatch)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the positioned-read bytes must be exactly
+    // "BXYE" — provable only if pwrite hit offset 2 and pread hit offset 1.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pos (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the positioned-read bytes",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pos (ring 3) — positioned-read bytes were {:?}, expected \
+             {:?}; os.pwrite/os.pread did not honor the file offsets (posix pwrite()/pread() \
+             path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pos` (ring 3: os.pwrite(fd, \"XY\", 2) + \
+         os.pread(fd, 4, 1) → posix pwrite()/pread(); the tool positioned-wrote and \
+         positioned-read {} bytes at explicit offsets while leaving the fd offset at 8): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

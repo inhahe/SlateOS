@@ -10187,6 +10187,147 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-lseek` utility — the first fastpy tool
+/// to exercise the raw-fd file **open** path (`os.open` → posix open() →
+/// `SYS_FS_OPEN`) and the file-offset **seek** path (`os.lseek` → posix
+/// lseek() → `SYS_FS_SEEK`).
+///
+/// Every other fastpy tool opens files through the high-level builtin `open()`
+/// (buffered `FILE*` I/O).  This one uses `os.open` to obtain a *raw integer
+/// file fd*, drives it with native raw-fd `os.write`/`os.read`/`os.close`, and
+/// repositions its kernel file offset with `os.lseek(fd, 4, SEEK_SET)` — a
+/// kernel path no prior fastpy tool touches.
+///
+/// False-pass-proof: the tool writes `"ABCDEFGH"` at offset 0, seeks to offset
+/// 4, then reads 4 bytes.  If `os.lseek` were a no-op or mis-lowered the read
+/// would return the bytes at offset 0 (`"ABCD"`); only a real kernel-offset
+/// reposition yields `"EFGH"`.  The harness knows the expected `"EFGH"` and
+/// asserts the file the tool wrote back holds exactly that — no userspace path
+/// can fake a seek that never moved the offset.
+pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
+    static FASTPY_LSEEK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-lseek/fastpy-lseek.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `lseek` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_LSEEK_ELF.len()
+    );
+
+    // The bytes the tool reads back *after seeking to offset 4* and writes to
+    // its output file.  Must match "EFGH" (offset 4..8 of "ABCDEFGH").
+    const EXPECTED: &[u8] = b"EFGH";
+
+    // The tool writes the read-after-seek bytes here (native open('w')/write);
+    // removed up front so a stale value from a prior boot can't masquerade as
+    // this run's output.  It also creates a scratch data file it opens raw.
+    const OUT_PATH: &str = "/tmp/fastpy-lseek.out";
+    const DAT_PATH: &str = "/tmp/fastpy-lseek.dat";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    // The tool loads its image (File READ), raw-opens+writes its scratch data
+    // file, and creates+writes its output file (File WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-lseek"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-lseek",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_LSEEK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-lseek spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Bounded yield loop: the tool does no unbounded blocking.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-lseek (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.open/os.lseek may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (read-after-seek matched,
+    // lseek returned 4, write returned 8).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-lseek (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = read-after-seek bytes / lseek return / write count mismatch)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the bytes the tool wrote back must be exactly
+    // the bytes at file offset 4 — provable only if lseek repositioned the
+    // kernel offset.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-lseek (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the read-after-seek bytes",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-lseek (ring 3) — read-after-seek bytes were {:?}, expected \
+             {:?}; os.lseek did not reposition the kernel file offset (os.open/SYS_FS_OPEN + \
+             os.lseek/SYS_FS_SEEK path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `lseek` (ring 3: os.open() → SYS_FS_OPEN raw file fd, \
+         os.lseek(fd, 4, SEEK_SET) → SYS_FS_SEEK; the tool read {} bytes from offset 4 — \
+         proving the seek moved the kernel offset): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

@@ -1897,6 +1897,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-lseek` utility: exercises the raw-fd file open
+    // path (os.open → SYS_FS_OPEN) and the file-offset seek path (os.lseek →
+    // SYS_FS_SEEK). The tool writes "ABCDEFGH", seeks to offset 4, reads 4
+    // bytes; the harness asserts the round-tripped file holds "EFGH", so the
+    // read can only match if lseek truly repositioned the kernel file offset.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_lseek() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `lseek` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

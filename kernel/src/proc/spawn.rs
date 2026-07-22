@@ -6938,6 +6938,108 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-sort` utility — the first fastpy
+/// SlateOS tool built on an **in-memory list of strings** with **ordering**.
+///
+/// `sort <file>` reads the file, collects every line into a `list`, sorts the
+/// list into ascending lexicographic order, and prints the lines.  Every prior
+/// tool streamed or compared lines one at a time; this one materialises the
+/// whole file as a native list (`append`/get/set) and orders strings with the
+/// `<` relational compare (native `fastpy_str_compare`) — capabilities no
+/// earlier fastpy-on-SlateOS component exercised.
+///
+/// The harness stages a *deliberately out-of-order* 3-line marker file
+/// (`SORT_3`, `SORT_1`, `SORT_2`), runs `sort`, and asserts the process becomes
+/// a `Zombie` and exits 0.  The printed lines are mirrored to serial, so the
+/// boot harness can confirm they came out ascending (`SORT_1`, `SORT_2`,
+/// `SORT_3`).
+pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
+    static FASTPY_SORT_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-sort/fastpy-sort.elf");
+
+    const SORT_PATH: &str = "/tmp/sort-input.txt";
+    const SORT_PATH_ARG: &[u8] = b"/tmp/sort-input.txt";
+    // Deliberately out of order; ascending sort must emit SORT_1, SORT_2,
+    // SORT_3 (lexicographic — the suffix digits order them unambiguously).
+    const SORT_CONTENT: &[u8] = b"SORT_3\nSORT_1\nSORT_2\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `sort` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SORT_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(SORT_PATH, SORT_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", SORT_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-sort", SORT_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-sort",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SORT_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SORT_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-sort spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(SORT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sort (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/open/read/list-build/sort path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sort (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `sort` (ring 3: list-of-strings + `<` ordering — sorting a \
+         3-line out-of-order file; expect SORT_1/SORT_2/SORT_3 ascending above): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

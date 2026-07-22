@@ -4311,6 +4311,68 @@ consistent with the ~1-in-120 intermittency.
   stack-scan naming the null pointer's caller. Boot-validated (BOOT_OK, no
   false-positive fatal reports). Still WATCH for the underlying corruption source.
 
+**BREAKTHROUGH 2026-07-22 — first symbolized capture + a RELIABLE (layout-locked)
+reproducer; victim pinned to a scheduler `BTreeMap` iteration.** While finishing
+the unrelated `fastpy-ls` tool (commit 3f10b31f2), removing a temporary
+kernel-side `Vfs::readdir` diagnostic from `self_test_fastpy_slateos_ls` shifted
+kernel/heap layout into a configuration where this corruption reproduces **2/2
+boots at the *identical* fault site** — the first non-intermittent reproducer of
+a bug that had been ~1-in-120. The idt.rs hardening from earlier this session
+finally paid off: the full stack-scan printed *before* the nested fault, so we
+have real symbols for the first time.
+
+Serial (build/serial-test.txt, during `REAL glibc dynamic-execution (ring 3,
+Path Z)`, process 199, right after a demand-page `[mmap] Lazy mapped …`):
+```
+EXCEPTION: Page Fault (#PF) at 0xffffffff816618de, address=0xbb, error=0x0
+  Cause: not-present, read, kernel        <- DATA read, not an I-fetch
+  CS=0x8 RFLAGS=0x10446 RSP=0xffffc100000277f0
+  Task: 0 ("")                            <- faulted on the IDLE task
+NESTED #PF during fatal diagnostics: rip==cr2==0xffffc10000026cf0 err=0x11 (I-fetch into stack)
+```
+Symbolized against `target/x86_64-unknown-none/debug/kernel` with `llvm-nm
+--print-size --numeric-sort` (nearest-preceding-symbol):
+- **Fault rip `0xffffffff816618de` = `alloc::collections::btree::navigate::…::next_kv +0x5e`**
+  — i.e. **BTreeMap *iteration*** dereferencing a corrupted leaf/edge node pointer
+  (reads data at `0xbb`, a near-null offset off a ~null base).
+- Stack-scan return-address candidates (a scan, not a verified chain, but the
+  cluster is telling): `btree::search::find_key_index +0x22a`,
+  `btree::navigate::next_unchecked` (+ its closure), plus scheduler frames
+  `kernel::sched::load_current_task`, `kernel::sched::SchedMutex::record`, and the
+  bss globals `CURRENT_TASK_IDS` / `SMP_INITIALIZED`. (`load_current_task` merely
+  reads an atomic — it's a stale stack value, not the real caller — but the btree
+  + sched clustering places the corrupt tree in the scheduler.)
+
+**Refined diagnosis.** This is a **data-read** variant (`addr=0xbb, error=0x0`)
+of the same Path-Z teardown corruption, distinct from the classic **code-fetch**
+variant (`#PF at 0x0, error=0x10`, wild jump through a null fn-pointer): same
+root (something scribbles a freed/heap object at a spawn/teardown boundary), but
+this time the victim is a **scheduler `BTreeMap` node** (almost certainly
+`SchedState.tasks: BTreeMap<TaskId, Task>`, iterated at many sites in
+`sched/mod.rs` — 968/2567/3015/3157/4373/4446/4773 — several reachable from the
+idle-task migration/anti-starvation path) rather than a stored code pointer. The
+nested fault (`rip==cr2`, I-fetch into the kernel stack, `err=0x11`) is
+`sched::panic_diagnostics()` returning through a corrupted stack return address —
+the corruption reaches the stack too.
+
+**Why iterator-invalidation is *not* the likely cause:** every `state.tasks`
+iteration runs under `SchedMutex` (a `Mutex<SchedState>`), and safe Rust forbids
+concurrent mutation within one CPU while the same lock serializes across CPUs —
+so this is genuine **adjacent-overflow / use-after-free** corruption of the BTree
+node's heap allocation, not a mid-iteration mutation.
+
+**Recommended next step (durable, layout-independent):** add **heap-allocator
+corruption detection** — per-allocation redzones + a poison-on-free / short
+quarantine in the kernel allocator (`mm/heap` / linked-list or slab) with a
+validate-on-alloc/free check that *fires at the corruptor's write*, not later at
+the victim's read. That catches the bug regardless of layout (the current
+reliable reproducer is layout-fragile and will dissolve on the next kernel edit,
+so don't rely on it). The Path-Z teardown sequence (process 199 glibc
+zombie-cleanup → idle-task migration) is the window to instrument. Deferred here
+because it's a sizable allocator change on top of an already-large fastpy-ls
+task; captured now so a focused session can act on the concrete symbols above.
+Still WATCH.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

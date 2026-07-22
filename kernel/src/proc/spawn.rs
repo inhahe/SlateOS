@@ -6520,6 +6520,118 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-store` utility — the third shipping
+/// fastpy SlateOS component and the core primitive of the package manager: a
+/// **content-addressed store**.
+///
+/// Unlike `fastpy-cat`/`fastpy-sysinfo`, which only *stream* file contents,
+/// this utility does non-trivial computation and writes to a *computed* path:
+/// it reads `argv[1]`, computes a 32-bit FNV-1a digest of the bytes (pure
+/// Python, all arithmetic kept inside a signed 64-bit register — no bigint),
+/// formats it as 8 hex chars, writes the contents to `/tmp/store-<digest>.blob`,
+/// then reads the blob back and verifies it equals the input.  It exits 0
+/// **only** when the read-back verification succeeds, so a clean exit proves the
+/// whole store round-trip end-to-end.
+///
+/// The harness stages a known input whose digest is `a6fd63bc` (matched against
+/// CPython), grants a File capability, spawns the utility, and asserts it
+/// becomes a `Zombie` and exits 0.  The printed digest is mirrored to serial via
+/// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
+pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
+    static FASTPY_STORE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-store/fastpy-store.elf");
+
+    // Staged input + the content-addressed blob the utility will create.  The
+    // digest is the 32-bit FNV-1a of STORE_CONTENT, verified against CPython.
+    const STORE_PATH: &str = "/tmp/store-input.txt";
+    const STORE_PATH_ARG: &[u8] = b"/tmp/store-input.txt";
+    const STORE_CONTENT: &[u8] = b"SlateOS package payload\n";
+    // The blob path the utility writes: `/tmp/store-<digest>.blob`.
+    const STORE_BLOB_PATH: &str = "/tmp/store-a6fd63bc.blob";
+    const EXPECTED_EXIT: i32 = 0;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `store` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_STORE_ELF.len()
+    );
+
+    // Stage the input file the utility will hash and store.
+    if let Err(e) = crate::fs::Vfs::write_file(STORE_PATH, STORE_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", STORE_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-store", STORE_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-store",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_STORE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(STORE_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-store spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(STORE_PATH);
+    // The utility wrote this blob; clean it up regardless of outcome.
+    let _ = crate::fs::Vfs::remove(STORE_BLOB_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-store (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted on the hash/open/write/read-back path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-store (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (exit 1 means the stored blob did not read back equal to the input; a \
+             wrong digest on serial means the bigint-masked FNV arithmetic is off)",
+            exit_code, EXPECTED_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `store` (ring 3: content-addressed store — hashed argv[1] \
+         with 32-bit FNV-1a, wrote it to /tmp/store-<digest>.blob, and verified the read-back, \
+         exit 0): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

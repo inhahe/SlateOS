@@ -1614,6 +1614,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the third shipping fastpy utility: `fastpy-store`, the
+    // package manager's core primitive — a content-addressed store. It hashes
+    // argv[1] with a 32-bit FNV-1a (kept inside i64 — no bigint), writes the
+    // bytes to /tmp/store-<digest>.blob, and verifies the read-back. Exit 0
+    // proves the store round-trip end-to-end.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_store() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `store` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

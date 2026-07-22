@@ -7797,6 +7797,123 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-on-SlateOS `size` utility.
+///
+/// This is the first fastpy tool to read a file's **metadata** rather than its
+/// contents or directory listing: `size <file>` calls `os.path.getsize(argv[1])`
+/// — which lowers to the native `fastpy_os_path_getsize` (posix `stat()` →
+/// `SYS_FS_STAT`) — and exits with the byte size as its process exit code.  So
+/// the size flows through the exit code and the harness asserts the exact byte
+/// count, meaning a no-op getsize (e.g. returning 0 or -1) cannot false-pass.
+///
+/// Because `SYS_FS_STAT` gates on `Rights::METADATA` (a distinct right from the
+/// READ/WRITE/DELETE the content and mutation tools use), the harness grants
+/// `READ | METADATA`.  It stages `/tmp/size-input.txt` with a payload of a known
+/// length and asserts the child exits with exactly that length.
+pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
+    static FASTPY_SIZE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-size/fastpy-size.elf");
+
+    const SIZE_FILE: &str = "/tmp/size-input.txt";
+    const SIZE_FILE_ARG: &[u8] = b"/tmp/size-input.txt";
+    // Exactly 42 bytes.  The expected exit code is derived from PAYLOAD.len()
+    // below, so the test stays correct even if this literal is edited.
+    const PAYLOAD: &[u8] = b"fastpy getsize self-test: 42 payload bytes";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `size` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SIZE_ELF.len()
+    );
+
+    // Stage the input file whose byte size the child will report.
+    let _ = crate::fs::Vfs::remove(SIZE_FILE);
+    if let Err(e) = crate::fs::Vfs::write_file(SIZE_FILE, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", SIZE_FILE, e);
+        return Err(e);
+    }
+    if !crate::fs::Vfs::exists(SIZE_FILE) {
+        serial_println!(
+            "[spawn]   FAIL: staged {} but VFS reports it absent before size",
+            SIZE_FILE
+        );
+        let _ = crate::fs::Vfs::remove(SIZE_FILE);
+        return Err(KernelError::InternalError);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-size", SIZE_FILE_ARG];
+    let envp: &[&[u8]] = &[];
+    // os.path.getsize → SYS_FS_STAT, which gates on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-size",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SIZE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SIZE_FILE);
+            serial_println!("[spawn]   FAIL: fastpy-size spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(SIZE_FILE);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-size (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.path.getsize path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let expected = PAYLOAD.len() as i32;
+    if exit_code != Some(expected) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-size (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== byte size of {}); mismatch => SYS_FS_STAT returned the wrong size",
+            exit_code, expected, SIZE_FILE
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `size` (ring 3: file metadata via os.path.getsize → \
+         SYS_FS_STAT; exit code {} == exact byte size of /tmp/size-input.txt): OK",
+        expected
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

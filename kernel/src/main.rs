@@ -1724,6 +1724,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the fastpy `size` utility: the first fastpy tool to read a
+    // file's *metadata* (os.path.getsize → SYS_FS_STAT, gated on Rights::METADATA)
+    // rather than its contents/listing. It exits with the byte size as its exit
+    // code, so the size flows through and the exact byte count is asserted.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_size() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `size` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

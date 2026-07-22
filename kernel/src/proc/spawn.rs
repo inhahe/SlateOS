@@ -9440,6 +9440,164 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-getpid` utility — the **first fastpy
+/// tool to exercise the process-identity syscall** (`SYS_PROCESS_ID`).
+///
+/// Where `fastpy-clock`/`fastpy-sleep` reach into *timekeeping* (an external
+/// resource — the wall clock, the scheduler timer), this one asks the kernel
+/// about the *caller itself*: `os.getpid()` lowers to native `fastpy_os_getpid`
+/// → posix `getpid()` → kernel `SYS_PROCESS_ID`.
+///
+/// False-pass-proof, kernel-verified two independent ways:
+///  1. The tool exits 0 only if `os.getpid() > 0` (a zero/negative stub → exit
+///     3), so a dead identity is caught by the exit code alone.
+///  2. The **strong** proof: the tool writes its PID to `/tmp/fastpy-getpid.out`
+///     (a real `open('w')`/`write` → `SYS_FS_*` path — fastpy's `print` lowers
+///     to a direct console-write that bypasses the fd table, so it can't be
+///     captured by a redirect); the harness reads that file back and asserts
+///     the PID it holds **equals the real PID the kernel assigned at spawn**
+///     (`result.pid`).  A stub `getpid()` returning a constant (0, 1, …) would
+///     not match the freshly-allocated PID → fail.  Only a genuine
+///     `SYS_PROCESS_ID` round-trip returns the caller's actual identity.
+pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
+    static FASTPY_GETPID_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-getpid/fastpy-getpid.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `getpid` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETPID_ELF.len()
+    );
+
+    // Path the tool writes its PID to (via native open('w')/write → SYS_FS_*),
+    // then the harness reads it back.  Removed up front so a stale value from a
+    // prior boot can never masquerade as this run's output.
+    const OUT_PATH: &str = "/tmp/fastpy-getpid.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE), mirroring the other file-writing ring-3 tools (e.g. store).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-getpid"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-getpid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_GETPID_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-getpid spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The tool does no blocking work (no sleep), so a bounded yield loop is
+    // sufficient here (cf. the sleep test which needs a wall-clock deadline).
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getpid (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.getpid may have mis-lowered)",
+            state
+        );
+        // Best-effort cleanup of the output file.
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (getpid() > 0).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getpid (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.getpid() returned <= 0)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): read the PID the tool wrote and confirm it
+    // matches the PID the kernel actually assigned at spawn.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getpid (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the reported PID",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    // Best-effort cleanup now that we have the bytes in hand.
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // Parse the leading run of ASCII decimal digits (the tool writes the bare
+    // decimal PID).
+    let mut reported_pid: u64 = 0;
+    let mut saw_digit = false;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            reported_pid = reported_pid
+                .saturating_mul(10)
+                .saturating_add(u64::from(b - b'0'));
+        } else if saw_digit {
+            break;
+        }
+    }
+
+    if !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getpid (ring 3) — output file held no decimal PID \
+             ({} bytes); os.getpid()/open/write may not have run",
+            written.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if reported_pid != result.pid {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getpid (ring 3) — tool reported PID {} but the kernel \
+             assigned PID {} at spawn; os.getpid() did not return the real identity",
+            reported_pid, result.pid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `getpid` (ring 3: os.getpid() → getpid() → SYS_PROCESS_ID; \
+         the tool's written PID {} matches the kernel-assigned PID exactly): OK",
+        reported_pid
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

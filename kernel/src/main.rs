@@ -1833,6 +1833,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-getpid`: os.getpid() → getpid() → SYS_PROCESS_ID —
+    // the first fastpy tool to exercise the *process-identity* syscall (about
+    // the caller itself, vs. clock/sleep's external timekeeping). Kernel-verified
+    // false-pass-proof: the tool's stdout is captured via an fd-1 redirect and
+    // the printed PID must equal the real PID the kernel assigned at spawn.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getpid() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `getpid` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

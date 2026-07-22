@@ -1800,6 +1800,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
+    // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
+    // chmod, times via settimes, owner here).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_chown() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `chown` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

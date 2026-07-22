@@ -8862,6 +8862,166 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
+/// **completes the metadata-mutation trio** (permissions via `chmod`, times
+/// via `settimes`, **owner** here).
+///
+/// `chown <uid> <gid> <path>` parses two decimal ids from `argv[1]`/`argv[2]`
+/// and stamps them onto `argv[3]` via `os.chown` → native `fastpy_os_chown` →
+/// posix `chown()` → kernel `SYS_FS_SET_OWNER` (gated on `Rights::WRITE`) →
+/// `Vfs::set_owner`.  Like `os.utime`, this is a 3-positional `os.*` native (a
+/// path plus two i64 ids).
+///
+/// False-pass-proof: the harness stages a file (memfs default uid/gid 0),
+/// asserts via the VFS that its `uid`/`gid` are *not* the target ids, runs
+/// `chown`, asserts exit 0, then independently re-reads `FileMeta` and asserts
+/// `uid == UID` AND `gid == GID`.  Using two DISTINCT non-zero ids verifies
+/// each field independently — a no-op chown that returned 0 without stamping
+/// (or one that stamped a single id into both fields) could not satisfy the
+/// after-checks.
+pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
+    static FASTPY_CHOWN_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-chown/fastpy-chown.elf");
+
+    const TARGET: &str = "/tmp/chown-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/chown-target.txt";
+    // Two DISTINCT non-zero ids so uid and gid can be verified independently.
+    const UID: u32 = 1000;
+    const GID: u32 = 2000;
+    const UID_ARG: &[u8] = b"1000";
+    const GID_ARG: &[u8] = b"2000";
+    const PAYLOAD: &[u8] = b"chown";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `chown` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_CHOWN_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // Sanity: the staged owner must differ from the targets, else a no-op chown
+    // could false-pass.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.uid == UID && m.gid == GID => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chown (ring 3) — staged file already owned by the \
+                 target ids; test cannot distinguish a no-op chown"
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: could not stat staged {} — {:?}", TARGET, e);
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    // os.chown → SYS_FS_SET_OWNER (Rights::WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-chown", UID_ARG, GID_ARG, TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-chown",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_CHOWN_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-chown spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-chown (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.chown may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means os.chown returned success (exit 3 = SYS_FS_SET_OWNER failed).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-chown (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.chown failed / SYS_FS_SET_OWNER rejected)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: BOTH ids must now equal the distinct
+    // values we passed — proving each field was set independently.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.uid == UID && m.gid == GID => {}
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chown (ring 3) — owner is uid={} gid={}, expected \
+                 {} / {}; SYS_FS_SET_OWNER did not stamp correctly",
+                m.uid, m.gid, UID, GID
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chown (ring 3) — could not re-stat the target: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `chown` (ring 3: os.chown → SYS_FS_SET_OWNER [Rights::WRITE]; \
+         the kernel VFS confirmed both uid and gid were stamped to the distinct requested values): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

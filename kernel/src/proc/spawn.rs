@@ -9022,6 +9022,118 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-clock` utility — the **first fastpy
+/// tool to exercise a kernel subsystem other than the filesystem**: it reads
+/// the wall clock via `time.time_ns()`.
+///
+/// Every prior fastpy SlateOS tool drove a `SYS_FS_*` syscall.  This one drives
+/// **timekeeping**: `time.time_ns()` → native `fastpy_time_time_ns` → posix
+/// `gettimeofday()` → kernel `SYS_CLOCK_REALTIME` → `timekeeping::clock_realtime`
+/// (boot-time CMOS RTC + TSC-elapsed).
+///
+/// False-pass-proof, kernel-verified: the harness reads its OWN
+/// `timekeeping::clock_realtime()` immediately before spawning and passes that
+/// ns count as `argv[1]` — a lower bound the tool's read must meet or exceed.
+/// The tool exits 0 only if its `time.time_ns()` is `> 0` AND `>= lower_bound`
+/// (it reads the *same* clock a few ms later, so a correct clock is `>=` the
+/// bound; a zero-stub clock returns 0 and fails; a clock stuck in the past
+/// returns `< bound` and fails).  The harness first asserts its own reading is
+/// `> 0` so the comparison is meaningful rather than `0 >= 0`.
+pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
+    static FASTPY_CLOCK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-clock/fastpy-clock.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `clock` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_CLOCK_ELF.len()
+    );
+
+    // The kernel's own current wall-clock reading, taken just before spawn.
+    // The tool must read a value at least this large (it reads the same clock a
+    // few ms later).  A dead/uninitialized clock reports 0.
+    let t0 = crate::timekeeping::clock_realtime();
+    if t0 == 0 {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-clock (ring 3) — kernel clock_realtime() returned 0 \
+             (no usable RTC); cannot validate the timekeeping path"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Decimal ns lower bound passed to the tool as argv[1].
+    let lb = alloc::format!("{t0}");
+    let lb_arg = lb.as_bytes();
+
+    // The clock tool touches no files (SYS_CLOCK_REALTIME and SYS_CONSOLE_WRITE
+    // are uncapped); a harmless File READ mirrors the proven crt-startup path.
+    let caps = [(ResourceType::File, 0u64, Rights::READ)];
+
+    let argv: &[&[u8]] = &[b"fastpy-clock", lb_arg];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-clock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_CLOCK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-clock spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-clock (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; time.time_ns may have mis-lowered)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the tool's clock read was > 0 and >= the kernel's earlier
+    // reading (exit 3 = zero-stub clock or a clock stuck before `t0`).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-clock (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = time.time_ns() was 0 or < the kernel's {} ns lower bound)",
+            exit_code, t0
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `clock` (ring 3: time.time_ns() → SYS_CLOCK_REALTIME; \
+         the tool's wall-clock read was positive and >= the kernel's {} ns pre-spawn reading): OK",
+        t0
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

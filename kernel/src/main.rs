@@ -1810,6 +1810,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-clock`: time.time_ns() → SYS_CLOCK_REALTIME — the
+    // first fastpy tool to exercise a non-filesystem kernel subsystem
+    // (timekeeping). Kernel-verified false-pass-proof: the kernel passes its own
+    // clock_realtime() reading as a lower bound the tool's read must meet/exceed.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_clock() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `clock` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

@@ -9742,6 +9742,220 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-samefile` utility — the first fastpy
+/// tool to exercise **`os.path.samefile(a, b)`** and the **`st_ino`** field.
+///
+/// `os.path.samefile` lowers to `fastpy_os_path_samefile` → two posix `stat()`
+/// calls → `SYS_FS_STAT`, comparing the `(st_dev, st_ino)` identity of the
+/// results.  Both stats **follow symlinks**, so a file and a symlink to it are
+/// the *same file* (same inode), while two independently-created files have
+/// distinct synthetic inodes.  It returns a Python **bool**.
+///
+/// The tool creates `TARGET` (argv[1]) and `OTHER` (argv[3]), a symlink `LINK`
+/// (argv[2]) → TARGET, then writes a 3-char `'1'/'0'` pattern:
+///   * `samefile(TARGET, LINK)`   symlink resolves to TARGET → True  ('1')
+///   * `samefile(TARGET, OTHER)`  distinct inodes            → False ('0')
+///   * `samefile(TARGET, TARGET)` identical path             → True  ('1')
+/// i.e. the expected pattern is exactly `"101"`, and it exits 0 iff so.
+///
+/// False-pass-proof: a constant-bool stub cannot produce "101"; the symlink
+/// case can only be True if `stat()` follows the link and inodes are compared
+/// (a no-follow or path-string comparison gives False).  This harness
+/// independently reads the VFS inode numbers (`FileMeta::ino`, which also
+/// follows symlinks) and asserts `ino(LINK) == ino(TARGET)` (validating the
+/// symlink case) AND `ino(OTHER) != ino(TARGET)` (validating discrimination) —
+/// an independent readout of the exact identity the tool compared — and that
+/// the tool wrote exactly "101".
+pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
+    static FASTPY_SAMEFILE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-samefile/fastpy-samefile.elf");
+
+    const TARGET: &str = "/tmp/samefile-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/samefile-target.txt";
+    const LINK: &str = "/tmp/samefile-link.txt";
+    const LINK_ARG: &[u8] = b"/tmp/samefile-link.txt";
+    const OTHER: &str = "/tmp/samefile-other.txt";
+    const OTHER_ARG: &[u8] = b"/tmp/samefile-other.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-samefile.out";
+    // [s1, s2, s3] = [file==symlink, file==other, file==file].
+    const EXPECTED: &[u8] = b"101";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `samefile` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SAMEFILE_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(LINK);
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OTHER);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // os.symlink → SYS_FS_SYMLINK gates on Rights::CREATE; the create/write of
+    // the probe files needs Rights::WRITE; os.path.samefile → SYS_FS_STAT gates
+    // on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::CREATE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-samefile", TARGET_ARG, LINK_ARG, OTHER_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-samefile",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SAMEFILE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-samefile spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-samefile (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.path.samefile may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the "101" identity pattern held (exit 3 = symlink failed or
+    // samefile reported a wrong identity: a stub, a no-follow stat, or a wiring
+    // that ignored the inode).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-samefile (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.symlink failed or os.path.samefile reported the wrong pattern)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independently read the VFS inode numbers (metadata() follows symlinks) to
+    // validate the exact identity the tool compared.
+    let ino_target = match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) => m.ino,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat TARGET {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    let ino_link = match crate::fs::Vfs::metadata(LINK) {
+        Ok(m) => m.ino,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat LINK {}: {:?}",
+                LINK, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    let ino_other = match crate::fs::Vfs::metadata(OTHER) {
+        Ok(m) => m.ino,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-samefile (ring 3) — could not stat OTHER {}: {:?}",
+                OTHER, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // The inode identity the tool observed must hold independently: the symlink
+    // resolves to TARGET's inode; OTHER is a distinct inode.  (Guards against a
+    // false pass where SYS_FS_STAT didn't follow the link or inodes collided.)
+    if ino_target == 0 || ino_link != ino_target {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-samefile (ring 3) — VFS ino(LINK)={} != ino(TARGET)={} \
+             (symlink did not resolve to the target inode; samefile's True is unverifiable)",
+            ino_link, ino_target
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if ino_other == ino_target {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-samefile (ring 3) — VFS ino(OTHER)={} == ino(TARGET)={} \
+             (distinct files share an inode; samefile's False is unverifiable)",
+            ino_other, ino_target
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The tool must have written exactly the expected "101" pattern.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-samefile (ring 3) — {} held {:?}, expected {:?} \
+                     (os.path.samefile did not report [file==symlink, file!=other, file==file])",
+                    OUT_PATH, bytes.as_slice(), EXPECTED
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-samefile (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `samefile` (ring 3: os.path.samefile → SYS_FS_STAT compared \
+         st_ino identity; a symlink matched its target while a distinct file did not, and the VFS \
+         inode numbers confirmed it): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

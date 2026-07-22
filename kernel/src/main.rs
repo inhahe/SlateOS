@@ -1843,6 +1843,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-samefile`: os.path.samefile → SYS_FS_STAT compares
+    // (st_dev, st_ino) identity — the first fastpy lowering to exercise st_ino.
+    // A symlink matches its target (stat follows links) while a distinct file
+    // does not; the kernel cross-checks the VFS inode numbers.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_samefile() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `samefile` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

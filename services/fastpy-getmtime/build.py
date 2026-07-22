@@ -89,11 +89,15 @@ SRC = (
     "f.write('x')\n"
     "f.close()\n"
     "rc = os.utime(path, ns, ns)\n"
-    # int() wraps the native os.path.getmtime call *inline* on purpose: binding
-    # the float result to an intermediate variable first would drop its FLOAT
-    # kind, so a later int(<var>) bridges to CPython (see known-issues.md).  The
-    # inline form keeps the whole expression native (fptosi over the double).
-    "got = int(os.path.getmtime(path))\n"
+    # Bind the native os.path.getmtime float result to an intermediate variable
+    # and int() it on the next line.  This exercises the fixed VKind-propagation
+    # path: the assignment now stamps `back` with kind FLOAT (see the chained
+    # os.path.* handler in codegen `_infer_call_type_tag`), so `int(back)` lowers
+    # natively (fptosi) instead of bridging to CPython.  This form used to bridge
+    # (was BUG-SCALARKIND-LOST-ON-NATIVE-MODULE-CALL-ASSIGN); keeping it here
+    # makes this tool an on-target regression test for that fix.
+    "back = os.path.getmtime(path)\n"
+    "got = int(back)\n"
     "g = open('/tmp/fastpy-getmtime.out', 'w')\n"
     "g.write(str(got))\n"
     "g.close()\n"

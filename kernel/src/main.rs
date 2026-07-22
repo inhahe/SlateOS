@@ -1768,6 +1768,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-chmod` — the first fastpy tool to MUTATE a file's
+    // metadata (os.chmod → SYS_FS_SET_PERMS). Prior metadata tools (size/ftype)
+    // only read via SYS_FS_STAT. The harness confirms the permission bits
+    // actually changed 0o644 → 0o600 via the VFS.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_chmod() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `chmod` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

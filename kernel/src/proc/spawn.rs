@@ -8367,6 +8367,161 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-chmod` utility — the first fastpy
+/// tool to **mutate** a file's metadata (all prior metadata tools —
+/// `size`/`ftype` — only *read* via `SYS_FS_STAT`).
+///
+/// `chmod <mode> <path>` parses an octal mode from `argv[1]` and applies it to
+/// `argv[2]` via `os.chmod` → native `fastpy_os_chmod` → posix `chmod()` →
+/// kernel `SYS_FS_SET_PERMS` (gated on `Rights::WRITE`) → `Vfs::set_permissions`.
+///
+/// False-pass-proof: the harness stages a file (memfs default `0o644`), asserts
+/// via the VFS the perms are *not* the target beforehand, runs `chmod 600`,
+/// asserts exit 0, then independently re-reads `FileMeta::permissions` and
+/// asserts it now equals `0o600`.  A no-op chmod that returned 0 without
+/// persisting could not satisfy the after-check.
+pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
+    static FASTPY_CHMOD_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-chmod/fastpy-chmod.elf");
+
+    const TARGET: &str = "/tmp/chmod-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/chmod-target.txt";
+    const MODE_ARG: &[u8] = b"600";
+    const NEW_PERMS: u16 = 0o600;
+    const PAYLOAD: &[u8] = b"chmod me\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `chmod` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_CHMOD_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    // Stage the file (memfs assigns default 0o644 on create).
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // Sanity: the target must NOT already carry the perms we're about to set,
+    // else a no-op chmod could false-pass.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.permissions == NEW_PERMS => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chmod (ring 3) — staged file already has perms {:o}; \
+                 test cannot distinguish a no-op chmod",
+                m.permissions
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: could not stat staged {} — {:?}", TARGET, e);
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    // os.chmod → SYS_FS_SET_PERMS (Rights::WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-chmod", MODE_ARG, TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-chmod",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_CHMOD_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-chmod spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-chmod (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.chmod may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means os.chmod returned success (exit 3 = SYS_FS_SET_PERMS failed).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-chmod (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.chmod failed / SYS_FS_SET_PERMS rejected)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: the perms must now be exactly the
+    // requested bits.  A chmod that returned 0 without persisting fails here.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.permissions == NEW_PERMS => {}
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chmod (ring 3) — perms are {:o}, expected {:o}; \
+                 SYS_FS_SET_PERMS did not persist",
+                m.permissions, NEW_PERMS
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-chmod (ring 3) — could not re-stat the target: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `chmod` (ring 3: os.chmod → SYS_FS_SET_PERMS [Rights::WRITE]; \
+         the kernel VFS confirmed the file's permission bits changed 0o644 → 0o600): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

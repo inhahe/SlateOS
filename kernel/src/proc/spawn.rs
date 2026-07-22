@@ -9755,6 +9755,162 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-gettid` utility — a sibling of
+/// `fastpy-getpid` / `fastpy-getppid` that exercises the **scheduler's task
+/// table** rather than the process table.
+///
+/// Where `fastpy-getpid` asks about the caller's process identity
+/// (`SYS_PROCESS_ID`) and `fastpy-getppid` about its parent
+/// (`SYS_PROCESS_PARENT_ID`), this asks for the calling thread's kernel task ID
+/// via a distinct kernel path: `os.gettid()` lowers to native
+/// `fastpy_os_gettid` → posix `gettid()` → kernel `SYS_TASK_ID`.
+///
+/// False-pass-proof: the harness records the main thread's task ID
+/// (`result.task_id`) that the kernel assigned at spawn, then asserts the value
+/// the tool wrote back is *exactly* that.  Task IDs are drawn from a different
+/// ID space than process PIDs, so had the lowering mistakenly called `getpid`
+/// (or otherwise reported the caller's PID), the written value would be the PID,
+/// not the task ID → the `== result.task_id` assertion fails.  So the test
+/// proves `os.gettid()` is wired to `SYS_TASK_ID`, not `SYS_PROCESS_ID`.
+pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
+    static FASTPY_GETTID_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-gettid/fastpy-gettid.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `gettid` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETTID_ELF.len()
+    );
+
+    // The tool writes its kernel task ID here (native open('w')/write →
+    // SYS_FS_*); removed up front so a stale value from a prior boot can't
+    // masquerade as this run's output.
+    const OUT_PATH: &str = "/tmp/fastpy-gettid.out";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // The tool loads its image (File READ) and creates+writes its output file
+    // (File WRITE), mirroring the other file-writing ring-3 tools.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-gettid"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-gettid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_GETTID_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-gettid spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The tool does no blocking work, so a bounded yield loop suffices.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-gettid (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.gettid may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (gettid() > 0).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-gettid (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.gettid() returned <= 0)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the task ID the tool wrote must match the
+    // main-thread task ID the kernel assigned at spawn — an unpredictable
+    // scheduler-assigned value from a different ID space than the PID.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-gettid (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the reported task ID",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    // Parse the leading run of ASCII decimal digits (the tool writes the bare
+    // decimal task ID).
+    let mut reported_tid: u64 = 0;
+    let mut saw_digit = false;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            reported_tid = reported_tid
+                .saturating_mul(10)
+                .saturating_add(u64::from(b - b'0'));
+        } else if saw_digit {
+            break;
+        }
+    }
+
+    if !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-gettid (ring 3) — output file held no decimal task ID \
+             ({} bytes); os.gettid()/open/write may not have run",
+            written.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if reported_tid != result.task_id {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-gettid (ring 3) — tool reported task ID {} but the kernel \
+             assigned task ID {} at spawn (its PID was {}); os.gettid() did not return the real \
+             SYS_TASK_ID identity",
+            reported_tid, result.task_id, result.pid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `gettid` (ring 3: os.gettid() → gettid() → SYS_TASK_ID; \
+         the tool's written task ID {} matches the kernel-assigned task ID exactly, distinct \
+         from its PID {}): OK",
+        reported_tid, result.pid
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

@@ -1858,6 +1858,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-gettid`: os.gettid() → gettid() → SYS_TASK_ID — a
+    // sibling of getpid/getppid exercising the *scheduler's task table* (a
+    // distinct kernel path from the process table). The harness knows the exact
+    // main-thread task ID it assigned at spawn and asserts the tool reports it
+    // back exactly — a value from a different ID space than the PID, proving it
+    // reached SYS_TASK_ID and not SYS_PROCESS_ID.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_gettid() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `gettid` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

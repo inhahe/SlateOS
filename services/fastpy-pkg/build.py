@@ -61,6 +61,14 @@ is a comma-separated list of dependency package names, or `-` for none:
     pkg current
         print the current generation number ("generation <n>"), exit 0.
 
+    pkg search <query>
+        print every registry record whose name contains the substring <query>
+        (native char-compare substring match, no bridge), then "found <count>".
+        Follows grep(1) exit semantics: exit 0 if at least one record matched,
+        exit 1 if none — so a caller can test "is any package matching X
+        installed?" by exit code.  The everyday "which packages match?" query
+        alongside `list`.
+
     pkg list
         print every record in the registry, exit 0.
 
@@ -213,6 +221,47 @@ SRC = (
     "            if len(line) > 0:\n"
     "                print(line)\n"
     "                count = count + 1\n"
+    "            line = ''\n"
+    "        else:\n"
+    "            line = line + db[i]\n"
+    "        i = i + 1\n"
+    "    return count\n"
+    # Return 1 if `needle` occurs anywhere in `hay`, else 0 (native char
+    # compares; both params str-annotated so hay[i]/needle[j] lower to
+    # fastpy_str_index — no object-subscript bridge).
+    "def contains_sub(hay: str, needle: str) -> int:\n"
+    "    hn = len(hay)\n"
+    "    nn = len(needle)\n"
+    "    if nn == 0:\n"
+    "        return 1\n"
+    "    if nn > hn:\n"
+    "        return 0\n"
+    "    i = 0\n"
+    "    while i <= hn - nn:\n"
+    "        j = 0\n"
+    "        ok = 1\n"
+    "        while j < nn:\n"
+    "            if ord(hay[i + j]) != ord(needle[j]):\n"
+    "                ok = 0\n"
+    "                j = nn\n"
+    "            else:\n"
+    "                j = j + 1\n"
+    "        if ok == 1:\n"
+    "            return 1\n"
+    "        i = i + 1\n"
+    "    return 0\n"
+    # Print every record whose name (field 0) contains `q`; return the count.
+    "def db_search(db: str, q: str) -> int:\n"
+    "    n = len(db)\n"
+    "    i = 0\n"
+    "    line = ''\n"
+    "    count = 0\n"
+    "    while i <= n:\n"
+    "        if i == n or ord(db[i]) == 10:\n"
+    "            if len(line) > 0:\n"
+    "                if contains_sub(field(line, 0), q) == 1:\n"
+    "                    print(line)\n"
+    "                    count = count + 1\n"
     "            line = ''\n"
     "        else:\n"
     "            line = line + db[i]\n"
@@ -387,6 +436,16 @@ SRC = (
     "    f.close()\n"
     "    print('generation ' + str(parse_int(curs)))\n"
     "    sys.exit(0)\n"
+    "if cmd == 'search':\n"
+    "    q = sys.argv[2]\n"
+    "    f = open(db_path, 'r')\n"
+    "    db = f.read()\n"
+    "    f.close()\n"
+    "    count = db_search(db, q)\n"
+    "    print('found ' + str(count))\n"
+    "    if count > 0:\n"
+    "        sys.exit(0)\n"
+    "    sys.exit(1)\n"
     "if cmd == 'list':\n"
     "    f = open(db_path, 'r')\n"
     "    db = f.read()\n"
@@ -394,7 +453,7 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|remove|query|deps|check|verify|commit|rollback|current|list')\n"
+    "print('usage: pkg install|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

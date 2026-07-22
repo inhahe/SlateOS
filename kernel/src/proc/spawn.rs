@@ -7152,6 +7152,121 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-compiled `pkg search` subcommand — the
+/// substring name query over the registry, with grep(1) exit semantics.
+///
+/// `search <query>` prints every record whose name contains `<query>` and
+/// exits 0 iff at least one matched (exit 1 for no match).  This exercises the
+/// pure-mode native substring matcher (`contains_sub`, char-by-char `ord`
+/// compares over `str`-annotated params → `fastpy_str_index`, no bridge).
+///
+/// The registry is seeded *directly* (search only reads record *names*, so no
+/// store blobs are needed) with three packages — `libc`, `libcurl`, `grep` —
+/// and four queries assert the exit code distinguishes match from no-match:
+///  - `search lib`  → matches libc + libcurl → exit 0
+///  - `search curl` → matches libcurl        → exit 0
+///  - `search grep` → matches grep           → exit 0
+///  - `search zzz`  → matches nothing        → exit 1
+pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    // Three records; search reads only the name (field 0), so the digests/deps
+    // are arbitrary placeholders and no store blobs are required.
+    const DB_SEED: &[u8] =
+        b"libc 86732e22 -\nlibcurl aaaaaaaa libc\ngrep 0f4143a6 libc\n";
+
+    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-pkg",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        let _ = crate::fs::Vfs::remove(DB_PATH);
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) `search` (grep-style) test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, DB_SEED) {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+
+    // (argv, expected exit code, description).  grep(1) semantics: 0 = matched,
+    // 1 = no match.
+    let steps: &[(&[&[u8]], i32, &str)] = &[
+        (&[b"fastpy-pkg", b"search", b"lib"], 0, "search lib (libc + libcurl)"),
+        (&[b"fastpy-pkg", b"search", b"curl"], 0, "search curl (libcurl)"),
+        (&[b"fastpy-pkg", b"search", b"grep"], 0, "search grep (grep)"),
+        (&[b"fastpy-pkg", b"search", b"zzz"], 1, "search zzz (no match)"),
+    ];
+
+    for (argv, want, desc) in steps {
+        match run_pkg(FASTPY_PKG_ELF, argv) {
+            Ok(code) if code == *want => {}
+            Ok(code) => {
+                cleanup();
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
+                    desc, code, want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                cleanup();
+                serial_println!("[spawn]   FAIL: fastpy-pkg `{}` — {:?}", desc, e);
+                return Err(e);
+            }
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: substring `search` with grep-style exit — \
+         lib/curl/grep match (exit 0), zzz no match (exit 1), native contains_sub matcher): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

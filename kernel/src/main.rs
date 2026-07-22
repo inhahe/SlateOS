@@ -1659,6 +1659,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the fastpy package manager's `search` subcommand: seed a
+    // registry, run substring queries, and assert grep-style exit codes
+    // (0 = matched, 1 = no match) distinguish match from no-match.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_search() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` search (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

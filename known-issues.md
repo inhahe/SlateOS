@@ -14,6 +14,40 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-POSIX-TEST-PARALLEL. `cargo test -p posix` is flaky under parallel execution — non-thread-safe libc functions share `static mut` return buffers — 2026-07-22 — OPEN (test-infra; run with `--test-threads=1` meanwhile)
+
+**What:** Running the posix host suite with the default parallel test runner
+(`cargo test -p posix --target x86_64-pc-windows-gnu`) intermittently fails a
+*different* small set of tests each run (observed: `socket::tests::
+test_getprotobynumber_tcp`/`_udp`, `time::tests::test_gmtime_mktime_roundtrip`).
+The set changes run-to-run — the hallmark of a data race, not a logic bug.
+
+**Root cause:** POSIX's `getprotobyname`/`getprotobynumber`/`getservby*`/
+`gmtime`/`localtime`/`asctime`/`ctime` (and peers) are, by spec, **not
+thread-safe** — each returns a pointer into a single process-wide `static mut`
+buffer (that's why the `_r` reentrant variants exist). The product code is
+spec-correct for real single-threaded-per-call usage. The *test harness* runs
+tests on multiple threads concurrently, so two tests calling the same
+static-buffer function race: thread A reads `p_name` after thread B has
+overwritten the shared buffer. Nothing to do with any product bug.
+
+**Workaround (now):** run the suite single-threaded —
+`cargo test -p posix --target x86_64-pc-windows-gnu -- --test-threads=1`
+(all 19992 pass deterministically that way).
+
+**Proper fix (candidate task):** make the static return buffers **thread-local**
+(matches glibc, whose `gmtime`/`localtime`/`getproto*` results are effectively
+per-thread), so the functions become per-thread-safe on both the host build
+(`thread_local!`) and the no_std OS target (FS/GS TLS, already used for pthread
+TSD). That fixes the races *and* improves product fidelity. Lighter-weight
+alternative: guard the affected tests with a shared `Mutex` (test-only) — fixes
+the suite but not the product thread-safety gap. Prefer the TLS-buffer fix.
+
+**Note:** while investigating this I also found and fixed a *deterministic*
+stale test (`file::tests::translate_no_flags` asserted the pre-
+BUG-OPENFLAGS-ENCODING return value `0`; corrected to `N_READ`). That one
+always failed and was unrelated to the parallel flakiness.
+
 ### BUG-OPENAT2-RESOLVE-NO-SYMLINKS-IGNORED. `openat2`'s `RESOLVE_NO_SYMLINKS` was accepted but never enforced — symlinks in the path were still followed — 2026-07-22 — ✅ RESOLVED 2026-07-22
 
 **What:** `sys_openat2` (`kernel/src/syscall/linux.rs`) accepted the

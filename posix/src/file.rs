@@ -5404,8 +5404,13 @@ mod tests {
 
     #[test]
     fn translate_no_flags() {
+        // O_RDONLY == 0, but native OpenFlags make READ an explicit bit:
+        // reading requires N_READ, so translate(0) yields exactly N_READ
+        // (no CREATE/TRUNC/APPEND/etc).  (Pre-BUG-OPENFLAGS-ENCODING this
+        // emitted the raw Linux bit pattern 0; the encoding was corrected
+        // to native OpenFlags 2026-07-21.)
         let flags = translate_open_flags(0);
-        assert_eq!(flags, 0);
+        assert_eq!(flags, N_READ);
     }
 
     // -- Stub functions: verify they return expected values --

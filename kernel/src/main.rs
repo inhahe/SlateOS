@@ -1854,6 +1854,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-islink`: os.path.islink → SYS_FS_LSTAT tests
+    // S_ISLNK without following the link.  First lstat (no-follow) lowering — a
+    // dangling symlink whose target is missing still reports True (proving
+    // no-follow), while a regular file and a nonexistent path report False; the
+    // kernel cross-checks the VFS lstat entry types.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_islink() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `islink` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

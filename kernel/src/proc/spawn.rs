@@ -9956,6 +9956,242 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-islink` utility — the first fastpy
+/// lowering to exercise **`lstat` (no-follow)** semantics.
+///
+/// The tool creates a regular file `TARGET`, a symlink `LINK` → TARGET, and a
+/// *dangling* symlink `DANGLING` → `MISSING` (a path never created), then tests
+/// `os.path.islink` on four inputs → native `fastpy_os_path_islink` → posix
+/// `lstat()` → `SYS_FS_LSTAT` (gated on `Rights::METADATA`) → `S_ISLNK`:
+///   * `islink(LINK)`     → True  (a symlink to an existing target)
+///   * `islink(TARGET)`   → False (a regular file)
+///   * `islink(DANGLING)` → True  (a symlink, though its target is missing —
+///                                 the decisive no-follow discriminator: a
+///                                 follow-symlink `stat()` would see it as
+///                                 nonexistent and report False)
+///   * `islink(MISSING)`  → False (the path does not exist)
+/// and writes the 4-char pattern `"1010"` to `/tmp/fastpy-islink.out`, exiting
+/// 0 iff both symlinks succeeded and the pattern held.
+///
+/// The kernel independently `Vfs::lstat`s each path (no-follow) and asserts the
+/// entry types — LINK and DANGLING are `Symlink`, TARGET is not, and MISSING
+/// does not resolve — an independent readout of the exact identity the tool
+/// tested.  Granted `READ|WRITE|CREATE|METADATA` (symlink needs CREATE, the
+/// probe file needs WRITE, lstat needs METADATA).
+pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
+    static FASTPY_ISLINK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-islink/fastpy-islink.elf");
+
+    const TARGET: &str = "/tmp/islink-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/islink-target.txt";
+    const LINK: &str = "/tmp/islink-link.txt";
+    const LINK_ARG: &[u8] = b"/tmp/islink-link.txt";
+    const DANGLING: &str = "/tmp/islink-dangling.txt";
+    const DANGLING_ARG: &[u8] = b"/tmp/islink-dangling.txt";
+    const MISSING: &str = "/tmp/islink-missing.txt";
+    const MISSING_ARG: &[u8] = b"/tmp/islink-missing.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-islink.out";
+    // [l1, l2, l3, l4] = [islink(link), islink(target), islink(dangling), islink(missing)].
+    const EXPECTED: &[u8] = b"1010";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `islink` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_ISLINK_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(LINK);
+        let _ = crate::fs::Vfs::remove(DANGLING);
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // os.symlink → SYS_FS_SYMLINK gates on Rights::CREATE; the create/write of
+    // the probe file needs Rights::WRITE; os.path.islink → SYS_FS_LSTAT gates
+    // on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::CREATE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-islink", TARGET_ARG, LINK_ARG, DANGLING_ARG, MISSING_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-islink",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_ISLINK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-islink spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.path.islink may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the "1010" pattern held (exit 3 = a symlink failed or islink
+    // reported a wrong pattern: a stub, a follow-symlink stat that mis-handled
+    // the dangling link, or a wiring that ignored S_ISLNK).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.symlink failed or os.path.islink reported the wrong pattern)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independently lstat each path (no-follow) to validate the exact identity
+    // the tool tested.  LINK and DANGLING must be symlinks; TARGET must not be;
+    // MISSING must not resolve.
+    let lt_link = match crate::fs::Vfs::lstat(LINK) {
+        Ok(e) => e.entry_type,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat LINK {}: {:?}",
+                LINK, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    if lt_link != crate::fs::EntryType::Symlink {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — VFS lstat(LINK) type = {:?}, expected \
+             Symlink (islink's True for LINK is unverifiable)",
+            lt_link
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    let lt_target = match crate::fs::Vfs::lstat(TARGET) {
+        Ok(e) => e.entry_type,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat TARGET {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    if lt_target == crate::fs::EntryType::Symlink {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — VFS lstat(TARGET) type = Symlink, expected \
+             a non-link (islink's False for TARGET is unverifiable)"
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    let lt_dangling = match crate::fs::Vfs::lstat(DANGLING) {
+        Ok(e) => e.entry_type,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-islink (ring 3) — could not lstat DANGLING {}: {:?} \
+                 (a dangling symlink must still be lstat-able)",
+                DANGLING, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    if lt_dangling != crate::fs::EntryType::Symlink {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — VFS lstat(DANGLING) type = {:?}, expected \
+             Symlink (islink's True on a broken link — the no-follow discriminator — is \
+             unverifiable)",
+            lt_dangling
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // MISSING was never created and is not a symlink target that exists; lstat
+    // must fail, corroborating islink(MISSING) == False.
+    if let Ok(e) = crate::fs::Vfs::lstat(MISSING) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-islink (ring 3) — VFS lstat(MISSING) unexpectedly succeeded \
+             (type {:?}); islink's False for a nonexistent path is unverifiable",
+            e.entry_type
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The tool must have written exactly the expected "1010" pattern.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-islink (ring 3) — {} held {:?}, expected {:?} \
+                     (os.path.islink did not report [link, not-file, dangling-link, missing])",
+                    OUT_PATH, bytes.as_slice(), EXPECTED
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-islink (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `islink` (ring 3: os.path.islink → SYS_FS_LSTAT tested \
+         S_ISLNK without following the link; a symlink — even a dangling one whose target is \
+         missing — reported True while a regular file and a nonexistent path reported False, and \
+         the VFS lstat entry types confirmed it): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

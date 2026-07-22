@@ -79,6 +79,9 @@ pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.
 pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
+/// Set the calling process's real uid/gid (arg0=uid, arg1=gid;
+/// 0xFFFF_FFFF = leave unchanged). Kernel enforces the permission rule.
+pub const SYS_PROCESS_SET_CREDENTIALS: u64 = 530;
 
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;

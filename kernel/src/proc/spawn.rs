@@ -10789,6 +10789,216 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-setuid` utility — the **write** half
+/// of the process-identity pair (getuid/getgid *read*; setuid/setgid *mutate*).
+///
+/// `os.setuid()`/`os.setgid()` lower bridge-free to `fastpy_os_set{u,g}id` →
+/// posix `set{u,g}id()`, which — after the userspace CAP_SETUID/CAP_SETGID +
+/// identity check — issue the native `SYS_PROCESS_SET_CREDENTIALS` syscall.
+/// That syscall *mutates* the calling process's `ProcessCredentials` in the
+/// kernel's process-credentials table (a distinct **write** path from the
+/// read-only `SYS_PROCESS_GET_CREDENTIALS`).  Until this work the posix
+/// `set{u,g}id` stubs permission-checked but silently succeeded without
+/// changing any state.
+///
+/// The harness spawns the tool as **root** `(0, 0)` (every process starts with
+/// CAP_SETUID/CAP_SETGID in its effective set, so the calls are permitted).
+/// The tool reads its spawn identity, calls `os.setuid(NEW_UID)` /
+/// `os.setgid(NEW_GID)`, reads the identity *back*, and writes
+/// `"<u0>,<g0>,<u1>,<g1>"`.  We assert it wrote exactly `"0,0,<NEW_UID>,<NEW_GID>"`
+/// AND that `pcb::get_credentials` reflects the **mutated** pair.  The old stub
+/// would leave the credentials at `(0, 0)`, so both the read-back `u1,g1` and
+/// the kernel cross-check would still be `0,0` — two independent failures.
+/// NEW_UID and NEW_GID are distinct non-zero values, ruling out a field-swap or
+/// single-field coincidence.  Granted `READ|WRITE` (for the `/tmp` output file);
+/// the credential syscalls need no capability token.
+pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
+    static FASTPY_SETUID_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-setuid/fastpy-setuid.elf");
+
+    const OUT_PATH: &str = "/tmp/fastpy-setuid.out";
+    // The tool changes to this distinct, non-obvious identity.  Must match the
+    // literals baked into services/fastpy-setuid/build.py's SRC.
+    const NEW_UID: u32 = 3131;
+    const NEW_GID: u32 = 4242;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `setuid` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SETUID_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-setuid"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-setuid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        // Spawn as root so the tool's setuid/setgid (cap path) are permitted.
+        uid_gid: Some((0, 0)),
+    };
+
+    let result = match spawn_process(FASTPY_SETUID_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-setuid spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Read the kernel-stored credentials while the zombie is still in the
+    // process table — an independent confirmation that setuid/setgid actually
+    // MUTATED the credentials (not merely returned success).
+    let stored = pcb::get_credentials(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-setuid (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.setuid/setgid may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-setuid (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The kernel credentials must reflect the MUTATED pair, proving the setuid/
+    // setgid syscall path wrote through to the process-credentials table.
+    match stored {
+        Some(c) if c.uid == NEW_UID && c.gid == NEW_GID => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-setuid (ring 3) — kernel credentials were {:?}, expected \
+                 the mutated uid={} gid={} (setuid/setgid did not write through to \
+                 ProcessCredentials — a permission-check-only stub)",
+                other.map(|c| (c.uid, c.gid)), NEW_UID, NEW_GID
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The tool must have written "<u0>,<g0>,<u1>,<g1>" = "0,0,<NEW_UID>,<NEW_GID>".
+    let written = match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-setuid (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Parse four comma-separated decimal fields (u0, g0, u1, g1).
+    let mut fields: [u64; 4] = [0, 0, 0, 0];
+    let mut idx = 0usize;
+    let mut saw_digit = false;
+    let mut ok_format = true;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            if let Some(slot) = fields.get_mut(idx) {
+                *slot = slot.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+            }
+        } else if b == b',' {
+            if !saw_digit {
+                ok_format = false;
+                break;
+            }
+            idx = idx.saturating_add(1);
+            saw_digit = false;
+            if idx >= fields.len() {
+                ok_format = false;
+                break;
+            }
+        } else {
+            ok_format = false;
+            break;
+        }
+    }
+    if !ok_format || idx != 3 || !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-setuid (ring 3) — malformed output {:?} (expected \
+             \"<u0>,<g0>,<u1>,<g1>\")",
+            written.as_slice()
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    // Spawn identity must have been root, and the read-back identity must be the
+    // mutated pair — the latter is what proves the mutation was observable to
+    // the process itself (os.getuid after os.setuid sees the new value).
+    if fields[0] != 0 || fields[1] != 0 {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-setuid (ring 3) — pre-setuid identity was uid={} gid={}, \
+             expected the spawn identity 0,0",
+            fields[0], fields[1]
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if fields[2] != u64::from(NEW_UID) || fields[3] != u64::from(NEW_GID) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-setuid (ring 3) — post-setuid identity was uid={} gid={}, \
+             expected the mutated uid={} gid={} (os.setuid/setgid returned success but the \
+             change was not observable via os.getuid/getgid — a silent no-op stub)",
+            fields[2], fields[3], NEW_UID, NEW_GID
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `setuid` (ring 3: os.setuid/os.setgid → \
+         SYS_PROCESS_SET_CREDENTIALS mutated the process identity from 0,0 to uid={} gid={}; the \
+         tool observed the change via os.getuid/getgid AND the kernel's stored \
+         ProcessCredentials reflected the mutated pair exactly): OK",
+        fields[2], fields[3]
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

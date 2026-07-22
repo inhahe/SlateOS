@@ -3996,6 +3996,57 @@ pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(packed as i64)
 }
 
+/// `SYS_PROCESS_SET_CREDENTIALS` — mutate the caller's own real uid/gid.
+///
+/// A thin mutation primitive backing POSIX `setuid()`/`setgid()` (and the
+/// `sete/re/res` family, all collapsed onto the single real uid/gid in our
+/// flat credential model). See the syscall-number doc for the full policy
+/// discussion: **the cap/identity permission check is performed by the
+/// userspace posix wrappers** (POSIX caps are userspace-only, so the kernel
+/// cannot re-check them — exactly as with every other cap-gated op). The
+/// only invariant enforced here is structural: the call always targets the
+/// *caller's own* process.
+///
+/// `arg0`/`arg1` carry the new uid/gid as `u32` widened to `u64`; the
+/// sentinel `0xFFFF_FFFF` means "leave that field unchanged". Both fields
+/// are applied atomically (computed, then written once). Fails only if the
+/// caller has no owning process.
+pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{pcb, thread};
+
+    /// `u32` "leave unchanged" sentinel (matches POSIX `(uid_t)-1`).
+    const KEEP: u64 = 0xFFFF_FFFF;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        // A kernel task with no owning process has no mutable credentials.
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(mut creds) = pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Apply each requested field (KEEP leaves it untouched), then write the
+    // credentials back in a single update so uid/gid change together.
+    if args.arg0 != KEEP {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            creds.uid = args.arg0 as u32;
+        }
+    }
+    if args.arg1 != KEEP {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            creds.gid = args.arg1 as u32;
+        }
+    }
+
+    match pcb::set_credentials(pid, creds) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_CAP_QUERY` — query the calling process's capabilities.
 ///
 /// Returns the number of valid capabilities held by the calling process.

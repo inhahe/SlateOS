@@ -1688,6 +1688,41 @@ pub const SYS_PROCESS_COUNT: u64 = 521;
 /// next free native syscall slot after the signal/fork/fs-base cluster).
 pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
 
+/// Set (part of) the calling process's own real credentials.
+///
+/// A thin mutation primitive: it writes the caller's
+/// [`ProcessCredentials`](crate::proc::pcb::ProcessCredentials) so that
+/// POSIX `setuid()`/`setgid()` (and the `sete/re/res` family, all collapsed
+/// onto the single real uid/gid in our flat credential model) actually take
+/// effect instead of silently succeeding without changing anything.
+///
+/// Arguments (each is a `u32` widened to `u64`; the sentinel
+/// `0xFFFF_FFFF` = "leave this field unchanged"):
+/// - `arg0` — new uid (or `0xFFFF_FFFF` to keep the current uid)
+/// - `arg1` — new gid (or `0xFFFF_FFFF` to keep the current gid)
+///
+/// **Policy lives in userspace, not here.** POSIX capabilities
+/// (`CAP_SETUID`/`CAP_SETGID`) are tracked entirely in the userspace posix
+/// layer (see `posix::sys_capability`), so — exactly like every other
+/// POSIX-capability-gated operation — the kernel cannot see or re-check
+/// them and instead *trusts* that the posix `setuid`/`setgid` wrappers
+/// performed the cap/identity check before issuing this call. The only
+/// invariant the kernel enforces is structural: a process may set **its
+/// own** credentials (the syscall always targets the caller). It fails
+/// only if the caller has no owning process.
+///
+/// KNOWN LIMITATION (tracked in `known-issues.md`): because policy is in
+/// userspace, a ring-3 process could issue this raw syscall directly to set
+/// its uid to 0, bypassing the wrapper's cap check. This is inert today —
+/// no kernel authorization derives from the credential uid (the real
+/// authority is the handle-based `CapTable`; see the `ProcessCredentials`
+/// doc "the user/group model is enforced once a login service exists").
+/// When credential uid *does* gain kernel authority, POSIX caps and this
+/// policy must move into the kernel together.
+///
+/// Returns 0 on success. Chosen number 530 (next free slot after 529).
+pub const SYS_PROCESS_SET_CREDENTIALS: u64 = 530;
+
 // ---------------------------------------------------------------------------
 // POSIX signal-shim syscalls (522–526)
 // ---------------------------------------------------------------------------

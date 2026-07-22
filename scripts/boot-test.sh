@@ -393,10 +393,20 @@ echo "=== Staging boot files ==="
 mkdir -p "$ESP_DIR/EFI/BOOT" "$ESP_DIR/boot"
 cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"
 
-# Strip debug symbols — the unstripped debug binary can exceed 150 MiB,
-# which blows past what Limine can load in 256-512 MiB of RAM.  Stripping
-# brings it down to ~30 MiB.  We try llvm-strip (ships with rustup) first,
-# falling back to a plain copy if no strip tool is found.
+# Strip debug symbols — the unstripped debug binary is ~280 MiB.  Stripping
+# removes the symbol table + .debug_* sections (~80 MiB), but the staged image
+# is still large because it carries a big .rodata payload: ~47 fastpy self-test
+# ELFs are embedded into the kernel via include_bytes! (~3.5 MiB each → ~165 MiB
+# of .rodata that stripping CANNOT remove — it's genuine program data).  Limine
+# must load that whole image into high memory, so the QEMU RAM below (-m) has to
+# comfortably exceed the staged kernel size (see the "-m" note near the QEMU
+# invocation).  We try llvm-strip (ships with rustup) first, falling back to a
+# plain copy if no strip tool is found.
+#
+# NOTE (tech debt, tracked in known-issues.md): embedding every fastpy self-test
+# ELF into the kernel .rodata makes the image grow ~3.5 MiB per new self-test.
+# The proper long-term fix is to load these test binaries from the ESP/disk at
+# boot instead of baking them into the kernel image.
 LLVM_STRIP=""
 for candidate in \
     "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/llvm-strip.exe" \
@@ -491,7 +501,7 @@ rm -f "$PIDFILE"
     -pidfile "$PIDFILE_WIN" \
     -display none \
     -no-reboot \
-    -m 512M \
+    -m 3072M \
     -machine q35 &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)

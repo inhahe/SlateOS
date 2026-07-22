@@ -1900,6 +1900,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-setuid`: os.setuid/os.setgid → SYS_PROCESS_SET_CREDENTIALS
+    // *mutates* the process identity (spawned root, changes to a distinct pair);
+    // the write half of the identity pair (getuid/getgid read, setuid/setgid write).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_setuid() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `setuid` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

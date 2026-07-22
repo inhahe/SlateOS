@@ -85,6 +85,7 @@ use super::number::{
     SYS_PROCESS_PARENT_ID,
     SYS_PROCESS_COUNT,
     SYS_PROCESS_GET_CREDENTIALS,
+    SYS_PROCESS_SET_CREDENTIALS,
     SYS_SIGNAL_REGISTER,
     SYS_SIGNAL_SEND,
     SYS_SIGNAL_MASK,
@@ -443,6 +444,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_PARENT_ID as usize] = Some(handlers::sys_process_parent_id);
     handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);
     handlers[SYS_PROCESS_GET_CREDENTIALS as usize] = Some(handlers::sys_process_get_credentials);
+    handlers[SYS_PROCESS_SET_CREDENTIALS as usize] = Some(handlers::sys_process_set_credentials);
 
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,

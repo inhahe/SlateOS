@@ -105,33 +105,36 @@ static REFCOUNT_LEN: AtomicU64 = AtomicU64::new(0);
 // Per-frame cgroup memory tracking
 // ---------------------------------------------------------------------------
 
-/// Maximum tracked frames for cgroup ownership (matches `frame_owner`).
-const CGROUP_MAX_FRAMES: usize = 65536;
-
-/// Per-frame cgroup ID.  Index = `phys_addr / FRAME_SIZE`.
+/// Per-frame cgroup ID array (1 byte per physical frame), sized to cover
+/// **all** physical memory rather than a fixed low window.  Index =
+/// `phys_addr / FRAME_SIZE`.
 ///
-/// When a frame is allocated and the allocating task belongs to a
-/// non-root cgroup with a memory limit, the cgroup ID is stored here.
-/// On free, the stored ID is used to uncharge the *correct* cgroup —
-/// even if a different task (e.g., a kernel worker cleaning up after
-/// process exit) performs the free.
+/// This array is carved from the frame-allocator metadata region in
+/// [`init`] (right after `page_info` + `refcount`, one byte per frame), so
+/// it scales with installed RAM.  A previous implementation used a fixed
+/// `[u8; 65536]` static, which only covered the first 1 GiB of physical
+/// memory: on any machine with more RAM, a frame allocated above 1 GiB was
+/// charged to a cgroup but its per-frame record was silently dropped, so on
+/// free the cgroup was never uncharged — a real memory-accounting leak that
+/// eventually made a limited cgroup deny allocations it should have allowed.
+/// Sizing to `total_frames` fixes that for arbitrary RAM.
 ///
-/// Value `0` means the frame was charged to the root cgroup (or was
-/// not charged at all), and no uncharge is needed.
+/// When a frame is allocated and the allocating task belongs to a non-root
+/// cgroup with a memory limit, the cgroup ID is stored here.  On free, the
+/// stored ID is used to uncharge the *correct* cgroup — even if a different
+/// task (e.g. a kernel worker cleaning up after process exit) performs the
+/// free.  Value `0` means the frame was charged to the root cgroup (or was
+/// not charged at all), so no uncharge is needed.
 ///
-/// Uses `UnsafeCell` like `frame_owner::OwnerArray` — access is
-/// safe because frame alloc/free for a given frame index is
-/// always serialised (a frame is either free or exclusively owned).
-struct CgroupArray(core::cell::UnsafeCell<[u8; CGROUP_MAX_FRAMES]>);
-
-// SAFETY: Frame alloc/free for a given index is serialised — only one
-// CPU owns a given physical frame at any time.  Free-list manipulation
-// is under the allocator lock.
-unsafe impl Send for CgroupArray {}
-unsafe impl Sync for CgroupArray {}
-
-static FRAME_CGROUP: CgroupArray =
-    CgroupArray(core::cell::UnsafeCell::new([0u8; CGROUP_MAX_FRAMES]));
+/// `FRAME_CGROUP_PTR` is the HHDM virtual base of the array and
+/// `FRAME_CGROUP_LEN` its length in frames; both are set once during `init`
+/// and never change.  Before they are set (or if allocation of the metadata
+/// somehow left them zero) every access no-ops — cgroup charging only
+/// happens long after the allocator is initialized.  Access is safe because
+/// frame alloc/free for a given index is always serialised (a frame is
+/// either free or exclusively owned).
+static FRAME_CGROUP_PTR: AtomicU64 = AtomicU64::new(0);
+static FRAME_CGROUP_LEN: AtomicU64 = AtomicU64::new(0);
 
 /// Record which cgroup was charged for a frame allocation.
 ///
@@ -140,13 +143,20 @@ static FRAME_CGROUP: CgroupArray =
 /// (MAX_CGROUPS = 256 fits in u8).
 #[inline]
 fn set_frame_cgroup(frame_idx: usize, cgroup_id: u8) {
-    if frame_idx >= CGROUP_MAX_FRAMES {
+    #[allow(clippy::cast_possible_truncation)]
+    let len = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize;
+    if frame_idx >= len {
         return;
     }
-    // SAFETY: frame_idx is bounds-checked, and we're the sole owner of
-    // this frame (just allocated it).
+    let base = FRAME_CGROUP_PTR.load(Ordering::Relaxed);
+    if base == 0 {
+        return;
+    }
+    // SAFETY: frame_idx < len, so `base + frame_idx` lies within the
+    // `len`-byte array allocated in `init` (HHDM virtual, never moved), and
+    // we're the sole owner of this frame (just allocated it).
     unsafe {
-        (*FRAME_CGROUP.0.get())[frame_idx] = cgroup_id;
+        (base as *mut u8).add(frame_idx).write(cgroup_id);
     }
 }
 
@@ -155,12 +165,18 @@ fn set_frame_cgroup(frame_idx: usize, cgroup_id: u8) {
 /// Returns 0 (ROOT_CGROUP) if the frame was not charged or is out of range.
 #[inline]
 fn get_frame_cgroup(frame_idx: usize) -> u8 {
-    if frame_idx >= CGROUP_MAX_FRAMES {
+    #[allow(clippy::cast_possible_truncation)]
+    let len = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize;
+    if frame_idx >= len {
         return 0;
     }
-    // SAFETY: frame_idx is bounds-checked, and we hold exclusive access
-    // to this frame (about to free it).
-    unsafe { (*FRAME_CGROUP.0.get())[frame_idx] }
+    let base = FRAME_CGROUP_PTR.load(Ordering::Relaxed);
+    if base == 0 {
+        return 0;
+    }
+    // SAFETY: frame_idx < len, so `base + frame_idx` is within the array,
+    // and we hold exclusive access to this frame (about to free it).
+    unsafe { (base as *const u8).add(frame_idx).read() }
 }
 
 /// Clear the cgroup charge record for a frame (on free).
@@ -1552,19 +1568,23 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
     );
 
     // We need 1 byte per frame for page_info + 2 bytes per frame for
-    // refcount, plus up to 1 byte of alignment padding between them.
+    // refcount + 1 byte per frame for the per-frame cgroup id, plus up to
+    // 1 byte of alignment padding before the (u16) refcount array.  The
+    // cgroup array is u8 so it needs no further alignment.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
-    let metadata_bytes = refcount_offset + total_frames * 2;
+    let cgroup_offset = refcount_offset + total_frames * 2;
+    let metadata_bytes = cgroup_offset + total_frames;
     let metadata_frames = (align_up(metadata_bytes as u64, frame_size) / frame_size) as usize;
     let metadata_size = (metadata_frames as u64) * frame_size;
 
     serial_println!(
-        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B]",
+        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B, cgroup: {}B]",
         metadata_bytes,
         metadata_frames,
         metadata_size / 1024,
         total_frames,
-        total_frames * 2
+        total_frames * 2,
+        total_frames
     );
 
     // Find the first USABLE region large enough for the metadata.
@@ -1674,8 +1694,11 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     //   [refcount_offset .. refcount_offset + total_frames*2) → refcount (u16)
     //
     // The refcount array must be 2-byte aligned (u16).  Round up the
-    // page_info region to the next even byte boundary.
+    // page_info region to the next even byte boundary.  The per-frame cgroup
+    // id array (u8) follows the refcount array; it must match the layout
+    // computed in `plan_metadata`.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
+    let cgroup_offset = refcount_offset + total_frames * 2;
     let metadata_virt = (metadata_phys + hhdm_offset) as *mut u8;
     // SAFETY: metadata_phys is in a USABLE memory region, the HHDM maps
     // it to metadata_virt, and we have exclusive access during early boot
@@ -1688,10 +1711,21 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
         // the aligned pointer for later use.
         let refcount_ptr = metadata_virt.add(refcount_offset);
         core::ptr::write_bytes(refcount_ptr, 0, total_frames * 2);
+        // per-frame cgroup ids: fill with 0 = "root / not charged".
+        let cgroup_ptr = metadata_virt.add(cgroup_offset);
+        core::ptr::write_bytes(cgroup_ptr, 0, total_frames);
     }
     // SAFETY: refcount_offset is even, so metadata_virt + refcount_offset
     // is 2-byte aligned (metadata_virt is frame-aligned = 16 KiB aligned).
     let refcount_virt = unsafe { metadata_virt.add(refcount_offset) as *mut u16 };
+    // SAFETY: cgroup_offset is within the metadata region reserved by
+    // plan_metadata (which sized it to include `total_frames` cgroup bytes).
+    let cgroup_virt = unsafe { metadata_virt.add(cgroup_offset) };
+    // Publish the per-frame cgroup array so set/get_frame_cgroup can reach it.
+    // These never change after init.  Store the base before the length so a
+    // reader that observes a non-zero length also observes a valid pointer.
+    FRAME_CGROUP_PTR.store(cgroup_virt as u64, Ordering::Release);
+    FRAME_CGROUP_LEN.store(total_frames as u64, Ordering::Release);
 
     // Build the allocator and populate free lists.
     let mut allocator = BuddyAllocator {
@@ -1848,7 +1882,7 @@ pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
             // for the root cgroup that is a no-op and records no per-frame
             // owner), so the charge that actually matters — and that pairs
             // with `free_frame`'s `uncharge_cgroup_free` via the per-frame
-            // `FRAME_CGROUP` record — must happen here, against the task
+            // cgroup-id array — must happen here, against the task
             // *consuming* the frame.  Without this, pool-sourced frames
             // escape cgroup accounting entirely (the limit is not enforced
             // and the page is never uncharged at free).  Fast-exits when no
@@ -2902,9 +2936,11 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     clear_frame_cgroup(42);
     assert_eq!(get_frame_cgroup(42), 0, "clear resets to 0");
 
-    // Out-of-bounds should return 0 / be a no-op.
-    assert_eq!(get_frame_cgroup(CGROUP_MAX_FRAMES + 1), 0, "out-of-bounds get");
-    set_frame_cgroup(CGROUP_MAX_FRAMES + 1, 5); // should be no-op
+    // Out-of-bounds (>= the dynamic array length) should return 0 / no-op.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    let oob_idx = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize + 1;
+    assert_eq!(get_frame_cgroup(oob_idx), 0, "out-of-bounds get");
+    set_frame_cgroup(oob_idx, 5); // should be no-op
     serial_println!("[mm]   Cgroup per-frame tracking: OK");
 
     // -----------------------------------------------------------------------

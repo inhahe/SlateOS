@@ -14,6 +14,84 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — OPEN (diagnostic-only; low severity)
+
+**Where:** `kernel/src/mm/frame_owner.rs` — `const MAX_FRAMES: usize = 65536;`
+and the `OwnerArray([u8; MAX_FRAMES])` static; `set`/`get`/`clear` no-op when
+`frame_idx >= MAX_FRAMES`.
+
+**What:** Frame index = `phys_addr / FRAME_SIZE` (16 KiB), so 65536 frames covers
+only the first **1 GiB** of physical memory. On any machine with more RAM, a
+frame allocated above 1 GiB gets owner `Unknown` — its owner tag is silently
+dropped. This is the *same* fixed-window bug that affected the per-frame cgroup
+array (now fixed — see BUG-CGROUP-1GIB below), but for the frame *owner*
+tracking.
+
+**Impact:** ownership tracking is **diagnostic only** (leak reporting, the
+`[mm]` owner-census stats, and the owner self-test), so a wrong `Unknown` above
+1 GiB degrades diagnostics but does **not** corrupt allocation or accounting.
+That is why this is low severity and was left open while the cgroup array (which
+*is* correctness-affecting) was fixed immediately.
+
+**Proper fix:** make `OwnerArray` dynamic exactly like the cgroup array now is —
+carve `total_frames` bytes from the frame-allocator metadata region in
+`frame::init` (or a dedicated init hook), publish a base-pointer + length pair,
+and bounds-check `set`/`get`/`clear` against the dynamic length. The metadata
+region already reserves per-frame bytes; adding one more `total_frames`-byte
+sub-array is the same pattern used for `page_info`/`refcount`/cgroup.
+
+### BUG-CGROUP-1GIB. (RESOLVED 2026-07-22) per-frame cgroup array only covered the first 1 GiB → cgroup accounting leak above 1 GiB
+
+**Where:** `kernel/src/mm/frame.rs` — was `const CGROUP_MAX_FRAMES = 65536;` +
+`FRAME_CGROUP([u8; 65536])` static.
+
+**What (was):** the per-frame cgroup-id array (used by `set_frame_cgroup`/
+`get_frame_cgroup` to remember which cgroup a frame was charged to, so
+`uncharge_cgroup_free` can uncharge the right group on free) was a fixed 65536
+entries = 1 GiB window. A frame allocated above 1 GiB was charged
+(`mem_charge` succeeded) but its per-frame record was dropped, so on free
+`get_frame_cgroup` returned 0 and the group was **never uncharged** — a
+monotonic cgroup memory-usage leak that eventually made a limited cgroup deny
+allocations it should have allowed. Latent because every boot-test ran at
+`-m 512M` (all frames < 1 GiB); surfaced when boot-test RAM was raised to 3 GiB
+and the mm cgroup round-trip self-test panicked (`frame.rs:3035`, "charge must
+record the cgroup id", `get_frame_cgroup` returned 0 for a high frame).
+
+**Fix:** the cgroup array is now **dynamically sized to `total_frames`** and
+carved from the frame-allocator metadata region in `frame::init` (right after
+`page_info` + `refcount`); `FRAME_CGROUP_PTR`/`FRAME_CGROUP_LEN` publish it and
+the accessors bounds-check against the live length. Covers all installed RAM.
+Verified: boot GREEN at `-m 3072M`, `[mm] Cgroup per-frame tracking: OK` +
+`Cgroup charge/uncharge round-trip (no double-charge): OK`.
+
+### TD-KERNEL-EMBED-BLOAT. Kernel image grows ~3.5 MiB per fastpy self-test — every self-test ELF is baked into `.rodata` via `include_bytes!` — 2026-07-22 — OPEN (tech debt; mitigated by raising boot-test RAM)
+
+**What:** Each fastpy ring-3 self-test embeds its native SlateOS ELF directly
+into the kernel binary with `include_bytes!` (see the ~47 embeds under
+`kernel/src/proc/spawn.rs`, paths `../../../services/fastpy-*/fastpy-*.elf`).
+Each ELF is ~3.5 MiB (fastpy statically links its whole runtime + libc into
+every binary), so the kernel's `.rodata` is now ~165 MiB and the staged
+(stripped) kernel image is ~202 MiB. Limine must load the whole image into
+high memory at boot; with QEMU's old `-m 512M` the setuid self-test (the 47th
+embed) tipped the loader past its budget → Limine `PANIC: High memory
+allocator: Out of memory` before the kernel ever ran.
+
+**Repro (historical):** add one more fastpy self-test around the 512 MiB edge,
+boot-test with `-m 512M` → Limine OOM panic during `/boot/kernel` load.
+
+**Mitigation applied:** raised the boot-test QEMU RAM to `-m 3072M`
+(`scripts/boot-test.sh`). This is realistic for a desktop OS and gives ample
+headroom, but it only *defers* the problem — the image keeps growing ~3.5 MiB
+per new self-test.
+
+**Proper fix:** stop baking self-test binaries into the kernel image. Stage the
+fastpy `*.elf` files onto the ESP (or the ext4 rootfs) at boot-test time and
+have the kernel self-tests load them from disk via the VFS, exactly like a real
+`spawn` from a file. That keeps the kernel image small (only real kernel code),
+removes the per-test `.rodata` growth, and makes the self-tests exercise the
+disk/loader path too. Secondary lever: shrink each fastpy ELF (shared runtime
+`.so` / dead-strip) so even embedded builds are smaller.
+
 ### TD-POSIX-TEST-PARALLEL. `cargo test -p posix` is flaky under parallel execution — non-thread-safe libc functions share `static mut` return buffers — 2026-07-22 — OPEN (test-infra; run with `--test-threads=1` meanwhile)
 
 **What:** Running the posix host suite with the default parallel test runner

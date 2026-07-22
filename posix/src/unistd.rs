@@ -570,6 +570,56 @@ fn process_credentials() -> (UidT, GidT) {
     }
 }
 
+/// Apply new real credentials via the kernel (`SYS_PROCESS_SET_CREDENTIALS`).
+///
+/// `new_uid`/`new_gid` use `UidT::MAX`/`GidT::MAX` (POSIX `(id_t)-1`) as the
+/// "leave unchanged" sentinel — the same encoding the kernel expects.  The
+/// `set*id` wrappers call this only *after* their capability/identity check
+/// has authorised the change; the kernel performs the mutation and (per its
+/// thin-primitive contract) does not re-run the policy check.
+///
+/// On bare metal this issues the syscall (0 on success; the only failure is
+/// the caller having no owning process).  In host tests there is no kernel
+/// and no persisted credential state, so it is a no-op that reports success
+/// — preserving the flat "current uid == 0" model the permission tests rely
+/// on (`getuid()` stays 0, so the identity-match arm keeps working).
+fn set_real_credentials(new_uid: UidT, new_gid: GidT) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_SET_CREDENTIALS,
+            u64::from(new_uid),
+            u64::from(new_gid),
+        )
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (new_uid, new_gid);
+        0
+    }
+}
+
+/// Whether the caller may set its uid to `target`, given its live current
+/// uid `cur`: allowed iff the target equals the current uid (re-asserting an
+/// identity the caller already holds) or the caller holds `CAP_SETUID`.
+///
+/// This is the uid analogue of Linux's per-field "match any current id OR
+/// `CAP_SETUID`" rule; in our flat single-uid model the three match arms
+/// (real/effective/saved) collapse to the single live uid.  `cur` is read
+/// from the kernel via [`getuid`], so a non-root process correctly succeeds
+/// when re-asserting its *own* uid (the pre-mutation stubs compared against a
+/// hardcoded 0, which wrongly `EPERM`ed a non-root caller setting its own id).
+#[inline]
+fn uid_change_permitted(target: UidT, cur: UidT) -> bool {
+    target == cur || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
+}
+
+/// Gid analogue of [`uid_change_permitted`], gated by `CAP_SETGID`.
+#[inline]
+fn gid_change_permitted(target: GidT, cur: GidT) -> bool {
+    target == cur || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
+}
+
 /// Get the real user ID of the calling process.
 ///
 /// Reads the process's kernel credentials (set at spawn / from
@@ -641,13 +691,19 @@ pub extern "C" fn getegid() -> GidT {
 /// see EPERM and surface the misconfiguration loudly.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setuid(uid: UidT) -> i32 {
-    // Phase 192: target uid != current → needs CAP_SETUID.  Our
-    // current uid is always 0, so any non-zero target requires the
-    // cap.  Linux's `sys_setuid` also accepts the call when uid
-    // matches the effective or saved uid; in our flat model those
-    // are also 0, so the same "uid == 0 always OK" rule covers all
-    // three Linux match arms simultaneously.
-    if uid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
+    // Target uid != the live current uid → needs CAP_SETUID.  `getuid()`
+    // reads the real kernel credential (usually 0, but a process spawned
+    // non-root sees its own uid), so re-asserting one's own uid always
+    // succeeds — covering Linux's real/effective/saved match arms, which
+    // collapse to the single uid in our flat model.
+    let cur = getuid();
+    if !uid_change_permitted(uid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    // The check passed — actually apply the change so `getuid()` reflects
+    // it (the pre-mutation stub silently succeeded without changing state).
+    if set_real_credentials(uid, GidT::MAX) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -678,9 +734,14 @@ pub extern "C" fn setuid(uid: UidT) -> i32 {
 /// the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seteuid(uid: UidT) -> i32 {
-    // Phase 192: same rule as setuid — target == 0 always OK; non-zero
-    // requires CAP_SETUID.
-    if uid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
+    // Same rule as setuid; effective == real in our flat single-uid model,
+    // so this sets the one uid field after the identity/cap check passes.
+    let cur = getuid();
+    if !uid_change_permitted(uid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if set_real_credentials(uid, GidT::MAX) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -707,13 +768,16 @@ pub extern "C" fn seteuid(uid: UidT) -> i32 {
 /// for the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgid(gid: GidT) -> i32 {
-    // Phase 193: target gid != current → needs CAP_SETGID.  Our
-    // current gid is always 0, so any non-zero target requires the
-    // cap.  Linux also accepts the call when gid matches the
-    // effective or saved gid; in our flat model those are also 0,
-    // so the same "gid == 0 always OK" rule covers all three Linux
-    // match arms simultaneously.
-    if gid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
+    // Target gid != the live current gid → needs CAP_SETGID.  `getgid()`
+    // reads the real kernel credential, so re-asserting one's own gid always
+    // succeeds — covering Linux's real/effective/saved gid match arms, which
+    // collapse to the single gid in our flat model.
+    let cur = getgid();
+    if !gid_change_permitted(gid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if set_real_credentials(UidT::MAX, gid) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -743,9 +807,13 @@ pub extern "C" fn setgid(gid: GidT) -> i32 {
 /// EPERM on the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setegid(gid: GidT) -> i32 {
-    // Phase 193: same rule as setgid — target == 0 always OK; non-zero
-    // requires CAP_SETGID.
-    if gid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
+    // Same rule as setgid; effective == real in our flat single-gid model.
+    let cur = getgid();
+    if !gid_change_permitted(gid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if set_real_credentials(UidT::MAX, gid) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -777,22 +845,24 @@ pub extern "C" fn setegid(gid: GidT) -> i32 {
 /// fixed for `setuid`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setreuid(ruid: UidT, euid: UidT) -> i32 {
-    // Phase 194: -1 sentinel skips the check; otherwise the field
-    // must be 0 (matches current uid) or the caller must hold
-    // CAP_SETUID.  Linux evaluates ruid before euid; either failing
-    // returns EPERM with no partial state change (our stub has no
-    // persisted state to roll back).
-    if ruid != UidT::MAX
-        && ruid != 0
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
-    {
+    // -1 (`UidT::MAX`) sentinel skips the check for that field; otherwise the
+    // field must match the live current uid or the caller must hold
+    // CAP_SETUID.  Linux evaluates ruid before euid; either failing returns
+    // EPERM before any mutation.
+    let cur = getuid();
+    if ruid != UidT::MAX && !uid_change_permitted(ruid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if euid != UidT::MAX
-        && euid != 0
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
-    {
+    if euid != UidT::MAX && !uid_change_permitted(euid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    // Both checks passed — apply.  Our single uid field holds the effective
+    // uid (which `getuid` also reports); prefer euid when given, else ruid.
+    // If both are the sentinel there is nothing to change.
+    let target = if euid != UidT::MAX { euid } else { ruid };
+    if target != UidT::MAX && set_real_credentials(target, GidT::MAX) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -810,17 +880,17 @@ pub extern "C" fn setreuid(ruid: UidT, euid: UidT) -> i32 {
 /// **Phase 194:** previous stub silently succeeded for any pair.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setregid(rgid: GidT, egid: GidT) -> i32 {
-    if rgid != GidT::MAX
-        && rgid != 0
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
-    {
+    let cur = getgid();
+    if rgid != GidT::MAX && !gid_change_permitted(rgid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if egid != GidT::MAX
-        && egid != 0
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
-    {
+    if egid != GidT::MAX && !gid_change_permitted(egid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    let target = if egid != GidT::MAX { egid } else { rgid };
+    if target != GidT::MAX && set_real_credentials(UidT::MAX, target) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -2303,22 +2373,34 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
 /// simultaneously — a silent no-op here was particularly dangerous.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
-    // Phase 195: short-circuit on CAP_SETUID — if held, all three
-    // fields are accepted as-is (matches Linux's outer `if (!cap)`
-    // guard).  Otherwise check each non-sentinel field against the
-    // current uid (always 0 in our flat model).
-    if crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
-        return 0;
-    }
-    if ruid != UidT::MAX && ruid != 0 {
+    // Each non-sentinel field must match the live current uid or the caller
+    // must hold CAP_SETUID (`uid_change_permitted` folds in Linux's outer
+    // `if (!cap)` fast-path: with the cap every field is permitted).  Order
+    // ruid → euid → suid, matching Linux; first failure EPERMs before any
+    // mutation.
+    let cur = getuid();
+    if ruid != UidT::MAX && !uid_change_permitted(ruid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if euid != UidT::MAX && euid != 0 {
+    if euid != UidT::MAX && !uid_change_permitted(euid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if suid != UidT::MAX && suid != 0 {
+    if suid != UidT::MAX && !uid_change_permitted(suid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    // Apply the effective uid to our single field (euid, else ruid, else the
+    // saved uid); all-sentinel means nothing changes.
+    let target = if euid != UidT::MAX {
+        euid
+    } else if ruid != UidT::MAX {
+        ruid
+    } else {
+        suid
+    };
+    if target != UidT::MAX && set_real_credentials(target, GidT::MAX) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -2336,18 +2418,27 @@ pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
 /// **Phase 195:** previous stub silently succeeded.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
-    if crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
-        return 0;
-    }
-    if rgid != GidT::MAX && rgid != 0 {
+    let cur = getgid();
+    if rgid != GidT::MAX && !gid_change_permitted(rgid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if egid != GidT::MAX && egid != 0 {
+    if egid != GidT::MAX && !gid_change_permitted(egid, cur) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
-    if sgid != GidT::MAX && sgid != 0 {
+    if sgid != GidT::MAX && !gid_change_permitted(sgid, cur) {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    let target = if egid != GidT::MAX {
+        egid
+    } else if rgid != GidT::MAX {
+        rgid
+    } else {
+        sgid
+    };
+    if target != GidT::MAX && set_real_credentials(UidT::MAX, target) < 0 {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }

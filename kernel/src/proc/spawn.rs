@@ -7679,6 +7679,124 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-rmdir` utility — the first fastpy
+/// SlateOS component to **remove a directory** (completes the mkdir/rmdir/
+/// rename trilogy).
+///
+/// Distinct kernel path from `fastpy-mkdir` (create) and `fastpy-rm` (delete a
+/// *file*): `os.rmdir()` → runtime `fastpy_os_rmdir` → posix C `rmdir()` →
+/// `SYS_FS_RMDIR` → VFS rmdir.  The harness pre-creates `/tmp/fpy-rmdir`, runs
+/// `rmdir /tmp/fpy-rmdir`, and — the false-pass-proof check — asserts via the
+/// VFS that the directory is now gone.  `SYS_FS_RMDIR` gates on
+/// `Rights::DELETE`, so the test grants `READ|WRITE|DELETE`.
+pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
+    static FASTPY_RMDIR_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-rmdir/fastpy-rmdir.elf");
+
+    const RM_DIR: &str = "/tmp/fpy-rmdir";
+    const RM_DIR_ARG: &[u8] = b"/tmp/fpy-rmdir";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `rmdir` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_RMDIR_ELF.len()
+    );
+
+    // Pre-create the directory to be removed.
+    if let Err(e) = crate::fs::Vfs::mkdir_all(RM_DIR) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", RM_DIR, e);
+        return Err(e);
+    }
+    if !crate::fs::Vfs::exists(RM_DIR) {
+        serial_println!(
+            "[spawn]   FAIL: staged {} but VFS reports it absent before rmdir",
+            RM_DIR
+        );
+        let _ = crate::fs::Vfs::rmdir(RM_DIR);
+        return Err(KernelError::InternalError);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-rmdir", RM_DIR_ARG];
+    let envp: &[&[u8]] = &[];
+    // Directory removal gates on Rights::DELETE (SYS_FS_RMDIR), same as rm.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-rmdir",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_RMDIR_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::rmdir(RM_DIR);
+            serial_println!("[spawn]   FAIL: fastpy-rmdir spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let still_exists = crate::fs::Vfs::exists(RM_DIR);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::rmdir(RM_DIR);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rmdir (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.rmdir path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rmdir (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (os.rmdir success); nonzero => SYS_FS_RMDIR failed",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if still_exists {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-rmdir (ring 3) — exited 0 but {} still exists per the VFS \
+             (os.rmdir did not actually remove it)",
+            RM_DIR
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `rmdir` (ring 3: directory removal via os.rmdir → \
+         SYS_FS_RMDIR; exit 0 and /tmp/fpy-rmdir verified gone via the VFS): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

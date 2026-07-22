@@ -1715,6 +1715,15 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-rmdir`: removes a directory via os.rmdir
+    // (SYS_FS_RMDIR) — completes the mkdir/rmdir/rename trilogy.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_rmdir() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `rmdir` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

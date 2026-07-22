@@ -5538,11 +5538,51 @@ yield-budget hang above — the two are different failure modes of the same test
 Intermittent: 1 of ~18 armed boots in that soak; every other pthread run in the
 soak passed. Unlike the hang variant (classified `TimedOut` → WARNING), this
 empty-capture path returns `InternalError` and boot-test.sh flags the boot
-FAILED. **Proper fix (deferred, needs its own investigation):** determine whether
+FAILED. ~~**Proper fix (deferred, needs its own investigation):** determine whether
 the redirected-fd-1 file write is fully durable/visible at the moment the child
 becomes Zombie — if not, either fsync/flush on the capture fd at process teardown
-or have the harness retry the read-back a bounded number of times. Logged for the
-next focused session on the VFS write-visibility path.
+or have the harness retry the read-back a bounded number of times.~~
+
+**ROOT CAUSE FOUND + RESOLVED 2026-07-22 — it was NOT a write/read visibility
+race; it was a redirect *TOCTOU* race.** The empty-capture-with-correct-exit
+symptom was reproduced on the hosted-cc `inline-asm` (Path-Z) rung and pinned to
+a leaked bare `42` on the serial console — the child wrote to the *console*, not
+the capture file. The capturing self-tests opened a capture file and then
+installed the redirect into the child's kernel `linux_fd` table with
+`linux_fd_take` + `linux_fd_install_at` **after `spawn_process` returned**.
+`spawn_process` yields a *Ready* child, so a timer-tick preemption (or another CPU
+under SMP) can schedule the child and let its very first `write(1, …)` run *before*
+the parent installs the redirect — that write leaks to the console and the capture
+file reads back empty (exit code still correct). The window is small, hence the
+~1/18 intermittency, and it manifested across every output-capturing self-test
+(pthread, stdio, full, signal, fault, sigqueue, forkexec, pipe, dash-script,
+hosted-cc), not just pthread.
+
+**Fix:** the redirect is now installed *atomically at spawn*, before the child is
+runnable, via a new `spawn_process_with_redirects` /
+`spawn_process_with_abi_and_redirects` (both thin wrappers over
+`spawn_process_inner`, which applies the redirects into the child's `linux_fd`
+table right after `linux_fd_install_stdio` — i.e. before the child's first
+instruction). All ~11 capture self-test sites in `proc/spawn.rs` were converted
+from the racy post-spawn pattern to the born-with-redirect wrappers, closing the
+window entirely. While doing so, a **pre-existing latent handle leak** was also
+fixed: the old post-spawn code installed the capture handle into `linux_fd`
+*without* `register_ipc_handle`, so `exit_close_fds` / `destroy` never reclaimed
+it (the `linux_fd` table has no teardown of its own — no `Drop`); each capture
+test leaked one fs handle per boot. The new redirect path registers the moved-in
+handle as an owned `File` ipc-handle, so it is reclaimed on both the normal
+zombie transition and the force-kill/error path. Ownership is now unambiguous:
+`spawn_process_with_redirects` owns the redirect handles on *every* path (moved +
+registered into the child on success; closed on any error — directly for
+pre-create validation failures, via `destroy`'s `cleanup_handles` for
+post-create failures), and callers never close them.
+
+**Not converted (out of scope, tracked):** `kernel/src/container.rs`'s
+container-log stdout/stderr redirect uses the same post-spawn `linux_fd_take` +
+`linux_fd_install_at` shape (with a fd-2 dup2). It is a container-launch feature,
+not a boot self-test, and its process may already be set up differently; it
+should be reviewed for the same TOCTOU window and the same missing
+`register_ipc_handle` in a follow-up.
 
 **Severity escalation 2026-06-30 — a *full* boot hang was observed, not
 just the non-fatal warning.** On a subsequent run the boot never reached

@@ -442,7 +442,37 @@ pub fn spawn_process(
     elf_data: &[u8],
     options: &SpawnOptions<'_>,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None)
+    spawn_process_inner(elf_data, options, None, &[])
+}
+
+/// Spawn a process, redirecting entries in its kernel-side Linux `fd` table
+/// *atomically at spawn* — before the child's first instruction runs.
+///
+/// Each `(fd, handle, status_flags)` in `linux_fd_redirects` replaces the
+/// child's default (console) `linux_fd` entry for `fd` with a file handle,
+/// installed right after `linux_fd_install_stdio` and before the child is made
+/// runnable.  This exists to close a TOCTOU race: installing the redirect with
+/// [`pcb::linux_fd_install_at`] *after* `spawn_process` returns lets a
+/// timer-tick preemption (or another CPU under SMP) schedule the freshly-Ready
+/// child first, so an early `write(1, …)` leaks to the console before the
+/// redirect lands — the intermittent "captured 0 bytes, exit 0" false-FAIL in
+/// the output-capturing self-tests (known-issues.md B-PTHREAD-YIELDBUDGET
+/// empty-capture variant).  The handle is *moved* into the child (the child owns
+/// the close); the caller must not close it afterwards.
+///
+/// Redirects target the *Linux* fd table, so they only take effect for
+/// Linux-ABI binaries (a glibc/ld.so program's `write` syscall consults this
+/// table).  For a native-ABI child the redirects are ignored.
+///
+/// # Errors
+///
+/// Same as [`spawn_process`].
+pub fn spawn_process_with_redirects(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    linux_fd_redirects: &[(i32, u64, u32)],
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, None, linux_fd_redirects)
 }
 
 /// Spawn a process, forcing it to run under an explicit syscall ABI
@@ -469,22 +499,70 @@ pub fn spawn_process_with_abi(
     options: &SpawnOptions<'_>,
     abi: pcb::AbiMode,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, Some(abi))
+    spawn_process_inner(elf_data, options, Some(abi), &[])
+}
+
+/// Spawn a process under an explicit ABI *and* with `linux_fd` redirects applied
+/// atomically at spawn — the combination of [`spawn_process_with_abi`] and
+/// [`spawn_process_with_redirects`].  Used to launch a freshly-built bare static
+/// Linux binary (which carries no ABI markers, so the ABI must be stated) while
+/// capturing its stdout without the TOCTOU race.  Handle ownership matches
+/// [`spawn_process_with_redirects`] (the handles are owned by this call).
+///
+/// # Errors
+///
+/// Same as [`spawn_process`].
+pub fn spawn_process_with_abi_and_redirects(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    abi: pcb::AbiMode,
+    linux_fd_redirects: &[(i32, u64, u32)],
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, Some(abi), linux_fd_redirects)
 }
 
 fn spawn_process_inner(
     elf_data: &[u8],
     options: &SpawnOptions<'_>,
     abi_override: Option<pcb::AbiMode>,
+    // Kernel-side Linux fd redirects `(fd, handle, status_flags)` applied before
+    // the child is runnable (see `spawn_process_with_redirects`).
+    linux_fd_redirects: &[(i32, u64, u32)],
 ) -> KernelResult<SpawnResult> {
+    // This function OWNS the `linux_fd_redirects` handles (see
+    // `spawn_process_with_redirects`): on success each is *moved* into the
+    // child's fd table (released by the child's exit teardown); on any error it
+    // must be closed here so it never leaks.  The error paths *after* the child
+    // is created destroy the child (whose fd-table teardown closes any handle
+    // already moved in), so this helper only covers the *pre-create* validation
+    // returns, where nothing has been moved yet.  Callers must NOT close a
+    // redirect handle themselves.
+    let close_redirects = || {
+        for &(_fd, handle, _flags) in linux_fd_redirects {
+            let _ = crate::fs::handle::close(handle);
+        }
+    };
+
     // Step 1: Parse the ELF binary.
-    let elf_file = elf::ElfFile::parse(elf_data)?;
+    let elf_file = match elf::ElfFile::parse(elf_data) {
+        Ok(f) => f,
+        Err(e) => {
+            close_redirects();
+            return Err(e);
+        }
+    };
 
     // Validate that the binary has loadable segments.
-    let segment_count = elf_file.loadable_segments()?
-        .count();
+    let segment_count = match elf_file.loadable_segments() {
+        Ok(segs) => segs.count(),
+        Err(e) => {
+            close_redirects();
+            return Err(e);
+        }
+    };
     if segment_count == 0 {
         serial_println!("[spawn] ELF has no loadable segments");
+        close_redirects();
         return Err(KernelError::InvalidExecutable);
     }
 
@@ -495,10 +573,14 @@ fn spawn_process_inner(
     // entry point, and the AT_ENTRY/AT_PHDR auxv values uniformly.
     let exec_load_bias: u64 = choose_exec_load_bias(elf_file.is_pie());
     let raw_entry = elf_file.entry_point();
-    let entry_point = raw_entry.checked_add(exec_load_bias).ok_or_else(|| {
-        serial_println!("[spawn] executable entry point overflowed load bias");
-        KernelError::InvalidExecutable
-    })?;
+    let entry_point = match raw_entry.checked_add(exec_load_bias) {
+        Some(v) => v,
+        None => {
+            serial_println!("[spawn] executable entry point overflowed load bias");
+            close_redirects();
+            return Err(KernelError::InvalidExecutable);
+        }
+    };
     serial_println!(
         "[spawn] ELF validated: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
         segment_count, entry_point, raw_entry, exec_load_bias, elf_file.is_pie()
@@ -552,6 +634,53 @@ fn spawn_process_inner(
             );
             // Non-fatal — the process runs but read/write on stdio
             // will fail until the binary opens something explicitly.
+        }
+    }
+
+    // Apply caller-requested Linux fd redirects (e.g. stdout/stdin -> a capture
+    // file) *now*, while the child is still not runnable, so its very first
+    // write/read on the redirected fd already sees the file rather than the
+    // default console.  Installing these after `spawn_process` returned was a
+    // TOCTOU race (see `spawn_process_with_redirects`).
+    //
+    // Handle ownership: on a successful install the handle is moved into the
+    // child's fd table AND registered as an owned `File` ipc-handle via
+    // `register_ipc_handle`.  That registration is what actually reclaims it:
+    // the `linux_fd` table has no teardown of its own (no `Drop`), so a moved-in
+    // handle is closed only because `cleanup_handles` walks the process's
+    // ipc-handle list — from `exit_close_fds` at the normal zombie transition
+    // and from `destroy_process_resources` on the force-kill / never-ran path.
+    // (Registering here mirrors what the Linux `open` path does for every file
+    // it installs; the old post-spawn redirect code omitted it and thus *leaked*
+    // the capture handle on every run.)  On install failure — or for a native
+    // child, which does not consult this table — we close the handle directly so
+    // it is never leaked.
+    if !linux_fd_redirects.is_empty() {
+        if is_linux_abi {
+            for &(fd, handle, status_flags) in linux_fd_redirects {
+                // Drop whatever default entry (console) occupies this fd, then
+                // install the file handle in its place.
+                let _ = pcb::linux_fd_take(pid, fd);
+                if let Err(e) = pcb::linux_fd_install_at(
+                    pid,
+                    fd,
+                    crate::proc::linux_fd::FdEntry::file(handle, status_flags),
+                ) {
+                    serial_println!(
+                        "[spawn] WARNING: failed to install fd {} redirect on process {}: {:?}",
+                        fd, pid, e
+                    );
+                    let _ = crate::fs::handle::close(handle);
+                } else {
+                    // Track for exit/destroy teardown so the moved-in handle is
+                    // reclaimed (see the ownership note above).
+                    pcb::register_ipc_handle(pid, crate::cap::ResourceType::File, handle);
+                }
+            }
+        } else {
+            for &(_fd, handle, _flags) in linux_fd_redirects {
+                let _ = crate::fs::handle::close(handle);
+            }
         }
     }
 
@@ -12707,7 +12836,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
 /// after the `/mnt` ext4 probe and after the glibc tree is reachable.
 pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     // The binary returns 7 so the exit-code channel independently confirms a
     // clean run, distinct from the bytes it prints.
@@ -12796,33 +12925,20 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect the child's fd 1 to the capture file *atomically at spawn*
+    // (before the child is runnable) via `spawn_process_with_redirects`, closing
+    // the TOCTOU race the old post-spawn `linux_fd_install_at` had.  The spawn
+    // takes ownership of `capture_handle` on every path (moved+registered into
+    // the child on success, closed on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            // We still own the capture handle — close it so it doesn't leak.
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc stdio spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect the child's fd 1 from the console to our capture file BEFORE it
-    // runs.  Dropping the console entry needs no kernel close (it owns no
-    // resource).  After install_at the capture handle is owned by the child's
-    // fd table and is released by its exit teardown — so we must NOT close it
-    // ourselves on the success path.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        // Install failed: ownership never transferred, so we still own the
-        // handle and must close it.  Tear the child down too.
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc stdio — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -12913,7 +13029,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
 /// missing) — the image is git-ignored, so most environments lack it.
 pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_RDONLY, O_WRONLY};
+    use crate::proc::linux_fd::{O_RDONLY, O_WRONLY};
 
     const EXPECT_EXIT: i32 = 11;
     // Deterministic from argv ["/bin/full","alpha","beta"] (argsum 9+5+4=18,
@@ -13020,48 +13136,24 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 0 (stdin) → input file and fd 1 (stdout) → capture file
+    // *atomically at spawn* (before the child is runnable), closing the TOCTOU
+    // race the old post-spawn `linux_fd_install_at` pair had.  The spawn takes
+    // ownership of both handles on every path (moved+registered into the child
+    // on success, closed on any error), so the caller never closes them.
+    let redirects = [
+        (0i32, stdin_handle, O_RDONLY),
+        (1i32, capture_handle, O_WRONLY),
+    ];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            // We still own both handles — close them so nothing leaks.
-            let _ = handle::close(stdin_handle);
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(INPUT);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc full spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 0 (stdin) → input file before the child runs.  After a
-    // successful install_at the handle is owned by the child's fd table.
-    let _ = pcb::linux_fd_take(result.pid, 0);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 0, FdEntry::file(stdin_handle, O_RDONLY)) {
-        // fd 0 ownership never transferred: we still own stdin_handle AND
-        // capture_handle (fd 1 not yet touched).  Close both, tear down child.
-        let _ = handle::close(stdin_handle);
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(INPUT);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc full — redirecting fd 0 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
-
-    // Redirect fd 1 (stdout) → capture file.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        // fd 1 ownership never transferred: we still own capture_handle.  The
-        // child now owns stdin_handle (fd 0) — destroying it releases that.
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(INPUT);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc full — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -13151,7 +13243,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
 /// failed).  No-op (returns `Ok`) when `/mnt/bin/pthread` is absent.
 pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 13;
     // 4 threads * 10000 increments = 40000; returns 1+2+3+4 = 10.
@@ -13237,26 +13329,19 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 1 → capture *atomically at spawn* (before the child is
+    // runnable), closing the TOCTOU race the old post-spawn install had.  The
+    // spawn owns `capture_handle` on every path (moved+registered on success,
+    // closed on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc pthread spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 1 → capture before the child runs.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc pthread — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -13353,7 +13438,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
 /// `/mnt/bin/signal` is absent.
 pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 17;
     // SIGUSR1 = 10 (x86_64). raise(3) routes through tgkill(2), so the kernel
@@ -13441,26 +13526,19 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 1 → capture *atomically at spawn* (before the child is
+    // runnable), closing the TOCTOU race the old post-spawn install had.  The
+    // spawn owns `capture_handle` on every path (moved+registered on success,
+    // closed on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc signal spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 1 → capture before the child runs.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc signal — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -13553,7 +13631,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
 /// `/mnt/bin/fault` is absent.
 pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 19;
     // SIGSEGV = 11, SEGV_MAPERR = 1, faulting address = 0xDEAD000.
@@ -13637,26 +13715,19 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 1 → capture *atomically at spawn* (before the child is
+    // runnable), closing the TOCTOU race the old post-spawn install had.  The
+    // spawn owns `capture_handle` on every path (moved+registered on success,
+    // closed on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc fault spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 1 → capture before the child runs.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc fault — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -13750,7 +13821,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
 /// `Ok`) when `/mnt/bin/sigqueue` is absent.
 pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 23;
     // SIGUSR1 = 10, SI_QUEUE = -1, sival_int = 0x12345678, self == getpid().
@@ -13835,26 +13906,19 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 1 → capture *atomically at spawn* (before the child is
+    // runnable), closing the TOCTOU race the old post-spawn install had.  The
+    // spawn owns `capture_handle` on every path (moved+registered on success,
+    // closed on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc sigqueue spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 1 → capture before the child runs.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc sigqueue — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -13945,7 +14009,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
 /// No-op (returns `Ok`) when `/mnt/bin/forkexec` is absent.
 pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 27;
     // /bin/hello exits 42; the parent decodes WEXITSTATUS and prints it.
@@ -14037,28 +14101,21 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 1 → capture *atomically at spawn* (before the child is
+    // runnable), closing the TOCTOU race the old post-spawn install had.  The
+    // forked child inherits this fd (it is silent), so only the parent's
+    // post-reap line lands in the capture file.  The spawn owns `capture_handle`
+    // on every path (moved+registered on success, closed on any error), so the
+    // caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc forkexec spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 1 → capture before the child runs.  The forked child
-    // inherits this fd (it is silent), so only the parent's post-reap line
-    // lands in the capture file.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc forkexec — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -14138,7 +14195,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
 /// No-op (returns `Ok`) when the Path-Z rootfs (`/mnt/bin/pipe`) is absent.
 pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     const EXPECT_EXIT: i32 = 29;
     // /bin/emit writes "SLATE_PIPE_BODY\n" (16 bytes) to the pipe; the
@@ -14235,56 +14292,44 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect the *parent's* fd 1 → capture *atomically at spawn* (before it
+    // runs), closing the TOCTOU race the old post-spawn install had.  The child
+    // rewires its own fd 1 onto the pipe (dup2) before exec, so only the
+    // parent's post-read line lands in the capture file.
+    //
+    // The capture handle must be installed the way a normally-open()ed file
+    // would be, or the forked child destroys it: the child's `dup2(pipe, 1)`
+    // displaces the inherited fd-1 entry and the kernel's dup2-close path
+    // (`sys_dup2_impl` → `close_handle` → `sys_fs_close`) drops one refcount on
+    // the displaced handle.  If the handle were injected raw (refcount 1,
+    // untracked) that single close would take it to refcount 0 and free it
+    // before the parent's post-read `printf` runs, yielding a 0-byte capture.
+    // To model real ownership we add a second reference up front via
+    // `dup_shared` (for the process tree) and keep our original `handle::open`
+    // reference (for the read-back + final close below).
+    // `spawn_process_with_redirects` then moves+registers the process-tree
+    // reference into the child, so (a) `fork_create`'s `dup_one` bumps it again
+    // for the grandchild, (b) the child's dup2-close decrements the child's
+    // reference only, and (c) the parent retains a live reference through its
+    // `printf`.
+    if let Err(e) = handle::dup_shared(capture_handle) {
+        let _ = handle::close(capture_handle);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc pipe — dup_shared(capture) failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
+            // spawn closed the process-tree reference on failure; drop our
+            // original open reference too.
             let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real glibc pipe spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect the *parent's* fd 1 → capture before it runs.  The child
-    // rewires its own fd 1 onto the pipe (dup2) before exec, so only the
-    // parent's post-read line lands in the capture file.
-    //
-    // The capture handle must be installed the way a normally-open()ed
-    // file would be, or the forked child destroys it: the child's
-    // `dup2(pipe, 1)` displaces the inherited fd-1 entry and the kernel's
-    // dup2-close path (`sys_dup2_impl` → `close_handle` → `sys_fs_close`)
-    // drops one refcount on the displaced handle.  If we injected the
-    // handle raw (refcount 1, untracked) that single close would take the
-    // shared capture handle to refcount 0 and free it before the parent's
-    // post-read `printf` runs, yielding a 0-byte capture.  To model real
-    // ownership: bump the refcount once for the parent's own reference and
-    // register it in the parent's ipc_handles, so (a) `fork_create`'s
-    // `dup_one` bumps it again for the child, (b) the child's dup2-close
-    // decrements the child's reference only, and (c) the parent retains a
-    // live reference through its `printf`.  The original `handle::open`
-    // reference stays ours, for the read-back + final close below.
-    if let Err(e) = handle::dup_shared(capture_handle) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc pipe — dup_shared(capture) failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
-    pcb::register_ipc_handle(result.pid, ResourceType::File, capture_handle);
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        // Drop the parent's reference we just added (register + dup_shared),
-        // then our own; the process never ran so nothing else holds it.
-        pcb::deregister_ipc_handle(result.pid, ResourceType::File, capture_handle);
-        let _ = handle::close(capture_handle);
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real glibc pipe — redirecting fd 1 failed: {:?}", e);
-        return Err(KernelError::InternalError);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -15441,7 +15486,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
 /// echo line, and dash must exit 0.
 pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_RDONLY, O_WRONLY};
+    use crate::proc::linux_fd::{O_RDONLY, O_WRONLY};
 
     const EXPECT_EXIT: i32 = 0;
     const SCRIPT_BYTES: &[u8] = b"/bin/emit\n/bin/emit\necho SLATE_DASH_SCRIPT_DONE\n";
@@ -15554,45 +15599,24 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(&exe_elf, &options) {
+    // Redirect fd 0 (stdin) → the script file and fd 1 (stdout) → capture file
+    // *atomically at spawn* (before dash runs), closing the TOCTOU race the old
+    // post-spawn install pair had.  The spawn owns both handles on every path
+    // (moved+registered into the child on success, closed on any error), so the
+    // caller never closes them.
+    let redirects = [
+        (0i32, script_handle, O_RDONLY),
+        (1i32, capture_handle, O_WRONLY),
+    ];
+    let result = match spawn_process_with_redirects(&exe_elf, &options, &redirects) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(script_handle);
-            let _ = handle::close(capture_handle);
             let _ = crate::fs::Vfs::remove(SCRIPT);
             let _ = crate::fs::Vfs::remove(CAPTURE);
             serial_println!("[spawn]   FAIL: real dash script spawn returned {:?}", e);
             return Err(e);
         }
     };
-
-    // Redirect fd 0 (stdin) → the script file before dash runs.
-    let _ = pcb::linux_fd_take(result.pid, 0);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 0, FdEntry::file(script_handle, O_RDONLY)) {
-        let _ = handle::close(script_handle);
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(SCRIPT);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real dash script — redirecting fd 0 failed: {:?}", e);
-        // Propagate the real fd-install error (infrastructure failure), not a
-        // blanket InternalError, so the failure class is unambiguous.
-        return Err(e);
-    }
-
-    // Redirect fd 1 (stdout) → capture file.
-    let _ = pcb::linux_fd_take(result.pid, 1);
-    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
-        let _ = crate::fs::Vfs::remove(SCRIPT);
-        let _ = crate::fs::Vfs::remove(CAPTURE);
-        serial_println!("[spawn]   FAIL: real dash script — redirecting fd 1 failed: {:?}", e);
-        // Propagate the real fd-install error (infrastructure failure).
-        return Err(e);
-    }
 
     let mut reaped = false;
     for _ in 0..MAX_YIELDS {
@@ -17997,7 +18021,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // "tcc produced a working ring-3 ELF" — without the shell/fork/exec layer
     // confounding the result.  (The make test already proves shell redirects.)
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     let run_argv: &[&[u8]] = &[b"/cc-prog"];
     let run_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
@@ -18034,10 +18058,19 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // Linux ABI (OSABI=SYSV, no PT_INTERP, no GNU property note), so the ELF
     // carries no marker `detect_linux_abi` can see.  We *know* it is a Linux
     // binary because we just compiled it as one, so state the ABI explicitly.
-    let run_result = match spawn_process_with_abi(&obj, &run_options, pcb::AbiMode::Linux) {
+    // Redirect fd 1 → the capture file *atomically at spawn* (before the child
+    // runs), closing the TOCTOU race the old post-spawn install had.  The spawn
+    // owns `capture_handle` on every path (moved+registered on success, closed
+    // on any error), so the caller never closes it.
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let run_result = match spawn_process_with_abi_and_redirects(
+        &obj,
+        &run_options,
+        pcb::AbiMode::Linux,
+        &redirects,
+    ) {
         Ok(r) => r,
         Err(e) => {
-            let _ = handle::close(capture_handle);
             serial_println!(
                 "[spawn]   FAIL: real cc — spawning the freshly-built {} returned {:?}",
                 OBJ_PATH, e
@@ -18048,24 +18081,6 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
             return Err(e);
         }
     };
-
-    // Redirect fd 1 (console) -> capture file before the child runs.  Dropping
-    // the console entry needs no kernel close.  After install_at the capture
-    // handle is owned by the child's fd table (released on its exit), so we
-    // must NOT close it ourselves on the success path.
-    let _ = pcb::linux_fd_take(run_result.pid, 1);
-    if let Err(e) =
-        pcb::linux_fd_install_at(run_result.pid, 1, FdEntry::file(capture_handle, O_WRONLY))
-    {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(run_result.task_id);
-        pcb::destroy(run_result.pid);
-        serial_println!("[spawn]   FAIL: real cc — redirecting the compiled program's fd 1 failed: {:?}", e);
-        let _ = crate::fs::Vfs::remove(SRC_PATH);
-        let _ = crate::fs::Vfs::remove(OBJ_PATH);
-        let _ = crate::fs::Vfs::remove(OUT_PATH);
-        return Err(KernelError::InternalError);
-    }
 
     let mut run_reaped = false;
     for _ in 0..RUN_MAX_YIELDS {
@@ -18431,24 +18446,14 @@ fn run_dynamic_capture(
 ) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>)> {
     const RUN_MAX_YIELDS: usize = 524_288;
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+    use crate::proc::linux_fd::O_WRONLY;
 
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let run_argv: &[&[u8]] = &[prog_path.as_bytes()];
     let run_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
-    let run_options = SpawnOptions {
-        name: "spawn-test-hosted-run",
-        parent: 0,
-        priority: DEFAULT_PRIORITY,
-        capabilities: &caps,
-        fd_map: &[],
-        argv: run_argv,
-        envp: run_envp,
-        exe_path: Some(prog_path.as_bytes()),
-        cwd: None,
-        uid_gid: None,
-    };
 
+    // Open the capture file BEFORE spawning so the redirect can be installed
+    // *during* spawn (before the child is runnable) rather than after.
     let capture_handle = match handle::open(
         out_path,
         handle::OpenFlags::READ
@@ -18465,7 +18470,37 @@ fn run_dynamic_capture(
         }
     };
 
-    let run_result = match spawn_process(obj, &run_options) {
+    // Redirect the child's stdout (fd 1) to the capture file *atomically at
+    // spawn*, before the child is made runnable, via `linux_fd_redirects`.
+    //
+    // The old approach installed the redirect with `linux_fd_install_at` *after*
+    // `spawn_process` returned — a TOCTOU race: `spawn_process` yields a *Ready*
+    // child that a timer-tick preemption (or another CPU under SMP) can schedule
+    // before the parent runs the install, so an early `write(1, …)` from the
+    // freshly-built program leaked to the *console* and the capture file read
+    // back empty — the intermittent "captured 0 bytes, exit 0" false-FAIL
+    // (known-issues.md B-PTHREAD-YIELDBUDGET "empty-capture" variant; also
+    // reproduced on the hosted-cc `inline-asm` Path-Z rung).  `spawn_process`
+    // now applies these redirects into the child's kernel `linux_fd` table right
+    // after `linux_fd_install_stdio`, i.e. before the child's first instruction,
+    // closing the window entirely.  (This targets the *linux_fd* table, which is
+    // what a glibc/ld.so binary's `write(1,…)` syscall consults — not the posix
+    // crt's `initial_fds` inheritance, which a real-glibc binary never queries.)
+    let redirects = [(1i32, capture_handle, O_WRONLY)];
+    let run_options = SpawnOptions {
+        name: "spawn-test-hosted-run",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: run_argv,
+        envp: run_envp,
+        exe_path: Some(prog_path.as_bytes()),
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let run_result = match spawn_process_with_redirects(obj, &run_options, &redirects) {
         Ok(r) => r,
         Err(e) => {
             let _ = handle::close(capture_handle);
@@ -18477,20 +18512,9 @@ fn run_dynamic_capture(
         }
     };
 
-    // Redirect fd 1 (console) -> capture file before the child runs.
-    let _ = pcb::linux_fd_take(run_result.pid, 1);
-    if let Err(e) =
-        pcb::linux_fd_install_at(run_result.pid, 1, FdEntry::file(capture_handle, O_WRONLY))
-    {
-        let _ = handle::close(capture_handle);
-        thread::on_thread_exit(run_result.task_id);
-        pcb::destroy(run_result.pid);
-        serial_println!(
-            "[spawn]   FAIL: hosted cc ({}) — redirecting the compiled program's fd 1 failed: {:?}",
-            label, e
-        );
-        return Err(KernelError::InternalError);
-    }
+    // `spawn_process` moved `capture_handle` into the child's fd 1; the parent no
+    // longer references it (the read-back below is by path), and the child owns
+    // the close.  Nothing to close here.
 
     let mut reaped = false;
     for i in 0..RUN_MAX_YIELDS {

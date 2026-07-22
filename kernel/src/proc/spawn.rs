@@ -6632,6 +6632,133 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 integration test for the fastpy-built SlateOS **package registry**
+/// (`services/fastpy-pkg`), the DB layer of the package manager built on top of
+/// the content-addressed store.
+///
+/// The utility takes a package name (`argv[1]`) and a payload path (`argv[2]`),
+/// content-addresses the payload into `/tmp/store-<digest>.blob`, then does a
+/// **read-modify-write** of the persistent text registry `/tmp/pkgdb.txt`
+/// (appending a `"<name> <digest>"` line), re-reads it from disk, and resolves
+/// the record **by name** (parsing the multi-line DB char-by-char).  It exits 0
+/// only when the persisted record resolves back to the digest just installed —
+/// so a clean exit proves the whole persist-and-resolve cycle end-to-end.
+///
+/// Where the `store` test proved a single content round-trip, this proves the
+/// persistent name -> content mapping a package manager needs: parse a
+/// pre-existing multi-line registry, append, persist, re-read, and look up by
+/// name.  The harness stages a payload (`"coreutils demo\n"`, 32-bit FNV-1a
+/// digest `1ee068f8`, matched against CPython) and a one-line pre-existing
+/// registry (`"base 59f7e180\n"`), grants a File capability, spawns the utility
+/// with argv `[fastpy-pkg, coreutils, <payload path>]`, and asserts it becomes a
+/// `Zombie` and exits 0.  The install/lookup report is mirrored to serial.
+pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    // Staged payload + a one-line pre-existing registry.  The payload's 32-bit
+    // FNV-1a digest (1ee068f8) and the pre-existing "base" digest (59f7e180)
+    // were both verified against CPython.
+    const PAYLOAD_PATH: &str = "/tmp/pkg-payload.txt";
+    const PAYLOAD_PATH_ARG: &[u8] = b"/tmp/pkg-payload.txt";
+    const PAYLOAD_CONTENT: &[u8] = b"coreutils demo\n";
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const DB_SEED: &[u8] = b"base 59f7e180\n";
+    // The content-addressed blob the utility writes: `/tmp/store-<digest>.blob`.
+    const PKG_BLOB_PATH: &str = "/tmp/store-1ee068f8.blob";
+    const EXPECTED_EXIT: i32 = 0;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` registry (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    // Stage the payload the utility will hash + store.
+    if let Err(e) = crate::fs::Vfs::write_file(PAYLOAD_PATH, PAYLOAD_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", PAYLOAD_PATH, e);
+        return Err(e);
+    }
+    // Stage a one-line pre-existing registry so the utility exercises parsing an
+    // existing multi-line DB (append + re-read + look up both records).
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, DB_SEED) {
+        let _ = crate::fs::Vfs::remove(PAYLOAD_PATH);
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-pkg", b"coreutils", PAYLOAD_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-pkg",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_PKG_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PAYLOAD_PATH);
+            let _ = crate::fs::Vfs::remove(DB_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-pkg spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PAYLOAD_PATH);
+    let _ = crate::fs::Vfs::remove(DB_PATH);
+    // The utility wrote this blob; clean it up regardless of outcome.
+    let _ = crate::fs::Vfs::remove(PKG_BLOB_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg (ring 3) — expected Zombie, got {:?} (the utility faulted \
+             on the hash/store/registry read-modify-write/lookup path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg (ring 3) — reached Zombie but exit code was {:?}, expected \
+             {} (exit 1 means the persisted record did not resolve back to the installed digest — \
+             a registry parse/persist bug)",
+            exit_code, EXPECTED_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: package registry — content-addressed the \
+         payload, read-modify-wrote the persistent /tmp/pkgdb.txt, re-read it, and resolved the \
+         record by name, exit 0): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

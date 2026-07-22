@@ -1626,6 +1626,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 integration test of the fastpy-built package registry: the DB layer
+    // atop the content-addressed store. It hashes a payload, stores the blob,
+    // then read-modify-writes the persistent /tmp/pkgdb.txt registry, re-reads
+    // it, and resolves the record by name. Exit 0 proves the persist-and-resolve
+    // cycle a package manager needs.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` registry (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

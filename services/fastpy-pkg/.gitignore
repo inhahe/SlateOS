@@ -1,0 +1,5 @@
+# Intermediate object emitted by build.py; only the linked ELF fixture is tracked.
+prog.o
+# Python bytecode cache and debug artifacts.
+__pycache__/
+*.pyc

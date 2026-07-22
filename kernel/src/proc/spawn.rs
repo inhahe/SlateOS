@@ -6215,6 +6215,108 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
+///
+/// This is the first proof that the whole pure-mode file path runs natively on
+/// SlateOS.  The embedded ELF (`services/fastpy-fileio/fastpy-fileio.elf`) is a
+/// fastpy-compiled Python program that:
+///   1. `open('/tmp/fpyio.txt', 'w')`, `write('slate\n')` (6 bytes), `close()`
+///   2. `open('/tmp/fpyio.txt', 'r')`, `read()`, `close()`
+///   3. `sys.exit(len(data))`  → exits with **6** (the byte count read back).
+///
+/// The exit code therefore proves the round-trip end-to-end:
+///   fastpy `open()`/`write()`/`read()`/`close()`
+///     -> runtime native file object (`fastpy_io_open` + C stdio)
+///     -> posix `libc.a` `fopen`/`fwrite`/`fread`/`fclose`
+///     -> native `SYS_FS_OPEN`/`SYS_FS_WRITE`/`SYS_FS_READ`
+///     -> kernel VFS/memfs (the writable `/tmp` mount).
+///
+/// Unlike the TLS test, the process must be granted a **File capability**:
+/// `sys_fs_open` calls `require_cap_type(File, READ)`, and a ring-3 process
+/// (PID != 0) with no File cap gets `PermissionDenied`.  We grant a wildcard
+/// File cap (`resource_id == 0`) with READ|WRITE so the open of `/tmp` succeeds.
+pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
+    static FASTPY_FILEIO_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-fileio/fastpy-fileio.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS pure-mode file I/O (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_FILEIO_ELF.len()
+    );
+
+    let argv: &[&[u8]] = &[b"fastpy-fileio"];
+    const EXPECTED_BYTES: i32 = 6; // len("slate\n")
+    let envp: &[&[u8]] = &[];
+    // Grant a wildcard File capability (resource_id 0) so the process passes
+    // `require_cap_type(File, READ)` in `sys_fs_open`.  Without it the very
+    // first open() would fail with PermissionDenied.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-fileio",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_FILEIO_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-fileio spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-fileio (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state means the fastpy runtime faulted somewhere on the file path, e.g. in the \
+             native file object or a syscall)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-fileio (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len('slate\\n')). Exit 0 means read() returned no data (write or \
+             reopen failed); a PermissionDenied on open would show up as a non-zombie fault",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS pure-mode file I/O (ring 3: open/write/close then \
+         open/read/close on the /tmp memfs via fastpy -> C stdio -> SYS_FS_* -> VFS, exited \
+         with the {}-byte read count): OK",
+        EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

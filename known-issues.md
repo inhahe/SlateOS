@@ -14,6 +14,40 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OPENFLAGS-ENCODING. posix `translate_open_flags` emitted Linux `O_*` bits instead of native `OpenFlags` — 2026-07-21 — ✅ RESOLVED 2026-07-21
+
+**What:** `posix/src/file.rs::translate_open_flags` produced a Linux-style
+flag word for `SYS_FS_OPEN`'s third argument (access mode copied into the low
+two bits as the POSIX enum 0/1/2, `O_CREAT`→bit 6 = 0x40, `O_TRUNC`→bit 9,
+`O_APPEND`→bit 10, `O_EXCL`→bit 7). But the kernel's native `OpenFlags`
+(kernel/src/fs/handle.rs) is an *independent single-bit layout*: READ=0x1,
+WRITE=0x2, CREATE=0x4, TRUNCATE=0x8, APPEND=0x10, DIRECTORY=0x20. The kernel
+did `OpenFlags::from_bits(raw)` directly — no re-translation — so the two
+encodings had to match and didn't.
+
+**Symptom:** `open(path, "w")` sent `O_WRONLY|O_CREAT|O_TRUNC` = `0x241`,
+which the kernel decoded as READ (bit 0 set), *no* WRITE, *no* CREATE. For a
+nonexistent file the create branch never ran → `NotFound`/ENOENT. Every
+write-/append-mode open of a not-yet-existing file failed on-target. Caught by
+the first pure-mode fastpy file-I/O self-test (`self_test_fastpy_slateos_fileio`):
+`open('/tmp/fpyio.txt','w')` raised `FileNotFoundError` and the program exited 1
+instead of 6. (This posix path had simply never been exercised on-target before:
+prior file-touching self-tests staged their targets via kernel-side VFS calls,
+not through the posix `open()` → `SYS_FS_OPEN` route.)
+
+**Fix:** `translate_open_flags` now maps the POSIX access-mode enum to
+independent READ/WRITE flags and each `O_*` to its native bit
+(CREATE=0x4/TRUNCATE=0x8/APPEND=0x10/DIRECTORY=0x20). Unit tests in
+`posix/src/file.rs` updated to assert the native encoding. Verified end-to-end
+by the file-I/O boot self-test (exit 6).
+
+**Residual limitation (tracked, not blocking):** the kernel native `OpenFlags`
+has no exclusive-create bit, so `O_EXCL` is dropped in translation —
+`open(..., O_CREAT|O_EXCL)` does *not* yet fail on an existing file on-target.
+Proper fix: add an `OpenFlags::EXCL` bit + enforcement in
+`kernel/src/fs/handle.rs::open` (return `AlreadyExists` when EXCL and the file
+exists), then map `O_EXCL` to it in `translate_open_flags`.
+
 ### BUG-NATIVE-MMAP-NUM. posix native memory-mgmt syscall numbers aliased kernel IRQ syscalls — 2026-07-21 — ✅ RESOLVED 2026-07-21
 
 **What:** posix/src/syscall.rs numbered `SYS_MMAP=30`, `SYS_MUNMAP=31`,

@@ -1578,6 +1578,19 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
+    // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
+    // memfs and exits with the byte count read back, proving the full path
+    // fastpy open/write/read/close -> C stdio -> SYS_FS_* -> kernel VFS. The
+    // process is granted a File capability so sys_fs_open's cap check passes.
+    // Bounded yield loop; can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_fileio() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS pure-mode file I/O (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

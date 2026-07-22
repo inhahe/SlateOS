@@ -4366,25 +4366,62 @@ pub extern "C" fn futimens(fd: Fd, times: *const crate::stat::Timespec) -> i32 {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Translate POSIX open flags to our native flag word.
+/// Translate POSIX open flags to the kernel's native `OpenFlags` word
+/// (`SYS_FS_OPEN`'s third argument).
+///
+/// The native encoding is **not** the Linux `O_*` bit layout — the kernel
+/// (`kernel/src/fs/handle.rs`, `struct OpenFlags`) uses an independent set of
+/// single-bit flags:
+///
+/// | native bit | value | meaning              |
+/// |------------|-------|----------------------|
+/// | 0          | 0x01  | READ                 |
+/// | 1          | 0x02  | WRITE                |
+/// | 2          | 0x04  | CREATE               |
+/// | 3          | 0x08  | TRUNCATE             |
+/// | 4          | 0x10  | APPEND               |
+/// | 5          | 0x20  | DIRECTORY            |
+///
+/// POSIX instead packs the access mode into the low two bits as an *enum*
+/// (`O_RDONLY`=0, `O_WRONLY`=1, `O_RDWR`=2) and uses high bits for `O_CREAT`
+/// (0o100), `O_TRUNC` (0o1000), etc.  So we must translate rather than pass
+/// the raw word through — an earlier version copied the low bits and OR'd
+/// `O_CREAT` at bit 6, which the kernel decoded as "READ, no CREATE", breaking
+/// every `open(..., "w")` (the file was never created → ENOENT).
+///
+/// `O_EXCL` has no native equivalent (the kernel does not implement exclusive
+/// create), so it is dropped here; `O_CREAT | O_EXCL` therefore does not yet
+/// fail on an existing file on-target.  Tracked in todo.txt.
 pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
+    // Native OpenFlags bits (must match kernel `fs::handle::OpenFlags`).
+    const N_READ: u64 = 0x01;
+    const N_WRITE: u64 = 0x02;
+    const N_CREATE: u64 = 0x04;
+    const N_TRUNCATE: u64 = 0x08;
+    const N_APPEND: u64 = 0x10;
+    const N_DIRECTORY: u64 = 0x20;
+
     let mut native: u64 = 0;
 
-    // Access mode.
-    native |= (posix_flags & fcntl::O_ACCMODE) as u64;
+    // Access mode: POSIX enum → independent READ/WRITE flags.
+    match posix_flags & fcntl::O_ACCMODE {
+        x if x == fcntl::O_WRONLY => native |= N_WRITE,
+        x if x == fcntl::O_RDWR => native |= N_READ | N_WRITE,
+        // O_RDONLY (0) and any malformed access mode default to read.
+        _ => native |= N_READ,
+    }
 
-    // Creation flags.
     if posix_flags & fcntl::O_CREAT != 0 {
-        native |= 0x40; // Bit 6 = create.
+        native |= N_CREATE;
     }
     if posix_flags & fcntl::O_TRUNC != 0 {
-        native |= 0x200; // Bit 9 = truncate.
+        native |= N_TRUNCATE;
     }
     if posix_flags & fcntl::O_APPEND != 0 {
-        native |= 0x400; // Bit 10 = append.
+        native |= N_APPEND;
     }
-    if posix_flags & fcntl::O_EXCL != 0 {
-        native |= 0x80; // Bit 7 = exclusive.
+    if posix_flags & fcntl::O_DIRECTORY != 0 {
+        native |= N_DIRECTORY;
     }
 
     native
@@ -5210,55 +5247,65 @@ mod tests {
 
     // -- translate_open_flags --
 
+    // These assert the *native* kernel OpenFlags encoding (must match
+    // kernel/src/fs/handle.rs): READ=0x01, WRITE=0x02, CREATE=0x04,
+    // TRUNCATE=0x08, APPEND=0x10, DIRECTORY=0x20.
+    const N_READ: u64 = 0x01;
+    const N_WRITE: u64 = 0x02;
+    const N_CREATE: u64 = 0x04;
+    const N_TRUNCATE: u64 = 0x08;
+    const N_APPEND: u64 = 0x10;
+    const N_DIRECTORY: u64 = 0x20;
+
     #[test]
     fn translate_rdonly() {
         let flags = translate_open_flags(fcntl::O_RDONLY);
-        // O_RDONLY = 0, so no access-mode bits set.
-        assert_eq!(flags, 0);
+        // O_RDONLY → native READ (an access mode is always required).
+        assert_eq!(flags, N_READ);
     }
 
     #[test]
     fn translate_wronly() {
         let flags = translate_open_flags(fcntl::O_WRONLY);
-        assert_eq!(flags & 0x3, 1); // O_WRONLY = 1.
+        assert_eq!(flags & (N_READ | N_WRITE), N_WRITE); // WRITE only.
     }
 
     #[test]
     fn translate_rdwr() {
         let flags = translate_open_flags(fcntl::O_RDWR);
-        assert_eq!(flags & 0x3, 2); // O_RDWR = 2.
+        assert_eq!(flags & (N_READ | N_WRITE), N_READ | N_WRITE);
     }
 
     #[test]
     fn translate_creat_trunc() {
         let flags = translate_open_flags(fcntl::O_WRONLY | fcntl::O_CREAT | fcntl::O_TRUNC);
-        assert_ne!(flags & 0x40, 0, "O_CREAT bit"); // Bit 6.
-        assert_ne!(flags & 0x200, 0, "O_TRUNC bit"); // Bit 9.
+        assert_ne!(flags & N_CREATE, 0, "CREATE bit");
+        assert_ne!(flags & N_TRUNCATE, 0, "TRUNCATE bit");
+        assert_ne!(flags & N_WRITE, 0, "WRITE bit");
     }
 
     #[test]
     fn translate_append() {
         let flags = translate_open_flags(fcntl::O_APPEND);
-        assert_ne!(flags & 0x400, 0, "O_APPEND bit"); // Bit 10.
+        assert_ne!(flags & N_APPEND, 0, "APPEND bit");
     }
 
     #[test]
-    fn translate_excl() {
-        let flags = translate_open_flags(fcntl::O_CREAT | fcntl::O_EXCL);
-        assert_ne!(flags & 0x40, 0, "O_CREAT bit");
-        assert_ne!(flags & 0x80, 0, "O_EXCL bit"); // Bit 7.
+    fn translate_directory() {
+        let flags = translate_open_flags(fcntl::O_RDONLY | fcntl::O_DIRECTORY);
+        assert_ne!(flags & N_DIRECTORY, 0, "DIRECTORY bit");
+        assert_ne!(flags & N_READ, 0, "READ bit");
     }
 
     #[test]
     fn translate_all_flags() {
         let flags = translate_open_flags(
-            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC | fcntl::O_APPEND | fcntl::O_EXCL,
+            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC | fcntl::O_APPEND,
         );
-        assert_eq!(flags & 0x3, 2); // O_RDWR.
-        assert_ne!(flags & 0x40, 0); // O_CREAT.
-        assert_ne!(flags & 0x80, 0); // O_EXCL.
-        assert_ne!(flags & 0x200, 0); // O_TRUNC.
-        assert_ne!(flags & 0x400, 0); // O_APPEND.
+        assert_eq!(flags & (N_READ | N_WRITE), N_READ | N_WRITE);
+        assert_ne!(flags & N_CREATE, 0);
+        assert_ne!(flags & N_TRUNCATE, 0);
+        assert_ne!(flags & N_APPEND, 0);
     }
 
     #[test]

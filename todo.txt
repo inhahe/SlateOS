@@ -28,6 +28,39 @@
 ## for all issues; design-decisions.md for all resolved judgment calls.
 ## ############################################################################
 
+## ============================================================================
+## OPEN (2026-07-22): Initiative F — next genuinely-distinct bridge-free os.*
+## lowerings (each must hit a DISTINCT kernel write path + a false-pass-proof
+## ring-3 self-test). Done so far: identity (setuid/setgid, §83), scheduling
+## priority (nice/getpriority/setpriority, §84). Scoped-but-not-yet-started:
+##
+##   * os.umask — MAKE IT REAL. Today posix umask() writes only a userspace
+##     static (posix/src/file.rs UMASK_VALUE); the kernel PCB has linux_umask
+##     but "the VFS does NOT yet consult linux_umask at file creation"
+##     (kernel/src/syscall/linux.rs:8362). So the create mode is never masked.
+##     Proper fix: apply `mode &= ~umask` in the file-creation path. Cleanest
+##     option (mirrors the §83/§84 userspace-policy theme): mask in the
+##     USERSPACE posix create wrappers (open O_CREAT / creat / mkdir / mknod /
+##     mkfifo) using get_umask() before the create syscall — self-contained, no
+##     kernel change, and the native fastpy path (os.umask -> UMASK_VALUE) then
+##     works directly. Self-test (single-CPU-observable, strong cross-check):
+##     os.umask(0o022), create a file with mode 0o777, stat it, assert the
+##     stored mode bits == 0o755. False-pass-proof: an unmasked create would
+##     leave 0o777. Lower os.umask bridge-free (fastpy_os_umask -> posix umask).
+##
+##   * os.sched_setaffinity/os.sched_getaffinity — DEFERRED. sched_setaffinity
+##     is currently a stub (kernel/src/syscall/linux.rs:15995 "affinity is
+##     advisory and our scheduler doesn't honour it yet"), even though the
+##     kernel already has real sched::set_cpu_affinity/get_cpu_affinity that the
+##     scheduler DOES honour (can_run_on/choose_cpu_for_task). Wiring the
+##     syscall to those would make it real. BUT the boot-test runs QEMU with 1
+##     vCPU (no -smp in scripts/boot-test.sh), so affinity cannot be
+##     BEHAVIOURALLY observed (no CPU migration to witness) — the only signal
+##     would be the stored mask, a weak false-pass proof. Trigger to do it
+##     properly: either boot the self-test under -smp>=2 (a bigger change that
+##     perturbs every self-test) or accept a stored-mask-only assertion. Prefer
+##     umask first.
+
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as
 ##   elf::build_linux_fork_wait_test_elf + proc::spawn::self_test_linux_fork_wait

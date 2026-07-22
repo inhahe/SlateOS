@@ -8126,6 +8126,152 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-compiled `pkg gc` subcommand — the
+/// content-addressed store's garbage collector, unblocked by fastpy gaining
+/// native `os.remove` (file-unlink was the prior blocker).
+///
+/// `gc` enumerates the store directory (`/tmp`) via `os.listdir`, and for every
+/// `store-<digest>.blob` whose `<digest>` is not referenced by any registry
+/// record, deletes it via `os.remove` (→ `SYS_FS_DELETE`).  It combines the two
+/// filesystem OS surfaces proven by `fastpy-ls` (directory enumeration) and
+/// `fastpy-rm` (deletion) into a real package-manager operation.
+///
+/// The harness seeds a registry referencing exactly one digest (`abcd1234`) and
+/// stages two store blobs — a *referenced* one (`store-abcd1234.blob`, must be
+/// kept) and an *orphan* (`store-deadbeef.blob`, must be reclaimed) — then runs
+/// `pkg gc` and asserts, via the VFS, that the referenced blob survives and the
+/// orphan is gone.  (Other `store-*.blob` files left by earlier pkg self-tests
+/// may also be reclaimed; that is correct gc behavior, so the assertions target
+/// only these two named blobs rather than the total reclaimed count.)  The
+/// register-then-sweep design means a no-op gc that deleted nothing — or a
+/// broken one that deleted the referenced blob — both fail.
+pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    // One record references digest abcd1234; deadbeef is referenced by nobody.
+    const DB_CONTENT: &[u8] = b"keepme abcd1234 -\n";
+    const KEEP_BLOB: &str = "/tmp/store-abcd1234.blob";
+    const ORPHAN_BLOB: &str = "/tmp/store-deadbeef.blob";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) store `gc` test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    let cleanup = || {
+        for p in [DB_PATH, KEEP_BLOB, ORPHAN_BLOB] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    };
+
+    // Seed the registry and the two blobs.
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, DB_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(KEEP_BLOB, b"keep\n") {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", KEEP_BLOB, e);
+        return Err(e);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(ORPHAN_BLOB, b"orphan\n") {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", ORPHAN_BLOB, e);
+        return Err(e);
+    }
+
+    // gc needs READ|WRITE (listdir/read) *and* DELETE (os.remove → SYS_FS_DELETE).
+    let argv: &[&[u8]] = &[b"fastpy-pkg", b"gc"];
+    let envp: &[&[u8]] = &[];
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-pkg",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_PKG_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-pkg gc spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    // Capture existence before teardown so nothing perturbs it.
+    let keep_exists = crate::fs::Vfs::exists(KEEP_BLOB);
+    let orphan_exists = crate::fs::Vfs::exists(ORPHAN_BLOB);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    cleanup();
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — exit code {:?}, expected 0",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The referenced blob must survive.
+    if !keep_exists {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — reclaimed the *referenced* blob {} \
+             (should have kept it)",
+            KEEP_BLOB
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The orphan blob must be gone.
+    if orphan_exists {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — orphan blob {} still exists \
+             (gc did not reclaim it)",
+            ORPHAN_BLOB
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: store gc via os.listdir + os.remove — \
+         referenced store-abcd1234.blob kept, orphan store-deadbeef.blob reclaimed): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the fastpy-compiled `pkg search` subcommand — the
 /// substring name query over the registry, with grep(1) exit semantics.
 ///

@@ -1749,6 +1749,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the fastpy package manager's `gc` subcommand: seed a
+    // registry referencing one blob, stage a referenced blob + an orphan,
+    // run `pkg gc`, and assert (via the VFS) the referenced blob survives and
+    // the orphan is reclaimed — os.listdir + os.remove combined into the
+    // content-addressed store's garbage collector (unblocked by native
+    // os.remove).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_gc() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` store gc (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the fastpy package manager's `search` subcommand: seed a
     // registry, run substring queries, and assert grep-style exit codes
     // (0 = matched, 1 = no match) distinguish match from no-match.

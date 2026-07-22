@@ -24,7 +24,7 @@ is a comma-separated list of dependency package names, or `-` for none:
         new digest/deps, and prints "upgraded <name> <old-digest> -> <new-digest>"
         + exit 0.  (The old content blob is left in place: pure-mode fastpy has no
         file-unlink, and orphan blobs are harmless in a content-addressed store —
-        a future `gc` subcommand can reclaim unreferenced blobs.)
+        the `gc` subcommand reclaims unreferenced blobs.)
 
     pkg batch <manifest-path>
         **transactional multi-package registry install.**  The manifest is one
@@ -98,6 +98,17 @@ is a comma-separated list of dependency package names, or `-` for none:
     pkg list
         print every record in the registry, exit 0.
 
+    pkg gc
+        garbage-collect the content-addressed store: enumerate the store
+        directory (/tmp) via os.listdir, and for every 'store-<digest>.blob'
+        whose <digest> is not referenced by any registry record, delete it via
+        os.remove.  Prints one "reclaimed <name>" line per freed blob then
+        "gc <count>", exit 0.  upgrade/remove leave orphan blobs behind (their
+        content is immutable and may still be shared by other records), so gc is
+        the safe sweep that frees exactly the blobs no record points at — the
+        garbage collector a content-addressed store needs.  Requires the paired
+        fastpy os.remove native lowering (file-unlink was the prior blocker).
+
 The registry file must already exist (the installer / a package-manager bootstrap
 creates an empty one); each subcommand reads it, and install/remove rewrite it.
 The generation pointer file /tmp/pkg-current.txt (an integer, "0" when no
@@ -163,6 +174,7 @@ from compiler import toolchain
 # <deps>" records, built on the content-addressed store.  32-bit FNV (no
 # bigint); every string-subscripting helper is type-annotated.
 SRC = (
+    "import os\n"
     "import sys\n"
     "def fnv1a(s: str) -> int:\n"
     "    h = 2166136261\n"
@@ -362,6 +374,53 @@ SRC = (
     "            line = line + db[i]\n"
     "        i = i + 1\n"
     "    return ''\n"
+    # Return 1 if any record in `db` has digest (field 1) == `digest`, else 0.
+    # This is the "is this content-addressed blob still referenced?" test gc
+    # uses to decide whether a store blob is reachable or garbage.
+    "def is_referenced(db: str, digest: str) -> int:\n"
+    "    n = len(db)\n"
+    "    i = 0\n"
+    "    line = ''\n"
+    "    while i <= n:\n"
+    "        if i == n or ord(db[i]) == 10:\n"
+    "            if len(line) > 0:\n"
+    "                if field(line, 1) == digest:\n"
+    "                    return 1\n"
+    "            line = ''\n"
+    "        else:\n"
+    "            line = line + db[i]\n"
+    "        i = i + 1\n"
+    "    return 0\n"
+    # Return 1 iff `name` is a store blob filename: 'store-<digest>.blob'.
+    # Char-compared against the fixed prefix/suffix (str-annotated param so
+    # name[i] lowers to native fastpy_str_index).
+    "def is_store_blob(name: str) -> int:\n"
+    "    n = len(name)\n"
+    "    if n < 12:\n"
+    "        return 0\n"
+    "    pre = 'store-'\n"
+    "    i = 0\n"
+    "    while i < 6:\n"
+    "        if ord(name[i]) != ord(pre[i]):\n"
+    "            return 0\n"
+    "        i = i + 1\n"
+    "    suf = '.blob'\n"
+    "    i = 0\n"
+    "    while i < 5:\n"
+    "        if ord(name[n - 5 + i]) != ord(suf[i]):\n"
+    "            return 0\n"
+    "        i = i + 1\n"
+    "    return 1\n"
+    # Extract the digest of a store-blob filename (the middle between the
+    # 'store-' prefix and '.blob' suffix).  Assumes is_store_blob(name)==1.
+    "def digest_of(name: str) -> str:\n"
+    "    n = len(name)\n"
+    "    out = ''\n"
+    "    i = 6\n"
+    "    while i < n - 5:\n"
+    "        out = out + name[i]\n"
+    "        i = i + 1\n"
+    "    return out\n"
     "cmd = sys.argv[1]\n"
     "db_path = '/tmp/pkgdb.txt'\n"
     "if cmd == 'install':\n"
@@ -564,7 +623,34 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|upgrade|batch|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
+    # gc: reclaim unreferenced content-addressed store blobs.  Enumerate the
+    # store directory (/tmp) via os.listdir, and for every 'store-<digest>.blob'
+    # whose <digest> is not referenced by any registry record, delete it via
+    # os.remove.  Prints 'gc <reclaimed>', exit 0.  This is the garbage
+    # collector a content-addressed store needs: upgrade/remove leave orphan
+    # blobs behind (their content is immutable and may still be shared), and gc
+    # is the safe sweep that frees exactly the blobs no record points at.
+    "if cmd == 'gc':\n"
+    "    f = open(db_path, 'r')\n"
+    "    db = f.read()\n"
+    "    f.close()\n"
+    "    names = os.listdir('/tmp')\n"
+    "    m = len(names)\n"
+    "    i = 0\n"
+    "    reclaimed = 0\n"
+    "    while i < m:\n"
+    "        nm = names[i]\n"
+    "        if is_store_blob(nm) == 1:\n"
+    "            dg = digest_of(nm)\n"
+    "            if is_referenced(db, dg) == 0:\n"
+    "                rc = os.remove('/tmp/' + nm)\n"
+    "                if rc == 0:\n"
+    "                    print('reclaimed ' + nm)\n"
+    "                    reclaimed = reclaimed + 1\n"
+    "        i = i + 1\n"
+    "    print('gc ' + str(reclaimed))\n"
+    "    sys.exit(0)\n"
+    "print('usage: pkg install|upgrade|batch|remove|query|deps|check|verify|search|gc|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

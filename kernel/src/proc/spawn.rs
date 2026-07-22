@@ -6632,33 +6632,47 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     Ok(())
 }
 
-/// Ring-3 CLI-lifecycle test for the fastpy-built SlateOS **package manager**
-/// front-end (`services/fastpy-pkg`), the registry layer built on top of the
-/// content-addressed store.
+/// Ring-3 dependency-lifecycle test for the fastpy-built SlateOS **package
+/// manager** front-end (`services/fastpy-pkg`), the registry + dependency layer
+/// built on top of the content-addressed store.
 ///
 /// `fastpy-pkg` is a real subcommand CLI over a persistent text registry
-/// `/tmp/pkgdb.txt` (records of `"<name> <digest>\n"`):
-///   * `install <name> <payload>` — hash the payload, write the content blob
-///     `/tmp/store-<digest>.blob`, and upsert the `"<name> <digest>"` record
-///     (replacing any prior record for that name); exit 0.
+/// `/tmp/pkgdb.txt` (records of `"<name> <digest> <deps>\n"`, where `<deps>` is a
+/// comma-separated list of dependency package names or `-`):
+///   * `install <name> <payload> <deps>` — hash the payload, write the content
+///     blob `/tmp/store-<digest>.blob`, and upsert the `"<name> <digest> <deps>"`
+///     record (replacing any prior record for that name); exit 0.
 ///   * `query <name>` — resolve the record, print its digest (exit 0) or
 ///     "not found" (exit 1).
+///   * `deps <name>` — print the record's dependency field (exit 0) or
+///     "not found" (exit 1).
+///   * `check <name>` — verify every declared dependency of `<name>` is itself
+///     installed; "ok <name>" + exit 0, else "missing <dep>" + exit 1 (or
+///     "not found <name>" + exit 1 if `<name>` is absent).
 ///   * `remove <name>` — drop the record (exit 0) or "not found" (exit 1).
 ///   * `list` — print every record; exit 0.
 ///
-/// This test drives the whole lifecycle across **six separate ring-3 spawns**,
-/// asserting each exit code, then reads `/tmp/pkgdb.txt` back from the kernel and
-/// asserts the final state (installed record present, removed record gone).  It
-/// proves an argv[1] subcommand dispatch (`cmd == "install"` etc. → native
-/// `fastpy_str_compare`), by-name resolution, an idempotent upsert, and record
-/// deletion — all over a text DB the utility parses char-by-char.  Payload
-/// digests (`coreutils demo\n` → 1ee068f8, `grep demo\n` → 0f4143a6) were
-/// verified against CPython.
+/// This test drives the whole dependency lifecycle across **eight separate
+/// ring-3 spawns**: install a dependency chain (`libc` <- `coreutils` <-
+/// `grep`), `check` that the deps resolve, `remove` the base `libc` dependency,
+/// then `check` again to confirm the now-missing dependency is detected — plus a
+/// `deps grep` readback.  It asserts each exit code, then reads `/tmp/pkgdb.txt`
+/// back from the kernel and asserts the final state.  This proves argv[1]
+/// subcommand dispatch (→ native `fastpy_str_compare`), by-name resolution, an
+/// idempotent upsert, record deletion, and — new here — **dependency-field
+/// storage and dependency verification** (`check` comma-splits and resolves each
+/// dep against the registry), all over a text DB the utility parses
+/// char-by-char.  Payload digests (`libc demo\n` → 86732e22,
+/// `coreutils demo\n` → 1ee068f8, `grep demo\n` → 0f4143a6) were verified
+/// against CPython.
 pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     static FASTPY_PKG_ELF: &[u8] =
         include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const LIBC_PATH: &str = "/tmp/pkg-libc.txt";
+    const LIBC_ARG: &[u8] = b"/tmp/pkg-libc.txt";
+    const LIBC_CONTENT: &[u8] = b"libc demo\n";
     const CORE_PATH: &str = "/tmp/pkg-coreutils.txt";
     const CORE_ARG: &[u8] = b"/tmp/pkg-coreutils.txt";
     const CORE_CONTENT: &[u8] = b"coreutils demo\n";
@@ -6666,6 +6680,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     const GREP_ARG: &[u8] = b"/tmp/pkg-grep.txt";
     const GREP_CONTENT: &[u8] = b"grep demo\n";
     // The content-addressed blobs the utility writes for each payload.
+    const LIBC_BLOB: &str = "/tmp/store-86732e22.blob";
     const CORE_BLOB: &str = "/tmp/store-1ee068f8.blob";
     const GREP_BLOB: &str = "/tmp/store-0f4143a6.blob";
 
@@ -6713,42 +6728,47 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     // Remove every artifact this test stages or the utility creates.
     fn cleanup() {
         for p in [
-            DB_PATH, CORE_PATH, GREP_PATH, CORE_BLOB, GREP_BLOB,
+            DB_PATH, LIBC_PATH, CORE_PATH, GREP_PATH, LIBC_BLOB, CORE_BLOB, GREP_BLOB,
         ] {
             let _ = crate::fs::Vfs::remove(p);
         }
     }
 
     serial_println!(
-        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) CLI lifecycle test \
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) dependency lifecycle test \
          ({} bytes ELF)...",
         FASTPY_PKG_ELF.len()
     );
 
-    // Seed an empty registry + the two payloads.
+    // Seed an empty registry + the three payloads.
     if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
         serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
         return Err(e);
     }
-    if let Err(e) = crate::fs::Vfs::write_file(CORE_PATH, CORE_CONTENT) {
-        cleanup();
-        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", CORE_PATH, e);
-        return Err(e);
-    }
-    if let Err(e) = crate::fs::Vfs::write_file(GREP_PATH, GREP_CONTENT) {
-        cleanup();
-        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", GREP_PATH, e);
-        return Err(e);
+    for (path, content) in [
+        (LIBC_PATH, LIBC_CONTENT),
+        (CORE_PATH, CORE_CONTENT),
+        (GREP_PATH, GREP_CONTENT),
+    ] {
+        if let Err(e) = crate::fs::Vfs::write_file(path, content) {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not stage {} — {:?}", path, e);
+            return Err(e);
+        }
     }
 
-    // The lifecycle: (argv, expected exit code, description).
+    // The dependency lifecycle: (argv, expected exit code, description).
+    // Install a chain libc <- coreutils <- grep; verify deps resolve; remove the
+    // base libc; verify the now-missing dep is detected.
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-pkg", b"install", b"coreutils", CORE_ARG], 0, "install coreutils"),
-        (&[b"fastpy-pkg", b"install", b"grep", GREP_ARG], 0, "install grep"),
-        (&[b"fastpy-pkg", b"query", b"coreutils"], 0, "query coreutils (present)"),
-        (&[b"fastpy-pkg", b"remove", b"coreutils"], 0, "remove coreutils"),
-        (&[b"fastpy-pkg", b"query", b"coreutils"], 1, "query coreutils (gone)"),
-        (&[b"fastpy-pkg", b"query", b"grep"], 0, "query grep (present)"),
+        (&[b"fastpy-pkg", b"install", b"libc", LIBC_ARG, b"-"], 0, "install libc (no deps)"),
+        (&[b"fastpy-pkg", b"install", b"coreutils", CORE_ARG, b"libc"], 0, "install coreutils (dep libc)"),
+        (&[b"fastpy-pkg", b"install", b"grep", GREP_ARG, b"libc,coreutils"], 0, "install grep (deps libc,coreutils)"),
+        (&[b"fastpy-pkg", b"check", b"grep"], 0, "check grep (deps satisfied)"),
+        (&[b"fastpy-pkg", b"check", b"coreutils"], 0, "check coreutils (deps satisfied)"),
+        (&[b"fastpy-pkg", b"deps", b"grep"], 0, "deps grep"),
+        (&[b"fastpy-pkg", b"remove", b"libc"], 0, "remove libc (base dep)"),
+        (&[b"fastpy-pkg", b"check", b"grep"], 1, "check grep (dep libc now missing)"),
     ];
 
     for (argv, want, desc) in steps {
@@ -6770,7 +6790,10 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
         }
     }
 
-    // Verify the final on-disk registry: grep must remain, coreutils must be gone.
+    // Verify the final on-disk registry: grep must remain with its full record
+    // (name digest deps), while the removed libc record must be gone.  Note the
+    // string "libc" still appears as a *dependency* of coreutils/grep, so we key
+    // the "gone" check on the libc record's name+digest, not on "libc" alone.
     let db = match crate::fs::Vfs::read_file(DB_PATH) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -6783,23 +6806,24 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     let contains = |needle: &[u8]| -> bool {
         db.windows(needle.len()).any(|w| w == needle)
     };
-    let grep_present = contains(b"grep 0f4143a6");
-    let coreutils_gone = !contains(b"coreutils");
+    let grep_record_present = contains(b"grep 0f4143a6 libc,coreutils");
+    let libc_record_gone = !contains(b"libc 86732e22");
 
     cleanup();
 
-    if !grep_present || !coreutils_gone {
+    if !grep_record_present || !libc_record_gone {
         serial_println!(
-            "[spawn]   FAIL: fastpy-pkg final registry wrong (grep_present={}, coreutils_gone={}) \
-             — install/remove did not persist correctly",
-            grep_present, coreutils_gone
+            "[spawn]   FAIL: fastpy-pkg final registry wrong (grep_record_present={}, \
+             libc_record_gone={}) — install/remove did not persist correctly",
+            grep_record_present, libc_record_gone
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
-        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: package manager CLI — install x2 / query / \
-         remove / query-gone over the persistent /tmp/pkgdb.txt registry, final state verified): \
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: package manager CLI — dependency chain \
+         install libc<-coreutils<-grep / check deps-satisfied / deps readback / remove base dep / \
+         check dep-now-missing over the persistent /tmp/pkgdb.txt registry, final state verified): \
          OK",
     );
     Ok(())

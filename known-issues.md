@@ -33,6 +33,15 @@ tracking.
 That is why this is low severity and was left open while the cgroup array (which
 *is* correctness-affecting) was fixed immediately.
 
+**Even lower priority than it looks:** `frame_owner::set`/`clear` currently have
+**no callers** in the allocator (verified 2026-07-22 — the `Owner` enum is only
+passed as a label to the separate `alloc_trace` ring buffer). So the `OWNERS`
+array is never populated in production; it is exercised only by the module's own
+self-test. The 1-GiB ceiling therefore has no real effect today. The proper fix
+below should be done *together with* wiring `set`/`clear` into the alloc/free
+paths if per-frame owner census is ever actually wanted; refactoring the array
+to be dynamic in isolation (while it stays unwired) is busywork.
+
 **Proper fix:** make `OwnerArray` dynamic exactly like the cgroup array now is —
 carve `total_frames` bytes from the frame-allocator metadata region in
 `frame::init` (or a dedicated init hook), publish a base-pointer + length pair,

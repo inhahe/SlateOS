@@ -1016,6 +1016,14 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             return SyscallResult::err(e);
         }
 
+        // Flush the TLB for the freshly-mapped range.  `map_committed_range`
+        // leaves TLB invalidation to the caller.  x86 does not cache
+        // not-present entries in the common case, but a VA reused shortly
+        // after a munmap (heavy allocator churn does exactly this) may still
+        // have a stale entry lingering until the matching flush; invalidating
+        // here guarantees the CPU observes the new PTEs immediately.
+        mmap_flush_range(base_vaddr, base_vaddr.saturating_add(size_aligned));
+
         serial_println!(
             "[mmap] Committed mapped {:#x}..{:#x} ({} frames)",
             base_vaddr, base_vaddr + size_aligned, num_frames
@@ -1096,6 +1104,18 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
+    // Flush the TLB for the whole unmapped range.  CRITICAL: `unmap_frame`
+    // only clears the page-table entries — it does NOT invalidate the TLB
+    // (its doc-comment makes flushing the caller's responsibility).  Without
+    // this flush the CPU keeps a stale VA→frame translation cached, so the
+    // process can continue to read/write a frame that we have already freed
+    // back to the buddy allocator.  Once that frame is recycled (its first
+    // 16 bytes become an intrusive `FreeNode`, or it is remapped elsewhere),
+    // the stale writes corrupt allocator state — observed as a kernel #PF in
+    // `BuddyAllocator::remove_free` dereferencing a user VA that had leaked
+    // into the free list.  Flush before the frames can be reused by anyone.
+    mmap_flush_range(vaddr, vaddr.saturating_add(size_aligned));
+
     // Also remove any per-process VMA that starts at this address.
     // Both committed and lazy (MAP_LAZY) mmap regions register a VMA, so
     // this drops the address-space record alongside the unmapped frames.
@@ -1109,6 +1129,42 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     );
 
     SyscallResult::ok(0)
+}
+
+/// Threshold (in 4 KiB pages) at which the mmap/munmap TLB flush switches
+/// from a per-page range shootdown (`invlpg` per page on each CPU) to a
+/// full TLB flush (CR3 reload).  Mirrors the `mprotect` path
+/// (`MPROTECT_FULL_FLUSH_PAGES`) and Linux's `tlb_single_page_flush_ceiling`:
+/// 64 × 4 KiB = 16 frames = 256 KiB — small enough that 64 `invlpg`s are
+/// cheap, large enough that most (un)map calls take the range path.
+const MMAP_FULL_FLUSH_PAGES: u64 = 64;
+
+/// Flush the TLB on every online CPU for the frame-aligned range
+/// `[start, end)`.  Used by `sys_mmap` (committed path) and `sys_munmap`
+/// after they mutate page-table entries, since the underlying
+/// `map_committed_range` / `unmap_frame` primitives leave TLB invalidation
+/// to the caller.  Picks a per-page shootdown for small ranges and a full
+/// flush for large ones.
+#[allow(clippy::arithmetic_side_effects)]
+fn mmap_flush_range(start: u64, end: u64) {
+    if end <= start {
+        return;
+    }
+    // Both are frame-aligned (16 KiB multiples), so this divides evenly
+    // into 4 KiB hardware pages.
+    let page_count = end.saturating_sub(start) / 4096;
+    if page_count == 0 {
+        return;
+    }
+    if page_count > MMAP_FULL_FLUSH_PAGES {
+        // Large range — one CR3 reload per CPU beats N×invlpg.  Also covers
+        // page_count > u32::MAX.
+        crate::tlb::flush_all();
+    } else {
+        // page_count <= 64 — fits in u32.
+        #[allow(clippy::cast_possible_truncation)]
+        crate::tlb::flush_range(start, page_count as u32);
+    }
 }
 
 // User mmap address-space layout.

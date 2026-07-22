@@ -1638,6 +1638,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 generations/rollback test of the fastpy package manager: commit
+    // immutable registry snapshots (install foo/commit, install bar/commit) and
+    // atomically roll back to the previous generation, then assert the live
+    // registry was reverted to gen 1's snapshot (foo present, bar gone).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg_gen() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pkg` generations/rollback (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

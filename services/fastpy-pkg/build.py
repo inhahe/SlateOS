@@ -35,11 +35,34 @@ is a comma-separated list of dependency package names, or `-` for none:
         itself is not installed).  This is the dependency-resolution primitive
         a real package manager needs before an install/upgrade is allowed.
 
+    pkg commit
+        snapshot the current registry as a new immutable **generation**: read the
+        current generation number from /tmp/pkg-current.txt, copy the active
+        /tmp/pkgdb.txt to /tmp/pkg-gen-<n+1>.txt, and advance the current pointer
+        to n+1.  Prints "committed <n+1>", exit 0.
+
+    pkg rollback
+        atomically switch the active registry back to the previous generation:
+        restore /tmp/pkg-gen-<current-1>.txt over /tmp/pkgdb.txt and set the
+        current pointer to current-1.  Prints "rolled back to <n>" + exit 0, or
+        "no previous generation" + exit 1 if already at (or below) generation 1.
+
+    pkg current
+        print the current generation number ("generation <n>"), exit 0.
+
     pkg list
         print every record in the registry, exit 0.
 
 The registry file must already exist (the installer / a package-manager bootstrap
 creates an empty one); each subcommand reads it, and install/remove rewrite it.
+The generation pointer file /tmp/pkg-current.txt (an integer, "0" when no
+generation has been committed) must likewise exist for commit/rollback/current.
+
+Generations give the package manager **immutable, atomically-switchable install
+roots** (the Nix/NixOS model): every `commit` freezes the current package set as
+a numbered, never-mutated snapshot, and `rollback` swaps the live registry back
+to the prior snapshot in one write — so a bad install/upgrade is reverted
+atomically without partial state.
 
 Where `fastpy-store` proved a single content round-trip and the earlier registry
 proved a persistent name->content mapping, this adds **dependency records and
@@ -57,8 +80,10 @@ Pure-mode caveats honored (see fastpy `known-issues.md`):
     intermediate stays inside signed i64 — no bigint (BUG-BIGINT-MUL-INT-NULL).
   * Subcommand dispatch and name matching use `==` on strings, lowered to the
     native `fastpy_str_compare` (strcmp); character classification uses
-    `ord(...)` integer compares (newline = 10, space = 32, comma = 44).  All
-    pure-mode-safe.
+    `ord(...)` integer compares (newline = 10, space = 32, comma = 44,
+    digits 48..57).  Generation numbers are formatted with `str(int)` (native,
+    proven by the `list` subcommand's `str(count)`) and parsed with the
+    `parse_int(s: str)` helper.  All pure-mode-safe.
   * File reads are inline (never returned through a user function), sidestepping
     BUG-FILEREAD-FN-RETTAG.
 
@@ -200,6 +225,17 @@ SRC = (
     "            dep = dep + deps[j]\n"
     "        j = j + 1\n"
     "    return miss\n"
+    # Parse a non-negative decimal integer from a string (non-digits ignored).
+    "def parse_int(s: str) -> int:\n"
+    "    n = len(s)\n"
+    "    i = 0\n"
+    "    acc = 0\n"
+    "    while i < n:\n"
+    "        ch = ord(s[i])\n"
+    "        if ch >= 48 and ch <= 57:\n"
+    "            acc = acc * 10 + (ch - 48)\n"
+    "        i = i + 1\n"
+    "    return acc\n"
     "cmd = sys.argv[1]\n"
     "db_path = '/tmp/pkgdb.txt'\n"
     "if cmd == 'install':\n"
@@ -276,6 +312,50 @@ SRC = (
     "        sys.exit(1)\n"
     "    print('ok ' + name)\n"
     "    sys.exit(0)\n"
+    "if cmd == 'commit':\n"
+    "    f = open('/tmp/pkg-current.txt', 'r')\n"
+    "    curs = f.read()\n"
+    "    f.close()\n"
+    "    n = parse_int(curs) + 1\n"
+    "    f = open(db_path, 'r')\n"
+    "    body = f.read()\n"
+    "    f.close()\n"
+    "    gen_path = '/tmp/pkg-gen-' + str(n) + '.txt'\n"
+    "    f = open(gen_path, 'w')\n"
+    "    f.write(body)\n"
+    "    f.close()\n"
+    "    f = open('/tmp/pkg-current.txt', 'w')\n"
+    "    f.write(str(n))\n"
+    "    f.close()\n"
+    "    print('committed ' + str(n))\n"
+    "    sys.exit(0)\n"
+    "if cmd == 'rollback':\n"
+    "    f = open('/tmp/pkg-current.txt', 'r')\n"
+    "    curs = f.read()\n"
+    "    f.close()\n"
+    "    cur = parse_int(curs)\n"
+    "    if cur <= 1:\n"
+    "        print('no previous generation')\n"
+    "        sys.exit(1)\n"
+    "    prev = cur - 1\n"
+    "    gen_path = '/tmp/pkg-gen-' + str(prev) + '.txt'\n"
+    "    f = open(gen_path, 'r')\n"
+    "    body = f.read()\n"
+    "    f.close()\n"
+    "    f = open(db_path, 'w')\n"
+    "    f.write(body)\n"
+    "    f.close()\n"
+    "    f = open('/tmp/pkg-current.txt', 'w')\n"
+    "    f.write(str(prev))\n"
+    "    f.close()\n"
+    "    print('rolled back to ' + str(prev))\n"
+    "    sys.exit(0)\n"
+    "if cmd == 'current':\n"
+    "    f = open('/tmp/pkg-current.txt', 'r')\n"
+    "    curs = f.read()\n"
+    "    f.close()\n"
+    "    print('generation ' + str(parse_int(curs)))\n"
+    "    sys.exit(0)\n"
     "if cmd == 'list':\n"
     "    f = open(db_path, 'r')\n"
     "    db = f.read()\n"
@@ -283,7 +363,7 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|remove|query|deps|check|list')\n"
+    "print('usage: pkg install|remove|query|deps|check|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

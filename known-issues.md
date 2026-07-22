@@ -14,6 +14,45 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-MUNMAP-NO-TLB-FLUSH. `sys_munmap`/`sys_mmap` never flushed the TLB → freed frame stayed writable via stale TLB → buddy free-list corruption → kernel #PF — 2026-07-22 — ✅ RESOLVED 2026-07-22
+
+**What:** `sys_munmap` (kernel/src/syscall/handlers.rs) walked the range calling
+`page_table::unmap_frame`, which only *clears the page-table entries* and
+(per its own doc-comment) leaves TLB invalidation to the caller — but
+`sys_munmap` never flushed the TLB. It then immediately returned each frame to
+the buddy allocator via `frame::free_frame`. The committed-`sys_mmap` path had
+the mirror-image gap: `map_committed_range` also documents "caller must flush",
+and the handler didn't.
+
+**Symptom / repro:** Under heavy anonymous mmap churn (the fastpy runtime's
+malloc grows/shrinks the heap by repeatedly `mmap`/`munmap`-ing single frames —
+visible in the serial log as alternating `[mmap] Committed mapped …` /
+`[mmap] Unmapped 1 frames at …` on the *same* VA), the process kept a stale
+VA→frame TLB entry after `munmap`. Because the frame was already freed, its
+first 16 bytes were reused as the buddy allocator's intrusive `FreeNode`
+(next/prev physical-address links). The process's still-cached writes to the
+old VA (heap pointers in the `0x60_0000_0000` mmap region) overwrote that node,
+so a *user virtual address* leaked into the free list as a bogus "physical"
+next-pointer. A later `alloc_frame` walked the list and dereferenced
+`phys_to_virt(0x6000070000)` = `0xffff806000070008` (physmap alias of a
+~412 GB "frame" that doesn't exist) → **unrecoverable kernel #PF, write,
+not-present** in `BuddyAllocator::remove_free` ← `pop_free` ← `alloc_inner`.
+Triggered on-target by the fastpy package-manager generations self-test
+(`self_test_fastpy_slateos_pkg_gen`), whose commit/rollback file copies do
+enough heap churn to cross the threshold; the lighter dependency-lifecycle test
+that runs just before it did not.
+
+**Fix:** Added `mmap_flush_range(start, end)` in handlers.rs (mirrors
+`mprotect_flush_range`: per-page `crate::tlb::flush_range` for ≤64×4 KiB pages,
+`crate::tlb::flush_all` above that) and call it (a) in `sys_munmap` after the
+unmap loop, before the frames can be recycled, and (b) in the committed
+`sys_mmap` path after `map_committed_range`. This closes the window where a
+freed frame remains reachable through a stale translation.
+
+**Why it lay hidden:** most earlier ring-3 tests either did little heap churn or
+happened not to reuse a frame while its stale TLB entry was still live; the
+generations test was the first to reliably cross the reuse-while-stale window.
+
 ### BUG-OPENFLAGS-ENCODING. posix `translate_open_flags` emitted Linux `O_*` bits instead of native `OpenFlags` — 2026-07-21 — ✅ RESOLVED 2026-07-21
 
 **What:** `posix/src/file.rs::translate_open_flags` produced a Linux-style

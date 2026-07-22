@@ -6829,6 +6829,177 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 **generations / rollback** test for the fastpy-built SlateOS package
+/// manager (`services/fastpy-pkg`) — the immutable, atomically-switchable
+/// install-root feature (the Nix/NixOS model).
+///
+/// A *generation* is an immutable snapshot of the whole registry.  `commit`
+/// freezes the current `/tmp/pkgdb.txt` as `/tmp/pkg-gen-<n>.txt` and advances
+/// the current-generation pointer `/tmp/pkg-current.txt`; `rollback` restores
+/// the previous generation's snapshot over the live registry in a single write
+/// (an atomic switch); `current` prints the active generation number.
+///
+/// This test proves the whole cycle across **seven ring-3 spawns**: install
+/// `foo`, `commit` (→ generation 1), install `bar`, `commit` (→ generation 2),
+/// `current` (→ "generation 2"), `rollback` (→ generation 1), `current` (→
+/// "generation 1").  After the rollback it reads `/tmp/pkgdb.txt` back from the
+/// kernel and asserts the live registry is exactly generation 1's snapshot —
+/// `foo` present, `bar` gone — i.e. the rollback atomically reverted the `bar`
+/// install.  It reuses two known payloads (`libc demo\n` → 86732e22 as `foo`,
+/// `coreutils demo\n` → 1ee068f8 as `bar`), so the content blobs are at known
+/// paths for cleanup.
+pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const CUR_PATH: &str = "/tmp/pkg-current.txt";
+    const GEN1_PATH: &str = "/tmp/pkg-gen-1.txt";
+    const GEN2_PATH: &str = "/tmp/pkg-gen-2.txt";
+    const FOO_PATH: &str = "/tmp/pkg-foo.txt";
+    const FOO_ARG: &[u8] = b"/tmp/pkg-foo.txt";
+    const FOO_CONTENT: &[u8] = b"libc demo\n"; // digest 86732e22
+    const BAR_PATH: &str = "/tmp/pkg-bar.txt";
+    const BAR_ARG: &[u8] = b"/tmp/pkg-bar.txt";
+    const BAR_CONTENT: &[u8] = b"coreutils demo\n"; // digest 1ee068f8
+    const FOO_BLOB: &str = "/tmp/store-86732e22.blob";
+    const BAR_BLOB: &str = "/tmp/store-1ee068f8.blob";
+
+    // Spawn `fastpy-pkg` with the given argv at ring 3, wait for Zombie, return
+    // its exit code.  (Same shape as in `self_test_fastpy_slateos_pkg`.)
+    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-pkg",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        for p in [
+            DB_PATH, CUR_PATH, GEN1_PATH, GEN2_PATH, FOO_PATH, BAR_PATH, FOO_BLOB, BAR_BLOB,
+        ] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) generations/rollback test \
+         ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    // Seed an empty registry, a zero generation pointer, and the two payloads.
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(CUR_PATH, b"0") {
+        cleanup();
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", CUR_PATH, e);
+        return Err(e);
+    }
+    for (path, content) in [(FOO_PATH, FOO_CONTENT), (BAR_PATH, BAR_CONTENT)] {
+        if let Err(e) = crate::fs::Vfs::write_file(path, content) {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not stage {} — {:?}", path, e);
+            return Err(e);
+        }
+    }
+
+    // The generations lifecycle: (argv, expected exit code, description).
+    let steps: &[(&[&[u8]], i32, &str)] = &[
+        (&[b"fastpy-pkg", b"install", b"foo", FOO_ARG, b"-"], 0, "install foo"),
+        (&[b"fastpy-pkg", b"commit"], 0, "commit (-> generation 1)"),
+        (&[b"fastpy-pkg", b"install", b"bar", BAR_ARG, b"-"], 0, "install bar"),
+        (&[b"fastpy-pkg", b"commit"], 0, "commit (-> generation 2)"),
+        (&[b"fastpy-pkg", b"current"], 0, "current (generation 2)"),
+        (&[b"fastpy-pkg", b"rollback"], 0, "rollback (-> generation 1)"),
+        (&[b"fastpy-pkg", b"current"], 0, "current (generation 1)"),
+    ];
+
+    for (argv, want, desc) in steps {
+        match run_pkg(FASTPY_PKG_ELF, argv) {
+            Ok(code) if code == *want => {}
+            Ok(code) => {
+                cleanup();
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
+                    desc, code, want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                cleanup();
+                serial_println!("[spawn]   FAIL: fastpy-pkg `{}` — {:?}", desc, e);
+                return Err(e);
+            }
+        }
+    }
+
+    // After the rollback the live registry must equal generation 1's snapshot:
+    // foo present, bar reverted away.
+    let db = match crate::fs::Vfs::read_file(DB_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not read back {} — {:?}", DB_PATH, e);
+            return Err(e);
+        }
+    };
+    let contains = |needle: &[u8]| -> bool { db.windows(needle.len()).any(|w| w == needle) };
+    let foo_present = contains(b"foo 86732e22");
+    let bar_reverted = !contains(b"bar ");
+
+    cleanup();
+
+    if !foo_present || !bar_reverted {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg rollback did not restore generation 1 \
+             (foo_present={}, bar_reverted={})",
+            foo_present, bar_reverted
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: generations/rollback — install foo / commit \
+         gen1 / install bar / commit gen2 / current=2 / rollback / current=1, live registry \
+         atomically reverted to gen1 snapshot verified): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

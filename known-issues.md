@@ -12957,3 +12957,38 @@ cannot be used as a CI gate yet.  `cargo build` / boot-test are clean.
 ---
 
 ### (closed) TD1 — `frame::ALLOCATOR` IRQ-safety — closed as F5 on 2026-06-07.
+
+---
+
+### TD — posix `realpath()` does not resolve symlinks (POSIX non-conformance)
+
+**Where:** `posix/src/unistd.rs:1398` (`realpath`), also reached via
+`__realpath_chk` (`posix/src/file.rs:4674`) and `canonicalize_file_name`.
+
+**What:** POSIX `realpath()` must return the *canonicalized* absolute path
+with **all symbolic links resolved**.  The SlateOS implementation instead
+calls `resolve_path()` (which only normalizes `.`/`..` and makes the path
+absolute) and then verifies existence via `SYS_FS_STAT`.  It returns the
+*normalized input* path, **not** the symlink-resolved target.  So for a
+symlink `/tmp/link -> /tmp/target`, `realpath("/tmp/link")` yields
+`/tmp/link` rather than `/tmp/target`.
+
+**Repro:** create `target`, `os.symlink(target, link)`, then `realpath(link)`
+returns the link path, not the target path.  A GNU `realpath`/`readlink -f`
+or CPython `os.path.realpath` would return the target.
+
+**Impact:** anything relying on realpath to canonicalize through symlinks
+(dedup by canonical path, mount detection, security checks that compare
+canonical paths) is subtly wrong.  Existence + `.`/`..` normalization work;
+only symlink resolution is missing.  This is why the fastpy `os.path.*`
+self-test suite does **not** include a realpath symlink-resolution probe —
+it would falsely pass.
+
+**Proper fix:** resolve the path component-by-component in the kernel VFS
+(which already follows symlinks for `SYS_FS_STAT`) and expose the resolved
+path — either a new `SYS_FS_REALPATH`/canonicalize syscall returning the
+fully-resolved path, or a userspace `readlink()` loop in `realpath()` that
+walks each component and follows links (bounded by a symlink-depth limit to
+avoid loops, returning `ELOOP`).  The kernel already has
+`resolve_path_no_follow` and symlink-following metadata, so a canonicalize
+syscall is the clean approach.

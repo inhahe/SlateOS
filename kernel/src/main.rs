@@ -1603,6 +1603,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
+    // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
+    // generated on the fly with no fixed size — and prints a report. Proves
+    // fastpy pure-mode reads stream generated kernel content correctly.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_sysinfo() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `sysinfo` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
     // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
     // The launcher reaps with a non-blocking WNOHANG retry loop and the

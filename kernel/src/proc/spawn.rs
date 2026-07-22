@@ -6431,6 +6431,95 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
+/// shipping fastpy SlateOS component.
+///
+/// Where `fastpy-cat` reads the writable `/tmp` memfs, this one reads the
+/// kernel's **procfs** (`/proc/version`, `/proc/uptime`, `/proc/meminfo`) —
+/// files whose contents are *generated on the fly* with no fixed on-disk size.
+/// It therefore additionally proves that fastpy pure-mode reads stream
+/// generated kernel content correctly (the runtime's `fpy_file_read` loops
+/// `fread` until a short read marks EOF).
+///
+/// The harness grants a File capability, spawns the utility, and asserts it
+/// becomes a `Zombie` and exits 0.  The printed report — including the
+/// `/proc/version` string `"MintOS kernel 0.1.0 …"` — is mirrored to serial via
+/// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
+pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
+    static FASTPY_SYSINFO_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-sysinfo/fastpy-sysinfo.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `sysinfo` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SYSINFO_ELF.len()
+    );
+
+    let argv: &[&[u8]] = &[b"fastpy-sysinfo"];
+    const EXPECTED_EXIT: i32 = 0;
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-sysinfo",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SYSINFO_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-sysinfo spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sysinfo (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; a procfs read may have mis-streamed or an open failed)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sysinfo (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (exit 1 means an uncaught exception, e.g. a /proc open failed)",
+            exit_code, EXPECTED_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `sysinfo` (ring 3: read /proc/version+uptime+meminfo via \
+         pure-mode file I/O and printed a report to stdout, exit 0): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

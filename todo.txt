@@ -53652,6 +53652,17 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   symlink-loop (ELOOP) semantics everywhere in the kernel (no hard-link-count
 ##   producer). Now maps → ELOOP, matching the Linux ABI; test + comments updated.
 
+## DONE (O_EXCL + O_NOFOLLOW Linux-ABI parity) — 2026-07-22
+##   Closed the parallel Linux-ABI gap: the kernel-side Linux translator
+##   (kernel/src/syscall/linux.rs::translate_open_flags, ~5352) mapped only
+##   READ/WRITE/CREATE/TRUNCATE/APPEND/DIRECTORY — it dropped both O_EXCL and
+##   O_NOFOLLOW, so glibc/Linux-ABI programs got neither guarantee even though
+##   sys_openat/open_kernel_path_install funnel through the same fs::handle::open.
+##   Added oflags::O_NOFOLLOW (0o400_000) constant and now map O_EXCL →
+##   OpenFlags::EXCL and O_NOFOLLOW → OpenFlags::NOFOLLOW. The shared handle::open
+##   guards (added earlier this day) now fire identically for the native posix
+##   and Linux ABIs. Kernel builds clean; boot test green.
+
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
 ##   prerequisite for a shipping fastpy component that touches the filesystem

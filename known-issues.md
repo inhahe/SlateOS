@@ -34,6 +34,14 @@ self-test (section 17) proves: (a) without NOFOLLOW a symlink resolves to its
 target, (b) with NOFOLLOW a final symlink → TooManyLinks, (c) NOFOLLOW on a
 non-symlink opens normally.
 
+**Linux-ABI parity (2026-07-22):** The kernel-side Linux translator
+(`kernel/src/syscall/linux.rs::translate_open_flags`, ~5352) dropped both
+`O_EXCL` and `O_NOFOLLOW`, so glibc/Linux-ABI programs got neither guarantee
+even though `sys_openat`/`open_kernel_path_install` funnel through the same
+`fs::handle::open`. Added `oflags::O_NOFOLLOW` (0o400_000) and now map
+`O_EXCL → OpenFlags::EXCL` and `O_NOFOLLOW → OpenFlags::NOFOLLOW`, so the shared
+`handle::open` guard fires identically for both ABIs.
+
 ### BUG-ERRNO-TOOMANYLINKS-EMLINK. native `errno::translate` mapped the kernel symlink-loop error to `EMLINK` instead of `ELOOP` — 2026-07-22 — ✅ RESOLVED 2026-07-22
 
 **What:** `posix/src/errno.rs` mapped `native::TOO_MANY_LINKS` (-506) → `EMLINK`,

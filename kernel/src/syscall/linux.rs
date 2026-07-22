@@ -746,6 +746,7 @@ pub mod oflags {
     pub const O_APPEND: u32 = 0o2000;
     pub const O_NONBLOCK: u32 = 0o4000;
     pub const O_DIRECTORY: u32 = 0o200_000;
+    pub const O_NOFOLLOW: u32 = 0o400_000;
     pub const O_CLOEXEC: u32 = 0o2_000_000;
 }
 
@@ -5369,6 +5370,16 @@ fn translate_open_flags(linux_flags: u32) -> u32 {
     }
     if linux_flags & oflags::O_DIRECTORY != 0 {
         bits |= OpenFlags::DIRECTORY.bits();
+    }
+    // O_EXCL (with O_CREAT) demands exclusive creation; O_NOFOLLOW refuses to
+    // open a final-component symlink. Both are enforced in `fs::handle::open`,
+    // so — like the native posix path — we must carry them through here or
+    // Linux-ABI (glibc) programs would silently lose the guarantee.
+    if linux_flags & oflags::O_EXCL != 0 {
+        bits |= OpenFlags::EXCL.bits();
+    }
+    if linux_flags & oflags::O_NOFOLLOW != 0 {
+        bits |= OpenFlags::NOFOLLOW.bits();
     }
     bits
 }

@@ -1832,6 +1832,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-access`: os.access(path, mode) → posix access() →
+    // SYS_FS_STAT, returning a bool. The first top-level os.* bool return and
+    // the first fastpy lowering whose mode argument is genuinely honored (an
+    // invalid mode bit gives False even on an existing file).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_access() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `access` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

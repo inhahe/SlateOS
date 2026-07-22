@@ -9568,6 +9568,180 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-access` utility — the first fastpy
+/// tool to exercise `os.access(path, mode)`.
+///
+/// Unlike the `os.path.get{a,m,c}time` trio (which read stat *fields* back),
+/// `os.access` lowers to `fastpy_os_access` → posix libc `access()` →
+/// `SYS_FS_STAT` and returns a Python **bool**.  Crucially the **mode argument
+/// is honored**: POSIX `access()` rejects mode bits outside `R_OK|W_OK|X_OK`
+/// (`mode & ~7 != 0`) with `EINVAL`, so `os.access(path, 8)` returns *False even
+/// for an existing file* — proving the mode reached the syscall rather than
+/// being ignored (a getsize-style existence-only wiring would return True here).
+///
+/// The tool probes four cases on `argv[1]` (an existing file it creates) and
+/// `argv[2]` (a path that does not exist) and writes a 4-char `'1'/'0'` pattern:
+///   * `os.access(TARGET, 0)`  F_OK, exists          → True  ('1')
+///   * `os.access(TARGET, 7)`  R|W|X valid, exists    → True  ('1')
+///   * `os.access(TARGET, 8)`  invalid mode (EINVAL)  → False ('0')
+///   * `os.access(MISSING, 0)` F_OK, missing          → False ('0')
+/// i.e. the expected pattern is exactly `"1100"`, and it exits 0 iff so.
+///
+/// False-pass-proof: a stub returning a constant bool cannot produce "1100" for
+/// these mixed inputs; the invalid-mode case can only be `'0'` if the mode is
+/// actually forwarded and validated.  This harness independently confirms via
+/// the VFS that TARGET exists and MISSING does not (anchoring cases 1 and 4),
+/// and asserts the tool wrote exactly "1100".
+pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
+    static FASTPY_ACCESS_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-access/fastpy-access.elf");
+
+    const TARGET: &str = "/tmp/access-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/access-target.txt";
+    const MISSING: &str = "/tmp/access-missing.txt";
+    const MISSING_ARG: &[u8] = b"/tmp/access-missing.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-access.out";
+    // [a, b, c, d] = [F_OK exists, R|W|X exists, invalid-mode, F_OK missing].
+    const EXPECTED: &[u8] = b"1100";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `access` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_ACCESS_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(MISSING);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // os.access → SYS_FS_STAT gates on Rights::METADATA; creating the probe file
+    // (open('w')) needs Rights::WRITE.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-access", TARGET_ARG, MISSING_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-access",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_ACCESS_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-access spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-access (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.access may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the "1100" accessibility pattern held (exit 3 = any case
+    // disagreed: a stub, a mode-ignoring wiring, or a wrong existence result).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-access (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.access reported the wrong accessibility pattern)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independently confirm TARGET exists (anchors case 1: F_OK → True).
+    if let Err(e) = crate::fs::Vfs::metadata(TARGET) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-access (ring 3) — TARGET {} does not exist in the VFS: {:?} \
+             (cannot validate the accessible case)",
+            TARGET, e
+        );
+        cleanup();
+        return Err(e);
+    }
+
+    // Independently confirm MISSING does NOT exist (anchors case 4: F_OK →
+    // False must be a genuine "not found", not a stubbed constant).
+    if crate::fs::Vfs::metadata(MISSING).is_ok() {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-access (ring 3) — MISSING {} unexpectedly exists in the VFS; \
+             the inaccessible case is not a genuine absence",
+            MISSING
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The tool must have written exactly the expected "1100" pattern.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-access (ring 3) — {} held {:?}, expected {:?} \
+                     (os.access did not report [exists, R|W|X, !invalid-mode, !missing])",
+                    OUT_PATH, bytes.as_slice(), EXPECTED
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-access (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `access` (ring 3: os.access → posix access() → SYS_FS_STAT \
+         returned a bool; the mode argument was honored — invalid mode 8 gave False on an existing \
+         file — and the existing/missing paths matched the VFS): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

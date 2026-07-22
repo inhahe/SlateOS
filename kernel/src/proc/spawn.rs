@@ -7405,6 +7405,280 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-mv` utility — the first fastpy
+/// SlateOS component to **rename** a filesystem entry.
+///
+/// Where `fastpy-rm` deletes (`SYS_FS_DELETE`) and `fastpy-ls` enumerates
+/// (`SYS_FS_LIST_DIR`), this exercises a distinct kernel path: `os.rename()`
+/// → runtime `fastpy_os_rename` → posix C `rename()` → `SYS_FS_RENAME` → VFS
+/// rename.  The harness stages `/tmp/mv-src` with known contents, runs
+/// `mv /tmp/mv-src /tmp/mv-dst`, and — the false-pass-proof check — asserts via
+/// the VFS that the source is now gone *and* the destination exists with the
+/// original bytes.
+pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
+    static FASTPY_MV_ELF: &[u8] = include_bytes!("../../../services/fastpy-mv/fastpy-mv.elf");
+
+    const MV_SRC: &str = "/tmp/mv-src";
+    const MV_DST: &str = "/tmp/mv-dst";
+    const MV_SRC_ARG: &[u8] = b"/tmp/mv-src";
+    const MV_DST_ARG: &[u8] = b"/tmp/mv-dst";
+    const PAYLOAD: &[u8] = b"move me across the tree\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `mv` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_MV_ELF.len()
+    );
+
+    // Cleanup helper: remove both endpoints (best effort).
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(MV_SRC);
+        let _ = crate::fs::Vfs::remove(MV_DST);
+    };
+    cleanup();
+
+    // Stage the source with known contents.
+    if let Err(e) = crate::fs::Vfs::write_file(MV_SRC, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", MV_SRC, e);
+        return Err(e);
+    }
+    if !crate::fs::Vfs::exists(MV_SRC) || crate::fs::Vfs::exists(MV_DST) {
+        serial_println!(
+            "[spawn]   FAIL: precondition — expected {} present and {} absent before mv",
+            MV_SRC, MV_DST
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-mv", MV_SRC_ARG, MV_DST_ARG];
+    let envp: &[&[u8]] = &[];
+    // rename creates the new name and unlinks the old; grant READ|WRITE|DELETE.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-mv",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_MV_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: fastpy-mv spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    // Capture post-run filesystem state before teardown.
+    let src_exists = crate::fs::Vfs::exists(MV_SRC);
+    let dst_contents = crate::fs::Vfs::read_file(MV_DST);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    cleanup();
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-mv (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.rename path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-mv (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (os.rename success); nonzero => SYS_FS_RENAME failed",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Real verification: source gone, destination holds the original bytes.
+    if src_exists {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but {} still exists (rename did not \
+             remove the old name)",
+            MV_SRC
+        );
+        return Err(KernelError::InternalError);
+    }
+    match dst_contents {
+        Ok(bytes) if bytes == PAYLOAD => {}
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mv (ring 3) — {} exists but holds {} bytes, expected the \
+                 original {} (content not preserved across rename)",
+                MV_DST, bytes.len(), PAYLOAD.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but {} is not readable: {:?} \
+                 (rename did not create the new name)",
+                MV_DST, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `mv` (ring 3: rename via os.rename → SYS_FS_RENAME; exit 0, \
+         /tmp/mv-src gone and /tmp/mv-dst holds the original bytes via the VFS): OK",
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of the `fastpy-mkdir` utility — the first fastpy
+/// SlateOS component to **create a directory**.
+///
+/// This exercises a distinct kernel path from every prior fastpy tool:
+/// `os.mkdir()` → runtime `fastpy_os_mkdir` → posix C `mkdir()` →
+/// `SYS_FS_MKDIR` → VFS mkdir.  The harness asserts the target is absent,
+/// runs `mkdir /tmp/fpy-mkdir`, and — the false-pass-proof check — asserts via
+/// the VFS that the path now exists *and* is a directory.
+pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
+    static FASTPY_MKDIR_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-mkdir/fastpy-mkdir.elf");
+
+    const MK_DIR: &str = "/tmp/fpy-mkdir";
+    const MK_DIR_ARG: &[u8] = b"/tmp/fpy-mkdir";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `mkdir` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_MKDIR_ELF.len()
+    );
+
+    // Ensure a clean slate: the directory must not pre-exist.
+    let _ = crate::fs::Vfs::rmdir(MK_DIR);
+    if crate::fs::Vfs::exists(MK_DIR) {
+        serial_println!(
+            "[spawn]   FAIL: precondition — {} already exists before mkdir",
+            MK_DIR
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-mkdir", MK_DIR_ARG];
+    let envp: &[&[u8]] = &[];
+    // Directory creation gates on Rights::CREATE (SYS_FS_MKDIR) — unlike the
+    // read/enumerate tools that only need READ|WRITE (cf. rm needing DELETE).
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::CREATE,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-mkdir",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_MKDIR_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::rmdir(MK_DIR);
+            serial_println!("[spawn]   FAIL: fastpy-mkdir spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    // Capture the post-run type before teardown.
+    let post_meta = crate::fs::Vfs::metadata(MK_DIR);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::rmdir(MK_DIR);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-mkdir (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/os.mkdir path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-mkdir (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (os.mkdir success); nonzero => SYS_FS_MKDIR failed",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Real verification: the path must now exist and be a directory.
+    match post_meta {
+        Ok(meta) if meta.entry_type == crate::fs::EntryType::Directory => {}
+        Ok(meta) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mkdir (ring 3) — exited 0 but {} is {:?}, not a directory",
+                MK_DIR, meta.entry_type
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mkdir (ring 3) — exited 0 but {} does not exist: {:?} \
+                 (os.mkdir did not actually create it)",
+                MK_DIR, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `mkdir` (ring 3: directory creation via os.mkdir → \
+         SYS_FS_MKDIR; exit 0 and /tmp/fpy-mkdir verified to be a directory via the VFS): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

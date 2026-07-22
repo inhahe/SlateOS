@@ -1697,6 +1697,24 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-mv`: renames a staged file via os.rename
+    // (SYS_FS_RENAME) — the first fastpy tool to rename a filesystem entry.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_mv() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `mv` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
+    // Ring-3 test of `fastpy-mkdir`: creates a directory via os.mkdir
+    // (SYS_FS_MKDIR) — the first fastpy tool to create a directory.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_mkdir() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `mkdir` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

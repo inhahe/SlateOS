@@ -28,40 +28,15 @@
 ## for all issues; design-decisions.md for all resolved judgment calls.
 ## ############################################################################
 
-## ============================================================================
-## DEFERRED (2026-06-14): ring-3 fork()+wait4() reap E2E self-test
-## ============================================================================
-## WHAT: an end-to-end self-test where a real Linux-ABI process fork()s a child,
-##   the child exits with a sentinel, and the parent wait4()s it and exits with
-##   the decoded WEXITSTATUS — the core toolchain primitive (make→gcc→cc1/as/ld
-##   all rely on fork+exec+wait). Today fork/vfork/clone and wait4 have only
-##   *dispatch-validation* coverage (syscall/linux.rs self_test_clone_vfork_parent,
-##   self_test_wait4_dispatch) — no test actually creates a child, runs it, and
-##   reaps it through the real ring-3 path.
-## WHY DEFERRED (not a capability gap — a test-safety call): the cooperative
-##   spawn-based self-test harness (proc::spawn::self_test_linux_*) yields a fixed
-##   number of times and then tears the process down. A fork+wait test is
-##   inherently scheduler/timing-dependent (child must be scheduled to exit before
-##   the parent's wait can reap it) and creates a SECOND process the driver doesn't
-##   track. This codebase has a documented history of intermittent timing-dependent
-##   self-test races at boot (known-issues.md W1 watchlist; F1/F2/F3 were all
-##   self-test/ISR races). Introducing another timing-dependent multi-process boot
-##   self-test AUTONOMOUSLY, while the operator is away, risks an intermittent boot
-##   hang that passes my boot-test but fails later — exactly the trust-eroding
-##   failure mode to avoid unsupervised.
-## PROPER DESIGN (when built): make the parent NON-BLOCKING to remove all hang
-##   risk — wait4 with WNOHANG in a bounded sched_yield() retry loop (fixed max
-##   iterations), exiting a distinct "timeout" sentinel if the child never reaps
-##   (so a real fork/wait bug surfaces as a clean assertion failure, never a hang).
-##   The launcher needs one forward branch after fork (jz child) + the bounded
-##   retry loop; assemble with a two-pass label/disp patch (rel8 jumps suffice for
-##   the small body). Decode WEXITSTATUS as byte[status+1] (status = exit<<8).
-##   Add a matching execve-in-child variant (child execve's build_linux_exit_elf)
-##   to cover the full fork→exec→wait cycle gcc/make exercise.
-## TRIGGER: do it on a tick the operator is reachable, or once a non-timing
-##   harness exists to run multi-process tests deterministically. WHERE:
-##   new elf::build_linux_fork_wait_test_elf + proc::spawn::self_test_linux_fork_wait,
-##   wired into main.rs alongside the other post-VFS Linux self-tests.
+## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
+##   The deferred item here (2026-06-14) is COMPLETE. Delivered as
+##   elf::build_linux_fork_wait_test_elf + proc::spawn::self_test_linux_fork_wait
+##   (and the fork+execve+wait variant build_linux_fork_execve_wait_test_elf /
+##   self_test_linux_fork_execve_wait), wired into main.rs after the post-VFS
+##   Linux self-tests. Both pass at boot ("...decoded WEXITSTATUS == 75: OK" and
+##   "...target WEXITSTATUS == 83: OK"), and are further superseded by REAL glibc
+##   coverage (forkexec, pipe+fork+dup2+execl, dash `cmd > file`). Per §14
+##   completed work is tracked by the commit + roadmap checkbox, not here.
 
 ## ============================================================================
 ## DONE (2026-06-30): C-lite unified read-only page cache (Q5/Q12 / design-decisions §23, §36)

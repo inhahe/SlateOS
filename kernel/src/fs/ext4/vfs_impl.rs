@@ -1025,85 +1025,46 @@ impl FileSystem for Ext4Fs {
 
     fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
-        let inode = self.driver.read_inode(ino)?;
-        // Search both inline and external xattrs.
-        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
-        for (k, v) in &attrs {
-            if k == key {
-                return Ok(v.clone());
-            }
-        }
-        Err(KernelError::NotFound)
+        self.get_xattr_ino(ino, key)
     }
 
     fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
-
-        // Read all xattrs (inline + external), then write back to external block.
-        // We always write to the external block because modifying inline xattrs
-        // requires careful inode body manipulation that risks corrupting the
-        // extra inode fields.
-        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
-
-        // Check key length (255 bytes max per design spec).
-        if key.len() > 255 {
-            return Err(KernelError::InvalidArgument);
-        }
-        // Check value size (64 KiB max per design spec).
-        if value.len() > 65536 {
-            return Err(KernelError::InvalidArgument);
-        }
-
-        // Update existing or insert new.
-        let mut found = false;
-        for (k, v) in &mut attrs {
-            if k == key {
-                *v = value.to_vec();
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            attrs.push((String::from(key), value.to_vec()));
-        }
-
-        // Setting an xattr advances ctime (metadata change).
-        stamp_inode_ctime(&mut inode);
-        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
-        self.driver.write_superblock()?;
-        self.driver.write_group_descs()?;
-        self.driver.flush()?;
-        Ok(())
+        self.set_xattr_ino(ino, key, value)
     }
 
     fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
-
-        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
-        let original_len = attrs.len();
-        attrs.retain(|(k, _)| k != key);
-
-        if attrs.len() == original_len {
-            // Key wasn't present.
-            return Err(KernelError::NotFound);
-        }
-
-        // Removing an xattr advances ctime (metadata change).
-        stamp_inode_ctime(&mut inode);
-        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
-        self.driver.write_superblock()?;
-        self.driver.write_group_descs()?;
-        self.driver.flush()?;
-        Ok(())
+        self.remove_xattr_ino(ino, key)
     }
 
     fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
         let ino = self.driver.resolve_path(path)?;
-        let inode = self.driver.read_inode(ino)?;
-        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
-        Ok(attrs.into_iter().map(|(k, _)| k).collect())
+        self.list_xattrs_ino(ino)
+    }
+
+    // --- No-follow xattr variants (lgetxattr/lsetxattr/lremovexattr/
+    // llistxattr): resolve the final component WITHOUT following a symlink,
+    // so the link inode's own xattrs are targeted. ---
+
+    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.get_xattr_ino(ino, key)
+    }
+
+    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.set_xattr_ino(ino, key, value)
+    }
+
+    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.remove_xattr_ino(ino, key)
+    }
+
+    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.list_xattrs_ino(ino)
     }
 
     fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
@@ -1380,6 +1341,91 @@ impl Ext4Fs {
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
         Ok(())
+    }
+
+    /// Shared body for [`get_xattr`]/[`get_xattr_no_follow`]: read an xattr
+    /// from an already-resolved inode.
+    fn get_xattr_ino(&mut self, ino: u32, key: &str) -> KernelResult<Vec<u8>> {
+        let inode = self.driver.read_inode(ino)?;
+        // Search both inline and external xattrs.
+        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
+        for (k, v) in &attrs {
+            if k == key {
+                return Ok(v.clone());
+            }
+        }
+        Err(KernelError::NotFound)
+    }
+
+    /// Shared body for [`set_xattr`]/[`set_xattr_no_follow`]: insert/replace an
+    /// xattr on an already-resolved inode.
+    fn set_xattr_ino(&mut self, ino: u32, key: &str, value: &[u8]) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Read all xattrs (inline + external), then write back to external block.
+        // We always write to the external block because modifying inline xattrs
+        // requires careful inode body manipulation that risks corrupting the
+        // extra inode fields.
+        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
+
+        // Check key length (255 bytes max per design spec).
+        if key.len() > 255 {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Check value size (64 KiB max per design spec).
+        if value.len() > 65536 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Update existing or insert new.
+        let mut found = false;
+        for (k, v) in &mut attrs {
+            if k == key {
+                *v = value.to_vec();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            attrs.push((String::from(key), value.to_vec()));
+        }
+
+        // Setting an xattr advances ctime (metadata change).
+        stamp_inode_ctime(&mut inode);
+        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    /// Shared body for [`remove_xattr`]/[`remove_xattr_no_follow`].
+    fn remove_xattr_ino(&mut self, ino: u32, key: &str) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+
+        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
+        let original_len = attrs.len();
+        attrs.retain(|(k, _)| k != key);
+
+        if attrs.len() == original_len {
+            // Key wasn't present.
+            return Err(KernelError::NotFound);
+        }
+
+        // Removing an xattr advances ctime (metadata change).
+        stamp_inode_ctime(&mut inode);
+        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    /// Shared body for [`list_xattrs`]/[`list_xattrs_no_follow`].
+    fn list_xattrs_ino(&mut self, ino: u32) -> KernelResult<Vec<String>> {
+        let inode = self.driver.read_inode(ino)?;
+        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
+        Ok(attrs.into_iter().map(|(k, _)| k).collect())
     }
 
     /// Create a new file at `path` with the given data.

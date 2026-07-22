@@ -1770,6 +1770,118 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // -- §20: no-follow xattr operate on the LINK inode, not target --
+    // lsetxattr / lgetxattr / llistxattr / lremovexattr must mutate the
+    // symlink's OWN inode, not the file it points to.  Prove that:
+    //   (a) set_xattr_no_follow stores on the LINK (get_xattr_no_follow
+    //       reads it back) while the TARGET (get_xattr = follow) has no
+    //       such attribute — the write did not leak through the link,
+    //   (b) set_xattr (following) stores on the TARGET, invisible to the
+    //       link's own no-follow view,
+    //   (c) remove_xattr_no_follow strips the link's attribute only.
+    // Skipped gracefully if the root FS lacks symlink/xattr support.
+    let nfx_target = "/handle_nfx_target.txt";
+    let nfx_link = "/handle_nfx_link";
+    let nfx_key = "user.nfx";
+    crate::fs::Vfs::remove(nfx_link).ok();
+    crate::fs::Vfs::remove(nfx_target).ok();
+    let nfx_ready = crate::fs::Vfs::write_file(nfx_target, b"nfx").is_ok()
+        && crate::fs::Vfs::symlink(nfx_link, nfx_target).is_ok()
+        // Probe xattr support on the link itself; skip if unsupported.
+        && crate::fs::Vfs::set_xattr_no_follow(nfx_link, nfx_key, b"link").is_ok();
+    if nfx_ready {
+        let nfx_cleanup = || {
+            crate::fs::Vfs::remove(nfx_link).ok();
+            crate::fs::Vfs::remove(nfx_target).ok();
+        };
+        // (a) the LINK's own inode carries the attribute (no-follow read).
+        match crate::fs::Vfs::get_xattr_no_follow(nfx_link, nfx_key) {
+            Ok(v) if v == b"link" => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: no-follow xattr not on link inode: {:?}",
+                    other
+                );
+                nfx_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ... and the TARGET (follow) must NOT see it — the write to the
+        // link did not leak to the pointed-at file.
+        match crate::fs::Vfs::get_xattr(nfx_link, nfx_key) {
+            Err(_) => {}
+            Ok(v) => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: no-follow xattr leaked to target: {:?}",
+                    v
+                );
+                nfx_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        // (b) a following set must hit the TARGET, invisible to the link.
+        if let Err(e) = crate::fs::Vfs::set_xattr(nfx_link, nfx_key, b"target") {
+            crate::serial_println!("[fs::handle]   FAIL: set_xattr (follow): {:?}", e);
+            nfx_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        match (
+            crate::fs::Vfs::get_xattr(nfx_link, nfx_key),
+            crate::fs::Vfs::get_xattr_no_follow(nfx_link, nfx_key),
+        ) {
+            (Ok(t), Ok(l)) if t == b"target" && l == b"link" => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: follow/no-follow xattr views crossed: {:?}",
+                    other
+                );
+                nfx_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        // llistxattr must list the link's key (not necessarily the target's).
+        match crate::fs::Vfs::list_xattrs_no_follow(nfx_link) {
+            Ok(keys) if keys.iter().any(|k| k == nfx_key) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: no-follow list missing link key: {:?}",
+                    other
+                );
+                nfx_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        // (c) no-follow remove strips the LINK's attribute; the TARGET keeps
+        // its own following-set value.
+        if let Err(e) = crate::fs::Vfs::remove_xattr_no_follow(nfx_link, nfx_key) {
+            crate::serial_println!("[fs::handle]   FAIL: remove_xattr_no_follow: {:?}", e);
+            nfx_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        let link_gone = crate::fs::Vfs::get_xattr_no_follow(nfx_link, nfx_key).is_err();
+        let tgt_kept = matches!(
+            crate::fs::Vfs::get_xattr(nfx_link, nfx_key),
+            Ok(ref v) if v == b"target"
+        );
+        if !link_gone || !tgt_kept {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: no-follow remove wrong inode (link_gone={} tgt_kept={})",
+                link_gone,
+                tgt_kept
+            );
+            nfx_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        nfx_cleanup();
+        crate::serial_println!("[fs::handle]   no-follow xattr targets link inode: OK");
+    } else {
+        crate::fs::Vfs::remove(nfx_link).ok();
+        crate::fs::Vfs::remove(nfx_target).ok();
+        crate::serial_println!(
+            "[fs::handle]   no-follow xattr test SKIPPED (no symlink/xattr support)"
+        );
+    }
+
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();
     crate::fs::Vfs::remove(test_path).ok();

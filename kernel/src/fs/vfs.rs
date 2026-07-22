@@ -681,6 +681,32 @@ pub trait FileSystem: Send {
         Ok(Vec::new())
     }
 
+    // --- No-follow xattr variants (lgetxattr/lsetxattr/llistxattr/
+    // lremovexattr): operate on a trailing symlink itself, not its target.
+    // Default delegates to the following version — correct for symlink-free
+    // filesystems (FAT); memfs/ext4 override to resolve the final component
+    // without following. ---
+
+    /// No-follow analogue of [`get_xattr`](Self::get_xattr) (`lgetxattr`).
+    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        self.get_xattr(path, key)
+    }
+
+    /// No-follow analogue of [`set_xattr`](Self::set_xattr) (`lsetxattr`).
+    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        self.set_xattr(path, key, value)
+    }
+
+    /// No-follow analogue of [`remove_xattr`](Self::remove_xattr) (`lremovexattr`).
+    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        self.remove_xattr(path, key)
+    }
+
+    /// No-follow analogue of [`list_xattrs`](Self::list_xattrs) (`llistxattr`).
+    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        self.list_xattrs(path)
+    }
+
     // --- Symlink operations ---
 
     /// Create a symbolic link at `path` pointing to `target`.
@@ -2898,6 +2924,52 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().list_xattrs(&relative)
+    }
+
+    // --- No-follow xattr wrappers (lgetxattr/lsetxattr/llistxattr/
+    // lremovexattr): operate on the symlink itself when the final component
+    // is a link.  Intermediate symlinks are still resolved. ---
+
+    /// Get an xattr WITHOUT following a trailing symlink (`lgetxattr`).
+    pub fn get_xattr_no_follow(path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        let path = Self::resolve_no_follow(path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().get_xattr_no_follow(&relative, key)
+    }
+
+    /// Set an xattr WITHOUT following a trailing symlink (`lsetxattr`).
+    pub fn set_xattr_no_follow(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_xattr_no_follow(&relative, key, value)?;
+        }
+        super::notify::emit_metadata(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        Ok(())
+    }
+
+    /// Remove an xattr WITHOUT following a trailing symlink (`lremovexattr`).
+    pub fn remove_xattr_no_follow(path: &str, key: &str) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().remove_xattr_no_follow(&relative, key)?;
+        }
+        super::notify::emit_metadata(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        Ok(())
+    }
+
+    /// List xattr keys WITHOUT following a trailing symlink (`llistxattr`).
+    pub fn list_xattrs_no_follow(path: &str) -> KernelResult<Vec<String>> {
+        let path = Self::resolve_no_follow(path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().list_xattrs_no_follow(&relative)
     }
 
     // --- Symlink VFS methods ---

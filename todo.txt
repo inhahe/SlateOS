@@ -7364,17 +7364,20 @@ Remaining net improvements (diminishing returns):
   17108 posix host tests pass (37 xattr tests rewritten for the new
   validation surface); bare-metal + host posix and kernel builds clean.
   JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
-    1. lgetxattr/lsetxattr/llistxattr/lremovexattr do NOT honour no-follow:
-       the kernel xattr syscalls resolve with resolve_follow, so on a symlink
-       they operate on the target.  OPEN TODO: the no-follow ABI now EXISTS
-       (2026-07-22) — Vfs::set_owner_no_follow/set_times_no_follow +
-       FileSystem::*_no_follow trait methods + resolve_no_follow_mut (memfs)
-       + resolve_path_no_follow (ext4), exposed via the SYS_FS_SET_OWNER/
-       SET_TIMES arg4 NO_FOLLOW bit.  The lchown/fchownat/utimensat gaps are
-       now CLOSED (known-issues B-CHOWN1 gap #1 / B-UTIME1 gap #1).  The xattr
-       family can be fixed the same way: add a get_xattr_no_follow /
-       set_xattr_no_follow / etc. trait method backed by resolve_no_follow(_mut)
-       and an arg NO_FOLLOW bit on the kernel xattr syscalls.
+    1. (CLOSED 2026-07-22) lgetxattr/lsetxattr/llistxattr/lremovexattr now
+       honour no-follow: on a symlink they operate on the LINK inode, not the
+       target.  Implemented the same way as the chown/times fix:
+       FileSystem::{get,set,remove,list}_xattr[s]_no_follow trait methods
+       (default-delegate to the following version; memfs overrides via
+       resolve_no_follow(_mut) + shared node_* xattr helpers; ext4 overrides
+       via resolve_path_no_follow + shared *_ino helpers), exposed as
+       Vfs::*_no_follow wrappers (resolve_no_follow + resolve_mount).  Kernel
+       xattr syscalls carry a NO_FOLLOW bit in their free arg slot
+       (get/set: arg5, list: arg4, remove: arg3); posix do_getxattr/
+       do_setxattr/do_listxattr/do_removexattr thread a no_follow bool
+       (syscall6/6/5/4) and the four l* variants pass true.  Proven by
+       handle.rs self-test §20 (no-follow xattr set/get/list/remove target the
+       link inode; following ops target the file — the two views never cross).
     2. A missing attribute reports ENOENT, not the Linux-conventional
        ENODATA, because the kernel collapses "file not found" and "attribute
        not found" into KernelError::NotFound.  Distinguishing them needs a

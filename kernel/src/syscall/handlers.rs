@@ -7181,7 +7181,8 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: key pointer (null-terminated).  `arg3`: output buffer pointer.
-/// `arg4`: buffer capacity.
+/// `arg4`: buffer capacity.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
+/// `lgetxattr` — read the link inode's own xattrs).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
@@ -7233,7 +7234,13 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    match crate::fs::Vfs::get_xattr(path, key) {
+    // arg5 bit 0 = NO_FOLLOW (lgetxattr: read the link inode's own xattrs).
+    let xattr_res = if args.arg5 & 1 != 0 {
+        crate::fs::Vfs::get_xattr_no_follow(path, key)
+    } else {
+        crate::fs::Vfs::get_xattr(path, key)
+    };
+    match xattr_res {
         Ok(val) => {
             // Copy as much as fits, but always report the TRUE length so the
             // caller can perform a size query or detect truncation (ERANGE).
@@ -7255,7 +7262,8 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: key pointer (null-terminated).  `arg3`: value pointer.
-/// `arg4`: value length.
+/// `arg4`: value length.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
+/// `lsetxattr` — write to the link inode's own xattrs).
 pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
         crate::cap::ResourceType::File,
@@ -7309,7 +7317,13 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         &[]
     };
 
-    match crate::fs::Vfs::set_xattr(path, key, value) {
+    // arg5 bit 0 = NO_FOLLOW (lsetxattr: write the link inode's own xattrs).
+    let res = if args.arg5 & 1 != 0 {
+        crate::fs::Vfs::set_xattr_no_follow(path, key, value)
+    } else {
+        crate::fs::Vfs::set_xattr(path, key, value)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7318,7 +7332,8 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_REMOVE_XATTR` — remove an extended attribute.
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
-/// `arg2`: key pointer (null-terminated).
+/// `arg2`: key pointer (null-terminated).  `arg3`: flags (bit 0 = `NO_FOLLOW`,
+/// i.e. `lremovexattr` — remove from the link inode's own xattrs).
 pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
         crate::cap::ResourceType::File,
@@ -7354,7 +7369,13 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
         }
     };
 
-    match crate::fs::Vfs::remove_xattr(path, key) {
+    // arg3 bit 0 = NO_FOLLOW (lremovexattr: remove from the link inode).
+    let res = if args.arg3 & 1 != 0 {
+        crate::fs::Vfs::remove_xattr_no_follow(path, key)
+    } else {
+        crate::fs::Vfs::remove_xattr(path, key)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7363,7 +7384,8 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_LIST_XATTRS` — list extended attribute keys.
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
-/// `arg2`: output buffer pointer.  `arg3`: buffer capacity.
+/// `arg2`: output buffer pointer.  `arg3`: buffer capacity.  `arg4`: flags
+/// (bit 0 = `NO_FOLLOW`, i.e. `llistxattr` — list the link inode's own xattrs).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
@@ -7391,7 +7413,12 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    let keys = match crate::fs::Vfs::list_xattrs(path) {
+    // arg4 bit 0 = NO_FOLLOW (llistxattr: list the link inode's own xattrs).
+    let keys = match if args.arg4 & 1 != 0 {
+        crate::fs::Vfs::list_xattrs_no_follow(path)
+    } else {
+        crate::fs::Vfs::list_xattrs(path)
+    } {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };

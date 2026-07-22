@@ -95,6 +95,66 @@ struct MemFsNode {
     xattrs: Vec<(String, Vec<u8>)>,
 }
 
+// --- Node-level xattr helpers (shared by follow / no-follow variants) ---
+// These operate on an already-resolved node so the trait methods differ only
+// in how the path is resolved (resolve/resolve_mut vs the no-follow pair).
+
+/// Validate an xattr key/value shape before touching the node.
+fn node_validate_xattr(key: &str, value: &[u8]) -> KernelResult<()> {
+    // Enforce max key length (255 bytes) and max value size (64 KiB).
+    if key.len() > 255 {
+        return Err(KernelError::InvalidArgument);
+    }
+    if value.len() > 65536 {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Read an xattr value from a resolved node.
+fn node_get_xattr(node: &MemFsNode, key: &str) -> KernelResult<Vec<u8>> {
+    for (k, v) in &node.xattrs {
+        if k == key {
+            return Ok(v.clone());
+        }
+    }
+    Err(KernelError::NotFound)
+}
+
+/// Insert or replace an xattr on a resolved node.  Assumes the key/value have
+/// already passed [`node_validate_xattr`].
+fn node_set_xattr(node: &mut MemFsNode, key: &str, value: &[u8]) -> KernelResult<()> {
+    let mut found = false;
+    for (k, v) in &mut node.xattrs {
+        if k == key {
+            *v = value.to_vec();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        node.xattrs.push((String::from(key), value.to_vec()));
+    }
+    node.changed_ns = metadata_now_ns();
+    Ok(())
+}
+
+/// Remove an xattr from a resolved node; `NotFound` if the key is absent.
+fn node_remove_xattr(node: &mut MemFsNode, key: &str) -> KernelResult<()> {
+    let orig_len = node.xattrs.len();
+    node.xattrs.retain(|(k, _)| k != key);
+    if node.xattrs.len() == orig_len {
+        return Err(KernelError::NotFound);
+    }
+    node.changed_ns = metadata_now_ns();
+    Ok(())
+}
+
+/// List all xattr keys on a resolved node.
+fn node_list_xattrs(node: &MemFsNode) -> Vec<String> {
+    node.xattrs.iter().map(|(k, _)| k.clone()).collect()
+}
+
 impl MemFsNode {
     fn new_file(data: Vec<u8>) -> Self {
         let now = metadata_now_ns();
@@ -1059,55 +1119,43 @@ impl FileSystem for MemFs {
     }
 
     fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
-        let node = self.resolve(path)?;
-        for (k, v) in &node.xattrs {
-            if k == key {
-                return Ok(v.clone());
-            }
-        }
-        Err(KernelError::NotFound)
+        node_get_xattr(self.resolve(path)?, key)
     }
 
     fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
-        // Enforce max key length (255 bytes) and max value size (64 KiB).
-        if key.len() > 255 {
-            return Err(KernelError::InvalidArgument);
-        }
-        if value.len() > 65536 {
-            return Err(KernelError::InvalidArgument);
-        }
-
-        let node = self.resolve_mut(path)?;
-        // Update existing or insert new.
-        let mut found = false;
-        for (k, v) in &mut node.xattrs {
-            if k == key {
-                *v = value.to_vec();
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            node.xattrs.push((String::from(key), value.to_vec()));
-        }
-        node.changed_ns = metadata_now_ns();
-        Ok(())
+        // Validation happens before path resolution so a bad key/value shape
+        // is rejected identically regardless of follow mode.
+        node_validate_xattr(key, value)?;
+        node_set_xattr(self.resolve_mut(path)?, key, value)
     }
 
     fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        let orig_len = node.xattrs.len();
-        node.xattrs.retain(|(k, _)| k != key);
-        if node.xattrs.len() == orig_len {
-            return Err(KernelError::NotFound);
-        }
-        node.changed_ns = metadata_now_ns();
-        Ok(())
+        node_remove_xattr(self.resolve_mut(path)?, key)
     }
 
     fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
-        let node = self.resolve(path)?;
-        Ok(node.xattrs.iter().map(|(k, _)| k.clone()).collect())
+        Ok(node_list_xattrs(self.resolve(path)?))
+    }
+
+    // --- No-follow xattr variants (l-prefixed: lgetxattr/lsetxattr/etc.) ---
+    // Operate on the symlink inode itself rather than its target.  Identical
+    // to the following versions but the final component is not followed.
+
+    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        node_get_xattr(self.resolve_no_follow(path)?, key)
+    }
+
+    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        node_validate_xattr(key, value)?;
+        node_set_xattr(self.resolve_no_follow_mut(path)?, key, value)
+    }
+
+    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        node_remove_xattr(self.resolve_no_follow_mut(path)?, key)
+    }
+
+    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        Ok(node_list_xattrs(self.resolve_no_follow(path)?))
     }
 
     // --- Symlink operations ---

@@ -9,11 +9,12 @@
 //! corresponding syscall.  On the host build (no kernel) the syscall is
 //! skipped and the call returns a validation-only result.
 //!
+//! The `l*` variants correctly operate on the symlink inode itself (they set
+//! the NO_FOLLOW flag bit on the kernel xattr syscall, which resolves the
+//! final path component without following it — memfs/ext4 back this via their
+//! `*_no_follow` VFS methods).
+//!
 //! LIMITATIONS (tracked in todo.txt):
-//!   * The `l*` variants are meant not to follow symlinks, but the kernel
-//!     xattr syscalls resolve paths with `resolve_follow`, so for a symlink
-//!     argument they operate on the target.  Correct for the common
-//!     non-symlink case; needs a no-follow kernel ABI to fix.
 //!   * The kernel collapses "file not found" and "attribute not found" into
 //!     one error, so a missing attribute reports ENOENT rather than the
 //!     Linux-conventional ENODATA on `getxattr`/`removexattr`.
@@ -62,14 +63,17 @@ fn do_getxattr(
     name: *const u8,
     value: *mut u8,
     size: usize,
+    no_follow: bool,
 ) -> SsizeT {
-    let ret = crate::syscall::syscall5(
+    // arg5 bit 0 = NO_FOLLOW (lgetxattr → read the link inode's own xattrs).
+    let ret = crate::syscall::syscall6(
         crate::syscall::SYS_FS_GET_XATTR,
         path_ptr as u64,
         path_len as u64,
         name as u64,
         value as u64,
         size as u64,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as SsizeT;
@@ -86,13 +90,21 @@ fn do_getxattr(
 
 /// Issue `SYS_FS_LIST_XATTRS` for an already-resolved path.
 #[cfg(target_os = "none")]
-fn do_listxattr(path_ptr: *const u8, path_len: usize, list: *mut u8, size: usize) -> SsizeT {
-    let ret = crate::syscall::syscall4(
+fn do_listxattr(
+    path_ptr: *const u8,
+    path_len: usize,
+    list: *mut u8,
+    size: usize,
+    no_follow: bool,
+) -> SsizeT {
+    // arg4 bit 0 = NO_FOLLOW (llistxattr → list the link inode's own xattrs).
+    let ret = crate::syscall::syscall5(
         crate::syscall::SYS_FS_LIST_XATTRS,
         path_ptr as u64,
         path_len as u64,
         list as u64,
         size as u64,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as SsizeT;
@@ -116,16 +128,20 @@ fn do_setxattr(
     value: *const u8,
     size: usize,
     flags: i32,
+    no_follow: bool,
 ) -> i32 {
     if flags & (XATTR_CREATE | XATTR_REPLACE) != 0 {
-        // Probe for existence with a size query (val_cap = 0).
-        let exists = crate::syscall::syscall5(
+        // Probe for existence with a size query (val_cap = 0).  The probe must
+        // use the same follow mode as the set so CREATE/REPLACE reason about
+        // the same inode (the link itself for lsetxattr).
+        let exists = crate::syscall::syscall6(
             crate::syscall::SYS_FS_GET_XATTR,
             path_ptr as u64,
             path_len as u64,
             name as u64,
             0,
             0,
+            u64::from(no_follow),
         ) >= 0;
         if (flags & XATTR_CREATE != 0) && exists {
             errno::set_errno(errno::EEXIST);
@@ -136,13 +152,15 @@ fn do_setxattr(
             return -1;
         }
     }
-    let ret = crate::syscall::syscall5(
+    // arg5 bit 0 = NO_FOLLOW (lsetxattr → write the link inode's own xattrs).
+    let ret = crate::syscall::syscall6(
         crate::syscall::SYS_FS_SET_XATTR,
         path_ptr as u64,
         path_len as u64,
         name as u64,
         value as u64,
         size as u64,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -152,12 +170,14 @@ fn do_setxattr(
 
 /// Issue `SYS_FS_REMOVE_XATTR` for an already-resolved path.
 #[cfg(target_os = "none")]
-fn do_removexattr(path_ptr: *const u8, path_len: usize, name: *const u8) -> i32 {
-    let ret = crate::syscall::syscall3(
+fn do_removexattr(path_ptr: *const u8, path_len: usize, name: *const u8, no_follow: bool) -> i32 {
+    // arg3 bit 0 = NO_FOLLOW (lremovexattr → remove from the link inode).
+    let ret = crate::syscall::syscall4(
         crate::syscall::SYS_FS_REMOVE_XATTR,
         path_ptr as u64,
         path_len as u64,
         name as u64,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -202,7 +222,7 @@ pub extern "C" fn getxattr(
         let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
             return -1;
         };
-        do_getxattr(buf.as_ptr(), len, name, value, size)
+        do_getxattr(buf.as_ptr(), len, name, value, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -211,7 +231,8 @@ pub extern "C" fn getxattr(
     }
 }
 
-/// Get an extended attribute value (don't follow symlinks — see LIMITATIONS).
+/// Get an extended attribute value WITHOUT following a trailing symlink:
+/// reads the link inode's own xattrs (`lgetxattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgetxattr(
     path: *const u8,
@@ -219,8 +240,23 @@ pub extern "C" fn lgetxattr(
     value: *mut u8,
     size: usize,
 ) -> SsizeT {
-    // No no-follow kernel xattr syscall yet; behaves like getxattr.
-    getxattr(path, name, value, size)
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_getxattr(buf.as_ptr(), len, name, value, size, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
 /// Get an extended attribute value by file descriptor.
@@ -240,7 +276,7 @@ pub extern "C" fn fgetxattr(fd: i32, name: *const u8, value: *mut u8, size: usiz
         let Some(len) = fd_to_path(fd, &mut buf) else {
             return -1;
         };
-        do_getxattr(buf.as_ptr(), len, name, value, size)
+        do_getxattr(buf.as_ptr(), len, name, value, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -275,7 +311,7 @@ pub extern "C" fn setxattr(
         let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
             return -1;
         };
-        do_setxattr(buf.as_ptr(), len, name, value, size, flags)
+        do_setxattr(buf.as_ptr(), len, name, value, size, flags, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -284,7 +320,8 @@ pub extern "C" fn setxattr(
     }
 }
 
-/// Set an extended attribute value (don't follow symlinks — see LIMITATIONS).
+/// Set an extended attribute value WITHOUT following a trailing symlink:
+/// writes the link inode's own xattrs (`lsetxattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lsetxattr(
     path: *const u8,
@@ -293,7 +330,26 @@ pub extern "C" fn lsetxattr(
     size: usize,
     flags: i32,
 ) -> i32 {
-    setxattr(path, name, value, size, flags)
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !setxattr_flags_valid(flags) {
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_setxattr(buf.as_ptr(), len, name, value, size, flags, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
 /// Set an extended attribute value by file descriptor.
@@ -322,7 +378,7 @@ pub extern "C" fn fsetxattr(
         let Some(len) = fd_to_path(fd, &mut buf) else {
             return -1;
         };
-        do_setxattr(buf.as_ptr(), len, name, value, size, flags)
+        do_setxattr(buf.as_ptr(), len, name, value, size, flags, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -348,7 +404,7 @@ pub extern "C" fn listxattr(path: *const u8, list: *mut u8, size: usize) -> Ssiz
         let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
             return -1;
         };
-        do_listxattr(buf.as_ptr(), len, list, size)
+        do_listxattr(buf.as_ptr(), len, list, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -357,10 +413,27 @@ pub extern "C" fn listxattr(path: *const u8, list: *mut u8, size: usize) -> Ssiz
     }
 }
 
-/// List extended attribute names (don't follow symlinks — see LIMITATIONS).
+/// List extended attribute names WITHOUT following a trailing symlink:
+/// lists the link inode's own xattrs (`llistxattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llistxattr(path: *const u8, list: *mut u8, size: usize) -> SsizeT {
-    listxattr(path, list, size)
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_listxattr(buf.as_ptr(), len, list, size, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (list, size);
+        0
+    }
 }
 
 /// List extended attribute names by file descriptor.
@@ -376,7 +449,7 @@ pub extern "C" fn flistxattr(fd: i32, list: *mut u8, size: usize) -> SsizeT {
         let Some(len) = fd_to_path(fd, &mut buf) else {
             return -1;
         };
-        do_listxattr(buf.as_ptr(), len, list, size)
+        do_listxattr(buf.as_ptr(), len, list, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -402,7 +475,7 @@ pub extern "C" fn removexattr(path: *const u8, name: *const u8) -> i32 {
         let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
             return -1;
         };
-        do_removexattr(buf.as_ptr(), len, name)
+        do_removexattr(buf.as_ptr(), len, name, false)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -410,10 +483,26 @@ pub extern "C" fn removexattr(path: *const u8, name: *const u8) -> i32 {
     }
 }
 
-/// Remove an extended attribute (don't follow symlinks — see LIMITATIONS).
+/// Remove an extended attribute WITHOUT following a trailing symlink:
+/// removes from the link inode's own xattrs (`lremovexattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lremovexattr(path: *const u8, name: *const u8) -> i32 {
-    removexattr(path, name)
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_removexattr(buf.as_ptr(), len, name, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Remove an extended attribute by file descriptor.
@@ -433,7 +522,7 @@ pub extern "C" fn fremovexattr(fd: i32, name: *const u8) -> i32 {
         let Some(len) = fd_to_path(fd, &mut buf) else {
             return -1;
         };
-        do_removexattr(buf.as_ptr(), len, name)
+        do_removexattr(buf.as_ptr(), len, name, false)
     }
     #[cfg(not(target_os = "none"))]
     {

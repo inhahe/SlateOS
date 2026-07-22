@@ -8387,6 +8387,20 @@ the harness confirms `Vfs::metadata` reports `permissions == 0o600`.
    stamps the link inode while the target owner is untouched, and that a
    following chown hits the target instead. (Symlink-swap-safety analogue of
    the openat2 `RESOLVE_NO_SYMLINKS` fix.)
+
+   **Extended to the xattr family 2026-07-22.** The identical no-follow
+   plumbing now backs `lgetxattr`/`lsetxattr`/`llistxattr`/`lremovexattr`,
+   which previously followed the trailing symlink and wrongly operated on
+   the target. Added `FileSystem::{get,set,remove,list}_xattr[s]_no_follow`
+   (default-delegate; memfs overrides via `resolve_no_follow(_mut)` + shared
+   `node_*` xattr helpers, ext4 via `resolve_path_no_follow` + shared `*_ino`
+   helpers), `Vfs::*_no_follow` wrappers, and a NO_FOLLOW bit in each xattr
+   syscall's free arg slot (get/set: `arg5`, list: `arg4`, remove: `arg3`;
+   posix threads a `no_follow` bool through `do_getxattr`/`do_setxattr`/
+   `do_listxattr`/`do_removexattr`). Regression: `fs::handle::self_test` §20
+   proves no-follow xattr set/get/list/remove target the link inode while
+   following ops target the file, and the two views never cross. (Closes the
+   xattr no-follow limitation formerly tracked in `todo.txt`.)
 2. We gate chmod/chown on the generic File-WRITE capability rather than a
    dedicated `CAP_CHOWN`/`CAP_FOWNER`; any process holding File-WRITE can
    change mode/owner. This matches the OS's capability model (no per-syscall

@@ -1757,6 +1757,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-link`, an `ln` (hard-link) clone: the first fastpy
+    // tool to create a hard link (os.link → SYS_FS_LINK). It links a file, reads
+    // it back through the new name, and the harness confirms both names share one
+    // inode — a distinct VFS surface from the symlink (target-string) path.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_link() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `link` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

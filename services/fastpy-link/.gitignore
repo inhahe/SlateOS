@@ -1,0 +1,2 @@
+# Intermediate object emitted by build.py; only the linked ELF fixture is tracked.
+prog.o

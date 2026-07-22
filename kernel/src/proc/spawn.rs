@@ -8194,6 +8194,179 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-link` utility — an `ln` (HARD-link)
+/// clone that drives the kernel's `SYS_FS_LINK` syscall from AOT Python.
+///
+/// This is the first fastpy tool to create a **hard link** — a second directory
+/// entry pointing at the *same inode* as an existing file (`os.link` →
+/// `SYS_FS_LINK`, gated on `Rights::CREATE`), distinct from the symlink surface
+/// (`fastpy-symlink`) which stores a target *string* in a new object.  The tool
+/// creates the link, reads the file back *through the new name*, and exits 0
+/// only when that read returns data (exit 3 = create failed, exit 4 = empty
+/// read-back).  For belt-and-braces, the harness re-reads both names via the
+/// VFS and asserts they report the **same `FileMeta::ino`** — the defining
+/// property of a hard link, which a mere copy could not satisfy.
+pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
+    static FASTPY_LINK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-link/fastpy-link.elf");
+
+    // Hard links require a filesystem with a stable inode identity — memfs
+    // (`/tmp`) returns NotSupported for `link`, only ext4 overrides it.  The
+    // boot environment mounts an ext4 volume at `/mnt` (backed by vdb), so the
+    // hard-link test targets ext4, not the memfs used by the other fastpy tools.
+    const TARGET: &str = "/mnt/link-target.txt";
+    const TARGET_ARG: &[u8] = b"/mnt/link-target.txt";
+    const LINK: &str = "/mnt/link-hard";
+    const LINK_ARG: &[u8] = b"/mnt/link-hard";
+    const PAYLOAD: &[u8] = b"hard link payload\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `link` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_LINK_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(LINK);
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    // Stage the file the hard link will share an inode with.
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // os.link → SYS_FS_LINK (Rights::CREATE); the read-back needs READ.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::CREATE,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-link", TARGET_ARG, LINK_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-link",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_LINK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-link spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-link (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.link may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the tool read data back through the new name (exit 3 =
+    // create failed, exit 4 = empty read-back / broken link).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-link (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.link failed / SYS_FS_LINK rejected, 4 = read-back through the \
+             new name was empty)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: both names must resolve to the SAME
+    // inode (the defining property of a hard link — a copy would differ), and
+    // the linked name must carry the staged bytes.
+    let target_meta = crate::fs::Vfs::metadata(TARGET);
+    let link_meta = crate::fs::Vfs::metadata(LINK);
+    match (target_meta, link_meta) {
+        (Ok(tm), Ok(lm)) => {
+            if tm.ino == 0 || lm.ino == 0 || tm.ino != lm.ino {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-link (ring 3) — inodes differ (target ino={}, \
+                     link ino={}); SYS_FS_LINK made a copy, not a hard link",
+                    tm.ino, lm.ino
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        (t, l) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-link (ring 3) — could not stat both names \
+                 (target={:?}, link={:?})",
+                t.map(|m| m.ino),
+                l.map(|m| m.ino)
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+    match crate::fs::Vfs::read_file(LINK) {
+        Ok(bytes) if bytes == PAYLOAD => {}
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-link (ring 3) — the hard link's content ({} bytes) \
+                 does not match the staged target ({} bytes)",
+                bytes.len(),
+                PAYLOAD.len()
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-link (ring 3) — could not read the hard link back: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `link` (ring 3: os.link → SYS_FS_LINK [Rights::CREATE]; \
+         read-back through the new name succeeded, and the kernel VFS confirmed both names \
+         share one inode with matching content): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

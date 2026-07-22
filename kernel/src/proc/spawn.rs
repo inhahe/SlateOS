@@ -8047,6 +8047,153 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-symlink` utility — an `ln -s` clone
+/// that drives the kernel's **symbolic-link** syscalls from AOT Python.
+///
+/// This is the first fastpy tool to exercise `SYS_FS_SYMLINK` (create, gated on
+/// `Rights::CREATE`) and `SYS_FS_READLINK` (read back, gated on
+/// `Rights::METADATA`) — a genuinely-new VFS surface, distinct from the
+/// content-read / dir-enumeration / mutation / metadata paths the earlier
+/// fastpy tools cover.  The Python source runs
+/// `os.symlink(target, linkpath)` then `os.readlink(linkpath)` and exits 0 only
+/// when the readback string equals the original target (exit 3 = create failed,
+/// exit 4 = readback mismatch), so the type distinction flows through the exit
+/// code.  For belt-and-braces, the harness *also* independently re-reads the
+/// link via `Vfs::readlink` and asserts it points at the staged target — a
+/// stubbed/no-op symlink could pass neither check.
+pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
+    static FASTPY_SYMLINK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-symlink/fastpy-symlink.elf");
+
+    const TARGET: &str = "/tmp/symlink-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/symlink-target.txt";
+    const LINK: &str = "/tmp/symlink-link";
+    const LINK_ARG: &[u8] = b"/tmp/symlink-link";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `symlink` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SYMLINK_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(LINK);
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    // Stage the file the link will point at.  (The kernel symlink is untyped
+    // text, so the target need not exist — but staging it makes the test's
+    // intent concrete and lets a follow-through read succeed later if desired.)
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, b"link target\n") {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // os.symlink → SYS_FS_SYMLINK (Rights::CREATE); os.readlink → SYS_FS_READLINK
+    // (Rights::METADATA).  READ is granted so the process image can load.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::CREATE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-symlink", TARGET_ARG, LINK_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-symlink",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SYMLINK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-symlink spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-symlink (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.symlink/os.readlink may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means the in-process readlink matched the target (exit 3 = create
+    // failed, exit 4 = readback mismatch).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-symlink (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.symlink failed / SYS_FS_SYMLINK rejected, 4 = os.readlink \
+             returned the wrong target)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: re-read the link via the VFS and
+    // confirm it stores the exact target the tool was asked to create.
+    match crate::fs::Vfs::readlink(LINK) {
+        Ok(stored) if stored == TARGET => {}
+        Ok(stored) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-symlink (ring 3) — VFS readlink returned {:?}, \
+                 expected {:?}",
+                stored, TARGET
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-symlink (ring 3) — the tool exited 0 but the kernel \
+                 could not read the link back: {:?} (SYS_FS_SYMLINK did not persist the link)",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `symlink` (ring 3: os.symlink → SYS_FS_SYMLINK \
+         [Rights::CREATE] + os.readlink → SYS_FS_READLINK [Rights::METADATA]; round-trip \
+         target match verified in-process AND re-verified by the kernel VFS): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

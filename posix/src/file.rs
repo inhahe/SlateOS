@@ -1759,12 +1759,16 @@ pub extern "C" fn symlink(target: *const u8, linkpath: *const u8) -> i32 {
         return -1;
     };
 
+    // Kernel ABI (SYS_FS_SYMLINK): arg0/arg1 = link path, arg2/arg3 = target.
+    // The link path is the resolved filesystem location; the target is stored
+    // verbatim.  (Getting this order wrong makes the kernel try to create the
+    // link *at* the target — EEXIST when the target already exists.)
     let ret = syscall4(
         SYS_FS_SYMLINK,
-        target as u64,
-        target_len as u64,
         link_resolved.as_ptr() as u64,
         link_len as u64,
+        target as u64,
+        target_len as u64,
     );
     errno::translate(ret) as i32
 }

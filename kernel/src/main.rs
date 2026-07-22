@@ -1746,6 +1746,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-symlink`, an `ln -s` clone: the first fastpy tool to
+    // drive the kernel's symbolic-link syscalls (os.symlink → SYS_FS_SYMLINK,
+    // os.readlink → SYS_FS_READLINK) — a genuinely-new VFS surface. It creates a
+    // link, reads it back, and exits 0 only on a target round-trip match.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_symlink() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `symlink` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

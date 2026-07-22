@@ -9292,6 +9292,154 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-sleep` utility — the **first fastpy
+/// tool to exercise the scheduler sleep / timer-wakeup path**.
+///
+/// `fastpy-clock` first took fastpy off the filesystem syscalls into a
+/// *read-only* timekeeping sample (`time.time_ns()` → `SYS_CLOCK_REALTIME`).
+/// This one exercises a fundamentally different kernel operation: a **blocking
+/// sleep that must be woken by a timer**.  `time.sleep(0.05)` lowers to native
+/// `fastpy_time_sleep` → posix `usleep()` → kernel `SYS_SLEEP` (the scheduler
+/// blocks the thread and a timer re-readies it ~50 ms later).
+///
+/// False-pass-proof, kernel-verified two independent ways:
+///  1. The tool samples `time.time_ns()` either side of the sleep and exits 0
+///     only if both samples are `> 0` and their delta `>=` the lower bound the
+///     harness passes as `argv[1]` (40 ms).  A *stub* sleep that returns
+///     immediately advances the clock by only microseconds → `< 40 ms` → fail.
+///     The bound is kernel-supplied, not baked into the binary.
+///  2. The harness reads its OWN `timekeeping::clock_realtime()` before spawn
+///     and after the child zombifies and asserts that kernel-observed delta is
+///     itself `>= 40 ms` — an independent proof that real wall-time elapsed
+///     during the run (so a tool whose *arithmetic* passed but which did not
+///     actually block would still be caught).
+pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
+    static FASTPY_SLEEP_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-sleep/fastpy-sleep.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `sleep` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SLEEP_ELF.len()
+    );
+
+    // The tool sleeps a fixed 50 ms; accept if the observed wall-clock delta is
+    // >= 40 ms (10 ms margin below the sleep, comfortably above the ~µs a no-op
+    // sleep would show).  The bound is kernel-controlled, passed as argv[1].
+    const MIN_ELAPSED_NS: u64 = 40_000_000;
+    let lb = alloc::format!("{MIN_ELAPSED_NS}");
+    let lb_arg = lb.as_bytes();
+
+    // Kernel-side wall-clock reading before spawn (secondary, independent guard
+    // #2).  A 0 reading means no usable RTC — the timekeeping path this test
+    // depends on is unavailable, so we cannot validate.
+    let t_before = crate::timekeeping::clock_realtime();
+    if t_before == 0 {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sleep (ring 3) — kernel clock_realtime() returned 0 \
+             (no usable RTC); cannot validate the sleep path"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The sleep tool touches no files (SYS_SLEEP / SYS_CLOCK_REALTIME /
+    // SYS_CONSOLE_WRITE are uncapped); a harmless File READ mirrors the proven
+    // crt-startup path.
+    let caps = [(ResourceType::File, 0u64, Rights::READ)];
+
+    let argv: &[&[u8]] = &[b"fastpy-sleep", lb_arg];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-sleep",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SLEEP_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-sleep spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Wait for the child to finish, bounded by *real wall-clock time* rather
+    // than a fixed yield count.  The child blocks ~50 ms in SYS_SLEEP; because
+    // this boot thread has nothing else to run while the child sleeps,
+    // `yield_now` returns immediately, so a fixed iteration count could spin
+    // through before 50 ms of real time even elapsed (a false "never zombified"
+    // FAIL).  A 5 s real-time deadline covers the 50 ms sleep with wide margin
+    // regardless of how fast the yield loop turns.
+    let wait_deadline = t_before.saturating_add(5_000_000_000);
+    let mut became_zombie = false;
+    loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        if crate::timekeeping::clock_realtime() >= wait_deadline {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Kernel-side wall-clock reading after the child zombified (guard #2).
+    let t_after = crate::timekeeping::clock_realtime();
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sleep (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; time.sleep / time.time_ns may have mis-lowered)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own before/after delta met the kernel-supplied bound.
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = a clock read was 0 or the observed sleep delta was < {} ns)",
+            exit_code, MIN_ELAPSED_NS
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2: real wall-time observed by the *kernel* across the run must also
+    // meet the bound — proves the sleep actually blocked in real time, not just
+    // that the tool's arithmetic lined up.
+    let kernel_elapsed = t_after.saturating_sub(t_before);
+    if kernel_elapsed < MIN_ELAPSED_NS {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-sleep (ring 3) — tool exited 0 but the kernel observed only \
+             {} ns of wall time across the run (< {} ns); the sleep did not actually block",
+            kernel_elapsed, MIN_ELAPSED_NS
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `sleep` (ring 3: time.sleep() → usleep() → SYS_SLEEP \
+         scheduler block + timer wakeup; the tool's 50 ms sleep advanced the wall clock >= {} ns \
+         both as the tool measured it and as the kernel independently observed {} ns): OK",
+        MIN_ELAPSED_NS, kernel_elapsed
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

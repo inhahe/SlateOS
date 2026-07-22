@@ -6836,6 +6836,108 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-tail` utility — the first **two-pass**
+/// fastpy SlateOS tool.
+///
+/// `tail <n> <file>` prints the last `<n>` lines of the file.  Because the last
+/// `n` lines can't be known until the total is known, the tool scans the text
+/// twice: `count_lines` counts the total, then `tail_lines` re-scans and prints
+/// only lines whose 0-based index is `>= total - n`.  This exercises a pattern
+/// no earlier tool did — two full passes over the same immutable file-read text
+/// crossing two separate str-typed helper boundaries — plus the integer argv
+/// parse (`parse_int`) shared with `head`.
+///
+/// The harness stages a 5-line marker file, runs `tail 2`, and asserts the
+/// process becomes a `Zombie` and exits 0.  The printed lines are mirrored to
+/// serial, so the boot harness can confirm only the last two markers
+/// (`TAIL_L4`, `TAIL_L5`) were printed and the first three were skipped.
+pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
+    static FASTPY_TAIL_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-tail/fastpy-tail.elf");
+
+    const TAIL_PATH: &str = "/tmp/tail-input.txt";
+    const TAIL_PATH_ARG: &[u8] = b"/tmp/tail-input.txt";
+    // Five distinct lines; `tail 2` must print only the last two (TAIL_L4,
+    // TAIL_L5) and skip TAIL_L1/TAIL_L2/TAIL_L3.
+    const TAIL_CONTENT: &[u8] = b"TAIL_L1\nTAIL_L2\nTAIL_L3\nTAIL_L4\nTAIL_L5\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `tail` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_TAIL_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(TAIL_PATH, TAIL_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TAIL_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-tail", b"2", TAIL_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-tail",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_TAIL_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(TAIL_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-tail spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(TAIL_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-tail (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/parse_int/open/read/two-pass path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-tail (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `tail` (ring 3: two-pass count-then-print — `tail 2` of a \
+         5-line file; expect only TAIL_L4/TAIL_L5 above, TAIL_L1/L2/L3 skipped): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

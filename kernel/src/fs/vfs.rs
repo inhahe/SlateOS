@@ -1471,7 +1471,7 @@ impl Vfs {
             }
         }
 
-        match Self::resolve_inner(&norm, true, 0) {
+        match Self::resolve_inner(&norm, true, 0, false) {
             Ok(resolved) => {
                 // Cache the positive result for future lookups.
                 {
@@ -1516,7 +1516,7 @@ impl Vfs {
             }
         }
 
-        match Self::resolve_inner(&norm, false, 0) {
+        match Self::resolve_inner(&norm, false, 0, false) {
             Ok(resolved) => {
                 // Cache the positive result.
                 {
@@ -1537,13 +1537,43 @@ impl Vfs {
         }
     }
 
+    /// Resolve `path` while refusing to traverse **any** symbolic link.
+    ///
+    /// Implements `openat2`'s `RESOLVE_NO_SYMLINKS`: if any component of the
+    /// path (parent *or* final) is a symlink, resolution fails with
+    /// [`KernelError::TooManyLinks`] (→ `ELOOP`) rather than following it.
+    /// On success the returned path equals the normalized input (no symlink
+    /// substitution ever happens), and all non-final components are verified
+    /// to exist; the final component may be absent (open-with-create).
+    ///
+    /// The VFS dcache is intentionally bypassed: it stores fully
+    /// symlink-*followed* resolutions, which would mask the very symlinks
+    /// this mode must reject.  These calls are rare (security-sensitive
+    /// `openat2` opens), so the extra component walk is acceptable.
+    pub fn resolve_no_symlinks(path: &str) -> KernelResult<String> {
+        // Apply per-process namespace translation before anything else.
+        let ns_path = crate::ipc::namespace::resolve_path(path)?;
+        let path = ns_path.as_str();
+
+        validate_path(path)?;
+        let norm = normalize_path(path);
+        Self::resolve_inner(&norm, true, 0, true)
+    }
+
     /// Core recursive resolver.
     ///
     /// `path` must already be normalized (no `.`, `..`, or double slashes).
+    ///
+    /// When `no_symlinks` is set, encountering a symlink in *any* component
+    /// (including the final one, regardless of `follow_last`) fails with
+    /// [`KernelError::TooManyLinks`] instead of following it.  This
+    /// implements `openat2`'s `RESOLVE_NO_SYMLINKS` semantics — strictly
+    /// stronger than `O_NOFOLLOW`, which only guards the final component.
     fn resolve_inner(
         path: &str,
         follow_last: bool,
         depth: usize,
+        no_symlinks: bool,
     ) -> KernelResult<String> {
         if depth > Self::MAX_SYMLINK_DEPTH {
             return Err(KernelError::TooManyLinks);
@@ -1567,8 +1597,10 @@ impl Vfs {
             resolved.push('/');
             resolved.push_str(comp);
 
-            // Only check for symlinks if we should follow at this position.
-            if !is_last || follow_last {
+            // Check for symlinks if we should follow at this position, or
+            // whenever `no_symlinks` is requested (which must reject a
+            // final-component symlink too, even when `follow_last` is false).
+            if !is_last || follow_last || no_symlinks {
                 let entry_type = {
                     match resolve_mount(&resolved) {
                         Ok((fs, _id, _opts, relative)) => match fs.lock().lstat(&relative) {
@@ -1584,6 +1616,11 @@ impl Vfs {
                 }; // VFS lock released
 
                 if entry_type == Some(EntryType::Symlink) {
+                    // RESOLVE_NO_SYMLINKS: refuse to traverse or open any
+                    // symlink, at any depth, rather than following it.
+                    if no_symlinks {
+                        return Err(KernelError::TooManyLinks);
+                    }
                     // Read the symlink target (separate lock acquisition).
                     let target = {
                         let (fs, _id, _opts, relative) = resolve_mount(&resolved)?;
@@ -1615,6 +1652,7 @@ impl Vfs {
                         &normalized,
                         follow_last,
                         depth.saturating_add(1),
+                        no_symlinks,
                     );
                 }
             }

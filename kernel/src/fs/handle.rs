@@ -68,6 +68,15 @@ impl OpenFlags {
     /// instead of resolving through it.  Symlinks in *parent* components are
     /// still followed, matching POSIX.  Only the final component is guarded.
     pub const NOFOLLOW: Self = Self(1 << 7);
+    /// Refuse to traverse *any* symlink in the path (`openat2`'s
+    /// `RESOLVE_NO_SYMLINKS`).  Strictly stronger than [`NOFOLLOW`](Self::NOFOLLOW):
+    /// a symbolic link in *any* component — parent or final — makes `open()`
+    /// fail with [`TooManyLinks`](crate::error::KernelError::TooManyLinks)
+    /// (→ `ELOOP`).  This is not a user-facing `O_*` flag; it is injected by
+    /// the `openat2` handler when its `open_how.resolve` requests it, so a
+    /// program can only opt *into* stricter resolution (never weaker),
+    /// making it safe even though it is honoured on any open path.
+    pub const NO_SYMLINKS: Self = Self(1 << 8);
 
     /// Create from raw bits (for syscall argument parsing).
     #[must_use]
@@ -274,7 +283,16 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
     // underlying file, not the symlink.  This matches Unix semantics:
     // if the symlink is later changed, existing handles still point
     // to the original target.
-    let norm = crate::fs::Vfs::resolve_path(path)?;
+    //
+    // NO_SYMLINKS (openat2 RESOLVE_NO_SYMLINKS) uses the stricter resolver
+    // that refuses to traverse a symlink in *any* component — parent or
+    // final — returning ELOOP.  It subsumes the NOFOLLOW final-component
+    // guard above, so we never reach here having followed a link.
+    let norm = if flags.contains(OpenFlags::NO_SYMLINKS) {
+        crate::fs::Vfs::resolve_no_symlinks(path)?
+    } else {
+        crate::fs::Vfs::resolve_path(path)?
+    };
 
     // Check file capability tags — the process must be a member of
     // all required groups for this path (or any ancestor with tags).
@@ -1571,6 +1589,109 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nf_target).ok();
         crate::serial_println!("[fs::handle]   O_NOFOLLOW test SKIPPED (no symlink support)");
+    }
+
+    // 18. NO_SYMLINKS (openat2 RESOLVE_NO_SYMLINKS) — refuse a symlink in ANY
+    // component, which O_NOFOLLOW (final-only) cannot catch.  Stage a real
+    // directory with a file, a symlink to that directory, and a symlink to the
+    // file, then prove:
+    //   (a) open(dirlink/f, READ) without NO_SYMLINKS follows the parent
+    //       symlink and opens the file (OK),
+    //   (b) open(dirlink/f, READ|NO_SYMLINKS) fails ELOOP — a *parent*-component
+    //       symlink is rejected (the case NOFOLLOW would happily follow),
+    //   (c) open(filelink, READ|NO_SYMLINKS) fails ELOOP — a *final* symlink is
+    //       rejected too,
+    //   (d) open(dir/f, READ|NO_SYMLINKS) succeeds — no symlink anywhere.
+    // Skipped gracefully if the root FS lacks mkdir/symlink support.
+    let ns_dir = "/handle_nsym_dir";
+    let ns_file = "/handle_nsym_dir/f.txt";
+    let ns_dirlink = "/handle_nsym_dirlink";
+    let ns_flink = "/handle_nsym_flink";
+    let ns_via_dirlink = "/handle_nsym_dirlink/f.txt";
+    // Best-effort cleanup of any stragglers from a prior boot.
+    crate::fs::Vfs::remove(ns_flink).ok();
+    crate::fs::Vfs::remove(ns_dirlink).ok();
+    crate::fs::Vfs::remove(ns_file).ok();
+    crate::fs::Vfs::rmdir(ns_dir).ok();
+    let ns_ready = crate::fs::Vfs::mkdir(ns_dir).is_ok()
+        && crate::fs::Vfs::write_file(ns_file, b"nsym").is_ok()
+        && crate::fs::Vfs::symlink(ns_dirlink, ns_dir).is_ok()
+        && crate::fs::Vfs::symlink(ns_flink, ns_file).is_ok();
+    if ns_ready {
+        // Local cleanup helper for the early-return failure paths.
+        let cleanup = || {
+            crate::fs::Vfs::remove(ns_flink).ok();
+            crate::fs::Vfs::remove(ns_dirlink).ok();
+            crate::fs::Vfs::remove(ns_file).ok();
+            crate::fs::Vfs::rmdir(ns_dir).ok();
+        };
+
+        // (a) without NO_SYMLINKS the parent symlink is followed.
+        match open(ns_via_dirlink, OpenFlags::READ) {
+            Ok(h) => {
+                close(h)?;
+            }
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: open via dir symlink (no flag) not OK: {:?}",
+                    other
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (b) with NO_SYMLINKS a PARENT-component symlink is refused (ELOOP).
+        match open(ns_via_dirlink, OpenFlags::READ.union(OpenFlags::NO_SYMLINKS)) {
+            Err(KernelError::TooManyLinks) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: NO_SYMLINKS parent-symlink not TooManyLinks: {:?}",
+                    other
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (c) with NO_SYMLINKS a FINAL symlink is also refused (ELOOP).
+        match open(ns_flink, OpenFlags::READ.union(OpenFlags::NO_SYMLINKS)) {
+            Err(KernelError::TooManyLinks) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: NO_SYMLINKS final-symlink not TooManyLinks: {:?}",
+                    other
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (d) a symlink-free path opens normally even with NO_SYMLINKS.
+        match open(ns_file, OpenFlags::READ.union(OpenFlags::NO_SYMLINKS)) {
+            Ok(h) => {
+                close(h)?;
+            }
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: NO_SYMLINKS on symlink-free path not OK: {:?}",
+                    other
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        cleanup();
+        crate::serial_println!("[fs::handle]   NO_SYMLINKS any-component guard: OK");
+    } else {
+        crate::fs::Vfs::remove(ns_flink).ok();
+        crate::fs::Vfs::remove(ns_dirlink).ok();
+        crate::fs::Vfs::remove(ns_file).ok();
+        crate::fs::Vfs::rmdir(ns_dir).ok();
+        crate::serial_println!(
+            "[fs::handle]   NO_SYMLINKS test SKIPPED (no mkdir/symlink support)"
+        );
     }
 
     // Cleanup test files.

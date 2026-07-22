@@ -5555,7 +5555,12 @@ fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
 }
 
 /// Shared backend for `open` / `openat`.
-fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
+fn open_common(
+    path_ptr: u64,
+    path_len_hint: u64,
+    flags: u32,
+    no_symlinks: bool,
+) -> SyscallResult {
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -5635,7 +5640,11 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    let kernel_flags = translate_open_flags(flags);
+    let mut kernel_flags = translate_open_flags(flags);
+    // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
+    if no_symlinks {
+        kernel_flags |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
+    }
     let r = handlers::fs_open_kernel_path(canon_str, kernel_flags);
     if r.value < 0 {
         return linux_from_native(r);
@@ -5683,7 +5692,7 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
 
 /// `open(path, flags, mode)` — equivalent to `openat(AT_FDCWD, path, flags, mode)`.
 fn sys_open(args: &SyscallArgs) -> SyscallResult {
-    open_common(args.arg0, 0, args.arg1 as u32)
+    open_common(args.arg0, 0, args.arg1 as u32, false)
 }
 
 /// Resolve a real (non-`AT_FDCWD`) directory `dirfd` to its **guest**
@@ -5747,12 +5756,19 @@ fn dirfd_to_guest_dir(dirfd: i32) -> Result<alloc::string::String, SyscallResult
 ///   - EFAULT  — path pointer is NULL or unreadable.
 ///   - ENOENT / ENAMETOOLONG / EINVAL — from path validation.
 fn sys_openat(args: &SyscallArgs) -> SyscallResult {
+    sys_openat_ex(args, false)
+}
+
+/// `openat` core, with an extra `no_symlinks` flag that the `openat2`
+/// handler sets for `RESOLVE_NO_SYMLINKS`.  The regular `openat` dispatch
+/// entry passes `false`; only `openat2` can request the stricter mode.
+fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
 
     if dirfd == AT_FDCWD {
-        return open_common(path_ptr, 0, flags);
+        return open_common(path_ptr, 0, flags, no_symlinks);
     }
 
     // Peek at the first byte of the path: if it's '/', dirfd is ignored
@@ -5769,7 +5785,7 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
     }
     if first == b'/' {
         // Absolute path — dirfd is ignored.
-        return open_common(path_ptr, 0, flags);
+        return open_common(path_ptr, 0, flags, no_symlinks);
     }
     if first == 0 {
         // Empty path under openat.  Linux's "empty path" semantics
@@ -5817,7 +5833,7 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    open_kernel_path_install(path_str, flags)
+    open_kernel_path_install(path_str, flags, no_symlinks)
 }
 
 /// Shared installer for "open by kernel-side absolute path".
@@ -5828,7 +5844,7 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
 /// `handlers::sys_fs_open` (capability check, IPC handle registration)
 /// plus the FdEntry install that `open_common` does — so the resulting
 /// fd is indistinguishable from one minted by plain `open()`.
-fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
+fn open_kernel_path_install(path: &str, flags: u32, no_symlinks: bool) -> SyscallResult {
     // Synthetic device nodes (e.g. /dev/snd/pcmC0D0p) are intercepted before
     // the VFS open, exactly as in `open_common`, so a relative openat that
     // resolves to one mints its own HandleKind instead of a File fd.
@@ -5848,7 +5864,12 @@ fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
 
-    let kernel_flags = crate::fs::handle::OpenFlags::from_bits(translate_open_flags(flags));
+    let mut kernel_bits = translate_open_flags(flags);
+    // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
+    if no_symlinks {
+        kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
+    }
+    let kernel_flags = crate::fs::handle::OpenFlags::from_bits(kernel_bits);
     let raw_handle = match crate::fs::handle::open(path, kernel_flags) {
         Ok(h) => h,
         Err(e) => return linux_err(linux_errno_for(e)),
@@ -30751,12 +30772,16 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
     if resolve & RESOLVE_BENEATH != 0 {
         return linux_err(errno::EXDEV);
     }
-    // The remaining bits (NO_XDEV, NO_MAGICLINKS, NO_SYMLINKS) are
-    // trivially satisfied: we have no mount points to cross, no
-    // /proc magic symlinks, and no symlinks at all.  Accept and
-    // proceed to the openat fast path.
+    // RESOLVE_NO_XDEV / RESOLVE_NO_MAGICLINKS ARE trivially satisfied here:
+    // we have no bind mounts to cross mid-walk and no /proc magic symlinks.
+    // RESOLVE_NO_SYMLINKS, however, is NOT free — this kernel fully supports
+    // symbolic links (memfs and ext4 both), so it must be actively enforced
+    // by refusing to traverse a symlink in any path component.  We thread it
+    // down to `fs::handle::open` (via OpenFlags::NO_SYMLINKS) so the VFS
+    // resolver returns ELOOP on any link, parent or final.
+    let no_symlinks = resolve & RESOLVE_NO_SYMLINKS != 0;
 
-    // Forward to sys_openat with (dirfd=arg0, path=arg1, flags, mode).
+    // Forward to openat with (dirfd=arg0, path=arg1, flags, mode).
     // The flags / mode in `open_how` are u64 but only the low 32
     // bits are meaningful per Linux (open_how reserves the high bits
     // for future use; we already rejected unknown bits at the
@@ -30770,7 +30795,7 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
         arg4: 0,
         arg5: 0,
     };
-    sys_openat(&openat_args)
+    sys_openat_ex(&openat_args, no_symlinks)
 }
 
 /// `execveat(dirfd, path, argv, envp, flags)` — non-frame validation entry.
@@ -44079,7 +44104,7 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
 fn sys_creat(args: &SyscallArgs) -> SyscallResult {
     // O_WRONLY | O_CREAT | O_TRUNC.
     let flags = oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC;
-    open_common(args.arg0, 0, flags)
+    open_common(args.arg0, 0, flags, false)
 }
 
 /// `uselib(library)` — deprecated dynamic-linker primitive.

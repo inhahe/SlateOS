@@ -53663,6 +53663,21 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   guards (added earlier this day) now fire identically for the native posix
 ##   and Linux ABIs. Kernel builds clean; boot test green.
 
+## DONE (openat2 RESOLVE_NO_SYMLINKS enforcement) — 2026-07-22
+##   Fixed a real security bug: sys_openat2 (kernel/src/syscall/linux.rs)
+##   accepted RESOLVE_NO_SYMLINKS but never enforced it — the comment falsely
+##   claimed "no symlinks at all", but memfs+ext4 both support symlinks, so
+##   openat2 with that resolve bit silently followed symlinks (defeating a
+##   symlink-swap-attack defense). Added Vfs::resolve_no_symlinks (vfs.rs) — a
+##   resolver mode returning ELOOP on ANY symlink component (parent or final),
+##   stronger than O_NOFOLLOW; dcache bypassed. Added OpenFlags::NO_SYMLINKS
+##   (bit 8, handle.rs) — open() uses the strict resolver when set. Threaded a
+##   non-forgeable no_symlinks bool sys_openat2 -> sys_openat_ex ->
+##   open_common/open_kernel_path_install, ORing the bit into native OpenFlags
+##   (a program can only opt INTO stricter resolution). Handle self-test §18:
+##   (a) parent symlink followed w/o flag, (b) parent symlink -> ELOOP w/ flag
+##   (the case NOFOLLOW misses), (c) final symlink -> ELOOP, (d) clean path OK.
+
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
 ##   prerequisite for a shipping fastpy component that touches the filesystem

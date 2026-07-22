@@ -1633,6 +1633,15 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-uniq` utility: `uniq <file>` drops adjacent
+    // duplicate lines via line-to-line string comparison (line == prev).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_uniq() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `uniq` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

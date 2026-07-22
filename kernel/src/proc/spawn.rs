@@ -6737,6 +6737,105 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-uniq` utility — a `uniq`(1)
+/// (`uniq <file>`): prints each line of `argv[1]` dropping any line identical
+/// to the immediately preceding printed line (adjacent de-dup), exits 0.
+///
+/// New ground vs. cat/grep/wc/head: it carries a *string across loop
+/// iterations* (the previous line) and does *line-to-line string comparison*
+/// (`line == prev`, native `fastpy_str_compare`).  The harness stages a file
+/// with an adjacent duplicate pair and a non-adjacent repeat
+/// (`A A B A C C`, using `UNIQ_*` markers), runs the utility, and asserts it
+/// becomes a `Zombie` and exits 0; the collapse (adjacent dups → one, the
+/// non-adjacent `A` surviving) is verified in the serial log by the boot
+/// harness (grep counts: `UNIQ_A`=2, `UNIQ_B`=1, `UNIQ_C`=1 — *not* 3/1/2).
+pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
+    static FASTPY_UNIQ_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-uniq/fastpy-uniq.elf");
+
+    const UNIQ_PATH: &str = "/tmp/uniq-input.txt";
+    const UNIQ_PATH_ARG: &[u8] = b"/tmp/uniq-input.txt";
+    // A A B A C C — adjacent dups (A A / C C) collapse; the non-adjacent A
+    // (after B) must survive.  Expected printed: A B A C.
+    const UNIQ_CONTENT: &[u8] = b"UNIQ_A\nUNIQ_A\nUNIQ_B\nUNIQ_A\nUNIQ_C\nUNIQ_C\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `uniq` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_UNIQ_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(UNIQ_PATH, UNIQ_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", UNIQ_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-uniq", UNIQ_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-uniq",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_UNIQ_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(UNIQ_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-uniq spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(UNIQ_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-uniq (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/open/read/dedup path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-uniq (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `uniq` (ring 3: adjacent de-dup via line==prev string \
+         compare — expect A/B/A/C above, adjacent A A and C C collapsed): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

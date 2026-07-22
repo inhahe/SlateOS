@@ -6639,6 +6639,104 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-head` utility — a `head`(1)
+/// (`head <n> <file>`): prints the first `<n>` lines of the file named by
+/// `argv[2]` and exits 0.
+///
+/// New ground vs. cat/grep/wc: it parses an **integer argument** from
+/// `argv[1]` (native digit `ord` arithmetic) and does **early-stop** line
+/// iteration (stops emitting once `n` lines have printed).  The harness stages
+/// a 4-line file with distinctive markers (`HEAD_L1..HEAD_L4`), runs
+/// `head 2 <file>`, and asserts the utility becomes a `Zombie` and exits 0;
+/// the printed `HEAD_L1`/`HEAD_L2` (and *absence* of `HEAD_L3`/`HEAD_L4`) are
+/// verified in the serial log by the boot harness.
+pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
+    static FASTPY_HEAD_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-head/fastpy-head.elf");
+
+    const HEAD_PATH: &str = "/tmp/head-input.txt";
+    const HEAD_PATH_ARG: &[u8] = b"/tmp/head-input.txt";
+    // Distinctive markers so the serial log can confirm exactly the first two
+    // printed and the last two did not.
+    const HEAD_CONTENT: &[u8] = b"HEAD_L1\nHEAD_L2\nHEAD_L3\nHEAD_L4\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `head` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_HEAD_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(HEAD_PATH, HEAD_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", HEAD_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-head", b"2", HEAD_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-head",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_HEAD_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(HEAD_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-head spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(HEAD_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-head (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/parse_int/open/read/head path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-head (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `head` (ring 3: parsed n=2 from argv[1], printed the first \
+         2 lines of argv[2] with early-stop — expect `HEAD_L1`/`HEAD_L2` above, not L3/L4): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

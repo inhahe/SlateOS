@@ -1626,14 +1626,14 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
-    // Ring-3 integration test of the fastpy-built package registry: the DB layer
-    // atop the content-addressed store. It hashes a payload, stores the blob,
-    // then read-modify-writes the persistent /tmp/pkgdb.txt registry, re-reads
-    // it, and resolves the record by name. Exit 0 proves the persist-and-resolve
-    // cycle a package manager needs.
+    // Ring-3 CLI-lifecycle test of the fastpy-built package manager front-end:
+    // the registry layer atop the content-addressed store. Across six spawns it
+    // drives install x2 / query / remove / query-gone over the persistent
+    // /tmp/pkgdb.txt registry, then the kernel reads the registry back and
+    // asserts the final state (installed record present, removed record gone).
     if let Err(e) = proc::spawn::self_test_fastpy_slateos_pkg() {
         serial_println!(
-            "WARNING: fastpy-on-SlateOS `pkg` registry (ring 3) self-test failed: {:?}",
+            "WARNING: fastpy-on-SlateOS `pkg` manager (ring 3) self-test failed: {:?}",
             e
         );
     }

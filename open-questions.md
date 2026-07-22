@@ -25,6 +25,61 @@ Earlier deferred operator decisions (Q1–Q31) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
 full rationale. New decisions should be appended above this line as `## Q32 …`.
 
+## Q32 — Prioritize building heap-corruption-detection infrastructure to root-cause B-KNULLJUMP? — Status: OPEN
+
+**Question.** Should we invest a focused session in building KASAN-style
+heap-corruption detection (shadow memory or an equivalent) to finally
+root-cause the long-standing **B-KNULLJUMP** corruption, or keep it on WATCH
+and continue roadmap features?
+
+**Context / why now.** B-KNULLJUMP is an intermittent (~1-in-120) kernel memory
+corruption at Path-Z process spawn/teardown boundaries, on WATCH for many
+sessions with root cause open. On 2026-07-22 it was finally **symbolized** (see
+`known-issues.md`): the victim is a **scheduler `BTreeMap` node** whose link
+pointer gets zeroed (fault reading `null+0xbb` inside
+`alloc::collections::btree::navigate::next_kv`, on the idle task, right after a
+glibc Path-Z teardown). It is *live-node* structural corruption — the existing
+slab poison/redzone system (`mm/poison.rs`, `mm/heap.rs`) can't catch it because
+it's neither a UAF of a poisoned slot nor an adjacent-redzone overflow; it's a
+wild write into a live allocation. Transiently there is a **reliable reproducer**
+(the exact kernel layout at commit 3f10b31f2 reproduces 2/2 boots), but it is
+layout-fragile and dissolves on the next kernel edit.
+
+**Options.**
+- **A — Build KASAN-style shadow memory now (recommended).** A 1/8-scale shadow
+  region marking every heap byte addressable/poisoned, with instrumented
+  alloc/free and (ideally) checked stores on the suspect paths. *Pros:* catches
+  this whole class at the corruptor's write, not the victim's later read;
+  durable, layout-independent tooling that pays off for all future memory bugs.
+  *Cons:* sizable new `mm` subsystem; memory overhead; perf cost on the
+  alloc/store hot path (must be debug-gated to protect the <200 ns heap target);
+  a few active hours of work; may not instrument std BTreeMap's internal stores
+  without compiler support, so may need a targeted store-check shim.
+- **B — Hardware-watchpoint hunt using the current reliable reproducer.** Set a
+  DR0–3 write watchpoint on the corrupted node address. *Pros:* pinpoints the
+  writer directly, cheap. *Cons:* the corrupted address isn't known a priori and
+  varies with layout; the reproducer is fragile; likely needs several
+  instrumented boots that themselves shift layout.
+- **C — Keep on WATCH, continue features.** *Pros:* roadmap keeps moving; the bug
+  is old, intermittent, and doesn't affect shipped fastpy tools; the next kernel
+  commit likely returns boot to its dormant ~1-in-120 state. *Cons:* leaves a
+  real kernel corruption unfixed; wastes the current (fragile) reliable repro.
+
+**Claude's recommendation.** **A**, given the severity (kernel memory corruption
+that can halt boot) and that we now have concrete symbols to target — but it's an
+initiative-level effort with a real perf/complexity tradeoff, so flagging for
+operator prioritization rather than starting unilaterally. **In the meantime**
+(default, non-blocking): continuing roadmap work, which rebuilds the kernel and
+probabilistically returns boot to green while the bug goes dormant. The full
+diagnostic + reliable-repro details are preserved in `known-issues.md` so a
+focused session can act whenever prioritized.
+
+**Where it bites.** `kernel/src/mm/heap.rs`, `kernel/src/mm/poison.rs` (existing
+poison/redzone to extend), `kernel/src/mm/frame.rs` (buddy `FreeNode` — the
+sibling B-MUNMAP-NO-TLB-FLUSH corruption target), `kernel/src/sched/mod.rs`
+(`SchedState.tasks` BTreeMap — the observed victim), and the Path-Z process
+teardown path in `kernel/src/proc/`.
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

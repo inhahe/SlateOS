@@ -9790,6 +9790,30 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
+
+**Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates).
+
+**What it is:** `openat2`'s `RESOLVE_BENEATH` (forbid the walk from escaping
+the `dirfd` directory via `..`/absolute paths/escaping symlinks) returns
+`EXDEV`, and `RESOLVE_IN_ROOT` (chroot-like rooted resolution) returns
+`EOPNOTSUPP`. Both are *refused* rather than enforced because we have no
+per-fd root/base tracking threaded through the VFS resolver, and a
+half-correct containment check would be a sandbox-escape hazard (worse than
+refusing). `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_XDEV`, `RESOLVE_NO_MAGICLINKS`,
+and `RESOLVE_CACHED` are all handled correctly (see the resolved
+BUG-OPENAT2-RESOLVE-NO-SYMLINKS-IGNORED entry).
+
+**Proper fix (when needed):** thread a containment base (the `dirfd`
+directory, or the resolution root) through `Vfs::resolve_inner` and, at
+every component step *including symlink-target expansion*, verify the
+running resolved path stays at/below the base — rejecting with the Linux
+error (`EXDEV` for BENEATH escape, `-EXDEV`/`ELOOP` per Linux semantics).
+This must be containment-checked per hop (not just on the input path) to be
+safe against symlinks that point outside the base. Deferred until a real
+consumer (container runtime / sandbox) needs beneath/in-root resolution;
+the current refusal is safe in the meantime.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /

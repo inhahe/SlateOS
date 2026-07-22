@@ -4394,6 +4394,10 @@ pub extern "C" fn futimens(fd: Fd, times: *const crate::stat::Timespec) -> i32 {
 /// exclusive-create semantics.  `O_EXCL` without `O_CREAT` is undefined by
 /// POSIX; the kernel only enforces `EXCL` when `CREATE` is also set, so the
 /// stray bit is harmless.
+///
+/// `O_NOFOLLOW` maps to the native `NOFOLLOW` bit (0x80); the kernel fails with
+/// `ELOOP` if the final path component is a symbolic link (parent-component
+/// symlinks are still followed).
 pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     // Native OpenFlags bits (must match kernel `fs::handle::OpenFlags`).
     const N_READ: u64 = 0x01;
@@ -4403,6 +4407,7 @@ pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     const N_APPEND: u64 = 0x10;
     const N_DIRECTORY: u64 = 0x20;
     const N_EXCL: u64 = 0x40;
+    const N_NOFOLLOW: u64 = 0x80;
 
     let mut native: u64 = 0;
 
@@ -4428,6 +4433,9 @@ pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     }
     if posix_flags & fcntl::O_EXCL != 0 {
         native |= N_EXCL;
+    }
+    if posix_flags & fcntl::O_NOFOLLOW != 0 {
+        native |= N_NOFOLLOW;
     }
 
     native

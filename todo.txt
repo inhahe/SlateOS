@@ -53637,6 +53637,21 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   window because the FileSystem trait lacks an atomic create-exclusive
 ##   primitive; exists-at-open-time guarantee (the primary use) holds regardless.
 
+## DONE (O_NOFOLLOW + errno ELOOP fix) — 2026-07-22
+##   Implemented POSIX O_NOFOLLOW enforcement (was accepted+stored but ignored:
+##   open() silently followed a final symlink). Added OpenFlags::NOFOLLOW (bit 7,
+##   0x80) to kernel/src/fs/handle.rs; open() runs a NOFOLLOW guard before
+##   resolve_path — Vfs::lstat (does not follow the final component); if the last
+##   component is a Symlink → returns TooManyLinks (→ ELOOP); parent symlinks
+##   still followed (POSIX); non-symlink/missing final components fall through.
+##   posix translate_open_flags maps O_NOFOLLOW → N_NOFOLLOW (0x80). Handle
+##   self-test section 17: (a) no-NOFOLLOW follows to target, (b) NOFOLLOW on a
+##   symlink → TooManyLinks, (c) NOFOLLOW on a non-symlink opens normally.
+##   Also fixed a latent bug (BUG-ERRNO-TOOMANYLINKS-EMLINK): native
+##   errno::translate mapped TooManyLinks (-506) → EMLINK, but that code is
+##   symlink-loop (ELOOP) semantics everywhere in the kernel (no hard-link-count
+##   producer). Now maps → ELOOP, matching the Linux ABI; test + comments updated.
+
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
 ##   prerequisite for a shipping fastpy component that touches the filesystem

@@ -62,6 +62,12 @@ impl OpenFlags {
     /// (→ `EEXIST`) instead of opening it.  Without `CREATE` it is ignored,
     /// matching Linux's regular-file behaviour.
     pub const EXCL: Self = Self(1 << 6);
+    /// Do not follow a final symlink component (POSIX `O_NOFOLLOW`).  If the
+    /// path's last component is a symbolic link, `open()` fails with
+    /// [`TooManyLinks`](crate::error::KernelError::TooManyLinks) (→ `ELOOP`)
+    /// instead of resolving through it.  Symlinks in *parent* components are
+    /// still followed, matching POSIX.  Only the final component is guarded.
+    pub const NOFOLLOW: Self = Self(1 << 7);
 
     /// Create from raw bits (for syscall argument parsing).
     #[must_use]
@@ -242,6 +248,26 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
         || flags.contains(OpenFlags::APPEND)
     {
         crate::ipc::namespace::check_writable(path)?;
+    }
+
+    // O_NOFOLLOW: refuse to open through a final symlink component.  The
+    // resolve_path below follows every symlink (including the last), so the
+    // guard must run first — lstat does NOT follow the final component, so it
+    // reports the link itself.  A symlink final component → ELOOP; anything
+    // else (regular/dir/missing) falls through to the normal open/create path
+    // (parent-component symlinks are still followed, matching POSIX).  Only
+    // the final component is guarded, so a missing target is not our concern
+    // here (CREATE handles it below).
+    if flags.contains(OpenFlags::NOFOLLOW) {
+        match crate::fs::Vfs::lstat(path) {
+            Ok(entry) if entry.entry_type == crate::fs::EntryType::Symlink => {
+                return Err(KernelError::TooManyLinks);
+            }
+            // Not a symlink, or the path/target doesn't exist yet — let the
+            // regular resolve/create path decide (ENOENT vs. create).
+            Ok(_) | Err(KernelError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
     }
 
     // Resolve symlinks at open time so the handle refers to the
@@ -1502,6 +1528,50 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(excl_existing).ok();
     crate::fs::Vfs::remove(excl_fresh).ok();
     crate::serial_println!("[fs::handle]   O_EXCL exclusive-create semantics: OK");
+
+    // 17. O_NOFOLLOW — refuse to open through a final symlink component.
+    //
+    // Stage a real target file and a symlink to it, then prove:
+    //   (a) open(symlink, READ) without NOFOLLOW follows to the target (OK),
+    //   (b) open(symlink, READ|NOFOLLOW) fails with TooManyLinks (-> ELOOP),
+    //   (c) open(regular, READ|NOFOLLOW) succeeds (NOFOLLOW only guards the
+    //       final component, and this one is not a symlink).
+    // Skipped gracefully if the root FS does not support symlinks.
+    let nf_target = "/handle_nofollow_target.txt";
+    let nf_link = "/handle_nofollow_link";
+    crate::fs::Vfs::remove(nf_link).ok();
+    crate::fs::Vfs::remove(nf_target).ok();
+    crate::fs::Vfs::write_file(nf_target, b"nofollow target")?;
+    if crate::fs::Vfs::symlink(nf_link, nf_target).is_ok() {
+        // (a) without NOFOLLOW the symlink resolves to the target.
+        let hnf = open(nf_link, OpenFlags::READ)?;
+        close(hnf)?;
+
+        // (b) with NOFOLLOW a final symlink component is refused with ELOOP.
+        match open(nf_link, OpenFlags::READ.union(OpenFlags::NOFOLLOW)) {
+            Err(KernelError::TooManyLinks) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: O_NOFOLLOW on symlink not TooManyLinks: {:?}",
+                    other
+                );
+                crate::fs::Vfs::remove(nf_link).ok();
+                crate::fs::Vfs::remove(nf_target).ok();
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (c) NOFOLLOW on a non-symlink final component opens normally.
+        let hnf2 = open(nf_target, OpenFlags::READ.union(OpenFlags::NOFOLLOW))?;
+        close(hnf2)?;
+
+        crate::fs::Vfs::remove(nf_link).ok();
+        crate::fs::Vfs::remove(nf_target).ok();
+        crate::serial_println!("[fs::handle]   O_NOFOLLOW final-symlink guard: OK");
+    } else {
+        crate::fs::Vfs::remove(nf_target).ok();
+        crate::serial_println!("[fs::handle]   O_NOFOLLOW test SKIPPED (no symlink support)");
+    }
 
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();

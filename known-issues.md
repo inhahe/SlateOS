@@ -14,6 +14,44 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-ONOFOLLOW-IGNORED. posix `O_NOFOLLOW` was accepted and stored but never enforced — `open()` silently followed a final symlink — 2026-07-22 — ✅ RESOLVED 2026-07-22
+
+**What:** `translate_open_flags` (posix/src/file.rs) dropped `O_NOFOLLOW`, and
+the kernel `open()` (`kernel/src/fs/handle.rs`) unconditionally resolved
+symlinks via `Vfs::resolve_path` (which follows the final component). So
+`open(path, O_NOFOLLOW)` on a symlink silently opened the *target* instead of
+failing with `ELOOP` — a POSIX-correctness gap and a mild security concern
+(a caller trying to avoid symlink attacks was not actually protected).
+
+**Fix (2026-07-22):** Added `OpenFlags::NOFOLLOW` (bit 7, 0x80) to
+`kernel/src/fs/handle.rs`. `open()` now runs a NOFOLLOW guard *before*
+`resolve_path`: it `Vfs::lstat`s the path (lstat does not follow the final
+component) and returns `TooManyLinks` (→ `ELOOP`) if the last component is a
+`Symlink`; parent-component symlinks are still followed (POSIX). Non-symlink
+or not-yet-existing final components fall through to the normal open/create
+path. `translate_open_flags` maps `O_NOFOLLOW` → `N_NOFOLLOW` (0x80). A handle
+self-test (section 17) proves: (a) without NOFOLLOW a symlink resolves to its
+target, (b) with NOFOLLOW a final symlink → TooManyLinks, (c) NOFOLLOW on a
+non-symlink opens normally.
+
+### BUG-ERRNO-TOOMANYLINKS-EMLINK. native `errno::translate` mapped the kernel symlink-loop error to `EMLINK` instead of `ELOOP` — 2026-07-22 — ✅ RESOLVED 2026-07-22
+
+**What:** `posix/src/errno.rs` mapped `native::TOO_MANY_LINKS` (-506) → `EMLINK`,
+with a test asserting that and a comment claiming -506 was the hard-link-count
+limit. But `KernelError::TooManyLinks`'s own doc/message is "too many symbolic
+links", and *every* kernel producer of it is symlink-loop / max-symlink-depth
+semantics (symlink-resolution depth guards in vfs/memfs/ext4, circular-symlink
+detection, and now the O_NOFOLLOW final-symlink guard) — no kernel path
+produces a hard-link-count EMLINK. So a native program hitting a circular
+symlink got `EMLINK` ("too many links") instead of the correct `ELOOP` ("too
+many levels of symbolic links"). The Linux-ABI translation (linux.rs:1346)
+already mapped it correctly to ELOOP; only the native path was wrong.
+
+**Fix (2026-07-22):** native `errno::translate` now maps `TOO_MANY_LINKS` →
+`ELOOP`, unifying both ABIs. Updated the test + comments. (If a real
+hard-link-count limit is ever enforced it must use a *distinct* kernel error
+code, not this symlink error — noted in the errno.rs comment.)
+
 ### BUG-OPENDIR-MISSING-BUFCAP-ARG3. posix `opendir`/`fdopendir` issued `SYS_FS_LIST_DIR` via `syscall3`, omitting the buffer capacity the kernel reads from arg3 → kernel computed `max_entries = 0` → every directory listing came back empty — 2026-07-22 — ✅ RESOLVED 2026-07-22
 
 **What:** `opendir` (posix/src/dirent.rs:126) and `fdopendir` (~:608) called

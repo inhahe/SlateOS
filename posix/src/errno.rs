@@ -319,7 +319,14 @@ pub fn translate(ret: i64) -> i64 {
         native::IS_A_DIRECTORY => EISDIR,
         native::NO_SPACE => ENOSPC,
         native::BAD_HANDLE => EBADF,
-        native::TOO_MANY_LINKS => EMLINK,
+        // TooManyLinks (-506) is the kernel's symlink-loop / max-symlink-depth
+        // error (see kernel error.rs message "too many symbolic links" and its
+        // sole producers — symlink-resolution depth checks + circular-symlink
+        // detection in vfs/memfs/ext4, plus the O_NOFOLLOW final-symlink guard).
+        // It maps to ELOOP, matching the Linux-ABI translation (linux.rs).
+        // (No kernel path currently produces an EMLINK hard-link-count error; if
+        // one is added it must use a distinct code, not this symlink error.)
+        native::TOO_MANY_LINKS => ELOOP,
         native::DIRECTORY_NOT_EMPTY => ENOTEMPTY,
         native::READ_ONLY_FS => EROFS,
         native::TOO_MANY_OPEN_FILES => EMFILE,
@@ -659,12 +666,15 @@ mod tests {
 
     #[test]
     fn test_translate_too_many_links() {
-        // TOO_MANY_LINKS is a filesystem error for exceeding the
-        // hard link count limit.  It must map to EMLINK (not ELOOP,
-        // which is for symlink resolution loops).
+        // TOO_MANY_LINKS (-506) is the kernel's symlink-loop / max-symlink-depth
+        // error (kernel message "too many symbolic links"; produced by symlink
+        // resolution depth checks, circular-symlink detection, and the
+        // O_NOFOLLOW final-symlink guard).  It maps to ELOOP, matching the
+        // Linux-ABI translation.  (It is NOT the hard-link-count EMLINK error —
+        // no kernel path produces that today.)
         let result = translate(native::TOO_MANY_LINKS);
         assert_eq!(result, -1);
-        assert_eq!(get_errno(), EMLINK);
+        assert_eq!(get_errno(), ELOOP);
     }
 
     #[test]

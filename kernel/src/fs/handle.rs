@@ -1882,6 +1882,78 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // -- §21: no-follow chmod operates on the LINK inode, not target --
+    // fchmodat2(AT_SYMLINK_NOFOLLOW) must set the symlink's own mode bits.
+    // Prove that:
+    //   (a) set_permissions_no_follow changes the LINK's mode (lmetadata) but
+    //       leaves the TARGET's mode untouched (metadata follows the link),
+    //   (b) set_permissions (following) changes the TARGET, not the link.
+    // Skipped gracefully if the root FS lacks symlink/chmod support.
+    let nfp_target = "/handle_nfp_target.txt";
+    let nfp_link = "/handle_nfp_link";
+    crate::fs::Vfs::remove(nfp_link).ok();
+    crate::fs::Vfs::remove(nfp_target).ok();
+    let nfp_ready = crate::fs::Vfs::write_file(nfp_target, b"nfp").is_ok()
+        && crate::fs::Vfs::symlink(nfp_link, nfp_target).is_ok()
+        // Seed distinct baseline modes so a mistaken follow is detectable.
+        && crate::fs::Vfs::set_permissions(nfp_target, 0o644).is_ok()
+        && crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o644).is_ok();
+    if nfp_ready {
+        let nfp_cleanup = || {
+            crate::fs::Vfs::remove(nfp_link).ok();
+            crate::fs::Vfs::remove(nfp_target).ok();
+        };
+        // (a) chmod the LINK itself (no-follow) to a distinct mode.
+        if let Err(e) = crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o600) {
+            crate::serial_println!("[fs::handle]   FAIL: set_permissions_no_follow: {:?}", e);
+            nfp_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        let link_meta = crate::fs::Vfs::lmetadata(nfp_link)?;
+        let tgt_meta = crate::fs::Vfs::metadata(nfp_link)?;
+        if link_meta.permissions & 0o777 != 0o600 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: no-follow chmod didn't stamp link (mode={:o})",
+                link_meta.permissions
+            );
+            nfp_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        if tgt_meta.permissions & 0o777 != 0o644 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: no-follow chmod leaked to target (mode={:o})",
+                tgt_meta.permissions
+            );
+            nfp_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        // (b) following chmod must hit the TARGET, not the link.
+        if let Err(e) = crate::fs::Vfs::set_permissions(nfp_link, 0o755) {
+            crate::serial_println!("[fs::handle]   FAIL: set_permissions (follow): {:?}", e);
+            nfp_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        let link_after = crate::fs::Vfs::lmetadata(nfp_link)?;
+        let tgt_after = crate::fs::Vfs::metadata(nfp_link)?;
+        if tgt_after.permissions & 0o777 != 0o755 || link_after.permissions & 0o777 != 0o600 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: follow chmod wrong target (link={:o} tgt={:o})",
+                link_after.permissions,
+                tgt_after.permissions
+            );
+            nfp_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        nfp_cleanup();
+        crate::serial_println!("[fs::handle]   no-follow chmod targets link inode: OK");
+    } else {
+        crate::fs::Vfs::remove(nfp_link).ok();
+        crate::fs::Vfs::remove(nfp_target).ok();
+        crate::serial_println!(
+            "[fs::handle]   no-follow chmod test SKIPPED (no symlink/chmod support)"
+        );
+    }
+
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();
     crate::fs::Vfs::remove(test_path).ok();

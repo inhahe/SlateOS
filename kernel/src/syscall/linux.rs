@@ -20380,6 +20380,20 @@ fn chmod_apply(path: &str, mode: u64) -> SyscallResult {
     }
 }
 
+/// No-follow variant of [`chmod_apply`] for `fchmodat2(AT_SYMLINK_NOFOLLOW)`:
+/// changes the mode of the final component itself even when it is a symlink.
+fn chmod_apply_no_follow(path: &str, mode: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let perms = (mode & 0o7777) as u16;
+    match crate::fs::Vfs::set_permissions_no_follow(path, perms) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
 /// `fchmod(fd, mode)`.
 fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -43811,10 +43825,14 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Fidelity gap: AT_SYMLINK_NOFOLLOW (0x100) is ignored —
-    // `Vfs::set_permissions` always follows the final symlink.  See
-    // known-issues B-CHOWN1.
-    chmod_apply(&resolved, args.arg2)
+    // AT_SYMLINK_NOFOLLOW (0x100): chmod the link inode itself rather than
+    // its target (Linux 6.6+ `fchmodat2` honours this — the whole reason the
+    // 4-arg syscall exists).  Mirrors the chown/times/xattr no-follow family.
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        chmod_apply_no_follow(&resolved, args.arg2)
+    } else {
+        chmod_apply(&resolved, args.arg2)
+    }
 }
 
 /// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake (Linux 6.7+).

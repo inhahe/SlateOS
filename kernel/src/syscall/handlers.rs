@@ -7127,6 +7127,8 @@ pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: permission bits (u16).
+/// `arg3`: flags (bit 0 = `NO_FOLLOW`, i.e. `lchmod` /
+/// `fchmodat2(AT_SYMLINK_NOFOLLOW)` — chmod the link inode itself).
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
@@ -7140,7 +7142,13 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    match crate::fs::Vfs::set_permissions(path, args.arg2 as u16) {
+    let no_follow = args.arg3 & 1 != 0;
+    let res = if no_follow {
+        crate::fs::Vfs::set_permissions_no_follow(path, args.arg2 as u16)
+    } else {
+        crate::fs::Vfs::set_permissions(path, args.arg2 as u16)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

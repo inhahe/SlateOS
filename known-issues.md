@@ -8453,6 +8453,20 @@ the harness confirms `Vfs::metadata` reports `permissions == 0o600`.
    proves no-follow xattr set/get/list/remove target the link inode while
    following ops target the file, and the two views never cross. (Closes the
    xattr no-follow limitation formerly tracked in `todo.txt`.)
+
+   **Extended to `chmod` 2026-07-22.** `fchmodat2(AT_SYMLINK_NOFOLLOW)`
+   (Linux 6.6+, the very reason the 4-arg syscall exists) previously ignored
+   the flag and always followed the trailing symlink (a documented gap in
+   `sys_fchmodat2`, "AT_SYMLINK_NOFOLLOW is ignored"). Now plumbed with the
+   same no-follow family pattern: `FileSystem::set_permissions_no_follow`
+   (default-delegate; memfs overrides via `resolve_no_follow_mut`, ext4 via
+   `resolve_path_no_follow` + a new shared `set_permissions_ino` helper),
+   `Vfs::set_permissions_no_follow`, a NO_FOLLOW bit in `SYS_FS_SET_PERMS`'s
+   free arg slot (`arg3`), and a `chmod_apply_no_follow` in the Linux ABI
+   wired from `sys_fchmodat2`'s `AT_SYMLINK_NOFOLLOW`. posix gained `lchmod`
+   and routes `fchmodat(AT_SYMLINK_NOFOLLOW)` through it. Regression:
+   `fs::handle::self_test` §21 proves no-follow chmod stamps the link inode's
+   mode while a following chmod hits the target, and neither crosses.
 2. We gate chmod/chown on the generic File-WRITE capability rather than a
    dedicated `CAP_CHOWN`/`CAP_FOWNER`; any process holding File-WRITE can
    change mode/owner. This matches the OS's capability model (no per-syscall

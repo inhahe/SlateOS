@@ -620,6 +620,17 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Set permission bits on the path's final component WITHOUT following it
+    /// if it is a symlink (`fchmodat2(AT_SYMLINK_NOFOLLOW)`, Linux 6.6+).
+    ///
+    /// Default delegates to [`set_permissions`](Self::set_permissions) —
+    /// correct for filesystems that have no symlinks (e.g. FAT).  Symlink-
+    /// capable filesystems (memfs, ext4) override this to resolve the final
+    /// component without following, so the link inode itself is chmod-ed.
+    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        self.set_permissions(path, permissions)
+    }
+
     /// Update timestamps.
     ///
     /// Pass 0 for any timestamp to leave it unchanged.
@@ -2861,6 +2872,25 @@ impl Vfs {
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().set_permissions(&relative, permissions)?;
+        }
+        super::notify::emit_metadata(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        Ok(())
+    }
+
+    /// Set permission bits WITHOUT following a final symlink
+    /// (`fchmodat2(AT_SYMLINK_NOFOLLOW)`).
+    ///
+    /// No-follow analogue of [`set_permissions`](Self::set_permissions): if the
+    /// final component is a symlink, the link inode's own mode bits are changed
+    /// rather than its target's.  Intermediate symlinks are still resolved.
+    pub fn set_permissions_no_follow(path: &str, permissions: u16) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_permissions_no_follow(&relative, permissions)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);

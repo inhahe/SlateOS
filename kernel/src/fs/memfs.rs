@@ -1100,6 +1100,16 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
+    /// `fchmodat2(AT_SYMLINK_NOFOLLOW)`: set mode bits on the link inode
+    /// itself.  Same as [`set_permissions`](Self::set_permissions) but the
+    /// final path component is resolved WITHOUT following a symlink.
+    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let node = self.resolve_no_follow_mut(path)?;
+        node.permissions = permissions;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
     /// `lutimes`/`utimensat(AT_SYMLINK_NOFOLLOW)`: stamp the link inode
     /// itself.  Same as [`set_times`](Self::set_times) but no-follow.
     fn set_times_no_follow(

@@ -2509,15 +2509,45 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32)
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // AT_SYMLINK_NOFOLLOW routes through lchmod (chmod the link inode itself);
+    // otherwise chmod (follow the final symlink).  Linux 6.6+ honours this via
+    // fchmodat2; we thread NO_FOLLOW to SYS_FS_SET_PERMS the same way.
+    let no_follow = flags & AT_SYMLINK_NOFOLLOW != 0;
+    let apply = |p: *const u8| if no_follow { lchmod(p, mode) } else { chmod(p, mode) };
     if dirfd == AT_FDCWD || is_absolute_path(path) {
-        return chmod(path, mode);
+        return apply(path);
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
     if len == 0 {
         return -1;
     }
-    chmod(full.as_ptr(), mode)
+    apply(full.as_ptr())
+}
+
+/// Change file mode bits WITHOUT following a final symlink (`lchmod`).
+///
+/// Like [`chmod`] but if `path` names a symlink, the link inode's own mode
+/// bits are changed rather than the target's (`fchmodat2(AT_SYMLINK_NOFOLLOW)`).
+///
+/// Errors:
+///   * `EFAULT` — `path` is NULL.
+///   * any error the kernel returns from `SYS_FS_SET_PERMS`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lchmod(path: *const u8, mode: ModeT) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        set_perms_path_ex(path, mode, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = mode;
+        0
+    }
 }
 
 /// Change file owner/group relative to a directory fd.
@@ -4142,6 +4172,14 @@ fn set_times_path_ex(
 /// Returns 0 on success or -1 with `errno` set.  Bare metal only.
 #[cfg(target_os = "none")]
 fn set_perms_path(path: *const u8, mode: ModeT) -> i32 {
+    set_perms_path_ex(path, mode, false)
+}
+
+/// Like [`set_perms_path`] but with explicit symlink-follow control.  When
+/// `no_follow` is set (`lchmod` / `fchmodat2(AT_SYMLINK_NOFOLLOW)`), the kernel
+/// chmods the link inode itself (arg3 bit 0 = NO_FOLLOW).
+#[cfg(target_os = "none")]
+fn set_perms_path_ex(path: *const u8, mode: ModeT, no_follow: bool) -> i32 {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
@@ -4149,11 +4187,12 @@ fn set_perms_path(path: *const u8, mode: ModeT) -> i32 {
     // The kernel masks to 0o7777, but mask here too so the ABI value is
     // unambiguous (mode_t carries file-type bits we must not forward).
     let perms = u64::from(mode & 0o7777);
-    let ret = syscall3(
+    let ret = syscall4(
         SYS_FS_SET_PERMS,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         perms,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;

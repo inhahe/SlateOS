@@ -969,17 +969,14 @@ impl FileSystem for Ext4Fs {
 
     fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
+        self.set_permissions_ino(ino, permissions)
+    }
 
-        // Preserve the file type bits, update only the permission bits.
-        let type_bits = inode.i_mode & file_type::S_IFMT;
-        inode.i_mode = type_bits | (permissions & 0o7777);
-
-        // chmod advances ctime (metadata change), not mtime.
-        stamp_inode_ctime(&mut inode);
-        self.driver.write_inode(ino, &inode)?;
-        self.driver.flush()?;
-        Ok(())
+    /// `fchmodat2(AT_SYMLINK_NOFOLLOW)`: set the link inode's own mode bits.
+    /// Resolves the final component WITHOUT following a trailing symlink.
+    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.set_permissions_ino(ino, permissions)
     }
 
     fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
@@ -1344,6 +1341,22 @@ impl Ext4Fs {
         // Write the full 32-bit UID/GID (low 16 in i_uid/i_gid, high 16 in i_osd2).
         set_inode_uid_32(&mut inode, uid);
         set_inode_gid_32(&mut inode, gid);
+        stamp_inode_ctime(&mut inode);
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    /// Shared body for [`set_permissions`]/[`set_permissions_no_follow`]: set
+    /// the mode bits on an already-resolved inode, preserving its type bits.
+    fn set_permissions_ino(&mut self, ino: u32, permissions: u16) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Preserve the file type bits, update only the permission bits.
+        let type_bits = inode.i_mode & file_type::S_IFMT;
+        inode.i_mode = type_bits | (permissions & 0o7777);
+
+        // chmod advances ctime (metadata change), not mtime.
         stamp_inode_ctime(&mut inode);
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;

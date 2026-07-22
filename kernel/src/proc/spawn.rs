@@ -8522,6 +8522,183 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-truncate` utility — the first fastpy
+/// tool to **resize a file's content** (`chmod` mutates metadata; every prior
+/// content tool only read/wrote whole files).
+///
+/// `truncate <size> <path>` parses a decimal byte count from `argv[1]` and
+/// resizes `argv[2]` to it via `os.truncate` → native `fastpy_os_truncate` →
+/// posix `truncate()` → kernel `SYS_FS_TRUNCATE` (gated on `Rights::WRITE`) →
+/// `Vfs::truncate`.
+///
+/// False-pass-proof: the harness stages a 20-byte file, asserts via the VFS its
+/// size is *not* the target beforehand, runs `truncate 8`, asserts exit 0, then
+/// independently re-reads `FileMeta::size` (must be 8) AND reads the file back
+/// (must be exactly the surviving 8-byte prefix).  A no-op truncate that
+/// returned 0 without resizing could not satisfy the after-checks.
+pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
+    static FASTPY_TRUNCATE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-truncate/fastpy-truncate.elf");
+
+    const TARGET: &str = "/tmp/truncate-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/truncate-target.txt";
+    const SIZE_ARG: &[u8] = b"8";
+    const NEW_SIZE: u64 = 8;
+    const PAYLOAD: &[u8] = b"0123456789abcdefghij"; // 20 bytes
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `truncate` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_TRUNCATE_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    // Stage the file at its full 20-byte size.
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // Sanity: the staged size must differ from the truncation target, else a
+    // no-op truncate could false-pass.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.size == NEW_SIZE => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-truncate (ring 3) — staged file already {} bytes; \
+                 test cannot distinguish a no-op truncate",
+                m.size
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: could not stat staged {} — {:?}", TARGET, e);
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    // os.truncate → SYS_FS_TRUNCATE (Rights::WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-truncate", SIZE_ARG, TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-truncate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_TRUNCATE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-truncate spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-truncate (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.truncate may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means os.truncate returned success (exit 3 = SYS_FS_TRUNCATE failed).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-truncate (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.truncate failed / SYS_FS_TRUNCATE rejected)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: the size must now be exactly the
+    // requested byte count, and the surviving bytes must be the original prefix.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.size == NEW_SIZE => {}
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-truncate (ring 3) — size is {}, expected {}; \
+                 SYS_FS_TRUNCATE did not resize",
+                m.size, NEW_SIZE
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-truncate (ring 3) — could not re-stat the target: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+    match crate::fs::Vfs::read_file(TARGET) {
+        Ok(bytes) if bytes == &PAYLOAD[..NEW_SIZE as usize] => {}
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-truncate (ring 3) — surviving {} bytes do not match the \
+                 original {}-byte prefix",
+                bytes.len(),
+                NEW_SIZE
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-truncate (ring 3) — could not read the file back: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `truncate` (ring 3: os.truncate → SYS_FS_TRUNCATE [Rights::WRITE]; \
+         the kernel VFS confirmed the file shrank 20 → 8 bytes with the surviving prefix intact): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

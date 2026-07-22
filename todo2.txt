@@ -1,3 +1,37 @@
+tell opus in OS:
+I told Fable 5 to optimize fastpy, so you may want to re-port whatever's necessary to assimilate the optimizations. Here's what Fable 5 said:
+"""
+Summary
+
+I worked through both phases of the optimization task, committing before each change so everything is revertible. Baseline was tagged at commit ae2da03.
+Phase 1 — Generated-code optimization strategies
+
+I analyzed the fundamental strategies (type-specialized codegen, unboxing via --typed/--int64, inlining, per-class free-lists, adaptive GC, LLVM -O2/-O3). The verdict: the generated code is already heavily optimized — the runtime (objects.c free-list allocator, gc.c adaptive threshold, acyclic-class GC-skip) and the type-inference prescan are mature. The one tunable I added is a FASTPY_OPT env knob (default 2) wiring the backend opt level through both the LLVM pass pipeline and codegen. I A/B-tested -O3; it showed no reliable win (regressions amid measurement noise), so -O2 stays the default. Micro-benchmark deltas below ~10% aren't provable on this machine — the compiled programs run in 7–40ms and are dominated by ~7ms subprocess startup + Windows scheduling noise. So I pivoted the substantive work to the highly measurable compile-time hotspots.
+Phase 2 — Compiler CPU hotspots (the real wins)
+
+Profiled with cProfile and found two dominant costs:
+Optimization	What it was	Before	After	Improvement
+MSVC env caching (toolchain.py, d83b6f5)	Re-ran vcvars64.bat on every link to find link.exe + env (~2.1s each)	2400 ms compile wall	~200 ms	−92% end-to-end compile
+↳ _link_windows specifically		2148 ms	141 ms	−93%
+Hoisted tree walks (codegen.py, dbb6b1f)	Two nested full-AST walks re-run per candidate receiver in _detect_class_container_attrs; they were loop-invariant	7.51 s (179 ms/call)	1.08 s (26 ms/call)	−86% on that function (Richards)
+
+The MSVC environment is now captured once and cached both in-process and on disk (runtime/_msvc_env_cache.json, keyed on vcvars path + mtime); link.exe is invoked directly with that env, falling back to the old batch method if the cache fails. The codegen fix precomputes _ctor_first/_ctor_fixpoint maps once before the per-receiver loop instead of walking the whole tree each iteration — semantics are byte-for-byte identical.
+Testing
+
+Full differential suite run twice (after each phase): 593 passed, 0 regressions (test_differential, test_comprehensive, test_full_suite, test_cpython_adapted; 4m44s). The A/B numbers above were verified by checking out the baseline files and re-measuring under identical warm-cache conditions.
+Docs updated
+BENCHMARK_REPORT.md — added a "Compiler Speed" section (compile −92%, codegen −86%, FASTPY_OPT note).
+README.md — documented the FASTPY_OPT environment variable.
+Commits (on top of baseline ae2da03, not pushed per project rules)
+096babe docs: document compile-speed wins and FASTPY_OPT knob
+dbb6b1f codegen: hoist loop-invariant tree walks in container-attr detection
+d83b6f5 toolchain: cache MSVC env instead of re-running vcvars per link
+
+Bottom line: compile/iteration time dropped ~92% (2.4s → ~0.2s for a typical small program) with no runtime regressions and no behavioral changes. The generated code itself was already near-optimal, so the headline gains are in developer iteration speed rather than output performance.
+"""
+
+--
+
 the crate is ~15k+ lines with 477 passing tests and is quite mature now. Most calendar time is rate-limit windows, not active work. If you ever want the faithful C++ cross-compile instead, the crate is isolated enough to swap once a C++/slateos toolchain exists (which Chromium/WINE will need anyway) — but that path is currently prerequisite-blocked.
 
 ". This is a real, in-scope bash-superset gap (the goal is bash compatibility, and line N: is strictly more useful for debugging). "

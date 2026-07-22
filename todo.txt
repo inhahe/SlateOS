@@ -53622,6 +53622,21 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   kept as a thin wrapper so sys_pkey_mprotect is unchanged. See known-issues.md
 ##   TD-NATIVE-MPROTECT (RESOLVED).
 
+## DONE (O_EXCL exclusive-create) — 2026-07-22
+##   Implemented POSIX O_EXCL end-to-end (was the BUG-OPENFLAGS residual
+##   limitation in known-issues.md). Added OpenFlags::EXCL (bit 6, 0x40) to
+##   kernel/src/fs/handle.rs; open() now returns AlreadyExists (→ EEXIST) when
+##   both CREATE and EXCL are set and the path already exists — checked before
+##   the dir/regular split so exclusive create over an existing directory also
+##   fails with EEXIST. EXCL without CREATE is ignored (Linux behaviour). posix
+##   translate_open_flags (posix/src/file.rs) maps O_EXCL → N_EXCL (0x40).
+##   Added false-pass-proof handle self-test (section 16): (a) CREATE|EXCL over
+##   an existing file → AlreadyExists, (b) fresh path → succeeds+creates, (c)
+##   second exclusive create → AlreadyExists, (d) EXCL w/o CREATE opens the file.
+##   Residual (tracked in known-issues.md): stat-based check has a narrow TOCTOU
+##   window because the FileSystem trait lacks an atomic create-exclusive
+##   primitive; exists-at-open-time guarantee (the primary use) holds regardless.
+
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
 ##   prerequisite for a shipping fastpy component that touches the filesystem

@@ -1212,10 +1212,6 @@ extern "C" fn kernel_main() -> ! {
         if let Err(e) = fs::fat::self_test() {
             serial_println!("WARNING: FAT self-test failed: {:?}", e);
         }
-        // File handle self-test (requires mounted filesystem).
-        if let Err(e) = fs::handle::self_test() {
-            serial_println!("WARNING: File handle self-test failed: {:?}", e);
-        }
         // io_ring file handle test (requires mounted /tmp).
         if let Err(e) = ipc::io_ring::self_test_fh() {
             serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
@@ -1254,6 +1250,14 @@ extern "C" fn kernel_main() -> ! {
     // --- Virtual filesystem self-tests (run on any root) ---
     // These construct their own filesystem instances and do not depend on a
     // real on-disk FAT root, so they run regardless of how "/" was mounted.
+    // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
+    // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
+    // (skips if "/" is not writable), so it runs on a diskless memfs boot too;
+    // gating it on a FAT root would leave the whole handle layer — and O_EXCL —
+    // untested on the common in-memory boot path (e.g. the CI boot test).
+    if let Err(e) = fs::handle::self_test() {
+        serial_println!("WARNING: File handle self-test failed: {:?}", e);
+    }
     // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
     if let Err(e) = fs::memfs::self_test() {
         serial_println!("WARNING: MemFs self-test failed: {:?}", e);

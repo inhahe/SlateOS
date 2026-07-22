@@ -4389,9 +4389,11 @@ pub extern "C" fn futimens(fd: Fd, times: *const crate::stat::Timespec) -> i32 {
 /// `O_CREAT` at bit 6, which the kernel decoded as "READ, no CREATE", breaking
 /// every `open(..., "w")` (the file was never created → ENOENT).
 ///
-/// `O_EXCL` has no native equivalent (the kernel does not implement exclusive
-/// create), so it is dropped here; `O_CREAT | O_EXCL` therefore does not yet
-/// fail on an existing file on-target.  Tracked in todo.txt.
+/// `O_EXCL` maps to the native `EXCL` bit (0x40); combined with `O_CREAT`, the
+/// kernel rejects an already-existing path with `EEXIST`, giving the standard
+/// exclusive-create semantics.  `O_EXCL` without `O_CREAT` is undefined by
+/// POSIX; the kernel only enforces `EXCL` when `CREATE` is also set, so the
+/// stray bit is harmless.
 pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     // Native OpenFlags bits (must match kernel `fs::handle::OpenFlags`).
     const N_READ: u64 = 0x01;
@@ -4400,6 +4402,7 @@ pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     const N_TRUNCATE: u64 = 0x08;
     const N_APPEND: u64 = 0x10;
     const N_DIRECTORY: u64 = 0x20;
+    const N_EXCL: u64 = 0x40;
 
     let mut native: u64 = 0;
 
@@ -4422,6 +4425,9 @@ pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     }
     if posix_flags & fcntl::O_DIRECTORY != 0 {
         native |= N_DIRECTORY;
+    }
+    if posix_flags & fcntl::O_EXCL != 0 {
+        native |= N_EXCL;
     }
 
     native

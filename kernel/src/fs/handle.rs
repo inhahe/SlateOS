@@ -56,6 +56,12 @@ impl OpenFlags {
     /// `NotADirectory` if it resolves to anything else.  When not set,
     /// directories are rejected with `IsADirectory` as before.
     pub const DIRECTORY: Self = Self(1 << 5);
+    /// Exclusive create (POSIX `O_EXCL`).  Only meaningful with
+    /// [`CREATE`](Self::CREATE): if the path already exists, `open()` fails
+    /// with [`AlreadyExists`](crate::error::KernelError::AlreadyExists)
+    /// (→ `EEXIST`) instead of opening it.  Without `CREATE` it is ignored,
+    /// matching Linux's regular-file behaviour.
+    pub const EXCL: Self = Self(1 << 6);
 
     /// Create from raw bits (for syscall argument parsing).
     #[must_use]
@@ -260,6 +266,15 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
     match stat_result {
         Ok(entry) => {
             // File exists.
+            // O_CREAT | O_EXCL demands that *this* open create the file, so an
+            // existing path (of any type) must fail with EEXIST (POSIX; Linux
+            // do_last()).  Checked before the dir/regular split so exclusive
+            // create over an existing directory also fails with EEXIST.  EXCL
+            // is only honoured together with CREATE (matching Linux's
+            // regular-file semantics); EXCL alone is ignored.
+            if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCL) {
+                return Err(KernelError::AlreadyExists);
+            }
             if entry.entry_type == crate::fs::EntryType::Directory {
                 // Directory: only allowed if the caller asked for one.
                 if !flags.contains(OpenFlags::DIRECTORY) {
@@ -1424,6 +1439,69 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::serial_println!("[fs::handle]   directory handle test SKIPPED (mkdir failed)");
     }
+
+    // 16. O_EXCL — exclusive create semantics.
+    //
+    // Proves both halves so a regression can't silently pass:
+    //   (a) CREATE|EXCL on an *existing* path → AlreadyExists (EEXIST), and
+    //   (b) CREATE|EXCL on a *fresh* path → succeeds (creates the file), and
+    //   (c) a second CREATE|EXCL over the just-created file → AlreadyExists,
+    //   (d) EXCL *without* CREATE over an existing file is ignored (opens it).
+    let excl_existing = "/handle_excl_existing.txt";
+    let excl_fresh = "/handle_excl_fresh.txt";
+    crate::fs::Vfs::remove(excl_existing).ok();
+    crate::fs::Vfs::remove(excl_fresh).ok();
+
+    // Stage an existing file for (a) and (d).
+    crate::fs::Vfs::write_file(excl_existing, b"pre-existing")?;
+
+    // (a) exclusive create over an existing file must fail with EEXIST.
+    let excl_flags = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::EXCL);
+    match open(excl_existing, excl_flags) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: O_CREAT|O_EXCL on existing file not AlreadyExists: {:?}",
+                other
+            );
+            crate::fs::Vfs::remove(excl_existing).ok();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (d) EXCL without CREATE over an existing file is ignored → opens it.
+    let hd_excl = open(excl_existing, OpenFlags::READ.union(OpenFlags::EXCL))?;
+    close(hd_excl)?;
+
+    // (b) exclusive create on a fresh path must succeed and create the file.
+    let hf_excl = open(excl_fresh, excl_flags)?;
+    close(hf_excl)?;
+    if crate::fs::Vfs::stat(excl_fresh).is_err() {
+        crate::serial_println!("[fs::handle]   FAIL: O_CREAT|O_EXCL fresh path did not create file");
+        crate::fs::Vfs::remove(excl_existing).ok();
+        crate::fs::Vfs::remove(excl_fresh).ok();
+        return Err(KernelError::InternalError);
+    }
+
+    // (c) a second exclusive create over the now-existing file must fail.
+    match open(excl_fresh, excl_flags) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: second O_CREAT|O_EXCL not AlreadyExists: {:?}",
+                other
+            );
+            crate::fs::Vfs::remove(excl_existing).ok();
+            crate::fs::Vfs::remove(excl_fresh).ok();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::fs::Vfs::remove(excl_existing).ok();
+    crate::fs::Vfs::remove(excl_fresh).ok();
+    crate::serial_println!("[fs::handle]   O_EXCL exclusive-create semantics: OK");
 
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();

@@ -121,12 +121,25 @@ independent READ/WRITE flags and each `O_*` to its native bit
 `posix/src/file.rs` updated to assert the native encoding. Verified end-to-end
 by the file-I/O boot self-test (exit 6).
 
-**Residual limitation (tracked, not blocking):** the kernel native `OpenFlags`
-has no exclusive-create bit, so `O_EXCL` is dropped in translation —
-`open(..., O_CREAT|O_EXCL)` does *not* yet fail on an existing file on-target.
-Proper fix: add an `OpenFlags::EXCL` bit + enforcement in
-`kernel/src/fs/handle.rs::open` (return `AlreadyExists` when EXCL and the file
-exists), then map `O_EXCL` to it in `translate_open_flags`.
+**Residual limitation — ✅ RESOLVED 2026-07-22:** `O_EXCL` is now honoured.
+`OpenFlags::EXCL` (bit 6, 0x40) was added to `kernel/src/fs/handle.rs`, and
+`open()` returns `AlreadyExists` (→ `EEXIST`) when both `CREATE` and `EXCL` are
+set and the path already exists — checked before the dir/regular split, so
+exclusive create over an existing directory also fails with EEXIST. `EXCL`
+without `CREATE` is ignored (matching Linux). `translate_open_flags`
+(`posix/src/file.rs`) maps `O_EXCL` → `N_EXCL` (0x40). A false-pass-proof
+handle self-test (section 16) asserts: (a) `CREATE|EXCL` over an existing file
+→ AlreadyExists, (b) over a fresh path → succeeds and creates it, (c) a second
+exclusive create → AlreadyExists, (d) `EXCL` without `CREATE` opens the file.
+
+*Residual TOCTOU atomicity gap (narrow, tracked):* the exclusive check is
+stat-based, and `open()` does the stat and the subsequent create in separate
+VFS lock acquisitions (the `FileSystem` trait has no atomic create-exclusive
+primitive). Two racers that both stat `NotFound` before either creates can both
+proceed. The exists-at-open-time guarantee — the primary use of `O_EXCL` — holds
+regardless; closing the race fully requires an atomic exclusive-create primitive
+in the VFS/`FileSystem` trait across all backends (ext4, FAT32, tmpfs). Not
+blocking; log an item if a caller depends on the race-proof guarantee.
 
 ### BUG-NATIVE-MMAP-NUM. posix native memory-mgmt syscall numbers aliased kernel IRQ syscalls — 2026-07-21 — ✅ RESOLVED 2026-07-21
 

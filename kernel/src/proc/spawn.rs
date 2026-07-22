@@ -8699,6 +8699,169 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-settimes` utility — the first fastpy
+/// tool to **set a file's timestamps**, completing the metadata-mutation trio
+/// (permissions via `chmod`, times here, [owner] later).
+///
+/// `settimes <atime_ns> <mtime_ns> <path>` parses two decimal nanosecond
+/// counts from `argv[1]`/`argv[2]` and stamps them onto `argv[3]` via
+/// `os.utime` → native `fastpy_os_utime` → posix `utimensat()` → kernel
+/// `SYS_FS_SET_TIMES` (gated on `Rights::WRITE`) → `Vfs::set_times`.  This is
+/// the first `os.*` native call taking THREE positional arguments (a path plus
+/// two i64 ns stamps).
+///
+/// False-pass-proof: the harness stages a file, asserts via the VFS that its
+/// `accessed_ns`/`modified_ns` are *not* already the target stamps, runs
+/// `settimes`, asserts exit 0, then independently re-reads `FileMeta` and
+/// asserts `accessed_ns == ATIME_NS` AND `modified_ns == MTIME_NS`.  Using two
+/// DISTINCT stamps verifies each field independently — a no-op utime that
+/// returned 0 without stamping (or one that stamped a single value into both
+/// fields) could not satisfy the after-checks.
+pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
+    static FASTPY_SETTIMES_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-settimes/fastpy-settimes.elf");
+
+    const TARGET: &str = "/tmp/settimes-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/settimes-target.txt";
+    // Two DISTINCT non-zero ns-since-epoch stamps (both < i64::MAX ~9.2e18) so
+    // atime and mtime can be verified independently.
+    const ATIME_NS: u64 = 1_500_000_000_000_000_000;
+    const MTIME_NS: u64 = 1_600_000_000_000_000_000;
+    const ATIME_ARG: &[u8] = b"1500000000000000000";
+    const MTIME_ARG: &[u8] = b"1600000000000000000";
+    const PAYLOAD: &[u8] = b"settimes";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `settimes` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_SETTIMES_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+    };
+    cleanup();
+
+    if let Err(e) = crate::fs::Vfs::write_file(TARGET, PAYLOAD) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", TARGET, e);
+        return Err(e);
+    }
+
+    // Sanity: the staged timestamps must differ from the targets, else a no-op
+    // utime could false-pass.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.accessed_ns == ATIME_NS && m.modified_ns == MTIME_NS => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-settimes (ring 3) — staged file already carries the \
+                 target stamps; test cannot distinguish a no-op utime"
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: could not stat staged {} — {:?}", TARGET, e);
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    // os.utime → SYS_FS_SET_TIMES (Rights::WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-settimes", ATIME_ARG, MTIME_ARG, TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-settimes",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_SETTIMES_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-settimes spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-settimes (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.utime may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means os.utime returned success (exit 3 = SYS_FS_SET_TIMES failed).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-settimes (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = os.utime failed / SYS_FS_SET_TIMES rejected)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independent kernel-side verification: BOTH timestamps must now equal the
+    // distinct stamps we passed — proving each field was set independently.
+    match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) if m.accessed_ns == ATIME_NS && m.modified_ns == MTIME_NS => {}
+        Ok(m) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-settimes (ring 3) — stamps are accessed_ns={} \
+                 modified_ns={}, expected {} / {}; SYS_FS_SET_TIMES did not stamp correctly",
+                m.accessed_ns, m.modified_ns, ATIME_NS, MTIME_NS
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-settimes (ring 3) — could not re-stat the target: {:?}",
+                e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `settimes` (ring 3: os.utime → SYS_FS_SET_TIMES [Rights::WRITE]; \
+         the kernel VFS confirmed both accessed_ns and modified_ns were stamped to the distinct \
+         requested values): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

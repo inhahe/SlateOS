@@ -1789,6 +1789,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-settimes`: os.utime → SYS_FS_SET_TIMES stamps two
+    // distinct atime/mtime nanosecond values onto a /tmp file; completes the
+    // metadata-mutation trio (perms via chmod, times here). First 3-positional
+    // os.* native.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_settimes() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `settimes` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

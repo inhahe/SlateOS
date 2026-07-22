@@ -53,6 +53,24 @@ freed frame remains reachable through a stale translation.
 happened not to reuse a frame while its stale TLB entry was still live; the
 generations test was the first to reliably cross the reuse-while-stale window.
 
+**Class audit (2026-07-22):** swept every other unmap-then-free caller for the
+same missing-flush gap. All are already correct:
+- `linux.rs::sys_munmap` (Linux ABI, ~7104) and `sys_brk` shrink (~7321) go
+  through `unmap_user_range`, which flushes per-page (`tlb::flush_range(va,1)`,
+  ~10878) as it clears each PTE. `sys_mremap` never unmaps (returns ENOMEM).
+- Rollback paths — `drm_mmap_dumb_rollback` (~10665), `linux_file_mmap_rollback`
+  (~10922), the MMIO-map rollback (handlers.rs ~894/914), and the shm_map
+  rollback (handlers.rs ~2801) — undo state created earlier in the *same*
+  syscall. Userspace never runs between the map and the unmap, and file data is
+  read into frames via the HHDM alias (not the user VA), so no TLB entry is ever
+  cached; device/MMIO and shm frames are ref-decremented, not hard-freed, so
+  even a stale entry couldn't corrupt the buddy free list. `linux_file_mmap_fill`
+  frees (11314/11335/11343) are for frames that were never mapped.
+- Process teardown (pcb.rs `clear_user_address_space`) is covered by the CR3
+  reload on the next context switch, which flushes the whole TLB.
+The native `handlers.rs::sys_munmap`/`sys_mmap` (fixed above) was the only path
+where userspace had run and dirtied TLB entries before freeing to the allocator.
+
 ### BUG-OPENFLAGS-ENCODING. posix `translate_open_flags` emitted Linux `O_*` bits instead of native `OpenFlags` — 2026-07-21 — ✅ RESOLVED 2026-07-21
 
 **What:** `posix/src/file.rs::translate_open_flags` produced a Linux-style

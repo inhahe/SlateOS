@@ -7267,6 +7267,157 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the fastpy-compiled `pkg upgrade` subcommand — the
+/// in-place package replacement that (unlike `install`) requires the package to
+/// already exist.
+///
+/// Steps (four ring-3 spawns):
+///  1. `upgrade foo` when foo is *not* installed → "not installed foo", exit 1
+///     (the distinction from `install`, which would have created it).
+///  2. `install foo` (payload `libc demo\n`, digest 86732e22) → exit 0.
+///  3. `upgrade foo` (new payload `libc demo v2\n`, digest cd352a42, deps
+///     `libc`) → exit 0; the record's digest and deps are replaced in place and
+///     the new content-addressed blob is written.
+///  4. Read `/tmp/pkgdb.txt` back and assert the record is now
+///     `foo cd352a42 libc` (new digest present, old 86732e22 gone), and read the
+///     new blob back and assert it holds the v2 payload byte-for-byte.
+pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
+    static FASTPY_PKG_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+
+    const DB_PATH: &str = "/tmp/pkgdb.txt";
+    const V1_PATH: &str = "/tmp/pkg-foo.txt";
+    const V1_ARG: &[u8] = b"/tmp/pkg-foo.txt";
+    const V1_CONTENT: &[u8] = b"libc demo\n"; // digest 86732e22
+    const V2_PATH: &str = "/tmp/pkg-foo2.txt";
+    const V2_ARG: &[u8] = b"/tmp/pkg-foo2.txt";
+    const V2_CONTENT: &[u8] = b"libc demo v2\n"; // digest cd352a42
+    const V1_BLOB: &str = "/tmp/store-86732e22.blob";
+    const V2_BLOB: &str = "/tmp/store-cd352a42.blob";
+
+    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-pkg",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        for p in [DB_PATH, V1_PATH, V2_PATH, V1_BLOB, V2_BLOB] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) `upgrade` test ({} bytes ELF)...",
+        FASTPY_PKG_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
+        serial_println!("[spawn]   FAIL: could not seed {} — {:?}", DB_PATH, e);
+        return Err(e);
+    }
+    for (path, content) in [(V1_PATH, V1_CONTENT), (V2_PATH, V2_CONTENT)] {
+        if let Err(e) = crate::fs::Vfs::write_file(path, content) {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not stage {} — {:?}", path, e);
+            return Err(e);
+        }
+    }
+
+    // (argv, expected exit code, description).
+    let steps: &[(&[&[u8]], i32, &str)] = &[
+        (&[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"], 1, "upgrade foo (not installed)"),
+        (&[b"fastpy-pkg", b"install", b"foo", V1_ARG, b"-"], 0, "install foo v1"),
+        (&[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"], 0, "upgrade foo -> v2"),
+    ];
+    for (argv, want, desc) in steps {
+        match run_pkg(FASTPY_PKG_ELF, argv) {
+            Ok(code) if code == *want => {}
+            Ok(code) => {
+                cleanup();
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-pkg `{}` exited {} (expected {})",
+                    desc, code, want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                cleanup();
+                serial_println!("[spawn]   FAIL: fastpy-pkg `{}` — {:?}", desc, e);
+                return Err(e);
+            }
+        }
+    }
+
+    // The record must now carry the v2 digest+deps, and the old digest gone.
+    let db = match crate::fs::Vfs::read_file(DB_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            cleanup();
+            serial_println!("[spawn]   FAIL: could not read back {} — {:?}", DB_PATH, e);
+            return Err(e);
+        }
+    };
+    let contains = |needle: &[u8]| -> bool { db.windows(needle.len()).any(|w| w == needle) };
+    let new_record = contains(b"foo cd352a42 libc");
+    let old_gone = !contains(b"86732e22");
+
+    // And the new content-addressed blob must hold the v2 payload.
+    let blob_ok = match crate::fs::Vfs::read_file(V2_BLOB) {
+        Ok(bytes) => bytes == V2_CONTENT,
+        Err(_) => false,
+    };
+
+    cleanup();
+
+    if !new_record || !old_gone || !blob_ok {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pkg upgrade did not replace the record/blob \
+             (new_record={}, old_gone={}, blob_ok={})",
+            new_record, old_gone, blob_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pkg` (ring 3: `upgrade` — reject upgrade of uninstalled foo \
+         (exit 1), install v1, upgrade to v2 (digest/deps replaced in place, new blob written)): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the System V initial stack places the **`envp`
 /// array at the correct variable offset**.
 ///

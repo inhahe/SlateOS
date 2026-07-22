@@ -15,6 +15,17 @@ is a comma-separated list of dependency package names, or `-` for none:
         record for the same name).  `<deps>` is a comma list or `-`.  Prints
         "installed <name> <digest> <deps>", exit 0.
 
+    pkg upgrade <name> <payload-path> <deps>
+        replace an **already-installed** package's content and record in place:
+        like `install`, but requires the package to already exist — prints
+        "not installed <name>" + exit 1 if it does not (this is the distinction
+        from `install`, which creates unconditionally).  On success reads the new
+        payload, writes its content-addressed blob, upserts the record with the
+        new digest/deps, and prints "upgraded <name> <old-digest> -> <new-digest>"
+        + exit 0.  (The old content blob is left in place: pure-mode fastpy has no
+        file-unlink, and orphan blobs are harmless in a content-addressed store —
+        a future `gc` subcommand can reclaim unreferenced blobs.)
+
     pkg remove <name>
         drop the named record from the registry (read-modify-write).  Prints
         "removed <name>" + exit 0 if it was present, else "not found <name>" +
@@ -335,6 +346,33 @@ SRC = (
     "        sys.exit(0)\n"
     "    print('not found ' + name)\n"
     "    sys.exit(1)\n"
+    "if cmd == 'upgrade':\n"
+    "    name = sys.argv[2]\n"
+    "    src_path = sys.argv[3]\n"
+    "    deps = sys.argv[4]\n"
+    "    f = open(db_path, 'r')\n"
+    "    db = f.read()\n"
+    "    f.close()\n"
+    "    line = find_line(db, name)\n"
+    "    if len(line) == 0:\n"
+    "        print('not installed ' + name)\n"
+    "        sys.exit(1)\n"
+    "    old = field(line, 1)\n"
+    "    f = open(src_path, 'r')\n"
+    "    payload = f.read()\n"
+    "    f.close()\n"
+    "    digest = to_hex8(fnv1a(payload))\n"
+    "    store_path = '/tmp/store-' + digest + '.blob'\n"
+    "    f = open(store_path, 'w')\n"
+    "    f.write(payload)\n"
+    "    f.close()\n"
+    "    db = db_remove(db, name)\n"
+    "    db = db + name + ' ' + digest + ' ' + deps + chr(10)\n"
+    "    f = open(db_path, 'w')\n"
+    "    f.write(db)\n"
+    "    f.close()\n"
+    "    print('upgraded ' + name + ' ' + old + ' -> ' + digest)\n"
+    "    sys.exit(0)\n"
     "if cmd == 'query':\n"
     "    name = sys.argv[2]\n"
     "    f = open(db_path, 'r')\n"
@@ -453,7 +491,7 @@ SRC = (
     "    count = db_list(db)\n"
     "    print('total ' + str(count))\n"
     "    sys.exit(0)\n"
-    "print('usage: pkg install|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
+    "print('usage: pkg install|upgrade|remove|query|deps|check|verify|search|commit|rollback|current|list')\n"
     "sys.exit(2)\n"
 )
 

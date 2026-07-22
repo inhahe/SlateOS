@@ -53607,19 +53607,20 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##       Niche; would need the command node to record its END line as well as
 ##       its start line. Deferred as very low value.
 
-## TODO (initiative-F / native mprotect) — 2026-07-21
-##   Implement a native SYS_MPROTECT handler (kernel native syscall #22,
-##   reserved in kernel/src/syscall/number.rs). Currently unregistered →
-##   native mprotect() returns NotSupported/ENOTSUP (safe stub). The Linux
-##   ABI mprotect (linux.rs::sys_mprotect, Linux #10) is complete and used by
-##   the Linux compat path; only the *native* ABI lacks a handler.
-##   Preferred fix: factor sys_mprotect's core (mprotect_validate_args +
-##   VMA-coverage gap check + per-4KiB PTE flag walk) into a helper returning
-##   KernelResult, then register a native handler at #22 that returns
-##   KernelError codes so posix errno::translate maps it uniformly. See
-##   known-issues.md TD-NATIVE-MPROTECT. Trigger: when a native binary needs
-##   working mprotect (e.g. a fastpy component that mmaps PROT_NONE then
-##   upgrades, or wants W^X page transitions).
+## DONE (initiative-F / native mprotect) — 2026-07-22
+##   Implemented the native SYS_MPROTECT handler (native syscall #22). Took the
+##   preferred DRY route: factored an ABI-neutral core into
+##   kernel/src/syscall/linux.rs — mprotect_validate_core (KernelResult gate) +
+##   pub(crate) mprotect_core (KernelResult<()> holding VMA-coverage check,
+##   protect_vma_range, per-4KiB change_flags_4k, batched mprotect_flush_range).
+##   sys_mprotect (Linux #10) is now a thin wrapper mapping KernelError→linux
+##   errno; syscall::handlers::sys_mprotect calls the same core and returns raw
+##   KernelError codes, registered at #22 in syscall::dispatch. posix
+##   mman::mprotect's errno::translate now maps 0/EINVAL/ENOMEM/ESRCH — no more
+##   ENOTSUP. New native dispatch self-test test_dispatch_mprotect_native proves
+##   the handler is wired (not NotSupported) + the gate order. mprotect_validate_args
+##   kept as a thin wrapper so sys_pkey_mprotect is unchanged. See known-issues.md
+##   TD-NATIVE-MPROTECT (RESOLVED).
 
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main

@@ -1131,6 +1131,30 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `mprotect(addr, len, prot)` — native ABI (`SYS_MPROTECT` = 22).
+///
+/// Change the protection of the pages in `[addr, addr+len)` in the calling
+/// process's address space.  Delegates the entire operation — Linux-style
+/// argument validation, VMA-coverage check, VMA bookkeeping, per-4 KiB-page
+/// PTE update, and a single batched TLB shootdown — to the ABI-neutral
+/// [`crate::syscall::linux::mprotect_core`], which is the *same* core the
+/// Linux-ABI `mprotect` (Linux syscall #10) runs.  We only differ in error
+/// encoding: the native ABI returns raw [`KernelError`] codes (mapped by
+/// posix's `errno::translate`), whereas the Linux ABI remaps them to Linux
+/// errno.  This closes the TD-NATIVE-MPROTECT stub (previously the native
+/// path had no handler at 22 and resolved to `ENOTSUP`).
+///
+/// `prot` is the standard `PROT_READ`=1 / `PROT_WRITE`=2 / `PROT_EXEC`=4
+/// mask (matching what posix `mman::mprotect` forwards); unknown bits are
+/// rejected with `InvalidArgument`.  `PROT_NONE` (prot == 0) makes the
+/// range user-inaccessible for real (see design-decisions §32).
+pub fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
+    match crate::syscall::linux::mprotect_core(args.arg0, args.arg1, args.arg2) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// Threshold (in 4 KiB pages) at which the mmap/munmap TLB flush switches
 /// from a per-page range shootdown (`invlpg` per page on each CPU) to a
 /// full TLB flush (CR3 reload).  Mirrors the `mprotect` path

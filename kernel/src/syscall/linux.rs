@@ -6491,21 +6491,30 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
 /// run identical Linux-style gate sequences before diverging on the
 /// pkey-allocation check.
 enum MprotectValidation {
-    Proceed { end: u64, len_aligned: u64 },
+    Proceed { end: u64 },
     Done(SyscallResult),
 }
 
-/// Run Linux's mprotect argument validation (Linux gate order from
+/// ABI-neutral mprotect argument validation (Linux gate order from
 /// `mm/mprotect.c::do_mprotect_pkey`).  Does not touch page tables.
 ///
+/// Returns:
+///   * `Ok(None)`      — zero-length range: succeed without doing anything.
+///   * `Ok(Some(end))` — all gates passed; `end` is the (4 KiB-aligned)
+///                       exclusive end of the range to operate on.
+///   * `Err(e)`        — a validation error as a [`KernelError`], so each
+///                       ABI (Linux vs native) can map it to its own errno
+///                       convention.  Never fabricates: EINVAL cases map to
+///                       `InvalidArgument`, ENOMEM cases to `OutOfMemory`.
+///
 /// Gate order:
-///   1. addr & (PAGE_SIZE - 1)                → -EINVAL
-///   2. !len                                  → 0
-///   3. PAGE_ALIGN(len) overflow              → -ENOMEM
-///   4. addr + len_aligned overflow           → -ENOMEM
-///   5. prot & ~PROT_VALID_MASK               → -EINVAL  (arch_validate_prot)
-///   6. range outside user space              → -ENOMEM  (find_vma_intersection NULL)
-fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation {
+///   1. addr & (PAGE_SIZE - 1)                → EINVAL  (InvalidArgument)
+///   2. !len                                  → 0       (Ok(None))
+///   3. PAGE_ALIGN(len) overflow              → ENOMEM  (OutOfMemory)
+///   4. addr + len_aligned overflow           → ENOMEM  (OutOfMemory)
+///   5. prot & ~PROT_VALID_MASK               → EINVAL  (arch_validate_prot)
+///   6. range outside user space              → ENOMEM  (find_vma_intersection NULL)
+fn mprotect_validate_core(addr: u64, len: u64, prot: u64) -> crate::error::KernelResult<Option<u64>> {
     use crate::mm::page_table::{HW_PAGE_SIZE, USER_SPACE_END};
 
     const PROT_READ: u64 = 1;
@@ -6521,11 +6530,11 @@ fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation 
     let page = HW_PAGE_SIZE as u64;
     // (1) addr must be (4 KiB) page-aligned.
     if (addr & (page - 1)) != 0 {
-        return MprotectValidation::Done(linux_err(errno::EINVAL));
+        return Err(KernelError::InvalidArgument);
     }
     // (2) POSIX: zero-length range succeeds without doing anything.
     if len == 0 {
-        return MprotectValidation::Done(SyscallResult::ok(0));
+        return Ok(None);
     }
     // (3) Round len up to whole 4 KiB pages.  Linux silently wraps via
     // PAGE_ALIGN and catches it in (4); we explicitly catch the wrap.
@@ -6534,49 +6543,84 @@ fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation 
         .map(|v| v & !(page - 1))
     {
         Some(v) => v,
-        None => return MprotectValidation::Done(linux_err(errno::ENOMEM)),
+        None => return Err(KernelError::OutOfMemory),
     };
     // (4) end = addr + len_aligned; overflow → ENOMEM.
     let end = match addr.checked_add(len_aligned) {
         Some(e) => e,
-        None => return MprotectValidation::Done(linux_err(errno::ENOMEM)),
+        None => return Err(KernelError::OutOfMemory),
     };
     // (5) Reject unknown prot bits (arch_validate_prot equivalent).
     if (prot & !PROT_VALID_MASK) != 0 {
-        return MprotectValidation::Done(linux_err(errno::EINVAL));
+        return Err(KernelError::InvalidArgument);
     }
     // (6) Range must lie entirely in user space — Linux's
     // find_vma_intersection returns NULL for kernel addresses and
     // surfaces ENOMEM.
     if addr >= USER_SPACE_END || end > USER_SPACE_END {
-        return MprotectValidation::Done(linux_err(errno::ENOMEM));
+        return Err(KernelError::OutOfMemory);
     }
-    MprotectValidation::Proceed { end, len_aligned }
+    Ok(Some(end))
 }
 
+/// Linux-ABI wrapper over [`mprotect_validate_core`], preserving the
+/// [`MprotectValidation`] form that [`sys_pkey_mprotect`] consumes: a
+/// short-circuit (`Done`) for both the zero-length success and every
+/// validation error, or `Proceed { end }` when the caller should walk the
+/// range.  Errors are mapped to Linux errno via [`linux_errno_for`].
+fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation {
+    match mprotect_validate_core(addr, len, prot) {
+        Ok(None) => MprotectValidation::Done(SyscallResult::ok(0)),
+        Ok(Some(end)) => MprotectValidation::Proceed { end },
+        Err(e) => MprotectValidation::Done(linux_err(linux_errno_for(e))),
+    }
+}
+
+/// `mprotect(addr, len, prot)` — Linux-ABI entry point.
+///
+/// A thin wrapper over the ABI-neutral [`mprotect_core`]: it runs the
+/// shared validation + page-table work and maps any [`KernelError`] to a
+/// Linux errno via [`linux_errno_for`].  The native ABI ([`SYS_MPROTECT`]
+/// = 22, registered in `syscall::handlers::sys_mprotect`) calls the same
+/// core but returns raw [`KernelError`] codes for posix's `errno::translate`
+/// to remap — so both ABIs share one implementation of the actual work.
 fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
+    match mprotect_core(args.arg0, args.arg1, args.arg2) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// ABI-neutral core of `mprotect(addr, len, prot)` — change page
+/// protection on `[addr, addr+len)` in the calling process's address space.
+///
+/// Shared by the Linux ABI ([`sys_mprotect`]) and the native ABI
+/// (`syscall::handlers::sys_mprotect`, syscall number [`SYS_MPROTECT`] = 22)
+/// so there is exactly one implementation of the VMA-coverage check, VMA
+/// bookkeeping, per-4 KiB-page PTE update, and TLB shootdown.  Returns
+/// `KernelResult<()>`; each ABI maps `Err(e)` to its own errno convention.
+///
+/// See [`mprotect_validate_core`] for the argument-gate order and the
+/// original per-pass commentary preserved inline below.
+pub(crate) fn mprotect_core(addr: u64, len: u64, prot: u64) -> crate::error::KernelResult<()> {
     use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
 
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
 
-    let addr = args.arg0;
-    let len = args.arg1;
-    let prot = args.arg2;
-
-    // All Linux gate-order validation is delegated to
-    // [`mprotect_validate_args`] so that [`sys_pkey_mprotect`] can
-    // share the exact same gate sequence before its pkey check.
-    // See that fn's doc comment for the full Linux gate order.
+    // All gate-order validation is delegated to [`mprotect_validate_core`]
+    // (shared with the Linux [`sys_pkey_mprotect`] gate via
+    // [`mprotect_validate_args`]).  See that fn's doc comment for the full
+    // Linux gate order.
     //
     // We operate at the 4 KiB hardware-page granularity (Linux's PAGE_SIZE):
     // glibc's RELRO `mprotect` covers a 4 KiB-aligned (not 16 KiB-aligned)
     // sub-range that may touch only some subpages of a 16 KiB frame whose
     // other subpages belong to a differently-permissioned segment.  Each
     // hardware page's PTE is updated individually via [`change_flags_4k`].
-    let end = match mprotect_validate_args(addr, len, prot) {
-        MprotectValidation::Proceed { end, len_aligned: _ } => end,
-        MprotectValidation::Done(result) => return result,
+    let end = match mprotect_validate_core(addr, len, prot)? {
+        None => return Ok(()), // zero-length range: nothing to do.
+        Some(end) => end,
     };
     let page = HW_PAGE_SIZE as u64;
 
@@ -6584,11 +6628,11 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     let task_id = crate::sched::current_task_id();
     let pid = match crate::proc::thread::owner_process(task_id) {
         Some(p) if p != 0 => p,
-        _ => return linux_err(errno::ESRCH),
+        _ => return Err(KernelError::NoSuchProcess),
     };
     let pml4 = match crate::proc::pcb::get_pml4(pid) {
         Some(p) if p != 0 => p,
-        _ => return linux_err(errno::ESRCH),
+        _ => return Err(KernelError::NoSuchProcess),
     };
 
     let want_write = (prot & PROT_WRITE) != 0;
@@ -6618,14 +6662,14 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     // VMA, then require every page in those gaps to have a present PTE;
     // any gap page that is also PTE-absent is a genuine hole → ENOMEM.
     match crate::proc::pcb::vma_coverage_gaps(pid, addr, end) {
-        None => return linux_err(errno::ESRCH),
+        None => return Err(KernelError::NoSuchProcess),
         Some(gaps) => {
             for (g_start, g_end) in gaps {
                 let mut va = g_start;
                 while va < g_end {
                     if page_table::translate_flags(pml4, VirtAddr::new(va)).is_none() {
                         // Genuine hole: no VMA and no present PTE.
-                        return linux_err(errno::ENOMEM);
+                        return Err(KernelError::OutOfMemory);
                     }
                     va = va.saturating_add(page);
                 }
@@ -6643,10 +6687,7 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     // touch) — see [`pcb::protect_vma_range`].  VMA-less but PTE-present
     // ranges (the eagerly-mapped main-exe segments) are left untouched by
     // this call and handled by the PTE pass below.
-    match crate::proc::pcb::protect_vma_range(pid, addr, end, want_write, want_exec, want_access) {
-        Ok(()) => {}
-        Err(e) => return linux_err(linux_errno_for(e)),
-    }
+    crate::proc::pcb::protect_vma_range(pid, addr, end, want_write, want_exec, want_access)?;
 
     // Pass 2 — update the PTEs of pages that are *already* present.  Not-
     // present pages are intentionally skipped: they are demand-paged and
@@ -6687,7 +6728,7 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
                 // already modified so other CPUs don't observe stale
                 // permissions for those pages.
                 mprotect_flush_range(addr, va);
-                return linux_err(linux_errno_for(e));
+                return Err(e);
             }
         }
         // Safe: va < end <= USER_SPACE_END so va + page cannot overflow
@@ -6699,7 +6740,7 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     // (cross-CPU via IPI when SMP is active, no-op IPI on single-CPU).
     mprotect_flush_range(addr, end);
 
-    SyscallResult::ok(0)
+    Ok(())
 }
 
 /// Threshold (in 4 KiB pages) at which `mprotect` switches from a

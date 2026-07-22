@@ -145,13 +145,15 @@ pub const SYS_MUNMAP: u64 = 21;
 
 /// Change the protection flags on a range of pages (native mprotect).
 ///
-/// **Reserved — no native handler is registered yet.**  The Linux-ABI
-/// mprotect (linux.rs, Linux syscall #10) is fully implemented and used
-/// by the Linux compatibility path; a *native* mprotect that returns
-/// `KernelError` codes (so `errno::translate` in posix works uniformly
-/// with the rest of the native ABI) has not been wired up.  Until it is,
-/// a native `mprotect()` call resolves to this number, finds no handler,
-/// and returns `NotSupported` (→ `ENOTSUP`) — safe and honest.
+/// **Implemented** (`syscall::handlers::sys_mprotect`, registered in the
+/// native dispatch table).  It delegates to the ABI-neutral
+/// `syscall::linux::mprotect_core` — the *same* core the Linux-ABI mprotect
+/// (linux.rs, Linux syscall #10) runs — and returns `KernelError` codes so
+/// posix's `errno::translate` maps failures uniformly with the rest of the
+/// native ABI (`Ok(())`→0, `InvalidArgument`→EINVAL, `OutOfMemory`→ENOMEM,
+/// `NoSuchProcess`→ESRCH).  This closed the TD-NATIVE-MPROTECT stub where a
+/// native `mprotect()` previously found no handler and returned `NotSupported`
+/// (→ `ENOTSUP`).
 ///
 /// This number is reserved here so it can never be reassigned to an
 /// unrelated syscall and re-create the class of bug where posix's
@@ -160,10 +162,6 @@ pub const SYS_MUNMAP: u64 = 21;
 /// `arg0`: virtual address (4 KiB-aligned).
 /// `arg1`: length in bytes.
 /// `arg2`: prot mask (PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4).
-///
-/// TODO(initiative-F/mprotect): implement a native handler that reuses
-/// the Linux mprotect core (kernel/src/syscall/linux.rs::sys_mprotect)
-/// but returns `KernelError` instead of Linux errno.  See todo.txt.
 pub const SYS_MPROTECT: u64 = 22;
 
 /// Register to receive interrupts from an IOAPIC IRQ line.

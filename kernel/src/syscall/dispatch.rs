@@ -78,7 +78,7 @@ use super::number::{
     SYS_MM_SET_PROFILE, SYS_MM_GET_PROFILE,
     SYS_SYSTEM_SET_PROFILE,
     SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL,
-    SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
+    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_CRASH_INFO,
     SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
@@ -257,6 +257,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_DEBUG_PRINT as usize] = Some(handlers::sys_debug_print);
     handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap);
     handlers[SYS_MUNMAP as usize] = Some(handlers::sys_munmap);
+    handlers[SYS_MPROTECT as usize] = Some(handlers::sys_mprotect);
     handlers[SYS_IRQ_REGISTER as usize] = Some(handlers::sys_irq_register);
     handlers[SYS_IRQ_WAIT as usize] = Some(handlers::sys_irq_wait);
     handlers[SYS_IRQ_RELEASE as usize] = Some(handlers::sys_irq_release);
@@ -755,8 +756,70 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
     test_io_dir_classification()?;
+    test_dispatch_mprotect_native()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
+    Ok(())
+}
+
+/// Verify the **native** `mprotect` (SYS_MPROTECT = 22) is wired into the
+/// dispatch table and runs the shared argument-validation gate, returning
+/// raw `KernelError` codes (not Linux errno, and — crucially — not
+/// `NotSupported`, which is what the old TD-NATIVE-MPROTECT stub returned).
+///
+/// This exercises the argument gates that short-circuit *before* any process
+/// or page-table state is touched, so it is safe to run from the kernel
+/// self-test task (which is not a user process).  The full page-table effect
+/// is covered by the shared `mprotect_core`, which the Linux-ABI mprotect —
+/// with its own boot self-tests and real glibc RELRO usage — also runs.
+fn test_dispatch_mprotect_native() -> KernelResult<()> {
+    let mk = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0, arg1, arg2, arg3: 0, arg4: 0, arg5: 0,
+    };
+
+    // (a) Misaligned address → InvalidArgument (EINVAL), and NOT
+    //     NotSupported — this alone proves the handler is registered.
+    let r = dispatch(SYS_MPROTECT, &mk(0x1, 0x1000, 0x1));
+    if r.value == i64::from(KernelError::NotSupported.code()) {
+        serial_println!("[syscall]   FAIL: native mprotect unregistered (NotSupported)");
+        return Err(KernelError::InternalError);
+    }
+    if r.value != i64::from(KernelError::InvalidArgument.code()) {
+        serial_println!(
+            "[syscall]   FAIL: native mprotect misalign returned {}, expected InvalidArgument",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (b) Zero length → success (0), no work.
+    let r = dispatch(SYS_MPROTECT, &mk(0x1000, 0, 0x1));
+    if r.value != 0 {
+        serial_println!("[syscall]   FAIL: native mprotect len=0 returned {}, expected 0", r.value);
+        return Err(KernelError::InternalError);
+    }
+
+    // (c) Unknown prot bit (0x8) on an otherwise-valid request → InvalidArgument.
+    let r = dispatch(SYS_MPROTECT, &mk(0x1000, 0x1000, 0x8));
+    if r.value != i64::from(KernelError::InvalidArgument.code()) {
+        serial_println!(
+            "[syscall]   FAIL: native mprotect bad-prot returned {}, expected InvalidArgument",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (d) Length overflow (PAGE_ALIGN wraps) → OutOfMemory (ENOMEM).
+    let r = dispatch(SYS_MPROTECT, &mk(0x1000, u64::MAX, 0x1));
+    if r.value != i64::from(KernelError::OutOfMemory.code()) {
+        serial_println!(
+            "[syscall]   FAIL: native mprotect len-overflow returned {}, expected OutOfMemory",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[syscall]   Native mprotect (SYS_MPROTECT=22) wired + gate order: OK");
     Ok(())
 }
 

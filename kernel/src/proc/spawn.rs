@@ -7040,6 +7040,109 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-freq` utility — the first fastpy
+/// SlateOS tool built on an **associative container** (`dict[str, int]`).
+///
+/// `freq <file>` counts how many times each distinct line occurs and prints one
+/// `"<count> <line>"` record per distinct line.  `sort` proved the native
+/// `list`; this proves the native `dict`: construction (`{}`), membership
+/// (`line in d`), subscript get/set (`d[line]`), and key iteration
+/// (`for k in d:`) — all lowered to native `fastpy_dict_*` calls, zero CPython
+/// bridge.  It is the associative analogue of `uniq -c` (counts every
+/// occurrence, not just adjacent runs).
+///
+/// The harness stages a file with known per-line counts (`FREQ_a`×3,
+/// `FREQ_b`×2, `FREQ_c`×1) and asserts the process becomes a `Zombie` and exits
+/// 0.  Because dict iteration order is an implementation detail, the boot
+/// harness verifies the *set* of emitted records (`3 FREQ_a`, `2 FREQ_b`,
+/// `1 FREQ_c`) in the serial log rather than their order.
+pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
+    static FASTPY_FREQ_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-freq/fastpy-freq.elf");
+
+    const FREQ_PATH: &str = "/tmp/freq-input.txt";
+    const FREQ_PATH_ARG: &[u8] = b"/tmp/freq-input.txt";
+    // Known per-line counts: FREQ_a occurs 3x, FREQ_b 2x, FREQ_c 1x.  Expected
+    // records (in some dict order): "3 FREQ_a", "2 FREQ_b", "1 FREQ_c".
+    const FREQ_CONTENT: &[u8] = b"FREQ_a\nFREQ_b\nFREQ_a\nFREQ_c\nFREQ_a\nFREQ_b\n";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `freq` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_FREQ_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(FREQ_PATH, FREQ_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", FREQ_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-freq", FREQ_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-freq",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_FREQ_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(FREQ_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-freq spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(FREQ_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-freq (ring 3) — expected Zombie, got {:?} (faulted on the \
+             argv/open/read/dict-count path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-freq (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (nonzero => an uncaught exception, e.g. the open failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `freq` (ring 3: dict[str,int] count via `line in d` / \
+         `d[line]` / `for k in d` — expect records `3 FREQ_a` `2 FREQ_b` `1 FREQ_c` above): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

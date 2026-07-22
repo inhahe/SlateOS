@@ -1662,6 +1662,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-freq` utility: `freq <file>` counts each
+    // distinct line's occurrences in a dict[str,int] (native dict construct/
+    // membership/get/set + key iteration) — the first fastpy dict tool.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_freq() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `freq` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

@@ -1877,6 +1877,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-statvfs`: os.statvfs → SYS_FS_STATVFS reports the
+    // whole filesystem's capacity/limits as a 10-int statvfs_result list;
+    // genuinely distinct from os.stat's per-file metadata. The kernel
+    // cross-checks the tool's observed f_bsize/f_namemax against its own
+    // Vfs::statvfs readout exactly.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_statvfs() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `statvfs` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

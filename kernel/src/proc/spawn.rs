@@ -10378,6 +10378,228 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-statvfs` utility — a **genuinely
+/// distinct** lowering from `os.stat`: filesystem-wide capacity/limits, not
+/// per-file metadata.
+///
+/// One `os.statvfs(path)` call → native `fastpy_os_statvfs` → posix `statvfs()`
+/// → `SYS_FS_STATVFS` (gated on `Rights::METADATA`) reports the metrics of the
+/// *filesystem the path lives on* and returns CPython's `os.statvfs_result`
+/// sequence form as a 10-int list `(f_bsize, f_frsize, f_blocks, f_bfree,
+/// f_bavail, f_files, f_ffree, f_favail, f_flag, f_namemax)` — indexed with
+/// `st[i]` like `os.stat`/`os.listdir`.
+///
+/// The tool creates a 1-byte probe file on `/tmp` (memfs), `os.statvfs`es it,
+/// checks three internal invariants (`f_bsize>=1`, `f_frsize==f_bsize`,
+/// `f_namemax>=1`), and writes the observed `"<f_bsize>,<f_namemax>"` decimal
+/// pair.  This kernel harness then independently `Vfs::statvfs`es TARGET and
+/// asserts the tool's two values match the **live** filesystem exactly (with
+/// the same posix zero-guards).  `/tmp` (memfs) has an unusual `block_size` of
+/// **1** and `max_name_len` of **255**, so a stub returning constant/guessed
+/// values cannot match both.  Granted `READ|WRITE|METADATA` (create/write the
+/// probe need WRITE, statvfs needs METADATA).
+pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
+    static FASTPY_STATVFS_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-statvfs/fastpy-statvfs.elf");
+
+    const TARGET: &str = "/tmp/statvfs-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/statvfs-target.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-statvfs.out";
+    // posix zero-guards (see posix/src/statvfs.rs::fill_statvfs_from_raw): a
+    // zero block size or max-name-len is reported as these defaults.
+    const DEFAULT_BLOCK_SIZE: u64 = 16384;
+    const DEFAULT_NAMEMAX: u64 = 255;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `statvfs` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_STATVFS_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // Create/write of the probe file needs Rights::WRITE; os.statvfs →
+    // SYS_FS_STATVFS gates on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-statvfs", TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-statvfs",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_STATVFS_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-statvfs spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-statvfs (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.statvfs may have mis-lowered the list return)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means all three field invariants held (exit 6 = a stub or a
+    // mis-lowered struct: implausible bsize/frsize/namemax).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-statvfs (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (6 = an os.statvfs field was implausible)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independently query the filesystem and compute the guarded fields the
+    // tool must have observed for the SAME path.
+    let info = match crate::fs::Vfs::statvfs(TARGET) {
+        Ok(i) => i,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-statvfs (ring 3) — could not statvfs TARGET {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    let expected_bsize = if info.block_size == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        info.block_size
+    };
+    let expected_namemax = if info.max_name_len == 0 {
+        DEFAULT_NAMEMAX
+    } else {
+        info.max_name_len
+    };
+
+    // Read the tool's "<f_bsize>,<f_namemax>" and cross-check both exactly.
+    let written = match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-statvfs (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Parse two comma-separated decimal fields (bsize, namemax).
+    let mut fields: [u64; 2] = [0, 0];
+    let mut idx = 0usize;
+    let mut saw_digit = false;
+    let mut ok_format = true;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            if let Some(slot) = fields.get_mut(idx) {
+                *slot = slot.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+            }
+        } else if b == b',' {
+            if !saw_digit {
+                ok_format = false;
+                break;
+            }
+            idx = idx.saturating_add(1);
+            saw_digit = false;
+            if idx >= fields.len() {
+                ok_format = false;
+                break;
+            }
+        } else {
+            ok_format = false;
+            break;
+        }
+    }
+    // We must have parsed exactly two fields (idx==1 after the single comma,
+    // and the second field saw at least one digit).
+    if !ok_format || idx != 1 || !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-statvfs (ring 3) — malformed output {:?} (expected \
+             \"<f_bsize>,<f_namemax>\")",
+            written.as_slice()
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    let reported_bsize = fields[0];
+    let reported_namemax = fields[1];
+
+    if reported_bsize != expected_bsize {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-statvfs (ring 3) — tool reported f_bsize {} but the live \
+             filesystem's block size is {} (os.statvfs's f_bsize is unverifiable / a stub)",
+            reported_bsize, expected_bsize
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if reported_namemax != expected_namemax {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-statvfs (ring 3) — tool reported f_namemax {} but the live \
+             filesystem's max name length is {} (os.statvfs's f_namemax is unverifiable / a stub)",
+            reported_namemax, expected_namemax
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `statvfs` (ring 3: os.statvfs → SYS_FS_STATVFS reported the \
+         whole filesystem's metrics in one call, returned as a 10-int statvfs_result list; the \
+         tool's observed f_bsize={} and f_namemax={} matched the kernel's independent \
+         Vfs::statvfs readout exactly): OK",
+        reported_bsize, reported_namemax
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

@@ -20483,6 +20483,13 @@ fn sys_chown(args: &SyscallArgs) -> SyscallResult {
 /// `(uid_t)-1` / `(gid_t)-1` "leave unchanged" sentinels are honoured by
 /// `Vfs::set_owner` itself.  Requires a File-WRITE capability.
 fn chown_apply(path: &str, uid_arg: u64, gid_arg: u64) -> SyscallResult {
+    chown_apply_ex(path, uid_arg, gid_arg, false)
+}
+
+/// Like [`chown_apply`] but with explicit symlink-follow control.  When
+/// `no_follow` is set (`lchown` / `fchownat(AT_SYMLINK_NOFOLLOW)`), the link
+/// inode itself is chowned rather than its target.
+fn chown_apply_ex(path: &str, uid_arg: u64, gid_arg: u64, no_follow: bool) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -20490,7 +20497,12 @@ fn chown_apply(path: &str, uid_arg: u64, gid_arg: u64) -> SyscallResult {
     let uid = uid_arg as u32;
     #[allow(clippy::cast_possible_truncation)]
     let gid = gid_arg as u32;
-    match crate::fs::Vfs::set_owner(path, uid, gid) {
+    let res = if no_follow {
+        crate::fs::Vfs::set_owner_no_follow(path, uid, gid)
+    } else {
+        crate::fs::Vfs::set_owner(path, uid, gid)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -20537,10 +20549,10 @@ fn sys_lchown(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Fidelity gap: lchown(2) must NOT follow a final symlink, but
-    // `Vfs::set_owner` always follows (resolve_follow).  The common
-    // non-symlink case is correct; see known-issues B-CHOWN1.
-    chown_apply(&path, args.arg1, args.arg2)
+    // lchown(2) must NOT follow a final symlink — chown the link inode
+    // itself.  `set_owner_no_follow` resolves the final component without
+    // following (closes known-issues B-CHOWN1 gap #1).
+    chown_apply_ex(&path, args.arg1, args.arg2, true)
 }
 
 /// `fchownat(dirfd, path, uid, gid, flags)`.
@@ -20616,9 +20628,10 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Fidelity gap: AT_SYMLINK_NOFOLLOW (0x100) is ignored — `Vfs::set_owner`
-    // always follows the final symlink.  See known-issues B-CHOWN1.
-    chown_apply(&path, args.arg2, args.arg3)
+    // AT_SYMLINK_NOFOLLOW (0x100): chown the link inode itself rather than
+    // its target (closes known-issues B-CHOWN1 gap #1).
+    let no_follow = flags & 0x100 != 0;
+    chown_apply_ex(&path, args.arg2, args.arg3, no_follow)
 }
 
 // ---------------------------------------------------------------------------
@@ -21290,9 +21303,10 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 // times may be NULL (use the current wall-clock time), and per-field UTIME_NOW
 // / UTIME_OMIT selectors; all honoured below.
 //
+// AT_SYMLINK_NOFOLLOW is honoured: when set, `Vfs::set_times_no_follow`
+// stamps the link inode itself rather than its target.
+//
 // Fidelity gaps (documented in known-issues B-UTIME1):
-//   * `Vfs::set_times` always follows symlinks, so `AT_SYMLINK_NOFOLLOW` is a
-//     no-op — a symlink target is touched instead of the link itself.
 //   * The `Timestamp = u64` VFS API uses 0 ("ns since epoch") as the
 //     "leave this field unchanged" sentinel, so a request to set a field to
 //     exactly the Unix epoch (or any pre-epoch / negative instant) is treated
@@ -21487,7 +21501,14 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
-    match crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns) {
+    // AT_SYMLINK_NOFOLLOW: stamp the link inode itself rather than its
+    // target (closes known-issues B-CHOWN1 gap #1 for utimensat).
+    let res = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        crate::fs::Vfs::set_times_no_follow(&target, atime_ns, mtime_ns)
+    } else {
+        crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }

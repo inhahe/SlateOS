@@ -967,17 +967,14 @@ impl FileSystem for Ext4Fs {
 
     fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
+        self.set_owner_ino(ino, uid, gid)
+    }
 
-        // Write the full 32-bit UID/GID (low 16 in i_uid/i_gid, high 16 in i_osd2).
-        set_inode_uid_32(&mut inode, uid);
-        set_inode_gid_32(&mut inode, gid);
-
-        // chown advances ctime (metadata change), not mtime.
-        stamp_inode_ctime(&mut inode);
-        self.driver.write_inode(ino, &inode)?;
-        self.driver.flush()?;
-        Ok(())
+    /// `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)`: chown the link inode itself.
+    /// Resolves the final component WITHOUT following a trailing symlink.
+    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.set_owner_ino(ino, uid, gid)
     }
 
     fn set_times(
@@ -987,27 +984,18 @@ impl FileSystem for Ext4Fs {
         modified_ns: crate::fs::vfs::Timestamp,
     ) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        let mut inode = self.driver.read_inode(ino)?;
+        self.set_times_ino(ino, accessed_ns, modified_ns)
+    }
 
-        // Convert nanoseconds to seconds (ext4 core inode stores seconds).
-        // Pass 0 to leave a timestamp unchanged.
-        let ns_to_sec = |ns: u64| -> u32 {
-            if ns == 0 { return 0; }
-            (ns / 1_000_000_000) as u32
-        };
-
-        if accessed_ns != 0 {
-            inode.i_atime = ns_to_sec(accessed_ns);
-        }
-        if modified_ns != 0 {
-            inode.i_mtime = ns_to_sec(modified_ns);
-            // Also update ctime (metadata change time) when mtime changes.
-            inode.i_ctime = ns_to_sec(modified_ns);
-        }
-
-        self.driver.write_inode(ino, &inode)?;
-        self.driver.flush()?;
-        Ok(())
+    /// `lutimes`/`utimensat(AT_SYMLINK_NOFOLLOW)`: stamp the link inode itself.
+    fn set_times_no_follow(
+        &mut self,
+        path: &str,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.set_times_ino(ino, accessed_ns, modified_ns)
     }
 
     fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
@@ -1350,6 +1338,50 @@ impl FileSystem for Ext4Fs {
 }
 
 impl Ext4Fs {
+    /// Shared body for [`set_owner`]/[`set_owner_no_follow`]: chown an
+    /// already-resolved inode.  Writes the full 32-bit UID/GID and advances
+    /// ctime (chown is a metadata change, not a data change).
+    fn set_owner_ino(&mut self, ino: u32, uid: u32, gid: u32) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+        // Write the full 32-bit UID/GID (low 16 in i_uid/i_gid, high 16 in i_osd2).
+        set_inode_uid_32(&mut inode, uid);
+        set_inode_gid_32(&mut inode, gid);
+        stamp_inode_ctime(&mut inode);
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    /// Shared body for [`set_times`]/[`set_times_no_follow`]: stamp an
+    /// already-resolved inode.  Pass 0 for a timestamp to leave it unchanged.
+    fn set_times_ino(
+        &mut self,
+        ino: u32,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Convert nanoseconds to seconds (ext4 core inode stores seconds).
+        let ns_to_sec = |ns: u64| -> u32 {
+            if ns == 0 { return 0; }
+            (ns / 1_000_000_000) as u32
+        };
+
+        if accessed_ns != 0 {
+            inode.i_atime = ns_to_sec(accessed_ns);
+        }
+        if modified_ns != 0 {
+            inode.i_mtime = ns_to_sec(modified_ns);
+            // Also update ctime (metadata change time) when mtime changes.
+            inode.i_ctime = ns_to_sec(modified_ns);
+        }
+
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
     /// Create a new file at `path` with the given data.
     fn create_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
         let (parent_path, name) = split_parent_name(path)?;

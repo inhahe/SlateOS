@@ -2520,15 +2520,19 @@ pub extern "C" fn fchownat(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // AT_SYMLINK_NOFOLLOW routes through lchown (operate on the link inode
+    // itself); otherwise chown (follow the final symlink).
+    let no_follow = flags & AT_SYMLINK_NOFOLLOW != 0;
+    let apply = |p: *const u8| if no_follow { lchown(p, owner, group) } else { chown(p, owner, group) };
     if dirfd == AT_FDCWD || is_absolute_path(path) {
-        return chown(path, owner, group);
+        return apply(path);
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
     if len == 0 {
         return -1;
     }
-    chown(full.as_ptr(), owner, group)
+    apply(full.as_ptr())
 }
 
 // ---------------------------------------------------------------------------
@@ -2694,13 +2698,8 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
 ///
 /// Like `chown`, but is meant to change ownership of a symlink itself
 /// rather than its target.  Validates `path != NULL` and enforces the
-/// `CAP_CHOWN` gate, then issues `SYS_FS_SET_OWNER`.
-///
-/// LIMITATION: the kernel `SYS_FS_SET_OWNER` resolves paths with
-/// `resolve_follow` (always follows symlinks), so for a symlink argument
-/// this changes the *target's* owner, not the link's.  For the common
-/// non-symlink case the behaviour is correct.  Tracked in `todo.txt`
-/// (no `AT_SYMLINK_NOFOLLOW` ownership syscall yet).
+/// `CAP_CHOWN` gate, then issues `SYS_FS_SET_OWNER` with the NO_FOLLOW flag
+/// so the *link inode itself* is chowned, not its target.
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
@@ -2722,7 +2721,8 @@ pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     }
     #[cfg(target_os = "none")]
     {
-        set_owner_path(path, owner, group)
+        // lchown(2): NO_FOLLOW — operate on the symlink itself.
+        set_owner_path_ex(path, owner, group, true)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -4089,16 +4089,30 @@ fn wall_clock_ns() -> u64 {
 /// Returns 0 on success or -1 with `errno` set.  Bare metal only.
 #[cfg(target_os = "none")]
 fn set_times_path(path: *const u8, accessed_ns: u64, modified_ns: u64) -> i32 {
+    set_times_path_ex(path, accessed_ns, modified_ns, false)
+}
+
+/// Like [`set_times_path`] but with explicit symlink-follow control.  When
+/// `no_follow` is set (`lutimes` / `utimensat(AT_SYMLINK_NOFOLLOW)`), the
+/// kernel stamps the link inode itself (arg4 bit 0 = NO_FOLLOW).
+#[cfg(target_os = "none")]
+fn set_times_path_ex(
+    path: *const u8,
+    accessed_ns: u64,
+    modified_ns: u64,
+    no_follow: bool,
+) -> i32 {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
-    let ret = syscall4(
+    let ret = syscall5(
         SYS_FS_SET_TIMES,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         accessed_ns,
         modified_ns,
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -4134,16 +4148,25 @@ fn set_perms_path(path: *const u8, mode: ModeT) -> i32 {
 /// Returns 0 on success or -1 with `errno` set.  Bare metal only.
 #[cfg(target_os = "none")]
 fn set_owner_path(path: *const u8, uid: u32, gid: u32) -> i32 {
+    set_owner_path_ex(path, uid, gid, false)
+}
+
+/// Like [`set_owner_path`] but with explicit symlink-follow control.  When
+/// `no_follow` is set (`lchown` / `fchownat(AT_SYMLINK_NOFOLLOW)`), the kernel
+/// chowns the link inode itself (arg4 bit 0 = NO_FOLLOW).
+#[cfg(target_os = "none")]
+fn set_owner_path_ex(path: *const u8, uid: u32, gid: u32, no_follow: bool) -> i32 {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
-    let ret = syscall4(
+    let ret = syscall5(
         SYS_FS_SET_OWNER,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         u64::from(uid),
         u64::from(gid),
+        u64::from(no_follow),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -4292,23 +4315,23 @@ pub extern "C" fn utimensat(
     }
     #[cfg(target_os = "none")]
     {
-        // Resolve the dirfd/path pair the same way fstatat does.  NOTE: the
-        // kernel SYS_FS_SET_TIMES follows symlinks unconditionally, so
-        // AT_SYMLINK_NOFOLLOW on a symlink updates the target's times rather
-        // than the link's (documented limitation — see todo.txt).
+        // Resolve the dirfd/path pair the same way fstatat does.
+        // AT_SYMLINK_NOFOLLOW → NO_FOLLOW flag: the kernel stamps the link
+        // inode itself rather than its target.
+        let no_follow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
         let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timespecs.
         let (a_ns, m_ns) = unsafe { utimens_pair_to_kernel(times, now) };
         if dirfd == AT_FDCWD || is_absolute_path(path) {
-            set_times_path(path, a_ns, m_ns)
+            set_times_path_ex(path, a_ns, m_ns, no_follow)
         } else {
             let mut full = [0u8; crate::unistd::PATH_MAX];
             let len = resolve_dirfd_path(dirfd, path, &mut full);
             if len == 0 {
                 return -1;
             }
-            set_times_path(full.as_ptr(), a_ns, m_ns)
+            set_times_path_ex(full.as_ptr(), a_ns, m_ns, no_follow)
         }
     }
     #[cfg(not(target_os = "none"))]

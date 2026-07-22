@@ -8316,9 +8316,12 @@ independently asserts the kernel-side `Vfs::metadata` reports
 `accessed_ns == 1.6e18` and `modified_ns == 1.5e18` exactly.
 
 **Fidelity gaps (minor, documented in the linux.rs module comment):**
-1. `Vfs::set_times` always follows symlinks, so `utimensat`'s
-   `AT_SYMLINK_NOFOLLOW` is a no-op (the target is touched, not the link).
-   Proper fix needs a `Vfs`/`Filesystem` no-follow `lset_times` variant.
+1. ~~`Vfs::set_times` always follows symlinks, so `utimensat`'s
+   `AT_SYMLINK_NOFOLLOW` is a no-op.~~ **RESOLVED 2026-07-22** alongside
+   B-CHOWN1 gap #1: added `Vfs::set_times_no_follow` (+ `FileSystem`
+   `set_times_no_follow` with memfs/ext4 overrides); `utimensat`/`lutimes`
+   now stamp the link inode itself when `AT_SYMLINK_NOFOLLOW` is set. See the
+   B-CHOWN1 gap #1 resolution note for the full plumbing.
 2. The `Timestamp = u64` VFS API overloads `0` ("ns since epoch") as the
    "leave this field unchanged" sentinel, so a request to set a field to
    exactly the Unix epoch (or any pre-epoch / negative instant) is silently
@@ -8367,10 +8370,23 @@ and calls `fchmodat2(fd, "", 0o600, AT_EMPTY_PATH)` (sentinels `0xE5`/`0xE6`);
 the harness confirms `Vfs::metadata` reports `permissions == 0o600`.
 
 **Fidelity gaps (minor):**
-1. `lchown` and `fchownat(AT_SYMLINK_NOFOLLOW)` must operate on the symlink
-   itself, but `Vfs::set_owner` always follows the final symlink (same
-   no-follow gap as B-SYM1 for `link`). The common non-symlink case is
-   correct; a proper fix needs a no-follow `lset_owner` VFS variant.
+1. ~~`lchown` and `fchownat(AT_SYMLINK_NOFOLLOW)` must operate on the symlink
+   itself, but `Vfs::set_owner` always follows the final symlink.~~
+   **RESOLVED 2026-07-22.** Added a no-follow VFS path: `FileSystem`
+   trait gained `set_owner_no_follow`/`set_times_no_follow` (default-delegate
+   to the following versions — correct for symlink-free FAT), overridden by
+   memfs (`resolve_no_follow_mut`) and ext4 (`resolve_path_no_follow`, via
+   shared `set_owner_ino`/`set_times_ino` helpers). `Vfs::set_owner_no_follow`
+   / `Vfs::set_times_no_follow` wrap them (using `resolve_no_follow` +
+   `lmetadata` for the `u32::MAX` "leave unchanged" sentinel). Wired through
+   both ABIs: Linux `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)` →
+   `chown_apply_ex(no_follow)`, `utimensat(AT_SYMLINK_NOFOLLOW)` →
+   `set_times_no_follow`; native `SYS_FS_SET_OWNER`/`SYS_FS_SET_TIMES` gained
+   an `arg4` NO_FOLLOW flag (bit 0), and posix `lchown`/`fchownat`/`utimensat`
+   set it. Regression: `fs::handle::self_test` §19 proves no-follow chown
+   stamps the link inode while the target owner is untouched, and that a
+   following chown hits the target instead. (Symlink-swap-safety analogue of
+   the openat2 `RESOLVE_NO_SYMLINKS` fix.)
 2. We gate chmod/chown on the generic File-WRITE capability rather than a
    dedicated `CAP_CHOWN`/`CAP_FOWNER`; any process holding File-WRITE can
    change mode/owner. This matches the OS's capability model (no per-syscall

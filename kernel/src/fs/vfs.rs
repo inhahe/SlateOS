@@ -601,6 +601,17 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Set ownership on the path's final component WITHOUT following it if it
+    /// is a symlink (`lchown` / `fchownat(AT_SYMLINK_NOFOLLOW)`).
+    ///
+    /// Default delegates to [`set_owner`](Self::set_owner) — correct for
+    /// filesystems that have no symlinks (e.g. FAT).  Symlink-capable
+    /// filesystems (memfs, ext4) override this to resolve the final
+    /// component without following, so the link inode itself is chowned.
+    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        self.set_owner(path, uid, gid)
+    }
+
     /// Set Unix-style permission bits (rwxrwxrwx).
     ///
     /// Default: not supported.
@@ -621,6 +632,21 @@ pub trait FileSystem: Send {
     ) -> KernelResult<()> {
         let _ = (path, accessed_ns, modified_ns);
         Err(KernelError::NotSupported)
+    }
+
+    /// Update timestamps WITHOUT following a final symlink
+    /// (`lutimes` / `utimensat(AT_SYMLINK_NOFOLLOW)`).
+    ///
+    /// Default delegates to [`set_times`](Self::set_times) — correct for
+    /// symlink-free filesystems.  memfs/ext4 override to stamp the link
+    /// inode itself.
+    fn set_times_no_follow(
+        &mut self,
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        self.set_times(path, accessed_ns, modified_ns)
     }
 
     /// Get an extended attribute value by key.
@@ -2757,6 +2783,35 @@ impl Vfs {
         Ok(())
     }
 
+    /// Set ownership WITHOUT following a trailing symlink (`lchown` /
+    /// `fchownat(AT_SYMLINK_NOFOLLOW)`).
+    ///
+    /// No-follow analogue of [`set_owner`](Self::set_owner): if the final
+    /// component is a symlink, the link inode itself is chowned rather than
+    /// its target.  Intermediate symlinks are still resolved.  The
+    /// `u32::MAX` "leave unchanged" sentinels are read from the link's own
+    /// metadata via [`lmetadata`](Self::lmetadata) (not the target's).
+    pub fn set_owner_no_follow(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
+            let meta = Self::lmetadata(&path)?;
+            (
+                if uid == u32::MAX { meta.uid } else { uid },
+                if gid == u32::MAX { meta.gid } else { gid },
+            )
+        } else {
+            (uid, gid)
+        };
+        {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().set_owner_no_follow(&relative, uid, gid)?;
+        }
+        super::notify::emit_metadata(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        Ok(())
+    }
+
     /// Set Unix-style permission bits.
     pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
         crate::ipc::namespace::check_writable(path)?;
@@ -2782,6 +2837,24 @@ impl Vfs {
         check_writable(&path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().set_times(&relative, accessed_ns, modified_ns)
+        // No notify/journal — timestamp changes are metadata-only.
+    }
+
+    /// Update timestamps WITHOUT following a trailing symlink (`lutimes` /
+    /// `utimensat(AT_SYMLINK_NOFOLLOW)`).
+    ///
+    /// No-follow analogue of [`set_times`](Self::set_times): stamps the
+    /// link inode itself when the final component is a symlink.
+    pub fn set_times_no_follow(
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        fs.lock().set_times_no_follow(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
 

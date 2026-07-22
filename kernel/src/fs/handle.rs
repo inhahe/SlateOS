@@ -1694,6 +1694,82 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // -- §19: no-follow chown/times operate on the LINK inode, not target --
+    // lchown / fchownat(AT_SYMLINK_NOFOLLOW) / lutimes / utimensat(NOFOLLOW)
+    // must mutate the symlink's own inode.  Prove that:
+    //   (a) set_owner_no_follow changes the LINK's uid/gid (lmetadata) but
+    //       leaves the TARGET's owner untouched (metadata follows the link),
+    //   (b) set_owner (following) changes the TARGET, not the link.
+    // Skipped gracefully if the root FS lacks symlink/chown support.
+    let nfo_target = "/handle_nfo_target.txt";
+    let nfo_link = "/handle_nfo_link";
+    crate::fs::Vfs::remove(nfo_link).ok();
+    crate::fs::Vfs::remove(nfo_target).ok();
+    let nfo_ready = crate::fs::Vfs::write_file(nfo_target, b"nfo").is_ok()
+        && crate::fs::Vfs::symlink(nfo_link, nfo_target).is_ok()
+        // Seed distinct baseline owners so a mistaken follow is detectable.
+        && crate::fs::Vfs::set_owner(nfo_target, 1000, 1000).is_ok()
+        && crate::fs::Vfs::set_owner_no_follow(nfo_link, 1000, 1000).is_ok();
+    if nfo_ready {
+        let nfo_cleanup = || {
+            crate::fs::Vfs::remove(nfo_link).ok();
+            crate::fs::Vfs::remove(nfo_target).ok();
+        };
+        // (a) chown the LINK itself (no-follow) to a distinct uid.
+        if let Err(e) = crate::fs::Vfs::set_owner_no_follow(nfo_link, 4242, 4243) {
+            crate::serial_println!("[fs::handle]   FAIL: set_owner_no_follow: {:?}", e);
+            nfo_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        // The link's own inode (lmetadata = no-follow) must show the new uid.
+        let link_meta = crate::fs::Vfs::lmetadata(nfo_link)?;
+        // The target (metadata = follow) must be UNCHANGED at the baseline.
+        let tgt_meta = crate::fs::Vfs::metadata(nfo_link)?;
+        if link_meta.uid != 4242 || link_meta.gid != 4243 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: no-follow chown didn't stamp link (uid={} gid={})",
+                link_meta.uid,
+                link_meta.gid
+            );
+            nfo_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        if tgt_meta.uid != 1000 || tgt_meta.gid != 1000 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: no-follow chown leaked to target (uid={} gid={})",
+                tgt_meta.uid,
+                tgt_meta.gid
+            );
+            nfo_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        // (b) following chown must hit the TARGET, not the link.
+        if let Err(e) = crate::fs::Vfs::set_owner(nfo_link, 7000, 7001) {
+            crate::serial_println!("[fs::handle]   FAIL: set_owner (follow): {:?}", e);
+            nfo_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        let link_after = crate::fs::Vfs::lmetadata(nfo_link)?;
+        let tgt_after = crate::fs::Vfs::metadata(nfo_link)?;
+        if tgt_after.uid != 7000 || link_after.uid != 4242 {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: follow chown wrong target (link.uid={} tgt.uid={})",
+                link_after.uid,
+                tgt_after.uid
+            );
+            nfo_cleanup();
+            return Err(KernelError::InternalError);
+        }
+        nfo_cleanup();
+        crate::serial_println!("[fs::handle]   no-follow chown targets link inode: OK");
+    } else {
+        crate::fs::Vfs::remove(nfo_link).ok();
+        crate::fs::Vfs::remove(nfo_target).ok();
+        crate::serial_println!(
+            "[fs::handle]   no-follow chown test SKIPPED (no symlink/chown support)"
+        );
+    }
+
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();
     crate::fs::Vfs::remove(test_path).ok();

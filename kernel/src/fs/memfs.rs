@@ -500,6 +500,17 @@ impl MemFs {
         self.walk(&resolved)
     }
 
+    /// Resolve a path mutably, following intermediate symlinks but NOT the
+    /// final component.  Used by `lchown`/`lutimes`-style operations that
+    /// must mutate the symlink inode itself, not its target.
+    fn resolve_no_follow_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+        // Phase 1: resolve intermediate symlinks immutably → owned String
+        // whose final component is left unfollowed.
+        let resolved = self.resolve_path_str(path, false)?;
+        // Phase 2: walk the resolved path without following the final link.
+        self.walk_mut(&resolved)
+    }
+
     /// Resolve the parent directory of a path (following symlinks in
     /// intermediate components) and return `(parent_node, filename)`.
     ///
@@ -1009,6 +1020,35 @@ impl FileSystem for MemFs {
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
+        if accessed_ns != 0 {
+            node.accessed_ns = accessed_ns;
+        }
+        if modified_ns != 0 {
+            node.modified_ns = modified_ns;
+        }
+        Ok(())
+    }
+
+    /// `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)`: chown the link inode itself,
+    /// not its target.  Identical to [`set_owner`](Self::set_owner) but the
+    /// final path component is resolved WITHOUT following a symlink.
+    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let node = self.resolve_no_follow_mut(path)?;
+        node.uid = uid;
+        node.gid = gid;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    /// `lutimes`/`utimensat(AT_SYMLINK_NOFOLLOW)`: stamp the link inode
+    /// itself.  Same as [`set_times`](Self::set_times) but no-follow.
+    fn set_times_no_follow(
+        &mut self,
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        let node = self.resolve_no_follow_mut(path)?;
         if accessed_ns != 0 {
             node.accessed_ns = accessed_ns;
         }

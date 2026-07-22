@@ -7091,7 +7091,8 @@ pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_SET_OWNER` — set file ownership.
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
-/// `arg2`: uid.  `arg3`: gid.
+/// `arg2`: uid.  `arg3`: gid.  `arg4`: flags (bit 0 = `NO_FOLLOW`, i.e.
+/// `lchown` / `fchownat(AT_SYMLINK_NOFOLLOW)` — chown the link inode itself).
 ///
 /// A uid or gid of `u32::MAX` (`(uid_t)-1` / `(gid_t)-1`) means "leave that
 /// field unchanged", per POSIX `chown`.  `Vfs::set_owner` resolves the
@@ -7109,7 +7110,14 @@ pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    match crate::fs::Vfs::set_owner(path, args.arg2 as u32, args.arg3 as u32) {
+    // arg4 bit 0 = NO_FOLLOW (operate on the link inode itself).
+    let no_follow = args.arg4 & 1 != 0;
+    let res = if no_follow {
+        crate::fs::Vfs::set_owner_no_follow(path, args.arg2 as u32, args.arg3 as u32)
+    } else {
+        crate::fs::Vfs::set_owner(path, args.arg2 as u32, args.arg3 as u32)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7142,6 +7150,8 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: accessed_ns (0 = unchanged).  `arg3`: modified_ns (0 = unchanged).
+/// `arg4`: flags (bit 0 = `NO_FOLLOW`, i.e. `lutimes` /
+/// `utimensat(AT_SYMLINK_NOFOLLOW)` — stamp the link inode itself).
 pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
         crate::cap::ResourceType::File,
@@ -7154,7 +7164,14 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    match crate::fs::Vfs::set_times(path, args.arg2, args.arg3) {
+    // arg4 bit 0 = NO_FOLLOW (stamp the link inode itself).
+    let no_follow = args.arg4 & 1 != 0;
+    let res = if no_follow {
+        crate::fs::Vfs::set_times_no_follow(path, args.arg2, args.arg3)
+    } else {
+        crate::fs::Vfs::set_times(path, args.arg2, args.arg3)
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

@@ -4263,18 +4263,30 @@ consistent with the ~1-in-120 intermittency.
 
 - **Good:** the idt.rs re-entrancy guard (6fb1597aa) worked — a single clean halt
   line, **no** #DF/#UD stack-overflow storm (contrast iter40's 4400-line cascade).
-- **Gap exposed:** the nested `#PF` fired at `rip=0xffffffff815da4de` (inside the
-  fatal-fault diagnostics) *before* the safe `dump_stack_scan` could print, so we
-  **again got no stack-scan naming the null pointer's caller.** The intended
-  evidence (return-address candidates) still didn't reach serial. The 2026-07-16
-  fix reordered `dump_stack_scan` *before* `print_current`, but *something earlier*
-  in the fatal branch (before the scan) is itself faulting on this path — likely a
-  deref of the trapframe/CR2-region during the initial fault-line formatting. To
-  actually capture the caller next time, the stack-scan must run **first thing** in
-  the fatal-`#PF` branch (before any other diagnostic that can fault), or the
-  scan's own output must be flushed line-by-line so a mid-scan nested-#PF still
-  yields the candidates gathered so far. Logged as the concrete next diagnostic
-  step; still WATCH for the root cause.
+- **Gap exposed — and its true cause pinned + FIXED this session.** The nested
+  `#PF` fired at `rip=0xffffffff815da4de` *before* the safe `dump_stack_scan` could
+  print, so we **again got no stack-scan naming the null pointer's caller.**
+  `llvm-nm` on the crash binary maps `0xffffffff815da4de` to
+  `alloc::collections::btree::node::slice_insert::<kernel::fs::history::FileHistory>`
+  — a **BTree insert, not the fatal-diagnostic code at all.** That is the tell: the
+  nested fault was **not** a diagnostic self-fault, it was an *interrupt-context*
+  fault racing the fatal report. Root cause: `handle_page_fault` re-enables
+  interrupts (`sti()`) early to make paging preemptible when the faulting context
+  had `RFLAGS.IF=1` (this fault: `RFLAGS=0x10646`, IF set), so the entire
+  stack-hungry fatal-diagnostic path ran **interruptible** — a timer tick / softirq
+  / deferred fs-history BTree insert fired mid-report, itself faulted (plausibly on
+  the same heap corruption), re-entered `handle_page_fault`, and tripped the
+  re-entrancy guard, halting us before the scan printed. **Fix (idt.rs
+  `handle_page_fault`, this session):** (1) `cpu::cli()` as the first action of the
+  unrecoverable-kernel-fault branch (before arming `FATAL_FAULT_IN_PROGRESS`) — the
+  fatal path ends in `halt_loop()` regardless, so making it atomic costs nothing and
+  stops any interrupt-context nested fault from racing/burying the report; (2) moved
+  `dump_stack_scan(frame.rsp, 64)` to run **before** the `sched::panic_diagnostics()`
+  task-name lookup (a locked deref of scheduler state that can itself fault when
+  that state is the corruption victim), so even a diagnostic self-fault can no longer
+  pre-empt the scan. Net: the **next** B-KNULLJUMP occurrence should finally emit the
+  stack-scan naming the null pointer's caller. Boot-validated (BOOT_OK, no
+  false-positive fatal reports). Still WATCH for the underlying corruption source.
 
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 

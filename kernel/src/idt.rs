@@ -2237,6 +2237,28 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
     // Unresolvable kernel page fault — halt.
     //
+    // Disable interrupts for the entire unrecoverable path.  We may have
+    // re-enabled them above (the `sti()` when the faulting context had IF=1),
+    // so without this the stack-hungry diagnostics below run interruptible: a
+    // timer tick / softirq / any deferred kernel work can fire mid-report and,
+    // if *it* faults (e.g. the same heap corruption that produced this fatal
+    // fault also clobbered an unrelated structure), re-enter this handler and
+    // trip the re-entrancy guard — halting us *before* the stack-scan that
+    // names the culprit has printed.  That is exactly what buried the evidence
+    // in the 2026-07-22 B-KNULLJUMP reproduction: the nested #PF's RIP resolved
+    // to `slice_insert::<FileHistory>` (a BTree insert from interrupt context),
+    // not the diagnostic code — an interrupt-context race, not a diagnostic
+    // self-fault.  The fatal path ends in `halt_loop()` regardless, so there is
+    // no reason to remain interruptible; making it atomic guarantees the full
+    // report (crucially the stack-scan) reaches serial uninterrupted.
+    //
+    // SAFETY: we are on the unrecoverable path to `halt_loop()`; disabling
+    // interrupts cannot lose any state we still need (CR2 was captured at entry)
+    // and only serializes the final diagnostics before we halt this CPU.
+    unsafe {
+        cpu::cli();
+    }
+
     // Commit to the unrecoverable path: arm the re-entrancy guard *before*
     // touching any stack-hungry diagnostics below, so a nested fault within
     // them halts cleanly (see the guard at the top of this handler) instead
@@ -2260,6 +2282,22 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
 
+    // Raw stack scan FIRST — before *any* other diagnostic, including the
+    // task-context lookup below.  Ordering matters: the scan is the safest
+    // probe — it validates every slot against known kernel stack regions before
+    // dereferencing, so it cannot itself fault — whereas both the
+    // `panic_diagnostics()` task-name lookup (a locked deref of scheduler state
+    // that can fault when that state is the corruption victim) and the RBP
+    // frame-walk (blindly follows a possibly-corrupted chain) *can* fault.
+    // Emitting the scan before either guarantees the return-address candidates
+    // that name the hijacked caller reach the serial log even if a subsequent
+    // diagnostic trips the re-entrancy guard and halts.  A control-flow hijack
+    // (corrupted return address / function pointer landing in a data region,
+    // e.g. B-PTHREAD-TEARDOWN-PF, or a kernel jump to RIP=0x0 / B-KNULLJUMP) is
+    // exactly the case where the RBP chain is broken and only the raw scan
+    // recovers the culprit.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
     // Print task context for easier debugging (uses try_lock).
     let sched_info = sched::panic_diagnostics();
     let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
@@ -2271,19 +2309,6 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         sched_info.priority,
         sched::current_cpu_id(),
     );
-
-    // Raw stack scan FIRST, from the fault-time RSP.  Ordering matters: the
-    // scan is the safer probe — it validates every slot against known kernel
-    // stack regions before dereferencing, so it cannot itself fault — whereas
-    // the RBP frame-walk below blindly follows a (possibly corrupted) chain and
-    // *can* fault on a control-flow hijack.  Emitting the scan before the walk
-    // guarantees the return-address candidates that name the hijacked caller
-    // reach the serial log even if the subsequent walk trips the re-entrancy
-    // guard and halts.  A control-flow hijack (corrupted return address /
-    // function pointer landing in a data region, e.g. B-PTHREAD-TEARDOWN-PF, or
-    // a kernel jump to RIP=0x0) is exactly the case where the RBP chain is
-    // broken and only the raw scan recovers the culprit.
-    crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
     // Then the RBP frame-walk for a clean ordered backtrace when the chain is
     // intact.  If it faults (broken chain), the re-entrancy guard halts us

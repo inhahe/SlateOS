@@ -802,6 +802,21 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Create a hard link WITHOUT following a trailing symlink in `existing`.
+    ///
+    /// This is the semantics of plain `link(2)` and `linkat` without
+    /// `AT_SYMLINK_FOLLOW`: if `existing` names a symlink, the new entry
+    /// hard-links the symlink inode itself, not its target.
+    ///
+    /// Default: delegate to [`link`].  This is correct for filesystems that
+    /// either lack hard links entirely (FAT, memfs, procfs, devfs, ISO9660 —
+    /// they return `NotSupported` regardless) or lack symlinks (FAT), where
+    /// the follow/no-follow distinction cannot arise.  ext4 overrides this to
+    /// resolve `existing` without following the final component.
+    fn link_no_follow(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+        self.link(existing, new_path)
+    }
+
     /// Flush (sync) all dirty data and metadata to stable storage.
     ///
     /// Called by `Vfs::sync()` to ensure durability.  For filesystems
@@ -3016,10 +3031,34 @@ impl Vfs {
     ///
     /// Both paths must resolve to the same mount point.  The existing
     /// path is followed through symlinks (the link points to the
-    /// underlying file, not the symlink).
+    /// underlying file, not the symlink) — this is the `linkat` +
+    /// `AT_SYMLINK_FOLLOW` semantics.  Plain `link(2)` must NOT follow;
+    /// use [`link_no_follow`] for that.
     pub fn link(existing: &str, new_path: &str) -> KernelResult<()> {
+        Self::link_inner(existing, new_path, true)
+    }
+
+    /// Create a hard link WITHOUT following a trailing symlink in `existing`
+    /// (`link(2)` / `linkat` without `AT_SYMLINK_FOLLOW`).
+    ///
+    /// If `existing` names a symlink, the new directory entry hard-links the
+    /// symlink inode itself rather than its target.  Intermediate symlinks in
+    /// `existing` are still resolved; only the final component is not.
+    pub fn link_no_follow(existing: &str, new_path: &str) -> KernelResult<()> {
+        Self::link_inner(existing, new_path, false)
+    }
+
+    /// Shared `link`/`link_no_follow` back-end.  `follow` selects whether a
+    /// trailing symlink in `existing` is dereferenced before the hard link is
+    /// created; everything else (namespace/write checks, same-mount rule,
+    /// quota, notify/journal/audit) is identical.
+    fn link_inner(existing: &str, new_path: &str, follow: bool) -> KernelResult<()> {
         crate::ipc::namespace::check_writable(new_path)?;
-        let existing = Self::resolve_follow(existing)?;
+        let existing = if follow {
+            Self::resolve_follow(existing)?
+        } else {
+            Self::resolve_no_follow(existing)?
+        };
         let new_path = Self::resolve_no_follow(new_path)?;
         check_writable(&new_path)?;
         // Intercept: let pre-operation handlers approve/deny link creation.
@@ -3041,7 +3080,15 @@ impl Vfs {
             if !Arc::ptr_eq(&fs_existing, &fs_new) {
                 return Err(KernelError::InvalidArgument); // Cross-mount hard link.
             }
-            fs_existing.lock().link(&rel_existing, &rel_new)?;
+            // The Vfs layer already resolved `existing` per `follow`, but the
+            // final on-disk lookup happens inside the FS driver — so route to
+            // the matching driver method to keep the no-follow contract when a
+            // symlink is the final component.
+            if follow {
+                fs_existing.lock().link(&rel_existing, &rel_new)?;
+            } else {
+                fs_existing.lock().link_no_follow(&rel_existing, &rel_new)?;
+            }
         }
 
         // Charge inode quota for new link.

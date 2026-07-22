@@ -9409,6 +9409,135 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     Ok(())
 }
 
+/// Kernel-context regression that **`link(2)`/`linkat` honour the no-follow
+/// contract for a symlink `oldpath`** (ext4 `/mnt`).
+///
+/// Plain `link(2)` (and `linkat` without `AT_SYMLINK_FOLLOW`) must hard-link
+/// the *symlink inode itself*, whereas `linkat(AT_SYMLINK_FOLLOW)` dereferences
+/// it and hard-links the target file.  memfs/FAT lack hard links, so this can
+/// only be exercised on ext4; it runs entirely in kernel context (direct `Vfs`
+/// calls) because the distinction is a pure VFS/driver property.
+///
+/// Setup: a target file `/mnt/nfl-target` ("T") and a symlink `/mnt/nfl-link`
+/// pointing at it.  Then:
+///   * `Vfs::link_no_follow(nfl-link, nfl-hl-nofollow)` — the new name must be
+///     a *symlink* (readlink returns the target string); reading through it
+///     yields the target's data, but the entry's own inode is the symlink.
+///   * `Vfs::link(nfl-link, nfl-hl-follow)` — the new name must be a *regular
+///     file* (readlink fails) whose contents are the target's "T".
+/// Skips cleanly when `/mnt` is not a writable ext4 mount or lacks symlink
+/// support (diskless boot).
+pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
+    use crate::fs::Vfs;
+    const TARGET: &str = "/mnt/nfl-target";
+    const LINK: &str = "/mnt/nfl-link";
+    const HL_NOFOLLOW: &str = "/mnt/nfl-hl-nofollow";
+    const HL_FOLLOW: &str = "/mnt/nfl-hl-follow";
+
+    serial_println!("[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...");
+
+    if !Vfs::exists("/mnt") {
+        serial_println!("[spawn]   link no-follow (ext4): SKIP (no /mnt ext4 mount)");
+        return Ok(());
+    }
+
+    // Drain stale entries (the /mnt fixture is persistent across boots).
+    // Use `remove` directly rather than an `exists` guard: `Vfs::exists`
+    // follows symlinks, so a *dangling* symlink (its target already drained)
+    // reports "absent" and would never be removed — yet `symlink()` would
+    // still fail `AlreadyExists`.  `Vfs::remove` resolves no-follow and
+    // deletes the symlink itself, so looping until it errors is robust.
+    let drain = |path: &str| {
+        for _ in 0..64 {
+            if Vfs::remove(path).is_err() {
+                return;
+            }
+        }
+    };
+    drain(HL_FOLLOW);
+    drain(HL_NOFOLLOW);
+    drain(LINK);
+    drain(TARGET);
+
+    // Stage the target file and the symlink pointing at it.
+    if let Err(e) = Vfs::write_file(TARGET, b"T") {
+        serial_println!("[spawn]   link no-follow (ext4): SKIP (target write failed: {:?})", e);
+        return Ok(());
+    }
+    if let Err(e) = Vfs::symlink(LINK, TARGET) {
+        drain(TARGET);
+        serial_println!("[spawn]   link no-follow (ext4): SKIP (symlink unsupported: {:?})", e);
+        return Ok(());
+    }
+
+    let cleanup = || {
+        drain(HL_FOLLOW);
+        drain(HL_NOFOLLOW);
+        drain(LINK);
+        drain(TARGET);
+    };
+
+    // (a) No-follow hard link → the new entry is a SYMLINK (same inode as LINK).
+    match Vfs::link_no_follow(LINK, HL_NOFOLLOW) {
+        Ok(()) => {}
+        Err(KernelError::NotSupported) => {
+            cleanup();
+            serial_println!("[spawn]   link no-follow (ext4): SKIP (hard links unsupported)");
+            return Ok(());
+        }
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: link_no_follow returned {:?}", e);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+    // readlink must succeed and return the symlink's target: the hard link
+    // shares the symlink inode, not the underlying file.
+    match Vfs::readlink(HL_NOFOLLOW) {
+        Ok(ref t) if t == TARGET => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: no-follow hard link is not a symlink (readlink={:?})",
+                other
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (b) Following hard link → the new entry is a REGULAR FILE (the target).
+    if let Err(e) = Vfs::link(LINK, HL_FOLLOW) {
+        serial_println!("[spawn]   FAIL: follow link returned {:?}", e);
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    // readlink must FAIL (regular file, not a symlink)...
+    if Vfs::readlink(HL_FOLLOW).is_ok() {
+        serial_println!("[spawn]   FAIL: follow hard link is a symlink, should be the target file");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    // ...and its contents must be the target's "T".
+    match Vfs::read_file(HL_FOLLOW) {
+        Ok(ref d) if d.as_slice() == b"T" => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: follow hard link content not \"T\": {:?}",
+                other.map(|d| d.len())
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup();
+    serial_println!(
+        "[spawn]   link()/linkat no-follow: OK (no-follow hard-links the symlink inode; \
+         follow hard-links the target file)"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that **`utimensat(2)` updates a file's timestamps**.
 ///
 /// Before this wiring, `utimensat`/`utimes`/`utime` were EROFS stubs (no

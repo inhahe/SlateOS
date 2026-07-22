@@ -21199,24 +21199,31 @@ fn sys_link(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg1) {
         return linux_err(e);
     }
-    link_common(AT_FDCWD, args.arg0, AT_FDCWD, args.arg1)
+    // Plain link(2) never follows a trailing symlink in oldpath.
+    link_common(AT_FDCWD, args.arg0, AT_FDCWD, args.arg1, false)
 }
 
 /// Shared `link`/`linkat` back-end.  Both the existing (`oldpath`) and the new
 /// (`newpath`) names are resolved against the caller's cwd / dirfds via
-/// `resolve_at_path`, then a hard link is created via `Vfs::link` (which
-/// follows symlinks in `oldpath` and rejects cross-mount links).  Requires a
-/// File-WRITE capability.
+/// `resolve_at_path`, then a hard link is created (rejecting cross-mount
+/// links).  Requires a File-WRITE capability.
+///
+/// `follow` selects the symlink treatment of a trailing symlink in `oldpath`:
+/// plain `link(2)` and `linkat` without `AT_SYMLINK_FOLLOW` pass `false`
+/// (hard-link the symlink inode itself → `Vfs::link_no_follow`); `linkat`
+/// with `AT_SYMLINK_FOLLOW` passes `true` (→ `Vfs::link`, which dereferences
+/// the symlink).  memfs/FAT have no hard links (they answer `NotSupported`
+/// either way); ext4 honours the distinction.
 ///
 /// Kernel context (no caller PID) preserves the EROFS terminal the batch-481
 /// fidelity self-tests assert; ring-3 callers create a real hard link.
-///
-/// Fidelity note: plain `link(2)` does **not** follow a symlink `oldpath`
-/// (it links the symlink itself), and `linkat` follows it only with
-/// `AT_SYMLINK_FOLLOW`.  `Vfs::link` always follows, so the (rare) case of
-/// hard-linking a symlink-as-oldpath links the target instead — see
-/// known-issues B-SYM1.
-fn link_common(olddirfd: i32, oldpath_ptr: u64, newdirfd: i32, newpath_ptr: u64) -> SyscallResult {
+fn link_common(
+    olddirfd: i32,
+    oldpath_ptr: u64,
+    newdirfd: i32,
+    newpath_ptr: u64,
+    follow: bool,
+) -> SyscallResult {
     if caller_pid().is_none() {
         return linux_err(errno::EROFS);
     }
@@ -21231,7 +21238,12 @@ fn link_common(olddirfd: i32, oldpath_ptr: u64, newdirfd: i32, newpath_ptr: u64)
     if let Err(r) = require_fs_write() {
         return r;
     }
-    match crate::fs::Vfs::link(&oldpath, &newpath) {
+    let result = if follow {
+        crate::fs::Vfs::link(&oldpath, &newpath)
+    } else {
+        crate::fs::Vfs::link_no_follow(&oldpath, &newpath)
+    };
+    match result {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -21287,9 +21299,9 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
     let olddirfd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let newdirfd = args.arg2 as i32;
-    // AT_SYMLINK_FOLLOW vs not is moot here: Vfs::link always follows the
-    // existing path (see link_common fidelity note / known-issues B-SYM1).
-    link_common(olddirfd, args.arg1, newdirfd, args.arg3)
+    // linkat follows a trailing symlink in oldpath only with AT_SYMLINK_FOLLOW.
+    let follow = flags & 0x400 != 0;
+    link_common(olddirfd, args.arg1, newdirfd, args.arg3, follow)
 }
 
 // ---------------------------------------------------------------------------

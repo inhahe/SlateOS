@@ -1845,6 +1845,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux link() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Kernel-context test that link(2)/linkat honour the no-follow contract:
+    // a symlink oldpath is hard-linked as the symlink itself (no-follow) vs the
+    // target file (AT_SYMLINK_FOLLOW).  Runs on ext4 /mnt (memfs lacks links).
+    if let Err(e) = proc::spawn::self_test_ext4_link_no_follow() {
+        serial_println!("WARNING: link no-follow (ext4) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that utimensat() applies file timestamps (the utimensat/
     // utimes/utime family now performs real Vfs::set_times for ring-3 callers
     // instead of returning EROFS).  Runs on the memfs root and verifies the

@@ -7458,14 +7458,14 @@ Remaining net improvements (diminishing returns):
   9 new host tests for the converters; 17114 posix host tests pass; bare-metal
   + host posix build clean; new code clippy-clean.
   JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
-    1. utimensat AT_SYMLINK_NOFOLLOW is NOT honoured on the final component:
-       the kernel SYS_FS_SET_TIMES (Vfs::set_times) resolves with
-       resolve_follow unconditionally, so setting times on a symlink updates
-       the TARGET, not the link.  Proper fix = a no-follow variant of the
-       kernel syscall (or a flag arg).  Deferred: low value (almost nobody
-       lutimes a symlink), and it needs a kernel ABI addition.  Trigger to do
-       it properly: a program that actually depends on lutimes/AT_SYMLINK_
-       NOFOLLOW semantics on links.
+    1. (RESOLVED 2026-07-22) utimensat AT_SYMLINK_NOFOLLOW is now honoured on
+       the final component.  Added Vfs::set_times_no_follow (+ FileSystem::
+       set_times_no_follow trait method, memfs/ext4 overrides) backed by
+       resolve_no_follow, and a NO_FOLLOW bit on SYS_FS_SET_TIMES arg4;
+       utimensat(AT_SYMLINK_NOFOLLOW) routes to it, so lutimes on a symlink
+       stamps the LINK, not the target.  (Same no-follow VFS infrastructure
+       later extended to chown/xattr/link — see known-issues B-CHOWN1 /
+       B-UTIME1 gap #1 and the B-SYM1 hard-link fidelity note.)
     2. Setting a timestamp to EXACTLY the Unix epoch (sec==0 && nsec==0)
        leaves it unchanged, because the kernel ABI overloads 0 as "don't
        change this field".  Proper fix = change the kernel SET_TIMES ABI to a

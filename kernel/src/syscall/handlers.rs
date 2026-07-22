@@ -7662,6 +7662,10 @@ pub fn sys_fs_sync(_args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: existing path length.
 /// `arg2`: pointer to new link path string.
 /// `arg3`: new link path length.
+/// `arg4`: flags — bit 0 = FOLLOW (dereference a trailing symlink in the
+///         existing path).  Cleared (the default) gives plain `link(2)`
+///         semantics: the symlink inode itself is hard-linked.  Set for
+///         `linkat(AT_SYMLINK_FOLLOW)`.
 pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
         crate::cap::ResourceType::File,
@@ -7692,7 +7696,15 @@ pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    match crate::fs::Vfs::link(existing, new_path) {
+    // bit 0 of arg4 selects follow (linkat AT_SYMLINK_FOLLOW) vs the default
+    // no-follow (plain link(2)).
+    let follow = args.arg4 & 1 != 0;
+    let result = if follow {
+        crate::fs::Vfs::link(existing, new_path)
+    } else {
+        crate::fs::Vfs::link_no_follow(existing, new_path)
+    };
+    match result {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

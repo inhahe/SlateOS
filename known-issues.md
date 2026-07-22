@@ -8275,11 +8275,45 @@ support). Proper fix: refactor memfs to an inode-table model (`MemFs` owns
 the body, so multiple names can reference one inode with a shared `nlink`).
 This is a sizeable refactor of a core subsystem with many passing self-tests,
 and ext4 (the design's real root FS) already implements hard links, so it is
-deferred rather than done speculatively. **Fidelity gap (minor):** `Vfs::link`
-always follows a symlink `oldpath`, whereas plain `link(2)` should not follow
-and `linkat` should follow only with `AT_SYMLINK_FOLLOW`; the common
-regular-file case is correct, only the rare hard-link-a-symlink case differs
-(would need a `Vfs::link` no-follow variant to fix properly).
+deferred rather than done speculatively. **Fidelity gap (RESOLVED 2026-07-22):**
+`Vfs::link` used to always follow a symlink `oldpath`, whereas plain `link(2)`
+must NOT follow (hard-link the symlink inode itself) and `linkat` follows only
+with `AT_SYMLINK_FOLLOW`. Fixed with the same no-follow VFS plumbing as the
+chown/times/xattr family: `FileSystem::link_no_follow` (default-delegates to
+`link` — correct for FAT/memfs, which lack hard links / symlinks; ext4 overrides
+it via `resolve_path_no_follow` + a shared `link_ino_checked` helper that now
+also accepts `S_IFLNK`), and `Vfs::link_no_follow` (a thin wrapper over the new
+`link_inner(follow)` back-end that resolves `oldpath` with `resolve_no_follow`).
+Wiring: native `SYS_FS_LINK` gained an `arg4` bit-0 FOLLOW flag (default clear =
+no-follow = `link(2)`); Linux-ABI `link_common` takes a `follow` bool
+(`sys_link` → false, `sys_linkat` → `flags & AT_SYMLINK_FOLLOW`); posix `link`
+stays no-follow (syscall4→syscall5 with follow=false) and `linkat` routes
+`AT_SYMLINK_FOLLOW` through a shared `link_ex`, and now validates its flags
+(`~(AT_SYMLINK_FOLLOW|AT_EMPTY_PATH)` → EINVAL). Regression:
+`proc::spawn::self_test_ext4_link_no_follow` (kernel context, ext4 `/mnt`)
+proves no-follow hard-links the symlink inode (the new name is itself a symlink)
+while a following link hard-links the target file.
+
+**Bug found & fixed while landing the above (ext4 `unlink` followed the final
+symlink, 2026-07-22):** `Ext4Fs::remove` resolved its path with
+`driver.resolve_path` (FOLLOW), so `unlink(2)`/`remove` on a symlink dereferenced
+it — decrementing the *target's* `i_links_count` while deleting the *symlink's*
+directory entry (data corruption when the target exists), and failing outright
+(`NotFound`) when the target was unreachable (e.g. a symlink whose stored target
+is an absolute VFS path on another mount, which ext4 mis-resolves relative to its
+own root). `unlink(2)` must never dereference the final symlink. Fixed to
+`resolve_path_no_follow` (parent still resolved with follow, which is correct).
+memfs's `remove` was already correct (operates on the entry itself). This bug
+had previously created a stray directory entry `/nfl-link` on the persistent
+`rootfs.ext4` test image that hard-linked the ext4 **root inode** (a
+directory-typed dirent → inode 2), left by a pre-`link_ino_checked`-guard run;
+the current `link_ino_checked` rejects directory hard-links (`EISDIR`) so it
+cannot recur. The stale entry was removed surgically with
+`debugfs -w -R "unlink /nfl-link"` + `e2fsck -fy` (which also re-homed an
+orphaned stale `nfl-target` inode to `lost+found` and corrected root's inflated
+link count). The self-test's `drain` now removes fixtures via `Vfs::remove`
+(no-follow) in a loop rather than an `exists` guard (which follows symlinks and
+would skip a dangling symlink).
 
 **Follow-up — `utimensat`/`utimes`/`utime` now wired (2026-06-16):** see
 B-UTIME1 below.

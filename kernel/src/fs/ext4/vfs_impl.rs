@@ -315,7 +315,13 @@ impl FileSystem for Ext4Fs {
     }
 
     fn remove(&mut self, path: &str) -> KernelResult<()> {
-        let ino = self.driver.resolve_path(path)?;
+        // `unlink(2)` never dereferences a trailing symlink: it removes the
+        // symlink inode itself, not its target.  Resolving with follow here
+        // both corrupts the wrong inode (decrementing the *target's* link
+        // count while deleting the symlink's dir entry) and fails outright
+        // when the target is unreachable (e.g. a symlink whose stored target
+        // is an absolute VFS path on another mount).  Resolve no-follow.
+        let ino = self.driver.resolve_path_no_follow(path)?;
         let inode = self.driver.read_inode(ino)?;
 
         // Can't remove directories with remove() — use rmdir().
@@ -1216,16 +1222,63 @@ impl FileSystem for Ext4Fs {
     /// - The new name must not already exist.
     #[allow(clippy::arithmetic_side_effects)]
     fn link(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
-        // Resolve the existing file to get its inode number.
+        // `link`/`linkat(AT_SYMLINK_FOLLOW)`: follow a trailing symlink in
+        // `existing` so the hard link points at the underlying file.
         let existing_ino = self.driver.resolve_path(existing)?;
+        self.link_ino_checked(existing_ino, new_path)
+    }
+
+    fn link_no_follow(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+        // Plain `link(2)` / `linkat` without AT_SYMLINK_FOLLOW: do NOT follow
+        // a trailing symlink — hard-link the symlink inode itself.
+        let existing_ino = self.driver.resolve_path_no_follow(existing)?;
+        self.link_ino_checked(existing_ino, new_path)
+    }
+
+    /// Report ext4 filesystem capacity and free space.
+    ///
+    /// Reads block count and free block count from the superblock.
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        let sb = self.driver.superblock();
+        Ok(FsInfo {
+            fs_type: String::from("ext4"),
+            volume_label: sb.volume_name.clone(),
+            block_size: u64::from(sb.block_size),
+            total_blocks: sb.block_count,
+            free_blocks: sb.free_block_count,
+            total_inodes: u64::from(sb.raw.s_inodes_count),
+            free_inodes: u64::from(sb.raw.s_free_inodes_count),
+            max_name_len: 255,
+            read_only: !sb.can_write,
+        })
+    }
+
+    /// Flush all pending writes to the block device.
+    ///
+    /// Writes the superblock and flushes the block cache.
+    fn sync(&mut self) -> KernelResult<()> {
+        self.driver.flush()
+    }
+}
+
+impl Ext4Fs {
+    /// Shared body for [`link`]/[`link_no_follow`]: create a new directory
+    /// entry (`new_path`) referencing an already-resolved inode.  The follow
+    /// vs no-follow distinction lives entirely in how `existing_ino` was
+    /// resolved by the caller; from here the two paths are identical.
+    ///
+    /// Regular files and symlinks may be hard-linked (a symlink inode is the
+    /// no-follow `link(2)` target); directories are rejected (EISDIR), as is
+    /// any other inode type (EINVAL).
+    fn link_ino_checked(&mut self, existing_ino: u32, new_path: &str) -> KernelResult<()> {
         let mut inode = self.driver.read_inode(existing_ino)?;
 
-        // Only regular files can be hard-linked.
         let mode_type = inode.i_mode & file_type::S_IFMT;
         if mode_type == file_type::S_IFDIR {
             return Err(KernelError::IsADirectory);
         }
-        if mode_type != file_type::S_IFREG {
+        // Regular files and symlinks are hard-linkable; nothing else.
+        if mode_type != file_type::S_IFREG && mode_type != file_type::S_IFLNK {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -1272,33 +1325,6 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    /// Report ext4 filesystem capacity and free space.
-    ///
-    /// Reads block count and free block count from the superblock.
-    fn statvfs(&mut self) -> KernelResult<FsInfo> {
-        let sb = self.driver.superblock();
-        Ok(FsInfo {
-            fs_type: String::from("ext4"),
-            volume_label: sb.volume_name.clone(),
-            block_size: u64::from(sb.block_size),
-            total_blocks: sb.block_count,
-            free_blocks: sb.free_block_count,
-            total_inodes: u64::from(sb.raw.s_inodes_count),
-            free_inodes: u64::from(sb.raw.s_free_inodes_count),
-            max_name_len: 255,
-            read_only: !sb.can_write,
-        })
-    }
-
-    /// Flush all pending writes to the block device.
-    ///
-    /// Writes the superblock and flushes the block cache.
-    fn sync(&mut self) -> KernelResult<()> {
-        self.driver.flush()
-    }
-}
-
-impl Ext4Fs {
     /// Shared body for [`set_owner`]/[`set_owner_no_follow`]: chown an
     /// already-resolved inode.  Writes the full 32-bit UID/GID and advances
     /// ctime (chown is a metadata change, not a data change).

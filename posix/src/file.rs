@@ -1703,8 +1703,19 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
 }
 
 /// Create a hard link.
+///
+/// Plain `link(2)` does NOT follow a trailing symlink in `oldpath` — the new
+/// entry hard-links the symlink inode itself.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn link(oldpath: *const u8, newpath: *const u8) -> i32 {
+    link_ex(oldpath, newpath, false)
+}
+
+/// Shared `link`/`linkat` back-end.  `follow` maps to the kernel
+/// `SYS_FS_LINK` arg4 bit 0 (FOLLOW): `false` (plain `link(2)` / `linkat`
+/// without `AT_SYMLINK_FOLLOW`) hard-links a trailing symlink itself; `true`
+/// (`linkat` with `AT_SYMLINK_FOLLOW`) dereferences it.
+fn link_ex(oldpath: *const u8, newpath: *const u8, follow: bool) -> i32 {
     if oldpath.is_null() || newpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1719,12 +1730,13 @@ pub extern "C" fn link(oldpath: *const u8, newpath: *const u8) -> i32 {
         return -1;
     };
 
-    let ret = syscall4(
+    let ret = syscall5(
         SYS_FS_LINK,
         old_resolved.as_ptr() as u64,
         old_len as u64,
         new_resolved.as_ptr() as u64,
         new_len as u64,
+        u64::from(follow),
     );
     errno::translate(ret) as i32
 }
@@ -2447,8 +2459,13 @@ pub extern "C" fn linkat(
     oldpath: *const u8,
     newdirfd: i32,
     newpath: *const u8,
-    _flags: i32,
+    flags: i32,
 ) -> i32 {
+    // Linux do_linkat: reject flags outside AT_SYMLINK_FOLLOW | AT_EMPTY_PATH.
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
     let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
 
@@ -2474,7 +2491,8 @@ pub extern "C" fn linkat(
         newpath
     };
 
-    link(old_ptr, new_ptr)
+    // linkat follows a trailing symlink in oldpath only with AT_SYMLINK_FOLLOW.
+    link_ex(old_ptr, new_ptr, flags & AT_SYMLINK_FOLLOW != 0)
 }
 
 /// Change file mode bits relative to a directory fd.

@@ -1948,75 +1948,53 @@ fn log_path_for(id: ContainerId) -> String {
     alloc::format!("{LOG_DIR}/{id}.log")
 }
 
-/// Redirect a freshly-spawned container init process's stdout (fd 1) and stderr
-/// (fd 2) to a per-container capture file, returning the host VFS path of that
-/// file on success.
+/// Open a per-container stdout+stderr capture log *before* spawning the init
+/// process, returning its host VFS path and the freshly-opened file handle.
 ///
-/// The process must not yet have executed — [`run`] calls this while the child
-/// is merely enqueued, so the redirect is in place before its first write.  The
-/// log directory is created lazily; the capture file is truncated so each run
-/// starts with a fresh log.  fd 1 is pointed at the file, then fd 2 is `dup2`'d
-/// onto fd 1 so stdout and stderr share one handle (and thus one append
-/// position — writes interleave in order rather than overwriting each other).
+/// The caller passes that handle to
+/// [`spawn_process_with_redirects`](crate::proc::spawn::spawn_process_with_redirects)
+/// as **both** fd 1 and fd 2, so the redirect is installed atomically *inside*
+/// the spawn — before the child is runnable — rather than after `spawn_process`
+/// returns.  Installing it afterwards was a TOCTOU race: `spawn_process` yields
+/// a *Ready* child, so a timer-tick preemption (or another CPU under SMP) could
+/// schedule the child and let its first `write(1, …)` leak to the console
+/// before the post-spawn redirect landed (the same class of bug as the
+/// output-capture self-tests — see known-issues.md B-PTHREAD-YIELDBUDGET).
 ///
-/// Returns `None` (capture skipped, non-fatal) if the log file cannot be opened
-/// or fd 1 cannot be redirected; the container still runs, just without a log.
-fn redirect_output_to_capture(id: ContainerId, pid: u64) -> Option<String> {
+/// Both fds alias this one handle (dup2 semantics: one shared open file
+/// description / append position, so stdout and stderr interleave in order
+/// rather than overwriting each other).  The spawn takes ownership of the
+/// handle — it is registered once for the child's exit teardown, or closed if
+/// the spawn fails or the child is native-ABI — so this function's caller must
+/// never close it.
+///
+/// The log directory is created lazily; the capture file is truncated so each
+/// run starts with a fresh log.  Returns `None` (capture skipped, non-fatal) if
+/// the log file cannot be opened; the container still runs, just without a log.
+fn open_capture_log(id: ContainerId) -> Option<(String, u64)> {
     use crate::fs::handle;
-    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
-    use crate::proc::pcb;
 
     // Create the log directory tree (idempotent) and derive the log path.
     ensure_dir_path("", LOG_DIR.trim_start_matches('/'));
     let path = log_path_for(id);
 
     // Open (create + truncate) the capture file.  On failure, skip capture.
-    let capture_handle = match handle::open(
+    match handle::open(
         &path,
         handle::OpenFlags::READ
             .union(handle::OpenFlags::WRITE)
             .union(handle::OpenFlags::CREATE)
             .union(handle::OpenFlags::TRUNCATE),
     ) {
-        Ok(h) => h,
+        Ok(h) => Some((path, h)),
         Err(e) => {
             serial_println!(
                 "[container] run id={}: log capture disabled (open {} failed: {:?})",
                 id, path, e
             );
-            return None;
+            None
         }
-    };
-
-    // Redirect fd 1 → capture file.  Drop the existing fd-1 entry first (a
-    // Console entry owns no kernel resource, so no close is needed).  On
-    // install failure ownership never transferred, so we close the handle and
-    // skip capture.
-    let _ = pcb::linux_fd_take(pid, 1);
-    if let Err(e) =
-        pcb::linux_fd_install_at(pid, 1, FdEntry::file(capture_handle, O_WRONLY))
-    {
-        let _ = handle::close(capture_handle);
-        serial_println!(
-            "[container] run id={}: log capture disabled (redirect fd 1 failed: {:?})",
-            id, e
-        );
-        return None;
     }
-
-    // Point fd 2 at the same handle via dup2 so stderr shares stdout's log.
-    // dup2 returns any entry it displaced from fd 2 (the Console stub); it owns
-    // no resource, so dropping it is sufficient.  A dup2 failure is non-fatal:
-    // stdout is still captured; stderr just keeps its own (console) fd.
-    match pcb::linux_fd_dup2(pid, 1, 2) {
-        Ok((_newfd, _displaced)) => {}
-        Err(e) => serial_println!(
-            "[container] run id={}: stderr not captured (dup2 fd 2 failed: {:?})",
-            id, e
-        ),
-    }
-
-    Some(path)
 }
 
 /// Launch an init process inside a container and start it running.
@@ -2082,6 +2060,8 @@ fn run_with_abi(
     options: &crate::proc::spawn::SpawnOptions<'_>,
     abi: Option<crate::proc::pcb::AbiMode>,
 ) -> KernelResult<u64> {
+    use crate::proc::linux_fd::O_WRONLY;
+
     // Step 1: container must exist and be freshly created.
     with_table_ref(|table| {
         let idx = id as usize;
@@ -2094,30 +2074,51 @@ fn run_with_abi(
         Ok(())
     })?;
 
-    // Step 2: spawn the init process.  It is enqueued but not yet run.
-    let result = match abi {
-        Some(m) => crate::proc::spawn::spawn_process_with_abi(elf_data, options, m)?,
-        None => crate::proc::spawn::spawn_process(elf_data, options)?,
+    // Step 1.5: open the per-container stdout+stderr capture log BEFORE spawning
+    // so the fd 1 + fd 2 redirect can be installed atomically *inside* the spawn
+    // — before the child is runnable — rather than in a post-spawn window a
+    // preempted child could beat (the TOCTOU race described in
+    // `open_capture_log`).  Best-effort: `None` here just means no captured log.
+    let capture = open_capture_log(id);
+    let capture_handle = capture.as_ref().map(|(_, h)| *h);
+
+    // Step 2: spawn the init process with stdout+stderr (fd 1 and fd 2) both
+    // redirected to the capture file — one shared handle (dup2 semantics) so
+    // `container logs` can read the interleaved output back.  The redirect binds
+    // only for a Linux-ABI child (a glibc `write` consults this table); a native
+    // child ignores it and the spawn closes the handle.  The spawn OWNS the
+    // handle on every path (moved into the child on success, closed on failure),
+    // so a spawn error needs no manual close here.  The child is enqueued but
+    // not yet run.
+    let result = match (capture_handle, abi) {
+        (Some(h), Some(m)) => {
+            let redirects = [(1i32, h, O_WRONLY), (2i32, h, O_WRONLY)];
+            crate::proc::spawn::spawn_process_with_abi_and_redirects(
+                elf_data, options, m, &redirects,
+            )?
+        }
+        (Some(h), None) => {
+            let redirects = [(1i32, h, O_WRONLY), (2i32, h, O_WRONLY)];
+            crate::proc::spawn::spawn_process_with_redirects(elf_data, options, &redirects)?
+        }
+        (None, Some(m)) => crate::proc::spawn::spawn_process_with_abi(elf_data, options, m)?,
+        (None, None) => crate::proc::spawn::spawn_process(elf_data, options)?,
     };
 
     // Step 3: bind it into the container (cgroup billing + namespaces),
     // keyed on the spawn result's task id for the scheduler resources.
     if let Err(e) = add_process_task(id, result.pid, result.task_id) {
-        // Roll back the spawn so a failed run leaks nothing.
+        // Roll back the spawn so a failed run leaks nothing.  The capture handle
+        // (if any) was moved into the child and registered as an ipc-handle, so
+        // `destroy`'s cleanup reclaims it — no manual close needed here.
         crate::proc::thread::kill_process_threads(result.pid);
         crate::proc::pcb::destroy(result.pid);
         return Err(e);
     }
 
-    // Step 3.5: redirect the init process's stdout+stderr (fd 1 and fd 2) to a
-    // per-container capture file so `container logs` can read them back.  This
-    // runs while the child is still merely enqueued (it does not execute until
-    // the scheduler next picks it — see the doc comment above), so the redirect
-    // is guaranteed in place before the process writes its first byte.  Capture
-    // is best-effort: if the log file cannot be opened or the fds cannot be
-    // redirected, the container still runs (just without a captured log),
-    // mirroring the non-fatal stdio install in `spawn_process`.
-    let captured_log_path = redirect_output_to_capture(id, result.pid);
+    // The capture log's host path (for `logs(id)` read-back); `None` when
+    // capture was skipped.
+    let captured_log_path = capture.map(|(p, _)| p);
 
     // Step 4: record init PID and flip Created → Running atomically under
     // the table lock.  Snapshot the network namespace, container IP, and

@@ -538,7 +538,15 @@ fn spawn_process_inner(
     // returns, where nothing has been moved yet.  Callers must NOT close a
     // redirect handle themselves.
     let close_redirects = || {
-        for &(_fd, handle, _flags) in linux_fd_redirects {
+        // Close each DISTINCT handle exactly once: a redirect list may alias one
+        // handle across several fds (dup2 semantics — one shared open file
+        // description / append position, e.g. a container's fd 1 + fd 2), and
+        // such a handle owns a single underlying resource that must be released
+        // once, not once per fd.
+        for (i, &(_fd, handle, _flags)) in linux_fd_redirects.iter().enumerate() {
+            if linux_fd_redirects[..i].iter().any(|&(_, h, _)| h == handle) {
+                continue;
+            }
             let _ = crate::fs::handle::close(handle);
         }
     };
@@ -657,6 +665,13 @@ fn spawn_process_inner(
     // it is never leaked.
     if !linux_fd_redirects.is_empty() {
         if is_linux_abi {
+            // Install each fd, then register each DISTINCT handle for teardown.
+            // The two steps are separate because a redirect list may alias one
+            // handle across several fds (dup2 semantics — e.g. a container's
+            // fd 1 + fd 2 sharing one capture file so their writes interleave in
+            // order).  Such a handle owns a single underlying resource that must
+            // be registered — and thus reclaimed — exactly once, not once per fd;
+            // registering it per fd would double-close it at exit.
             for &(fd, handle, status_flags) in linux_fd_redirects {
                 // Drop whatever default entry (console) occupies this fd, then
                 // install the file handle in its place.
@@ -666,19 +681,33 @@ fn spawn_process_inner(
                     fd,
                     crate::proc::linux_fd::FdEntry::file(handle, status_flags),
                 ) {
+                    // Non-fatal: this fd just keeps its default (console) entry.
+                    // Do NOT close the handle here — ownership is registered once
+                    // below, independent of any single fd's install success, so
+                    // the handle is always reclaimed exactly once at teardown.
                     serial_println!(
                         "[spawn] WARNING: failed to install fd {} redirect on process {}: {:?}",
                         fd, pid, e
                     );
-                    let _ = crate::fs::handle::close(handle);
-                } else {
-                    // Track for exit/destroy teardown so the moved-in handle is
-                    // reclaimed (see the ownership note above).
-                    pcb::register_ipc_handle(pid, crate::cap::ResourceType::File, handle);
                 }
             }
+            // Register each distinct handle exactly once for exit/destroy
+            // teardown so the moved-in handle is reclaimed (see the ownership
+            // note above).  `cleanup_handles` closes it via the ipc-handle list;
+            // the `linux_fd` table has no `Drop` of its own.
+            for (i, &(_fd, handle, _flags)) in linux_fd_redirects.iter().enumerate() {
+                if linux_fd_redirects[..i].iter().any(|&(_, h, _)| h == handle) {
+                    continue;
+                }
+                pcb::register_ipc_handle(pid, crate::cap::ResourceType::File, handle);
+            }
         } else {
-            for &(_fd, handle, _flags) in linux_fd_redirects {
+            // Native child: it does not consult this table, so close each
+            // distinct handle once (never leak, never double-close an alias).
+            for (i, &(_fd, handle, _flags)) in linux_fd_redirects.iter().enumerate() {
+                if linux_fd_redirects[..i].iter().any(|&(_, h, _)| h == handle) {
+                    continue;
+                }
                 let _ = crate::fs::handle::close(handle);
             }
         }

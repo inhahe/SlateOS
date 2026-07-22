@@ -5577,12 +5577,33 @@ registered into the child on success; closed on any error — directly for
 pre-create validation failures, via `destroy`'s `cleanup_handles` for
 post-create failures), and callers never close them.
 
-**Not converted (out of scope, tracked):** `kernel/src/container.rs`'s
-container-log stdout/stderr redirect uses the same post-spawn `linux_fd_take` +
-`linux_fd_install_at` shape (with a fd-2 dup2). It is a container-launch feature,
-not a boot self-test, and its process may already be set up differently; it
-should be reviewed for the same TOCTOU window and the same missing
-`register_ipc_handle` in a follow-up.
+**Container log redirect — converted 2026-07-22 (same class-fix).**
+`kernel/src/container.rs`'s container-log stdout/stderr redirect used the same
+post-spawn `linux_fd_take` + `linux_fd_install_at` shape (with a fd-2 dup2) and
+had the *same two bugs*: the TOCTOU window (a preempted init could leak its
+first `write` to the console before the redirect landed) and the missing
+`register_ipc_handle` (so the capture handle leaked one fs handle per container
+run). Both are now fixed by the same born-with-redirect mechanism: `run_with_abi`
+opens the capture file *before* spawning (`open_capture_log`) and passes the
+handle as **both** fd 1 and fd 2 to `spawn_process_with_redirects` /
+`spawn_process_with_abi_and_redirects`, so the redirect is installed inside the
+spawn before the child is runnable. To support the fd-1/fd-2 alias (dup2
+semantics — one shared handle / append position), the spawn redirect applier was
+generalised to **dedup by handle**: it installs every fd but registers (and, on
+error/native paths, closes) each *distinct* handle exactly once, so an aliased
+handle is reclaimed once rather than double-closed. Validated by the container
+`logs` self-test (`run_with_abi(HELLO_ELF, …, AbiMode::Linux)` at
+container.rs:~6557).
+
+**Still not converted (separate, larger race — tracked):** `run_with_abi`'s
+`add_process_task` (cgroup billing + pid/net/uts namespace binding) still runs
+*after* `spawn_process` returns, i.e. after the child is Ready. In principle a
+timer-tick preemption could run the child's first instructions before the
+binding completes (the same "child runs before setup finishes" shape). This is a
+distinct, pre-existing issue with different severity (accounting/namespace, not
+lost output) and a much larger fix (threading container-binding info into the
+spawn), so it is left for a dedicated follow-up rather than folded into the
+capture-redirect fix.
 
 **Severity escalation 2026-06-30 — a *full* boot hang was observed, not
 just the non-fatal warning.** On a subsequent run the boot never reached
@@ -10613,19 +10634,22 @@ remain the deferred mount-namespace piece.
 
 ### TD33. Container `logs` capture works only for Linux-ABI container inits — ACCEPTED LIMITATION 2026-06-30
 
-**Where:** `kernel/src/container.rs` (`redirect_output_to_capture`, called from
-`run_with_abi` right after `spawn_process`). The capture works by rewriting the
-init process's **Linux fd table** — `pcb::linux_fd_take(pid, 1)` then
-`linux_fd_install_at(pid, 1, FdEntry::file(capture_handle, O_WRONLY))` and
-`linux_fd_dup2(pid, 1, 2)` — during the window after spawn but before the init is
-scheduled.
+**Where:** `kernel/src/container.rs` (`open_capture_log`, whose handle
+`run_with_abi` passes as fd 1 + fd 2 to `spawn_process_with_redirects` /
+`spawn_process_with_abi_and_redirects`). The capture works by installing the
+capture handle into the init process's **Linux fd table** as fds 1 and 2 (one
+shared handle — dup2 semantics — for interleaved stdout+stderr). *(Updated
+2026-07-22: the redirect is now installed atomically inside the spawn, before
+the child is runnable, closing the former post-spawn TOCTOU window; the old
+`redirect_output_to_capture` post-spawn helper was removed. See the
+B-PTHREAD-YIELDBUDGET empty-capture entry for the race fix.)*
 
 **The limitation.** The `linux_fd_table` is only installed for **Linux-ABI**
 binaries (`spawn.rs`: `if is_linux_abi { … linux_fd_install_stdio(pid) }`).
-Native SlateOS binaries have no `linux_fd_table`, so `linux_fd_install_at` fails,
-`redirect_output_to_capture` returns `None`, the container's `log_path` stays
-empty, and `container logs ID` returns `NotFound`. A native-ABI container init's
-stdout/stderr therefore goes to the console and is **not** captured to
+Native SlateOS binaries have no `linux_fd_table`, so the spawn redirect applier
+skips installation (and closes the handle instead), the container's `log_path`
+stays empty, and `container logs ID` returns `NotFound`. A native-ABI container
+init's stdout/stderr therefore goes to the console and is **not** captured to
 `/var/log/containers/<id>.log`.
 
 **Why it's accepted, not blocking.** Real Docker/OCI container entrypoints are

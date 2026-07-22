@@ -6124,11 +6124,15 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
 /// the way to `exit(0)`.  A fault in TLS setup would instead leave the
 /// process killed in a non-zombie state (or exiting with a fault code).
 pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
-    // The fastpy-compiled Python program: builds a list, sums it, prints.
-    // `print` writes to fd 1, which a native process has no console handle
-    // for — the write silently fails, which is fine: we are testing that the
-    // program *runs* (TLS + syscalls), not console plumbing.  Its normal
-    // completion yields exit code 0.
+    // The fastpy-compiled Python program: builds a list, sums it, prints,
+    // then `sys.exit(len(sys.argv))`.  `print` writes to fd 1, which a native
+    // process has no console handle for — the write silently fails, which is
+    // fine: we are testing that the program *runs* (TLS + syscalls), not
+    // console plumbing.  Exiting with `argc` lets us verify two things at once
+    // on-target: (a) TLS setup worked (it reached user code at all), and
+    // (b) the argv delivery path — kernel `SYS_PROCESS_GET_ARGS` -> crt ->
+    // runtime `fpy_argv` -> `sys.argv` — carried the exact argument vector we
+    // spawned it with, and the non-zero exit code propagated back.
     static FASTPY_HELLO_ELF: &[u8] =
         include_bytes!("../../../services/fastpy-hello/fastpy-hello.elf");
 
@@ -6137,7 +6141,9 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
         FASTPY_HELLO_ELF.len()
     );
 
-    let argv: &[&[u8]] = &[b"fastpy-hello"];
+    // Spawn with a known 3-element argv; the program exits with argc (3).
+    let argv: &[&[u8]] = &[b"fastpy-hello", b"alpha", b"bravo"];
+    const EXPECTED_ARGC: i32 = 3;
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
         name: "fastpy-hello",
@@ -6189,18 +6195,22 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if exit_code != Some(0) {
+    if exit_code != Some(EXPECTED_ARGC) {
         serial_println!(
             "[spawn]   FAIL: fastpy-hello (ring 3) — reached Zombie (so TLS setup worked) but \
-             exit code was {:?}, expected 0",
-            exit_code
+             exit code was {:?}, expected {} (== argc). A wrong argc means the argv delivery \
+             path (SYS_PROCESS_GET_ARGS -> crt -> sys.argv) is broken; exit(0) with no argc \
+             would mean the program never read its arguments",
+            exit_code, EXPECTED_ARGC
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[spawn]   fastpy-on-SlateOS TLS (ring 3: native fastpy binary set up main-thread \
-         ELF TLS via SYS_SET_FS_BASE and ran to exit(0)): OK"
+         ELF TLS via SYS_SET_FS_BASE, read its {}-element argv via sys.argv, and ran to \
+         exit(argc)): OK",
+        EXPECTED_ARGC
     );
     Ok(())
 }

@@ -53620,3 +53620,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   known-issues.md TD-NATIVE-MPROTECT. Trigger: when a native binary needs
 ##   working mprotect (e.g. a fastpy component that mmaps PROT_NONE then
 ##   upgrades, or wants W^X page transitions).
+
+## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
+##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
+##   prerequisite for a shipping fastpy component that touches the filesystem
+##   (package manager, cat, a config reader, etc.).
+##   Current gap: fastpy's file/Path machinery (open(), Path.read_text/
+##   write_text/is_file/iterdir, etc.) lives in runtime/cpython_bridge.c, which
+##   is REPLACED by bridge_stub.c in pure mode (-DFPY_PURE_MODE). Worse, those
+##   functions take a CPython Path *object* (PyObject*) and use _path_as_cstr()/
+##   Py* calls, so it is not a simple "move the fopen() calls" refactor — the
+##   pure-mode representation of a Path/file object must be designed.
+##   Good news: the SlateOS posix libc already implements the full C file
+##   surface backed by SYS_FS_* VFS syscalls — fopen/fread/fwrite/fclose/fseek/
+##   ftell in posix/src/stdio.rs and open/read/write/close in posix/src/file.rs.
+##   So once fastpy has a pure-mode file/Path object model, backing it with
+##   plain C stdio "just works" on-target (and on host).
+##   Proper fix (in the fastpy repo): design a bridge-neutral file/Path object
+##   for pure mode (a small C struct + a FILE*), emit open()/read()/write()/
+##   close() and Path.read_text/write_text against it via standard stdio, and
+##   compile that TU in BOTH host and pure builds. Then validate on-target with
+##   a kernel self-test that writes a file to the VFS and reads it back.
+##   Note: sys.argv and sys.exit(code) already work in pure mode (runtime.c,
+##   fpy_argv / fastpy_sys_exit) — validated on-target by
+##   self_test_fastpy_slateos_tls (exits with argc). print() also works.

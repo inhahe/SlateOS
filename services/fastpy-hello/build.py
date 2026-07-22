@@ -25,11 +25,20 @@ from compiler.codegen import CodeGen
 from compiler import toolchain
 
 SRC = (
+    # print + int arithmetic + list iteration (validates the base runtime).
+    "import sys\n"
     "print('hello from fastpy on SlateOS')\n"
     "total = 0\n"
     "for x in [1, 2, 3, 4, 5]:\n"
     "    total += x\n"
     "print(total)\n"
+    # sys.argv + nonzero sys.exit: validates the argv delivery path
+    # (kernel SYS_PROCESS_GET_ARGS -> crt -> runtime fpy_argv) and
+    # exit-code propagation on-target.  The kernel self-test spawns this
+    # with a known argc and asserts the process exits with that argc.
+    "argc = len(sys.argv)\n"
+    "print('argc', argc)\n"
+    "sys.exit(argc)\n"
 )
 
 

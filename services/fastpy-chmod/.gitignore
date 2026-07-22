@@ -1,2 +1,4 @@
 # Intermediate object emitted by build.py; only the linked ELF fixture is tracked.
 prog.o
+# Python bytecode cache from importing build.py (e.g. IR bridge-free probes).
+__pycache__/

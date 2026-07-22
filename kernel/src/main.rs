@@ -1603,6 +1603,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
+    // reads argv[2], prints lines containing argv[1] via the native
+    // contains_sub matcher, and exits 0/1 per grep semantics.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_grep() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `grep` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

@@ -6431,6 +6431,114 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
+/// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
+/// prints every line containing the substring `argv[1]`, and exits following
+/// grep(1) semantics (0 if any line matched, 1 if none).
+///
+/// Where `fastpy-cat` echoes a whole file, this exercises per-line iteration
+/// plus the native `contains_sub` substring matcher (the same matcher backing
+/// `pkg search`) end-to-end on-target.  The harness stages a known multi-line
+/// file, then spawns the utility twice: once with a pattern that matches
+/// (asserting exit 0) and once with a pattern that does not (asserting exit 1).
+pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
+    static FASTPY_GREP_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-grep/fastpy-grep.elf");
+
+    const GREP_PATH: &str = "/tmp/grep-input.txt";
+    const GREP_PATH_ARG: &[u8] = b"/tmp/grep-input.txt";
+    // Four lines; "alpha"/"gamma" share the substring "a", "delta" matches on
+    // "elta", and nothing contains "zzz".
+    const GREP_CONTENT: &[u8] = b"alpha line\nbeta line\ngamma line\ndelta line\n";
+
+    fn run_grep(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+        let envp: &[&[u8]] = &[];
+        let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "fastpy-grep",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..2000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-grep (ring 3) did not reach Zombie (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        exit_code.ok_or(KernelError::InternalError)
+    }
+
+    fn cleanup() {
+        let _ = crate::fs::Vfs::remove(GREP_PATH);
+    }
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `grep` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GREP_ELF.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(GREP_PATH, GREP_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", GREP_PATH, e);
+        return Err(e);
+    }
+
+    // (argv, expected exit code, description).  grep(1): 0 = matched, 1 = none.
+    let steps: &[(&[&[u8]], i32, &str)] = &[
+        (&[b"fastpy-grep", b"line", GREP_PATH_ARG], 0, "grep 'line' (all 4 lines)"),
+        (&[b"fastpy-grep", b"gamma", GREP_PATH_ARG], 0, "grep 'gamma' (1 line)"),
+        (&[b"fastpy-grep", b"zzz", GREP_PATH_ARG], 1, "grep 'zzz' (no match)"),
+    ];
+
+    for (argv, want, desc) in steps {
+        match run_grep(FASTPY_GREP_ELF, argv) {
+            Ok(code) if code == *want => {}
+            Ok(code) => {
+                cleanup();
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-grep `{}` exited {} (expected {})",
+                    desc, code, want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                cleanup();
+                serial_println!("[spawn]   FAIL: fastpy-grep `{}` — {:?}", desc, e);
+                return Err(e);
+            }
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `grep` (ring 3: fixed-string grep(1) — read argv[2] file, \
+         printed lines containing argv[1] via native contains_sub, grep-style exit 0/1): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

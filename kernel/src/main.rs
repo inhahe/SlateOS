@@ -1909,6 +1909,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-ftruncate` utility: exercises the fd-based
+    // file truncate path (os.ftruncate → SYS_FS_FTRUNCATE, distinct from the
+    // path-based os.truncate/SYS_FS_TRUNCATE). The tool writes 8 bytes,
+    // truncates to 3, and confirms only "ABC" survives; the harness asserts
+    // the round-tripped file holds "ABC", so the file can only be that short
+    // if ftruncate truly shrank it in the kernel.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_ftruncate() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `ftruncate` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the second shipping fastpy utility: `fastpy-sysinfo` reads
     // the kernel's procfs (/proc/version, /proc/uptime, /proc/meminfo) — files
     // generated on the fly with no fixed size — and prints a report. Proves

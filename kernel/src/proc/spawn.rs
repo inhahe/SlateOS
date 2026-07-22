@@ -10328,6 +10328,138 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-ftruncate` utility — the first fastpy
+/// tool to exercise the fd-based file **truncate** path (`os.ftruncate` →
+/// posix ftruncate() → `SYS_FS_FTRUNCATE`).
+///
+/// `SYS_FS_FTRUNCATE` is a genuinely distinct kernel syscall from the
+/// path-based `os.truncate()` (`SYS_FS_TRUNCATE`) and from lseek/write.  The
+/// tool raw-opens a file (`os.open`), writes `"ABCDEFGH"` (8 bytes), truncates
+/// it to 3 bytes with `os.ftruncate(fd, 3)`, confirms via `SEEK_END` that the
+/// new size is 3, then rewinds and reads.
+///
+/// False-pass-proof: a no-op/mis-lowered `os.ftruncate` would leave the file at
+/// 8 bytes — `SEEK_END` would report 8 and the read would return `"ABCDEFGH"`.
+/// Only a real kernel truncation leaves the file at 3 bytes, so the surviving
+/// `"ABC"` (which the harness asserts the tool wrote back) can only be right if
+/// `SYS_FS_FTRUNCATE` actually shrank the file.
+pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
+    static FASTPY_FTRUNCATE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-ftruncate/fastpy-ftruncate.elf");
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `ftruncate` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_FTRUNCATE_ELF.len()
+    );
+
+    // The bytes that survive the truncate-to-3 and the tool writes back.
+    const EXPECTED: &[u8] = b"ABC";
+
+    const OUT_PATH: &str = "/tmp/fastpy-ftruncate.out";
+    const DAT_PATH: &str = "/tmp/fastpy-ftruncate.dat";
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    // The tool loads its image (File READ), raw-opens+writes+truncates its
+    // scratch data file, and creates+writes its output file (File WRITE).
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-ftruncate"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-ftruncate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_FTRUNCATE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-ftruncate spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftruncate (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.ftruncate may have mis-lowered)",
+            state
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #1: the tool's own self-consistency check (post-truncate read
+    // matched, SEEK_END returned 3, write returned 8).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftruncate (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (3 = post-truncate read / SEEK_END size / write count mismatch)",
+            exit_code
+        );
+        let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // Guard #2 (the strong one): the surviving bytes must be exactly the first
+    // 3 — provable only if ftruncate really shrank the file.
+    let written = match crate::fs::vfs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-ftruncate (ring 3) — could not read back output file {} \
+                 ({:?}); cannot confirm the post-truncate bytes",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let _ = crate::fs::vfs::Vfs::remove(OUT_PATH);
+
+    if written != EXPECTED {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-ftruncate (ring 3) — post-truncate bytes were {:?}, expected \
+             {:?}; os.ftruncate did not shrink the file (os.ftruncate/SYS_FS_FTRUNCATE path)",
+            written, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `ftruncate` (ring 3: os.ftruncate(fd, 3) → \
+         SYS_FS_FTRUNCATE; the tool wrote 8 bytes, truncated to {} and confirmed only those \
+         survive — proving the kernel shrank the file): OK",
+        written.len()
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-sysinfo` utility — the second
 /// shipping fastpy SlateOS component.
 ///

@@ -1889,6 +1889,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-getuid`: os.getuid/os.getgid → the new
+    // SYS_PROCESS_GET_CREDENTIALS syscall reads the real process identity
+    // (previously the posix stubs returned 0). Spawned with a distinct non-root
+    // uid/gid the kernel cross-checks against the tool's readout.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_getuid() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `getuid` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

@@ -77,6 +77,8 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
+/// Get the calling process's real uid/gid, packed as gid<<32 | uid.
+pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
 
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;

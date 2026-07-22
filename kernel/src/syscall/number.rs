@@ -1671,6 +1671,23 @@ pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 /// fails — there is no error path.
 pub const SYS_PROCESS_COUNT: u64 = 521;
 
+/// Get the calling process's real user and group IDs (credentials).
+///
+/// Takes no arguments.  Reads the calling process's
+/// [`ProcessCredentials`](crate::proc::pcb::ProcessCredentials) (set from the
+/// parent at spawn, or from `SpawnOptions.uid_gid`) and returns the pair
+/// packed into one non-negative i64:
+///
+/// - bits `[0..32)`  — real uid (u32)
+/// - bits `[32..64)` — real gid (u32)
+///
+/// Backs the POSIX `getuid()`/`getgid()` (and, until euid/egid are tracked
+/// separately, `geteuid()`/`getegid()`), which previously returned a
+/// hardcoded 0.  A kernel task with no owning process reports uid=gid=0
+/// (root).  Never fails — there is no error path.  Chosen number 529 (the
+/// next free native syscall slot after the signal/fork/fs-base cluster).
+pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
+
 // ---------------------------------------------------------------------------
 // POSIX signal-shim syscalls (522–526)
 // ---------------------------------------------------------------------------

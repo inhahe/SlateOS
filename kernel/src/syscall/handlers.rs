@@ -3973,6 +3973,29 @@ pub fn sys_process_count(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(clamped)
 }
 
+/// `SYS_PROCESS_GET_CREDENTIALS` — get the calling process's real uid/gid.
+///
+/// Returns the pair packed into one non-negative i64: uid in bits `[0..32)`,
+/// gid in bits `[32..64)`.  A kernel task with no owning process (or a process
+/// with no recorded credentials) reports uid=gid=0 (root).  Backs POSIX
+/// `getuid()`/`getgid()`.  Never fails.
+pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::{thread, pcb};
+
+    let task_id = sched::current_task_id();
+    let (uid, gid) = match thread::owner_process(task_id) {
+        Some(pid) => pcb::get_credentials(pid).map_or((0u32, 0u32), |c| (c.uid, c.gid)),
+        None => (0u32, 0u32),
+    };
+    // Pack gid into the high 32 bits, uid into the low 32.  Both are u32, so
+    // the packed value fits in u64; the only way bit 63 is set is a gid past
+    // 2^31, which the caller reinterprets as u64 (never an error sentinel).
+    let packed: u64 = (u64::from(gid) << 32) | u64::from(uid);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(packed as i64)
+}
+
 /// `SYS_CAP_QUERY` — query the calling process's capabilities.
 ///
 /// Returns the number of valid capabilities held by the calling process.

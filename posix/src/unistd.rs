@@ -546,31 +546,64 @@ pub extern "C" fn fchdir(fd: Fd) -> i32 {
 // isatty() is defined in ioctl.rs — it checks the fd table's HandleKind
 // rather than hardcoding fd numbers, so it works for any Console fd.
 
+/// Query the calling process's real credentials from the kernel.
+///
+/// On bare metal this issues `SYS_PROCESS_GET_CREDENTIALS`, which returns the
+/// pair packed as `gid << 32 | uid`.  In host tests (no kernel) it reports
+/// root (uid=gid=0).  Returns `(uid, gid)`.
+fn process_credentials() -> (UidT, GidT) {
+    #[cfg(target_os = "none")]
+    {
+        let packed = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_GET_CREDENTIALS);
+        // The syscall never fails; the packed pair is non-negative in practice
+        // (uid/gid fit in 32 bits each). Reinterpret as u64 and unpack.
+        #[allow(clippy::cast_sign_loss)]
+        let bits = packed as u64;
+        let uid = (bits & 0xFFFF_FFFF) as UidT;
+        #[allow(clippy::cast_possible_truncation)]
+        let gid = (bits >> 32) as GidT;
+        (uid, gid)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        (0, 0)
+    }
+}
+
 /// Get the real user ID of the calling process.
 ///
-/// Returns 0 (root) since we don't have multi-user support in
-/// userspace yet.
+/// Reads the process's kernel credentials (set at spawn / from
+/// `SpawnOptions.uid_gid`).  Reports root (0) for the kernel's own tasks and
+/// in host tests.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getuid() -> UidT {
-    0
+    process_credentials().0
 }
 
 /// Get the effective user ID of the calling process.
+///
+/// Aliased to the real uid until the kernel tracks a separate effective uid.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn geteuid() -> UidT {
-    0
+    process_credentials().0
 }
 
 /// Get the real group ID of the calling process.
+///
+/// Reads the process's kernel credentials (set at spawn / from
+/// `SpawnOptions.uid_gid`).  Reports root (0) for the kernel's own tasks and
+/// in host tests.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgid() -> GidT {
-    0
+    process_credentials().1
 }
 
 /// Get the effective group ID of the calling process.
+///
+/// Aliased to the real gid until the kernel tracks a separate effective gid.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getegid() -> GidT {
-    0
+    process_credentials().1
 }
 
 /// Set the user ID of the calling process.

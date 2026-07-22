@@ -10600,6 +10600,195 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-getuid` utility — a **genuinely
+/// distinct** lowering from the filesystem stat-family: process *identity*.
+///
+/// `os.getuid()`/`os.getgid()` lower bridge-free to `fastpy_os_get{u,g}id` →
+/// posix `get{u,g}id()` → the native `SYS_PROCESS_GET_CREDENTIALS` syscall,
+/// which reads the calling process's `ProcessCredentials` (set by the kernel at
+/// spawn from `SpawnOptions.uid_gid`) — a distinct kernel path (the
+/// process-credentials table) from the pid/tid identity syscalls and from every
+/// filesystem syscall.  Until this work the posix stubs returned a hardcoded 0.
+///
+/// This harness spawns the tool with a **non-root** identity `(EXPECTED_UID,
+/// EXPECTED_GID)` — two distinct, non-obvious values — and asserts the tool's
+/// written `"<uid>,<gid>"` matches exactly AND that `pcb::get_credentials`
+/// stored the same pair.  The old stub (`0,0`) fails immediately, and a
+/// hardcoded-constant stub cannot know the spawn-time ids; the two ids being
+/// distinct rules out a single-field coincidence.  Granted `READ|WRITE` (for
+/// the `/tmp` output file); the credential syscall needs no capability.
+pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
+    static FASTPY_GETUID_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-getuid/fastpy-getuid.elf");
+
+    const OUT_PATH: &str = "/tmp/fastpy-getuid.out";
+    // Distinct, non-obvious identity to spawn the tool with. Distinctness rules
+    // out a getuid/getgid folding bug or a single-field coincidence.
+    const EXPECTED_UID: u32 = 4242;
+    const EXPECTED_GID: u32 = 8181;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `getuid` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_GETUID_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-getuid"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-getuid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: Some((EXPECTED_UID, EXPECTED_GID)),
+    };
+
+    let result = match spawn_process(FASTPY_GETUID_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-getuid spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Read the kernel-stored credentials while the zombie is still in the
+    // process table (before destroy) — an independent confirmation that the
+    // spawn actually installed the identity the tool then read back.
+    let stored = pcb::get_credentials(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getuid (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.getuid/getgid may have mis-lowered)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getuid (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The kernel must have stored exactly the identity we spawned with.
+    match stored {
+        Some(c) if c.uid == EXPECTED_UID && c.gid == EXPECTED_GID => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getuid (ring 3) — kernel credentials were {:?}, expected \
+                 uid={} gid={} (SpawnOptions.uid_gid was not installed)",
+                other.map(|c| (c.uid, c.gid)), EXPECTED_UID, EXPECTED_GID
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The tool must have read back and written exactly "<EXPECTED_UID>,<EXPECTED_GID>".
+    let written = match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-getuid (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Parse two comma-separated decimal fields (uid, gid).
+    let mut fields: [u64; 2] = [0, 0];
+    let mut idx = 0usize;
+    let mut saw_digit = false;
+    let mut ok_format = true;
+    for &b in &written {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            if let Some(slot) = fields.get_mut(idx) {
+                *slot = slot.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+            }
+        } else if b == b',' {
+            if !saw_digit {
+                ok_format = false;
+                break;
+            }
+            idx = idx.saturating_add(1);
+            saw_digit = false;
+            if idx >= fields.len() {
+                ok_format = false;
+                break;
+            }
+        } else {
+            ok_format = false;
+            break;
+        }
+    }
+    if !ok_format || idx != 1 || !saw_digit {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getuid (ring 3) — malformed output {:?} (expected \
+             \"<uid>,<gid>\")",
+            written.as_slice()
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if fields[0] != u64::from(EXPECTED_UID) || fields[1] != u64::from(EXPECTED_GID) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-getuid (ring 3) — tool reported uid={} gid={}, expected \
+             uid={} gid={} (os.getuid/getgid did not read the real process credentials — a stub \
+             or a mis-lowered credential syscall)",
+            fields[0], fields[1], EXPECTED_UID, EXPECTED_GID
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `getuid` (ring 3: os.getuid/os.getgid → \
+         SYS_PROCESS_GET_CREDENTIALS read the real process identity; the tool reported uid={} \
+         gid={}, matching both the spawn-time SpawnOptions.uid_gid and the kernel's stored \
+         ProcessCredentials exactly): OK",
+        fields[0], fields[1]
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

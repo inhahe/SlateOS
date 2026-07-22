@@ -4047,6 +4047,58 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PROCESS_GET_NICE` — read the caller's scheduling nice value.
+///
+/// Returns the nice value biased by +20 (`0..=39` ⇒ nice `-20..=19`) so the
+/// result is always a non-negative `i64`; the userspace wrapper subtracts 20.
+/// A kernel task with no owning process (or one with no recorded value)
+/// reports the default nice 0 (biased `20`). Never fails. Backs POSIX
+/// `getpriority()`/`nice()`.
+pub fn sys_process_get_nice(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::{pcb, thread};
+
+    let task_id = sched::current_task_id();
+    let nice = match thread::owner_process(task_id) {
+        Some(pid) => pcb::get_nice(pid).unwrap_or(0),
+        None => 0,
+    };
+    // Bias by +20: nice ∈ [-20,19] ⇒ [0,39], always non-negative.
+    let biased = i64::from(nice) + 20;
+    SyscallResult::ok(biased)
+}
+
+/// `SYS_PROCESS_SET_NICE` — set the caller's nice value and apply it.
+///
+/// `arg0` is the new nice **biased by +20** (`0..=39`). The kernel un-biases,
+/// clamps to `-20..=19`, records it in the caller's PCB, and re-prioritises
+/// every task the process owns (nice→priority via
+/// [`thread::nice_to_priority`]) so the change actually affects scheduling.
+///
+/// Per the thin-primitive contract (see the syscall-number doc), the
+/// `CAP_SYS_NICE` policy for priority raises is enforced by the userspace
+/// posix wrappers; the kernel only performs the mutation, always on the
+/// caller's own process. Returns the *previous* nice, biased by +20. Fails
+/// only if the caller has no owning process.
+pub fn sys_process_set_nice(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Un-bias arg0 (biased +20) back to a signed nice, clamping to the POSIX
+    // range. arg0 is u64; a caller passing a wild value is clamped, not UB.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let requested = (args.arg0 as i64).clamp(0, 39) as i32 - 20;
+
+    match thread::set_process_nice(pid, requested) {
+        Some(old) => SyscallResult::ok(i64::from(old) + 20),
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
+}
+
 /// `SYS_CAP_QUERY` — query the calling process's capabilities.
 ///
 /// Returns the number of valid capabilities held by the calling process.

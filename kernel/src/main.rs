@@ -1910,6 +1910,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-nice`: os.setpriority/os.nice → SYS_PROCESS_SET_NICE
+    // *mutates* the process's scheduling nice AND re-prioritises its tasks (the
+    // scheduler's per-task priority — a distinct kernel path from the credential
+    // table). Proves nice is a real scheduling attribute, not a userspace no-op.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_nice() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `nice` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

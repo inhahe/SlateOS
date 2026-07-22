@@ -670,6 +670,63 @@ pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
     (nvcsw, nivcsw)
 }
 
+/// Map a POSIX **nice** value to a scheduler **priority** level.
+///
+/// Nice ranges `-20..=19` (lower = more favourable / higher priority);
+/// our scheduler priority ranges `0..=31` (0 = highest, 31 = lowest, see
+/// [`crate::sched::task::NUM_PRIORITIES`]). The mapping is linear and
+/// monotonic (higher nice ⇒ higher priority number ⇒ lower scheduling
+/// priority), pinned so nice `0` lands on the default priority level:
+///
+/// `priority = round((nice + 20) * 31 / 39)`
+///
+/// which yields `nice -20 → 0`, `nice 0 → 16` (== [`task::DEFAULT_PRIORITY`]),
+/// and `nice 19 → 31`. Inputs are clamped to the valid nice range first.
+#[must_use]
+pub fn nice_to_priority(nice: i32) -> u8 {
+    // Clamp to the POSIX nice range, then bias to 0..=39 so the scaling is a
+    // non-negative integer computation.
+    let biased = nice.clamp(-20, 19) + 20; // 0..=39
+    // round(biased * 31 / 39): add half the denominator before the floor.
+    // biased*31 <= 39*31 = 1209, +19 = 1228, well within i32 — no overflow.
+    #[allow(clippy::arithmetic_side_effects)]
+    let prio = (biased * 31 + 19) / 39; // 0..=31
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        prio.clamp(0, 31) as u8
+    }
+}
+
+/// Record a process's **nice** value and apply it to the scheduler.
+///
+/// This is the authoritative "make nice real" primitive shared by both the
+/// native `SYS_PROCESS_SET_NICE` path and the Linux-ABI `setpriority` /
+/// `sched_setattr` paths. It:
+/// 1. clamps `nice` to `-20..=19`,
+/// 2. stores it in the process's PCB (via [`pcb::set_nice`]), and
+/// 3. maps it to a priority level and re-prioritises **every** task the
+///    process currently owns via [`sched::set_priority`].
+///
+/// Returns the *previous* nice value, or `None` if `pid` is unknown.
+///
+/// Lock ordering: [`pcb::set_nice`] and [`pcb::get_threads`] each take and
+/// release the process-table lock; [`sched::set_priority`] takes the
+/// scheduler lock. We deliberately finish all PCB access before touching the
+/// scheduler so the two locks are never held simultaneously.
+pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
+    let clamped = nice.clamp(-20, 19);
+    let old = pcb::set_nice(pid, clamped)?;
+    let prio = nice_to_priority(clamped);
+    if let Some(task_ids) = pcb::get_threads(pid) {
+        for tid in task_ids {
+            // Ignore a missing task: a thread may have exited between the
+            // get_threads snapshot and here; its priority is moot.
+            let _ = sched::set_priority(tid, prio);
+        }
+    }
+    Some(old)
+}
+
 /// Force-kill all threads in a process.
 ///
 /// For each thread belonging to the process:

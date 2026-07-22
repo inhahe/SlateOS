@@ -10999,6 +10999,229 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-nice` utility — the tool that proves
+/// `os.setpriority()`/`os.nice()` are a **real scheduling mutation**, not a
+/// userspace-local no-op.
+///
+/// `os.getpriority`/`os.nice`/`os.setpriority` lower bridge-free to
+/// `fastpy_os_{getpriority,nice,setpriority}` → posix
+/// `{getpriority,nice,setpriority}()`, which — after the userspace CAP_SYS_NICE
+/// check for a priority *raise* — issue the native
+/// `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE` syscalls.  The *set* syscall
+/// records the process's nice in its `ProcessControlBlock` **and** maps it to a
+/// scheduler priority level, re-prioritising every task the process owns
+/// (`thread::set_process_nice` → `sched::set_priority`) — a distinct **write**
+/// path (the scheduler's per-task priority table) from every filesystem/
+/// credential syscall.  Until this work the posix `nice`/`setpriority` stubs
+/// stored the value in a userspace static that did not affect scheduling.
+///
+/// The harness spawns the tool as **root** (a negative nice is a
+/// CAP_SYS_NICE-gated priority *raise*, so the tool needs the cap).  The tool
+/// reads its spawn nice (`n0` == 0), `setpriority`s it to -7 (`n1`),
+/// `nice(-5)`s it to -12 (`r`), reads it back (`n2`), writes
+/// `"<n0>,<n1>,<r>,<n2>"`, then **sleeps in a loop** (blocked, *not*
+/// busy-spinning — it has raised its own priority to 6, above this harness, so
+/// a spin would starve the harness and livelock the boot).  Once the output
+/// file is fully written (the tool's sync signal that every nice call has run
+/// and it is now sleeping — so the task is guaranteed alive but off the run
+/// queue), we read, *while the task still exists*, both (a) `pcb::get_nice(pid)`
+/// and (b) the task's base scheduler priority (`sched::get_base_priority`).  We
+/// assert the tool wrote exactly `"0,-7,-12,-12"` AND `pcb::get_nice == -12`
+/// AND the base priority equals `thread::nice_to_priority(-12)` (== 6).  Then
+/// we kill the (sleeping) process.  The old stub would leave `pcb::get_nice` at
+/// 0 and the scheduler priority at the spawn default (16) — two independent
+/// failures.  nice -12 → priority 6 is distinct from the default 16, ruling out
+/// a coincidence.  Granted `READ|WRITE` for the `/tmp` output file; the raise
+/// is CAP_SYS_NICE-gated in the userspace posix wrapper (the kernel mutation
+/// syscall itself needs no capability token).
+pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
+    static FASTPY_NICE_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-nice/fastpy-nice.elf");
+
+    const OUT_PATH: &str = "/tmp/fastpy-nice.out";
+    // Must match the literals baked into services/fastpy-nice/build.py's SRC:
+    // setpriority(-7), then nice(-5) ⇒ -12.  nice_to_priority(-12) == 6.
+    // Negative nice (a priority *raise*) is CAP_SYS_NICE-gated — the tool is
+    // spawned as root so it holds the cap — and moves the tool ABOVE the
+    // default priority.  The tool then *sleeps* (blocks) rather than spins, so
+    // it never starves the polling harness despite its higher priority.
+    const EXPECT_NICE: i32 = -12;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `nice` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_NICE_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-nice"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-nice",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        // Spawn as root (default caps = all) so the tool has CAP_SYS_NICE
+        // available; the calls it makes only *lower* priority (need no cap),
+        // but a root spawn keeps parity with the other identity self-tests.
+        uid_gid: Some((0, 0)),
+    };
+
+    let result = match spawn_process(FASTPY_NICE_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-nice spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Parse "n0,n1,r,n2" into four signed decimal fields.  Returns None until
+    // the file exists AND contains a well-formed 4-field record (our sync
+    // barrier: the tool writes+closes the file before it starts sleeping).
+    let parse_four = |bytes: &[u8]| -> Option<[i64; 4]> {
+        let mut fields: [i64; 4] = [0; 4];
+        let mut idx = 0usize;
+        let mut saw_digit = false;
+        let mut neg = false;
+        for &b in bytes {
+            if b == b'-' && !saw_digit {
+                neg = true;
+            } else if b.is_ascii_digit() {
+                saw_digit = true;
+                if let Some(slot) = fields.get_mut(idx) {
+                    *slot = slot.saturating_mul(10).saturating_add(i64::from(b - b'0'));
+                }
+            } else if b == b',' {
+                if !saw_digit {
+                    return None;
+                }
+                if neg {
+                    if let Some(slot) = fields.get_mut(idx) {
+                        *slot = -*slot;
+                    }
+                }
+                idx = idx.saturating_add(1);
+                saw_digit = false;
+                neg = false;
+                if idx >= fields.len() {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        if idx != 3 || !saw_digit {
+            return None;
+        }
+        if neg {
+            if let Some(slot) = fields.get_mut(3) {
+                *slot = -*slot;
+            }
+        }
+        Some(fields)
+    };
+
+    // Poll: wait for the tool to finish its nice calls (well-formed output
+    // file), then — while the task is still alive and sleeping — capture the
+    // kernel's authoritative nice AND the scheduler's base priority.
+    let mut observed: Option<([i64; 4], Option<i32>, Option<u8>)> = None;
+    for _ in 0..200_000 {
+        if let Ok(bytes) = crate::fs::Vfs::read_file(OUT_PATH) {
+            if let Some(fields) = parse_four(&bytes) {
+                let stored_nice = pcb::get_nice(result.pid);
+                let base_prio = crate::sched::get_base_priority(result.task_id);
+                observed = Some((fields, stored_nice, base_prio));
+                break;
+            }
+        }
+        crate::sched::yield_now();
+    }
+
+    // The tool sleeps in a loop; kill it regardless of the outcome so it never
+    // lingers.  kill_process_threads marks its tasks Dead → process Zombie.
+    let _ = pcb::set_exit_code(result.pid, 0);
+    let _ = thread::kill_process_threads(result.pid);
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let Some((fields, stored_nice, base_prio)) = observed else {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-nice (ring 3) — never observed a well-formed {} (the tool \
+             faulted before writing; os.nice/os.setpriority may have mis-lowered)",
+            OUT_PATH
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    };
+
+    // The tool's own readback must show the full round-trip: 0 → -7 → -12 → -12.
+    if fields != [0, -7, -12, -12] {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-nice (ring 3) — tool wrote {:?}, expected [0, -7, -12, -12] \
+             (os.getpriority/os.setpriority/os.nice round-trip broke)",
+            fields
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The kernel's own nice store must reflect the mutation — proves
+    // SYS_PROCESS_SET_NICE wrote through to the PCB (not a userspace-only store).
+    if stored_nice != Some(EXPECT_NICE) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-nice (ring 3) — kernel pcb::get_nice was {:?}, expected \
+             Some({}) (os.setpriority/os.nice did not write through to the PCB — a \
+             userspace-only stub)",
+            stored_nice, EXPECT_NICE
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The scheduler's base priority must reflect the nice→priority mapping —
+    // proves nice actually re-prioritised the task (the "make it real" half).
+    let expect_prio = thread::nice_to_priority(EXPECT_NICE);
+    if base_prio != Some(expect_prio) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-nice (ring 3) — scheduler base priority was {:?}, expected \
+             Some({}) = nice_to_priority({}) (nice was stored but the scheduler was NOT \
+             re-prioritised — the effect is not real)",
+            base_prio, expect_prio, EXPECT_NICE
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `nice` (ring 3: os.setpriority(-7)+os.nice(-5) → nice {} via \
+         SYS_PROCESS_SET_NICE; kernel pcb::get_nice == {} AND scheduler base priority == {} = \
+         nice_to_priority({}), so the priority change is REAL and observable both to the process \
+         and to the scheduler): OK",
+        EXPECT_NICE, EXPECT_NICE, expect_prio, EXPECT_NICE
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

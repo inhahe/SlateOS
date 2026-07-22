@@ -1723,6 +1723,39 @@ pub const SYS_PROCESS_GET_CREDENTIALS: u64 = 529;
 /// Returns 0 on success. Chosen number 530 (next free slot after 529).
 pub const SYS_PROCESS_SET_CREDENTIALS: u64 = 530;
 
+/// Get the calling process's scheduling **nice** value.
+///
+/// Returns the nice value *biased by +20* so the result is always a
+/// non-negative `i64` (never collides with the negative error sentinels):
+/// the true nice is `result - 20`, giving `0..=39` for nice `-20..=19`.
+/// A kernel task with no owning process reports the default (`nice = 0`,
+/// i.e. biased `20`). Never fails. Backs POSIX `getpriority()`/`nice()`.
+/// Chosen number 531 (next free slot after 530).
+pub const SYS_PROCESS_GET_NICE: u64 = 531;
+
+/// Set the calling process's scheduling **nice** value — and actually apply
+/// it to the scheduler.
+///
+/// Unlike the historical stub (which stored a value that did not affect
+/// scheduling), this mutation primitive both records the process's nice in
+/// its PCB *and* maps it to a scheduler priority level, re-prioritising every
+/// task the process owns via [`crate::sched::set_priority`]. Nice thus becomes
+/// a real, observable scheduling attribute.
+///
+/// `arg0` carries the new nice **biased by +20** (`0..=39` ⇒ nice `-20..=19`);
+/// out-of-range inputs are clamped. The mapping nice→priority is monotonic and
+/// sends nice `0` to the default priority level (see `thread::nice_to_priority`).
+///
+/// **Policy lives in userspace.** Like `SYS_PROCESS_SET_CREDENTIALS`, the
+/// `CAP_SYS_NICE` check that guards a priority *raise* (negative nice) is done
+/// by the userspace posix `nice`/`setpriority` wrappers; the kernel trusts
+/// them and only performs the mutation, always targeting the caller's own
+/// process. Fails only if the caller has no owning process.
+///
+/// Returns the *previous* nice value, biased by +20 (`0..=39`). Chosen number
+/// 532 (next free slot after 531).
+pub const SYS_PROCESS_SET_NICE: u64 = 532;
+
 // ---------------------------------------------------------------------------
 // POSIX signal-shim syscalls (522–526)
 // ---------------------------------------------------------------------------

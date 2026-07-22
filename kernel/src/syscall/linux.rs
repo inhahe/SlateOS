@@ -14200,7 +14200,12 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
         caller_pid()
     };
     if let Some(tp) = target_pid {
-        let _ = pcb::set_nice(tp, new_nice);
+        // Store the nice value AND apply it to the scheduler (re-prioritise
+        // every task the target owns).  Routing through set_process_nice keeps
+        // the Linux-ABI path and the native SYS_PROCESS_SET_NICE path in lock-
+        // step: nice is a single, real scheduling attribute regardless of which
+        // ABI installed it.
+        let _ = crate::proc::thread::set_process_nice(tp, new_nice);
     }
     SyscallResult::ok(0)
 }
@@ -32763,9 +32768,12 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
             let _ = pcb::set_sched_policy(tp, effective_policy);
             let _ = pcb::set_sched_priority(tp, sched_prio);
             // __setscheduler_params: fair_policy(policy) (NORMAL=0,
-            // BATCH=3 — NOT IDLE=5) writes static_prio from nice.
+            // BATCH=3 — NOT IDLE=5) writes static_prio from nice.  Route
+            // through set_process_nice so the fair-policy nice actually
+            // re-prioritises the target's tasks (same real effect as the
+            // setpriority / native SYS_PROCESS_SET_NICE paths).
             if stores_fair_nice {
-                let _ = pcb::set_nice(tp, effective_nice);
+                let _ = crate::proc::thread::set_process_nice(tp, effective_nice);
             }
         }
     }

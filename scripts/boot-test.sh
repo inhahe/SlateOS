@@ -516,7 +516,11 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$((ELAPSED + 1))
 
-    if [ -f "$SERIAL_FILE" ] && grep -q "$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
+    # Anchor to line start: the success marker is printed as a standalone line
+    # (`serial_println!("BOOT_OK")`).  An UNanchored match also trips on the
+    # livelock diagnostic "...still armed 200s after arming (no BOOT_OK)...",
+    # which contains the substring BOOT_OK — a false PASS on a hung boot.
+    if [ -f "$SERIAL_FILE" ] && grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "$WAIT_MARKER detected after ${ELAPSED}s!"
         kill_qemu "$QEMU_PID"
         if ! check_selftest_failures "$SERIAL_FILE"; then
@@ -534,7 +538,7 @@ done
 # BEFORE we kill it.  This is the primary observability tool for the silent
 # BSP-dead hang, which never takes the injected NMI in-guest.
 if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
-    if ! grep -q "$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
+    if ! grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "=== Timeout with guest still running: capturing wedged RIP via HMP monitor ==="
         RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
         capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
@@ -546,7 +550,7 @@ kill_qemu "$QEMU_PID"
 
 # Check final output
 if [ -f "$SERIAL_FILE" ]; then
-    if grep -q "$WAIT_MARKER" "$SERIAL_FILE"; then
+    if grep -q "^$WAIT_MARKER" "$SERIAL_FILE"; then
         echo "$WAIT_MARKER found."
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
@@ -568,7 +572,7 @@ fi
 # benchmark suite hangs after context_switch").  So even on timeout, surface
 # whatever benchmark numbers DID get captured — they are still useful for
 # spotting regressions in the early benchmarks — before reporting failure.
-if [ "$BENCH" -eq 1 ] && [ -f "$SERIAL_FILE" ] && grep -q "BOOT_OK" "$SERIAL_FILE"; then
+if [ "$BENCH" -eq 1 ] && [ -f "$SERIAL_FILE" ] && grep -q "^BOOT_OK" "$SERIAL_FILE"; then
     echo "Note: BOOT_OK reached but $WAIT_MARKER did not arrive within ${TIMEOUT}s."
     echo "      (Known issue: the deferred benchmark suite hangs in bench_pick_next."
     echo "       Partial benchmark numbers captured up to the hang are shown below.)"

@@ -3934,6 +3934,19 @@ pub fn get_effective_priority(task_id: TaskId) -> Option<u8> {
     state.tasks.get(&task_id).map(|t| t.effective_priority())
 }
 
+/// Get a task's **base** scheduling priority — the user-assigned level
+/// (`0` = highest .. `31` = lowest), *before* any interactive boost or
+/// priority-inheritance donation.  This is exactly the value
+/// [`set_priority`] installs, so it is the authoritative field to
+/// cross-check a `nice`→priority mapping against.
+///
+/// Returns `None` if the task is not found.
+#[must_use]
+pub fn get_base_priority(task_id: TaskId) -> Option<u8> {
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map(|t| t.priority)
+}
+
 /// Boost a task's scheduling priority via priority inheritance.
 ///
 /// Sets the task's `inherited_priority` to `donor_priority`, or

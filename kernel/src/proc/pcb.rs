@@ -667,10 +667,17 @@ pub struct Process {
     /// value; the ABI translation happens in `sys_getpriority`.
     ///
     /// Inherited verbatim across fork and preserved across exec —
-    /// matches Linux exactly.  We store this purely for ABI
-    /// round-trip; our scheduler does not currently honour nice in
-    /// its priority decisions (that lives under the scheduler
-    /// roadmap).
+    /// matches Linux exactly.
+    ///
+    /// Nice is a **real scheduling attribute**: installing it via
+    /// [`crate::proc::thread::set_process_nice`] (the shared entry point for
+    /// the native `SYS_PROCESS_SET_NICE`, Linux `setpriority`, and
+    /// `sched_setattr` fair-policy paths) maps it to a priority level
+    /// (`thread::nice_to_priority`, nice 0 → the default level) and
+    /// re-prioritises every task the process owns.  The bare
+    /// [`set_nice`]/[`get_nice`] helpers only touch this field (ABI
+    /// round-trip); they do **not** apply the scheduler effect — always go
+    /// through `set_process_nice` when the change should be honoured.
     pub linux_nice: i32,
     /// Linux `prctl(PR_SET_DUMPABLE)` flag.  Controls whether the
     /// process is core-dumpable and, on Linux, whether its
@@ -2882,6 +2889,11 @@ pub fn get_nice(pid: ProcessId) -> Option<i32> {
 /// Caller is responsible for clamping to -20..=19; this helper
 /// stores whatever it is given.  Returns `None` if `pid` is
 /// unknown.
+///
+/// This writes only the PCB field — it does **not** apply the nice→priority
+/// scheduling effect.  Callers that want the change honoured by the scheduler
+/// must use [`crate::proc::thread::set_process_nice`] instead (it calls this
+/// and then re-prioritises the process's tasks).
 pub fn set_nice(pid: ProcessId, nice: i32) -> Option<i32> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;

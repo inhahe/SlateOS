@@ -10,8 +10,15 @@
 //!   kernel does not enforce them.
 //! - getrusage returns zeroes for all fields except user/system time
 //!   (which also return zero — no kernel support yet).
-//! - nice/getpriority/setpriority are stubs — the kernel scheduler
-//!   doesn't expose priority control to POSIX yet.
+//! - nice/getpriority/setpriority are **real**: they issue
+//!   `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE` (via `kernel_get_nice`/
+//!   `kernel_set_nice`), which write the process's kernel nice value *and*
+//!   re-prioritise its tasks in the scheduler (`thread::set_process_nice` →
+//!   `sched::set_priority`).  The CAP_SYS_NICE policy for a priority *raise*
+//!   is enforced here in userspace before the syscall (the kernel primitive
+//!   trusts the wrapper, mirroring the setuid/setgid model).  On the host
+//!   (non-`target_os = "none"`) build these fall back to a process-local
+//!   static so unit tests remain self-contained.
 
 use crate::errno;
 
@@ -409,16 +416,75 @@ pub const PRIO_PGRP: i32 = 1;
 /// User priority target.
 pub const PRIO_USER: i32 = 2;
 
-/// Process-local stored nice value.
+/// Process-local stored nice value — **host builds only**.
 ///
-/// Not enforced by the kernel — purely for programs that query or
-/// set their own nice value and expect the call to succeed.
+/// On SlateOS the kernel is the authoritative nice store (see
+/// [`kernel_get_nice`]/[`kernel_set_nice`]); this static is compiled only for
+/// host unit tests, where there is no kernel to hold the value.  It preserves
+/// the round-trip semantics those tests assert (seed a value, read it back).
+#[cfg(not(target_os = "none"))]
 static mut NICE_VALUE: i32 = 0;
+
+/// Read the calling process's nice value from the kernel.
+///
+/// On bare metal this issues `SYS_PROCESS_GET_NICE`, which returns the value
+/// biased by +20 (`0..=39`); we subtract 20 to recover the logical nice.  The
+/// kernel is the authoritative store — nice is a real scheduling attribute
+/// (the kernel maps it to a scheduler priority level and re-prioritises the
+/// process's tasks).  In host tests it reads the process-local static.
+fn kernel_get_nice() -> i32 {
+    #[cfg(target_os = "none")]
+    {
+        let biased = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_GET_NICE);
+        // biased is 0..=39 in practice; recover the signed nice.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (biased as i32) - 20
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // SAFETY: Single-threaded host-test access.
+        unsafe { core::ptr::addr_of!(NICE_VALUE).read() }
+    }
+}
+
+/// Install the calling process's nice value in the kernel (and apply it to
+/// the scheduler).
+///
+/// `nice` must already be clamped to `[-20, 19]`; the caller performs the
+/// `CAP_SYS_NICE` policy check *before* calling this (the kernel trusts the
+/// wrapper, exactly like `setuid`).  On bare metal this issues
+/// `SYS_PROCESS_SET_NICE` with the value biased by +20, returning the previous
+/// logical nice.  In host tests it writes the process-local static.
+fn kernel_set_nice(nice: i32) -> i32 {
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let biased = (nice + 20) as u64;
+        let old_biased = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_SET_NICE, biased);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (old_biased as i32) - 20
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // SAFETY: Single-threaded host-test access.
+        let old = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
+        unsafe {
+            core::ptr::addr_of_mut!(NICE_VALUE).write(nice);
+        }
+        old
+    }
+}
 
 /// Adjust the nice value of the calling process.
 ///
-/// Returns the new nice value on success.  Since our scheduler doesn't
-/// use nice values, this just stores the value locally.
+/// Returns the new nice value on success.  On SlateOS this issues the real
+/// `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE` syscalls: the kernel records
+/// the value AND maps it to a scheduler priority level, so the change actually
+/// affects scheduling (previously this only mutated a userspace-local static).
 ///
 /// Phase 168: Linux's `kernel/sys.c::sys_nice` gates negative
 /// increments on `CAP_SYS_NICE` (via `can_nice` /
@@ -440,21 +506,20 @@ pub extern "C" fn nice(inc: i32) -> i32 {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    // SAFETY: Single-threaded access.
-    let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
+    let current = kernel_get_nice();
     // Clamp to [-20, 19] per POSIX.
     let new_val = current.saturating_add(inc).clamp(-20, 19);
-    unsafe {
-        core::ptr::addr_of_mut!(NICE_VALUE).write(new_val);
-    }
+    kernel_set_nice(new_val);
     new_val
 }
 
 /// Get the scheduling priority of a process, process group, or user.
 ///
 /// Returns the nice value (which can be negative), so callers must
-/// clear errno before calling and check it after.  Returns 0 for
-/// all queries (no kernel support).
+/// clear errno before calling and check it after.  On SlateOS this reads the
+/// caller's real kernel nice via `SYS_PROCESS_GET_NICE` (`who` targeting other
+/// processes is not modelled by the native path — the calling process's value
+/// is returned regardless).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
@@ -462,14 +527,14 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
         return -1;
     }
     errno::set_errno(0); // Clear errno — return value can be negative.
-    // SAFETY: Single-threaded access.
-    unsafe { core::ptr::addr_of!(NICE_VALUE).read() }
+    kernel_get_nice()
 }
 
 /// Set the scheduling priority of a process, process group, or user.
 ///
-/// Stores the value locally but does not affect kernel scheduling.
-/// Returns 0 on success, -1 on error.
+/// On SlateOS this installs the nice value in the kernel via
+/// `SYS_PROCESS_SET_NICE`, which re-prioritises the process's tasks — the
+/// change is real, not merely stored.  Returns 0 on success, -1 on error.
 ///
 /// Phase 169: Linux's `sys_setpriority` calls `set_one_prio` on each
 /// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
@@ -489,8 +554,7 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
         return -1;
     }
     let val = prio.clamp(-20, 19);
-    // SAFETY: Single-threaded access.
-    let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
+    let current = kernel_get_nice();
     // Phase 169: priority-raise (new nice < current nice) requires
     // CAP_SYS_NICE.  Linux returns EACCES from set_one_prio in this
     // case (distinct from the cross-uid EPERM path).
@@ -499,10 +563,7 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
         errno::set_errno(errno::EACCES);
         return -1;
     }
-    // SAFETY: Single-threaded access.
-    unsafe {
-        core::ptr::addr_of_mut!(NICE_VALUE).write(val);
-    }
+    kernel_set_nice(val);
     0
 }
 

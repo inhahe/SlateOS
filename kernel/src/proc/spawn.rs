@@ -10192,6 +10192,192 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-stat` utility — the **capstone** of
+/// the fastpy stat-field lowerings.
+///
+/// Where `getsize`/`get{a,m,c}time`/`samefile`/`islink` each read a single
+/// field, one `os.stat(path)` call → native `fastpy_os_stat` → posix `stat()`
+/// → `SYS_FS_STAT` (gated on `Rights::METADATA`) fills the whole struct and
+/// returns CPython's `os.stat_result` sequence form as a 10-int list
+/// `(st_mode, st_ino, st_dev, st_nlink, st_uid, st_gid, st_size, st_atime,
+/// st_mtime, st_ctime)` — indexed with `st[i]` like `os.listdir`.
+///
+/// The tool writes an 11-byte file, `os.stat`s it, and checks four independent
+/// fields — `st[6]==11` (size), `st[0]&0o170000==0o100000` (S_IFREG type
+/// bits), `st[3]>=1` (nlink), `st[1]!=0` (ino) — writing the 4-char pattern
+/// `"1111"` and exiting 0 iff all held.  The kernel independently
+/// `Vfs::metadata`s TARGET and asserts `size==11`, `ino!=0`, and
+/// `entry_type==File` — an independent readout of the exact fields `os.stat`
+/// returned.  Granted `READ|WRITE|METADATA` (create/write need WRITE, stat
+/// needs METADATA).
+pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
+    static FASTPY_STAT_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-stat/fastpy-stat.elf");
+
+    const TARGET: &str = "/tmp/stat-target.txt";
+    const TARGET_ARG: &[u8] = b"/tmp/stat-target.txt";
+    const OUT_PATH: &str = "/tmp/fastpy-stat.out";
+    // The tool writes exactly "hello world" (11 bytes); both the tool and this
+    // harness know that constant, binding the two independent readouts.
+    const EXPECTED_SIZE: u64 = 11;
+    // [size==11, S_IFREG, nlink>=1, ino!=0].
+    const EXPECTED: &[u8] = b"1111";
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `stat` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_STAT_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(TARGET);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+    };
+    cleanup();
+
+    // Create/write of the probe file needs Rights::WRITE; os.stat →
+    // SYS_FS_STAT gates on Rights::METADATA.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+
+    let argv: &[&[u8]] = &[b"fastpy-stat", TARGET_ARG];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-stat",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(FASTPY_STAT_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-stat spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-stat (ring 3) — expected Zombie, got {:?} (the utility \
+             faulted; os.stat may have mis-lowered the list return)",
+            state
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Exit 0 means all four field checks held (exit 5 = a stub or a mis-lowered
+    // struct: wrong size, wrong type bits, zero inode, or bad nlink).
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-stat (ring 3) — reached Zombie but exit code was {:?}, \
+             expected 0 (5 = an os.stat field was wrong: size/mode/nlink/ino)",
+            exit_code
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Independently read the VFS metadata and validate the exact fields the
+    // tool observed: same size, a real inode, and a regular file.
+    let meta = match crate::fs::Vfs::metadata(TARGET) {
+        Ok(m) => m,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-stat (ring 3) — could not stat TARGET {}: {:?}",
+                TARGET, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    };
+    if meta.size != EXPECTED_SIZE {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-stat (ring 3) — VFS size = {}, expected {} (os.stat's \
+             st_size is unverifiable / the file was not written as expected)",
+            meta.size, EXPECTED_SIZE
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if meta.ino == 0 {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-stat (ring 3) — VFS ino = 0 (os.stat's nonzero st_ino is \
+             unverifiable)"
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if meta.entry_type != crate::fs::EntryType::File {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-stat (ring 3) — VFS entry_type = {:?}, expected File \
+             (os.stat's S_IFREG type bits are unverifiable)",
+            meta.entry_type
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // The tool must have written exactly the expected "1111" pattern.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED {
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-stat (ring 3) — {} held {:?}, expected {:?} \
+                     (os.stat did not report [size==11, S_IFREG, nlink>=1, ino!=0])",
+                    OUT_PATH, bytes.as_slice(), EXPECTED
+                );
+                cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-stat (ring 3) — could not read {}: {:?}",
+                OUT_PATH, e
+            );
+            cleanup();
+            return Err(e);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `stat` (ring 3: os.stat → SYS_FS_STAT filled the whole \
+         struct in one call, returned as a 10-int stat_result list; st_size matched the bytes \
+         written, the S_IFREG type bits, nlink and a nonzero st_ino all held, and the VFS \
+         metadata independently confirmed size/ino/type): OK",
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

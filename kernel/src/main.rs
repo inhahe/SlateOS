@@ -1866,6 +1866,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-stat`: os.stat → SYS_FS_STAT fills the whole
+    // struct in one call, returned as a 10-int stat_result list.  The capstone
+    // of the stat-field lowerings — checks st_size/S_IFREG mode/nlink/st_ino at
+    // once; the kernel cross-checks size/ino/type via Vfs::metadata.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_stat() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `stat` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

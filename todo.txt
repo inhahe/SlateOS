@@ -172,11 +172,17 @@
 ##       →&x_elf for spawn_process. (4) rebuild rootfs, cargo build kernel,
 ##       boot-test; confirm debug kernel drops ~361→~197 MiB and every fastpy
 ##       self-test still runs (loaded from disk). DO WITH THE COMPILER IN THE
-##       LOOP (61-site mechanical refactor). NOT yet started — deferred until
-##       the hunt soak finishes to avoid QEMU/rootfs/build contention (a rootfs
-##       rebuild mid-soak would corrupt in-flight vdb reads; a heavy parallel
-##       cargo build could push a timed boot past the soak timeout). The leaned
-##       continuation of Initiative F.
+##       LOOP (61-site mechanical refactor). The leaned continuation of
+##       Initiative F.
+##       DONE (verified 2026-07-23): refactor is COMPLETE. spawn.rs now has ZERO
+##       fastpy `include_bytes!` sites — all ~49 distinct fastpy ELFs load from
+##       /mnt/tests/<name>.elf via load_test_elf() (57 call sites), staged there
+##       by scripts/create-ext4-rootfs.sh (globs services/fastpy-*/*.elf). The
+##       only include_bytes! left in spawn.rs are the 6 small NON-fastpy embeds
+##       (NETSTACK/HTTPGET/UDPGET) and the tiny main.rs/container.rs hand-written
+##       services — all intentionally left embedded per the plan. All fastpy
+##       self-tests still run (loaded from disk) and boot green (BOOT_OK). This
+##       entry is closed; only re-verify the debug-image size drop if measuring.
 
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as

@@ -72,6 +72,13 @@ pub fn probe(device: &str) -> bool {
 ///
 /// This test only runs if an ext4 device is available.  If no ext4
 /// filesystem is mounted, the test is skipped silently.
+/// Pure (no-I/O) ext4 self-tests that must run on *every* boot, including the
+/// diskless / non-FAT Path-Z boot where [`self_test`] is skipped. Guards the
+/// sparse-file extent-placement regression (BUG-EXT4-SPARSE-READ).
+pub fn self_test_pure() -> KernelResult<()> {
+    driver::self_test_pure()
+}
+
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[ext4] Running self-test...");
 

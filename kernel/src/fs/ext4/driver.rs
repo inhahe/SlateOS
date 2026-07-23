@@ -5541,9 +5541,21 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_dir_entries()?;
     test_write_dir_entry_raw()?;
     test_blank_inode()?;
-    test_block_copy_placement()?;
 
-    crate::serial_println!("[ext4-driver] Self-test PASSED (10 tests)");
+    crate::serial_println!("[ext4-driver] Self-test PASSED (9 tests)");
+    Ok(())
+}
+
+/// Pure (no-disk) ext4 self-tests that must run on *every* boot config,
+/// including the diskless / non-FAT Path-Z boot where [`self_test`] is skipped.
+///
+/// Currently just [`test_block_copy_placement`], which guards the sparse-file
+/// extent-placement regression (BUG-EXT4-SPARSE-READ): that bug corrupts every
+/// sparse file read through the extent path — and the fastpy ring-3 self-test
+/// ELFs on `/mnt/tests` are exactly such sparse files — so its regression guard
+/// must not be gated behind a mounted FAT root.
+pub fn self_test_pure() -> KernelResult<()> {
+    test_block_copy_placement()?;
     Ok(())
 }
 

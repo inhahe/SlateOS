@@ -1256,6 +1256,12 @@ extern "C" fn kernel_main() -> ! {
     // --- Virtual filesystem self-tests (run on any root) ---
     // These construct their own filesystem instances and do not depend on a
     // real on-disk FAT root, so they run regardless of how "/" was mounted.
+    // Pure ext4 extent-placement regression guard (BUG-EXT4-SPARSE-READ) — no
+    // disk needed, so unlike ext4::self_test() it runs on the diskless / non-FAT
+    // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
+    if let Err(e) = fs::ext4::self_test_pure() {
+        serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
+    }
     // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
     // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
     // (skips if "/" is not writable), so it runs on a diskless memfs boot too;

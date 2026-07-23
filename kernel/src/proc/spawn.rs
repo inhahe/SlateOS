@@ -7938,6 +7938,7 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     const IN_PATH: &str = "/tmp/minishell-in.txt";
     const TEE_PATH: &str = "/tmp/minishell-tee.txt";
     const OUT_PATH: &str = "/tmp/minishell-out.txt";
+    const APP_PATH: &str = "/tmp/minishell-app.txt";
     const IN_CONTENT: &[u8] = b"minishell composes redirects OK\n";
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     const EXPECTED_BYTES: i32 = IN_CONTENT.len() as i32;
@@ -8286,10 +8287,97 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(TEE_PATH);
     }
 
+    // Test 6: `cat IN >> APP` — append redirect. Pre-seed APP with one copy of
+    // IN_CONTENT, then append cat's output; the file must end up holding IN_CONTENT
+    // TWICE. This exercises the distinct O_APPEND open-flag path (1089), completing
+    // the `< > >> |` redirect grammar (`>` truncates, `>>` appends without clobber).
+    {
+        // Seed the append target with an existing copy so a truncating (`>`) open
+        // would visibly wipe it — only a real append leaves 2x the content.
+        if let Err(e) = crate::fs::Vfs::write_file(APP_PATH, IN_CONTENT) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!("[spawn]   FAIL: could not seed {} — {:?}", APP_PATH, e);
+            return Err(e);
+        }
+        let (st6, ec6) = match run_line(
+            &minishell_elf,
+            b"cat /tmp/minishell-in.txt >> /tmp/minishell-app.txt",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                let _ = crate::fs::Vfs::remove(APP_PATH);
+                serial_println!("[spawn]   FAIL: fastpy-minishell (test 6) spawn/poll error {:?}", e);
+                return Err(e);
+            }
+        };
+        if st6 != Some(pcb::ProcessState::Zombie) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(APP_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — expected Zombie, got {:?}",
+                st6
+            );
+            return Err(KernelError::InternalError);
+        }
+        if let Some(msg) = diag(ec6) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(APP_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — {}", msg);
+            return Err(KernelError::InternalError);
+        }
+        // fastpy-cat exits with the byte count it read (`sys.exit(len(data))`), and a
+        // single-stage pipeline's status is that last (only) command's exit. So the
+        // expected status is EXPECTED_BYTES, not 0. (The real proof of *append* is the
+        // 2x file-length check below; this just confirms cat ran to completion.)
+        if ec6 != Some(EXPECTED_BYTES) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(APP_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — pipeline exit {:?}, \
+                 expected Some({}) (cat exits with the byte count it read)",
+                ec6, EXPECTED_BYTES
+            );
+            return Err(KernelError::InternalError);
+        }
+        match crate::fs::Vfs::read_file(APP_PATH) {
+            Ok(bytes) => {
+                // Expected: the seeded copy followed by cat's appended copy.
+                let mut expected = alloc::vec::Vec::with_capacity(IN_CONTENT.len() * 2);
+                expected.extend_from_slice(IN_CONTENT);
+                expected.extend_from_slice(IN_CONTENT);
+                if bytes.as_slice() != expected.as_slice() {
+                    let _ = crate::fs::Vfs::remove(IN_PATH);
+                    let _ = crate::fs::Vfs::remove(APP_PATH);
+                    serial_println!(
+                        "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — append target has \
+                         {} bytes, expected {} (the seeded copy + one appended copy); `>>` did not append \
+                         cleanly (a truncating open would have left only {} bytes)",
+                        bytes.len(),
+                        expected.len(),
+                        IN_CONTENT.len()
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                let _ = crate::fs::Vfs::remove(APP_PATH);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 6, `cat IN >> APP`) — could not read back {}: {:?}",
+                    APP_PATH, e
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let _ = crate::fs::Vfs::remove(APP_PATH);
+    }
+
     let _ = crate::fs::Vfs::remove(IN_PATH);
     serial_println!(
         "[spawn]   fastpy-on-SlateOS `minishell` (ring 3: parsed `cat IN > OUT` — output redirect \
-         with args, {} bytes verified landed in the file{}{}): OK — a real command-line parser \
+         with args, {} bytes verified landed in the file{}{}, and `cat IN >> APP` — append redirect \
+         (O_APPEND) verified to grow rather than truncate): OK — a real command-line parser \
          dispatching simple commands, redirections AND pipelines through fork + os.pipe + open/dup2 \
          + execv end to end",
         EXPECTED_BYTES,

@@ -11,16 +11,17 @@ utilities each proved a single primitive by calling it directly, this one
 It accepts one argument, a whole command line as a single string, and
 supports pipelines of simple commands:
 
-    cmd [args...] [< infile] [> outfile] | cmd2 [args...] [> outfile] | ...
+    cmd [args...] [< infile] [> outfile | >> outfile] | cmd2 [args...] ... | ...
 
 i.e. one or more stages separated by `|`, where each stage is a command
 with arguments and optional per-stage input redirection (`< file`,
-pointing the stage's stdin at a file) and output redirection (`> file`,
-O_TRUNC, pointing the stage's stdout at a file).  A single stage with no
-`|` is the simple-command case.  Adjacent stages are connected by a pipe
-(`os.pipe()`): stage i's stdout feeds stage i+1's stdin, unless overridden
-by an explicit `>`/`<` on that stage (an explicit redirection wins over the
-pipe wiring, exactly as in a POSIX shell).
+pointing the stage's stdin at a file) and output redirection: `> file`
+(O_TRUNC, truncate) or `>> file` (O_APPEND, append), pointing the stage's
+stdout at a file.  A single stage with no `|` is the simple-command case.
+Adjacent stages are connected by a pipe (`os.pipe()`): stage i's stdout
+feeds stage i+1's stdin, unless overridden by an explicit `>`/`>>`/`<` on
+that stage (an explicit redirection wins over the pipe wiring, exactly as
+in a POSIX shell).
 
 The shell:
   1. Tokenises the line on whitespace (`str.split()`).
@@ -110,6 +111,9 @@ SRC = (
     "argv = []\n"
     "infile = ''\n"
     "outfile = ''\n"
+    # outmode: 0 = truncate ('>'), 1 = append ('>>'). Chosen by the redirect
+    # operator, so it is fixed when the operator token is seen (not the operand).
+    "outmode = 0\n"
     "mode = 0\n"
     # Single forward pass: accumulate a stage's argv + redirections; at each '|'
     # boundary (including the trailing sentinel) resolve, pipe, and fork it, then
@@ -119,6 +123,10 @@ SRC = (
     "        mode = 1\n"
     "    elif t == '>':\n"
     "        mode = 2\n"
+    "        outmode = 0\n"
+    "    elif t == '>>':\n"
+    "        mode = 2\n"
+    "        outmode = 1\n"
     "    elif t == '|':\n"
     # --- Flush the accumulated stage ---
     "        if len(argv) == 0:\n"
@@ -160,7 +168,12 @@ SRC = (
     "                os.dup2(prev_read, 0)\n"
     # stdout: explicit outfile wins, else this stage's pipe to the next.
     "            if outfile != '':\n"
-    "                ofd = os.open(outfile, 577, 420)\n"
+    # O_WRONLY|O_CREAT|O_TRUNC = 577 (truncate) vs O_WRONLY|O_CREAT|O_APPEND =
+    # 1089 (append). if/else, not a ternary (pure-mode codegen keeps it simple).
+    "                oflags = 577\n"
+    "                if outmode == 1:\n"
+    "                    oflags = 1089\n"
+    "                ofd = os.open(outfile, oflags, 420)\n"
     "                if ofd < 0:\n"
     "                    sys.exit(120)\n"
     "                os.dup2(ofd, 1)\n"
@@ -190,6 +203,7 @@ SRC = (
     "        argv = []\n"
     "        infile = ''\n"
     "        outfile = ''\n"
+    "        outmode = 0\n"
     "        mode = 0\n"
     "    else:\n"
     # An ordinary word: a redirection operand (per pending mode) or an argv word.

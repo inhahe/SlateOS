@@ -126,7 +126,9 @@
 ##     3 in main.rs; each is `static X_ELF: &[u8] = include_bytes!(".../fastpy-
 ##     NAME/fastpy-NAME.elf")` inside a ring-3 self-test that spawn_process()es
 ##     it and asserts the exit code. PLAN: (1) stage the fastpy ELFs into the
-##     rootfs disk image at rootfs-build time (a /tests or /bin dir); (2) replace
+##     rootfs disk image at rootfs-build time — scripts/create-ext4-rootfs.sh
+##     (WSL-run, currently IMG_SIZE=48M; bump to ~256M and cp the 49 ELFs into a
+##     /tests/fastpy dir) (a /tests or /bin dir); (2) replace
 ##     each include_bytes! with a disk-read helper load_test_elf("fastpy-NAME")
 ##     -> Vec<u8> that no-ops the test when the rootfs/file is absent (mirrors
 ##     the Path-Z glibc tests, which already stage from rootfs.ext4 at /mnt and

@@ -23,7 +23,8 @@ Format for each entry:
 
 Earlier deferred operator decisions (Q1–Q31) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended above this line as `## Q32 …`.
+full rationale. New decisions should be appended as `## Q34 …` just above the
+`---` separator that precedes the "Recently resolved" list.
 
 ## Q32 — Prioritize building heap-corruption-detection infrastructure to root-cause B-KNULLJUMP? — Status: OPEN
 
@@ -79,6 +80,62 @@ poison/redzone to extend), `kernel/src/mm/frame.rs` (buddy `FreeNode` — the
 sibling B-MUNMAP-NO-TLB-FLUSH corruption target), `kernel/src/sched/mod.rs`
 (`SchedState.tasks` BTreeMap — the observed victim), and the Path-Z process
 teardown path in `kernel/src/proc/`.
+
+## Q33 — Next phase of the fastpy integration (initiative F): promote fastpy-compiled binaries from boot self-tests to REAL shipping OS components? — Status: OPEN
+
+**Question.** Initiative F's "one more genuinely-distinct bridge-free `os.*`
+path + false-pass-proof ring-3 self-test" line has **saturated** (as of
+2026-07-22 the fastpy self-test surface covers virtually every meaningful
+distinct kernel write/read path — identity, scheduling nice, umask+create-mode,
+metadata mutation, content I/O, namespace ops, query, timekeeping, sleep, pipes,
+the whole pkg suite). Manufacturing further `os.*` self-tests is now low-value
+churn. What should the initiative do next?
+
+**Context / why now.** The roadmap task is *"Integrate fastpy compiler into
+build system — native executables for OS components."* The toolchain is proven
+(pure-mode AOT → SlateOS ELF, bridge-free, TLS, ~48 self-tests all boot-GREEN).
+The natural next step is to make a fastpy binary an **actual part of the running
+OS**, not just a boot self-test. But this is a direction the operator has been
+steering (Q29/§80 pure-mode-first, Q30/§81 zig-cc runtime, Q31/§82 TLS), and it
+has real forks below — hence surfacing rather than picking unilaterally.
+
+**Options.**
+- **A — Promote fastpy coreutils to real `/bin` commands driven by the shell
+  (recommended, highest value).** Install fastpy-compiled `cat/ls/grep/wc/...`
+  ELFs into the VFS `/bin` and wire the real shell (`osh`/Oils port) to resolve
+  + `execve` them as external commands, so typing `ls` runs the fastpy binary.
+  *Pros:* this is the actual roadmap goal — fastpy as the implementation language
+  for shipped OS utilities; exercises the real install→PATH-resolve→execve
+  pipeline end to end. *Cons:* the boot-test is **non-interactive** (the current
+  `userspace/shell` is only a Rust std-validation demo; the real shell is `osh`),
+  so verifying shell-driven exec needs either a scripted `osh -c 'ls'` boot step
+  or a non-shell harness that execve's `/bin/ls` from a path and checks output;
+  several active hours; touches osh command-resolution + `/bin` population.
+- **B — Reduce the embedded-ELF kernel bloat first (TD-KERNEL-EMBED-BLOAT).**
+  The ~48 self-test ELFs are `include_bytes!`'d into `.rodata` (~3.5 MiB each,
+  kernel image ~202 MB). Move them (and future fastpy binaries) onto the rootfs
+  disk and load-from-disk. *Pros:* real, growing tech debt; faster builds/boot;
+  prerequisite-ish for a `/bin` that lives on disk anyway. *Cons:* boot-ordering
+  subtleties (self-tests run before the rootfs is guaranteed mounted); its own
+  design question (disk vs embed vs compress); substantial refactor of every
+  self-test.
+- **C — Declare initiative F's self-test phase done and move to an unrelated
+  roadmap area.** *Pros:* the toolchain is proven; time may be better spent
+  elsewhere (e.g. the KASAN infra of Q32, or a fresh subsystem). *Cons:* leaves
+  the "native executables for OS components" payoff unrealized.
+
+**Claude's recommendation.** **A** is the real goal and highest value, but it's
+an initiative-level effort with a genuine fork (how to verify under a
+non-interactive boot-test; osh integration surface), so flagging for operator
+prioritization. **B** is a defensible prerequisite if we want `/bin` on disk.
+**In the meantime** (default, non-blocking): the umask increment is committed and
+boot-GREEN; I am not manufacturing further low-value `os.*` self-tests.
+
+**Where it bites.** `userspace/shell/` (demo only) and the `osh`/Oils port
+(real shell command resolution); `kernel/src/proc/spawn.rs` (self-test harness),
+`kernel/src/container.rs::exec_path` (existing path-exec model); the boot image
+assembly + `scripts/boot-test.sh` (non-interactive verification); rootfs build
+for options A/B; `services/fastpy-*/` (the candidate coreutils).
 
 ---
 

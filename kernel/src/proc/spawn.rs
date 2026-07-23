@@ -50,6 +50,33 @@ use crate::sched::task::{TaskId, DEFAULT_PRIORITY};
 use crate::serial_println;
 use crate::serial_print;
 
+/// Load a ring-3 self-test fixture ELF from the rootfs-staged test directory
+/// (`/mnt/tests/<name>.elf`, where `/mnt` is the ext4 rootfs mounted at boot,
+/// long before the Path-Z self-tests run).
+///
+/// Returns `None` when the fixture — or the whole rootfs test disk — is absent,
+/// so a self-test that depends on an on-disk fixture cleanly *self-skips* in a
+/// lean build that carries no test disk, rather than failing.
+///
+/// This is the seam that lets the (formerly `include_bytes!`'d, ~164 MiB) fastpy
+/// self-test ELFs live on disk instead of bloating the kernel image
+/// (TD-KERNEL-EMBED-BLOAT; see design-decisions.md #86). The `name` key is the
+/// ELF filename stem staged by `scripts/create-ext4-rootfs.sh`, which equals the
+/// fastpy directory name (e.g. `load_test_elf("fastpy-hello")` reads
+/// `/mnt/tests/fastpy-hello.elf`).
+fn load_test_elf(name: &str) -> Option<alloc::vec::Vec<u8>> {
+    let mut path = alloc::string::String::with_capacity(
+        "/mnt/tests/".len() + name.len() + ".elf".len(),
+    );
+    path.push_str("/mnt/tests/");
+    path.push_str(name);
+    path.push_str(".elf");
+    match crate::fs::Vfs::read_file(&path) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
 /// Exit code set when exec fails after tearing down the old address space.
 ///
 /// The process cannot resume its old code (it's been freed), so it must
@@ -6293,12 +6320,19 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     // (b) the argv delivery path — kernel `SYS_PROCESS_GET_ARGS` -> crt ->
     // runtime `fpy_argv` -> `sys.argv` — carried the exact argument vector we
     // spawned it with, and the non-zero exit code propagated back.
-    static FASTPY_HELLO_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-hello/fastpy-hello.elf");
+    let fastpy_hello_elf = match load_test_elf("fastpy-hello") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-hello: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS TLS (ring 3) integration test ({} bytes ELF)...",
-        FASTPY_HELLO_ELF.len()
+        fastpy_hello_elf.len()
     );
 
     // Spawn with a known 3-element argv; the program exits with argc (3).
@@ -6318,7 +6352,7 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_HELLO_ELF, &options) {
+    let result = match spawn_process(&fastpy_hello_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-hello spawn returned {:?}", e);
@@ -6396,13 +6430,20 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
 /// (PID != 0) with no File cap gets `PermissionDenied`.  We grant a wildcard
 /// File cap (`resource_id == 0`) with READ|WRITE so the open of `/tmp` succeeds.
 pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
-    static FASTPY_FILEIO_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-fileio/fastpy-fileio.elf");
+    let fastpy_fileio_elf = match load_test_elf("fastpy-fileio") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-fileio: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS pure-mode file I/O (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_FILEIO_ELF.len()
+        fastpy_fileio_elf.len()
     );
 
     let argv: &[&[u8]] = &[b"fastpy-fileio"];
@@ -6425,7 +6466,7 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_FILEIO_ELF, &options) {
+    let result = match spawn_process(&fastpy_fileio_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-fileio spawn returned {:?}", e);
@@ -6497,8 +6538,15 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
 /// which the boot harness can grep for — proving stdout works end-to-end for a
 /// native fastpy binary.
 pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
-    static FASTPY_CAT_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-cat/fastpy-cat.elf");
+    let fastpy_cat_elf = match load_test_elf("fastpy-cat") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-cat: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     // Staged input file + its exact contents.  The exit code is the byte
     // count, so keep the length obvious: "SlateOS fastpy cat OK\n" = 22 bytes.
@@ -6511,7 +6559,7 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `cat` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_CAT_ELF.len()
+        fastpy_cat_elf.len()
     );
 
     // Stage the input file the utility will read.
@@ -6536,7 +6584,7 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_CAT_ELF, &options) {
+    let result = match spawn_process(&fastpy_cat_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(CAT_PATH);
@@ -6600,8 +6648,15 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
 /// file, then spawns the utility twice: once with a pattern that matches
 /// (asserting exit 0) and once with a pattern that does not (asserting exit 1).
 pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
-    static FASTPY_GREP_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-grep/fastpy-grep.elf");
+    let fastpy_grep_elf = match load_test_elf("fastpy-grep") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-grep: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const GREP_PATH: &str = "/tmp/grep-input.txt";
     const GREP_PATH_ARG: &[u8] = b"/tmp/grep-input.txt";
@@ -6609,7 +6664,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
     // "elta", and nothing contains "zzz".
     const GREP_CONTENT: &[u8] = b"alpha line\nbeta line\ngamma line\ndelta line\n";
 
-    fn run_grep(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_grep(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -6654,7 +6709,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `grep` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GREP_ELF.len()
+        fastpy_grep_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(GREP_PATH, GREP_CONTENT) {
@@ -6670,7 +6725,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
     ];
 
     for (argv, want, desc) in steps {
-        match run_grep(FASTPY_GREP_ELF, argv) {
+        match run_grep(&fastpy_grep_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -6712,8 +6767,15 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
 /// `"4 6 30"` line is mirrored to serial (via `SYS_CONSOLE_WRITE`) so the boot
 /// harness can grep it for the actual count values.
 pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
-    static FASTPY_WC_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-wc/fastpy-wc.elf");
+    let fastpy_wc_elf = match load_test_elf("fastpy-wc") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-wc: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const WC_PATH: &str = "/tmp/wc-input.txt";
     const WC_PATH_ARG: &[u8] = b"/tmp/wc-input.txt";
@@ -6723,7 +6785,7 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `wc` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_WC_ELF.len()
+        fastpy_wc_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(WC_PATH, WC_CONTENT) {
@@ -6747,7 +6809,7 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_WC_ELF, &options) {
+    let result = match spawn_process(&fastpy_wc_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(WC_PATH);
@@ -6809,8 +6871,15 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
 /// the printed `HEAD_L1`/`HEAD_L2` (and *absence* of `HEAD_L3`/`HEAD_L4`) are
 /// verified in the serial log by the boot harness.
 pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
-    static FASTPY_HEAD_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-head/fastpy-head.elf");
+    let fastpy_head_elf = match load_test_elf("fastpy-head") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-head: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const HEAD_PATH: &str = "/tmp/head-input.txt";
     const HEAD_PATH_ARG: &[u8] = b"/tmp/head-input.txt";
@@ -6821,7 +6890,7 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `head` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_HEAD_ELF.len()
+        fastpy_head_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(HEAD_PATH, HEAD_CONTENT) {
@@ -6845,7 +6914,7 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_HEAD_ELF, &options) {
+    let result = match spawn_process(&fastpy_head_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(HEAD_PATH);
@@ -6908,8 +6977,15 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
 /// non-adjacent `A` surviving) is verified in the serial log by the boot
 /// harness (grep counts: `UNIQ_A`=2, `UNIQ_B`=1, `UNIQ_C`=1 — *not* 3/1/2).
 pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
-    static FASTPY_UNIQ_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-uniq/fastpy-uniq.elf");
+    let fastpy_uniq_elf = match load_test_elf("fastpy-uniq") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-uniq: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const UNIQ_PATH: &str = "/tmp/uniq-input.txt";
     const UNIQ_PATH_ARG: &[u8] = b"/tmp/uniq-input.txt";
@@ -6920,7 +6996,7 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `uniq` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_UNIQ_ELF.len()
+        fastpy_uniq_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(UNIQ_PATH, UNIQ_CONTENT) {
@@ -6944,7 +7020,7 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_UNIQ_ELF, &options) {
+    let result = match spawn_process(&fastpy_uniq_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(UNIQ_PATH);
@@ -7010,8 +7086,15 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
 /// serial, so the boot harness can confirm only the last two markers
 /// (`TAIL_L4`, `TAIL_L5`) were printed and the first three were skipped.
 pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
-    static FASTPY_TAIL_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-tail/fastpy-tail.elf");
+    let fastpy_tail_elf = match load_test_elf("fastpy-tail") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-tail: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TAIL_PATH: &str = "/tmp/tail-input.txt";
     const TAIL_PATH_ARG: &[u8] = b"/tmp/tail-input.txt";
@@ -7022,7 +7105,7 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `tail` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_TAIL_ELF.len()
+        fastpy_tail_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(TAIL_PATH, TAIL_CONTENT) {
@@ -7046,7 +7129,7 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_TAIL_ELF, &options) {
+    let result = match spawn_process(&fastpy_tail_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(TAIL_PATH);
@@ -7112,8 +7195,15 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
 /// boot harness can confirm they came out ascending (`SORT_1`, `SORT_2`,
 /// `SORT_3`).
 pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
-    static FASTPY_SORT_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-sort/fastpy-sort.elf");
+    let fastpy_sort_elf = match load_test_elf("fastpy-sort") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-sort: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const SORT_PATH: &str = "/tmp/sort-input.txt";
     const SORT_PATH_ARG: &[u8] = b"/tmp/sort-input.txt";
@@ -7124,7 +7214,7 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `sort` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SORT_ELF.len()
+        fastpy_sort_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(SORT_PATH, SORT_CONTENT) {
@@ -7148,7 +7238,7 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SORT_ELF, &options) {
+    let result = match spawn_process(&fastpy_sort_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(SORT_PATH);
@@ -7215,8 +7305,15 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
 /// harness verifies the *set* of emitted records (`3 FREQ_a`, `2 FREQ_b`,
 /// `1 FREQ_c`) in the serial log rather than their order.
 pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
-    static FASTPY_FREQ_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-freq/fastpy-freq.elf");
+    let fastpy_freq_elf = match load_test_elf("fastpy-freq") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-freq: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const FREQ_PATH: &str = "/tmp/freq-input.txt";
     const FREQ_PATH_ARG: &[u8] = b"/tmp/freq-input.txt";
@@ -7227,7 +7324,7 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `freq` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_FREQ_ELF.len()
+        fastpy_freq_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(FREQ_PATH, FREQ_CONTENT) {
@@ -7251,7 +7348,7 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_FREQ_ELF, &options) {
+    let result = match spawn_process(&fastpy_freq_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(FREQ_PATH);
@@ -7318,7 +7415,15 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
 /// verifies the *set* of printed names (`LS_alpha`, `LS_beta`, `LS_gamma`) in
 /// the serial log rather than their order.
 pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
-    static FASTPY_LS_ELF: &[u8] = include_bytes!("../../../services/fastpy-ls/fastpy-ls.elf");
+    let fastpy_ls_elf = match load_test_elf("fastpy-ls") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-ls: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const LS_DIR: &str = "/tmp/lsdir";
     const LS_DIR_ARG: &[u8] = b"/tmp/lsdir";
@@ -7331,7 +7436,7 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `ls` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_LS_ELF.len()
+        fastpy_ls_elf.len()
     );
 
     // Stage a dedicated directory with three known files.
@@ -7372,7 +7477,7 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(LS_DIR);
     };
 
-    let result = match spawn_process(FASTPY_LS_ELF, &options) {
+    let result = match spawn_process(&fastpy_ls_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             cleanup();
@@ -7449,7 +7554,15 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
 /// `os.remove` that merely returned 0 without deleting (the false-pass lesson
 /// from `fastpy-ls`'s empty listing).
 pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
-    static FASTPY_RM_ELF: &[u8] = include_bytes!("../../../services/fastpy-rm/fastpy-rm.elf");
+    let fastpy_rm_elf = match load_test_elf("fastpy-rm") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-rm: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const RM_FILE: &str = "/tmp/rmfile";
     const RM_FILE_ARG: &[u8] = b"/tmp/rmfile";
@@ -7457,7 +7570,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `rm` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_RM_ELF.len()
+        fastpy_rm_elf.len()
     );
 
     // Stage the file to be deleted.
@@ -7497,7 +7610,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_RM_ELF, &options) {
+    let result = match spawn_process(&fastpy_rm_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(RM_FILE);
@@ -7574,7 +7687,15 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
 /// the VFS that the source is now gone *and* the destination exists with the
 /// original bytes.
 pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
-    static FASTPY_MV_ELF: &[u8] = include_bytes!("../../../services/fastpy-mv/fastpy-mv.elf");
+    let fastpy_mv_elf = match load_test_elf("fastpy-mv") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-mv: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const MV_SRC: &str = "/tmp/mv-src";
     const MV_DST: &str = "/tmp/mv-dst";
@@ -7585,7 +7706,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `mv` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_MV_ELF.len()
+        fastpy_mv_elf.len()
     );
 
     // Cleanup helper: remove both endpoints (best effort).
@@ -7630,7 +7751,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_MV_ELF, &options) {
+    let result = match spawn_process(&fastpy_mv_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             cleanup();
@@ -7721,8 +7842,15 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
 /// runs `mkdir /tmp/fpy-mkdir`, and — the false-pass-proof check — asserts via
 /// the VFS that the path now exists *and* is a directory.
 pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
-    static FASTPY_MKDIR_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-mkdir/fastpy-mkdir.elf");
+    let fastpy_mkdir_elf = match load_test_elf("fastpy-mkdir") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-mkdir: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const MK_DIR: &str = "/tmp/fpy-mkdir";
     const MK_DIR_ARG: &[u8] = b"/tmp/fpy-mkdir";
@@ -7730,7 +7858,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `mkdir` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_MKDIR_ELF.len()
+        fastpy_mkdir_elf.len()
     );
 
     // Ensure a clean slate: the directory must not pre-exist.
@@ -7765,7 +7893,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_MKDIR_ELF, &options) {
+    let result = match spawn_process(&fastpy_mkdir_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::rmdir(MK_DIR);
@@ -7848,8 +7976,15 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
 /// VFS that the directory is now gone.  `SYS_FS_RMDIR` gates on
 /// `Rights::DELETE`, so the test grants `READ|WRITE|DELETE`.
 pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
-    static FASTPY_RMDIR_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-rmdir/fastpy-rmdir.elf");
+    let fastpy_rmdir_elf = match load_test_elf("fastpy-rmdir") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-rmdir: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const RM_DIR: &str = "/tmp/fpy-rmdir";
     const RM_DIR_ARG: &[u8] = b"/tmp/fpy-rmdir";
@@ -7857,7 +7992,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `rmdir` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_RMDIR_ELF.len()
+        fastpy_rmdir_elf.len()
     );
 
     // Pre-create the directory to be removed.
@@ -7895,7 +8030,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_RMDIR_ELF, &options) {
+    let result = match spawn_process(&fastpy_rmdir_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::rmdir(RM_DIR);
@@ -7969,8 +8104,15 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
 /// `READ | METADATA`.  It stages `/tmp/size-input.txt` with a payload of a known
 /// length and asserts the child exits with exactly that length.
 pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
-    static FASTPY_SIZE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-size/fastpy-size.elf");
+    let fastpy_size_elf = match load_test_elf("fastpy-size") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-size: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const SIZE_FILE: &str = "/tmp/size-input.txt";
     const SIZE_FILE_ARG: &[u8] = b"/tmp/size-input.txt";
@@ -7981,7 +8123,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `size` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SIZE_ELF.len()
+        fastpy_size_elf.len()
     );
 
     // Stage the input file whose byte size the child will report.
@@ -8020,7 +8162,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SIZE_ELF, &options) {
+    let result = match spawn_process(&fastpy_size_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(SIZE_FILE);
@@ -8093,8 +8235,15 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
 /// so the type distinction flows through the exit code and a stat that ignored
 /// `st_mode` could not false-pass.  `SYS_FS_STAT` gates on `Rights::METADATA`.
 pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
-    static FASTPY_FTYPE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-ftype/fastpy-ftype.elf");
+    let fastpy_ftype_elf = match load_test_elf("fastpy-ftype") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-ftype: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const FTYPE_FILE: &str = "/tmp/ftype-file.txt";
     const FTYPE_FILE_ARG: &[u8] = b"/tmp/ftype-file.txt";
@@ -8105,7 +8254,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `ftype` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_FTYPE_ELF.len()
+        fastpy_ftype_elf.len()
     );
 
     let cleanup = || {
@@ -8150,7 +8299,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
             cwd: None,
             uid_gid: None,
         };
-        let result = spawn_process(FASTPY_FTYPE_ELF, &options).ok()?;
+        let result = spawn_process(&fastpy_ftype_elf, &options).ok()?;
         let mut became_zombie = false;
         for _ in 0..2000 {
             if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
@@ -8220,8 +8369,15 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
 /// link via `Vfs::readlink` and asserts it points at the staged target — a
 /// stubbed/no-op symlink could pass neither check.
 pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
-    static FASTPY_SYMLINK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-symlink/fastpy-symlink.elf");
+    let fastpy_symlink_elf = match load_test_elf("fastpy-symlink") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-symlink: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/symlink-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/symlink-target.txt";
@@ -8231,7 +8387,7 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `symlink` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SYMLINK_ELF.len()
+        fastpy_symlink_elf.len()
     );
 
     let cleanup = || {
@@ -8271,7 +8427,7 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SYMLINK_ELF, &options) {
+    let result = match spawn_process(&fastpy_symlink_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-symlink spawn returned {:?}", e);
@@ -8365,8 +8521,15 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
 /// VFS and asserts they report the **same `FileMeta::ino`** — the defining
 /// property of a hard link, which a mere copy could not satisfy.
 pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
-    static FASTPY_LINK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-link/fastpy-link.elf");
+    let fastpy_link_elf = match load_test_elf("fastpy-link") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-link: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     // Hard links require a filesystem with a stable inode identity — memfs
     // (`/tmp`) returns NotSupported for `link`, only ext4 overrides it.  The
@@ -8381,7 +8544,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `link` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_LINK_ELF.len()
+        fastpy_link_elf.len()
     );
 
     let cleanup = || {
@@ -8418,7 +8581,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_LINK_ELF, &options) {
+    let result = match spawn_process(&fastpy_link_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-link spawn returned {:?}", e);
@@ -8539,8 +8702,15 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
 /// asserts it now equals `0o600`.  A no-op chmod that returned 0 without
 /// persisting could not satisfy the after-check.
 pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
-    static FASTPY_CHMOD_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-chmod/fastpy-chmod.elf");
+    let fastpy_chmod_elf = match load_test_elf("fastpy-chmod") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-chmod: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/chmod-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/chmod-target.txt";
@@ -8551,7 +8721,7 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `chmod` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_CHMOD_ELF.len()
+        fastpy_chmod_elf.len()
     );
 
     let cleanup = || {
@@ -8603,7 +8773,7 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_CHMOD_ELF, &options) {
+    let result = match spawn_process(&fastpy_chmod_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-chmod spawn returned {:?}", e);
@@ -8695,8 +8865,15 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
 /// (must be exactly the surviving 8-byte prefix).  A no-op truncate that
 /// returned 0 without resizing could not satisfy the after-checks.
 pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
-    static FASTPY_TRUNCATE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-truncate/fastpy-truncate.elf");
+    let fastpy_truncate_elf = match load_test_elf("fastpy-truncate") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-truncate: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/truncate-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/truncate-target.txt";
@@ -8707,7 +8884,7 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `truncate` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_TRUNCATE_ELF.len()
+        fastpy_truncate_elf.len()
     );
 
     let cleanup = || {
@@ -8759,7 +8936,7 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_TRUNCATE_ELF, &options) {
+    let result = match spawn_process(&fastpy_truncate_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-truncate spawn returned {:?}", e);
@@ -8876,8 +9053,15 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
 /// returned 0 without stamping (or one that stamped a single value into both
 /// fields) could not satisfy the after-checks.
 pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
-    static FASTPY_SETTIMES_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-settimes/fastpy-settimes.elf");
+    let fastpy_settimes_elf = match load_test_elf("fastpy-settimes") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-settimes: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/settimes-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/settimes-target.txt";
@@ -8892,7 +9076,7 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `settimes` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SETTIMES_ELF.len()
+        fastpy_settimes_elf.len()
     );
 
     let cleanup = || {
@@ -8942,7 +9126,7 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SETTIMES_ELF, &options) {
+    let result = match spawn_process(&fastpy_settimes_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-settimes spawn returned {:?}", e);
@@ -9043,8 +9227,15 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
 /// returned — and additionally confirms via the VFS that `modified_ns` was
 /// stamped to `secs * 1e9`.
 pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
-    static FASTPY_GETMTIME_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getmtime/fastpy-getmtime.elf");
+    let fastpy_getmtime_elf = match load_test_elf("fastpy-getmtime") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getmtime: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/getmtime-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/getmtime-target.txt";
@@ -9060,7 +9251,7 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getmtime` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETMTIME_ELF.len()
+        fastpy_getmtime_elf.len()
     );
 
     let cleanup = || {
@@ -9094,7 +9285,7 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETMTIME_ELF, &options) {
+    let result = match spawn_process(&fastpy_getmtime_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getmtime spawn returned {:?}", e);
@@ -9217,8 +9408,15 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
 /// the stamped decimal seconds AND that the VFS `accessed_ns` matches the stamp
 /// (the independent atime readout — distinct from `modified_ns`).
 pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
-    static FASTPY_GETATIME_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getatime/fastpy-getatime.elf");
+    let fastpy_getatime_elf = match load_test_elf("fastpy-getatime") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getatime: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/getatime-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/getatime-target.txt";
@@ -9234,7 +9432,7 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getatime` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETATIME_ELF.len()
+        fastpy_getatime_elf.len()
     );
 
     let cleanup = || {
@@ -9268,7 +9466,7 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETATIME_ELF, &options) {
+    let result = match spawn_process(&fastpy_getatime_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getatime spawn returned {:?}", e);
@@ -9392,8 +9590,15 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
 /// 0 stub); the harness additionally cross-checks the exact value against the
 /// VFS `changed_ns`.
 pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
-    static FASTPY_GETCTIME_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getctime/fastpy-getctime.elf");
+    let fastpy_getctime_elf = match load_test_elf("fastpy-getctime") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getctime: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/getctime-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/getctime-target.txt";
@@ -9408,7 +9613,7 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getctime` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETCTIME_ELF.len()
+        fastpy_getctime_elf.len()
     );
 
     let cleanup = || {
@@ -9440,7 +9645,7 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETCTIME_ELF, &options) {
+    let result = match spawn_process(&fastpy_getctime_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getctime spawn returned {:?}", e);
@@ -9593,8 +9798,15 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
 /// the VFS that TARGET exists and MISSING does not (anchoring cases 1 and 4),
 /// and asserts the tool wrote exactly "1100".
 pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
-    static FASTPY_ACCESS_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-access/fastpy-access.elf");
+    let fastpy_access_elf = match load_test_elf("fastpy-access") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-access: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/access-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/access-target.txt";
@@ -9607,7 +9819,7 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `access` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_ACCESS_ELF.len()
+        fastpy_access_elf.len()
     );
 
     let cleanup = || {
@@ -9640,7 +9852,7 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_ACCESS_ELF, &options) {
+    let result = match spawn_process(&fastpy_access_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-access spawn returned {:?}", e);
@@ -9767,8 +9979,15 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
 /// an independent readout of the exact identity the tool compared — and that
 /// the tool wrote exactly "101".
 pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
-    static FASTPY_SAMEFILE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-samefile/fastpy-samefile.elf");
+    let fastpy_samefile_elf = match load_test_elf("fastpy-samefile") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-samefile: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/samefile-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/samefile-target.txt";
@@ -9783,7 +10002,7 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `samefile` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SAMEFILE_ELF.len()
+        fastpy_samefile_elf.len()
     );
 
     let cleanup = || {
@@ -9818,7 +10037,7 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SAMEFILE_ELF, &options) {
+    let result = match spawn_process(&fastpy_samefile_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-samefile spawn returned {:?}", e);
@@ -9979,8 +10198,15 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
 /// tested.  Granted `READ|WRITE|CREATE|METADATA` (symlink needs CREATE, the
 /// probe file needs WRITE, lstat needs METADATA).
 pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
-    static FASTPY_ISLINK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-islink/fastpy-islink.elf");
+    let fastpy_islink_elf = match load_test_elf("fastpy-islink") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-islink: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/islink-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/islink-target.txt";
@@ -9997,7 +10223,7 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `islink` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_ISLINK_ELF.len()
+        fastpy_islink_elf.len()
     );
 
     let cleanup = || {
@@ -10032,7 +10258,7 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_ISLINK_ELF, &options) {
+    let result = match spawn_process(&fastpy_islink_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-islink spawn returned {:?}", e);
@@ -10211,8 +10437,15 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
 /// returned.  Granted `READ|WRITE|METADATA` (create/write need WRITE, stat
 /// needs METADATA).
 pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
-    static FASTPY_STAT_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-stat/fastpy-stat.elf");
+    let fastpy_stat_elf = match load_test_elf("fastpy-stat") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-stat: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/stat-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/stat-target.txt";
@@ -10226,7 +10459,7 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `stat` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_STAT_ELF.len()
+        fastpy_stat_elf.len()
     );
 
     let cleanup = || {
@@ -10258,7 +10491,7 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_STAT_ELF, &options) {
+    let result = match spawn_process(&fastpy_stat_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-stat spawn returned {:?}", e);
@@ -10399,8 +10632,15 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
 /// values cannot match both.  Granted `READ|WRITE|METADATA` (create/write the
 /// probe need WRITE, statvfs needs METADATA).
 pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
-    static FASTPY_STATVFS_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-statvfs/fastpy-statvfs.elf");
+    let fastpy_statvfs_elf = match load_test_elf("fastpy-statvfs") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-statvfs: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/statvfs-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/statvfs-target.txt";
@@ -10413,7 +10653,7 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `statvfs` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_STATVFS_ELF.len()
+        fastpy_statvfs_elf.len()
     );
 
     let cleanup = || {
@@ -10445,7 +10685,7 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_STATVFS_ELF, &options) {
+    let result = match spawn_process(&fastpy_statvfs_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-statvfs spawn returned {:?}", e);
@@ -10618,8 +10858,15 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
 /// distinct rules out a single-field coincidence.  Granted `READ|WRITE` (for
 /// the `/tmp` output file); the credential syscall needs no capability.
 pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
-    static FASTPY_GETUID_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getuid/fastpy-getuid.elf");
+    let fastpy_getuid_elf = match load_test_elf("fastpy-getuid") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getuid: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const OUT_PATH: &str = "/tmp/fastpy-getuid.out";
     // Distinct, non-obvious identity to spawn the tool with. Distinctness rules
@@ -10630,7 +10877,7 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getuid` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETUID_ELF.len()
+        fastpy_getuid_elf.len()
     );
 
     let cleanup = || {
@@ -10655,7 +10902,7 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
         uid_gid: Some((EXPECTED_UID, EXPECTED_GID)),
     };
 
-    let result = match spawn_process(FASTPY_GETUID_ELF, &options) {
+    let result = match spawn_process(&fastpy_getuid_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getuid spawn returned {:?}", e);
@@ -10813,8 +11060,15 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
 /// single-field coincidence.  Granted `READ|WRITE` (for the `/tmp` output file);
 /// the credential syscalls need no capability token.
 pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
-    static FASTPY_SETUID_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-setuid/fastpy-setuid.elf");
+    let fastpy_setuid_elf = match load_test_elf("fastpy-setuid") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-setuid: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const OUT_PATH: &str = "/tmp/fastpy-setuid.out";
     // The tool changes to this distinct, non-obvious identity.  Must match the
@@ -10825,7 +11079,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `setuid` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SETUID_ELF.len()
+        fastpy_setuid_elf.len()
     );
 
     let cleanup = || {
@@ -10851,7 +11105,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
         uid_gid: Some((0, 0)),
     };
 
-    let result = match spawn_process(FASTPY_SETUID_ELF, &options) {
+    let result = match spawn_process(&fastpy_setuid_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-setuid spawn returned {:?}", e);
@@ -11035,8 +11289,15 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
 /// is CAP_SYS_NICE-gated in the userspace posix wrapper (the kernel mutation
 /// syscall itself needs no capability token).
 pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
-    static FASTPY_NICE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-nice/fastpy-nice.elf");
+    let fastpy_nice_elf = match load_test_elf("fastpy-nice") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-nice: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const OUT_PATH: &str = "/tmp/fastpy-nice.out";
     // Must match the literals baked into services/fastpy-nice/build.py's SRC:
@@ -11050,7 +11311,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `nice` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_NICE_ELF.len()
+        fastpy_nice_elf.len()
     );
 
     let cleanup = || {
@@ -11078,7 +11339,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
         uid_gid: Some((0, 0)),
     };
 
-    let result = match spawn_process(FASTPY_NICE_ELF, &options) {
+    let result = match spawn_process(&fastpy_nice_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-nice spawn returned {:?}", e);
@@ -11248,8 +11509,15 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
 ///     AND the requested mode (0o777), so neither a "umask ignored" bug nor a
 ///     "mode ignored, always default" bug can coincidentally pass.
 pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
-    static FASTPY_UMASK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-umask/fastpy-umask.elf");
+    let fastpy_umask_elf = match load_test_elf("fastpy-umask") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-umask: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const OUT_PATH: &str = "/tmp/fastpy-umask.out";
     const DAT_PATH: &str = "/tmp/fastpy-umask.dat";
@@ -11264,7 +11532,7 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `umask` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_UMASK_ELF.len()
+        fastpy_umask_elf.len()
     );
 
     let cleanup = || {
@@ -11291,7 +11559,7 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
         uid_gid: Some((0, 0)),
     };
 
-    let result = match spawn_process(FASTPY_UMASK_ELF, &options) {
+    let result = match spawn_process(&fastpy_umask_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-umask spawn returned {:?}", e);
@@ -11442,8 +11710,15 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
 /// (or one that stamped a single id into both fields) could not satisfy the
 /// after-checks.
 pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
-    static FASTPY_CHOWN_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-chown/fastpy-chown.elf");
+    let fastpy_chown_elf = match load_test_elf("fastpy-chown") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-chown: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const TARGET: &str = "/tmp/chown-target.txt";
     const TARGET_ARG: &[u8] = b"/tmp/chown-target.txt";
@@ -11457,7 +11732,7 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `chown` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_CHOWN_ELF.len()
+        fastpy_chown_elf.len()
     );
 
     let cleanup = || {
@@ -11507,7 +11782,7 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_CHOWN_ELF, &options) {
+    let result = match spawn_process(&fastpy_chown_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-chown spawn returned {:?}", e);
@@ -11602,13 +11877,20 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
 /// returns `< bound` and fails).  The harness first asserts its own reading is
 /// `> 0` so the comparison is meaningful rather than `0 >= 0`.
 pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
-    static FASTPY_CLOCK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-clock/fastpy-clock.elf");
+    let fastpy_clock_elf = match load_test_elf("fastpy-clock") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-clock: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `clock` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_CLOCK_ELF.len()
+        fastpy_clock_elf.len()
     );
 
     // The kernel's own current wall-clock reading, taken just before spawn.
@@ -11645,7 +11927,7 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_CLOCK_ELF, &options) {
+    let result = match spawn_process(&fastpy_clock_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-clock spawn returned {:?}", e);
@@ -11718,13 +12000,20 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
 ///     during the run (so a tool whose *arithmetic* passed but which did not
 ///     actually block would still be caught).
 pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
-    static FASTPY_SLEEP_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-sleep/fastpy-sleep.elf");
+    let fastpy_sleep_elf = match load_test_elf("fastpy-sleep") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-sleep: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `sleep` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SLEEP_ELF.len()
+        fastpy_sleep_elf.len()
     );
 
     // The tool sleeps a fixed 50 ms; accept if the observed wall-clock delta is
@@ -11766,7 +12055,7 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SLEEP_ELF, &options) {
+    let result = match spawn_process(&fastpy_sleep_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-sleep spawn returned {:?}", e);
@@ -11864,13 +12153,20 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
 ///     not match the freshly-allocated PID → fail.  Only a genuine
 ///     `SYS_PROCESS_ID` round-trip returns the caller's actual identity.
 pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
-    static FASTPY_GETPID_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getpid/fastpy-getpid.elf");
+    let fastpy_getpid_elf = match load_test_elf("fastpy-getpid") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getpid: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getpid` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETPID_ELF.len()
+        fastpy_getpid_elf.len()
     );
 
     // Path the tool writes its PID to (via native open('w')/write → SYS_FS_*),
@@ -11898,7 +12194,7 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETPID_ELF, &options) {
+    let result = match spawn_process(&fastpy_getpid_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getpid spawn returned {:?}", e);
@@ -12020,13 +12316,20 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
 /// PID, not 1 → the `== 1` assertion fails.  So the test proves `os.getppid()`
 /// is wired to `SYS_PROCESS_PARENT_ID`, not `SYS_PROCESS_ID`.
 pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
-    static FASTPY_GETPPID_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-getppid/fastpy-getppid.elf");
+    let fastpy_getppid_elf = match load_test_elf("fastpy-getppid") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-getppid: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getppid` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETPPID_ELF.len()
+        fastpy_getppid_elf.len()
     );
 
     // The tool writes its parent PID here (native open('w')/write → SYS_FS_*);
@@ -12054,7 +12357,7 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETPPID_ELF, &options) {
+    let result = match spawn_process(&fastpy_getppid_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-getppid spawn returned {:?}", e);
@@ -12177,13 +12480,20 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
 /// not the task ID → the `== result.task_id` assertion fails.  So the test
 /// proves `os.gettid()` is wired to `SYS_TASK_ID`, not `SYS_PROCESS_ID`.
 pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
-    static FASTPY_GETTID_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-gettid/fastpy-gettid.elf");
+    let fastpy_gettid_elf = match load_test_elf("fastpy-gettid") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-gettid: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `gettid` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_GETTID_ELF.len()
+        fastpy_gettid_elf.len()
     );
 
     // The tool writes its kernel task ID here (native open('w')/write →
@@ -12211,7 +12521,7 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_GETTID_ELF, &options) {
+    let result = match spawn_process(&fastpy_gettid_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-gettid spawn returned {:?}", e);
@@ -12333,13 +12643,20 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
 /// really wired a kernel pipe and `write`/`read` really moved data through it —
 /// there is no userspace echo path a mis-lowering could fake.
 pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
-    static FASTPY_PIPE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pipe/fastpy-pipe.elf");
+    let fastpy_pipe_elf = match load_test_elf("fastpy-pipe") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pipe: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pipe` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_PIPE_ELF.len()
+        fastpy_pipe_elf.len()
     );
 
     // The message the tool round-trips through the pipe and writes back to the
@@ -12371,7 +12688,7 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_PIPE_ELF, &options) {
+    let result = match spawn_process(&fastpy_pipe_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-pipe spawn returned {:?}", e);
@@ -12471,13 +12788,20 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
 /// asserts the file the tool wrote back contains exactly it; there is no
 /// userspace echo path a mis-lowering could fake.
 pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
-    static FASTPY_DUP_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-dup/fastpy-dup.elf");
+    let fastpy_dup_elf = match load_test_elf("fastpy-dup") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-dup: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `dup` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_DUP_ELF.len()
+        fastpy_dup_elf.len()
     );
 
     // The message the tool round-trips *through the duplicated write-end* and
@@ -12510,7 +12834,7 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_DUP_ELF, &options) {
+    let result = match spawn_process(&fastpy_dup_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-dup spawn returned {:?}", e);
@@ -12606,13 +12930,20 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
 /// a false pass).  The tool also asserts `dup2` returned the requested fd 9, and
 /// the harness asserts the written-back file holds exactly `"DUP2_OK"`.
 pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
-    static FASTPY_DUP2_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-dup2/fastpy-dup2.elf");
+    let fastpy_dup2_elf = match load_test_elf("fastpy-dup2") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-dup2: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `dup2` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_DUP2_ELF.len()
+        fastpy_dup2_elf.len()
     );
 
     // The message the tool round-trips through the dup2 target fd and writes
@@ -12641,7 +12972,7 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_DUP2_ELF, &options) {
+    let result = match spawn_process(&fastpy_dup2_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-dup2 spawn returned {:?}", e);
@@ -12739,13 +13070,20 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
 /// asserts the file the tool wrote back holds exactly that — no userspace path
 /// can fake a seek that never moved the offset.
 pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
-    static FASTPY_LSEEK_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-lseek/fastpy-lseek.elf");
+    let fastpy_lseek_elf = match load_test_elf("fastpy-lseek") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-lseek: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `lseek` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_LSEEK_ELF.len()
+        fastpy_lseek_elf.len()
     );
 
     // The bytes the tool reads back *after seeking to offset 4* and writes to
@@ -12779,7 +13117,7 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_LSEEK_ELF, &options) {
+    let result = match spawn_process(&fastpy_lseek_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-lseek spawn returned {:?}", e);
@@ -12878,13 +13216,20 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
 /// `"ABC"` (which the harness asserts the tool wrote back) can only be right if
 /// `SYS_FS_FTRUNCATE` actually shrank the file.
 pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
-    static FASTPY_FTRUNCATE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-ftruncate/fastpy-ftruncate.elf");
+    let fastpy_ftruncate_elf = match load_test_elf("fastpy-ftruncate") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-ftruncate: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `ftruncate` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_FTRUNCATE_ELF.len()
+        fastpy_ftruncate_elf.len()
     );
 
     // The bytes that survive the truncate-to-3 and the tool writes back.
@@ -12914,7 +13259,7 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_FTRUNCATE_ELF, &options) {
+    let result = match spawn_process(&fastpy_ftruncate_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-ftruncate spawn returned {:?}", e);
@@ -13011,13 +13356,20 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
 /// the tool wrote back exactly `"BXYE"`, so both the offset-preservation and the
 /// correct positioning are proven end-to-end.
 pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
-    static FASTPY_POS_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pos/fastpy-pos.elf");
+    let fastpy_pos_elf = match load_test_elf("fastpy-pos") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pos: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pos` (positioned I/O) utility (ring 3) integration \
          test ({} bytes ELF)...",
-        FASTPY_POS_ELF.len()
+        fastpy_pos_elf.len()
     );
 
     // The bytes the tool reads back via os.pread(offset=1) after the positioned
@@ -13048,7 +13400,7 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_POS_ELF, &options) {
+    let result = match spawn_process(&fastpy_pos_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-pos spawn returned {:?}", e);
@@ -13144,13 +13496,20 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
 /// `/proc/version` string `"MintOS kernel 0.1.0 …"` — is mirrored to serial via
 /// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
 pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
-    static FASTPY_SYSINFO_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-sysinfo/fastpy-sysinfo.elf");
+    let fastpy_sysinfo_elf = match load_test_elf("fastpy-sysinfo") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-sysinfo: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `sysinfo` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_SYSINFO_ELF.len()
+        fastpy_sysinfo_elf.len()
     );
 
     let argv: &[&[u8]] = &[b"fastpy-sysinfo"];
@@ -13170,7 +13529,7 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_SYSINFO_ELF, &options) {
+    let result = match spawn_process(&fastpy_sysinfo_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             serial_println!("[spawn]   FAIL: fastpy-sysinfo spawn returned {:?}", e);
@@ -13236,8 +13595,15 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
 /// becomes a `Zombie` and exits 0.  The printed digest is mirrored to serial via
 /// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
 pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
-    static FASTPY_STORE_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-store/fastpy-store.elf");
+    let fastpy_store_elf = match load_test_elf("fastpy-store") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-store: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     // Staged input + the content-addressed blob the utility will create.  The
     // digest is the 32-bit FNV-1a of STORE_CONTENT, verified against CPython.
@@ -13251,7 +13617,7 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `store` utility (ring 3) integration test \
          ({} bytes ELF)...",
-        FASTPY_STORE_ELF.len()
+        fastpy_store_elf.len()
     );
 
     // Stage the input file the utility will hash and store.
@@ -13276,7 +13642,7 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_STORE_ELF, &options) {
+    let result = match spawn_process(&fastpy_store_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(STORE_PATH);
@@ -13364,8 +13730,15 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
 /// `coreutils demo\n` → 1ee068f8, `grep demo\n` → 0f4143a6) were verified
 /// against CPython.
 pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     const LIBC_PATH: &str = "/tmp/pkg-libc.txt";
@@ -13385,7 +13758,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     // Spawn `fastpy-pkg` with the given argv at ring 3, wait for it to become a
     // Zombie, and return its exit code.  A nested fn (not a closure) so it
     // captures nothing and can be reused across the lifecycle steps.
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -13435,7 +13808,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) dependency lifecycle test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     // Seed an empty registry + the three payloads.
@@ -13470,7 +13843,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
     ];
 
     for (argv, want, desc) in steps {
-        match run_pkg(FASTPY_PKG_ELF, argv) {
+        match run_pkg(&fastpy_pkg_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -13547,8 +13920,15 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
 /// `coreutils demo\n` → 1ee068f8 as `bar`), so the content blobs are at known
 /// paths for cleanup.
 pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     const CUR_PATH: &str = "/tmp/pkg-current.txt";
@@ -13565,7 +13945,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
 
     // Spawn `fastpy-pkg` with the given argv at ring 3, wait for Zombie, return
     // its exit code.  (Same shape as in `self_test_fastpy_slateos_pkg`.)
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -13614,7 +13994,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) generations/rollback test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     // Seed an empty registry, a zero generation pointer, and the two payloads.
@@ -13647,7 +14027,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
     ];
 
     for (argv, want, desc) in steps {
-        match run_pkg(FASTPY_PKG_ELF, argv) {
+        match run_pkg(&fastpy_pkg_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -13717,8 +14097,15 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
 /// artifact; catching the tamper (step 4) is the whole point of a
 /// content-addressed store.
 pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     const FOO_PATH: &str = "/tmp/pkg-foo.txt";
@@ -13728,7 +14115,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     // Bytes that do NOT hash to 86732e22 — the simulated tamper/bit-rot.
     const TAMPERED: &[u8] = b"tampered payload\n";
 
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -13775,7 +14162,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) content-integrity `verify` test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     // Seed an empty registry and the payload to install.
@@ -13796,7 +14183,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
         (&[b"fastpy-pkg", b"verify", b"foo"], 0, "verify foo (intact)"),
     ];
     for (argv, want, desc) in good_steps {
-        match run_pkg(FASTPY_PKG_ELF, argv) {
+        match run_pkg(&fastpy_pkg_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -13823,7 +14210,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
 
     // Step 4: verify now detects the mismatch (blob no longer hashes to its
     // address) and exits 1.
-    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"verify", b"foo"]) {
+    match run_pkg(&fastpy_pkg_elf, &[b"fastpy-pkg", b"verify", b"foo"]) {
         Ok(1) => {}
         Ok(code) => {
             cleanup();
@@ -13870,8 +14257,15 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
 /// register-then-sweep design means a no-op gc that deleted nothing — or a
 /// broken one that deleted the referenced blob — both fail.
 pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     // One record references digest abcd1234; deadbeef is referenced by nobody.
@@ -13882,7 +14276,7 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) store `gc` test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     let cleanup = || {
@@ -13928,7 +14322,7 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
         uid_gid: None,
     };
 
-    let result = match spawn_process(FASTPY_PKG_ELF, &options) {
+    let result = match spawn_process(&fastpy_pkg_elf, &options) {
         Ok(r) => r,
         Err(e) => {
             cleanup();
@@ -14012,8 +14406,15 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
 ///  - `search grep` → matches grep           → exit 0
 ///  - `search zzz`  → matches nothing        → exit 1
 pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     // Three records; search reads only the name (field 0), so the digests/deps
@@ -14021,7 +14422,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     const DB_SEED: &[u8] =
         b"libc 86732e22 -\nlibcurl aaaaaaaa libc\ngrep 0f4143a6 libc\n";
 
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -14066,7 +14467,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) `search` (grep-style) test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, DB_SEED) {
@@ -14084,7 +14485,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
     ];
 
     for (argv, want, desc) in steps {
-        match run_pkg(FASTPY_PKG_ELF, argv) {
+        match run_pkg(&fastpy_pkg_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -14126,8 +14527,15 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
 ///     `foo cd352a42 libc` (new digest present, old 86732e22 gone), and read the
 ///     new blob back and assert it holds the v2 payload byte-for-byte.
 pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     const V1_PATH: &str = "/tmp/pkg-foo.txt";
@@ -14139,7 +14547,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
     const V1_BLOB: &str = "/tmp/store-86732e22.blob";
     const V2_BLOB: &str = "/tmp/store-cd352a42.blob";
 
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -14185,7 +14593,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) `upgrade` test ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
@@ -14207,7 +14615,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
         (&[b"fastpy-pkg", b"upgrade", b"foo", V2_ARG, b"libc"], 0, "upgrade foo -> v2"),
     ];
     for (argv, want, desc) in steps {
-        match run_pkg(FASTPY_PKG_ELF, argv) {
+        match run_pkg(&fastpy_pkg_elf, argv) {
             Ok(code) if code == *want => {}
             Ok(code) => {
                 cleanup();
@@ -14277,8 +14685,15 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
 ///     `libncurses`) is rejected with exit 1 and the registry is unchanged — the
 ///     all-or-nothing transactional guarantee.
 pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
-    static FASTPY_PKG_ELF: &[u8] =
-        include_bytes!("../../../services/fastpy-pkg/fastpy-pkg.elf");
+    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
     const MAN_PATH: &str = "/tmp/pkg-manifest.txt";
@@ -14290,7 +14705,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
     // `editor` depends on `libncurses`, which is nowhere in the registry.
     const MAN_BAD: &[u8] = b"editor deadbeef libncurses\n";
 
-    fn run_pkg(elf: &'static [u8], argv: &[&[u8]]) -> KernelResult<i32> {
+    fn run_pkg(elf: &[u8], argv: &[&[u8]]) -> KernelResult<i32> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
@@ -14343,7 +14758,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pkg` manager (ring 3) transactional `batch` test \
          ({} bytes ELF)...",
-        FASTPY_PKG_ELF.len()
+        fastpy_pkg_elf.len()
     );
 
     if let Err(e) = crate::fs::Vfs::write_file(DB_PATH, b"") {
@@ -14357,7 +14772,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         serial_println!("[spawn]   FAIL: could not stage good manifest — {:?}", e);
         return Err(e);
     }
-    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
+    match run_pkg(&fastpy_pkg_elf, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
         Ok(0) => {}
         Ok(code) => {
             cleanup();
@@ -14399,7 +14814,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         serial_println!("[spawn]   FAIL: could not stage bad manifest — {:?}", e);
         return Err(e);
     }
-    match run_pkg(FASTPY_PKG_ELF, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
+    match run_pkg(&fastpy_pkg_elf, &[b"fastpy-pkg", b"batch", MAN_ARG]) {
         Ok(1) => {}
         Ok(code) => {
             cleanup();

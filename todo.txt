@@ -87,6 +87,23 @@
 ## tool as the actual implementation), rather than manufacturing further os.*
 ## self-tests. Do not re-open the os.*-path hunt looking for scraps.
 
+## OPERATOR DECISIONS (2026-07-23): Q32→A and Q33→"lean B" resolved; recorded in
+## design-decisions.md §86/§87.
+##   - Q32→A: BUILD KASAN-style shadow memory to root-cause B-KNULLJUMP.
+##     STARTED THIS SESSION (§86): mm/kasan.rs landed — 1:8 lazily-mapped shadow
+##     over the HHDM heap, hooked into mm/heap.rs alloc/dealloc (runtime-gated,
+##     default off), with a check_access() shim + boot self-test. See
+##     known-issues.md B-KNULLJUMP "UPDATE 2026-07-23". NEXT (small follow-up):
+##     (1) put kasan::check_access on the scheduler BTreeMap access / Path-Z
+##     teardown paths (sched/mod.rs state.tasks sites); (2) kasan::enable()
+##     around the Path-Z boot self-tests so a checked access to a freed/redzoned
+##     node is flagged AT the access. Only then is the bug actually hunted.
+##   - Q33→"lean B": reduce embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
+##     before promoting fastpy coreutils to /bin. Move the ~48 include_bytes!'d
+##     self-test ELFs onto the rootfs disk / load-from-disk. Not yet started;
+##     the leaned continuation of Initiative F. Boot-ordering caveat: self-tests
+##     currently run before the rootfs is guaranteed mounted.
+
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as
 ##   elf::build_linux_fork_wait_test_elf + proc::spawn::self_test_linux_fork_wait

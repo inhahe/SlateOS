@@ -546,6 +546,12 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Initialize KASAN shadow memory (heap-corruption detector). Records the
+    // HHDM offset so shadow addresses can be computed; shadow pages are lazily
+    // mapped and checking is disabled by default (see mm::kasan). Requires the
+    // page-table subsystem (for lazy shadow mapping) to be up first.
+    mm::kasan::init(boot_info.hhdm_offset);
+
     // Step 8: Initialize the page fault / demand paging subsystem.
     // This registers the kernel address space and enables the page
     // fault handler to resolve faults for demand-paged regions.
@@ -4293,6 +4299,12 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();
+
+    // Step 22e⅞+: KASAN shadow-memory self-test.
+    // Exercises the lazy-mapped shadow with real heap allocations: verifies a
+    // live object reads clean, its redzone / partial granule are flagged
+    // out-of-bounds, and a freed slot is flagged use-after-free.
+    mm::kasan::self_test();
 
     // Step 22e⅞+: Memory watermark self-test.
     // Verifies per-subsystem peak usage tracking.

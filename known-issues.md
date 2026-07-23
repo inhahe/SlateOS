@@ -4619,6 +4619,39 @@ because it's a sizable allocator change on top of an already-large fastpy-ls
 task; captured now so a focused session can act on the concrete symbols above.
 Still WATCH.
 
+**UPDATE 2026-07-23 — KASAN-style shadow memory built (Q32→A, operator-approved;
+§86).** Landed a real KASAN shadow-memory subsystem (`kernel/src/mm/kasan.rs`)
+as the durable, layout-independent tooling the step above called for:
+- **1:8 shadow** over the HHDM heap (`shadow(addr) = KASAN_SHADOW_BASE +
+  ((addr - hhdm) >> 3)`), reserved at `0xFFFF_E000_0000_0000` (512 MiB → covers
+  4 GiB heap; registered in `kvspace.rs::KASAN_SHADOW`), **lazily mapped** per
+  16 KiB shadow frame on first touch (bitmap-gated; mapping is heap-lock-free —
+  frame alloc + `map_frame`, guarded by `MAP_LOCK` with IRQs off).
+- **Generic-KASAN encoding**: `0x00` addressable, `0x01..07` partial trailing
+  granule, `0xFA` freed (UAF), `0xFB` redzone. Fail-open for untracked/unmapped
+  shadow (no false positives).
+- **Hooked into the allocator** (`mm/heap.rs` `alloc`/`dealloc`, both the
+  per-CPU and global paths): `on_alloc` marks the object addressable + poisons
+  the slot's trailing redzone; `on_free` poisons the whole slot as freed.
+  Runtime-gated by `kasan::is_enabled()` (default **off** — one relaxed atomic
+  load per alloc/free, protecting the <200 ns target), so a normal boot is
+  unaffected.
+- **`kasan::check_access(addr, size, is_write)`** is the checked-store/load
+  **shim** for the suspect paths — the substitute for compiler store
+  instrumentation the operator's decision anticipated.
+- Boot self-test (`mm::kasan::self_test`) exercises the whole lazy-map + poison
+  + check pipeline with **real heap allocations** (40-in-64 redzone, freed-slot
+  UAF, 12-in-16 partial granule, out-of-range fail-open).
+
+**Remaining to actually catch B-KNULLJUMP** (next step): (1) place
+`kasan::check_access` calls on the scheduler `BTreeMap` node access / Path-Z
+teardown paths (`sched/mod.rs` `state.tasks` iteration sites; the process-199
+glibc zombie-cleanup → idle-task migration window), and (2) enable KASAN around
+the Path-Z boot self-tests (`kasan::enable()` before, `disable()` after) so a
+checked access to a freed/redzoned node is flagged **at the access**. Landing
+the infra first (this update) keeps that follow-up small and low-risk. Still
+WATCH.
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

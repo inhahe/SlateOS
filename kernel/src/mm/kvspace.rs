@@ -108,6 +108,16 @@ pub const FAULT_TEST: Region = Region {
     size: 16 * 1024 * 1024, // 16 MiB
 };
 
+/// KASAN shadow region (1:8 scale over the HHDM heap; lazily mapped).
+///
+/// 512 MiB of shadow describes up to 4 GiB of heap. Pages are backed on first
+/// touch by `mm::kasan`, so the reservation is virtual-only until used.
+pub const KASAN_SHADOW: Region = Region {
+    name: "kasan_shadow",
+    start: 0xFFFF_E000_0000_0000,
+    size: 512 * 1024 * 1024, // 512 MiB
+};
+
 /// User-space range.
 pub const USER_SPACE: Region = Region {
     name: "user",
@@ -135,6 +145,7 @@ const ALL_REGIONS: &[Region] = &[
     VMALLOC,
     PT_SELFTEST,
     FAULT_TEST,
+    KASAN_SHADOW,
 ];
 
 // ---------------------------------------------------------------------------

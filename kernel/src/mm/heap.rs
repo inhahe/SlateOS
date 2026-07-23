@@ -1124,6 +1124,19 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
 // GlobalAlloc implementation
 // ---------------------------------------------------------------------------
 
+/// Physical slot size backing an allocation, for KASAN redzone/free poisoning.
+///
+/// Slab allocations occupy their full power-of-two size class; large (buddy)
+/// allocations occupy whole frames. Returns the on-heap footprint so KASAN can
+/// mark the object's trailing padding (redzone) and the whole slot on free.
+#[allow(clippy::arithmetic_side_effects)]
+fn kasan_slot_size(class_idx: Option<usize>, layout: &Layout) -> usize {
+    match class_idx {
+        Some(idx) => SIZE_CLASSES.get(idx).copied().unwrap_or_else(|| layout.size()),
+        None => layout.size().div_ceil(FRAME_SIZE).saturating_mul(FRAME_SIZE),
+    }
+}
+
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // OPT: Compute the size class once (O(1) via bit ops) and reuse
@@ -1151,6 +1164,11 @@ unsafe impl GlobalAlloc for KernelHeap {
                         Ordering::Relaxed, Ordering::Relaxed,
                         |peak| if current > peak { Some(current) } else { None },
                     );
+                    // KASAN: mark the object addressable + poison slot redzone.
+                    if crate::mm::kasan::is_enabled() {
+                        crate::mm::kasan::on_alloc(
+                            ptr, layout.size(), kasan_slot_size(Some(idx), &layout));
+                    }
                     return ptr;
                 }
                 // Per-CPU path failed (OOM) — fall through to global.
@@ -1196,6 +1214,13 @@ unsafe impl GlobalAlloc for KernelHeap {
                 |peak| if current > peak { Some(current) } else { None },
             );
         }
+        // Release the heap lock before touching KASAN shadow (lazy shadow-page
+        // mapping uses the frame allocator + page tables, never the heap lock).
+        drop(inner);
+        if crate::mm::kasan::is_enabled() && !ptr.is_null() {
+            crate::mm::kasan::on_alloc(
+                ptr, layout.size(), kasan_slot_size(class_idx, &layout));
+        }
         ptr
     }
 
@@ -1218,6 +1243,13 @@ unsafe impl GlobalAlloc for KernelHeap {
                 // SAFETY: ptr points to a valid slab slot of class_size bytes.
                 unsafe { check_redzone(ptr, layout.size(), class_size); }
             }
+        }
+
+        // KASAN: poison the whole slot as freed *before* the allocator can
+        // reuse it, so a later KASAN-checked access is flagged as UAF. Runs
+        // with no heap lock held (shadow mapping is heap-lock-free).
+        if crate::mm::kasan::is_enabled() {
+            crate::mm::kasan::on_free(ptr, kasan_slot_size(class_idx, &layout));
         }
 
         // Per-CPU slab cache fast path.

@@ -5726,7 +5726,11 @@ coreutils `wc`, `head`, and `tail` were promoted next the same way (their
 self-tests now `resolve_command(...)` and spawn `argv[0]="wc"|"head"|"tail"`), so
 `/bin` holds four fastpy commands and `/tests` dropped to 45 fixtures. A second
 batch — `grep`, `sort`, `uniq`, `ls` — followed the same way, bringing `/bin` to
-eight promoted fastpy commands and `/tests` to 41 fixtures. Whether these minimal
+eight promoted fastpy commands and `/tests` to 41 fixtures. A third batch — the
+filesystem-mutating coreutils `rm`, `mv`, `mkdir`, `rmdir`, `chmod`, `chown` —
+was promoted the same way, bringing `/bin` to 14 promoted fastpy commands and
+`/tests` to 35 fixtures. (The remaining `fastpy-*` self-tests are OS-API probes,
+not user-facing commands, so they stay under `/tests`.) Whether these minimal
 utilities should ever *replace* the mature Rust coreutils in a shipping `/bin` is
 deferred to the operator as `open-questions.md` Q35 (recommendation: keep the
 promotions additive; never swap a Rust coreutil silently).

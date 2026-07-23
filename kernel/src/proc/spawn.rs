@@ -7613,11 +7613,11 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
 /// `os.remove` that merely returned 0 without deleting (the false-pass lesson
 /// from `fastpy-ls`'s empty listing).
 pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
-    let fastpy_rm_elf = match load_test_elf("fastpy-rm") {
+    let fastpy_rm_elf = match resolve_command("rm", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-rm: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP rm: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -7647,7 +7647,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-rm", RM_FILE_ARG];
+    let argv: &[&[u8]] = &[b"rm", RM_FILE_ARG];
     let envp: &[&[u8]] = &[];
     // Deletion needs Rights::DELETE — SYS_FS_DELETE gates on it (unlike the
     // read/enumerate tools, which only need READ|WRITE).
@@ -7657,7 +7657,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
         Rights::READ | Rights::WRITE | Rights::DELETE,
     )];
     let options = SpawnOptions {
-        name: "fastpy-rm",
+        name: "rm",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -7746,11 +7746,11 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
 /// the VFS that the source is now gone *and* the destination exists with the
 /// original bytes.
 pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
-    let fastpy_mv_elf = match load_test_elf("fastpy-mv") {
+    let fastpy_mv_elf = match resolve_command("mv", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-mv: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP mv: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -7789,7 +7789,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-mv", MV_SRC_ARG, MV_DST_ARG];
+    let argv: &[&[u8]] = &[b"mv", MV_SRC_ARG, MV_DST_ARG];
     let envp: &[&[u8]] = &[];
     // rename creates the new name and unlinks the old; grant READ|WRITE|DELETE.
     let caps = [(
@@ -7798,7 +7798,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
         Rights::READ | Rights::WRITE | Rights::DELETE,
     )];
     let options = SpawnOptions {
-        name: "fastpy-mv",
+        name: "mv",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -7901,11 +7901,11 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
 /// runs `mkdir /tmp/fpy-mkdir`, and — the false-pass-proof check — asserts via
 /// the VFS that the path now exists *and* is a directory.
 pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
-    let fastpy_mkdir_elf = match load_test_elf("fastpy-mkdir") {
+    let fastpy_mkdir_elf = match resolve_command("mkdir", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-mkdir: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP mkdir: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -7930,7 +7930,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-mkdir", MK_DIR_ARG];
+    let argv: &[&[u8]] = &[b"mkdir", MK_DIR_ARG];
     let envp: &[&[u8]] = &[];
     // Directory creation gates on Rights::CREATE (SYS_FS_MKDIR) — unlike the
     // read/enumerate tools that only need READ|WRITE (cf. rm needing DELETE).
@@ -7940,7 +7940,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
         Rights::READ | Rights::WRITE | Rights::CREATE,
     )];
     let options = SpawnOptions {
-        name: "fastpy-mkdir",
+        name: "mkdir",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -8035,11 +8035,11 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
 /// VFS that the directory is now gone.  `SYS_FS_RMDIR` gates on
 /// `Rights::DELETE`, so the test grants `READ|WRITE|DELETE`.
 pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
-    let fastpy_rmdir_elf = match load_test_elf("fastpy-rmdir") {
+    let fastpy_rmdir_elf = match resolve_command("rmdir", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-rmdir: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP rmdir: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -8068,7 +8068,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-rmdir", RM_DIR_ARG];
+    let argv: &[&[u8]] = &[b"rmdir", RM_DIR_ARG];
     let envp: &[&[u8]] = &[];
     // Directory removal gates on Rights::DELETE (SYS_FS_RMDIR), same as rm.
     let caps = [(
@@ -8077,7 +8077,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
         Rights::READ | Rights::WRITE | Rights::DELETE,
     )];
     let options = SpawnOptions {
-        name: "fastpy-rmdir",
+        name: "rmdir",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -8761,11 +8761,11 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
 /// asserts it now equals `0o600`.  A no-op chmod that returned 0 without
 /// persisting could not satisfy the after-check.
 pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
-    let fastpy_chmod_elf = match load_test_elf("fastpy-chmod") {
+    let fastpy_chmod_elf = match resolve_command("chmod", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-chmod: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP chmod: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -8817,10 +8817,10 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
     // os.chmod → SYS_FS_SET_PERMS (Rights::WRITE).
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
 
-    let argv: &[&[u8]] = &[b"fastpy-chmod", MODE_ARG, TARGET_ARG];
+    let argv: &[&[u8]] = &[b"chmod", MODE_ARG, TARGET_ARG];
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
-        name: "fastpy-chmod",
+        name: "chmod",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -11769,11 +11769,11 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
 /// (or one that stamped a single id into both fields) could not satisfy the
 /// after-checks.
 pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
-    let fastpy_chown_elf = match load_test_elf("fastpy-chown") {
+    let fastpy_chown_elf = match resolve_command("chown", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-chown: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP chown: not installed on PATH ({:?}) — lean build", COMMAND_PATH
             );
             return Ok(());
         }
@@ -11826,10 +11826,10 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
     // os.chown → SYS_FS_SET_OWNER (Rights::WRITE).
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
 
-    let argv: &[&[u8]] = &[b"fastpy-chown", UID_ARG, GID_ARG, TARGET_ARG];
+    let argv: &[&[u8]] = &[b"chown", UID_ARG, GID_ARG, TARGET_ARG];
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
-        name: "fastpy-chown",
+        name: "chown",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,

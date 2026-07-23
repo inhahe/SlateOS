@@ -98,8 +98,12 @@
 ## that command's self-test load from load_test_elf("fastpy-X") to
 ## resolve_command("X", COMMAND_PATH) and set argv[0]/name to "X"; (3) rebuild
 ## rootfs (WSL) + boot-test. Additive/reversible; no Rust coreutil touched.
-## Remaining coreutil candidates: ls, grep, sort, uniq, mkdir, mv, rm, rmdir,
-## chmod, chown, etc. OPEN sub-question worth the operator eventually: whether
+## DONE so far (14 promoted, all boot-test-green): cat, wc, head, tail, grep,
+## sort, uniq, ls, and the mutating set rm, mv, mkdir, rmdir, chmod, chown. The
+## remaining fastpy-* self-tests are OS-API probes (getpid, stat, pipe, dup,
+## lseek, umask, nice, statvfs, pkg, …), not user-facing commands — leave them
+## under /tests. So the coreutil-promotion track is effectively COMPLETE.
+## OPEN sub-question worth the operator eventually: whether
 ## these toy fastpy coreutils should ever *replace* the mature Rust coreutils in
 ## a real shipping /bin, or stay a parallel demonstration track (do NOT replace
 ## silently — that's a user-visible policy fork).

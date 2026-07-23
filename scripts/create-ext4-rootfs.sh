@@ -792,6 +792,12 @@ declare -A PROMOTED=(
     [fastpy-sort]=sort
     [fastpy-uniq]=uniq
     [fastpy-ls]=ls
+    [fastpy-rm]=rm
+    [fastpy-mv]=mv
+    [fastpy-mkdir]=mkdir
+    [fastpy-rmdir]=rmdir
+    [fastpy-chmod]=chmod
+    [fastpy-chown]=chown
 )
 
 FASTPY_COUNT=0

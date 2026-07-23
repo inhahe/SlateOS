@@ -7886,6 +7886,249 @@ pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-minishell` utility — the first
+/// *composition* step of the fastpy shell work.
+///
+/// Where every prior fastpy plumbing binary called a single primitive directly
+/// (`os.execv`, `os.fork`+`os.pipe`, `os.dup2`+`os.open`…), `fastpy-minishell`
+/// **parses a command line** (`str.split()` tokeniser) and dispatches it,
+/// composing PATH-resolution, `os.fork`, `os.open`+`os.dup2` redirection, and
+/// `os.execv` into a real (if minimal) shell. It handles the simple-command
+/// grammar `cmd [args...] [< infile] [> outfile]`.
+///
+/// This harness stages a known input file and drives the shell two ways, both
+/// through its parser:
+///   1. `cat /tmp/minishell-in.txt > /tmp/minishell-out.txt` — output
+///      redirection with arguments. The shell PATH-resolves `cat`, forks,
+///      `dup2`s the O_TRUNC'd output file onto fd 1, and execs; `cat` copies the
+///      input to the redirected stdout and exits with its byte count, which the
+///      shell propagates. We assert the shell's exit == the input length AND
+///      that the *output file* actually received exactly those bytes (proving
+///      the redirect landed in the file, not the console).
+///   2. `/mnt/tests/fastpy-countin.elf < /tmp/minishell-in.txt` — input
+///      redirection via an absolute-path command. The shell forks, `dup2`s the
+///      O_RDONLY input file onto fd 0, and execs `countin`, which reads stdin to
+///      EOF and exits with the byte count; we assert the shell's exit == the
+///      input length. (Skipped if the `countin` fixture is absent.)
+///
+/// Diagnostic exit codes 90/100/101/110/111/112/120/122 (see
+/// `services/fastpy-minishell/build.py`) pinpoint a parser/dispatch failure.
+/// `cat` must be installed at `/bin/cat`; if it isn't we self-skip.
+pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
+    let minishell_elf = match load_test_elf("fastpy-minishell") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-minishell: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-minishell: target command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+    let have_countin = load_test_elf("fastpy-countin").is_some();
+
+    const IN_PATH: &str = "/tmp/minishell-in.txt";
+    const OUT_PATH: &str = "/tmp/minishell-out.txt";
+    const IN_CONTENT: &[u8] = b"minishell composes redirects OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = IN_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `minishell` (parse a command line, then fork + \
+         open/dup2 redirect + execv) integration test ({} bytes ELF)...",
+        minishell_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(IN_PATH, IN_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", IN_PATH, e);
+        return Err(e);
+    }
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // Run one command line through the shell; returns (final state, exit code).
+    fn run_line(
+        elf: &[u8],
+        cmdline: &[u8],
+    ) -> KernelResult<(Option<pcb::ProcessState>, Option<i32>)> {
+        let argv: &[&[u8]] = &[b"fastpy-minishell", cmdline];
+        let envp: &[&[u8]] = &[];
+        let caps = [(
+            ResourceType::File,
+            0u64,
+            Rights::READ | Rights::WRITE | Rights::METADATA,
+        )];
+        let options = SpawnOptions {
+            name: "fastpy-minishell",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        let result = spawn_process(elf, &options)?;
+        let mut became_zombie = false;
+        for _ in 0..4000 {
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                became_zombie = true;
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        if !became_zombie {
+            return Err(KernelError::InternalError);
+        }
+        Ok((state, exit_code))
+    }
+
+    // Map a shell diagnostic exit code to a human-readable failure.
+    fn diag(code: Option<i32>) -> Option<&'static str> {
+        match code {
+            Some(90) => Some("exited 90: empty command after parsing (tokeniser produced no argv)"),
+            Some(100) => Some("exited 100: argv[0] resolved to nothing (absolute path missing or PATH search matched nothing)"),
+            Some(110) => Some("exited 110: os.fork() returned -1"),
+            Some(120) => Some("exited 120: child's os.open of the output-redirect file failed"),
+            Some(122) => Some("exited 122: child's os.open of the input-redirect file failed"),
+            Some(111) => Some("exited 111: os.waitpid() returned -1 (could not reap the child)"),
+            Some(112) => Some("exited 112: os.WIFEXITED false (child faulted or was signalled)"),
+            Some(101) => Some("exited 101: os.execv returned in the child (exec failed)"),
+            _ => None,
+        }
+    }
+
+    // ---- Test 1: `cat <in> > <out>` — output redirection with arguments. ----
+    let (st1, ec1) = match run_line(&minishell_elf, b"cat /tmp/minishell-in.txt > /tmp/minishell-out.txt") {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 1) spawn/poll error {:?}", e);
+            return Err(e);
+        }
+    };
+    if st1 != Some(pcb::ProcessState::Zombie) {
+        let _ = crate::fs::Vfs::remove(IN_PATH);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — expected Zombie, got {:?}",
+            st1
+        );
+        return Err(KernelError::InternalError);
+    }
+    if let Some(msg) = diag(ec1) {
+        let _ = crate::fs::Vfs::remove(IN_PATH);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        serial_println!("[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — {}", msg);
+        return Err(KernelError::InternalError);
+    }
+    if ec1 != Some(EXPECTED_BYTES) {
+        let _ = crate::fs::Vfs::remove(IN_PATH);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — shell exit {:?}, expected {} \
+             (cat's byte count, propagated as $?)",
+            ec1, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The exit code alone doesn't prove the redirect landed in the FILE (cat
+    // exits with its byte count regardless of where stdout went); read the
+    // output file back and confirm it received exactly the input bytes.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != IN_CONTENT {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                let _ = crate::fs::Vfs::remove(OUT_PATH);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — the output file holds \
+                     {} bytes, expected {} matching the input (the `>` redirect did NOT land in the \
+                     file, i.e. cat's stdout went elsewhere)",
+                    bytes.len(),
+                    IN_CONTENT.len()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — could not read back the \
+                 output file {} ({:?}) — the `>` redirect never created it",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // ---- Test 2: `<countin> < <in>` — input redirection, absolute-path cmd. ----
+    if have_countin {
+        let (st2, ec2) = match run_line(
+            &minishell_elf,
+            b"/mnt/tests/fastpy-countin.elf < /tmp/minishell-in.txt",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                serial_println!("[spawn]   FAIL: fastpy-minishell (test 2) spawn/poll error {:?}", e);
+                return Err(e);
+            }
+        };
+        if st2 != Some(pcb::ProcessState::Zombie) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — expected Zombie, got {:?}",
+                st2
+            );
+            return Err(KernelError::InternalError);
+        }
+        if let Some(msg) = diag(ec2) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — {}", msg);
+            return Err(KernelError::InternalError);
+        }
+        if ec2 != Some(EXPECTED_BYTES) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 2, `countin < in`) — shell exit {:?}, \
+                 expected {} (bytes countin read from its redirected stdin). A mismatch means the \
+                 `<` redirect did not feed the file to fd 0",
+                ec2, EXPECTED_BYTES
+            );
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        serial_println!(
+            "[spawn]   (fastpy-minishell test 2 `< in` skipped: `fastpy-countin` fixture absent)"
+        );
+    }
+
+    let _ = crate::fs::Vfs::remove(IN_PATH);
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `minishell` (ring 3: parsed `cat IN > OUT` — output redirect \
+         with args, {} bytes verified landed in the file — and `{}countin < IN` — input redirect \
+         via absolute path): OK — a real command-line parser dispatching through fork + open/dup2 \
+         + execv end to end",
+        EXPECTED_BYTES,
+        if have_countin { "" } else { "SKIPPED " }
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

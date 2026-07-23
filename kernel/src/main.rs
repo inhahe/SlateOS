@@ -1653,6 +1653,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-pipeline` utility: a genuine two-stage
+    // `cmd1 | cmd2` pipeline. One os.pipe + two os.fork'd children — the
+    // producer dup2's stdout->pipe and execs `/bin/cat`, the consumer dup2's
+    // pipe->stdin and execs the `fastpy-countin` fixture; the parent waitpid's
+    // both and cross-checks their byte counts. Proves the consumer-side
+    // dup2(pipe->stdin) redirect survives execve (the direction the capture
+    // test never exercised).
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pipeline() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `pipeline` (two-stage cmd1 | cmd2) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

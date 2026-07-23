@@ -7231,6 +7231,243 @@ pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-pipeline` utility — a genuine two-stage
+/// shell pipeline `cmd1 | cmd2` (a `cat file | countin` shape) run entirely from
+/// ring 3 through fastpy's own bindings.
+///
+/// Where `self_test_fastpy_slateos_capture` proved the *producer* half of a pipe
+/// (a child `dup2`s its stdout onto the pipe write end and the parent drains the
+/// pipe itself), this proves BOTH halves: `fastpy-pipeline` `os.pipe()`s one
+/// kernel pipe, `os.fork()`s twice, points the producer's stdout (`dup2(w, 1)`)
+/// at the write end and the consumer's stdin (`dup2(r, 0)`) at the read end, then
+/// `os.execv()`s each child (`cat target` upstream, the `fastpy-countin` fixture
+/// downstream). The consumer-side redirect (`dup2(pipe_r, 0)` surviving execve)
+/// is the direction the capture test never exercised. The parent closes both
+/// ends, `os.waitpid()`s both children, and cross-checks that the producer's byte
+/// count (cat exits with its byte count) equals the consumer's byte count
+/// (countin exits with the bytes it read off stdin) — proving the pipe carried
+/// every byte exactly once between two independently exec'd processes.
+///
+/// The harness stages a known file, spawns
+/// `fastpy-pipeline cat /mnt/tests/fastpy-countin.elf /tmp/pipeline-input.txt`,
+/// and asserts the fastpy process becomes a `Zombie` whose exit code equals the
+/// file's byte count. Diagnostic exit codes 100/101/102/103/110/111/112/113/
+/// 114/115/116 (see `services/fastpy-pipeline/build.py`) pinpoint a failure.
+/// `cat` must be installed at `/bin/cat` and the `fastpy-countin` fixture present
+/// on `/mnt/tests`; if either is absent we self-skip (lean build).
+pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
+    // The orchestrator ELF is a /tests fixture, loaded by name from /mnt/tests.
+    let fastpy_pipeline_elf = match load_test_elf("fastpy-pipeline") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pipeline: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    // The consumer stage is loaded by the fastpy program itself via os.execv on
+    // this absolute path; confirm the fixture is staged before we bother running.
+    const CONSUMER_PATH: &str = "/mnt/tests/fastpy-countin.elf";
+    const CONSUMER_PATH_ARG: &[u8] = b"/mnt/tests/fastpy-countin.elf";
+    if load_test_elf("fastpy-countin").is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-pipeline: consumer fixture `fastpy-countin` absent on /mnt/tests \
+             (lean build)"
+        );
+        return Ok(());
+    }
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-pipeline: producer command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+
+    const PIPE_PATH: &str = "/tmp/pipeline-input.txt";
+    const PIPE_PATH_ARG: &[u8] = b"/tmp/pipeline-input.txt";
+    const PIPE_CONTENT: &[u8] = b"fastpy two-stage pipeline OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = PIPE_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pipeline` (os.pipe + 2x os.fork + os.dup2(1) + \
+         os.dup2(0) + os.execv x2 + os.waitpid) integration test ({} bytes ELF)...",
+        fastpy_pipeline_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(PIPE_PATH, PIPE_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", PIPE_PATH, e);
+        return Err(e);
+    }
+
+    // Ensure the consumer path resolves for the ELF read (defensive; load_test_elf
+    // above already confirmed the fixture bytes exist under /tests).
+    let _ = CONSUMER_PATH;
+
+    let argv: &[&[u8]] = &[b"fastpy-pipeline", b"cat", CONSUMER_PATH_ARG, PIPE_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    // File cap (METADATA for os.path.exists → SYS_FS_STAT, READ for the ELF reads
+    // — orchestrator, cat, and the countin fixture — and cat's file read; WRITE is
+    // unused by the pipeline but kept uniform with the capture test). Both children
+    // inherit it across fork+execv.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-pipeline",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fastpy_pipeline_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PIPE_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-pipeline spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Parent forks TWO children, reaps both — give it headroom.
+    let mut became_zombie = false;
+    for _ in 0..6000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PIPE_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — expected Zombie, got {:?} (faulted on the \
+             pipe / fork / dup2 / exec / waitpid path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(102) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 102: os.path.exists returned false \
+             on the staged /tmp target (stat broken)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(103) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 103: os.path.exists returned false \
+             on the consumer ELF path ({})",
+            CONSUMER_PATH
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(100) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 100: the PATH search never matched \
+             the producer `cat`"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(110) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 110: the producer os.fork() \
+             returned -1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(114) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 114: the consumer os.fork() \
+             returned -1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(111) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 111: an os.waitpid() returned pid \
+             -1 (could not reap a child)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(112) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 112: the producer's os.WIFEXITED \
+             was false (cat faulted or was signalled)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(116) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 116: the consumer's os.WIFEXITED \
+             was false (countin faulted or was signalled — likely fd 0 was NOT redirected to the \
+             pipe read end across execve)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(101) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 101: os.execv returned in the \
+             producer child (exec of /mnt/bin/cat FAILED)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(115) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 115: os.execv returned in the \
+             consumer child (exec of {} FAILED)",
+            CONSUMER_PATH
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(113) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — exited 113: the producer's byte count did \
+             NOT equal the consumer's byte count — the pipe dropped or duplicated data between the \
+             two exec'd stages (a dup2(stdout→pipe) or dup2(pipe→stdin) redirect was lost across \
+             execve)"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pipeline (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged file, the bytes carried from cat's stdout through \
+             the pipe into countin's stdin). A different value means the pipeline mis-counted",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `pipeline` (ring 3: os.pipe + 2x os.fork — the producer \
+         os.dup2'd stdout→pipe and os.execv'd `cat`, the consumer os.dup2'd pipe→stdin and \
+         os.execv'd `countin`, the parent os.waitpid-reaped both and cross-checked their \
+         {}-byte counts): OK — a real cmd1 | cmd2 pipeline end to end",
+        EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

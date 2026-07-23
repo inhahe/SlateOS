@@ -6755,6 +6755,30 @@ is a *freed, parked* slab slot. B-KNULLJUMP corrupts a *live* scheduler
 wild store into a *live* allocation remains compiler-instrumented KASAN
 (`-Zsanitizer=kernel-address`, feasibility confirmed) — see Q34.
 
+**UPDATE 2026-07-23 (c) — KASAN shadow cover was too small; enlarged 4 GiB→64
+GiB (fixes an intermittent self-test boot-halt AND a hunt blind spot; commit
+`c6ff07ee3`).** A later armed soak (`HUNT=1`) caught a *wedge* on iter 01 that
+turned out to be a **false** KASAN self-test panic (`assert!(check(a+40,1,…)
+.is_err(), "kasan: redzone not caught")`), not a corruption. Root cause: the
+shadow was sized for only **4 GiB** of heap (512 MiB shadow at 1:8), smaller
+than the **5 GiB** physical RAM on the dev/QEMU config. Heap objects allocated
+above the 4 GiB mark have no shadow byte — `shadow_of()` returns `None`, the
+poison write is dropped, and `check_access` **fails open**, so the redzone
+assertion trips. It was intermittent because hunt boots churn the heap into
+higher frames, so whether the 40-byte test object lands above 4 GiB is
+timing-dependent. This *also silently blinded the B-KNULLJUMP hunt above 4 GiB*
+— an uncovered live allocation is unchecked, so any wild store up there would
+have been missed entirely. Fix: `KASAN_SHADOW_SIZE` 512 MiB → **8 GiB** (covers
+**64 GiB** heap, above physical RAM on any realistic dev box) in both
+`mm/kasan.rs` and `kvspace.rs::KASAN_SHADOW`; the shadow is lazily mapped so the
+reservation stays virtual-only until touched. Added a defensive self-test guard
+that *skips with a warning* (instead of panic-halting the boot) if the test
+object ever lands outside the covered window on a future RAM-larger-than-cover
+box. Verified: boots green (BOOT_OK), KASAN self-test now **PASSED** (redzone,
+UAF, partial-granule, out-of-range fail-open all OK), and the log confirms
+`[kasan] shadow ready … covers heap [0xffff800000000000..0xffff801000000000)`
+(a full 64 GiB span). The hunt tooling is now trustworthy for a long campaign.
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge

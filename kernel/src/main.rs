@@ -1619,6 +1619,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-run` utility: the first fastpy program to
+    // resolve a command by name over a PATH and hand its own process off to it
+    // via os.execv → SYS_EXECVE (the shell/init exec primitive). It execs the
+    // promoted `/bin/cat` and inherits this process's File cap + console.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_run() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `run` (os.execv handoff) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

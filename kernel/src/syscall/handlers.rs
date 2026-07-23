@@ -3488,7 +3488,19 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns up to `max_count` strings, splitting on null bytes.
 fn parse_packed_strings(data: &[u8], max_count: usize) -> alloc::vec::Vec<&[u8]> {
-    let mut result = alloc::vec::Vec::with_capacity(max_count);
+    // `max_count` is an upper *bound* on how many strings to extract, and
+    // callers pass `usize::MAX` to mean "no limit" (e.g. exec, which derives
+    // the count from the packed data itself).  Pre-allocating to `max_count`
+    // directly is a latent DoS: `Vec::<&[u8]>::with_capacity(usize::MAX)`
+    // overflows the `capacity × size_of::<&[u8]>()` layout computation and
+    // panics ("capacity overflow"), taking down the kernel on any exec/spawn
+    // with a non-empty argv.  The packed buffer can hold at most `data.len()`
+    // strings (each needs its own NUL separator) plus one possibly-unterminated
+    // tail, so `data.len() + 1` is a tight, safe upper bound — clamp the
+    // pre-allocation to it (and to `max_count`, which may legitimately be
+    // smaller than the string count when the caller wants a hard cap).
+    let cap = data.len().saturating_add(1).min(max_count);
+    let mut result = alloc::vec::Vec::with_capacity(cap);
     let mut start = 0;
     for (i, &b) in data.iter().enumerate() {
         if b == 0 {

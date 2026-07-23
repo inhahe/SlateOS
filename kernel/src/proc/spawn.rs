@@ -6682,6 +6682,175 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-run` utility — the first fastpy
+/// component to **resolve a command by name over a PATH and hand its own
+/// process off to it via `os.execv`**.
+///
+/// Every prior fastpy utility did its whole job inside its own image. This one
+/// does almost nothing itself: given a command name (`argv[1]`) and a file
+/// (`argv[2]`), it walks a PATH list (a bogus dir first, then `/mnt/bin`),
+/// finds the first directory that actually holds the command via
+/// `os.path.exists`, and replaces its own image with that command via
+/// `os.execv(path, [cmd, arg])`. This exercises a brand-new on-target path —
+/// userspace-initiated program execution — where `os.execv` lowers bridge-free
+/// to posix `execv()` → `SYS_EXECVE`, which reuses the caller's PID so the
+/// resolved command **inherits this process's File capability and stdout
+/// console handle**. That inheritance is exactly what lets the handed-off
+/// `cat` open the staged file and write to serial.
+///
+/// The harness stages a known file, spawns `fastpy-run cat /tmp/run-input.txt`,
+/// and asserts the process becomes a `Zombie` whose exit code equals the file's
+/// byte count — i.e. `cat`'s own exit semantics, proving the resolve+exec
+/// handoff completed and `cat` ran to completion in the same process. A wrong
+/// count (or exit 127, the runner's "command not found / exec failed" path)
+/// would flag a broken execv. `cat` must be installed at `/bin/cat`; on a lean
+/// build with no `/bin`, the handed-off command can't be found and the runner
+/// would exit 127 — so if `cat` itself isn't resolvable we self-skip up front.
+pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
+    // The runner ELF is a /tests fixture (a harness program, not an installed
+    // command), loaded by name from /mnt/tests.
+    let fastpy_run_elf = match load_test_elf("fastpy-run") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-run: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    // The runner execs `/mnt/bin/cat`; if cat isn't installed there is nothing
+    // to hand off to, so skip rather than spuriously fail.
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-run: target command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+
+    const RUN_PATH: &str = "/tmp/run-input.txt";
+    const RUN_PATH_ARG: &[u8] = b"/tmp/run-input.txt";
+    const RUN_CONTENT: &[u8] = b"fastpy exec handoff OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = RUN_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `run` (PATH-resolve + os.execv handoff) \
+         integration test ({} bytes ELF)...",
+        fastpy_run_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(RUN_PATH, RUN_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", RUN_PATH, e);
+        return Err(e);
+    }
+
+    // argv: the runner takes the command name to resolve and the file to hand
+    // it. After execv the image becomes `cat`, which sees argv = ["cat", file].
+    let argv: &[&[u8]] = &[b"fastpy-run", b"cat", RUN_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    // Grant a File capability with METADATA (for the PATH probe: os.path.exists
+    // → SYS_FS_STAT requires METADATA rights) plus READ (the runner reads the
+    // resolved ELF, and the handed-off `cat` reads the staged file — SYS_FS_OPEN
+    // requires READ). The cap survives execv because execve reuses the PID and
+    // its cap table, so `cat` inherits it.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-run",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fastpy_run_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(RUN_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-run spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(RUN_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-run (ring 3) — expected Zombie, got {:?} (faulted on the \
+             PATH-resolve or os.execv handoff path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(102) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-run (ring 3) — exited 102: os.path.exists returned false even \
+             on the staged /tmp (memfs) target — the stat mechanism itself is broken in this ELF \
+             (codegen / posix stat), NOT a /mnt-specific issue"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(100) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-run (ring 3) — exited 100: os.path.exists works on /tmp (the \
+             102 probe passed) but the PATH search never matched `cat` — stat on /mnt/bin/cat \
+             specifically returns false from ring 3 (ext4-mount-specific)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(101) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-run (ring 3) — exited 101: os.path.exists matched but \
+             os.execv returned (exec of /mnt/bin/cat FAILED — likely the userspace ELF read \
+             or SYS_PROCESS_EXEC)"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-run (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged file, i.e. the handed-off `cat`'s own exit). \
+             A different nonzero value means the exec handed off but `cat` misread the file",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `run` (ring 3: resolved `cat` by name over PATH {:?} via \
+         os.path.exists, then os.execv → SYS_EXECVE replaced the image in-place; the handed-off \
+         `cat` inherited the File cap + console handle, read the file and exited with the \
+         {}-byte count): OK",
+        COMMAND_PATH, EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

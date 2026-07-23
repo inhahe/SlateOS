@@ -14,6 +14,14 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-EXEC-ARGV-CAPACITY-OVERFLOW. `parse_packed_strings` pre-allocated `Vec::with_capacity(usize::MAX)` for exec argv/envp → kernel panic ("capacity overflow") on any `execve`/`SYS_EXECVE`/spawn with a non-empty argv — 2026-07-23 — ✅ RESOLVED 2026-07-23
+
+**Symptom.** Any userspace-initiated exec that supplied a non-empty argv (or envp) panicked the kernel with `capacity overflow` the moment the exec handler unpacked its arguments. Latent for a long time because virtually every exercised exec path passed `argv_ptr == 0` (empty argv); it only surfaced when the new fastpy `os.execv` runner (`fastpy-run`) handed `os.execv(path, [cmd, target])` — a two-element argv — down through posix `execv()` → `SYS_PROCESS_EXEC`.
+
+**Root cause.** `parse_packed_strings(data, max_count)` (`kernel/src/syscall/handlers.rs`) did `alloc::vec::Vec::with_capacity(max_count)`. `max_count` is only an *upper bound*; the exec handler (`sys_process_exec_with_frame`, handlers.rs ~5273/5278) passes `usize::MAX` to mean "no limit, derive the count from the packed data." `Vec::<&[u8]>::with_capacity(usize::MAX)` overflows the internal `capacity × size_of::<&[u8]>()` (×16) layout computation, which panics with `capacity overflow` — an unconditional kernel DoS reachable from ring 3 by anyone able to exec with arguments.
+
+**Fix.** Clamp the pre-allocation to a tight, real upper bound: a packed buffer of length `data.len()` can hold at most `data.len()` NUL-separated strings plus one unterminated tail, so `cap = data.len().saturating_add(1).min(max_count)`. This hardens *all* callers (the argc/envc-bounded spawn callers and the `usize::MAX` exec callers alike). Verified end-to-end by the `self_test_fastpy_slateos_run` ring-3 self-test (fastpy-run resolves `cat` over PATH, `os.execv`s it, `cat` exits with the 23-byte count) booting green with no panic.
+
 ### BUG-EXT4-SPARSE-READ. ext4 extent reader collapsed sparse holes — every sparse file read back corrupted (data shifted left into the holes) — 2026-07-23 — ✅ RESOLVED 2026-07-23
 
 **Where:** `kernel/src/fs/ext4/driver.rs` — `read_range_from_tree` (the page-cache

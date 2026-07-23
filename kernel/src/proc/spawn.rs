@@ -7932,6 +7932,7 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         return Ok(());
     }
     let have_countin = load_test_elf("fastpy-countin").is_some();
+    let have_catstdin = load_test_elf("fastpy-catstdin").is_some();
 
     const IN_PATH: &str = "/tmp/minishell-in.txt";
     const OUT_PATH: &str = "/tmp/minishell-out.txt";
@@ -8160,6 +8161,55 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         );
     }
 
+    // ---- Test 4: `cat <in> | catstdin | countin` — a THREE-stage pipeline. ---
+    // The point of a third stage is the *middle* stage (catstdin): it reads
+    // from the upstream pipe on fd 0 AND writes to the downstream pipe on fd 1
+    // *simultaneously* — a combination a two-stage pipeline never wires onto a
+    // single process. So this proves both inherited PIPE fds survive fork+exec
+    // on one process at once. countin (the last stage) must still see all 32
+    // bytes, forwarded unchanged through catstdin.
+    if have_countin && have_catstdin {
+        let (st4, ec4) = match run_line(
+            &minishell_elf,
+            b"cat /tmp/minishell-in.txt | /mnt/tests/fastpy-catstdin.elf | /mnt/tests/fastpy-countin.elf",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                serial_println!("[spawn]   FAIL: fastpy-minishell (test 4) spawn/poll error {:?}", e);
+                return Err(e);
+            }
+        };
+        if st4 != Some(pcb::ProcessState::Zombie) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 4, `cat | catstdin | countin`) — expected Zombie, got {:?}",
+                st4
+            );
+            return Err(KernelError::InternalError);
+        }
+        if let Some(msg) = diag(ec4) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 4, `cat | catstdin | countin`) — {}", msg);
+            return Err(KernelError::InternalError);
+        }
+        if ec4 != Some(EXPECTED_BYTES) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 4, `cat | catstdin | countin`) — pipeline exit {:?}, \
+                 expected {} (the LAST stage, countin, should count every byte the MIDDLE stage forwarded). \
+                 A mismatch means the middle stage's simultaneous read-pipe/write-pipe wiring was broken \
+                 across fork/exec",
+                ec4, EXPECTED_BYTES
+            );
+            return Err(KernelError::InternalError);
+        }
+    } else if have_countin {
+        serial_println!(
+            "[spawn]   (fastpy-minishell test 4 `cat | catstdin | countin` skipped: `fastpy-catstdin` fixture absent)"
+        );
+    }
+
     let _ = crate::fs::Vfs::remove(IN_PATH);
     serial_println!(
         "[spawn]   fastpy-on-SlateOS `minishell` (ring 3: parsed `cat IN > OUT` — output redirect \
@@ -8167,7 +8217,11 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
          dispatching simple commands, redirections AND pipelines through fork + os.pipe + open/dup2 \
          + execv end to end",
         EXPECTED_BYTES,
-        if have_countin {
+        if have_countin && have_catstdin {
+            ", `countin < IN` — input redirect via absolute path, `cat IN | countin` — a real \
+             two-stage pipeline, and `cat IN | catstdin | countin` — a three-stage pipeline whose \
+             MIDDLE stage reads one pipe and writes another at once"
+        } else if have_countin {
             ", `countin < IN` — input redirect via absolute path, and `cat IN | countin` — a real \
              two-stage pipeline"
         } else {

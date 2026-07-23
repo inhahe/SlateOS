@@ -7933,8 +7933,10 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     }
     let have_countin = load_test_elf("fastpy-countin").is_some();
     let have_catstdin = load_test_elf("fastpy-catstdin").is_some();
+    let have_tee = load_test_elf("fastpy-tee").is_some();
 
     const IN_PATH: &str = "/tmp/minishell-in.txt";
+    const TEE_PATH: &str = "/tmp/minishell-tee.txt";
     const OUT_PATH: &str = "/tmp/minishell-out.txt";
     const IN_CONTENT: &[u8] = b"minishell composes redirects OK\n";
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -8210,10 +8212,84 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         );
     }
 
+    // ---- Test 5: `cat <in> | tee OUT` — a pipeline stage that FANS OUT. --------
+    // tee reads the upstream pipe on fd 0 and writes each byte to BOTH its own
+    // stdout (fd 1, inherited here) AND a file it opens itself. This proves the
+    // fan-out pattern (one input duplicated onto two output fds at once) and that
+    // the shell dispatches a pipe-fed stage carrying its own argv operand (the
+    // filename). Success = tee's copy on disk byte-matches the piped input.
+    if have_tee {
+        let _ = crate::fs::Vfs::remove(TEE_PATH);
+        let (st5, ec5) = match run_line(
+            &minishell_elf,
+            b"cat /tmp/minishell-in.txt | /mnt/tests/fastpy-tee.elf /tmp/minishell-tee.txt",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                let _ = crate::fs::Vfs::remove(TEE_PATH);
+                serial_println!("[spawn]   FAIL: fastpy-minishell (test 5) spawn/poll error {:?}", e);
+                return Err(e);
+            }
+        };
+        if st5 != Some(pcb::ProcessState::Zombie) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(TEE_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — expected Zombie, got {:?}",
+                st5
+            );
+            return Err(KernelError::InternalError);
+        }
+        if let Some(msg) = diag(ec5) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(TEE_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — {}", msg);
+            return Err(KernelError::InternalError);
+        }
+        if ec5 != Some(0) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            let _ = crate::fs::Vfs::remove(TEE_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — pipeline exit {:?}, \
+                 expected 0 (tee should exit 0 after copying every piped byte to stdout AND the file)",
+                ec5
+            );
+            return Err(KernelError::InternalError);
+        }
+        match crate::fs::Vfs::read_file(TEE_PATH) {
+            Ok(bytes) => {
+                if bytes.as_slice() != IN_CONTENT {
+                    let _ = crate::fs::Vfs::remove(IN_PATH);
+                    let _ = crate::fs::Vfs::remove(TEE_PATH);
+                    serial_println!(
+                        "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — tee'd file has \
+                         {} bytes, expected the {}-byte piped input verbatim (fan-out to the file was \
+                         short or corrupted)",
+                        bytes.len(),
+                        IN_CONTENT.len()
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                let _ = crate::fs::Vfs::remove(TEE_PATH);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-minishell (test 5, `cat | tee OUT`) — could not read back \
+                     tee'd file {}: {:?}",
+                    TEE_PATH, e
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let _ = crate::fs::Vfs::remove(TEE_PATH);
+    }
+
     let _ = crate::fs::Vfs::remove(IN_PATH);
     serial_println!(
         "[spawn]   fastpy-on-SlateOS `minishell` (ring 3: parsed `cat IN > OUT` — output redirect \
-         with args, {} bytes verified landed in the file{}): OK — a real command-line parser \
+         with args, {} bytes verified landed in the file{}{}): OK — a real command-line parser \
          dispatching simple commands, redirections AND pipelines through fork + os.pipe + open/dup2 \
          + execv end to end",
         EXPECTED_BYTES,
@@ -8226,6 +8302,12 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
              two-stage pipeline"
         } else {
             " (input-redirect and pipeline sub-tests SKIPPED: countin fixture absent)"
+        },
+        if have_tee {
+            ", and `cat IN | tee OUT` — a pipeline stage fanning its piped input out to both stdout \
+             and a file (verified on disk)"
+        } else {
+            ""
         }
     );
     Ok(())

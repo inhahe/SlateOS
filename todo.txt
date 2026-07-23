@@ -67,6 +67,25 @@
 ##     properly: either boot the self-test under -smp>=2 (a bigger change that
 ##     perturbs every self-test) or accept a stored-mask-only assertion. Prefer
 ##     umask first.
+##
+## SATURATION NOTE (2026-07-22): the "one more genuinely-distinct bridge-free
+## os.* path + false-pass-proof ring-3 self-test" line of Initiative F has now
+## effectively SATURATED. As of today the fastpy self-test surface already
+## covers virtually every meaningful DISTINCT kernel write/read path reachable
+## from os.*: identity (setuid/getuid/getpid/getppid/gettid), scheduling
+## priority (nice), file-creation mask (umask, today), metadata mutation
+## (chmod/chown/settimes/utime), content (ftruncate/truncate/pwrite/lseek/dup/
+## dup2/redirection), namespace ops (link/symlink/islink/samefile/rename[mv]/
+## rm/rmdir/mkdir), query (stat/statvfs/access/size/ftype/getatime/getctime/
+## getmtime/sysinfo), timekeeping (clock/freq), blocking sleep, pipes, and the
+## whole pkg suite. Remaining candidates are either weak-to-prove single-CPU
+## (sched_setaffinity, above) or low marginal value. => Treat this micro-
+## increment line as COMPLETE. The next meaningful step for the fastpy-build
+## roadmap task is a DIRECTION choice (bigger, operator-worthy): promote a
+## fastpy-compiled binary from a boot self-test to a REAL shipping OS component
+## invoked by init/shell (e.g. one of the coreutils cat/ls/grep/... or the pkg
+## tool as the actual implementation), rather than manufacturing further os.*
+## self-tests. Do not re-open the os.*-path hunt looking for scraps.
 
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as

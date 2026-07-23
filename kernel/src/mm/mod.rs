@@ -58,6 +58,7 @@ pub mod pt_walk;
 pub mod poison;
 pub mod pressure;
 pub mod protect;
+pub mod quarantine;
 pub mod rlimits;
 pub mod rmap;
 pub mod scrub;

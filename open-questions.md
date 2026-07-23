@@ -23,8 +23,58 @@ Format for each entry:
 
 Earlier deferred operator decisions (Q1–Q33) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended as `## Q34 …` just above the
+full rationale. New decisions should be appended as `## Q35 …` just above the
 `---` separator that precedes the "Recently resolved" list.
+
+## Q34 — Escalate to a full compiler-instrumented KASAN kernel to catch B-KNULLJUMP? — Status: OPEN
+
+**Question.** We built the two *lighter* corruption detectors the Q32→A
+decision called for: a lazily-mapped KASAN **shadow** (`mm/kasan.rs`) and a
+slab **free-quarantine** (`mm/quarantine.rs`), both boot-green and self-tested.
+Neither *passively* catches B-KNULLJUMP's actual failure mode — an arbitrary
+wild **store** into a live scheduler BTree node — unless the corrupting write
+happens to hit a parked/poisoned slot (quarantine) or unless we manually
+`check_access` the exact suspect line (shadow). The *definitive* tool is
+LLVM's `-Zsanitizer=kernel-address`, which auto-instruments **every** load/store
+in the kernel and would flag the faulting instruction directly. Probing
+confirms it **is supported** on our target
+(`x86_64-unknown-none` → `supported-sanitizers: ['kcfi', 'kernel-address']`).
+Should we invest in wiring up full compiler KASAN, or first exhaust the lighter
+shadow + quarantine tools?
+
+**Options.**
+
+- **A — Try the lighter tools first (current path).** Run the Path-Z stress
+  repro with quarantine (and targeted `kasan::check_access`) enabled; if the
+  corruption vanishes under quarantine that confirms UAF/reuse and likely
+  localizes the culprit free. *Pro:* cheap, low-risk, already built, doesn't
+  touch the kernel build. *Con:* may not pinpoint the exact faulting store if
+  the write lands outside a parked window; intermittent (~1-in-120) so needs
+  many stress iterations.
+- **B — Escalate to full compiler-instrumented KASAN now.** *Pro:* definitive —
+  auto-catches the exact wild store with a backtrace, no guessing. *Con:* large,
+  higher-risk bring-up and a genuine build fork: needs whole-kernel-VA shadow
+  backing (not just heap; Linux uses a shared zero shadow page for untracked
+  regions), in-kernel `__asan_*`/`__kasan_*` runtime callbacks, a fixed
+  compile-time shadow offset matching our layout, `#[no_sanitize]` + careful
+  ordering on all early-boot/shadow-setup paths, and almost certainly a
+  separate debug build profile (whole-kernel instrumentation is a big perf hit).
+  Risk of destabilizing boot if the shadow isn't perfectly ready before
+  instrumented code runs.
+
+**Claude's recommendation.** **A first, B as fallback.** Sequence the lighter
+tools (done) → run the hunt → only escalate to compiler KASAN if quarantine +
+targeted checks fail to localize it. In the meantime I'm proceeding on A
+(wiring the tools into the Path-Z repro). Flagging B because committing the
+kernel to a full instrumented build is a costly, hard-to-reverse fork the
+operator may want to weigh in on — but it does **not** block A, so I'm not
+idling on it.
+
+**Where it bites.** `kernel/src/mm/kasan.rs`, `kernel/src/mm/quarantine.rs`,
+`kernel/src/mm/heap.rs` (alloc/free hooks); a compiler-KASAN escalation would
+add `.cargo/config.toml` rustflags (`-Zsanitizer=kernel-address`,
+`-Cllvm-args=-asan-mapping-offset/scale`), a new `__asan_*` runtime module, and
+whole-VA shadow setup in early boot (`main.rs` mm init).
 
 ---
 

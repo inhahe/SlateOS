@@ -98,6 +98,17 @@
 ##     teardown paths (sched/mod.rs state.tasks sites); (2) kasan::enable()
 ##     around the Path-Z boot self-tests so a checked access to a freed/redzoned
 ##     node is flagged AT the access. Only then is the bug actually hunted.
+##     UPDATE (2026-07-23 b): ALSO landed mm/quarantine.rs — a slab
+##     free-quarantine (8192-entry FIFO ring, poison-on-park, verify-on-evict +
+##     scan_all()) that attacks the UAF/reuse hypothesis the passive shadow
+##     can't (a stale write into an immediately-reused slot). Runtime-gated,
+##     default off, boot-green self-test (flags a stomped parked slot). AND
+##     resolved the compiler-KASAN feasibility Q: -Zsanitizer=kernel-address IS
+##     supported on x86_64-unknown-none — the definitive auto-instrument tool,
+##     but a large build fork; flagged as open-questions.md Q34 (recommend: use
+##     the light shadow+quarantine tools first, escalate to compiler KASAN only
+##     if they don't localize it). NEXT: wire quarantine::enable() +
+##     scan_all()/kasan checks into the Path-Z process spawn/teardown repro.
 ##   - Q33→"lean B": reduce embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
 ##     before promoting fastpy coreutils to /bin. Move the ~48 include_bytes!'d
 ##     self-test ELFs onto the rootfs disk / load-from-disk. Not yet started;

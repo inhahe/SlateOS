@@ -4306,6 +4306,11 @@ extern "C" fn kernel_main() -> ! {
     // out-of-bounds, and a freed slot is flagged use-after-free.
     mm::kasan::self_test();
 
+    // Step 22e⅞+: Slab free-quarantine self-test.
+    // Exercises the FIFO parking ring / poison-verify / eviction logic used to
+    // catch stale-pointer/UAF writes (leading B-KNULLJUMP hypothesis).
+    mm::quarantine::self_test();
+
     // Step 22e⅞+: Memory watermark self-test.
     // Verifies per-subsystem peak usage tracking.
     mm::watermark::self_test();

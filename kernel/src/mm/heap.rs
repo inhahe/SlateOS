@@ -1252,6 +1252,36 @@ unsafe impl GlobalAlloc for KernelHeap {
             crate::mm::kasan::on_free(ptr, kasan_slot_size(class_idx, &layout));
         }
 
+        // Free-quarantine (default off; corruption-hunt mode): hold this slab
+        // slot out of circulation, poisoned, for the next N frees so a stale-
+        // pointer/UAF write lands on parked poison (detected on eviction/scan)
+        // instead of silently corrupting a freshly-reused live object — the
+        // leading B-KNULLJUMP hypothesis. When the ring is full, the displaced
+        // (oldest) slot is returned to the slab here in our place.
+        if crate::mm::quarantine::is_enabled() {
+            if let Some(idx) = class_idx {
+                // Account the user's free now (logical free); the slot's
+                // physical memory is held parked until eviction.
+                BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+                let slot_size = kasan_slot_size(class_idx, &layout);
+                // SAFETY: ptr is a live slab slot of `slot_size` bytes for `idx`,
+                // about to be freed (still mapped/writable).
+                match unsafe { crate::mm::quarantine::on_free(ptr, idx, slot_size) } {
+                    // Slot parked; nothing to return to the free list yet.
+                    None => return,
+                    // The oldest slot was displaced — return *it* to the slab.
+                    Some((evicted_ptr, evicted_idx)) => {
+                        let mut inner = self.lock_tracked();
+                        if inner.initialized {
+                            inner.slab_dealloc(evicted_ptr, evicted_idx);
+                            SLAB_FREES.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
         // Per-CPU slab cache fast path.
         // OPT: No atomic counter on this path — the per-CPU
         // cache.slab_frees counter (plain increment, no lock prefix)

@@ -4652,6 +4652,49 @@ checked access to a freed/redzoned node is flagged **at the access**. Landing
 the infra first (this update) keeps that follow-up small and low-risk. Still
 WATCH.
 
+**UPDATE 2026-07-23 (b) — free-quarantine added + compiler-KASAN feasibility
+resolved.** Two follow-ons to the shadow work above, both boot-green:
+
+- **Slab free-quarantine** (`kernel/src/mm/quarantine.rs`). The KASAN shadow
+  above is *passive* — it flags a freed/redzoned region only when instrumented
+  code *reads/checks* it, so it cannot catch B-KNULLJUMP's actual failure mode:
+  a stale-pointer/UAF **write** into a slot that the slab *immediately reused*
+  for a live scheduler BTree node (nothing ever checks that write). Quarantine
+  attacks that class directly: when enabled, a freed slab slot is filled with
+  `POISON_FREE` (0xDE) and parked in a fixed 8192-entry FIFO ring instead of
+  being handed straight back out. While parked, the live node can **never be
+  allocated at that address** (so if the corruption vanishes under quarantine,
+  it's confirmed a reuse/UAF — hypothesis 1 — not an in-place overflow), and a
+  lingering stale write lands on parked poison, caught on eviction (`on_free`)
+  or an on-demand full-ring sweep (`scan_all`) with address/class/offset
+  reported. Runtime-gated (`quarantine::is_enabled()`, default **off** — one
+  relaxed load per free); when on, frees route through a global locked ring and
+  bypass the per-CPU fast path (perf irrelevant during a hunt). `drain()`
+  reclaims parked slots afterward. Self-test (`mm::quarantine::self_test`)
+  exercises park/poison/FIFO-eviction/`scan_all`/`drain`; verified in-boot it
+  flags a stomped parked slot ("byte +7 = 0x00 … B-KNULLJUMP candidate").
+
+- **Compiler-level KASAN IS available** on our kernel target. Probing
+  `rustc +nightly --target x86_64-unknown-none --print target-spec-json`
+  shows `supported-sanitizers: ['kcfi', 'kernel-address']` — i.e. LLVM
+  `-Zsanitizer=kernel-address` (which auto-instruments *every* load/store,
+  catching arbitrary wild writes with no manual shim) compiles for this target.
+  This is the **definitive** tool to catch B-KNULLJUMP's exact faulting store.
+  It was NOT taken now because it is a large, higher-risk bring-up and a genuine
+  build fork: it needs (a) shadow backing for the **entire** accessed kernel VA
+  (text/data/stacks/HHDM/MMIO), not just the heap — Linux maps a shared
+  read-only zero shadow page for untracked regions; (b) the `__asan_*` /
+  `__kasan_*` runtime callback symbols defined in-kernel; (c) a fixed
+  compile-time shadow offset (`-Cllvm-args=-asan-mapping-offset=…`,
+  `-asan-mapping-scale=3`) matching our layout, viable since HHDM is
+  deterministic (0xFFFF_8000_0000_0000); (d) `#[no_sanitize]` on all
+  shadow-setup / early-boot paths and correct bring-up ordering; and (e) most
+  likely a separate debug build profile (whole-kernel instrumentation is a big
+  perf hit). Sequencing the lighter, lower-risk shadow + quarantine tools first
+  (this + the (a) update) is the right order; escalating to a full
+  compiler-instrumented KASAN kernel is the fallback if they don't localize it.
+  Flagged as a design fork for the operator — see `open-questions.md` (Q34).
+
 ### B-VIRTIO-BLK-WRITE-TIMEOUT. Intermittent boot hang — a spurious virtio-blk request timeout corrupts the virtqueue, cascading into an unrecoverable storm of write timeouts during ext4 journal replay — ROOT-CAUSED & FIXED 2026-07-15
 
 **Symptom.** A live boot wedge caught by `scripts/wedge-soak.sh`

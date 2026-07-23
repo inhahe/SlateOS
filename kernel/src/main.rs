@@ -1667,6 +1667,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-redirect` utility: the `cmd > file` output
+    // redirection primitive. A forked child os.open's the output file, dup2's
+    // it onto fd 1, and execs `/bin/cat`; the parent reaps and reads the file
+    // back, cross-checking the byte count. Proves a FILE fd (not just a PIPE
+    // fd) survives execve via the SYS_PROCESS_SET_EXEC_FDS fd-preservation fix.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_redirect() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `redirect` (cmd > file, FILE fd across exec) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

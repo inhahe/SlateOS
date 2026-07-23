@@ -7468,6 +7468,214 @@ pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-redirect` utility — the shell
+/// output-redirection primitive `cmd > file`.
+///
+/// Where `self_test_fastpy_slateos_capture`/`_pipeline` redirected a child's
+/// stdout onto a **pipe** (a PIPE kernel handle), this redirects it onto a
+/// regular **file** (a FILE kernel handle) — a different handle type, so a
+/// distinct exercise of the exec fd-table-preservation fix
+/// (`SYS_PROCESS_SET_EXEC_FDS`): the fix must serialise/restore FILE fds across
+/// execve, not just PIPE fds. `fastpy-redirect` forks a child that `os.open`s
+/// the output file (O_WRONLY|O_CREAT|O_TRUNC), `dup2`s it onto fd 1, and
+/// `os.execv`s `cat <input>`; the redirected fd 1 (a FILE handle) survives
+/// execve, so cat copies the input into the output file. The parent reaps the
+/// child, re-opens the output file, counts the bytes written, and cross-checks
+/// them against cat's own byte count.
+///
+/// The harness stages an input file, spawns
+/// `fastpy-redirect cat /tmp/redirect-input.txt /tmp/redirect-output.txt`, and
+/// asserts the fastpy process becomes a `Zombie` whose exit code equals the
+/// input file's byte count — proving fork + open + dup2(stdout→file) + exec +
+/// read-back worked end to end, and that a FILE fd survives exec. Diagnostic
+/// exit codes 100/101/102/110/111/112/113/120/121 (see
+/// `services/fastpy-redirect/build.py`) pinpoint a failure. `cat` must be
+/// installed at `/bin/cat`; if it isn't resolvable we self-skip.
+pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
+    // The runner ELF is a /tests fixture, loaded by name from /mnt/tests.
+    let fastpy_redirect_elf = match load_test_elf("fastpy-redirect") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-redirect: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-redirect: target command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+
+    const IN_PATH: &str = "/tmp/redirect-input.txt";
+    const IN_PATH_ARG: &[u8] = b"/tmp/redirect-input.txt";
+    const OUT_PATH: &str = "/tmp/redirect-output.txt";
+    const OUT_PATH_ARG: &[u8] = b"/tmp/redirect-output.txt";
+    const IN_CONTENT: &[u8] = b"fastpy > file redirect OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = IN_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `redirect` (os.open + os.fork + os.dup2 + os.execv + \
+         read-back) integration test ({} bytes ELF)...",
+        fastpy_redirect_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(IN_PATH, IN_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", IN_PATH, e);
+        return Err(e);
+    }
+    // Remove any stale output from a prior boot so the read-back is unambiguous.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[b"fastpy-redirect", b"cat", IN_PATH_ARG, OUT_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    // File cap (METADATA for os.path.exists → SYS_FS_STAT, READ for the ELF/cat
+    // reads and the parent's read-back, WRITE for the child's O_CREAT/O_TRUNC
+    // output open). The child inherits it across fork+execv.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-redirect",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fastpy_redirect_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-redirect spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Parent forks a child, waits, then re-opens and reads a file — give headroom.
+    let mut became_zombie = false;
+    for _ in 0..4000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(IN_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — expected Zombie, got {:?} (faulted on the \
+             open / fork / dup2 / exec / read-back path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(102) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 102: os.path.exists returned false \
+             on the staged input (stat broken)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(100) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 100: the PATH search never matched \
+             `cat`"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(110) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 110: os.fork() returned -1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(120) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 120: the child's os.open of the \
+             output file (O_WRONLY|O_CREAT|O_TRUNC) failed"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(111) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 111: os.waitpid() returned pid -1 \
+             (could not reap the child)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(112) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 112: os.WIFEXITED was false (child \
+             faulted or was signalled)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(101) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 101: os.execv returned in the child \
+             (exec of /mnt/bin/cat FAILED)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(121) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 121: the parent's os.open of the \
+             output file for read-back failed (cat may never have created it, i.e. the redirected \
+             fd 1 did NOT point at the file across exec)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(113) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — exited 113: the bytes read back from the \
+             output file did NOT equal cat's own exit count — the FILE-backed stdout redirect lost \
+             or duplicated data across exec (fd 1 may not have been the output file, i.e. cat's \
+             stdout went to the console instead)"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-redirect (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged input, i.e. the bytes cat wrote into the output \
+             file). A different value means the redirect mis-counted",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `redirect` (ring 3: os.fork, the child os.open'd the output \
+         file, os.dup2'd it onto stdout and os.execv'd `cat`, the parent os.waitpid-reaped and \
+         read the file back, cross-checking the {}-byte count against cat's exit): OK — a real \
+         cmd > file redirect end to end, proving a FILE fd survives exec",
+        EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

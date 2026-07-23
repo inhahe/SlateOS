@@ -119,6 +119,17 @@ kill_qemu() {
 TIMEOUT=480
 NO_BUILD=0
 BENCH=0
+# Serial-stall wedge detector (opt-in; 0 = disabled).  A genuinely wedged kernel
+# stops emitting serial output, whereas a merely-slow boot keeps printing as it
+# grinds through the self-test suite.  When --stall-secs=N (N>0) is set, the wait
+# loop watches the serial log's growth: if it goes silent for N consecutive
+# seconds while QEMU is still alive and the wait marker has not appeared, that is
+# a real hang (not just a slow host) — we capture the frozen RIP and exit 2 with
+# a distinct "WEDGE: serial stalled" verdict.  This is the discriminator the
+# corruption-hunt soak needs so a slow-but-healthy boot is never mistaken for a
+# wedge (which would abort the whole campaign on a false positive).  Off by
+# default so normal/shared harness runs are byte-for-byte unchanged.
+STALL_SECS=0
 # Attach the QEMU i6300esb PCI watchdog (inject-nmi on timeout)?  OFF by
 # default so the shared harness is byte-for-byte unchanged on normal runs;
 # only --hard-lockup-watchdog opts in (see Q20 in open-questions.md).
@@ -134,6 +145,7 @@ for arg in "$@"; do
         --no-build) NO_BUILD=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
         --timeout=*) TIMEOUT="${arg#*=}" ;;
+        --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
     esac
 done
@@ -524,6 +536,11 @@ trap 'kill_qemu "$QEMU_PID"' EXIT INT TERM
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0
+# Serial-stall tracking (only acted on when STALL_SECS > 0).  We remember the
+# serial log's last observed size and the elapsed time at which it last grew;
+# if (ELAPSED - last-growth) reaches STALL_SECS the kernel has gone silent.
+STALL_LAST_SIZE=-1
+STALL_LAST_GROWTH=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$((ELAPSED + 1))
@@ -542,6 +559,28 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
+    fi
+
+    # Serial-stall wedge detection (opt-in).  A wedged kernel stops writing to
+    # the serial log; a slow-but-healthy boot keeps appending self-test output.
+    # If the log has not grown for STALL_SECS seconds and the marker still isn't
+    # present, treat it as a genuine hang (distinct from a slow host that would
+    # eventually reach the marker) — capture the frozen RIP and exit 2.
+    if [ "$STALL_SECS" -gt 0 ] && [ -f "$SERIAL_FILE" ]; then
+        cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
+        if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
+            STALL_LAST_SIZE=$cur_size
+            STALL_LAST_GROWTH=$ELAPSED
+        elif [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
+            echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s (kernel not progressing; $WAIT_MARKER never reached) ==="
+            if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+                RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
+                capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+            fi
+            kill_qemu "$QEMU_PID"
+            echo "=== Boot test FAILED (WEDGE: serial stalled) ==="
+            exit 2
+        fi
     fi
 done
 

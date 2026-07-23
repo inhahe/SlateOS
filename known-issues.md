@@ -6779,6 +6779,34 @@ UAF, partial-granule, out-of-range fail-open all OK), and the log confirms
 `[kasan] shadow ready … covers heap [0xffff800000000000..0xffff801000000000)`
 (a full 64 GiB span). The hunt tooling is now trustworthy for a long campaign.
 
+**UPDATE 2026-07-23 (d) — soak wedge-detection was false-positiving on SLOW
+boots; added a serial-stall discriminator.** The first re-launched hunt soak
+(`soak-20260723-182551`) "caught a wedge" on iter 02 — but it was a **false
+positive**: the archived serial log showed the kernel still actively running
+self-tests (`[service] Register/connect/accept: OK`, near the end of the suite)
+at the moment of the 480s timeout, having reached 23591 lines (*more* than the
+23470 of a passing boot). The captured RIP `0xffffffff81ec4d2a` resolved to
+`core::ptr::read_volatile+0x2a` with `RAX=ffff8000fee00020` (HHDM + local-APIC
+base + 0x20 = the APIC ID register) — a completely benign MMIO read the HMP
+capture happened to freeze on. Root cause: under TCG on a loaded host the full
+self-test boot had slowed to ~460-470s (the harness comment still assumed
+~305s), leaving the soak's 480s timeout almost no margin; and `boot-test.sh`
+captured a RIP on *any* timeout-with-guest-alive, so `wedge-soak.sh`'s "rc≠0 +
+captured RIP = wedge" rule fired on a merely-slow boot and **aborted the whole
+campaign** on iter 02. Fix (commit pending): (1) `boot-test.sh` gained an opt-in
+`--stall-secs=N` serial-stall detector — a *wedged* kernel stops emitting serial
+output, so if the log goes silent for N s while QEMU is alive and BOOT_OK has
+not appeared, that is a genuine hang (captures the RIP, exits **2**); a
+slow-but-healthy boot keeps appending self-test lines and never trips it.
+(2) `wedge-soak.sh` now only stops on a *genuine* anomaly — a corruption
+checkpoint (`corruptions=[1-9]`), a stall-wedge (rc=2), a hard fault/panic/
+`SYSTEM HANG` signature in serial, or a self-test regression — and treats a
+plain slow-boot timeout (rc=1, none of those) as a wasted sample that it logs
+and **continues past** instead of aborting. Per-boot timeout raised to 720s
+(headroom over ~470s boots) with `STALL_SECS=150` (generous, so a legit long
+*quiet* Path-Z tcc/make window is never mistaken for a hang). Net: the soak can
+now run a long unattended campaign without a slow boot masquerading as a catch.
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge

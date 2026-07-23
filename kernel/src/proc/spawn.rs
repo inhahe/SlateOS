@@ -8005,6 +8005,7 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
             Some(111) => Some("exited 111: os.waitpid() returned -1 (could not reap the child)"),
             Some(112) => Some("exited 112: os.WIFEXITED false (child faulted or was signalled)"),
             Some(101) => Some("exited 101: os.execv returned in the child (exec failed)"),
+            Some(130) => Some("exited 130: os.pipe() failed to create an inter-stage pipe"),
             _ => None,
         }
     }
@@ -8117,14 +8118,61 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         );
     }
 
+    // ---- Test 3: `cat <in> | countin` — a real pipeline through the parser. --
+    if have_countin {
+        let (st3, ec3) = match run_line(
+            &minishell_elf,
+            b"cat /tmp/minishell-in.txt | /mnt/tests/fastpy-countin.elf",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = crate::fs::Vfs::remove(IN_PATH);
+                serial_println!("[spawn]   FAIL: fastpy-minishell (test 3) spawn/poll error {:?}", e);
+                return Err(e);
+            }
+        };
+        if st3 != Some(pcb::ProcessState::Zombie) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — expected Zombie, got {:?}",
+                st3
+            );
+            return Err(KernelError::InternalError);
+        }
+        if let Some(msg) = diag(ec3) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — {}", msg);
+            return Err(KernelError::InternalError);
+        }
+        if ec3 != Some(EXPECTED_BYTES) {
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-minishell (test 3, `cat | countin`) — pipeline exit {:?}, \
+                 expected {} (the LAST stage, countin, should have counted every byte cat piped it). \
+                 A mismatch means the inter-stage pipe was mis-wired across fork/exec",
+                ec3, EXPECTED_BYTES
+            );
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        serial_println!(
+            "[spawn]   (fastpy-minishell test 3 `cat | countin` skipped: `fastpy-countin` fixture absent)"
+        );
+    }
+
     let _ = crate::fs::Vfs::remove(IN_PATH);
     serial_println!(
         "[spawn]   fastpy-on-SlateOS `minishell` (ring 3: parsed `cat IN > OUT` — output redirect \
-         with args, {} bytes verified landed in the file — and `{}countin < IN` — input redirect \
-         via absolute path): OK — a real command-line parser dispatching through fork + open/dup2 \
+         with args, {} bytes verified landed in the file{}): OK — a real command-line parser \
+         dispatching simple commands, redirections AND pipelines through fork + os.pipe + open/dup2 \
          + execv end to end",
         EXPECTED_BYTES,
-        if have_countin { "" } else { "SKIPPED " }
+        if have_countin {
+            ", `countin < IN` — input redirect via absolute path, and `cat IN | countin` — a real \
+             two-stage pipeline"
+        } else {
+            " (input-redirect and pipeline sub-tests SKIPPED: countin fixture absent)"
+        }
     );
     Ok(())
 }

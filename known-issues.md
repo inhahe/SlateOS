@@ -32,6 +32,44 @@ work that should be done now."
 
 **Fix.** Added a one-shot exec fd-table snapshot that mirrors the spawn path. New syscall `SYS_PROCESS_SET_EXEC_FDS` (=1061): posix `execve` (`posix/src/spawn.rs`) reuses `build_fd_map` (null file_actions → the current table minus cloexec/epoll/timerfd/inotify) to serialise its live fd table and hands it to the kernel *just before* `SYS_PROCESS_EXEC`. The kernel stores it in a new PCB field `exec_inherited_fds: Vec<(i32,u8,u64)>` (pcb.rs) — these are **aliases of handles already owned by `ipc_handles`**, so the kernel never closes them (no double-close). After exec, the child's crt0 `SYS_PROCESS_GET_INITIAL_FDS` handler (`sys_process_get_initial_fds`, handlers.rs) now falls back to this snapshot when `initial_fds` is empty, restoring the fd→handle mapping origin-aware (unconsumed entries are put back to the correct list). This makes `fork`+`dup2`+`exec` redirection work uniformly for all native processes. Verified: `self_test_fastpy_slateos_capture` boots green, capturing the 23-byte staged file's output and cross-checking it against `cat`'s exit code.
 
+### TD-FASTPY-PURE-MODE-FVALUE. fastpy pure-native mode (`-DFPY_PURE_MODE`, no CPython bridge) can't dispatch methods on, or iterate, a "flexible value" (FVALUE) — the element type you get from indexing OR iterating an `append`-built list — 2026-07-23 — OPEN (fastpy codegen constraint; documented + worked around)
+
+**What it is (a fastpy compiler limitation, not an OS bug).** When writing OS
+components as native Python compiled by fastpy (initiative F), the pure-native
+runtime excludes `runtime/cpython_bridge.c` (replaced by `bridge_stub.c`). Any
+operation that would dynamic-dispatch through the bridge is unavailable and
+fails as either a **link error** or a **runtime hang**:
+
+1. **Method dispatch on an FVALUE → link error.** Indexing an `append`-built
+   list (`x = mylist[i]`) yields an FVALUE, not a concrete type. Calling a
+   method on it (e.g. `x.find('/')`) emits a call to `fpy_fv_call_method1`,
+   which is undefined in pure mode → `undefined symbol: fpy_fv_call_method1`
+   at link time. (codegen conditions FV dispatch on receiver VKind ∈
+   {PATH,PYOBJ,MIXED,FVALUE}: compiler/codegen.py ~42549.)
+2. **Iterating an FVALUE → silent infinite spin.** Iterating an element of an
+   `append`-built **nested** list (list-of-lists) — e.g. `st = stages[i]` or
+   even `for st in stages:` then `for tok in st:` — iterates an FVALUE, which
+   spins forever in a **pure-CPU loop with no syscalls and no output** (looks
+   like a dead hang: QEMU alive, serial log frozen, no child ever forked).
+   This one is nastier than (1) because it *compiles cleanly* and only manifests
+   at runtime.
+
+**Workarounds (both proven in `services/fastpy-minishell/build.py`).**
+- Never call methods on an indexed list element; capture the concrete value
+  from the **loop variable** instead (`for t in toks: ... cmd = t`), then call
+  methods on `t`/`cmd`.
+- Never build a **list-of-lists**. Restructure to a **single flat forward
+  pass** over one flat `append` list (append a sentinel to flush the tail case
+  uniformly). Flat-list iteration by loop variable, `str` methods on the loop
+  variable, list literals (`PATH = [...]`) and `argv` handed to `os.execv` are
+  all fine.
+
+**Proper fix (upstream, in fastpy — out of scope for the OS repo).** Emit
+pure-mode-safe monomorphic paths for FVALUE method-dispatch and iteration (or
+teach codegen to propagate concrete element types through `append`-built
+containers so the element isn't an FVALUE in the first place). Until then, the
+constraint is a known authoring rule for fastpy-compiled OS components.
+
 ### BUG-CRT0-STREAM-SOCKET-UNMAPPED. crt0 `retrieve_initial_fds` has no STREAM_SOCKET→UnixStream mapping, so inherited unix-domain sockets are mislabeled as `File` across `posix_spawn`/`exec` fd inheritance — 2026-07-23 — OPEN (latent)
 
 **Where:** `posix/src/crt.rs` — `retrieve_initial_fds` maps handle_type FILE/PIPE/TCP_SOCKET/UDP_SOCKET/CONSOLE/EVENTFD but omits STREAM_SOCKET (unix-domain / `AF_UNIX` stream, handle_type 6). Any inherited unix-domain socket fd is reconstructed as a plain `File` entry in the child's userspace fd table.

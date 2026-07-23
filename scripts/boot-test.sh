@@ -457,6 +457,18 @@ fi
 
 cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
 
+# Optional kernel cmdline injection: when SLATE_CMDLINE is set in the
+# environment, append a Limine `cmdline:` line to the staged config so the
+# kernel receives boot parameters (parsed by fs::kernparam). Used e.g. to arm
+# the B-KNULLJUMP corruption hunt under the soak harness:
+#     SLATE_CMDLINE="mm.corruption_hunt=1" ./scripts/boot-test.sh
+# Normal boots leave it unset (fast, unperturbed). The line is indented to
+# associate with the single boot entry in limine.conf.
+if [ -n "${SLATE_CMDLINE:-}" ]; then
+    printf '    cmdline: %s\n' "$SLATE_CMDLINE" >> "$ESP_DIR/limine.conf"
+    echo "=== Injected kernel cmdline: $SLATE_CMDLINE ==="
+fi
+
 # Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
 SWAP_IMG="$PROJECT_ROOT/build/swap.img"
 SWAP_IMG_WIN="$(to_win_path "$SWAP_IMG")"

@@ -2317,6 +2317,26 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux execveat(2) (ring 3) self-test failed: {:?}", e);
     }
 
+    // B-KNULLJUMP corruption hunt (opt-in via `mm.corruption_hunt` cmdline
+    // flag; default off so normal boots stay fast and keep their unperturbed
+    // repro conditions). When armed, the KASAN shadow + slab free-quarantine
+    // are enabled *around* the Path-Z process spawn/teardown block below — the
+    // region where B-KNULLJUMP reproduces (~1-in-120). Quarantine parks freed
+    // slab slots poisoned so a stale-pointer/UAF write into a reused scheduler
+    // BTree node lands on poison (caught at eviction / the scan_all() checkpoint
+    // after the block) instead of silently corrupting a live node. Intended to
+    // run under the soak harness (many reboots) with the flag set. See
+    // known-issues.md B-KNULLJUMP and open-questions.md Q34.
+    let corruption_hunt = fs::kernparam::is_set("mm.corruption_hunt");
+    if corruption_hunt {
+        mm::kasan::enable();
+        mm::quarantine::enable();
+        serial_println!(
+            "[hunt] B-KNULLJUMP corruption hunt ARMED (KASAN shadow + slab \
+             free-quarantine) around the Path-Z spawn/teardown block"
+        );
+    }
+
     // Path Z: run a REAL, prebuilt, dynamically-linked glibc binary
     // (/bin/hello, PT_INTERP=ld-linux-x86-64.so.2) end-to-end.  Self-stages the
     // glibc tree from the read-only ext4 rootfs at /mnt into the active root and
@@ -2943,6 +2963,37 @@ extern "C" fn kernel_main() -> ! {
             "WARNING: Path-Z dense-switch C runtime self-test failed: {:?}",
             e
         );
+    }
+
+    // B-KNULLJUMP corruption hunt: end-of-block checkpoint. Sweep every
+    // still-parked slot for a stomped poison pattern (a stale-pointer/UAF write
+    // that landed while the slot was quarantined), report the verdict + stats,
+    // then disarm and drain the ring back to the slab. Under the soak harness a
+    // corruption here pins the fault to this Path-Z window with a precise
+    // address/class instead of the vague downstream crash.
+    if corruption_hunt {
+        let corrupted = mm::quarantine::scan_all();
+        let qs = mm::quarantine::stats();
+        let ks = mm::kasan::stats();
+        serial_println!(
+            "[hunt] Path-Z checkpoint: quarantine parked={} total_parked={} \
+             evicted={} corruptions={} (scan found {}); kasan violations={} \
+             shadow_frames={}",
+            qs.parked_now, qs.total_parked, qs.total_evicted, qs.corruptions,
+            corrupted, ks.violations, ks.shadow_frames_mapped
+        );
+        mm::quarantine::disable();
+        mm::kasan::disable();
+        // Reclaim parked slots (verifying each on the way out).
+        mm::quarantine::drain(|ptr, _class_idx| {
+            // SAFETY: `ptr` is a slab slot that was live when parked; returning
+            // it to the global allocator via the standard dealloc path. The
+            // layout size is reconstructed from the class by the allocator's
+            // size-class lookup, so a byte-accurate Layout isn't required here —
+            // we free through the raw slab return used for quarantine eviction.
+            mm::heap::quarantine_return_slot(ptr, _class_idx);
+        });
+        serial_println!("[hunt] disarmed; quarantine drained back to the slab");
     }
 
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,

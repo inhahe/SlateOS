@@ -1326,6 +1326,26 @@ unsafe impl GlobalAlloc for KernelHeap {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Return a slab slot to the global free list by size-class index.
+///
+/// Used by the free-quarantine (`mm::quarantine`) to reclaim parked slots when
+/// the ring evicts or is drained: the slot was a live slab allocation when it
+/// was parked (poisoned), and this hands it straight back to the class free
+/// list, bypassing the quarantine re-entry. Skips accounting for `BYTES_IN_USE`
+/// (already decremented when the user logically freed the slot at park time).
+///
+/// No-op on a null pointer or before the heap is initialized.
+pub fn quarantine_return_slot(ptr: *mut u8, class_idx: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let mut inner = HEAP.lock_tracked();
+    if inner.initialized {
+        inner.slab_dealloc(ptr, class_idx);
+        SLAB_FREES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Statistics API
 // ---------------------------------------------------------------------------

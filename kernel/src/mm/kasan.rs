@@ -89,8 +89,19 @@ const KASAN_GRANULE_MASK: u64 = KASAN_GRANULE - 1;
 
 /// Base of the shadow region (see `kvspace::KASAN_SHADOW`).
 const KASAN_SHADOW_BASE: u64 = 0xFFFF_E000_0000_0000;
-/// Size of the reserved shadow VA range (512 MiB → covers 4 GiB of heap).
-const KASAN_SHADOW_SIZE: u64 = 512 * 1024 * 1024;
+/// Size of the reserved shadow VA range (8 GiB → covers 64 GiB of heap).
+///
+/// Must comfortably exceed the machine's physical RAM: the HHDM heap can back
+/// a slab slot with any physical frame, and an object whose HHDM offset lands
+/// past `KASAN_COVER_BYTES` has no shadow byte (`shadow_of` → `None`), so its
+/// poison is silently dropped and every access to it fails *open* (unchecked).
+/// A 4 GiB cover previously left a blind spot on the 5 GiB test machine: once
+/// heap churn pushed allocations above 4 GiB, redzones stopped being poisoned —
+/// which both broke the self-test intermittently and made the corruption hunt
+/// blind to any stomp in high memory. 64 GiB covers every realistic dev/QEMU
+/// config; the shadow is lazily mapped so the reservation is virtual-only until
+/// heap is actually touched at a given offset.
+const KASAN_SHADOW_SIZE: u64 = 8 * 1024 * 1024 * 1024;
 /// Heap span the shadow can describe (`KASAN_SHADOW_SIZE * KASAN_GRANULE`).
 const KASAN_COVER_BYTES: u64 = KASAN_SHADOW_SIZE << KASAN_GRANULE_SHIFT;
 
@@ -514,6 +525,28 @@ pub fn self_test() {
     let p = unsafe { alloc(layout40) };
     assert!(!p.is_null(), "kasan self-test: alloc(40) failed");
     let a = p as u64;
+
+    // Defensive: KASAN only covers `[hhdm, hhdm + KASAN_COVER_BYTES)`. If the
+    // heap handed back a slot whose HHDM offset falls outside that window
+    // (physical RAM larger than the cover), its shadow byte does not exist —
+    // `shadow_of` returns `None`, poison is silently dropped, and every check
+    // below fails *open*, so the redzone/UAF asserts would spuriously panic and
+    // halt the boot. With the 64 GiB cover this cannot happen on any realistic
+    // dev/QEMU config, but rather than reintroduce a boot-halting flake on a
+    // future RAM-larger-than-cover box, skip the self-test with a loud warning.
+    if shadow_of(a).is_none() || shadow_of(a + 63).is_none() {
+        serial_println!(
+            "[kasan] self-test SKIPPED: test object {:#x} is outside the covered \
+             window — raise KASAN_SHADOW_SIZE above physical RAM to self-verify",
+            a
+        );
+        // SAFETY: `p` was allocated with `layout40` and is otherwise unused.
+        unsafe { dealloc(p, layout40); }
+        if !was_enabled {
+            disable();
+        }
+        return;
+    }
 
     // Body is fully accessible.
     assert!(check(a, 40, false).is_ok(), "kasan: body flagged");

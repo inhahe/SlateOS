@@ -110,12 +110,17 @@ pub const FAULT_TEST: Region = Region {
 
 /// KASAN shadow region (1:8 scale over the HHDM heap; lazily mapped).
 ///
-/// 512 MiB of shadow describes up to 4 GiB of heap. Pages are backed on first
-/// touch by `mm::kasan`, so the reservation is virtual-only until used.
+/// 8 GiB of shadow describes up to 64 GiB of heap — sized to exceed physical
+/// RAM on any realistic dev/QEMU config so no heap object falls outside the
+/// covered window (an uncovered object has no shadow byte and fails open, which
+/// both flaked the KASAN self-test and blinded the corruption hunt above the
+/// old 4 GiB cap). Pages are backed on first touch by `mm::kasan`, so the
+/// reservation is virtual-only until used. The next region (kernel text at
+/// 0xFFFF_FF00_...) is ~30 TiB away, so there is ample room.
 pub const KASAN_SHADOW: Region = Region {
     name: "kasan_shadow",
     start: 0xFFFF_E000_0000_0000,
-    size: 512 * 1024 * 1024, // 512 MiB
+    size: 8 * 1024 * 1024 * 1024, // 8 GiB
 };
 
 /// User-space range.

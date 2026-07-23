@@ -5697,3 +5697,15 @@ settled from reading the code:
   bloat. The 3 `main.rs` + 6 `container.rs` `include_bytes!` sites are tiny
   hand-written no_std services (`init`/`hello`/`ticker`, tens of KB) and stay
   embedded.
+
+**Implemented & verified (2026-07-23).** Done exactly as designed above. 54
+`static FASTPY_*_ELF` decls in `spawn.rs` converted to `load_test_elf()` disk
+loads (self-skip on absence); all 49 fastpy `*.elf` staged into `/tests` by
+`create-ext4-rootfs.sh` (image 48M→256M). **Debug kernel binary 361.7 MiB →
+181.8 MiB (−180 MiB / ~50 %).** All 55 fastpy ring-3 self-tests pass loading
+from `/mnt/tests`, green boot. One surprise: the sparse fastpy ELFs were the
+*first* sparse files ever read through the ext4 extent path, which exposed a
+latent extent-reader bug (holes collapsed → data shifted) — fixed as
+BUG-EXT4-SPARSE-READ (`kernel/src/fs/ext4/driver.rs`, `block_copy_placement`).
+The loader indirection (`load_test_elf`) is now the seam for the follow-on
+option A (promote fastpy coreutils to real `/bin`).

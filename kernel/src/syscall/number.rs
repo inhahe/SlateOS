@@ -1630,6 +1630,26 @@ pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 /// The entries are consumed (one-shot) — subsequent calls return 0.
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 
+/// Record the caller's userspace fd table so it survives `execve`.
+///
+/// A native (non-Linux-ABI) process holds its POSIX fd → kernel-handle
+/// mapping in userspace; `execve` wipes the address space and would lose
+/// any `dup2()` redirection set up before the exec (the shell `cmd > file`
+/// / `$(...)` / pipeline primitive).  The posix layer's `execve` calls
+/// this immediately before `SYS_PROCESS_EXEC` to hand the kernel the
+/// current table; the new image reads it back via
+/// `SYS_PROCESS_GET_INITIAL_FDS` and rebuilds its userspace table.
+///
+/// The recorded handles merely *alias* handles the process already owns
+/// (`ipc_handles`), which survive exec — they are not duplicated and are
+/// never closed by the kernel on this path.
+///
+/// `arg0`: pointer to an array of `FdMapEntry`.
+/// `arg1`: entry count.
+///
+/// Returns: number of entries recorded on success, or negative error.
+pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
+
 /// Retrieve initial argv/envp for the current process.
 ///
 /// Called by the child process's POSIX layer during startup to read

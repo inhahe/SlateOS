@@ -1108,6 +1108,44 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
     let mut envp_buf = [0u8; EXEC_PACKED_MAX];
     let envp_len = pack_cstring_array(envp, &mut envp_buf);
 
+    // Preserve the current userspace fd table across the image
+    // replacement.  A native process keeps its fd → kernel-handle map in
+    // *userspace*, which `exec` wipes; without this the new image would
+    // lose every `dup2()` redirection a shell set up before exec (the
+    // `cmd > file` / `$(...)` / pipeline primitive).  We snapshot the
+    // inheritable fds (`build_fd_map` with no file actions == "current
+    // table minus cloexec/epoll/timerfd/inotify") and hand them to the
+    // kernel, which stores them for the new image to read back via
+    // `SYS_PROCESS_GET_INITIAL_FDS` during startup.  The handles are the
+    // process's own (owned via the kernel's `ipc_handles`, which survive
+    // exec) — this only rebuilds the userspace fd→handle mapping.
+    //
+    // Best-effort: a failure here costs only the redirection, not the
+    // exec.  Done just before `SYS_PROCESS_EXEC` so it reflects the final
+    // fd table; on exec failure it is harmlessly overwritten by the next
+    // exec (or dropped at exit — the kernel never closes these aliases).
+    {
+        let mut fd_map = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
+        let mut opened = OpenedHandles::new();
+        let fd_count = build_fd_map(core::ptr::null(), &mut fd_map, &mut opened);
+        // `build_fd_map` opens nothing when file_actions is null, so
+        // `opened` is empty — no handles to release here.
+        let _ = syscall2(
+            SYS_PROCESS_SET_EXEC_FDS,
+            if fd_count > 0 {
+                fd_map.as_ptr() as u64
+            } else {
+                0
+            },
+            fd_count as u64,
+        );
+    }
+
     // Replace the current process image with argv/envp.
     let ret = syscall6(
         SYS_PROCESS_EXEC,

@@ -14,6 +14,22 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-NATIVE-EXEC-FD-TABLE-LOST. Native-ABI `execve` dropped the child's userspace fd→handle table, so any pre-exec `dup2` redirect (e.g. `dup2(pipe_w, 1)` for output capture) was lost across `exec` — 2026-07-23 — ✅ RESOLVED 2026-07-23
+
+**Symptom.** The fastpy `capture` primitive (fork + `os.pipe` + child `os.dup2(w, 1)` + `os.execv("cat")`, parent `os.read`-drains the pipe) captured **0 bytes** instead of the child's stdout, so the self-test's byte-count cross-check tripped and it exited **113**. This is the core `$(...)`/`cmd1 | cmd2` shell primitive, so command substitution and pipelines were broken for every native (fastpy/posix) process, not just the test.
+
+**Root cause.** On SlateOS the POSIX layer keeps its fd→kernel-handle map in **userspace** (`posix/src/fdtable.rs`: a static 256-entry `FdEntry` array; `dup`/`dup2` only *alias* within this table, sharing one kernel handle). `execve` replaces the address space, which **wipes that userspace table**; the new image's crt0 rebuilds a fresh default table (fd 1 → console), so the child's `dup2(pipe_w, 1)` redirection vanished. The underlying pipe *handle* survived exec (it is owned via the kernel `ipc_handles` list, which exec does not touch) — only the userspace fd→handle *mapping* was lost. The existing `posix_spawn` fd-inheritance path (fd_map → `initial_fds` → crt0 `SYS_PROCESS_GET_INITIAL_FDS`) did not cover raw `fork`+`dup2`+`execv` because the kernel had no knowledge of the userspace dup2.
+
+**Fix.** Added a one-shot exec fd-table snapshot that mirrors the spawn path. New syscall `SYS_PROCESS_SET_EXEC_FDS` (=1061): posix `execve` (`posix/src/spawn.rs`) reuses `build_fd_map` (null file_actions → the current table minus cloexec/epoll/timerfd/inotify) to serialise its live fd table and hands it to the kernel *just before* `SYS_PROCESS_EXEC`. The kernel stores it in a new PCB field `exec_inherited_fds: Vec<(i32,u8,u64)>` (pcb.rs) — these are **aliases of handles already owned by `ipc_handles`**, so the kernel never closes them (no double-close). After exec, the child's crt0 `SYS_PROCESS_GET_INITIAL_FDS` handler (`sys_process_get_initial_fds`, handlers.rs) now falls back to this snapshot when `initial_fds` is empty, restoring the fd→handle mapping origin-aware (unconsumed entries are put back to the correct list). This makes `fork`+`dup2`+`exec` redirection work uniformly for all native processes. Verified: `self_test_fastpy_slateos_capture` boots green, capturing the 23-byte staged file's output and cross-checking it against `cat`'s exit code.
+
+### BUG-CRT0-STREAM-SOCKET-UNMAPPED. crt0 `retrieve_initial_fds` has no STREAM_SOCKET→UnixStream mapping, so inherited unix-domain sockets are mislabeled as `File` across `posix_spawn`/`exec` fd inheritance — 2026-07-23 — OPEN (latent)
+
+**Where:** `posix/src/crt.rs` — `retrieve_initial_fds` maps handle_type FILE/PIPE/TCP_SOCKET/UDP_SOCKET/CONSOLE/EVENTFD but omits STREAM_SOCKET (unix-domain / `AF_UNIX` stream, handle_type 6). Any inherited unix-domain socket fd is reconstructed as a plain `File` entry in the child's userspace fd table.
+
+**Impact:** latent — no current self-test inherits a unix-domain socket across spawn/exec, so it hasn't manifested. It would surface if/when a native process passes an `AF_UNIX` connection to a child: the child's fd would route through the File path instead of the stream-socket path (wrong `read`/`write`/`recv` semantics, likely EBADF or silent misbehavior).
+
+**Fix:** add the STREAM_SOCKET(6) arm to `retrieve_initial_fds`, reconstructing a `UnixStream` fd entry, mirroring the TCP/UDP socket arms. Also audit `kind_to_handle_type` / `build_fd_map` on the send side to confirm unix-domain sockets serialise with handle_type 6.
+
 ### BUG-EXEC-ARGV-CAPACITY-OVERFLOW. `parse_packed_strings` pre-allocated `Vec::with_capacity(usize::MAX)` for exec argv/envp → kernel panic ("capacity overflow") on any `execve`/`SYS_EXECVE`/spawn with a non-empty argv — 2026-07-23 — ✅ RESOLVED 2026-07-23
 
 **Symptom.** Any userspace-initiated exec that supplied a non-empty argv (or envp) panicked the kernel with `capacity overflow` the moment the exec handler unpacked its arguments. Latent for a long time because virtually every exercised exec path passed `argv_ptr == 0` (empty argv); it only surfaced when the new fastpy `os.execv` runner (`fastpy-run`) handed `os.execv(path, [cmd, target])` — a two-element argv — down through posix `execv()` → `SYS_PROCESS_EXEC`.

@@ -409,6 +409,25 @@ pub struct Process {
     /// reads them (e.g., a non-POSIX process), they are cleaned up when
     /// the process is reaped.
     pub initial_fds: Vec<(i32, u8, u64)>,
+    /// File-descriptor table snapshot carried across `execve`.
+    ///
+    /// A native (non-Linux-ABI) process keeps its POSIX fd → kernel-handle
+    /// mapping in *userspace* (the posix crate's `fdtable`).  `execve`
+    /// replaces the address space, wiping that userspace table, so the new
+    /// image would otherwise lose every redirection a shell set up with
+    /// `dup2()` before `exec` (the `cmd > file` / `$(...)` / pipeline
+    /// primitive).  Just before the exec syscall, the caller's posix layer
+    /// serialises its current fd table here (via `SYS_PROCESS_SET_EXEC_FDS`);
+    /// the new image's startup reads it back through
+    /// `SYS_PROCESS_GET_INITIAL_FDS` and rebuilds its userspace table.
+    ///
+    /// Unlike [`Self::initial_fds`], these entries are **not** kernel-owned
+    /// duplicates: they merely *alias* handles this process already owns via
+    /// [`Self::ipc_handles`] (which survives exec).  The kernel therefore
+    /// never closes them on teardown — ownership stays entirely with
+    /// `ipc_handles`, and the userspace `close()`/exit path releases each
+    /// handle exactly once.  Consumed one-shot by the post-exec startup.
+    pub exec_inherited_fds: Vec<(i32, u8, u64)>,
     /// Initial command-line arguments for the child process.
     ///
     /// Each element is one argument as a byte string (NOT null-terminated
@@ -1265,6 +1284,7 @@ impl Process {
             ipc_handles: Vec::new(),
             crash_info: None,
             initial_fds: Vec::new(),
+            exec_inherited_fds: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
             // Persistent /proc snapshots — populated by set_initial_args
@@ -1712,6 +1732,9 @@ pub fn fork_create(
         ipc_handles,
         crash_info: None,
         initial_fds,
+        // A fresh fork carries no pending exec fd-table snapshot; it is
+        // populated only when this process later calls execve.
+        exec_inherited_fds: Vec::new(),
         // argv/envp are not re-read by a forked child — its argument
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
@@ -5699,6 +5722,36 @@ pub fn take_initial_fds(pid: ProcessId) -> Vec<(i32, u8, u64)> {
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get_mut(&pid) {
         core::mem::take(&mut proc.initial_fds)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Record the caller's userspace fd table so it survives an imminent
+/// `execve` (see [`Process::exec_inherited_fds`]).
+///
+/// Called by the posix layer's `execve` (via `SYS_PROCESS_SET_EXEC_FDS`)
+/// just before it issues the exec syscall.  Each entry is
+/// `(posix_fd_number, handle_type, kernel_handle_id)` — an *alias* of a
+/// handle this process already owns via `ipc_handles`, not a fresh dup.
+/// Overwrites any previous snapshot (e.g. from an exec that then failed).
+pub fn set_exec_inherited_fds(pid: ProcessId, fds: Vec<(i32, u8, u64)>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.exec_inherited_fds = fds;
+    }
+}
+
+/// Take (move out) the exec-carried fd snapshot from a process's PCB.
+///
+/// One-shot, mirroring [`take_initial_fds`]: the post-exec startup reads
+/// it once via `SYS_PROCESS_GET_INITIAL_FDS` and it is cleared.  These
+/// handles are never closed by the kernel here — ownership stays with
+/// `ipc_handles`.
+pub fn take_exec_inherited_fds(pid: ProcessId) -> Vec<(i32, u8, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        core::mem::take(&mut proc.exec_inherited_fds)
     } else {
         Vec::new()
     }

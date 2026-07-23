@@ -3542,11 +3542,37 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Take the initial fds from the PCB (one-shot: clears them).
-    let fds = pcb::take_initial_fds(pid);
+    //
+    // Two sources feed this: `initial_fds` (kernel-owned dups installed by
+    // `SYS_PROCESS_SPAWN_EX` fd inheritance) and `exec_inherited_fds` (a
+    // userspace fd-table snapshot the caller's own `execve` recorded so its
+    // dup2 redirections survive the image replacement — see
+    // `Process::exec_inherited_fds`).  A given startup only ever has one of
+    // the two populated; prefer the spawn set, then fall back to the exec
+    // snapshot so a forked-then-exec'd native process rebuilds its table.
+    let mut fds = pcb::take_initial_fds(pid);
+    // Track which PCB list the entries came from so any "put back" below
+    // restores them to the *same* list — restoring exec-snapshot aliases
+    // into the kernel-owned `initial_fds` would make teardown close handles
+    // that `ipc_handles` already owns (a double-close).
+    let mut from_exec = false;
+    if fds.is_empty() {
+        fds = pcb::take_exec_inherited_fds(pid);
+        from_exec = true;
+    }
 
     if fds.is_empty() {
         return SyscallResult::ok(0);
     }
+
+    // Restore helper: put unconsumed entries back on the originating list.
+    let put_back = |pid, remaining: alloc::vec::Vec<(i32, u8, u64)>| {
+        if from_exec {
+            pcb::set_exec_inherited_fds(pid, remaining);
+        } else {
+            pcb::set_initial_fds(pid, remaining);
+        }
+    };
 
     // Clamp to output capacity.
     let count = fds.len().min(out_cap);
@@ -3556,7 +3582,7 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
 
         if let Err(e) = crate::mm::user::validate_user_write(args.arg0, byte_len) {
             // Put the fds back — caller can retry with a valid buffer.
-            pcb::set_initial_fds(pid, fds);
+            put_back(pid, fds);
             return SyscallResult::err(e);
         }
 
@@ -3580,12 +3606,73 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
         // put the remaining ones back.
         if count < fds.len() {
             let remaining: alloc::vec::Vec<(i32, u8, u64)> = fds[count..].to_vec();
-            pcb::set_initial_fds(pid, remaining);
+            put_back(pid, remaining);
         }
     }
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(count as i64)
+}
+
+/// `SYS_PROCESS_SET_EXEC_FDS` — record the caller's fd table for `execve`.
+///
+/// The posix layer calls this just before `SYS_PROCESS_EXEC` so a native
+/// process's userspace fd → handle mapping (including any `dup2`
+/// redirection) survives the image replacement.  The kernel stores the
+/// snapshot in the PCB; the post-exec startup reads it back via
+/// `SYS_PROCESS_GET_INITIAL_FDS`.  See [`crate::proc::pcb::Process`]'s
+/// `exec_inherited_fds`.
+///
+/// `arg0`: pointer to an array of `FdMapEntry`.
+/// `arg1`: entry count.
+///
+/// Returns: number of entries recorded, or negative error.
+pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::spawn::FdMapEntry;
+    use crate::proc::pcb;
+
+    let in_ptr = args.arg0 as usize;
+    let count = args.arg1 as usize;
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::ok(0), // Kernel task — nothing to do.
+    };
+
+    // An empty table clears any prior snapshot (e.g. a failed exec).
+    if count == 0 || in_ptr == 0 {
+        pcb::set_exec_inherited_fds(pid, alloc::vec::Vec::new());
+        return SyscallResult::ok(0);
+    }
+
+    // Bound the count so a bogus argument can't request an unbounded read.
+    // 256 mirrors the userspace fd-table capacity (posix `fdtable::MAX_FDS`).
+    let count = count.min(256);
+    let byte_len = count.saturating_mul(core::mem::size_of::<FdMapEntry>());
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, byte_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — in_ptr covers `count` readable FdMapEntry.
+    let in_slice = unsafe {
+        core::slice::from_raw_parts(in_ptr as *const FdMapEntry, count)
+    };
+
+    let mut fds = alloc::vec::Vec::with_capacity(count);
+    for entry in in_slice {
+        // Skip nonsensical fd numbers; keep every valid, in-range entry.
+        if entry.fd < 0 {
+            continue;
+        }
+        fds.push((entry.fd, entry.handle_type, entry.handle));
+    }
+
+    let recorded = fds.len();
+    pcb::set_exec_inherited_fds(pid, fds);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(recorded as i64)
 }
 
 /// `SYS_PROCESS_GET_ARGS` — retrieve initial argv/envp.

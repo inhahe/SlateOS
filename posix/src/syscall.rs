@@ -75,6 +75,11 @@ pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;
+/// Record the current userspace fd table so it survives `execve`
+/// (the kernel hands it back to the new image via
+/// `SYS_PROCESS_GET_INITIAL_FDS`).  arg0 = `FdMapEntry` array ptr,
+/// arg1 = entry count.
+pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

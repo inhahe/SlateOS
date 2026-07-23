@@ -82,6 +82,7 @@ use super::number::{
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_CRASH_INFO,
     SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_SET_EXEC_FDS,
     SYS_PROCESS_PARENT_ID,
     SYS_PROCESS_COUNT,
     SYS_PROCESS_GET_CREDENTIALS,
@@ -442,6 +443,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_IS_READY as usize] = Some(handlers::sys_process_is_ready);
     handlers[SYS_PROCESS_SPAWN_EX as usize] = Some(handlers::sys_process_spawn_ex);
     handlers[SYS_PROCESS_GET_INITIAL_FDS as usize] = Some(handlers::sys_process_get_initial_fds);
+    handlers[SYS_PROCESS_SET_EXEC_FDS as usize] = Some(handlers::sys_process_set_exec_fds);
     handlers[SYS_PROCESS_GET_ARGS as usize] = Some(handlers::sys_process_get_args);
     handlers[SYS_PROCESS_PARENT_ID as usize] = Some(handlers::sys_process_parent_id);
     handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);

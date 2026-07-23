@@ -7043,6 +7043,194 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-capture` utility — the first fastpy
+/// component to **capture a forked child's stdout through a pipe**: the last
+/// core shell primitive, and the machinery behind command substitution
+/// `$(...)` and one stage of a `cmd1 | cmd2` pipeline.
+///
+/// It combines every process/IO primitive fastpy now has: `os.pipe()` to make a
+/// kernel pipe, `os.fork()` to clone, `os.dup2(w, 1)` in the child to point its
+/// stdout at the pipe's write end, `os.execv()` to become the resolved command
+/// (the redirected fd 1 survives execve because the kernel reuses the child's
+/// fd/handle table, so the command's stdout is piped), `os.read()` in the
+/// parent to drain the pipe until EOF, and `os.waitpid()` to reap. The parent
+/// cross-checks that the byte count it captured equals the child's own exit
+/// (fastpy `cat` exits with its byte count) and then exits with that count.
+///
+/// The harness stages a known file, spawns
+/// `fastpy-capture cat /tmp/capture-input.txt`, and asserts the fastpy process
+/// becomes a `Zombie` whose exit code equals the file's byte count — proving
+/// fork + dup2(stdout→pipe) + exec + pipe-drain worked end to end. Diagnostic
+/// exit codes 100/101/102/110/111/112 (as elsewhere) plus 113 (captured count
+/// disagreed with the child's exit — the pipe dropped or duplicated data)
+/// pinpoint a failure. `cat` must be installed at `/bin/cat`; if it isn't
+/// resolvable we self-skip.
+pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
+    // The runner ELF is a /tests fixture, loaded by name from /mnt/tests.
+    let fastpy_capture_elf = match load_test_elf("fastpy-capture") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-capture: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-capture: target command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+
+    const CAP_PATH: &str = "/tmp/capture-input.txt";
+    const CAP_PATH_ARG: &[u8] = b"/tmp/capture-input.txt";
+    const CAP_CONTENT: &[u8] = b"fastpy pipe capture OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = CAP_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `capture` (os.pipe + os.fork + os.dup2 + os.execv + \
+         os.read) integration test ({} bytes ELF)...",
+        fastpy_capture_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(CAP_PATH, CAP_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", CAP_PATH, e);
+        return Err(e);
+    }
+
+    let argv: &[&[u8]] = &[b"fastpy-capture", b"cat", CAP_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    // File cap (METADATA for os.path.exists → SYS_FS_STAT, READ/WRITE for the
+    // ELF read and the child cat's file read). The child inherits it across
+    // fork+execv. The pipe fds are created at runtime and need no capability
+    // beyond what the process already holds.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-capture",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fastpy_capture_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(CAP_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-capture spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Parent forks a child, drains a pipe, then waitpids — give it headroom.
+    let mut became_zombie = false;
+    for _ in 0..4000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAP_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — expected Zombie, got {:?} (faulted on the \
+             pipe / fork / dup2 / exec / read path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(102) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 102: os.path.exists returned false on \
+             the staged /tmp target (stat broken)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(100) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 100: the PATH search never matched \
+             `cat`"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(110) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 110: os.fork() returned -1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(111) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 111: os.waitpid() returned pid -1 \
+             (could not reap the child)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(112) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 112: os.WIFEXITED was false (child \
+             faulted or was signalled)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(101) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 101: os.execv returned in the child \
+             (exec of /mnt/bin/cat FAILED, propagated by the parent)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(113) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — exited 113: the bytes captured off the pipe \
+             did NOT equal the child cat's own exit count — the dup2(stdout→pipe) redirect or the \
+             pipe read dropped/duplicated data (fd 1 may not have been redirected into the pipe, \
+             i.e. cat's stdout went to the console instead)"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-capture (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged file, i.e. the bytes the parent captured off the \
+             pipe). A different value means the capture pipeline mis-counted",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `capture` (ring 3: os.pipe + os.fork, the child \
+         os.dup2'd stdout→pipe and os.execv'd `cat`, the parent os.read-drained the pipe and \
+         os.waitpid-reaped the child, capturing the {}-byte output and cross-checking it against \
+         cat's exit): OK",
+        EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

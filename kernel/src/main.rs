@@ -1641,6 +1641,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-capture` utility: fork + os.pipe + os.dup2 +
+    // os.execv + os.read output capture — the pipeline / command-substitution
+    // `$(...)` primitive. The child dup2's its stdout onto a pipe and execs
+    // `/bin/cat`; the parent drains the pipe and cross-checks the captured byte
+    // count against the child's exit, proving dup2(stdout->pipe) survives exec.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_capture() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `capture` (fork+pipe+dup2+exec output capture) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

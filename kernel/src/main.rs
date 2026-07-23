@@ -1630,6 +1630,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the `fastpy-forkexec` utility: the fork/exec/wait trinity
+    // from fastpy bindings — os.fork clones the process, the child os.execv's
+    // the promoted `/bin/cat`, and the parent os.waitpid's + propagates the
+    // child's exit status. Proves os.fork/os.waitpid/os.WEXITSTATUS end to end.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_forkexec() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `forkexec` (os.fork+execv+waitpid) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

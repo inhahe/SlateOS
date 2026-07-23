@@ -6851,6 +6851,198 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-forkexec` utility — the first fastpy
+/// component to exercise the **classic fork/exec/wait trinity** entirely from
+/// Python bindings.
+///
+/// Where `fastpy-run` *replaced* its own image with the resolved command
+/// (`os.execv` in-place — a single process), `fastpy-forkexec` keeps running:
+/// it **`os.fork()`s a child**, has the child `os.execv` the resolved command,
+/// and the parent **blocks in `os.waitpid`** until the child exits, then reads
+/// the child's status with `os.WIFEXITED`/`os.WEXITSTATUS` and propagates it as
+/// its own exit code. This is exactly how a shell / `init` spawns a program
+/// without terminating itself. Each binding lowers bridge-free:
+/// `os.fork` → `SYS_PROCESS_FORK` (COW clone), `os.execv` → `SYS_EXECVE` (child
+/// image replaced), `os.waitpid` → the kernel wait/reap path.
+///
+/// The kernel's existing `self_test_linux_fork_execve_wait` proves the same
+/// primitives work for a C/Linux-ABI program; this test proves the **fastpy
+/// language bindings** (`os.fork`/`os.waitpid`/`os.WEXITSTATUS`) drive them
+/// correctly end to end. The harness stages a known file, spawns
+/// `fastpy-forkexec cat /tmp/forkexec-input.txt`, and asserts the fastpy
+/// process becomes a `Zombie` whose exit code equals the file's byte count —
+/// i.e. the forked child really became `cat`, ran to completion, and the parent
+/// reaped it and read the correct status. Diagnostic exit codes 100/101/102
+/// (as in `fastpy-run`) plus 110 (fork failed), 111 (waitpid failed), 112
+/// (child did not exit normally) pinpoint a failure. `cat` must be installed at
+/// `/bin/cat`; if it isn't resolvable we self-skip up front.
+pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
+    // The runner ELF is a /tests fixture (a harness program, not an installed
+    // command), loaded by name from /mnt/tests.
+    let fastpy_forkexec_elf = match load_test_elf("fastpy-forkexec") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-forkexec: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+    // The child execs `/mnt/bin/cat`; if cat isn't installed there is nothing to
+    // hand off to, so skip rather than spuriously fail.
+    if resolve_command("cat", COMMAND_PATH).is_none() {
+        serial_println!(
+            "[spawn] SKIP fastpy-forkexec: target command `cat` not installed on PATH ({:?})",
+            COMMAND_PATH
+        );
+        return Ok(());
+    }
+
+    const FE_PATH: &str = "/tmp/forkexec-input.txt";
+    const FE_PATH_ARG: &[u8] = b"/tmp/forkexec-input.txt";
+    const FE_CONTENT: &[u8] = b"fastpy fork+exec+wait OK\n";
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    const EXPECTED_BYTES: i32 = FE_CONTENT.len() as i32;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `forkexec` (os.fork + os.execv + os.waitpid) \
+         integration test ({} bytes ELF)...",
+        fastpy_forkexec_elf.len()
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(FE_PATH, FE_CONTENT) {
+        serial_println!("[spawn]   FAIL: could not stage {} — {:?}", FE_PATH, e);
+        return Err(e);
+    }
+
+    // argv: the runner takes the command name to resolve and the file to hand
+    // it. After the child forks + execs, the child image becomes `cat`, which
+    // sees argv = ["cat", file]; the parent reaps it.
+    let argv: &[&[u8]] = &[b"fastpy-forkexec", b"cat", FE_PATH_ARG];
+    let envp: &[&[u8]] = &[];
+    // Grant a File capability with METADATA (os.path.exists → SYS_FS_STAT) plus
+    // READ/WRITE (the runner reads the resolved ELF; the forked child inherits
+    // the cap across fork+execv, so the handed-off `cat` can read the staged
+    // file). fork duplicates the cap table refcount-shared; execve reuses the
+    // child's PID + cap table, so the inheritance chain holds end to end.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-forkexec",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fastpy_forkexec_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(FE_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-forkexec spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The parent process blocks in os.waitpid until its forked child exits, so
+    // this can take a bit longer than a single-process test — give it headroom.
+    let mut became_zombie = false;
+    for _ in 0..4000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(FE_PATH);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — expected Zombie, got {:?} (faulted on the \
+             fork / execv / waitpid path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(102) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 102: os.path.exists returned false \
+             even on the staged /tmp target — the stat mechanism itself is broken in this ELF"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(100) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 100: the PATH search never matched \
+             `cat` (stat on /mnt/bin/cat returns false from ring 3)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(110) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 110: os.fork() returned -1 \
+             (SYS_PROCESS_FORK failed)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(111) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 111: os.waitpid() returned pid -1 \
+             (the parent could not reap its child)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(112) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 112: os.WIFEXITED was false (the \
+             child did not exit normally — it faulted or was signalled)"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code == Some(101) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — exited 101: os.execv returned in the child \
+             (exec of /mnt/bin/cat FAILED). Note 101 here means the CHILD's execv failed and the \
+             parent propagated the child's 101 exit"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_BYTES) {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {} (== len of the staged file, i.e. the child `cat`'s own exit propagated by \
+             the parent). A different value means fork/exec/wait handed off but the status was \
+             mis-read",
+            exit_code, EXPECTED_BYTES
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `forkexec` (ring 3: os.fork cloned the process, the child \
+         os.execv'd `cat` over PATH {:?}, and the parent os.waitpid'd + os.WEXITSTATUS-decoded the \
+         child's exit, propagating the {}-byte count as its own): OK",
+        COMMAND_PATH, EXPECTED_BYTES
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

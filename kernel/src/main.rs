@@ -1679,6 +1679,13 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_inredirect() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `inredirect` (cmd < file, readable FILE fd across exec as fd 0) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

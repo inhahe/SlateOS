@@ -788,6 +788,10 @@ declare -A PROMOTED=(
     [fastpy-wc]=wc
     [fastpy-head]=head
     [fastpy-tail]=tail
+    [fastpy-grep]=grep
+    [fastpy-sort]=sort
+    [fastpy-uniq]=uniq
+    [fastpy-ls]=ls
 )
 
 FASTPY_COUNT=0

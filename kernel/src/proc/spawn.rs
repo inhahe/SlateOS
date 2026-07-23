@@ -6693,11 +6693,13 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
 /// file, then spawns the utility twice: once with a pattern that matches
 /// (asserting exit 0) and once with a pattern that does not (asserting exit 1).
 pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
-    let fastpy_grep_elf = match load_test_elf("fastpy-grep") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_grep_elf = match resolve_command("grep", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-grep: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP grep: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -6713,7 +6715,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
         let envp: &[&[u8]] = &[];
         let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
         let options = SpawnOptions {
-            name: "fastpy-grep",
+            name: "grep",
             parent: 0,
             priority: DEFAULT_PRIORITY,
             capabilities: &caps,
@@ -6764,9 +6766,9 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
 
     // (argv, expected exit code, description).  grep(1): 0 = matched, 1 = none.
     let steps: &[(&[&[u8]], i32, &str)] = &[
-        (&[b"fastpy-grep", b"line", GREP_PATH_ARG], 0, "grep 'line' (all 4 lines)"),
-        (&[b"fastpy-grep", b"gamma", GREP_PATH_ARG], 0, "grep 'gamma' (1 line)"),
-        (&[b"fastpy-grep", b"zzz", GREP_PATH_ARG], 1, "grep 'zzz' (no match)"),
+        (&[b"grep", b"line", GREP_PATH_ARG], 0, "grep 'line' (all 4 lines)"),
+        (&[b"grep", b"gamma", GREP_PATH_ARG], 0, "grep 'gamma' (1 line)"),
+        (&[b"grep", b"zzz", GREP_PATH_ARG], 1, "grep 'zzz' (no match)"),
     ];
 
     for (argv, want, desc) in steps {
@@ -7026,11 +7028,13 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
 /// non-adjacent `A` surviving) is verified in the serial log by the boot
 /// harness (grep counts: `UNIQ_A`=2, `UNIQ_B`=1, `UNIQ_C`=1 — *not* 3/1/2).
 pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
-    let fastpy_uniq_elf = match load_test_elf("fastpy-uniq") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_uniq_elf = match resolve_command("uniq", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-uniq: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP uniq: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -7053,11 +7057,11 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-uniq", UNIQ_PATH_ARG];
+    let argv: &[&[u8]] = &[b"uniq", UNIQ_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-uniq",
+        name: "uniq",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -7246,11 +7250,13 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
 /// boot harness can confirm they came out ascending (`SORT_1`, `SORT_2`,
 /// `SORT_3`).
 pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
-    let fastpy_sort_elf = match load_test_elf("fastpy-sort") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_sort_elf = match resolve_command("sort", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-sort: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP sort: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -7273,11 +7279,11 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-sort", SORT_PATH_ARG];
+    let argv: &[&[u8]] = &[b"sort", SORT_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-sort",
+        name: "sort",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -7466,11 +7472,13 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
 /// verifies the *set* of printed names (`LS_alpha`, `LS_beta`, `LS_gamma`) in
 /// the serial log rather than their order.
 pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
-    let fastpy_ls_elf = match load_test_elf("fastpy-ls") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_ls_elf = match resolve_command("ls", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-ls: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP ls: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -7505,11 +7513,11 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
         }
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-ls", LS_DIR_ARG];
+    let argv: &[&[u8]] = &[b"ls", LS_DIR_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-ls",
+        name: "ls",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,

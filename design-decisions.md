@@ -5721,5 +5721,7 @@ shell/`init` performs before `exec`. `self_test_fastpy_slateos_cat` now resolves
 `cat` **by command name** through that PATH and spawns it with `argv[0]="cat"`,
 so the test exercises the real installed-command execution path rather than a
 fixture load. Additive and reversible: no existing Rust coreutil is touched, and
-the promotion is a per-command opt-in via the `PROMOTED` map (more commands —
-`wc`, `head`, `tail`, … — can be added the same way once each is validated).
+the promotion is a per-command opt-in via the `PROMOTED` map. The file-reading
+coreutils `wc`, `head`, and `tail` were promoted next the same way (their
+self-tests now `resolve_command(...)` and spawn `argv[0]="wc"|"head"|"tail"`), so
+`/bin` holds four fastpy commands and `/tests` dropped to 45 fixtures.

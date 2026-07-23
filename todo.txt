@@ -86,6 +86,23 @@
 ## invoked by init/shell (e.g. one of the coreutils cat/ls/grep/... or the pkg
 ## tool as the actual implementation), rather than manufacturing further os.*
 ## self-tests. Do not re-open the os.*-path hunt looking for scraps.
+##
+## UPDATE (2026-07-23): the /bin-promotion direction is now UNDERWAY (this is
+## option A, the operator-blessed endpoint of Q33 — "a /bin that lives on disk
+## anyway"). Q33-B (embed-bloat reduction, §87) built the seam; the promotion
+## itself has begun: `fastpy-cat` -> /bin/cat, then wc/head/tail, are installed
+## at their real command paths and their self-tests now resolve them BY NAME via
+## spawn.rs::resolve_command()/COMMAND_PATH (["/mnt/bin"]) — the shell/init
+## exec path — rather than load_test_elf() from /tests. Pattern to promote more:
+## (1) add [fastpy-X]=X to the PROMOTED map in create-ext4-rootfs.sh; (2) retarget
+## that command's self-test load from load_test_elf("fastpy-X") to
+## resolve_command("X", COMMAND_PATH) and set argv[0]/name to "X"; (3) rebuild
+## rootfs (WSL) + boot-test. Additive/reversible; no Rust coreutil touched.
+## Remaining coreutil candidates: ls, grep, sort, uniq, mkdir, mv, rm, rmdir,
+## chmod, chown, etc. OPEN sub-question worth the operator eventually: whether
+## these toy fastpy coreutils should ever *replace* the mature Rust coreutils in
+## a real shipping /bin, or stay a parallel demonstration track (do NOT replace
+## silently — that's a user-visible policy fork).
 
 ## OPERATOR DECISIONS (2026-07-23): Q32→A and Q33→"lean B" resolved; recorded in
 ## design-decisions.md §86/§87.

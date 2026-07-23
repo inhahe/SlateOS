@@ -778,11 +778,17 @@ fi
 # they are installed at their real command path under /bin, exactly like the
 # glibc binaries above, and the kernel runs them by *command name* through PATH
 # resolution (spawn.rs::resolve_command), the way init/a shell launches a
-# command.  The first is fastpy-cat -> /bin/cat.  Each promoted binary is staged
-# ONLY in /bin (not also under /tests) so there is no ~3.5 MiB duplication.
+# command.  The first was fastpy-cat -> /bin/cat; the file-reading coreutils
+# wc/head/tail followed.  Each promoted binary is staged ONLY in /bin (not also
+# under /tests) so there is no ~3.5 MiB duplication.
 #
 # Map: <fastpy dir-stem>  ->  <installed /bin command name>
-declare -A PROMOTED=( [fastpy-cat]=cat )
+declare -A PROMOTED=(
+    [fastpy-cat]=cat
+    [fastpy-wc]=wc
+    [fastpy-head]=head
+    [fastpy-tail]=tail
+)
 
 FASTPY_COUNT=0
 PROMOTED_COUNT=0

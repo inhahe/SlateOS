@@ -6812,11 +6812,13 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
 /// `"4 6 30"` line is mirrored to serial (via `SYS_CONSOLE_WRITE`) so the boot
 /// harness can grep it for the actual count values.
 pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
-    let fastpy_wc_elf = match load_test_elf("fastpy-wc") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_wc_elf = match resolve_command("wc", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-wc: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP wc: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -6838,11 +6840,11 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-wc", WC_PATH_ARG];
+    let argv: &[&[u8]] = &[b"wc", WC_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-wc",
+        name: "wc",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -6916,11 +6918,13 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
 /// the printed `HEAD_L1`/`HEAD_L2` (and *absence* of `HEAD_L3`/`HEAD_L4`) are
 /// verified in the serial log by the boot harness.
 pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
-    let fastpy_head_elf = match load_test_elf("fastpy-head") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_head_elf = match resolve_command("head", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-head: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP head: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -6943,11 +6947,11 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-head", b"2", HEAD_PATH_ARG];
+    let argv: &[&[u8]] = &[b"head", b"2", HEAD_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-head",
+        name: "head",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -7131,11 +7135,13 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
 /// serial, so the boot harness can confirm only the last two markers
 /// (`TAIL_L4`, `TAIL_L5`) were printed and the first three were skipped.
 pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
-    let fastpy_tail_elf = match load_test_elf("fastpy-tail") {
+    // Promoted /bin command: resolved by name via PATH (see the cat test).
+    let fastpy_tail_elf = match resolve_command("tail", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-tail: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP tail: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -7158,11 +7164,11 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-tail", b"2", TAIL_PATH_ARG];
+    let argv: &[&[u8]] = &[b"tail", b"2", TAIL_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-tail",
+        name: "tail",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,

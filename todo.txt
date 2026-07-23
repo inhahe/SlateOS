@@ -109,11 +109,33 @@
 ##     the light shadow+quarantine tools first, escalate to compiler KASAN only
 ##     if they don't localize it). NEXT: wire quarantine::enable() +
 ##     scan_all()/kasan checks into the Path-Z process spawn/teardown repro.
+##     UPDATE (2026-07-23 c): DONE — hunt is wired + armed. mm.corruption_hunt
+##     cmdline flag (default off) enables KASAN+quarantine around the Path-Z
+##     block in kmain, with an end-of-block scan_all() checkpoint + drain.
+##     boot-test.sh gained SLATE_CMDLINE injection; wedge-soak.sh auto-arms the
+##     hunt (HUNT=1) and treats corruptions=N>0 as a catch. Verified armed boot
+##     GREEN (184,178 frees through quarantine, 0 corruptions on a single boot).
+##     REMAINING: run a real soak campaign (~120+ boots for the ~1-in-120 bug)
+##     to actually catch it. A 24-iter hunt soak was launched this session as a
+##     first pass (build/hunt-soak.log). If it doesn't catch, either run a
+##     longer soak or escalate to compiler KASAN (open-questions.md Q34).
 ##   - Q33→"lean B": reduce embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
-##     before promoting fastpy coreutils to /bin. Move the ~48 include_bytes!'d
-##     self-test ELFs onto the rootfs disk / load-from-disk. Not yet started;
-##     the leaned continuation of Initiative F. Boot-ordering caveat: self-tests
-##     currently run before the rootfs is guaranteed mounted.
+##     before promoting fastpy coreutils to /bin. SURVEY (2026-07-23): 49 fastpy
+##     self-test ELFs are include_bytes!'d = ~163 MiB embedded (the bulk of the
+##     ~361 MB debug kernel image). 61 sites in proc/spawn.rs, 6 in container.rs,
+##     3 in main.rs; each is `static X_ELF: &[u8] = include_bytes!(".../fastpy-
+##     NAME/fastpy-NAME.elf")` inside a ring-3 self-test that spawn_process()es
+##     it and asserts the exit code. PLAN: (1) stage the fastpy ELFs into the
+##     rootfs disk image at rootfs-build time (a /tests or /bin dir); (2) replace
+##     each include_bytes! with a disk-read helper load_test_elf("fastpy-NAME")
+##     -> Vec<u8> that no-ops the test when the rootfs/file is absent (mirrors
+##     the Path-Z glibc tests, which already stage from rootfs.ext4 at /mnt and
+##     skip when absent); (3) ensure the fastpy self-tests run AFTER the vdb
+##     rootfs mount (the Path-Z block at kmain ~line 2320+ already does — move
+##     the fastpy tests alongside/after it if needed); (4) boot-test + confirm
+##     the kernel image shrinks by ~163 MiB. NOT yet started (needs builds +
+##     rootfs regen + boot-test; deferred until the hunt soak finishes to avoid
+##     QEMU/build contention). The leaned continuation of Initiative F.
 
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as

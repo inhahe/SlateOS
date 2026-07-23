@@ -37,7 +37,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_IMG="${1:-$ROOT_DIR/rootfs.ext4}"
-IMG_SIZE="${IMG_SIZE:-48M}"
+# 256M (was 48M): headroom for the ~49 fastpy self-test ELFs (~3.3 MiB each,
+# ~162 MiB total) now staged under /tests instead of include_bytes!'d into the
+# kernel image (TD-KERNEL-EMBED-BLOAT; design-decisions.md #86), plus the glibc
+# tree and toolchain binaries.
+IMG_SIZE="${IMG_SIZE:-256M}"
 
 # --- standard Ubuntu/Debian glibc locations ----------------------------------
 LD_SO="/lib64/ld-linux-x86-64.so.2"          # PT_INTERP of every x86-64 glibc exe
@@ -759,6 +763,30 @@ else
     echo "[rootfs] WARNING: tcc not found — the C-compiler self-test will no-op"
 fi
 
+# --- fastpy self-test coreutils ELFs (TD-KERNEL-EMBED-BLOAT) ------------------
+# The fastpy ring-3 self-test fixtures used to be include_bytes!'d into the
+# kernel image (~164 MiB, ~45% of the ~361 MiB debug kernel). They are now
+# staged on the rootfs at /tests/<name>.elf and loaded at boot via
+# load_test_elf() (kernel/src/proc/spawn.rs), which reads /mnt/tests/<name>.elf
+# and self-skips the test when the fixture is absent — so a lean production
+# build carrying no test disk still boots green. See design-decisions.md #86.
+# The <name> key is the ELF's filename stem, which equals the fastpy dir name
+# (e.g. services/fastpy-hello/fastpy-hello.elf -> /tests/fastpy-hello.elf,
+# loaded via load_test_elf("fastpy-hello")).
+FASTPY_COUNT=0
+mkdir -p "$STAGE/tests"
+for elf in "$ROOT_DIR"/services/fastpy-*/*.elf; do
+    [ -e "$elf" ] || continue
+    name="$(basename "$elf" .elf)"          # e.g. fastpy-hello
+    cp -L "$elf" "$STAGE/tests/$name.elf"
+    FASTPY_COUNT=$((FASTPY_COUNT + 1))
+done
+if [ "$FASTPY_COUNT" -gt 0 ]; then
+    echo "[rootfs] staged $FASTPY_COUNT fastpy self-test ELF(s) into /tests"
+else
+    echo "[rootfs] WARNING: no services/fastpy-*/*.elf found — fastpy self-tests will self-skip"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
 
@@ -779,4 +807,6 @@ dumpe2fs -h "$OUT_IMG" 2>/dev/null | grep -E 'Filesystem features|Block size|Ino
 echo "[rootfs] contents (debugfs):"
 debugfs -R 'ls -l /' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
 debugfs -R 'ls -l /bin' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
+echo "[rootfs] /tests (fastpy self-test fixtures):"
+debugfs -R 'ls -l /tests' "$OUT_IMG" 2>/dev/null | sed 's/^/  /'
 echo "[rootfs] DONE."

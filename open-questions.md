@@ -21,125 +21,32 @@ Format for each entry:
 - **Where it bites** — files/symbols affected, so the resolution can be applied.
 - **Status** — `OPEN` until the operator decides.
 
-Earlier deferred operator decisions (Q1–Q31) have been
+Earlier deferred operator decisions (Q1–Q33) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
 full rationale. New decisions should be appended as `## Q34 …` just above the
 `---` separator that precedes the "Recently resolved" list.
 
-## Q32 — Prioritize building heap-corruption-detection infrastructure to root-cause B-KNULLJUMP? — Status: OPEN
-
-**Question.** Should we invest a focused session in building KASAN-style
-heap-corruption detection (shadow memory or an equivalent) to finally
-root-cause the long-standing **B-KNULLJUMP** corruption, or keep it on WATCH
-and continue roadmap features?
-
-**Context / why now.** B-KNULLJUMP is an intermittent (~1-in-120) kernel memory
-corruption at Path-Z process spawn/teardown boundaries, on WATCH for many
-sessions with root cause open. On 2026-07-22 it was finally **symbolized** (see
-`known-issues.md`): the victim is a **scheduler `BTreeMap` node** whose link
-pointer gets zeroed (fault reading `null+0xbb` inside
-`alloc::collections::btree::navigate::next_kv`, on the idle task, right after a
-glibc Path-Z teardown). It is *live-node* structural corruption — the existing
-slab poison/redzone system (`mm/poison.rs`, `mm/heap.rs`) can't catch it because
-it's neither a UAF of a poisoned slot nor an adjacent-redzone overflow; it's a
-wild write into a live allocation. Transiently there is a **reliable reproducer**
-(the exact kernel layout at commit 3f10b31f2 reproduces 2/2 boots), but it is
-layout-fragile and dissolves on the next kernel edit.
-
-**Options.**
-- **A — Build KASAN-style shadow memory now (recommended).** A 1/8-scale shadow
-  region marking every heap byte addressable/poisoned, with instrumented
-  alloc/free and (ideally) checked stores on the suspect paths. *Pros:* catches
-  this whole class at the corruptor's write, not the victim's later read;
-  durable, layout-independent tooling that pays off for all future memory bugs.
-  *Cons:* sizable new `mm` subsystem; memory overhead; perf cost on the
-  alloc/store hot path (must be debug-gated to protect the <200 ns heap target);
-  a few active hours of work; may not instrument std BTreeMap's internal stores
-  without compiler support, so may need a targeted store-check shim.
-- **B — Hardware-watchpoint hunt using the current reliable reproducer.** Set a
-  DR0–3 write watchpoint on the corrupted node address. *Pros:* pinpoints the
-  writer directly, cheap. *Cons:* the corrupted address isn't known a priori and
-  varies with layout; the reproducer is fragile; likely needs several
-  instrumented boots that themselves shift layout.
-- **C — Keep on WATCH, continue features.** *Pros:* roadmap keeps moving; the bug
-  is old, intermittent, and doesn't affect shipped fastpy tools; the next kernel
-  commit likely returns boot to its dormant ~1-in-120 state. *Cons:* leaves a
-  real kernel corruption unfixed; wastes the current (fragile) reliable repro.
-
-**Claude's recommendation.** **A**, given the severity (kernel memory corruption
-that can halt boot) and that we now have concrete symbols to target — but it's an
-initiative-level effort with a real perf/complexity tradeoff, so flagging for
-operator prioritization rather than starting unilaterally. **In the meantime**
-(default, non-blocking): continuing roadmap work, which rebuilds the kernel and
-probabilistically returns boot to green while the bug goes dormant. The full
-diagnostic + reliable-repro details are preserved in `known-issues.md` so a
-focused session can act whenever prioritized.
-
-**Where it bites.** `kernel/src/mm/heap.rs`, `kernel/src/mm/poison.rs` (existing
-poison/redzone to extend), `kernel/src/mm/frame.rs` (buddy `FreeNode` — the
-sibling B-MUNMAP-NO-TLB-FLUSH corruption target), `kernel/src/sched/mod.rs`
-(`SchedState.tasks` BTreeMap — the observed victim), and the Path-Z process
-teardown path in `kernel/src/proc/`.
-
-## Q33 — Next phase of the fastpy integration (initiative F): promote fastpy-compiled binaries from boot self-tests to REAL shipping OS components? — Status: OPEN
-
-**Question.** Initiative F's "one more genuinely-distinct bridge-free `os.*`
-path + false-pass-proof ring-3 self-test" line has **saturated** (as of
-2026-07-22 the fastpy self-test surface covers virtually every meaningful
-distinct kernel write/read path — identity, scheduling nice, umask+create-mode,
-metadata mutation, content I/O, namespace ops, query, timekeeping, sleep, pipes,
-the whole pkg suite). Manufacturing further `os.*` self-tests is now low-value
-churn. What should the initiative do next?
-
-**Context / why now.** The roadmap task is *"Integrate fastpy compiler into
-build system — native executables for OS components."* The toolchain is proven
-(pure-mode AOT → SlateOS ELF, bridge-free, TLS, ~48 self-tests all boot-GREEN).
-The natural next step is to make a fastpy binary an **actual part of the running
-OS**, not just a boot self-test. But this is a direction the operator has been
-steering (Q29/§80 pure-mode-first, Q30/§81 zig-cc runtime, Q31/§82 TLS), and it
-has real forks below — hence surfacing rather than picking unilaterally.
-
-**Options.**
-- **A — Promote fastpy coreutils to real `/bin` commands driven by the shell
-  (recommended, highest value).** Install fastpy-compiled `cat/ls/grep/wc/...`
-  ELFs into the VFS `/bin` and wire the real shell (`osh`/Oils port) to resolve
-  + `execve` them as external commands, so typing `ls` runs the fastpy binary.
-  *Pros:* this is the actual roadmap goal — fastpy as the implementation language
-  for shipped OS utilities; exercises the real install→PATH-resolve→execve
-  pipeline end to end. *Cons:* the boot-test is **non-interactive** (the current
-  `userspace/shell` is only a Rust std-validation demo; the real shell is `osh`),
-  so verifying shell-driven exec needs either a scripted `osh -c 'ls'` boot step
-  or a non-shell harness that execve's `/bin/ls` from a path and checks output;
-  several active hours; touches osh command-resolution + `/bin` population.
-- **B — Reduce the embedded-ELF kernel bloat first (TD-KERNEL-EMBED-BLOAT).**
-  The ~48 self-test ELFs are `include_bytes!`'d into `.rodata` (~3.5 MiB each,
-  kernel image ~202 MB). Move them (and future fastpy binaries) onto the rootfs
-  disk and load-from-disk. *Pros:* real, growing tech debt; faster builds/boot;
-  prerequisite-ish for a `/bin` that lives on disk anyway. *Cons:* boot-ordering
-  subtleties (self-tests run before the rootfs is guaranteed mounted); its own
-  design question (disk vs embed vs compress); substantial refactor of every
-  self-test.
-- **C — Declare initiative F's self-test phase done and move to an unrelated
-  roadmap area.** *Pros:* the toolchain is proven; time may be better spent
-  elsewhere (e.g. the KASAN infra of Q32, or a fresh subsystem). *Cons:* leaves
-  the "native executables for OS components" payoff unrealized.
-
-**Claude's recommendation.** **A** is the real goal and highest value, but it's
-an initiative-level effort with a genuine fork (how to verify under a
-non-interactive boot-test; osh integration surface), so flagging for operator
-prioritization. **B** is a defensible prerequisite if we want `/bin` on disk.
-**In the meantime** (default, non-blocking): the umask increment is committed and
-boot-GREEN; I am not manufacturing further low-value `os.*` self-tests.
-
-**Where it bites.** `userspace/shell/` (demo only) and the `osh`/Oils port
-(real shell command resolution); `kernel/src/proc/spawn.rs` (self-test harness),
-`kernel/src/container.rs::exec_path` (existing path-exec model); the boot image
-assembly + `scripts/boot-test.sh` (non-interactive verification); rootfs build
-for options A/B; `services/fastpy-*/` (the candidate coreutils).
-
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):
+
+- Q33 Next phase of the fastpy integration (initiative F) — resolved 2026-07-23
+  (§87): **option B — reduce the embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
+  first**, before promoting fastpy coreutils to real `/bin` commands. The ~48
+  self-test ELFs are `include_bytes!`'d into `.rodata` (~3.5 MiB each); move them
+  (and future fastpy binaries) onto the rootfs disk and load-from-disk. Operator
+  said "I lean towards B"; Claude recommended A (promote to `/bin`) but noted B as
+  a defensible prerequisite. B is a prerequisite-ish step toward a `/bin` that
+  lives on disk anyway.
+
+- Q32 Build KASAN-style heap-corruption detection to root-cause B-KNULLJUMP —
+  resolved 2026-07-23 (§86): **option A — build KASAN-style shadow memory now.** A
+  1/8-scale shadow region marking every heap byte addressable/poisoned, with
+  instrumented alloc/free and checked stores on the suspect paths, debug-gated to
+  protect the <200 ns heap target. Catches the whole live-write corruption class
+  at the corruptor's write rather than the victim's later read. Operator said
+  "A"; Claude recommended A. Targets the symbolized scheduler-`BTreeMap`-node
+  corruption (see `known-issues.md`).
 
 - Q31 SlateOS native-ABI main-thread ELF TLS setup (initiative F) — resolved
   2026-07-21 (§82): **option A — the posix crt sets up main-thread TLS in

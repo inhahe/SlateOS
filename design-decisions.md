@@ -5583,3 +5583,87 @@ PCB and subtract it in `sys_fs_open_mode`/`sys_fs_mkdir_mode`, then drop
 `apply_umask` from the posix wrappers. To retire the old numbers once every
 binary is rebuilt, point `SYS_FS_OPEN`/`SYS_FS_MKDIR` at the mode handlers with a
 default mode and delete 659/660.
+
+
+## §86 — Build KASAN-style shadow memory to root-cause B-KNULLJUMP
+
+**Date:** 2026-07-23
+**Decided by:** Operator (Claude recommended A; operator concurred — "A")
+
+**Decision.** Invest a focused effort in building **KASAN-style heap-corruption
+detection** (option A of Q32) rather than keeping B-KNULLJUMP on WATCH (C) or
+relying on a fragile hardware-watchpoint hunt (B). Build a **1/8-scale shadow
+memory** region that marks every kernel-heap byte as addressable or poisoned,
+with instrumented alloc/free and — on the suspect Path-Z spawn/teardown paths —
+checked stores, so the corruption is caught **at the corruptor's write** instead
+of at the victim's much-later read.
+
+**Why.** B-KNULLJUMP is an intermittent (~1-in-120) kernel memory corruption at
+Path-Z process spawn/teardown, on WATCH for many sessions. On 2026-07-22 it was
+finally *symbolized* (see `known-issues.md`): the victim is a scheduler
+`BTreeMap` node (`SchedState.tasks`) whose link pointer is zeroed — a *live-node*
+wild write that the existing slab poison/redzone (`mm/poison.rs`, `mm/heap.rs`)
+cannot catch (it is neither a UAF of a poisoned slot nor an adjacent-redzone
+overflow). Shadow memory catches this whole class durably and layout-
+independently, and pays off for all future memory bugs.
+
+**Alternatives considered.**
+- *B — hardware-watchpoint hunt on the reliable reproducer*: rejected as primary
+  — the corrupted address isn't known a priori, varies with layout, and the
+  reproducer is fragile (dissolves on the next kernel edit). May still be used
+  opportunistically once shadow memory narrows the writer.
+- *C — keep on WATCH, continue features*: rejected — leaves a real kernel
+  corruption (can halt boot) unfixed and wastes the current concrete symbols.
+
+**Tradeoffs (why this needed the operator).** Sizable new `mm` subsystem; memory
+overhead (1/8 of the heap); perf cost on the alloc/store hot path — so it **must
+be debug-gated** to protect the <200 ns heap-alloc target. std `BTreeMap`'s
+internal stores may not be instrumentable without compiler support, so a targeted
+store-check shim on the suspect paths may be needed.
+
+**Where it lives.** `kernel/src/mm/` (new shadow module + hooks in `heap.rs`,
+extending `poison.rs`), `kernel/src/mm/frame.rs` (buddy `FreeNode`), the Path-Z
+teardown path in `kernel/src/proc/`, and `kernel/src/sched/mod.rs`
+(`SchedState.tasks` — the observed victim). Tracked as B-KNULLJUMP in
+`known-issues.md`.
+
+## §87 — Reduce embedded-ELF kernel bloat before promoting fastpy coreutils to /bin
+
+**Date:** 2026-07-23
+**Decided by:** Operator (Claude recommended A; operator leaned B — "I lean towards B")
+
+**Decision.** For the next phase of initiative F, do **option B — reduce the
+embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT) first** — before **option A**
+(promoting fastpy-compiled coreutils to real `/bin` commands driven by the
+shell). The ~48 fastpy self-test ELFs are currently `include_bytes!`'d into the
+kernel's `.rodata` (~3.5 MiB each; kernel image ~202 MB). Move them (and future
+fastpy binaries) onto the **rootfs disk** and load-from-disk.
+
+**Why.** The initiative-F `os.*` self-test line has *saturated* (identity,
+scheduling nice, umask+create-mode, metadata, content I/O, namespace, query,
+timekeeping, sleep, pipes, the whole pkg suite) — further self-tests are low-value
+churn. Both A and B are the real "native executables for OS components" payoff.
+The operator leaned B because it is real, growing tech debt (slow builds/boot from
+a 202 MB image) and is *prerequisite-ish* for a `/bin` that lives on disk anyway —
+so doing B first avoids building the `/bin` install pipeline twice.
+
+**Alternatives considered.**
+- *A — promote fastpy coreutils to real `/bin` commands (Claude's recommendation,
+  highest end-value)*: deferred, not rejected — it is the actual roadmap goal and
+  the natural follow-on once `/bin` lives on disk (B). Its verification fork
+  (non-interactive boot-test; osh command-resolution surface) remains to be
+  settled when A is taken up.
+- *C — declare the self-test phase done and move to an unrelated roadmap area*:
+  rejected — leaves the "native executables for OS components" payoff unrealized.
+
+**Tradeoffs / open sub-questions (to resolve while implementing B).** Boot-ordering:
+the self-tests currently run *before* the rootfs (Path-Z glibc `rootfs.ext4`, vdb)
+is guaranteed mounted, so either the self-tests must move after mount, or a small
+early-mount / dedicated self-test partition is needed. Also a mechanism sub-choice
+(plain disk files vs a compressed archive vs a dedicated fastpy-bin image). These
+are implementation decisions for B, not re-openings of the A/B/C fork.
+
+**Where it lives.** `kernel/src/proc/spawn.rs` (the `include_bytes!` self-test
+harness — every `self_test_fastpy_slateos_*`), the boot-image assembly, the rootfs
+build, and `scripts/boot-test.sh` (non-interactive verification). Tracked as
+TD-KERNEL-EMBED-BLOAT in `known-issues.md`.

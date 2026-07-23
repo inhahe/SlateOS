@@ -67,15 +67,23 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "iter $n: rc=$rc :: $verdict"
 
     # --- Catch classification -------------------------------------------------
-    # Only a GENUINE anomaly stops the campaign.  A slow-but-healthy boot that
-    # merely ran past the per-boot timeout (rc=1, no fault/stall signature) is
-    # NOT a catch — it is a wasted sample; we log it and press on, rather than
-    # aborting the whole hunt on a false positive (the old logic treated any
-    # timeout+RIP as a wedge, which the ~460s TCG boots tripped constantly).
+    # Only a GENUINE anomaly stops the campaign.  The overriding principle: a boot
+    # that reaches BOOT_OK and PASSES (rc=0) is healthy BY DEFINITION — boot-test
+    # exits 0 only on BOOT_OK with no self-test failures.  A healthy boot's serial
+    # log routinely contains EXPECTED fault/diagnostic lines that must NOT be
+    # mistaken for a crash: ring-3 `#GP`/`#UD` from the SEH / SMAP self-tests, the
+    # `instructions would #UD` SMAP-absence note, and even a TRANSIENT `[liveness]
+    # SYSTEM HANG` dump when a self-test stalls >15s under host load and then
+    # recovers.  So fault/hang/regression signatures are only treated as a catch
+    # on a boot that did NOT pass (rc != 0); on rc=0 only the hunt's own
+    # corruption checkpoint counts.  (A genuinely fatal fault always prevents
+    # BOOT_OK, so it surfaces as rc != 0 — nothing real is lost by this gate.)
 
     # (1) B-KNULLJUMP corruption checkpoint: the Path-Z hunt reported a nonzero
     #     corruption count (a stale-pointer/UAF write into a parked slot) — the
-    #     precise, primary signal.
+    #     precise, primary signal.  Checked on EVERY boot (the checkpoint runs
+    #     before BOOT_OK, so a corruption can be flagged even on a boot that then
+    #     goes on to pass).
     if [ -f "$SERIAL" ] && grep -aqE '\[hunt\].*corruptions=[1-9]' "$SERIAL"; then
         echo ""
         echo "=== B-KNULLJUMP CORRUPTION CAUGHT on iter $n ==="
@@ -96,31 +104,40 @@ for i in $(seq 1 "$MAX_ITERS"); do
         caught=1
         break
     fi
-    # (3) Hard fault / panic in serial (incl. B-KNULLJUMP's null-jump #DF/#UD
-    #     storm, a GPF, or a liveness SYSTEM HANG).  A genuine crash worth
-    #     investigating — distinct from a slow-boot timeout, which prints none
-    #     of these.
-    if [ -f "$SERIAL" ] && grep -aqE 'KERNEL PANIC|PANIC|FATAL|EXCEPTION|SYSTEM HANG|DOUBLE FAULT|#DF|#GP|#UD|RIP=0x0000000000000000|RIP=0000000000000000' "$SERIAL"; then
-        echo ""
-        echo "=== HARD FAULT / HANG CAUGHT on iter $n ==="
-        grep -aE 'KERNEL PANIC|PANIC|FATAL|EXCEPTION|SYSTEM HANG|DOUBLE FAULT|#DF|#GP|#UD' "$SERIAL" | head -12 || true
-        echo "  serial: $OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
-        caught=1
-        break
+    # A boot that PASSED (rc=0) is healthy; expected self-test fault/diagnostic
+    # lines are noise.  Nothing further to check — move to the next iter.
+    if [ "$rc" -eq 0 ]; then
+        continue
     fi
-    # (4) A self-test regression (BOOT_OK reached but a test failed).
+
+    # --- rc != 0 (and != 2): the boot did NOT complete cleanly. --------------
+    # (3) A self-test regression (a test explicitly reported failure).
     if [ -f "$SERIAL" ] && grep -aqiE 'self-test failed' "$SERIAL"; then
         echo ""
         echo "=== SELF-TEST REGRESSION on iter $n ==="
-        grep -aiE 'self-test failed|FAIL' "$SERIAL" | head -12 || true
+        grep -aiE 'self-test failed' "$SERIAL" | head -12 || true
         echo "  serial: $OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
         caught=1
         break
     fi
-    # Otherwise: rc=0 healthy pass, or rc=1 slow-boot timeout (no anomaly).
-    if [ "$rc" -ne 0 ]; then
-        echo "iter $n: slow-boot timeout (no fault/stall/corruption signature) — NOT a wedge; continuing."
+    # (4) A FATAL fault/hang that prevented boot completion (incl. B-KNULLJUMP's
+    #     null-jump #DF storm).  Restricted to unambiguously-fatal signatures —
+    #     a kernel PANIC/FATAL, a double-fault storm, a null-RIP jump, or a
+    #     SYSTEM HANG that did NOT recover (the boot never reached BOOT_OK).
+    #     Deliberately does NOT grep bare `#GP`/`#UD`/`EXCEPTION`, which also
+    #     appear in expected ring-3 self-test output.
+    if [ -f "$SERIAL" ] && grep -aqE 'KERNEL PANIC|PANIC:|FATAL|DOUBLE FAULT|SYSTEM HANG|RIP=0x0000000000000000|RIP=0000000000000000' "$SERIAL"; then
+        echo ""
+        echo "=== FATAL FAULT / HANG CAUGHT on iter $n (boot did not reach BOOT_OK) ==="
+        grep -aE 'KERNEL PANIC|PANIC|FATAL|DOUBLE FAULT|SYSTEM HANG|Killing task.*ring 0|RIP=0x0000000000000000' "$SERIAL" | head -12 || true
+        echo "  serial: $OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
+        [ -f "$REGS" ] && echo "  regs:   $OUTDIR/soak-$RUNSTAMP-iter$n.regs.txt"
+        caught=1
+        break
     fi
+    # Otherwise: a plain slow-boot timeout (rc=1, boot still progressing, no
+    # fatal signature) — a wasted sample, not a wedge.  Log and press on.
+    echo "iter $n: slow-boot timeout (no fault/stall/corruption signature) — NOT a wedge; continuing."
 done
 
 echo ""

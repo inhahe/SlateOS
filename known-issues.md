@@ -6807,6 +6807,29 @@ and **continues past** instead of aborting. Per-boot timeout raised to 720s
 *quiet* Path-Z tcc/make window is never mistaken for a hang). Net: the soak can
 now run a long unattended campaign without a slow boot masquerading as a catch.
 
+**UPDATE 2026-07-23 (e) — second false-positive class fixed: fault signatures on
+a PASSED boot.** The re-launched soak (`soak-20260723-185331`) then stopped on
+iter 01 with a bogus "HARD FAULT / HANG" — even though that boot **reached
+BOOT_OK and PASSED in 324s** (also confirming the earlier ~466s was transient
+host load, not a regression). The over-broad serial grep matched three
+*expected* healthy-boot lines: a ring-3 `#GP` immediately followed by `SEH
+handler resumes execution: OK` (an intentional SEH self-test), `instructions
+would #UD` (the SMAP-absence diagnostic), and a **transient** `[liveness] SYSTEM
+HANG` dump (a self-test paused >15s under load at serial line 4992, the detector
+dumped the task table, then progress resumed and the boot completed). Fix
+(same commit line): the fault/hang/self-test-regression catches are now **gated
+behind `rc != 0`** — a boot that exits 0 is healthy by construction
+(`boot-test` exits 0 only on BOOT_OK with no failures), so on a passed boot only
+the hunt's own `corruptions=[1-9]` checkpoint counts; a genuinely fatal fault
+always prevents BOOT_OK and thus surfaces as `rc != 0`, so nothing real is lost.
+The rc≠0 fault grep was also narrowed to unambiguously-fatal tokens (`KERNEL
+PANIC`/`FATAL`/`DOUBLE FAULT`/`SYSTEM HANG`/null-RIP) and no longer greps bare
+`#GP`/`#UD`/`EXCEPTION`, which recur in expected ring-3 self-test output. (Note:
+the quarantine *self-test* deliberately corrupts a parked slot and prints
+`[quarantine] *** CORRUPTION ***` to prove the scanner works — that line is
+`[quarantine]`-prefixed and never matches the hunt's `[hunt] … corruptions=[1-9]`
+checkpoint pattern, so it does not false-trip the corruption catch.)
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge

@@ -237,10 +237,36 @@ fn check_file_tags_for_handle(path: &str) -> KernelResult<()> {
 
 /// Open a file and return a handle ID.
 ///
+/// Default permission bits for a freshly-created regular file when the
+/// caller does not specify a mode.  Historically the VFS stamped every
+/// new file 0o644; callers that go through the bare [`open`] wrapper keep
+/// exactly that behaviour.  Userspace `open(O_CREAT)`/`creat` supply their
+/// own (already umask-masked) mode via [`open_with_mode`].
+pub const DEFAULT_CREATE_MODE: u16 = 0o644;
+
 /// Validates that the file exists (or creates it if `CREATE` is set),
 /// caches the file size, and optionally truncates.  The handle starts
 /// with offset 0 (or at end-of-file if `APPEND` is set).
+///
+/// This is the mode-less convenience wrapper: on `CREATE` the new file is
+/// stamped [`DEFAULT_CREATE_MODE`] (0o644), preserving the historical
+/// behaviour for every in-kernel caller.  Userspace file creation goes
+/// through [`open_with_mode`] so a caller-supplied, umask-masked mode is
+/// honoured.
 pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
+    open_with_mode(path, flags, DEFAULT_CREATE_MODE)
+}
+
+/// Like [`open`], but when the `CREATE` flag causes a new file to be
+/// created the file is stamped `create_mode` (masked to the low 9
+/// permission bits) instead of the 0o644 default.  `create_mode` is
+/// ignored when no file is created (existing file, or `CREATE` absent).
+///
+/// The mode is expected to be **already umask-masked by the caller**: our
+/// umask lives in the userspace POSIX layer (per design-decision on the
+/// thin-kernel-primitive model), so the kernel treats `create_mode` as the
+/// final on-disk permission bits and does not apply any mask of its own.
+pub fn open_with_mode(path: &str, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
     // Must have at least READ or WRITE.
     if !flags.is_readable() && !flags.is_writable() {
         return Err(KernelError::InvalidArgument);
@@ -387,6 +413,16 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
             // Create an empty file.  write_file already emits IN_CREATE; the
             // IN_OPEN below follows it, matching Linux's O_CREAT open order.
             crate::fs::Vfs::write_file_resolved(&norm, &[])?;
+
+            // Stamp the caller-supplied (umask-masked) permission bits.  The
+            // underlying write_file stamps a 0o644 default; overwrite it with
+            // the requested mode so O_CREAT honours its `mode` argument.  Only
+            // the low 9 bits are meaningful today (setuid/setgid/sticky on a
+            // brand-new file are not yet plumbed through the create path).
+            let perm = create_mode & 0o777;
+            if perm != DEFAULT_CREATE_MODE {
+                crate::fs::Vfs::set_permissions(&norm, perm)?;
+            }
 
             let handle = allocate_handle(norm.clone(), 0, 0, flags)?;
             crate::fs::notify::emit_opened(&norm);

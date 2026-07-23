@@ -1921,6 +1921,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of `fastpy-umask`: os.umask changes the process file-creation
+    // mask AND that mask is actually subtracted from the requested mode at
+    // create time (os.open with a mode → SYS_FS_OPEN_MODE). Proves umask is a
+    // real, observable effect on the on-disk permission bits, not a no-op.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_umask() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS `umask` utility (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
     // uid/gid onto a /tmp file; completes the metadata-mutation trio (perms via
     // chmod, times via settimes, owner here).

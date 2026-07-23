@@ -27,13 +27,16 @@ use crate::types::*;
 /// Open a file.
 ///
 /// Translates POSIX `open(path, flags, mode)` to our native
-/// `SYS_FS_OPEN(path_ptr, path_len, flags)`.
+/// `SYS_FS_OPEN(path_ptr, path_len, flags, create_mode)`.
+///
+/// When `O_CREAT` is set and the file is created, the on-disk permission
+/// bits are `mode & ~umask` (masked to the low 9 bits) — computed here and
+/// passed to the kernel as the 4th syscall argument.  Without `O_CREAT` the
+/// mode is ignored (arg3 = 0, which the kernel reads as "unspecified").
 ///
 /// Returns a file descriptor on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
-    let _ = mode; // Our kernel doesn't use mode in open yet.
-
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -61,11 +64,20 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
 
     let native_flags = translate_open_flags(flags);
 
-    let ret = syscall3(
-        SYS_FS_OPEN,
+    // Compute the umask-masked create mode only when O_CREAT is present;
+    // otherwise pass 0 so the kernel keeps its "mode unspecified" path.
+    let create_mode = if flags & fcntl::O_CREAT != 0 {
+        u64::from(apply_umask(mode))
+    } else {
+        0
+    };
+
+    let ret = syscall4(
+        SYS_FS_OPEN_MODE,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         native_flags,
+        create_mode,
     );
 
     if ret < 0 {
@@ -1803,10 +1815,12 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
 // ---------------------------------------------------------------------------
 
 /// Create a directory.
+///
+/// The new directory's permission bits are `mode & ~umask` (masked to the
+/// low 9 bits), computed here and passed to the kernel as the 3rd syscall
+/// argument (the kernel is a thin create primitive — see `Vfs::mkdir_mode`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
-    let _ = mode; // Our kernel doesn't use mode for mkdir yet.
-
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1817,7 +1831,12 @@ pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
         return -1;
     };
 
-    let ret = syscall2(SYS_FS_MKDIR, resolved.as_ptr() as u64, resolved_len as u64);
+    let ret = syscall3(
+        SYS_FS_MKDIR_MODE,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        u64::from(apply_umask(mode)),
+    );
     errno::translate(ret) as i32
 }
 
@@ -2812,6 +2831,19 @@ pub extern "C" fn umask(cmask: ModeT) -> ModeT {
 pub(crate) fn get_umask() -> ModeT {
     // SAFETY: Single-threaded access.
     unsafe { core::ptr::addr_of!(UMASK_VALUE).read() }
+}
+
+/// Apply the process umask to a requested create mode.
+///
+/// POSIX: the permission bits of a newly-created file/directory are
+/// `mode & ~umask`, restricted to the low 9 (rwxrwxrwx) bits.  Our umask
+/// lives entirely in this userspace layer (the kernel is a thin create
+/// primitive that stamps whatever final mode we hand it — see
+/// `kernel::fs::handle::open_with_mode` / `Vfs::mkdir_mode`), so the masking
+/// is done here, right before the create syscall, and the already-masked
+/// result is passed to the kernel.
+pub(crate) fn apply_umask(mode: ModeT) -> ModeT {
+    (mode & 0o777) & !(get_umask() & 0o777)
 }
 
 // ---------------------------------------------------------------------------

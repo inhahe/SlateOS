@@ -32,21 +32,28 @@
 ## OPEN (2026-07-22): Initiative F — next genuinely-distinct bridge-free os.*
 ## lowerings (each must hit a DISTINCT kernel write path + a false-pass-proof
 ## ring-3 self-test). Done so far: identity (setuid/setgid, §83), scheduling
-## priority (nice/getpriority/setpriority, §84). Scoped-but-not-yet-started:
+## priority (nice/getpriority/setpriority, §84), file-creation mask (umask +
+## the create-mode ABI, §85). Scoped-but-not-yet-started:
 ##
-##   * os.umask — MAKE IT REAL. Today posix umask() writes only a userspace
-##     static (posix/src/file.rs UMASK_VALUE); the kernel PCB has linux_umask
-##     but "the VFS does NOT yet consult linux_umask at file creation"
-##     (kernel/src/syscall/linux.rs:8362). So the create mode is never masked.
-##     Proper fix: apply `mode &= ~umask` in the file-creation path. Cleanest
-##     option (mirrors the §83/§84 userspace-policy theme): mask in the
-##     USERSPACE posix create wrappers (open O_CREAT / creat / mkdir / mknod /
-##     mkfifo) using get_umask() before the create syscall — self-contained, no
-##     kernel change, and the native fastpy path (os.umask -> UMASK_VALUE) then
-##     works directly. Self-test (single-CPU-observable, strong cross-check):
-##     os.umask(0o022), create a file with mode 0o777, stat it, assert the
-##     stored mode bits == 0o755. False-pass-proof: an unmasked create would
-##     leave 0o777. Lower os.umask bridge-free (fastpy_os_umask -> posix umask).
+##   * os.umask — DONE (2026-07-22, §85). The scope grew: the *real* blocker
+##     was not just that umask wrote a userspace-only static, but that the
+##     native VFS create path IGNORED the caller's mode ENTIRELY — SYS_FS_OPEN
+##     (610)/SYS_FS_MKDIR (604) took no mode arg, so every new file was stamped
+##     a fixed 0o644 (new dir 0o755) regardless of mode OR umask. So userspace
+##     masking alone would have had zero effect. Fix closed the ABI gap with
+##     NEW backward-compatible syscall numbers SYS_FS_OPEN_MODE (659, arg3=mode)
+##     / SYS_FS_MKDIR_MODE (660, arg2=mode) — NOT an arg-overload of the old
+##     numbers, because syscall3/syscall2 don't set the extra register and the
+##     ~48 already-built embedded ELFs would pass garbage as the mode, corrupting
+##     create perms at boot. Old numbers keep their default-mode behavior for
+##     stale binaries; mode 0 => historical default. umask masking stays in the
+##     USERSPACE posix wrappers (apply_umask: mode & ~UMASK_VALUE) which pass the
+##     FINAL on-disk bits to the kernel (thin-primitive theme, §83/§84). os.umask
+##     lowered bridge-free (fastpy_os_umask -> posix umask). Self-test
+##     self_test_fastpy_slateos_umask: umask(0o077)->18, umask(0o022)->63, then
+##     os.open(mode 0o777) under mask 0o022 => 0o755 on disk (Vfs::metadata),
+##     distinct from both 0o644 default and 0o777 request. VERIFIED GREEN in the
+##     QEMU boot-test (BOOT_OK, no self-test-failed marker; OK line in serial).
 ##
 ##   * os.sched_setaffinity/os.sched_getaffinity — DEFERRED. sched_setaffinity
 ##     is currently a stub (kernel/src/syscall/linux.rs:15995 "affinity is

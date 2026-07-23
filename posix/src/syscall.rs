@@ -119,6 +119,10 @@ pub const SYS_FS_WRITE_FILE: u64 = 601;
 pub const SYS_FS_DELETE: u64 = 602;
 pub const SYS_FS_LIST_DIR: u64 = 603;
 pub const SYS_FS_MKDIR: u64 = 604;
+/// mkdir with a caller-supplied (umask-masked) permission mode in arg2.
+/// Separate number from `SYS_FS_MKDIR` so the 2-arg ABI stays intact for
+/// already-built binaries.  See kernel `sys_fs_mkdir_mode`.
+pub const SYS_FS_MKDIR_MODE: u64 = 660;
 pub const SYS_FS_RMDIR: u64 = 605;
 pub const SYS_FS_STAT: u64 = 606;
 pub const SYS_FS_LINK: u64 = 607;
@@ -130,6 +134,10 @@ pub const SYS_FS_STATVFS: u64 = 608;
 pub const SYS_FS_FLOCK: u64 = 609;
 pub const SYS_FS_FUNLOCK: u64 = 640;
 pub const SYS_FS_OPEN: u64 = 610;
+/// open with a caller-supplied (umask-masked) create mode in arg3, used for
+/// `O_CREAT`.  Separate number from `SYS_FS_OPEN` so the 3-arg ABI stays
+/// intact for already-built binaries.  See kernel `sys_fs_open_mode`.
+pub const SYS_FS_OPEN_MODE: u64 = 659;
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;
 pub const SYS_FS_WRITE: u64 = 613;
@@ -659,11 +667,13 @@ mod tests {
             SYS_FS_DELETE,
             SYS_FS_LIST_DIR,
             SYS_FS_MKDIR,
+            SYS_FS_MKDIR_MODE,
             SYS_FS_RMDIR,
             SYS_FS_STAT,
             SYS_FS_LINK,
             SYS_FS_STATVFS,
             SYS_FS_OPEN,
+            SYS_FS_OPEN_MODE,
             SYS_FS_CLOSE,
             SYS_FS_READ,
             SYS_FS_WRITE,
@@ -807,11 +817,13 @@ mod tests {
             SYS_FS_DELETE,
             SYS_FS_LIST_DIR,
             SYS_FS_MKDIR,
+            SYS_FS_MKDIR_MODE,
             SYS_FS_RMDIR,
             SYS_FS_STAT,
             SYS_FS_LINK,
             SYS_FS_STATVFS,
             SYS_FS_OPEN,
+            SYS_FS_OPEN_MODE,
             SYS_FS_CLOSE,
             SYS_FS_READ,
             SYS_FS_WRITE,
@@ -1089,11 +1101,13 @@ mod tests {
             SYS_FS_DELETE,
             SYS_FS_LIST_DIR,
             SYS_FS_MKDIR,
+            SYS_FS_MKDIR_MODE,
             SYS_FS_RMDIR,
             SYS_FS_STAT,
             SYS_FS_LINK,
             SYS_FS_STATVFS,
             SYS_FS_OPEN,
+            SYS_FS_OPEN_MODE,
             SYS_FS_CLOSE,
             SYS_FS_READ,
             SYS_FS_WRITE,

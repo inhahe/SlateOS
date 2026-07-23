@@ -5959,6 +5959,57 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FS_MKDIR_MODE` — create a directory, stamping a caller-supplied
+/// permission mode.
+///
+/// Identical to [`sys_fs_mkdir`] except it carries a 3rd argument, `mode`
+/// (`arg2`), as the final on-disk permission bits (the userspace POSIX wrapper
+/// has already applied the process umask).  A separate syscall number keeps the
+/// 2-argument `SYS_FS_MKDIR` ABI unchanged, so already-built binaries that
+/// leave the 3rd arg register undefined keep their 0o755-default behaviour.
+pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::CREATE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // arg2 = directory create mode (already umask-masked).  Zero → historical
+    // 0o755 default.
+    #[allow(clippy::cast_possible_truncation)]
+    let mode_raw = args.arg2 as u16;
+    let mode = if mode_raw == 0 {
+        crate::fs::Vfs::DEFAULT_DIR_MODE
+    } else {
+        mode_raw & 0o777
+    };
+
+    match crate::fs::Vfs::mkdir_mode(path, mode) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_RMDIR` — remove an empty directory.
 pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with DELETE rights.
@@ -6195,6 +6246,74 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
             // File handles are refcounted in the open-file table, so the
             // matching deregister-on-close + cleanup-on-exit drop exactly
             // one reference each.
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::File, handle);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_OPEN_MODE` — open (and, with `O_CREAT`, create) a file, stamping a
+/// caller-supplied permission mode on a newly-created file.
+///
+/// Identical to [`sys_fs_open`] except it carries a 4th argument, `mode`
+/// (`arg3`), used only when `CREATE` actually creates a new file.  The mode is
+/// the final on-disk permission bits: the userspace POSIX wrapper has already
+/// applied the process umask (`mode & ~umask`), so the kernel stamps it
+/// verbatim (thin-primitive model — the umask lives in userspace).
+///
+/// This is a *separate* syscall number rather than an extra argument on
+/// `SYS_FS_OPEN` on purpose: the 3-argument `SYS_FS_OPEN` ABI is unchanged, so
+/// already-built binaries (which issue a 3-arg syscall and leave the 4th arg
+/// register undefined) keep their historical 0o644-default create behaviour
+/// with no risk of an undefined register being misread as a mode.
+pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_raw = args.arg2 as u32;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+
+    // arg3 = create mode (already umask-masked by userspace).  A zero value is
+    // treated as "unspecified" → the historical 0o644 default, so a caller that
+    // omits O_CREAT (and passes 0) never accidentally creates a 0o000 file.
+    #[allow(clippy::cast_possible_truncation)]
+    let mode_raw = args.arg3 as u16;
+    let create_mode = if mode_raw == 0 {
+        crate::fs::handle::DEFAULT_CREATE_MODE
+    } else {
+        mode_raw & 0o777
+    };
+
+    match crate::fs::handle::open_with_mode(path, flags, create_mode) {
+        Ok(handle) => {
             if let Some(pid) = caller_pid() {
                 pcb::register_ipc_handle(pid, ResourceType::File, handle);
             }

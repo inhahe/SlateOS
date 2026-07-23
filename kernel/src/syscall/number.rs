@@ -1939,6 +1939,20 @@ pub const SYS_FS_LIST_DIR: u64 = 603;
 /// Returns: 0 on success, or negative error code.
 pub const SYS_FS_MKDIR: u64 = 604;
 
+/// Create a directory, stamping a caller-supplied permission mode.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: create mode — the final on-disk permission bits (already
+///   umask-masked by the userspace POSIX layer).  0 means "unspecified" →
+///   the historical 0o755 default.
+///
+/// A separate number from [`SYS_FS_MKDIR`] so the 2-argument mkdir ABI is
+/// unchanged for already-built binaries.  Number 660.
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_MKDIR_MODE: u64 = 660;
+
 /// Remove an empty directory.
 ///
 /// `arg0`: pointer to path string.
@@ -2247,6 +2261,25 @@ pub const SYS_FS_TRIM: u64 = 656;
 ///
 /// Returns: file handle on success, negative error code on failure.
 pub const SYS_FS_OPEN: u64 = 610;
+
+/// Open (and optionally create) a file, stamping a caller-supplied
+/// permission mode on a newly-created file.
+///
+/// `arg0`: pointer to path bytes.
+/// `arg1`: path length.
+/// `arg2`: open flags (`OpenFlags` bits).
+/// `arg3`: create mode — the final on-disk permission bits for a file
+///   created by `O_CREAT` (already umask-masked by the userspace POSIX
+///   layer).  Ignored when no file is created; 0 means "unspecified" →
+///   the historical 0o644 default.
+///
+/// A separate number from [`SYS_FS_OPEN`] so the 3-argument open ABI is
+/// unchanged — already-built binaries that leave the 4th arg register
+/// undefined never have it misread as a mode.  Number 659 (out of the
+/// original 600-block; the contiguous slots were exhausted).
+///
+/// Returns: file handle on success, negative error code on failure.
+pub const SYS_FS_OPEN_MODE: u64 = 659;
 
 /// Close an open file handle.
 ///

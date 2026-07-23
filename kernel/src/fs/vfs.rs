@@ -2140,7 +2140,22 @@ impl Vfs {
     ///
     /// Intermediate symlinks are followed; the last component is the
     /// new directory name (not followed if it happens to exist).
+    /// Default permission bits for a freshly-created directory when the
+    /// caller does not specify a mode (the historical 0o755).
+    pub const DEFAULT_DIR_MODE: u16 = 0o755;
+
     pub fn mkdir(path: &str) -> KernelResult<()> {
+        Self::mkdir_mode(path, Self::DEFAULT_DIR_MODE)
+    }
+
+    /// Create a directory, stamping it with `mode` (masked to the low 9
+    /// permission bits) instead of the 0o755 default.
+    ///
+    /// `mode` is expected to be **already umask-masked by the caller** — the
+    /// umask lives in the userspace POSIX layer, so the kernel treats `mode`
+    /// as the final on-disk permission bits (same thin-primitive model as the
+    /// file-create path in [`crate::fs::handle::open_with_mode`]).
+    pub fn mkdir_mode(path: &str, mode: u16) -> KernelResult<()> {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
@@ -2152,6 +2167,13 @@ impl Vfs {
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().mkdir(&relative)?;
+        }
+        // Stamp the caller-supplied (umask-masked) permission bits; the
+        // underlying mkdir stamps a 0o755 default, so only override when the
+        // requested mode differs.
+        let perm = mode & 0o777;
+        if perm != Self::DEFAULT_DIR_MODE {
+            Self::set_permissions(&path, perm)?;
         }
         // Charge quota for new inode.
         super::quota::charge_inode(0, 0);

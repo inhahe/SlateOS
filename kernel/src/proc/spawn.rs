@@ -11222,6 +11222,208 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-umask` utility — proves that
+/// `os.umask` is **real**: it changes the process file-creation mask AND that
+/// mask is actually subtracted from the requested mode when a file is created,
+/// so the on-disk permission bits reflect it.
+///
+/// The tool (see `services/fastpy-umask/build.py`) does:
+/// ```text
+/// a = os.umask(0o077)   # returns the previous mask (default 0o022 = 18)
+/// b = os.umask(0o022)   # returns the previous mask (0o077 = 63)
+/// fd = os.open('/tmp/fastpy-umask.dat', 577, 0o777)  # O_CREAT|O_WRONLY|O_TRUNC, mode 0o777
+/// ...  # writes "18,63" to /tmp/fastpy-umask.out, then sleeps
+/// ```
+/// With the effective mask 0o022, requesting mode 0o777 must yield 0o755 on
+/// disk (`0o777 & ~0o022`).
+///
+/// False-pass-proof on three independent signals:
+///  1. The tool's own readback of the two previous-mask values ("18,63") —
+///     proves `os.umask` returns the prior mask (a real getter/setter, not a
+///     stub that returns its argument or 0).
+///  2. The kernel's authoritative `Vfs::metadata` read of the created file's
+///     permissions == 0o755 — proves the mask was actually applied at create
+///     time and written through to the filesystem.
+///  3. 0o755 is distinct from BOTH the kernel's default create mode (0o644)
+///     AND the requested mode (0o777), so neither a "umask ignored" bug nor a
+///     "mode ignored, always default" bug can coincidentally pass.
+pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
+    static FASTPY_UMASK_ELF: &[u8] =
+        include_bytes!("../../../services/fastpy-umask/fastpy-umask.elf");
+
+    const OUT_PATH: &str = "/tmp/fastpy-umask.out";
+    const DAT_PATH: &str = "/tmp/fastpy-umask.dat";
+    // Must match services/fastpy-umask/build.py's SRC and posix's default
+    // UMASK_VALUE (0o022): umask(0o077) returns prior 0o022=18, then
+    // umask(0o022) returns prior 0o077=63.
+    const EXPECT_PREV: [i64; 2] = [18, 63];
+    // 0o777 requested & ~0o022 effective mask = 0o755.  Distinct from the
+    // kernel default create mode (0o644) and the requested mode (0o777).
+    const EXPECT_PERMS: u16 = 0o755;
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `umask` utility (ring 3) integration test \
+         ({} bytes ELF)...",
+        FASTPY_UMASK_ELF.len()
+    );
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        let _ = crate::fs::Vfs::remove(DAT_PATH);
+    };
+    cleanup();
+
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+
+    let argv: &[&[u8]] = &[b"fastpy-umask"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "fastpy-umask",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        // Root spawn so it holds File CREATE/WRITE caps for the /tmp create.
+        uid_gid: Some((0, 0)),
+    };
+
+    let result = match spawn_process(FASTPY_UMASK_ELF, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fastpy-umask spawn returned {:?}", e);
+            cleanup();
+            return Err(e);
+        }
+    };
+
+    // Parse "n0,n1" into two signed decimal fields.  Returns None until the
+    // file exists AND contains a well-formed 2-field record (the tool writes +
+    // closes OUT_PATH before it starts sleeping — our sync barrier).
+    let parse_two = |bytes: &[u8]| -> Option<[i64; 2]> {
+        let mut fields: [i64; 2] = [0; 2];
+        let mut idx = 0usize;
+        let mut saw_digit = false;
+        for &b in bytes {
+            if b.is_ascii_digit() {
+                saw_digit = true;
+                if let Some(slot) = fields.get_mut(idx) {
+                    *slot = slot.saturating_mul(10).saturating_add(i64::from(b - b'0'));
+                }
+            } else if b == b',' {
+                if !saw_digit {
+                    return None;
+                }
+                idx = idx.saturating_add(1);
+                saw_digit = false;
+                if idx >= fields.len() {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        if idx != 1 || !saw_digit {
+            return None;
+        }
+        Some(fields)
+    };
+
+    // Poll: wait for the tool to finish (well-formed OUT_PATH), then — while it
+    // is still alive and sleeping — capture the created file's authoritative
+    // on-disk permissions via the VFS.
+    let mut observed: Option<([i64; 2], Option<u16>)> = None;
+    for _ in 0..200_000 {
+        if let Ok(bytes) = crate::fs::Vfs::read_file(OUT_PATH) {
+            if let Some(fields) = parse_two(&bytes) {
+                let perms = crate::fs::Vfs::metadata(DAT_PATH).ok().map(|m| m.permissions);
+                observed = Some((fields, perms));
+                break;
+            }
+        }
+        crate::sched::yield_now();
+    }
+
+    // The tool sleeps in a loop; kill it regardless of outcome.
+    let _ = pcb::set_exit_code(result.pid, 0);
+    let _ = thread::kill_process_threads(result.pid);
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let Some((fields, perms)) = observed else {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-umask (ring 3) — never observed a well-formed {} (the tool \
+             faulted before writing; os.umask may have mis-lowered)",
+            OUT_PATH
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    };
+
+    // Signal 1: the tool's own readback of the two previous masks.
+    if fields != EXPECT_PREV {
+        serial_println!(
+            "[spawn]   FAIL: fastpy-umask (ring 3) — tool wrote {:?}, expected {:?} \
+             (os.umask did not return the prior mask — a stub returning its arg or 0)",
+            fields, EXPECT_PREV
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // Signal 2: the created file's on-disk permissions must be the masked mode.
+    match perms {
+        Some(p) if p == EXPECT_PERMS => {}
+        Some(p) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-umask (ring 3) — created file perms were {:o}, expected \
+                 {:o} (0o777 requested & ~0o022 mask). {} — the umask was NOT applied at create \
+                 time; the effect is not real.",
+                p,
+                EXPECT_PERMS,
+                if p == 0o777 {
+                    "Got the raw requested mode: umask masking was skipped"
+                } else if p == 0o644 {
+                    "Got the kernel default: the create mode was ignored entirely"
+                } else {
+                    "Unexpected value"
+                }
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-umask (ring 3) — created file {} was not found on disk \
+                 (os.open with a mode did not create the file)",
+                DAT_PATH
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup();
+
+    serial_println!(
+        "[spawn]   fastpy-on-SlateOS `umask` (ring 3: os.umask(0o077)→prior 18, os.umask(0o022)→\
+         prior 63, then os.open(mode 0o777) with effective mask 0o022 ⇒ on-disk perms {:o} via \
+         SYS_FS_OPEN_MODE; distinct from the 0o644 default and 0o777 request, so the mask is \
+         REAL and applied at create time): OK",
+        EXPECT_PERMS
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-chown` utility — the tool that
 /// **completes the metadata-mutation trio** (permissions via `chmod`, times
 /// via `settimes`, **owner** here).

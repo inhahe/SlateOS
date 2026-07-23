@@ -773,18 +773,41 @@ fi
 # The <name> key is the ELF's filename stem, which equals the fastpy dir name
 # (e.g. services/fastpy-hello/fastpy-hello.elf -> /tests/fastpy-hello.elf,
 # loaded via load_test_elf("fastpy-hello")).
+# --- PROMOTED fastpy binaries: real shipping /bin commands --------------------
+# A curated subset of the fastpy utilities are no longer mere /tests fixtures —
+# they are installed at their real command path under /bin, exactly like the
+# glibc binaries above, and the kernel runs them by *command name* through PATH
+# resolution (spawn.rs::resolve_command), the way init/a shell launches a
+# command.  The first is fastpy-cat -> /bin/cat.  Each promoted binary is staged
+# ONLY in /bin (not also under /tests) so there is no ~3.5 MiB duplication.
+#
+# Map: <fastpy dir-stem>  ->  <installed /bin command name>
+declare -A PROMOTED=( [fastpy-cat]=cat )
+
 FASTPY_COUNT=0
+PROMOTED_COUNT=0
 mkdir -p "$STAGE/tests"
 for elf in "$ROOT_DIR"/services/fastpy-*/*.elf; do
     [ -e "$elf" ] || continue
     name="$(basename "$elf" .elf)"          # e.g. fastpy-hello
-    cp -L "$elf" "$STAGE/tests/$name.elf"
-    FASTPY_COUNT=$((FASTPY_COUNT + 1))
+    if [ -n "${PROMOTED[$name]:-}" ]; then
+        # Promoted: install at /bin/<cmd>, do NOT also stage under /tests.
+        cmd="${PROMOTED[$name]}"
+        cp -L "$elf" "$STAGE/bin/$cmd"
+        PROMOTED_COUNT=$((PROMOTED_COUNT + 1))
+        echo "[rootfs] promoted fastpy binary: /bin/$cmd  ($name)"
+    else
+        cp -L "$elf" "$STAGE/tests/$name.elf"
+        FASTPY_COUNT=$((FASTPY_COUNT + 1))
+    fi
 done
 if [ "$FASTPY_COUNT" -gt 0 ]; then
     echo "[rootfs] staged $FASTPY_COUNT fastpy self-test ELF(s) into /tests"
 else
     echo "[rootfs] WARNING: no services/fastpy-*/*.elf found — fastpy self-tests will self-skip"
+fi
+if [ "$PROMOTED_COUNT" -gt 0 ]; then
+    echo "[rootfs] installed $PROMOTED_COUNT promoted fastpy command(s) into /bin"
 fi
 
 echo "[rootfs] staged tree:"

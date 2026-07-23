@@ -5709,3 +5709,17 @@ latent extent-reader bug (holes collapsed → data shifted) — fixed as
 BUG-EXT4-SPARSE-READ (`kernel/src/fs/ext4/driver.rs`, `block_copy_placement`).
 The loader indirection (`load_test_elf`) is now the seam for the follow-on
 option A (promote fastpy coreutils to real `/bin`).
+
+**Follow-on — first /bin promotion (2026-07-23).** Option A started: `fastpy-cat`
+is the first fastpy binary promoted from a `/tests` self-test fixture to a real
+installed command. `create-ext4-rootfs.sh` now maps a curated
+`PROMOTED[fastpy-cat]=cat` set — the binary is installed at `/bin/cat` (and
+*not* also under `/tests`, so no ~3.5 MiB duplication). The kernel gained a
+`resolve_command(name, PATH)` helper (`spawn.rs`) that searches `COMMAND_PATH`
+(`["/mnt/bin"]`, where the rootfs `/bin` is mounted) — the resolve+load step a
+shell/`init` performs before `exec`. `self_test_fastpy_slateos_cat` now resolves
+`cat` **by command name** through that PATH and spawns it with `argv[0]="cat"`,
+so the test exercises the real installed-command execution path rather than a
+fixture load. Additive and reversible: no existing Rust coreutil is touched, and
+the promotion is a per-command opt-in via the `PROMOTED` map (more commands —
+`wc`, `head`, `tail`, … — can be added the same way once each is validated).

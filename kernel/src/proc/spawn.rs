@@ -77,6 +77,37 @@ fn load_test_elf(name: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
+/// Search PATH directories for installed native SlateOS commands.
+///
+/// The rootfs `/bin` (holding the promoted fastpy commands) is mounted at
+/// `/mnt/bin` in the bring-up boot. This is the command-search PATH a shell or
+/// `init` consults; keep it ordered most-specific-first.
+const COMMAND_PATH: &[&str] = &["/mnt/bin"];
+
+/// Resolve an installed command by *name* against a search [`path`] and return
+/// its ELF image — the resolve+load step a shell or `init` performs before it
+/// `exec`s a command (e.g. `cat` -> `/mnt/bin/cat`).
+///
+/// Returns `None` if the command is not found on any PATH entry (or is empty),
+/// so callers on a lean build with no `/bin` can self-skip. Unlike
+/// [`load_test_elf`], the name is a bare command (no `.elf` suffix), matching
+/// how binaries are installed under `/bin`.
+fn resolve_command(name: &str, path_dirs: &[&str]) -> Option<alloc::vec::Vec<u8>> {
+    for dir in path_dirs {
+        let mut path =
+            alloc::string::String::with_capacity(dir.len() + 1 + name.len());
+        path.push_str(dir);
+        path.push('/');
+        path.push_str(name);
+        if let Ok(v) = crate::fs::Vfs::read_file(&path) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 /// Exit code set when exec fails after tearing down the old address space.
 ///
 /// The process cannot resume its old code (it's been freed), so it must
@@ -6531,18 +6562,32 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
 ///     `printf`/`fflush` -> posix `write(1, ...)` -> Console handle ->
 ///     `SYS_CONSOLE_WRITE`, which mirrors to serial).
 ///
+/// **Promotion (2026-07-23):** `cat` is no longer loaded from a `/tests`
+/// fixture. It is *installed* at `/bin/cat` (mounted at `/mnt/bin`) like any
+/// other shipping command, and this harness resolves it **by command name**
+/// through the PATH ([`resolve_command`]/[`COMMAND_PATH`]) — the exact
+/// resolve+load step init or a shell performs before `exec` — then spawns it
+/// with `argv[0] = "cat"`. This makes `cat` the first fastpy binary promoted
+/// from a boot self-test fixture to a real `/bin` component invoked as a
+/// command (design-decisions.md §87 follow-on).
+///
 /// The harness stages a known file in the writable `/tmp` memfs, spawns
-/// `fastpy-cat` with that path as `argv[1]` and a File capability, and asserts
-/// the process becomes a `Zombie` and exits with the file's byte count.  The
-/// echoed contents also appear on the serial console (via `SYS_CONSOLE_WRITE`),
-/// which the boot harness can grep for — proving stdout works end-to-end for a
-/// native fastpy binary.
+/// `cat /tmp/cat-input.txt` (with a File capability), and asserts the process
+/// becomes a `Zombie` and exits with the file's byte count. The echoed contents
+/// also appear on the serial console (via `SYS_CONSOLE_WRITE`), which the boot
+/// harness can grep for — proving stdout works end-to-end for a native fastpy
+/// binary run as an installed command.
 pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
-    let fastpy_cat_elf = match load_test_elf("fastpy-cat") {
+    // `cat` is a PROMOTED fastpy command: it is installed at /bin/cat (mounted
+    // at /mnt/bin) and resolved BY COMMAND NAME through the PATH, exactly the
+    // way init/a shell launches a command — not loaded from a /tests fixture.
+    // On a lean build with no /bin, resolution fails and the test self-skips.
+    let fastpy_cat_elf = match resolve_command("cat", COMMAND_PATH) {
         Some(v) => v,
         None => {
             serial_println!(
-                "[spawn] SKIP fastpy-cat: fixture absent on /mnt/tests (lean build)"
+                "[spawn] SKIP cat: not installed on PATH ({:?}) — lean build",
+                COMMAND_PATH
             );
             return Ok(());
         }
@@ -6568,11 +6613,11 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
         return Err(e);
     }
 
-    let argv: &[&[u8]] = &[b"fastpy-cat", CAT_PATH_ARG];
+    let argv: &[&[u8]] = &[b"cat", CAT_PATH_ARG];
     let envp: &[&[u8]] = &[];
     let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
-        name: "fastpy-cat",
+        name: "cat",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
@@ -6629,10 +6674,10 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   fastpy-on-SlateOS `cat` (ring 3: first shipping fastpy utility — read \
-         argv[1] file off /tmp and echoed it to stdout via SYS_CONSOLE_WRITE, exited with the \
-         {}-byte count): OK",
-        EXPECTED_BYTES
+        "[spawn]   fastpy-on-SlateOS `cat` (ring 3: promoted /bin command resolved by name via \
+         PATH {:?} — read argv[1] file off /tmp and echoed it to stdout via SYS_CONSOLE_WRITE, \
+         exited with the {}-byte count): OK",
+        COMMAND_PATH, EXPECTED_BYTES
     );
     Ok(())
 }

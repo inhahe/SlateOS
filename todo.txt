@@ -125,19 +125,37 @@
 ##     ~361 MB debug kernel image). 61 sites in proc/spawn.rs, 6 in container.rs,
 ##     3 in main.rs; each is `static X_ELF: &[u8] = include_bytes!(".../fastpy-
 ##     NAME/fastpy-NAME.elf")` inside a ring-3 self-test that spawn_process()es
-##     it and asserts the exit code. PLAN: (1) stage the fastpy ELFs into the
-##     rootfs disk image at rootfs-build time — scripts/create-ext4-rootfs.sh
-##     (WSL-run, currently IMG_SIZE=48M; bump to ~256M and cp the 49 ELFs into a
-##     /tests/fastpy dir) (a /tests or /bin dir); (2) replace
-##     each include_bytes! with a disk-read helper load_test_elf("fastpy-NAME")
-##     -> Vec<u8> that no-ops the test when the rootfs/file is absent (mirrors
-##     the Path-Z glibc tests, which already stage from rootfs.ext4 at /mnt and
-##     skip when absent); (3) ensure the fastpy self-tests run AFTER the vdb
-##     rootfs mount (the Path-Z block at kmain ~line 2320+ already does — move
-##     the fastpy tests alongside/after it if needed); (4) boot-test + confirm
-##     the kernel image shrinks by ~163 MiB. NOT yet started (needs builds +
-##     rootfs regen + boot-test; deferred until the hunt soak finishes to avoid
-##     QEMU/build contention). The leaned continuation of Initiative F.
+##     it and asserts the exit code. SCOPE REFINED (2026-07-23): the bloat is
+##     EXCLUSIVELY the 61 fastpy sites in proc/spawn.rs (49 distinct ~3.3 MiB
+##     ELFs; fastpy-pkg.elf is referenced 7×, netstack/httpget/udpget are the
+##     only NON-fastpy embeds in spawn.rs and are small). The 3 main.rs + 6
+##     container.rs sites are tiny hand-written no_std services (init/hello/
+##     ticker, ~tens of KB) — LEAVE THOSE EMBEDDED; they are not the bloat.
+##     GROUNDED DESIGN: loader primitive = crate::fs::Vfs::read_file(&str) ->
+##     KernelResult<Vec<u8>> (already used all over the Path-Z tests to read
+##     /mnt files). /mnt (rootfs.ext4 vdb) mounts at kmain ~line 1180, long
+##     before the Path-Z block (~line 2320+), so ordering is already safe — no
+##     test reordering needed. PLAN: (1) scripts/create-ext4-rootfs.sh (WSL-run,
+##     IMG_SIZE 48M→256M): mkdir /tests and cp the 49 services/fastpy-*/*.elf
+##     into /tests/<name>.elf (flat). (2) add a small helper to spawn.rs:
+##       fn load_test_elf(name:&str)->Option<Vec<u8>> {
+##         let mut p=String::new(); p.push_str("/mnt/tests/"); p.push_str(name);
+##         p.push_str(".elf");
+##         match crate::fs::Vfs::read_file(&p){Ok(v) if !v.is_empty()=>Some(v),_=>None} }
+##     (3) convert each of the 61 fastpy sites from
+##       `static FASTPY_X_ELF:&[u8]=include_bytes!(...);` (+ later uses
+##       FASTPY_X_ELF.len() and spawn_process(FASTPY_X_ELF,...)) to
+##       `let x_elf = match load_test_elf("fastpy-NAME"){Some(v)=>v,None=>{
+##          serial_println!("[spawn] SKIP fastpy-NAME: fixture not on /mnt/tests");
+##          return Ok(()); }};`  then FASTPY_X_ELF→x_elf for .len() and
+##       →&x_elf for spawn_process. (4) rebuild rootfs, cargo build kernel,
+##       boot-test; confirm debug kernel drops ~361→~197 MiB and every fastpy
+##       self-test still runs (loaded from disk). DO WITH THE COMPILER IN THE
+##       LOOP (61-site mechanical refactor). NOT yet started — deferred until
+##       the hunt soak finishes to avoid QEMU/rootfs/build contention (a rootfs
+##       rebuild mid-soak would corrupt in-flight vdb reads; a heavy parallel
+##       cargo build could push a timed boot past the soak timeout). The leaned
+##       continuation of Initiative F.
 
 ## DONE (superseded — breadcrumb): ring-3 fork()+wait4() reap E2E self-test.
 ##   The deferred item here (2026-06-14) is COMPLETE. Delivered as

@@ -5667,3 +5667,33 @@ are implementation decisions for B, not re-openings of the A/B/C fork.
 harness — every `self_test_fastpy_slateos_*`), the boot-image assembly, the rootfs
 build, and `scripts/boot-test.sh` (non-interactive verification). Tracked as
 TD-KERNEL-EMBED-BLOAT in `known-issues.md`.
+
+**Sub-design resolved (2026-07-23) — implementing B.** *Decided by:* Claude
+(operator-approved scope). The two open sub-questions flagged above are now
+settled from reading the code:
+- *Boot-ordering: no reordering needed.* The rootfs (`rootfs.ext4`, vdb) is
+  mounted at `/mnt` in `kmain` at ~line 1180 (`fs::ext4::mount(ext4_dev,"/mnt")`),
+  which runs **long before** the Path-Z self-test block (~line 2320+) where the
+  fastpy tests live. So the fixtures are already on a mounted fs by the time the
+  tests run — no early-mount and no dedicated self-test partition required.
+- *Mechanism: plain disk files on the existing rootfs, not a compressed archive
+  or a separate image.* Stage the 49 distinct `services/fastpy-*/*.elf` (~3.3 MiB
+  each) flat into `/tests/<name>.elf` on `rootfs.ext4` at rootfs-build time
+  (`scripts/create-ext4-rootfs.sh`, bump `IMG_SIZE` 48M→256M). Load each at
+  runtime with `load_test_elf(name) -> Option<Vec<u8>>`, a thin wrapper over the
+  existing `crate::fs::Vfs::read_file("/mnt/tests/<name>.elf")` primitive already
+  used throughout the Path-Z tests; `None` (file/disk absent) makes the affected
+  self-test cleanly *self-skip* rather than fail, so a lean production build (no
+  fixture disk) still boots green.
+- *Why plain files over an archive/dedicated image:* zero new machinery (reuses
+  the mounted ext4 + `Vfs::read_file`), the fixtures are individually inspectable,
+  and it mirrors exactly how the glibc Path-Z fixtures are already staged. A
+  compressed archive would need an in-kernel decompressor on the test path; a
+  dedicated fastpy-bin image would add a second disk + mount for no benefit at
+  this stage. When A (promote to real `/bin`) is later taken up, the staging
+  simply retargets `/bin` and the self-tests spawn the installed binaries — the
+  loader indirection introduced here is the seam that makes that trivial.
+- *Scope correction:* only the **61 fastpy sites in `spawn.rs`** are the 164 MiB
+  bloat. The 3 `main.rs` + 6 `container.rs` `include_bytes!` sites are tiny
+  hand-written no_std services (`init`/`hello`/`ticker`, tens of KB) and stay
+  embedded.

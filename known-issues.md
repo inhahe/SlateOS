@@ -6601,6 +6601,39 @@ warning is meant to be non-fatal — extra motivation for the long-deferred harn
 fix (wait on a real exit signal / adaptive budget rather than a fixed yield count,
 and/or make the WARNING text not collide with the failure-grep phrase).
 
+**Recurrence 2026-07-23 (B-KNULLJUMP corruption-hunt soak, iter 10 of 24 —
+same flake, confirmed NOT a corruption).** During the armed corruption-hunt
+soak (`HUNT=1`, KASAN shadow + free-quarantine armed around the Path-Z block;
+`build/hang-catches/soak-20260723-083044-iter10.*`), iter 10 was the only
+failing boot of the 13 that completed before this note, and it was the exact
+B-PTHREAD-YIELDBUDGET signature: `[spawn] FAIL: real glibc pthread — process
+did not exit within 262144 yields (state=Some(Running)); a thread likely
+deadlocked on a futex or a worker faulted` → `WARNING: Path-Z real glibc
+pthread self-test failed: TimedOut`. Diff vs. the adjacent passing boots
+(iter 09/11) is diagnostic and benign: in a passing run the log shows workers
+`Task 203..206 exiting`, then `Process 240 has no threads left — now zombie`,
+then **`Task 202 exiting`** and `OK`; in iter 10 everything is identical *up
+to* the zombie line, but the main thread (task 202) never reaches its exit
+syscall before the driver's fixed 262144-yield budget expires — i.e. the main
+thread was still burning userspace cycles in glibc's `pthread_join`
+spin-then-futex path when the budget ran out. **Crucially, the corruption hunt
+was CLEAN on this boot:** the Path-Z checkpoint reported `quarantine …
+corruptions=0 (scan found 0); kasan violations=0 shadow_frames=298`, so this
+was *not* a wild write into a parked slot. It is the yield-budget flake, not
+B-KNULLJUMP. (B-KNULLJUMP manifests as a hard `#PF`/GPF in
+`alloc::…::navigate::next_kv`, never as a soft `TimedOut`.) Reconfirms the
+long-deferred harness fix (adaptive budget / wait on a real exit signal, and
+de-collide the WARNING text from the failure grep).
+
+**Tooling-gap note from the same hunt (for B-KNULLJUMP, recorded here for
+cross-reference):** the free-quarantine only catches a wild write whose target
+is a *freed, parked* slab slot. B-KNULLJUMP corrupts a *live* scheduler
+`BTreeMap` node, so unless the stray store happens to land on a quarantined
+(freed) slot, the quarantine cannot see it — which is why 13 clean
+`corruptions=0` boots do **not** rule the race out. The definitive catch for a
+wild store into a *live* allocation remains compiler-instrumented KASAN
+(`-Zsanitizer=kernel-address`, feasibility confirmed) — see Q34.
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge

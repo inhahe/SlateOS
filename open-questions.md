@@ -76,6 +76,49 @@ add `.cargo/config.toml` rustflags (`-Zsanitizer=kernel-address`,
 `-Cllvm-args=-asan-mapping-offset/scale`), a new `__asan_*` runtime module, and
 whole-VA shadow setup in early boot (`main.rs` mm init).
 
+## Q35 — Should promoted fastpy coreutils ever *replace* the Rust coreutils in the shipping /bin, or stay a parallel demonstration track? — Status: OPEN
+
+**Question.** The fastpy `/bin`-promotion (design-decisions.md §87 follow-on) is
+underway: `cat`, `wc`, `head`, `tail` are now installed at `/bin/<cmd>` and run
+as real commands resolved by name. These are **minimal** implementations (e.g.
+`cat` is ~5 lines of Python) — proof-of-pipeline, not feature-complete. SlateOS
+*already* ships 85 mature Rust coreutils (roadmap §2.7). At some point a single
+shipping `/bin` must decide which `cat` (etc.) is *the* `cat`. Do the fastpy
+utilities eventually replace the Rust ones, coexist under different names, or
+remain a demo track that never lands in the real shipping image?
+
+**Options.**
+
+- **A — Demonstration track only (current, default).** Keep promoting fastpy
+  commands additively into the *test* rootfs `/bin` to exercise the pipeline, but
+  never let them shadow the Rust coreutils in a production image. *Pro:* zero
+  regression risk to the mature Rust tools; purely additive/reversible. *Con:*
+  the fastpy build pipeline never becomes the *actual* implementation of anything
+  user-facing — it stays a perpetual demo.
+- **B — Fastpy becomes the real implementation, per-command, as each reaches
+  parity.** Grow each fastpy utility to feature parity, then have it *be* the
+  shipping `/bin/<cmd>`, retiring the Rust one. *Pro:* realises the CLAUDE.md
+  "prefer Python via fastpy for userspace tools" guidance; one implementation to
+  maintain. *Con:* large per-command effort to reach parity + the maturity/perf
+  of the Rust tools is thrown away; user-visible behaviour changes; needs a
+  parity bar + test suite per command before any swap.
+- **C — Coexist under distinct names** (e.g. `/bin/pycat`). *Pro:* both available,
+  no collision. *Con:* clutters `/bin`, no clear "which is canonical" story.
+
+**Claude's recommendation.** **A for now** — the current promotions are
+explicitly proof-of-pipeline and I am keeping them additive (no Rust coreutil is
+touched or shadowed). Do **not** silently swap any Rust coreutil for a fastpy one
+— that's a user-visible policy change and belongs to the operator. Revisit
+toward **B** only per-command, and only once a given fastpy utility has a real
+parity test suite. Not blocking: more commands can be promoted additively (track
+A) without resolving this.
+
+**Where it bites.** `scripts/create-ext4-rootfs.sh` (`PROMOTED` map — currently
+maps to the *test* rootfs `/bin`), `kernel/src/proc/spawn.rs`
+(`resolve_command`/`COMMAND_PATH`), the fastpy `services/fastpy-*` sources, and
+whatever eventually assembles the *production* rootfs `/bin` vs. the Rust
+coreutils in `userspace/`.
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

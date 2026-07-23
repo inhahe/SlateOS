@@ -1236,7 +1236,12 @@ impl Ext4Driver {
             }
 
             let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
-            let mut result = Vec::with_capacity(actual_len);
+            // Pre-zero the output so sparse holes (and unwritten extents) read
+            // back as zeros at their correct logical positions.  The tree walk
+            // writes each allocated block by absolute index, never by append —
+            // otherwise a hole in the middle of the requested range would shift
+            // all following data left (see the sparse-ELF corruption bug).
+            let mut result = alloc::vec![0u8; actual_len];
             self.read_range_from_tree(
                 ino_seed,
                 block_bytes,
@@ -1249,7 +1254,6 @@ impl Ext4Driver {
                 &mut result,
             )?;
 
-            result.truncate(actual_len);
             Ok(result)
         } else {
             // Indirect-block-based: read each logical block via lookup.
@@ -3313,20 +3317,20 @@ impl Ext4Driver {
         byte_offset: u64,
         byte_len: usize,
         is_file_data: bool,
-        result: &mut Vec<u8>,
+        result: &mut [u8],
     ) -> KernelResult<()> {
         let block_size = u64::from(self.sb.block_size);
         let block_size_usize = self.sb.block_size as usize;
         let header_size = core::mem::size_of::<Ext4ExtentHeader>();
 
         if header.eh_depth == 0 {
-            // Leaf node — read matching extents.
+            // Leaf node — read matching extents.  `result` is a pre-zeroed slice
+            // of exactly `byte_len` bytes (covering file bytes `[byte_offset,
+            // byte_offset+byte_len)`); every allocated block is written at its
+            // absolute logical position, so unmapped holes and unwritten extents
+            // are left as the pre-existing zeros.
             let extent_size = core::mem::size_of::<Ext4Extent>();
             for i in 0..header.eh_entries as usize {
-                if result.len() >= byte_len {
-                    return Ok(());
-                }
-
                 let off = header_size.saturating_add(i.saturating_mul(extent_size));
                 let ext_bytes = node_data
                     .get(off..off.saturating_add(extent_size))
@@ -3344,37 +3348,36 @@ impl Ext4Driver {
                 if ext_end <= first_logical || ext_logical > last_logical {
                     continue;
                 }
+                // Unwritten extents read back as zeros — already pre-zeroed.
+                if ext_unwritten {
+                    continue;
+                }
 
-                // Read blocks within this extent that overlap our range.
+                // Read blocks within this extent that overlap our range,
+                // mapping each into `result` by its absolute logical position
+                // (never by append) so holes stay as pre-zeroed gaps.
                 for b in 0..ext_len {
                     let logical = ext_logical.saturating_add(b);
                     if logical < first_logical || logical > last_logical {
                         continue;
                     }
-                    if result.len() >= byte_len {
-                        return Ok(());
-                    }
+                    let Some((dest_start, src_start, n)) =
+                        block_copy_placement(logical, block_size, byte_offset, byte_len)
+                    else {
+                        continue;
+                    };
 
                     let mut buf = vec![0u8; block_size_usize];
-                    if !ext_unwritten {
-                        let phys = ext_phys.saturating_add(b);
-                        // Regular-file data bypasses the buffer cache (§38).
-                        self.reader.read_block_classed(phys, &mut buf, is_file_data)?;
-                    }
-                    // Unwritten extents: buf stays zeroed.
+                    let phys = ext_phys.saturating_add(b);
+                    // Regular-file data bypasses the buffer cache (§38).
+                    self.reader.read_block_classed(phys, &mut buf, is_file_data)?;
 
-                    // Calculate how much of this block to copy.
-                    let block_start_byte = logical.saturating_mul(block_size);
-                    let copy_start = if block_start_byte < byte_offset {
-                        (byte_offset.saturating_sub(block_start_byte)) as usize
-                    } else {
-                        0
-                    };
-                    let remaining = byte_len.saturating_sub(result.len());
-                    let copy_end = block_size_usize.min(copy_start.saturating_add(remaining));
-
-                    if let Some(data) = buf.get(copy_start..copy_end) {
-                        result.extend_from_slice(data);
+                    let dest_end = dest_start.saturating_add(n);
+                    let src_end = src_start.saturating_add(n);
+                    if let (Some(dst), Some(src)) =
+                        (result.get_mut(dest_start..dest_end), buf.get(src_start..src_end))
+                    {
+                        dst.copy_from_slice(src);
                     }
                 }
             }
@@ -3382,10 +3385,6 @@ impl Ext4Driver {
             // Internal node — recurse into child blocks.
             let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
             for i in 0..header.eh_entries as usize {
-                if result.len() >= byte_len {
-                    return Ok(());
-                }
-
                 let off = header_size.saturating_add(i.saturating_mul(idx_size));
                 let idx_bytes = node_data
                     .get(off..off.saturating_add(idx_size))
@@ -4035,8 +4034,6 @@ impl Ext4Driver {
 
     /// Read file data using the extent tree.
     fn read_extent_data(&self, inode_nr: u32, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
-        let block_size = u64::from(self.sb.block_size);
-
         // The extent tree root is in inode.i_block (60 bytes).
         // First 12 bytes = extent header, rest = extent entries.
         let block_bytes = inode_block_as_bytes(inode);
@@ -4047,65 +4044,23 @@ impl Ext4Driver {
             return Err(KernelError::IoError);
         }
 
-        let mut result = Vec::with_capacity(file_size as usize);
-
-        if header.eh_depth == 0 {
-            // Leaf node — extents are directly in i_block.
-            let entries = header.eh_entries as usize;
-            let header_size = core::mem::size_of::<Ext4ExtentHeader>();
-            let extent_size = core::mem::size_of::<Ext4Extent>();
-
-            for i in 0..entries {
-                let offset = header_size.saturating_add(i.saturating_mul(extent_size));
-                let ext_bytes = block_bytes.get(offset..offset.saturating_add(extent_size))
-                    .ok_or(KernelError::IoError)?;
-                let extent = read_struct::<Ext4Extent>(ext_bytes)?;
-
-                let phys_block = u64::from(extent.ee_start_lo)
-                    | (u64::from(extent.ee_start_hi) << 32);
-                // Uninitialized (unwritten) extents have bit 15 of ee_len set.
-                // These are pre-allocated but not yet written — reads return zeros.
-                let unwritten = (extent.ee_len & 0x8000) != 0;
-                let block_count = u64::from(extent.ee_len & 0x7FFF);
-
-                for b in 0..block_count {
-                    let mut buf = vec![0u8; block_size as usize];
-                    if !unwritten {
-                        let block_nr = phys_block.saturating_add(b);
-                        // Regular-file data bypasses the buffer cache (§38).
-                        self.reader.read_block_classed(
-                            block_nr,
-                            &mut buf,
-                            inode_holds_file_data(inode),
-                        )?;
-                    }
-                    // Unwritten extents: buf stays zeroed (correct behavior).
-
-                    // Don't append past file_size.
-                    let remaining = file_size.saturating_sub(result.len() as u64);
-                    let copy_len = (block_size).min(remaining) as usize;
-                    if let Some(data) = buf.get(..copy_len) {
-                        result.extend_from_slice(data);
-                    }
-                }
-            }
-        } else {
-            // Multi-level extent tree — follow index nodes.
-            // For simplicity, handle depth=1 (one level of indirection).
-            // Deeper trees are rare for files under ~340 MB.
-            let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
-            self.read_extent_tree_recursive(
-                ino_seed, block_bytes, &header, file_size,
-                inode_holds_file_data(inode), &mut result,
-            )?;
-        }
-
-        // Truncate to exact file size.
-        result.truncate(file_size as usize);
+        // Pre-zero the whole file image so sparse holes and unwritten extents
+        // read back as zeros at their correct logical offsets.  The tree walk
+        // writes each allocated block by absolute index (`ee_block`), never by
+        // append — a hole in the middle must not shift the following data left.
+        let mut result = alloc::vec![0u8; file_size as usize];
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+        self.read_extent_tree_recursive(
+            ino_seed, block_bytes, &header, file_size,
+            inode_holds_file_data(inode), &mut result,
+        )?;
         Ok(result)
     }
 
-    /// Recursively read data from an extent tree node.
+    /// Recursively read data from an extent tree node into a pre-zeroed,
+    /// exactly `file_size`-length output slice.  Each allocated block is placed
+    /// at `ee_block * block_size`; holes and unwritten extents are left as the
+    /// pre-existing zeros.
     fn read_extent_tree_recursive(
         &self,
         ino_seed: u32,
@@ -4113,9 +4068,10 @@ impl Ext4Driver {
         header: &Ext4ExtentHeader,
         file_size: u64,
         is_file_data: bool,
-        result: &mut Vec<u8>,
+        result: &mut [u8],
     ) -> KernelResult<()> {
-        let block_size = self.sb.block_size as usize;
+        let block_size = u64::from(self.sb.block_size);
+        let block_size_usize = self.sb.block_size as usize;
         let header_size = core::mem::size_of::<Ext4ExtentHeader>();
 
         if header.eh_depth == 0 {
@@ -4127,26 +4083,41 @@ impl Ext4Driver {
                     .ok_or(KernelError::IoError)?;
                 let extent = read_struct::<Ext4Extent>(ext_bytes)?;
 
+                let ext_logical = u64::from(extent.ee_block);
                 let phys_block = u64::from(extent.ee_start_lo)
                     | (u64::from(extent.ee_start_hi) << 32);
                 let unwritten = (extent.ee_len & 0x8000) != 0;
                 let block_count = u64::from(extent.ee_len & 0x7FFF);
 
-                for b in 0..block_count {
-                    if result.len() as u64 >= file_size {
-                        return Ok(());
-                    }
-                    let mut buf = vec![0u8; block_size];
-                    if !unwritten {
-                        let block_nr = phys_block.saturating_add(b);
-                        // Regular-file data bypasses the buffer cache (§38).
-                        self.reader.read_block_classed(block_nr, &mut buf, is_file_data)?;
-                    }
+                // Unwritten extents read back as zeros — already pre-zeroed.
+                if unwritten {
+                    continue;
+                }
 
-                    let remaining = file_size.saturating_sub(result.len() as u64);
-                    let copy_len = (block_size as u64).min(remaining) as usize;
-                    if let Some(data) = buf.get(..copy_len) {
-                        result.extend_from_slice(data);
+                for b in 0..block_count {
+                    let logical = ext_logical.saturating_add(b);
+                    // Full-file read: the requested range is the whole file
+                    // (`byte_offset = 0`, `byte_len = file_size`), so `src_start`
+                    // is always 0 and `dest_start = logical * block_size`.
+                    let Some((dest_start, src_start, n)) = block_copy_placement(
+                        logical,
+                        block_size,
+                        0,
+                        file_size as usize,
+                    ) else {
+                        continue;
+                    };
+                    let mut buf = vec![0u8; block_size_usize];
+                    let block_nr = phys_block.saturating_add(b);
+                    // Regular-file data bypasses the buffer cache (§38).
+                    self.reader.read_block_classed(block_nr, &mut buf, is_file_data)?;
+
+                    let dest_end = dest_start.saturating_add(n);
+                    let src_end = src_start.saturating_add(n);
+                    if let (Some(dst), Some(src)) =
+                        (result.get_mut(dest_start..dest_end), buf.get(src_start..src_end))
+                    {
+                        dst.copy_from_slice(src);
                     }
                 }
             }
@@ -4154,9 +4125,6 @@ impl Ext4Driver {
             // Internal node: follow index entries to child blocks.
             let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
             for i in 0..header.eh_entries as usize {
-                if result.len() as u64 >= file_size {
-                    return Ok(());
-                }
                 let offset = header_size.saturating_add(i.saturating_mul(idx_size));
                 let idx_bytes = node_data.get(offset..offset.saturating_add(idx_size))
                     .ok_or(KernelError::IoError)?;
@@ -4164,9 +4132,12 @@ impl Ext4Driver {
 
                 let child_block = u64::from(idx.ei_leaf_lo)
                     | (u64::from(idx.ei_leaf_hi) << 32);
+                if child_block == 0 {
+                    continue;
+                }
 
                 // Read the child block.
-                let mut child_data = vec![0u8; block_size];
+                let mut child_data = vec![0u8; block_size_usize];
                 self.reader.read_block(child_block, &mut child_data)?;
 
                 // Parse child header.
@@ -5194,6 +5165,55 @@ pub fn inode_holds_file_data(inode: &Ext4Inode) -> bool {
     (inode.i_mode & file_type::S_IFMT) == file_type::S_IFREG
 }
 
+/// Compute where a file's logical block lands inside an output buffer that
+/// covers the byte range `[byte_offset, byte_offset + byte_len)`.
+///
+/// Returns `(dest_start, src_start, n)`:
+/// - `dest_start` — index into the output buffer where copying begins,
+/// - `src_start`  — index into the freshly-read block buffer to copy from,
+/// - `n`          — number of bytes to copy.
+///
+/// Returns `None` when the block lies entirely outside the requested range (or
+/// the overlap is empty).
+///
+/// This is the placement arithmetic at the heart of sparse-file correctness:
+/// the destination is derived from the block's *logical* position, never from a
+/// running append counter — so an unmapped hole (a logical block with no extent)
+/// leaves its gap in the pre-zeroed output instead of shifting later data left.
+/// A prior bug appended each allocated block contiguously, which corrupted every
+/// sparse file (e.g. the fastpy self-test ELFs, >50 % zeros): later segments were
+/// dragged into the holes, so an ELF's function pointers pointed at the wrong
+/// bytes and the process jumped through null on start-up.
+fn block_copy_placement(
+    logical: u64,
+    block_size: u64,
+    byte_offset: u64,
+    byte_len: usize,
+) -> Option<(usize, usize, usize)> {
+    let block_start_byte = logical.saturating_mul(block_size);
+    let block_end_byte = block_start_byte.saturating_add(block_size);
+    let range_end = byte_offset.saturating_add(byte_len as u64);
+    // No overlap with the requested range.
+    if block_end_byte <= byte_offset || block_start_byte >= range_end {
+        return None;
+    }
+    // Where within the block the copy begins (nonzero only for the first block
+    // when the range starts partway into it).
+    let src_start = byte_offset.saturating_sub(block_start_byte).min(block_size) as usize;
+    let abs_start = block_start_byte.saturating_add(src_start as u64);
+    let dest_start = abs_start.saturating_sub(byte_offset) as usize;
+    if dest_start >= byte_len {
+        return None;
+    }
+    let avail_in_block = (block_size as usize).saturating_sub(src_start);
+    let avail_in_result = byte_len.saturating_sub(dest_start);
+    let n = avail_in_block.min(avail_in_result);
+    if n == 0 {
+        return None;
+    }
+    Some((dest_start, src_start, n))
+}
+
 pub fn inode_block_as_bytes(inode: &Ext4Inode) -> &[u8] {
     // SAFETY: i_block is [u32; 15] inside a repr(C) struct.
     // Reinterpreting as bytes is safe on any platform.
@@ -5521,8 +5541,52 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_dir_entries()?;
     test_write_dir_entry_raw()?;
     test_blank_inode()?;
+    test_block_copy_placement()?;
 
-    crate::serial_println!("[ext4-driver] Self-test PASSED (9 tests)");
+    crate::serial_println!("[ext4-driver] Self-test PASSED (10 tests)");
+    Ok(())
+}
+
+/// Verify [`block_copy_placement`] positions blocks by their *logical* offset,
+/// so a sparse file's holes stay as zeros instead of shifting later data left
+/// (the sparse-ELF corruption regression — see the fn's doc comment).
+fn test_block_copy_placement() -> KernelResult<()> {
+    const BS: u64 = 4096;
+    let check = |got: Option<(usize, usize, usize)>,
+                 want: Option<(usize, usize, usize)>,
+                 what: &str|
+     -> KernelResult<()> {
+        if got != want {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: block_copy_placement {} = {:?}, want {:?}",
+                what, got, want
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+
+    // Full-file read: each block lands at logical*block_size.
+    check(block_copy_placement(0, BS, 0, 8192), Some((0, 0, 4096)), "full b0")?;
+    check(block_copy_placement(1, BS, 0, 8192), Some((4096, 0, 4096)), "full b1")?;
+
+    // Sparse regression: with a hole at logical block 1, block 2 must stay at
+    // byte 8192, NOT collapse to 4096.
+    check(block_copy_placement(2, BS, 0, 12288), Some((8192, 0, 4096)), "sparse b2")?;
+
+    // Tail block clamped to file size.
+    check(block_copy_placement(1, BS, 0, 4196), Some((4096, 0, 100)), "clamp tail")?;
+
+    // Page-aligned partial read [8192,12288): covering block maps to page start.
+    check(block_copy_placement(2, BS, 8192, 4096), Some((0, 0, 4096)), "page b2")?;
+    check(block_copy_placement(3, BS, 8192, 4096), None, "page past")?;
+    check(block_copy_placement(1, BS, 8192, 4096), None, "page before")?;
+
+    // Unaligned range start sets the src offset within the first block.
+    check(block_copy_placement(1, BS, 4196, 4096), Some((0, 100, 3996)), "unaligned b1")?;
+    check(block_copy_placement(2, BS, 4196, 4096), Some((3996, 0, 100)), "unaligned b2")?;
+
+    crate::serial_println!("[ext4-driver]   block_copy_placement (sparse holes): OK");
     Ok(())
 }
 
@@ -6014,4 +6078,74 @@ fn test_blank_inode() -> KernelResult<()> {
 
     crate::serial_println!("[ext4-driver]   blank_inode: OK");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (host `cargo test` only — not compiled into the kernel)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod placement_tests {
+    use super::block_copy_placement;
+
+    const BS: u64 = 4096;
+
+    /// A full-file read (offset 0, len = file_size) places each block at its
+    /// logical offset — the property that makes holes read as zeros.
+    #[test]
+    fn full_file_places_by_logical_offset() {
+        // Block 0 -> dest 0.
+        assert_eq!(block_copy_placement(0, BS, 0, 8192), Some((0, 0, 4096)));
+        // Block 1 -> dest 4096 (NOT appended after block 0).
+        assert_eq!(block_copy_placement(1, BS, 0, 8192), Some((4096, 0, 4096)));
+    }
+
+    /// The sparse-file regression: with a hole at logical block 1, block 2 must
+    /// still land at byte offset 8192, leaving [4096,8192) as the pre-zeroed
+    /// hole — never dragged left into the hole (the old append bug).
+    #[test]
+    fn hole_does_not_shift_following_blocks() {
+        let file_size = 12288usize; // 3 blocks
+        // Blocks 0 and 2 are allocated; block 1 is a hole (never placed).
+        let p0 = block_copy_placement(0, BS, 0, file_size).unwrap();
+        let p2 = block_copy_placement(2, BS, 0, file_size).unwrap();
+        assert_eq!(p0, (0, 0, 4096));
+        // Block 2 stays at its logical position 8192, not 4096.
+        assert_eq!(p2, (8192, 0, 4096));
+    }
+
+    /// The final block is clamped to the file's tail length.
+    #[test]
+    fn last_block_clamped_to_file_size() {
+        // file_size = 4096 + 100: block 1 contributes only 100 bytes.
+        assert_eq!(block_copy_placement(1, BS, 0, 4196), Some((4096, 0, 100)));
+    }
+
+    /// A page-aligned partial read (offset 8192, one page) maps the covering
+    /// blocks relative to the page start.
+    #[test]
+    fn partial_range_maps_relative_to_offset() {
+        // Reading [8192, 12288): block 2 -> dest 0 within the page buffer.
+        assert_eq!(block_copy_placement(2, BS, 8192, 4096), Some((0, 0, 4096)));
+        // Block 3 would be past the requested page -> None.
+        assert_eq!(block_copy_placement(3, BS, 8192, 4096), None);
+        // Block 1 is before the requested page -> None.
+        assert_eq!(block_copy_placement(1, BS, 8192, 4096), None);
+    }
+
+    /// A range that starts partway into a block copies from the right src.
+    #[test]
+    fn unaligned_range_start_sets_src_offset() {
+        // Reading [4196, 8292) (starts 100 bytes into block 1).
+        // Block 1: src_start=100, dest_start=0, n = 4096-100 = 3996.
+        assert_eq!(block_copy_placement(1, BS, 4196, 4096), Some((0, 100, 3996)));
+        // Block 2: dest_start = 8192-4196 = 3996, src_start=0, clamped to 100.
+        assert_eq!(block_copy_placement(2, BS, 4196, 4096), Some((3996, 0, 100)));
+    }
+
+    /// Blocks entirely outside the range yield None.
+    #[test]
+    fn out_of_range_blocks_are_none() {
+        assert_eq!(block_copy_placement(10, BS, 0, 4096), None);
+    }
 }

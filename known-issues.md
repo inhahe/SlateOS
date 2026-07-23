@@ -14,6 +14,41 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-EXT4-SPARSE-READ. ext4 extent reader collapsed sparse holes — every sparse file read back corrupted (data shifted left into the holes) — 2026-07-23 — ✅ RESOLVED 2026-07-23
+
+**Where:** `kernel/src/fs/ext4/driver.rs` — `read_range_from_tree` (the page-cache
+fill primitive behind `read_at`/`mmap`), `read_extent_data` + `read_extent_tree_recursive`
+(the full-file `read_file_data` path).
+
+**What:** All three extent readers assembled file data by **appending** each
+allocated block's bytes to the output (`result.extend_from_slice(...)`, tracking
+position by `result.len()`), and **never consulted `extent.ee_block`** (the block's
+logical offset). For a *contiguous* file this is fine. For a **sparse** file (one
+with unmapped logical blocks — holes), the gaps were simply skipped, so every block
+after a hole was placed at the wrong offset — the data after each hole got dragged
+left into the hole. The read came back the correct *length* only because the read
+path pre-zeroes a full-size page-cache buffer (`read_file_routed` → `read_through`),
+and the *zero-count* happened to match — but the bytes were permuted, so any hash
+differed.
+
+**How it manifested:** the fastpy self-test ELFs (moved onto the rootfs disk for
+TD-KERNEL-EMBED-BLOAT) are **>50 % zeros** and stored sparse by `cp`/mkfs (e.g.
+`fastpy-hello.elf`: 3 475 528 bytes, 1 777 808 zero, ~214 hole blocks). Loaded from
+`/mnt/tests`, every one validated as an ELF (header/TLS in the first, hole-free
+blocks) and reached `Zombie`, then **jumped through a null function pointer**
+(`rip=0x0`, exit code -8) because its `.data`/relocated code had been shifted — 100 %
+of fastpy ring-3 tests failed identically. Dense files (glibc `.so`) were unaffected,
+which is why real-glibc Path-Z tests always passed. Confirmed by checksumming the
+loaded ELF in-kernel: FNV `0x42eb…bf12` vs host `0x77f4…bf12` (same len, same zero
+count), then byte-exact match after the fix.
+
+**Fix:** rewrote all three readers to place each allocated block at its **absolute
+logical offset** in a pre-zeroed output buffer, leaving holes and unwritten extents
+as zeros. Extracted the placement arithmetic into a pure `block_copy_placement()`
+helper (unit-tested in `#[cfg(test)] mod placement_tests` and by the boot-time
+`test_block_copy_placement` in `driver::self_test`). Verified: all 55 sparse fastpy
+ring-3 self-tests pass, byte-exact ELF load, green boot.
+
 ### BUG-BOOTTEST-BOOTOK-SUBSTRING. `boot-test.sh` reported PASSED on a livelocked boot because its `grep -q "BOOT_OK"` matched the substring inside the livelock diagnostic "…still armed 200s after arming (no BOOT_OK)…" — 2026-07-22 — ✅ RESOLVED 2026-07-22
 
 The success marker is printed as a standalone line (`serial_println!("BOOT_OK")`),
@@ -85,7 +120,7 @@ the accessors bounds-check against the live length. Covers all installed RAM.
 Verified: boot GREEN at `-m 3072M`, `[mm] Cgroup per-frame tracking: OK` +
 `Cgroup charge/uncharge round-trip (no double-charge): OK`.
 
-### TD-KERNEL-EMBED-BLOAT. Kernel image grows ~3.5 MiB per fastpy self-test — every self-test ELF is baked into `.rodata` via `include_bytes!` — 2026-07-22 — OPEN (tech debt; mitigated by raising boot-test RAM)
+### TD-KERNEL-EMBED-BLOAT. Kernel image grows ~3.5 MiB per fastpy self-test — every self-test ELF is baked into `.rodata` via `include_bytes!` — 2026-07-22 — ✅ RESOLVED 2026-07-23 (Q33-B: staged onto rootfs disk, loaded at runtime)
 
 **What:** Each fastpy ring-3 self-test embeds its native SlateOS ELF directly
 into the kernel binary with `include_bytes!` (see the ~47 embeds under
@@ -112,6 +147,20 @@ have the kernel self-tests load them from disk via the VFS, exactly like a real
 removes the per-test `.rodata` growth, and makes the self-tests exercise the
 disk/loader path too. Secondary lever: shrink each fastpy ELF (shared runtime
 `.so` / dead-strip) so even embedded builds are smaller.
+
+**Resolution (2026-07-23, Q33-B — see design-decisions.md #86):** implemented the
+proper fix. The 54 `include_bytes!` fastpy embeds in `kernel/src/proc/spawn.rs` were
+converted to runtime disk loads via a new `load_test_elf(name)` helper that reads
+`/mnt/tests/<name>.elf` through `crate::fs::Vfs::read_file` (the ext4 rootfs is
+mounted at `/mnt` before the Path-Z self-tests run). Each test self-*skips*
+(`return Ok(())`) when the fixture is absent, so a lean build with no test disk still
+boots green. `scripts/create-ext4-rootfs.sh` stages all fastpy `*.elf` into `/tests`
+and the image grew 48M→256M to hold them. **Result: debug kernel binary 361.7 MiB →
+181.8 MiB (−180 MiB / ~50 %).** Uncovered and fixed BUG-EXT4-SPARSE-READ in the
+process (the sparse fastpy ELFs were the first sparse files ever read through the
+extent path). Verified: 55/55 fastpy ring-3 self-tests pass loading from disk, green
+boot. Follow-on secondary lever (shared-runtime `.so` to shrink each ELF) remains a
+possible future optimization but is no longer urgent.
 
 ### TD-POSIX-TEST-PARALLEL. `cargo test -p posix` is flaky under parallel execution — non-thread-safe libc functions share `static mut` return buffers — 2026-07-22 — OPEN (test-infra; run with `--test-threads=1` meanwhile)
 

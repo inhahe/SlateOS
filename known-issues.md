@@ -6830,6 +6830,30 @@ the quarantine *self-test* deliberately corrupts a parked slot and prints
 `[quarantine]`-prefixed and never matches the hunt's `[hunt] … corruptions=[1-9]`
 checkpoint pattern, so it does not false-trip the corruption catch.)
 
+**UPDATE 2026-07-23 (f) — first full 100-iter armed hunt campaign ran CLEAN
+(B-KNULLJUMP NOT reproduced; bug NOT cleared).** With the KASAN cover fix (c) and
+both false-positive fixes (d),(e) in place, `soak-20260723-190300` ran to
+completion: **100/100 boots reached BOOT_OK and PASSED**, boot wall-clock
+~283–318s (297s on the final iter), `[hunt] corruptions=0` on every iteration,
+zero serial-stall wedges (rc=2 never fired), zero fatal-fault catches. Final
+harness verdict: `SOAK DONE: no wedge caught in 100 iters (race did not fire)` /
+`WEDGE_SOAK_DONE rc_caught=0`. Archives: `build/hang-catches/soak-20260723-190300-iter*.{serial,stdout}.txt`.
+**This does NOT clear B-KNULLJUMP.** At the observed ~1-in-120 base rate,
+P(zero catches in 100 boots) ≈ e^(−100/120) ≈ **43%** — i.e. a clean 100-iter
+run is the *more-likely-than-not* outcome even if the bug is fully present and
+unchanged. So the campaign is inconclusive, not exonerating. What it *does*
+establish: (1) the harness is now false-positive-free across 100 real boots
+(the three fixed classes did not recur); (2) the passive KASAN-shadow +
+slab-free-quarantine tooling (Path A / Q32→A), even with the 64 GiB cover, did
+not catch the wild write in this window — consistent with the known structural
+blind spot (B-KNULLJUMP stomps a *live* scheduler BTreeMap node, not a
+parked/poisoned slot, so passive shadow only catches it on the rare occasions
+the stray store lands in an already-poisoned granule). Path A is effectively
+exhausted for reproduction/localization; the documented next escalation is
+compiler-instrumented KASAN (Q34→B in open-questions.md), which is
+operator-decision-worthy and NOT started unilaterally. B-KNULLJUMP does not
+block other roadmap work.
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge

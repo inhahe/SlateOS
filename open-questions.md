@@ -64,11 +64,26 @@ shadow + quarantine tools?
 
 **Claude's recommendation.** **A first, B as fallback.** Sequence the lighter
 tools (done) → run the hunt → only escalate to compiler KASAN if quarantine +
-targeted checks fail to localize it. In the meantime I'm proceeding on A
-(wiring the tools into the Path-Z repro). Flagging B because committing the
+targeted checks fail to localize it. Flagging B because committing the
 kernel to a full instrumented build is a costly, hard-to-reverse fork the
-operator may want to weigh in on — but it does **not** block A, so I'm not
-idling on it.
+operator may want to weigh in on — but it does **not** block A.
+
+**UPDATE 2026-07-23 — Path A now effectively exhausted for this bug.** A full
+100-iteration armed hunt campaign (`soak-20260723-190300`, `mm.corruption_hunt=1`,
+KASAN shadow @64 GiB cover + slab free-quarantine) ran to completion with the
+harness now false-positive-free: **100/100 boots PASSED, `[hunt] corruptions=0`
+on every iter, zero wedges.** This is *inconclusive, not exonerating* — at the
+~1-in-120 base rate, a clean 100-run is ~43% likely even if the bug is fully
+present (see known-issues.md B-KNULLJUMP UPDATE (f)). The passive tools did not
+catch the wild store, consistent with their known structural blind spot (they
+only see the write if it lands in a parked/poisoned granule; B-KNULLJUMP stomps
+a *live* BTree node). **Bottom line for the operator:** the cheap Path-A tooling
+has been built, hardened, and run at scale without localizing B-KNULLJUMP, so
+the remaining escalation is **Option B (compiler-instrumented KASAN)** — the one
+tool that instruments *every* store and would flag the exact faulting
+instruction. I am **not** starting B unilaterally (it's the costly build fork
+this question is about) and B-KNULLJUMP does not block other roadmap work, so
+I'm moving on to other tasks until you weigh in.
 
 **Where it bites.** `kernel/src/mm/kasan.rs`, `kernel/src/mm/quarantine.rs`,
 `kernel/src/mm/heap.rs` (alloc/free hooks); a compiler-KASAN escalation would

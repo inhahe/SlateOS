@@ -1693,6 +1693,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the pure-mode `pathlib.Path` runtime (CPython-free): a
+    // fastpy program exercises write_text/read_text/exists/is_file/is_dir/
+    // name/suffix/stem/parent/joinpath against /tmp and exits with the count of
+    // checks passed (expected 10). Proves the high-level Pythonic Path API works
+    // in a no-CPython SlateOS build, not just the low-level os.* calls.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_pathlib() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS pure-mode `pathlib.Path` runtime self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
     // reads argv[2], prints lines containing argv[1] via the native
     // contains_sub matcher, and exits 0/1 per grep semantics.

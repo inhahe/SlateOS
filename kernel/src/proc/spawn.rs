@@ -8401,6 +8401,167 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `fastpy-pathlib` utility — the on-target proof
+/// of fastpy's **pure-mode `pathlib.Path`** runtime (`runtime/pathlib_pure.c`).
+///
+/// Where the shell-plumbing utilities exercised the low-level `os.*` calls
+/// (`os.open`/`read`/`write`/`fork`/`dup2`/`execv`), this drives the high-level
+/// Pythonic `Path` API a real filesystem-touching fastpy component would use:
+/// `Path.write_text`/`read_text`, `exists`, `is_file`, `is_dir`, and the
+/// name-component accessors (`name`/`suffix`/`stem`/`parent`/`joinpath`).  In
+/// pure mode those are backed by a CPython-free C string + stdio implementation
+/// rather than the (absent) libpython bridge — this test proves that
+/// implementation works end-to-end against the SlateOS VFS.
+///
+/// The utility runs 10 independent checks against a scratch file under `/tmp`
+/// and exits with the count that passed (see `services/fastpy-pathlib/build.py`
+/// for the exact list), so a partial failure yields a diagnostic count < 10
+/// that localizes how much of the Path surface works.  We assert exit == 10 and
+/// independently confirm the file the program wrote via `Path.write_text`
+/// actually landed on the VFS with the expected bytes.  Self-skips if the ELF
+/// fixture is absent (lean build with no /tests disk).
+pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
+    let pathlib_elf = match load_test_elf("fastpy-pathlib") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-pathlib: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    const OUT_PATH: &str = "/tmp/fpy-pathlib.txt";
+    const EXPECTED_CONTENT: &[u8] = b"hello pathlib\n";
+    // The program runs 10 checks and exits with a BITMASK: check N sets bit
+    // (N-1). All ten passing == 2^10 - 1 == 1023. Any other value's clear bits
+    // name exactly which checks failed (see services/fastpy-pathlib/build.py).
+    const EXPECTED_OK: i32 = 1023;
+    // Human-readable name for each bit, lowest first, for the failure diagnostic.
+    const CHECK_NAMES: [&str; 10] = [
+        "read_text round-trip",
+        "exists()",
+        "is_file()",
+        "not is_dir()",
+        "name=='fpy-pathlib.txt'",
+        "suffix=='.txt'",
+        "stem=='fpy-pathlib'",
+        "str(parent)=='/tmp'",
+        "joinpath=='/tmp/fpy-pathlib.txt'",
+        "/tmp is_dir()",
+    ];
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS `pathlib` (pure-mode pathlib.Path: write_text/read_text/\
+         exists/is_file/is_dir/name/suffix/stem/parent/joinpath) integration test ({} bytes ELF)...",
+        pathlib_elf.len()
+    );
+
+    // Start from a clean slate so a leftover file can't mask a write failure.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[b"fastpy-pathlib"];
+    let envp: &[&[u8]] = &[];
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "fastpy-pathlib",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = spawn_process(&pathlib_elf, &options)?;
+    let mut became_zombie = false;
+    for _ in 0..4000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pathlib — expected Zombie, got {:?} (process did not exit)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(EXPECTED_OK) {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        let mask = exit_code.unwrap_or(0);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-pathlib — check bitmask {:#b} (exit {:?}), expected {:#b} ({}). \
+             A cleared bit means that pathlib.Path operation returned the wrong result in pure mode:",
+            mask,
+            exit_code,
+            EXPECTED_OK,
+            EXPECTED_OK
+        );
+        let mut i = 0usize;
+        while i < CHECK_NAMES.len() {
+            let bit = 1i32 << i;
+            serial_println!(
+                "[spawn]       check {}: {} — {}",
+                i + 1,
+                CHECK_NAMES[i],
+                if mask & bit != 0 { "PASS" } else { "FAIL" }
+            );
+            i += 1;
+        }
+        return Err(KernelError::InternalError);
+    }
+    // The exit count says the program's OWN read_text saw the right bytes;
+    // independently confirm write_text actually persisted them to the VFS.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED_CONTENT {
+                let _ = crate::fs::Vfs::remove(OUT_PATH);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-pathlib — Path.write_text left {} bytes on disk, expected \
+                     {} (the write did not persist the expected content to the VFS)",
+                    bytes.len(),
+                    EXPECTED_CONTENT.len()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pathlib — could not read back {} ({:?}) — Path.write_text \
+                 never created the file on the VFS",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    serial_println!(
+        "[spawn]   fastpy-pathlib: all 10 pure-mode pathlib.Path checks passed (bitmask {}: \
+         write_text/read_text round-trip, exists/is_file/is_dir, name/suffix/stem/parent/joinpath) \
+         AND the written file verified on the VFS: OK — a fastpy pure-mode program can now touch the \
+         filesystem through the high-level Path API, not just raw os.* calls",
+        EXPECTED_OK
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the `fastpy-grep` utility — a fixed-string
 /// `grep`(1) (`grep <pattern> <file>`): reads the file named by `argv[2]`,
 /// prints every line containing the substring `argv[1]`, and exits following

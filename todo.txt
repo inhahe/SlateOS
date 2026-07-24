@@ -53819,6 +53819,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   (a) parent symlink followed w/o flag, (b) parent symlink -> ELOOP w/ flag
 ##   (the case NOFOLLOW misses), (c) final symlink -> ELOOP, (d) clean path OK.
 
+## DONE (initiative-F / fastpy pure-mode file I/O) — completed 2026-07-24
+##   RESOLVED. runtime/pathlib_pure.c (fastpy repo) is the bridge-neutral,
+##   CPython-free pathlib.Path surface: Path/write_text/read_text/exists/
+##   is_file/is_dir/name/suffix/stem/parent/joinpath, a Path == a heap C string
+##   backed by plain stdio (fopen/fread/fwrite) over the SlateOS posix libc's
+##   SYS_FS_* VFS syscalls. Compiled only in pure builds (toolchain
+##   _SLATEOS_RUNTIME_NAMES); the host build keeps cpython_bridge.c.
+##   Two codegen bugs fixed along the way (see fastpy known-issues.md):
+##     - str(Path) raised "requires the CPython bridge" — Path is OBJ-tagged but
+##       its data is a raw char*, so generic fastpy_fv_str routed it to the
+##       pure-mode bridge stub. Fixed: _emit_builtin_str specializes PATH args to
+##       fastpy_path_str; _infer_type_tag keeps the PATH tag on Path-returning
+##       method calls (d.joinpath(...) etc.).
+##     - Path buffer offset-32 magic collision — _path_alloc_n zero-pads Path
+##       buffers to >=40 bytes so the OBJ decref dispatcher reads 0, not garbage.
+##   Validated on-target: services/fastpy-pathlib/ (build.py + fastpy-pathlib.elf)
+##   and kernel self_test_fastpy_slateos_pathlib (spawn.rs) — 10-check bitmask,
+##   all pass (exit 1023). Residual tech-debt (Path-header collision if bytes
+##   32-35 == magic; iterdir() deferred) tracked in fastpy known-issues.md.
+##
+## (original task description follows)
 ## TODO (initiative-F / fastpy pure-mode file I/O) — 2026-07-21
 ##   Enable real file I/O for fastpy *pure-mode* (SlateOS) programs — the main
 ##   prerequisite for a shipping fastpy component that touches the filesystem

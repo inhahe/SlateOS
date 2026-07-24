@@ -1607,6 +1607,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the RICHER pure-mode file-object surface: `with open()`,
+    // whole-file read, line iteration (`for line in f`), readline, readlines —
+    // the file-object API a real pure-mode fastpy program uses, beyond the bare
+    // open/write/read the previous test covers.  Bounded yield loop; can never
+    // hang the boot.
+    if let Err(e) = proc::spawn::self_test_fastpy_slateos_fileio2() {
+        serial_println!(
+            "WARNING: fastpy-on-SlateOS pure-mode file-object surface (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of the FIRST SHIPPING fastpy SlateOS utility:
     // `fastpy-cat`, a real `cat`(1) that reads its argv[1] file and echoes it
     // to stdout.  Ties together argv delivery + pure-mode file I/O + stdout

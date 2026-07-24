@@ -6549,6 +6549,163 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the **richer pure-mode file-object surface** —
+/// `services/fastpy-fileio2`.  Where [`self_test_fastpy_slateos_fileio`] proves
+/// the bare `open('w')`/`write`/`read` round-trip, this drives the file-object
+/// API a real pure-mode fastpy program uses: the `with open(...) as f:` context
+/// manager (implicit close on block exit), whole-file `read()`, line iteration
+/// (`for line in f:`), `readline()`, and `readlines()`.  In pure mode these are
+/// backed by the CPython-free native file object (C stdio over posix `libc.a`),
+/// so this proves that surface works end-to-end against the SlateOS VFS.
+///
+/// The program writes three known lines to `/tmp/fpyio2.txt`, then runs four
+/// independent checks and exits with a **bitmask**: check N sets bit (N-1). All
+/// four passing == 2^4 - 1 == 15; any other value's clear bits name exactly
+/// which file-object operation misbehaved (see `services/fastpy-fileio2/build.py`).
+/// We assert exit == 15 and independently confirm the three lines the program
+/// wrote actually landed on the VFS.  Self-skips if the ELF fixture is absent.
+pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
+    let fileio2_elf = match load_test_elf("fastpy-fileio2") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP fastpy-fileio2: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    const OUT_PATH: &str = "/tmp/fpyio2.txt";
+    const EXPECTED_CONTENT: &[u8] = b"alpha\nbeta\ngamma\n";
+    // Four checks; check N sets bit (N-1). All pass == 2^4 - 1 == 15.
+    const EXPECTED_OK: i32 = 15;
+    const CHECK_NAMES: [&str; 4] = [
+        "with-open f.read() whole file",
+        "for line in f (3 lines)",
+        "f.readline() == 'alpha\\n'",
+        "f.readlines() len == 3",
+    ];
+
+    serial_println!(
+        "[spawn] Running fastpy-on-SlateOS pure-mode file-object surface (with open()/for line in f/\
+         readline/readlines) integration test ({} bytes ELF)...",
+        fileio2_elf.len()
+    );
+
+    // Start from a clean slate so a leftover file can't mask a write failure.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[b"fastpy-fileio2"];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "fastpy-fileio2",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&fileio2_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            serial_println!("[spawn]   FAIL: fastpy-fileio2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..4000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-fileio2 (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state means the fastpy runtime faulted somewhere on the file-object path)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED_OK) {
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        let mask = exit_code.unwrap_or(0);
+        serial_println!(
+            "[spawn]   FAIL: fastpy-fileio2 — check bitmask {:#b} (exit {:?}), expected {:#b} ({}). \
+             A cleared bit means that file-object operation returned the wrong result in pure mode:",
+            mask,
+            exit_code,
+            EXPECTED_OK,
+            EXPECTED_OK
+        );
+        let mut i = 0usize;
+        while i < CHECK_NAMES.len() {
+            let bit = 1i32 << i;
+            serial_println!(
+                "[spawn]       check {}: {} — {}",
+                i + 1,
+                CHECK_NAMES[i],
+                if mask & bit != 0 { "PASS" } else { "FAIL" }
+            );
+            i += 1;
+        }
+        return Err(KernelError::InternalError);
+    }
+
+    // The exit count says the program's OWN reads saw the right data;
+    // independently confirm the three lines actually persisted to the VFS.
+    match crate::fs::Vfs::read_file(OUT_PATH) {
+        Ok(bytes) => {
+            if bytes.as_slice() != EXPECTED_CONTENT {
+                let _ = crate::fs::Vfs::remove(OUT_PATH);
+                serial_println!(
+                    "[spawn]   FAIL: fastpy-fileio2 — file on disk was {} bytes, expected {} \
+                     (the writes did not persist the expected content to the VFS)",
+                    bytes.len(),
+                    EXPECTED_CONTENT.len()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            serial_println!(
+                "[spawn]   FAIL: fastpy-fileio2 — could not read back {} ({:?}) — the file writes \
+                 never created the file on the VFS",
+                OUT_PATH, e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    serial_println!(
+        "[spawn]   fastpy-fileio2: all 4 pure-mode file-object checks passed (bitmask {}: \
+         with-open f.read(), for-line iteration, readline, readlines) AND the written file \
+         verified on the VFS: OK — a fastpy pure-mode program can drive the full file-object \
+         API, not just bare open/read/write",
+        EXPECTED_OK
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the **first shipping fastpy SlateOS utility**:
 /// `services/fastpy-cat`, a minimal `cat`(1).
 ///

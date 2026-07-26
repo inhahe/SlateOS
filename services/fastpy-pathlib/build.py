@@ -17,13 +17,13 @@ kernel ring-3 self-test (`self_test_fastpy_slateos_pathlib` in
 arguments.
 
 The exit status is a **bitmask**: check N (1-based) sets bit (N-1), i.e. adds
-2**(N-1) to `ok`. Bit 15 (32768) is a *completion sentinel* set unconditionally
-on the last line, so a full pass is 2**16 - 1 == 65535; any other value's clear
+2**(N-1) to `ok`. Bit 17 (131072) is a *completion sentinel* set unconditionally
+on the last line, so a full pass is 2**18 - 1 == 262143; any other value's clear
 bits name exactly which checks failed (far more diagnostic than a bare count),
-and a clear bit 15 means the program died before finishing (an uncaught
+and a clear bit 17 means the program died before finishing (an uncaught
 exception exits 1, which would otherwise read as "only check 1 passed").
 
-Checks (bit value in parentheses; EXPECTED = 65535 on success):
+Checks (bit value in parentheses; EXPECTED = 262143 on success):
    1. write_text then read_text round-trips the exact bytes        (1)
    2. exists() is true for the written file                        (2)
    3. is_file() is true for it                                     (4)
@@ -39,12 +39,28 @@ Checks (bit value in parentheses; EXPECTED = 65535 on success):
   13. the os.mkdir'd scratch directory is_dir()                    (4096)
   14. iterdir() entries keep their Path type (.name works on them) (8192)
   15. iterdir() entries are fully joined (read_text on them works)(16384)
+  16. the builtin open() accepts a Path (not just a str)          (32768)
+  17. a None-returning __exit__ does NOT swallow the exception    (65536)
 
 Checks 11-12 are the on-target half of the FpyPurePath header work: the path
 text is chosen so bytes 32..35 spell "SJBO" == FPY_OBJ_MAGIC, which under the
 old bare-`char*` Path representation made the OBJ refcount dispatcher treat the
 filename as a live object and decrement bytes of it in place. Checks 13-15
 cover `Path.iterdir()`, the only Path method returning a container of Paths.
+
+Check 16 covers the builtin `open()`, which reaches the filesystem through
+`fastpy_io_open` rather than the `os.*` table swept when the Path header was
+introduced — so it kept passing the header through unconverted and fopen() tried
+to open a file literally named "PATH" (the header's magic word).
+
+Check 17 is not about pathlib at all; it rides along because it needs a real
+boot. A Python method with no `return <expr>` compiles to a *void* LLVM
+function, but the runtime's string method dispatcher called every method through
+an `int64_t`-returning pointer type, so the "result" was whatever the callee left
+in the return register. For `__exit__` a truthy result means "suppress the
+exception", so an exception raised in a `with` body silently vanished whenever
+`__exit__` did enough work to dirty that register (touching `self` sufficed).
+The dispatchers now honour `FpyMethodDef.returns_value`.
 
 Run from the fastpy repo root so `compiler` is importable, e.g.:
 
@@ -142,11 +158,41 @@ SRC = (
     "    ok = ok + 8192\n"
     "if body == '1\\n2\\n' or body == '2\\n1\\n':\n"
     "    ok = ok + 16384\n"
-    # Completion sentinel (bit 15). Set unconditionally on the last line before
+    # Check 16: the builtin open() given a Path rather than a str. This is a
+    # different code path from os.open() — it goes to fastpy_io_open — and it was
+    # missed when the FpyPurePath header landed, so fopen() received the header
+    # and reported "No such file or directory: 'PATH'".
+    "fh = open(p, 'r')\n"
+    "if fh.read() == 'hello pathlib\\n':\n"
+    "    ok = ok + 32768\n"
+    "fh.close()\n"
+    # Check 17: a `with` block whose __exit__ returns None must NOT suppress an
+    # exception raised in the body. __exit__ touches `self` deliberately — that
+    # is what used to leave a non-zero value in the return register, which the
+    # `with` lowering then read as a truthy "suppress it" answer.
+    "class Guard:\n"
+    "    def __init__(self, tag):\n"
+    "        self.tag = tag\n"
+    "    def __enter__(self):\n"
+    "        return self\n"
+    "    def __exit__(self, a, b, c):\n"
+    "        print('DIAG guard-exit')\n"
+    "        print(self.tag)\n"
+    "caught = 0\n"
+    "try:\n"
+    "    with Guard('g1'):\n"
+    "        raise ValueError('propagate me')\n"
+    "except ValueError:\n"
+    "    caught = 1\n"
+    "if caught == 1:\n"
+    "    ok = ok + 65536\n"
+    "if caught == 0:\n"
+    "    print('DIAG with-exception-SWALLOWED')\n"
+    # Completion sentinel (bit 17). Set unconditionally on the last line before
     # exiting, so its ABSENCE means "the program never reached the end" — an
     # uncaught exception, which exits 1, would otherwise be indistinguishable
     # from the legitimate bitmask "only check 1 passed".
-    "ok = ok + 32768\n"
+    "ok = ok + 131072\n"
     "sys.exit(ok)\n"
 )
 

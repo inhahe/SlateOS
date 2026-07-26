@@ -8570,13 +8570,13 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
 /// rather than the (absent) libpython bridge — this test proves that
 /// implementation works end-to-end against the SlateOS VFS.
 ///
-/// The utility runs 15 independent checks against scratch files under `/tmp`
+/// The utility runs 17 independent checks against scratch files under `/tmp`
 /// and exits with a BITMASK of which ones passed (see
 /// `services/fastpy-pathlib/build.py` for the exact list), so a partial failure
-/// names the exact operations that regressed rather than just a count.  A
-/// sixteenth "completion sentinel" bit is set unconditionally on the program's
+/// names the exact operations that regressed rather than just a count.  An
+/// eighteenth "completion sentinel" bit is set unconditionally on the program's
 /// last line, so a crash (an uncaught exception exits 1) cannot be misread as a
-/// partial bitmask.  We assert exit == 65535 and independently confirm the file
+/// partial bitmask.  We assert exit == 262143 and independently confirm the file
 /// the program wrote via `Path.write_text` actually landed on the VFS with the
 /// expected bytes.
 /// Self-skips if the ELF fixture is absent (lean build with no /tests disk).
@@ -8587,6 +8587,18 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
 /// the old bare-`char*` Path representation such a filename was mistaken for a
 /// live object and had its own bytes decremented.  Checks 13-15 cover
 /// `Path.iterdir()`, whose entries must come back as fully-joined Paths.
+///
+/// Check 16 covers the *builtin* `open()`, which reaches the filesystem through
+/// `fastpy_io_open` rather than the `os.*` table that was swept when the Path
+/// header landed — it was still handing `fopen()` the header, so it tried to
+/// open a file literally named "PATH".  Check 17 rides along because it needs a
+/// real boot rather than because it is about pathlib: a Python method with no
+/// `return <expr>` compiles to a **void** LLVM function, but the runtime's
+/// string method dispatcher called every method through an `int64_t`-returning
+/// pointer type, so the result was whatever the callee left in the return
+/// register.  A truthy `__exit__` result means "suppress the exception", so an
+/// exception raised in a `with` body silently vanished as soon as `__exit__`
+/// dirtied that register (touching `self` sufficed).
 pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     let pathlib_elf = match load_test_elf("fastpy-pathlib") {
         Some(v) => v,
@@ -8600,17 +8612,17 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
 
     const OUT_PATH: &str = "/tmp/fpy-pathlib.txt";
     const EXPECTED_CONTENT: &[u8] = b"hello pathlib\n";
-    // The program runs 15 checks and exits with a BITMASK: check N sets bit
-    // (N-1). Bit 15 is a completion sentinel set unconditionally on the last
-    // line, so all fifteen passing == 2^16 - 1 == 65535. Any other value's clear
+    // The program runs 17 checks and exits with a BITMASK: check N sets bit
+    // (N-1). Bit 17 is a completion sentinel set unconditionally on the last
+    // line, so all seventeen passing == 2^18 - 1 == 262143. Any other value's clear
     // bits name exactly which checks failed (see services/fastpy-pathlib/build.py).
-    const EXPECTED_OK: i32 = 65535;
+    const EXPECTED_OK: i32 = 262143;
     // Set by the program's final statement. Its absence means the program never
     // reached the end — an uncaught exception exits 1, which would otherwise be
     // misreported as the legitimate bitmask "only check 1 passed".
-    const COMPLETED_BIT: i32 = 1 << 15;
+    const COMPLETED_BIT: i32 = 1 << 17;
     // Human-readable name for each bit, lowest first, for the failure diagnostic.
-    const CHECK_NAMES: [&str; 15] = [
+    const CHECK_NAMES: [&str; 17] = [
         "read_text round-trip",
         "exists()",
         "is_file()",
@@ -8626,6 +8638,8 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
         "os.mkdir'd scratch dir is_dir()",
         "iterdir() entries keep their Path type (.name)",
         "iterdir() entries are fully joined (read_text)",
+        "builtin open() accepts a Path, not just a str",
+        "None-returning __exit__ does not swallow the exception",
     ];
 
     serial_println!(
@@ -8749,7 +8763,8 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     serial_println!(
         "[spawn]   fastpy-pathlib: all {} pure-mode pathlib.Path checks passed (bitmask {}: \
          write_text/read_text round-trip, exists/is_file/is_dir, name/suffix/stem/parent/joinpath, \
-         an FPY_OBJ_MAGIC-colliding filename, iterdir entries typed and fully joined) AND the \
+         an FPY_OBJ_MAGIC-colliding filename, iterdir entries typed and fully joined, builtin \
+         open(Path), a None-returning __exit__ propagating its exception) AND the \
          written file verified on the VFS: OK — a fastpy pure-mode program can now touch the \
          filesystem through the high-level Path API, not just raw os.* calls",
         CHECK_NAMES.len(),

@@ -8570,13 +8570,23 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
 /// rather than the (absent) libpython bridge — this test proves that
 /// implementation works end-to-end against the SlateOS VFS.
 ///
-/// The utility runs 10 independent checks against a scratch file under `/tmp`
-/// and exits with the count that passed (see `services/fastpy-pathlib/build.py`
-/// for the exact list), so a partial failure yields a diagnostic count < 10
-/// that localizes how much of the Path surface works.  We assert exit == 10 and
-/// independently confirm the file the program wrote via `Path.write_text`
-/// actually landed on the VFS with the expected bytes.  Self-skips if the ELF
-/// fixture is absent (lean build with no /tests disk).
+/// The utility runs 15 independent checks against scratch files under `/tmp`
+/// and exits with a BITMASK of which ones passed (see
+/// `services/fastpy-pathlib/build.py` for the exact list), so a partial failure
+/// names the exact operations that regressed rather than just a count.  A
+/// sixteenth "completion sentinel" bit is set unconditionally on the program's
+/// last line, so a crash (an uncaught exception exits 1) cannot be misread as a
+/// partial bitmask.  We assert exit == 65535 and independently confirm the file
+/// the program wrote via `Path.write_text` actually landed on the VFS with the
+/// expected bytes.
+/// Self-skips if the ELF fixture is absent (lean build with no /tests disk).
+///
+/// Checks 11-12 use a filename whose bytes 32..35 spell `FPY_OBJ_MAGIC`
+/// ("SJBO").  Pure-mode Path values are OBJ-tagged, and fastpy's refcount
+/// dispatcher blind-probes an OBJ pointee for that magic at offset 32, so under
+/// the old bare-`char*` Path representation such a filename was mistaken for a
+/// live object and had its own bytes decremented.  Checks 13-15 cover
+/// `Path.iterdir()`, whose entries must come back as fully-joined Paths.
 pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     let pathlib_elf = match load_test_elf("fastpy-pathlib") {
         Some(v) => v,
@@ -8590,12 +8600,17 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
 
     const OUT_PATH: &str = "/tmp/fpy-pathlib.txt";
     const EXPECTED_CONTENT: &[u8] = b"hello pathlib\n";
-    // The program runs 10 checks and exits with a BITMASK: check N sets bit
-    // (N-1). All ten passing == 2^10 - 1 == 1023. Any other value's clear bits
-    // name exactly which checks failed (see services/fastpy-pathlib/build.py).
-    const EXPECTED_OK: i32 = 1023;
+    // The program runs 15 checks and exits with a BITMASK: check N sets bit
+    // (N-1). Bit 15 is a completion sentinel set unconditionally on the last
+    // line, so all fifteen passing == 2^16 - 1 == 65535. Any other value's clear
+    // bits name exactly which checks failed (see services/fastpy-pathlib/build.py).
+    const EXPECTED_OK: i32 = 65535;
+    // Set by the program's final statement. Its absence means the program never
+    // reached the end — an uncaught exception exits 1, which would otherwise be
+    // misreported as the legitimate bitmask "only check 1 passed".
+    const COMPLETED_BIT: i32 = 1 << 15;
     // Human-readable name for each bit, lowest first, for the failure diagnostic.
-    const CHECK_NAMES: [&str; 10] = [
+    const CHECK_NAMES: [&str; 15] = [
         "read_text round-trip",
         "exists()",
         "is_file()",
@@ -8606,11 +8621,17 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
         "str(parent)=='/tmp'",
         "joinpath=='/tmp/fpy-pathlib.txt'",
         "/tmp is_dir()",
+        "read_text on an FPY_OBJ_MAGIC-colliding filename",
+        "name intact on that colliding filename",
+        "os.mkdir'd scratch dir is_dir()",
+        "iterdir() entries keep their Path type (.name)",
+        "iterdir() entries are fully joined (read_text)",
     ];
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `pathlib` (pure-mode pathlib.Path: write_text/read_text/\
-         exists/is_file/is_dir/name/suffix/stem/parent/joinpath) integration test ({} bytes ELF)...",
+         exists/is_file/is_dir/name/suffix/stem/parent/joinpath/iterdir) integration test ({} bytes \
+         ELF)...",
         pathlib_elf.len()
     );
 
@@ -8619,10 +8640,15 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
 
     let argv: &[&[u8]] = &[b"fastpy-pathlib"];
     let envp: &[&[u8]] = &[];
+    // CREATE is required by `SYS_FS_MKDIR` (the `iterdir` checks build their own
+    // scratch directory with `os.mkdir`) and DELETE by `SYS_FS_UNLINK`/`SYS_FS_RMDIR`
+    // (the program tears that directory down first so its entry count is exact).
+    // Plain `write_text` only needs WRITE, which is why the first ten checks passed
+    // under the narrower cap set — directory mutation is gated separately.
     let caps = [(
         ResourceType::File,
         0u64,
-        Rights::READ | Rights::WRITE | Rights::METADATA,
+        Rights::READ | Rights::WRITE | Rights::METADATA | Rights::CREATE | Rights::DELETE,
     )];
     let options = SpawnOptions {
         name: "fastpy-pathlib",
@@ -8669,6 +8695,17 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
             EXPECTED_OK,
             EXPECTED_OK
         );
+        if mask & COMPLETED_BIT == 0 {
+            // Without the sentinel the per-bit table below is meaningless: the
+            // exit code is whatever the runtime chose on the way out (1 for an
+            // uncaught exception), not an accumulated bitmask. Say so, and point
+            // at the traceback the program already printed to this same log.
+            serial_println!(
+                "[spawn]       (completion sentinel CLEAR — the program died before its final \
+                 statement, so this exit code is NOT a bitmask; see the traceback above)"
+            );
+            return Err(KernelError::InternalError);
+        }
         let mut i = 0usize;
         while i < CHECK_NAMES.len() {
             let bit = 1i32 << i;
@@ -8710,10 +8747,12 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     serial_println!(
-        "[spawn]   fastpy-pathlib: all 10 pure-mode pathlib.Path checks passed (bitmask {}: \
-         write_text/read_text round-trip, exists/is_file/is_dir, name/suffix/stem/parent/joinpath) \
-         AND the written file verified on the VFS: OK — a fastpy pure-mode program can now touch the \
+        "[spawn]   fastpy-pathlib: all {} pure-mode pathlib.Path checks passed (bitmask {}: \
+         write_text/read_text round-trip, exists/is_file/is_dir, name/suffix/stem/parent/joinpath, \
+         an FPY_OBJ_MAGIC-colliding filename, iterdir entries typed and fully joined) AND the \
+         written file verified on the VFS: OK — a fastpy pure-mode program can now touch the \
          filesystem through the high-level Path API, not just raw os.* calls",
+        CHECK_NAMES.len(),
         EXPECTED_OK
     );
     Ok(())
@@ -11342,7 +11381,9 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
     const SECS: u64 = 1_700_000_000;
     const SECS_ARG: &[u8] = b"1700000000";
     const EXPECTED_OUT: &[u8] = b"1700000000";
-    const MTIME_NS: u64 = 1_700_000_000_000_000_000;
+    // Derived, not respelled, so the seconds value and the ns value it must
+    // round-trip to can never drift apart.
+    const MTIME_NS: u64 = SECS * 1_000_000_000;
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getmtime` utility (ring 3) integration test \
@@ -11523,7 +11564,9 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
     const SECS: u64 = 1_700_000_000;
     const SECS_ARG: &[u8] = b"1700000000";
     const EXPECTED_OUT: &[u8] = b"1700000000";
-    const ATIME_NS: u64 = 1_700_000_000_000_000_000;
+    // Derived, not respelled, so the seconds value and the ns value it must
+    // round-trip to can never drift apart.
+    const ATIME_NS: u64 = SECS * 1_000_000_000;
 
     serial_println!(
         "[spawn] Running fastpy-on-SlateOS `getatime` utility (ring 3) integration test \

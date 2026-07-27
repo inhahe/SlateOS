@@ -39,6 +39,7 @@ pub mod stats;
 pub mod stream_socket;
 pub mod timer;
 pub mod timerfd;
+pub mod waiters;
 
 // Pipe splice/tee/vmsplice: the syscall-level transfers (sys_splice,
 // sys_tee, sys_vmsplice in syscall/linux.rs) are implemented against the

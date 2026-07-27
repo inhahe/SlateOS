@@ -44,11 +44,13 @@
 //! `EVENTFD_TABLE` → `SCHED` (read/write may call `sched::wake()`).
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use super::waiters::{wake_all, WaiterSet};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -104,10 +106,15 @@ impl EventFdHandle {
 struct EventFd {
     /// The counter value.
     counter: u64,
-    /// Task blocked waiting to read (counter is 0).
-    reader_waiter: Option<TaskId>,
-    /// Task blocked waiting to write (counter would overflow).
-    writer_waiter: Option<TaskId>,
+    /// Tasks blocked waiting to read (counter is 0).
+    ///
+    /// An eventfd is a many-waiter primitive by construction — the whole
+    /// point of `EFD_SEMAPHORE` is N consumers sharing one counter — so this
+    /// must be a set, not the single slot it used to be.  See
+    /// [`super::waiters`].
+    reader_waiters: WaiterSet,
+    /// Tasks blocked waiting to write (counter would overflow).
+    writer_waiters: WaiterSet,
     /// Whether the eventfd has been closed.
     closed: bool,
     /// Semaphore mode: `read()` decrements the counter by 1 and returns
@@ -126,8 +133,8 @@ impl EventFd {
     fn new(initial: u64, semaphore: bool) -> Self {
         Self {
             counter: initial.min(MAX_COUNTER),
-            reader_waiter: None,
-            writer_waiter: None,
+            reader_waiters: WaiterSet::new(),
+            writer_waiters: WaiterSet::new(),
             closed: false,
             semaphore,
             refcount: 1,
@@ -253,6 +260,11 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
                 .get_mut(&handle.id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: on any iteration after the first we may still
+            // be listed (a signal wake does not clear the entry), and every
+            // path below either returns or re-registers.
+            efd.writer_waiters.remove(task);
+
             if efd.closed {
                 return Err(KernelError::ChannelClosed);
             }
@@ -263,30 +275,29 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
             {
                 efd.counter = new_val;
 
-                // Wake blocked reader.
-                let reader = efd.reader_waiter.take();
+                // Wake every blocked reader: the counter transition is a
+                // level condition all of them are waiting on, and in
+                // semaphore mode `value` may satisfy several at once.
+                let readers = efd.reader_waiters.take_all();
                 drop(table);
 
                 super::stats::eventfd_signal();
-                if let Some(task_id) = reader {
+                for _ in &readers {
                     super::stats::eventfd_wakeup();
-                    sched::wake(task_id);
                 }
+                wake_all(readers);
                 return Ok(());
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  An interrupted indefinite
-            // eventfd write is restartable (ERESTARTSYS) at the syscall layer.
+            // Honour a deliverable signal before parking.  An interrupted
+            // indefinite eventfd write is restartable (ERESTARTSYS) at the
+            // syscall layer.
             if deliverable_signal_pending(pid) {
-                if efd.writer_waiter == Some(task) {
-                    efd.writer_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
             // Would overflow — block until reader drains.
-            efd.writer_waiter = Some(task);
+            efd.writer_waiters.insert(task);
         }
 
         park_for_eventfd(pid, task);
@@ -305,7 +316,7 @@ pub fn try_write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
         return Ok(());
     }
 
-    let wake_reader;
+    let wake_readers;
 
     {
         let mut table = EVENTFD_TABLE.lock();
@@ -321,17 +332,17 @@ pub fn try_write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
             && new_val <= MAX_COUNTER
         {
             efd.counter = new_val;
-            wake_reader = efd.reader_waiter.take();
+            wake_readers = efd.reader_waiters.take_all();
         } else {
             return Err(KernelError::WouldBlock);
         }
     }
 
     super::stats::eventfd_signal();
-    if let Some(task_id) = wake_reader {
+    for _ in &wake_readers {
         super::stats::eventfd_wakeup();
-        sched::wake(task_id);
     }
+    wake_all(wake_readers);
     Ok(())
 }
 
@@ -370,13 +381,13 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             && new_val <= MAX_COUNTER
         {
             efd.counter = new_val;
-            let reader = efd.reader_waiter.take();
+            let readers = efd.reader_waiters.take_all();
             drop(table);
             super::stats::eventfd_signal();
-            if let Some(task_id) = reader {
+            for _ in &readers {
                 super::stats::eventfd_wakeup();
-                sched::wake(task_id);
             }
+            wake_all(readers);
             return Ok(());
         }
     }
@@ -414,6 +425,12 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
                     KernelError::InvalidHandle
                 })?;
 
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // Leaving a stale entry would later "wake" whichever task had
+            // since recycled this task ID.
+            efd.writer_waiters.remove(task);
+
             if efd.closed {
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
@@ -423,14 +440,14 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
                 && new_val <= MAX_COUNTER
             {
                 efd.counter = new_val;
-                let reader = efd.reader_waiter.take();
+                let readers = efd.reader_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
                 super::stats::eventfd_signal();
-                if let Some(task_id) = reader {
+                for _ in &readers {
                     super::stats::eventfd_wakeup();
-                    sched::wake(task_id);
                 }
+                wake_all(readers);
                 return Ok(());
             }
 
@@ -440,19 +457,15 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  A timed wait maps the
-            // interruption to EINTR (no restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if efd.writer_waiter == Some(task) {
-                    efd.writer_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
-            efd.writer_waiter = Some(task);
+            efd.writer_waiters.insert(task);
         }
 
         park_for_eventfd(pid, task);
@@ -479,6 +492,11 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                 .get_mut(&handle.id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: on any iteration after the first we may still
+            // be listed (a signal wake does not clear the entry), and every
+            // path below either returns or re-registers.
+            efd.reader_waiters.remove(task);
+
             if efd.counter > 0 {
                 let val = if efd.semaphore {
                     // Semaphore mode: decrement by 1, return 1.
@@ -492,14 +510,12 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                     v
                 };
 
-                // Wake blocked writer (now that counter has room again).
-                let writer = efd.writer_waiter.take();
+                // Wake every blocked writer (the counter has room again).
+                let writers = efd.writer_waiters.take_all();
                 drop(table);
 
                 super::stats::eventfd_read();
-                if let Some(task_id) = writer {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 return Ok(val);
             }
 
@@ -507,18 +523,15 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                 return Err(KernelError::ChannelClosed);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  An interrupted indefinite
-            // eventfd read is restartable (ERESTARTSYS) at the syscall layer.
+            // Honour a deliverable signal before parking.  An interrupted
+            // indefinite eventfd read is restartable (ERESTARTSYS) at the
+            // syscall layer.
             if deliverable_signal_pending(pid) {
-                if efd.reader_waiter == Some(task) {
-                    efd.reader_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
             // Counter is 0 — block.
-            efd.reader_waiter = Some(task);
+            efd.reader_waiters.insert(task);
         }
 
         park_for_eventfd(pid, task);
@@ -533,7 +546,7 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
 /// - `Err(WouldBlock)` — counter is 0.
 /// - `Err(ChannelClosed)` — eventfd closed.
 pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
-    let wake_writer;
+    let wake_writers;
     let result;
 
     {
@@ -551,7 +564,7 @@ pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
                 result = Ok(efd.counter);
                 efd.counter = 0;
             }
-            wake_writer = efd.writer_waiter.take();
+            wake_writers = efd.writer_waiters.take_all();
         } else if efd.closed {
             return Err(KernelError::ChannelClosed);
         } else {
@@ -560,9 +573,7 @@ pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
     }
 
     super::stats::eventfd_read();
-    if let Some(task_id) = wake_writer {
-        sched::wake(task_id);
-    }
+    wake_all(wake_writers);
     result
 }
 
@@ -597,12 +608,10 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                 efd.counter = 0;
                 v
             };
-            let writer = efd.writer_waiter.take();
+            let writers = efd.writer_waiters.take_all();
             drop(table);
             super::stats::eventfd_read();
-            if let Some(task_id) = writer {
-                sched::wake(task_id);
-            }
+            wake_all(writers);
             return Ok(val);
         }
 
@@ -644,6 +653,12 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                     KernelError::InvalidHandle
                 })?;
 
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // Leaving a stale entry would later "wake" whichever task had
+            // since recycled this task ID.
+            efd.reader_waiters.remove(task);
+
             if efd.counter > 0 {
                 let val = if efd.semaphore {
                     efd.counter = efd.counter.saturating_sub(1);
@@ -653,13 +668,11 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                     efd.counter = 0;
                     v
                 };
-                let writer = efd.writer_waiter.take();
+                let writers = efd.writer_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
                 super::stats::eventfd_read();
-                if let Some(task_id) = writer {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 return Ok(val);
             }
 
@@ -674,19 +687,15 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  A timed wait maps the
-            // interruption to EINTR (no restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if efd.reader_waiter == Some(task) {
-                    efd.reader_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
-            efd.reader_waiter = Some(task);
+            efd.reader_waiters.insert(task);
         }
 
         park_for_eventfd(pid, task);
@@ -729,7 +738,10 @@ pub fn dup(handle: EventFdHandle) -> KernelResult<EventFdHandle> {
 /// removes the entry from the table and wakes any blocked reader or
 /// writer (they will see `ChannelClosed`).
 pub fn close(handle: EventFdHandle) {
-    let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
+    // Every waiter on both ends must be woken, not just one of each: the
+    // closed state is a permanent broadcast condition, so a task left parked
+    // here would never be woken by anything else.
+    let mut wake_tasks = Vec::new();
 
     {
         let mut table = EVENTFD_TABLE.lock();
@@ -746,15 +758,13 @@ pub fn close(handle: EventFdHandle) {
 
             // Final close: mark closed, drain waiters, remove entry.
             efd.closed = true;
-            wake_tasks[0] = efd.reader_waiter.take();
-            wake_tasks[1] = efd.writer_waiter.take();
+            wake_tasks = efd.reader_waiters.take_all();
+            wake_tasks.append(&mut efd.writer_waiters.take_all());
             table.remove(&handle.id());
         }
     }
 
-    for task_id in wake_tasks.iter().flatten() {
-        sched::wake(*task_id);
-    }
+    wake_all(wake_tasks);
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +836,7 @@ pub fn self_test() -> KernelResult<()> {
     test_blocking_read()?;
     test_semaphore_mode()?;
     test_dup_refcount()?;
+    test_multi_waiter_wake()?;
 
     serial_println!("[eventfd] Eventfd self-test PASSED");
     Ok(())
@@ -1075,6 +1086,103 @@ fn test_blocking_read() -> KernelResult<()> {
 
     close(handle);
     serial_println!("[eventfd]   Blocking read: OK");
+    Ok(())
+}
+
+/// Number of multi-waiter readers that consumed one semaphore unit.
+static EVENTFD_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Number of multi-waiter readers released by the final `close()`.
+static EVENTFD_MULTI_CLOSE_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Multi-waiter task: park until one semaphore unit is available.
+extern "C" fn eventfd_multi_sem_task(handle_raw: u64) {
+    let handle = EventFdHandle::from_raw(handle_raw);
+    if let Ok(1) = read(handle) {
+        EVENTFD_MULTI_DATA_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Multi-waiter task: park on a zero counter until the eventfd is closed.
+extern "C" fn eventfd_multi_close_task(handle_raw: u64) {
+    let handle = EventFdHandle::from_raw(handle_raw);
+    // The final `close()` removes the table entry, so a released waiter sees
+    // either `ChannelClosed` or `InvalidHandle`.  Either proves it was woken;
+    // the failure mode under test is not waking at all.
+    if read(handle).is_err() {
+        EVENTFD_MULTI_CLOSE_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Test 8: **two** tasks parked on the same eventfd are both woken.
+///
+/// Regression test for the single-`Option<TaskId>` waiter slot (see
+/// `BUG-PIPE-SINGLE-WAITER-SLOT` in `known-issues.md`, which this module
+/// shared): a second parking task overwrote the first, and the overwritten
+/// task then hung forever.  An eventfd is a many-waiter primitive by
+/// construction — `EFD_SEMAPHORE` exists precisely so N consumers can share
+/// one counter — so this was the most exposed instance of the defect.
+///
+/// 1. **Counter wake.** Two readers park on an empty *semaphore-mode*
+///    eventfd; a single `write(2)` must wake both, each consuming one unit.
+/// 2. **Close broadcast.** Two readers park on an empty eventfd; the final
+///    `close()` must release both.  Closure is permanent, so a waiter missed
+///    here could never be woken by anything.
+fn test_multi_waiter_wake() -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    // Give the spawned readers plenty of scheduling opportunities; a single
+    // yield only guarantees one of them ran.
+    fn yield_a_few() {
+        for _ in 0..8 {
+            sched::yield_now();
+        }
+    }
+
+    // --- Phase 1: one write wakes both parked readers. ---
+    EVENTFD_MULTI_DATA_OK.store(0, SeqCst);
+    let handle = create_with_flags(0, true);
+    sched::spawn(b"efd-multi-a", 16, eventfd_multi_sem_task, handle.raw(), 0)?;
+    sched::spawn(b"efd-multi-b", 16, eventfd_multi_sem_task, handle.raw(), 0)?;
+    yield_a_few();
+    write(handle, 2)?;
+    yield_a_few();
+
+    let data_ok = EVENTFD_MULTI_DATA_OK.load(SeqCst);
+    if data_ok != 2 {
+        serial_println!(
+            "[eventfd]   FAIL: {} of 2 parked readers woke on write",
+            data_ok
+        );
+        // Close so any still-parked reader is released rather than leaked as
+        // a permanently blocked task.
+        close(handle);
+        yield_a_few();
+        return Err(KernelError::InternalError);
+    }
+    close(handle);
+
+    // --- Phase 2: the final close releases both parked readers. ---
+    EVENTFD_MULTI_CLOSE_OK.store(0, SeqCst);
+    let h2 = create(0);
+    sched::spawn(b"efd-multi-c", 16, eventfd_multi_close_task, h2.raw(), 0)?;
+    sched::spawn(b"efd-multi-d", 16, eventfd_multi_close_task, h2.raw(), 0)?;
+    yield_a_few();
+    close(h2);
+    yield_a_few();
+
+    let close_ok = EVENTFD_MULTI_CLOSE_OK.load(SeqCst);
+    if close_ok != 2 {
+        serial_println!(
+            "[eventfd]   FAIL: {} of 2 parked readers woke on close",
+            close_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[eventfd]   Multi-waiter wake (counter + close): OK");
     Ok(())
 }
 

@@ -38,7 +38,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
-use crate::sched::{self, task::TaskId};
+use crate::sched;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
@@ -152,72 +152,13 @@ impl PipeEnd {
 // Pipe internals
 // ---------------------------------------------------------------------------
 
-/// The set of tasks parked on one end of a pipe.
-///
-/// A pipe end can legitimately have **several** tasks parked on it at once:
-/// `dup()` and process spawn hand the same end to multiple processes, and
-/// [`wait_readable`] (the `tee` primitive) parks on the read end without
-/// consuming, alongside a real reader.  This was previously a single
-/// `Option<TaskId>` slot, so a second parking task silently overwrote the
-/// first — and the overwritten task was then never woken by anyone, hanging
-/// forever.  Storing the full set is the only representation that cannot
-/// lose a waiter.
-///
-/// Every state change wakes *all* waiters on the affected end rather than
-/// one, matching Linux (`fs/pipe.c` parks on a non-exclusive wait queue, so
-/// `wake_up_interruptible_sync_poll()` wakes every sleeper).  Waking one
-/// would be enough when the wake means "one unit of work is available", but
-/// it is not enough for EOF/EPIPE, and it goes wrong even for data if the
-/// single woken task leaves without consuming (a signal, or a timeout that
-/// expires in the same instant).  Losers simply re-check under the lock and
-/// park again.
-struct WaiterSet {
-    /// Parked task IDs.  Order is registration order; duplicates are
-    /// rejected by [`insert`](Self::insert) so a task that re-parks after a
-    /// spurious wake does not occupy two entries.
-    tasks: Vec<TaskId>,
-}
-
-impl WaiterSet {
-    /// Create an empty waiter set.
-    const fn new() -> Self {
-        Self { tasks: Vec::new() }
-    }
-
-    /// Register `task` as parked on this end.  Idempotent.
-    fn insert(&mut self, task: TaskId) {
-        if !self.tasks.contains(&task) {
-            self.tasks.push(task);
-        }
-    }
-
-    /// Deregister `task`.  No-op if it is not registered.
-    ///
-    /// Callers must do this on *every* path out of a park loop, not just the
-    /// signal path: a stale entry names a task that is no longer parked, and
-    /// once task IDs are recycled that entry would wake an unrelated task.
-    fn remove(&mut self, task: TaskId) {
-        self.tasks.retain(|t| *t != task);
-    }
-
-    /// Take every waiter, leaving the set empty.
-    ///
-    /// The caller must drop the `PIPES` lock before waking them (lock order
-    /// `PIPES` → `SCHED`).
-    fn take_all(&mut self) -> Vec<TaskId> {
-        core::mem::take(&mut self.tasks)
-    }
-}
-
-/// Wake every task in `tasks`.
-///
-/// Split out so the call sites read as "drop the lock, then wake", which is
-/// the ordering the module's lock hierarchy requires.
-fn wake_all(tasks: Vec<TaskId>) {
-    for task_id in tasks {
-        sched::wake(task_id);
-    }
-}
+// The waiter bookkeeping lives in `super::waiters` because pipes, eventfds,
+// stream sockets and timerfds all need exactly the same thing and all four
+// originally carried the same single-slot defect.  A pipe end can legitimately
+// have several tasks parked on it at once: `dup()` and process spawn hand the
+// same end to multiple processes, and `wait_readable` (the `tee` primitive)
+// parks on the read end without consuming, alongside a real reader.
+use super::waiters::{wake_all, WaiterSet};
 
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {

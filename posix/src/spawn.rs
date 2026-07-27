@@ -680,6 +680,40 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
     }
 }
 
+/// Convert the kernel's `fd_handle_type` constant back to a `HandleKind`.
+///
+/// This is the inverse of [`kind_to_handle_type`] and is used by the child's
+/// crt0 (`crt::retrieve_initial_fds`) to rebuild its userspace fd table from
+/// the entries the kernel hands back after `posix_spawn`/`execve`.
+///
+/// The two directions are deliberately kept adjacent: they were previously
+/// maintained in separate files and silently drifted apart
+/// (BUG-CRT0-STREAM-SOCKET-UNMAPPED — the send side learned `STREAM_SOCKET`
+/// but the receive side never did, so inherited `AF_UNIX` endpoints were
+/// mislabeled as `File`).  `round_trips_for_every_transferable_kind` below
+/// pins the invariant so it cannot drift again.
+///
+/// Unknown/unrecognised types fall back to `File` so the function is total.
+/// Note the round trip is exact for every *transferable* kind except
+/// `TcpListener`, which shares the `TCP_SOCKET` wire type with `TcpStream`
+/// and therefore comes back as `TcpStream`.
+pub fn handle_type_to_kind(handle_type: u8) -> crate::fdtable::HandleKind {
+    use crate::fdtable::HandleKind;
+    match handle_type {
+        fd_handle_type::FILE => HandleKind::File,
+        fd_handle_type::PIPE => HandleKind::Pipe,
+        fd_handle_type::TCP_SOCKET => HandleKind::TcpStream,
+        fd_handle_type::UDP_SOCKET => HandleKind::UdpSocket,
+        fd_handle_type::CONSOLE => HandleKind::Console,
+        fd_handle_type::EVENTFD => HandleKind::Eventfd,
+        // Unix-domain stream endpoint (`socketpair`).  Reconstructing this
+        // as `File` would route the child's read/write/recv through the
+        // file path with the wrong semantics (EBADF or silent misbehaviour).
+        fd_handle_type::STREAM_SOCKET => HandleKind::UnixStream,
+        _ => HandleKind::File,
+    }
+}
+
 /// Tracks kernel handles opened by `build_fd_map` for open file_actions.
 ///
 /// The parent opens files on behalf of the child (so the kernel can dup
@@ -1555,6 +1589,72 @@ pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- fd handle-type <-> HandleKind mapping --
+
+    /// Every kind that can actually be transferred to a child must survive
+    /// the serialise/reconstruct round trip, so the parent's
+    /// `kind_to_handle_type` and the child crt0's `handle_type_to_kind`
+    /// cannot drift apart again (BUG-CRT0-STREAM-SOCKET-UNMAPPED).
+    #[test]
+    fn round_trips_for_every_transferable_kind() {
+        use crate::fdtable::HandleKind;
+        for kind in [
+            HandleKind::File,
+            HandleKind::Pipe,
+            HandleKind::Console,
+            HandleKind::TcpStream,
+            HandleKind::UdpSocket,
+            HandleKind::Eventfd,
+            HandleKind::UnixStream,
+        ] {
+            assert_eq!(
+                handle_type_to_kind(kind_to_handle_type(kind)),
+                kind,
+                "{kind:?} did not survive the fd-inheritance round trip"
+            );
+        }
+    }
+
+    /// The regression itself: an inherited `AF_UNIX` endpoint must come back
+    /// as `UnixStream`, not silently degrade to `File`.
+    #[test]
+    fn unix_stream_is_not_rebuilt_as_a_plain_file() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(
+            kind_to_handle_type(HandleKind::UnixStream),
+            fd_handle_type::STREAM_SOCKET
+        );
+        assert_eq!(
+            handle_type_to_kind(fd_handle_type::STREAM_SOCKET),
+            HandleKind::UnixStream
+        );
+    }
+
+    /// `TcpListener` shares the `TCP_SOCKET` wire type with `TcpStream`, so it
+    /// is the one documented lossy case — pinned so the asymmetry stays
+    /// deliberate rather than becoming a surprise.
+    #[test]
+    fn tcp_listener_collapses_to_tcp_stream() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(
+            kind_to_handle_type(HandleKind::TcpListener),
+            fd_handle_type::TCP_SOCKET
+        );
+        assert_eq!(
+            handle_type_to_kind(fd_handle_type::TCP_SOCKET),
+            HandleKind::TcpStream
+        );
+    }
+
+    /// Unrecognised wire types must not panic — the child rebuilds them as
+    /// `File` so a forward-compatible parent can't wedge an older crt0.
+    #[test]
+    fn unknown_handle_type_falls_back_to_file() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(handle_type_to_kind(200), HandleKind::File);
+        assert_eq!(handle_type_to_kind(u8::MAX), HandleKind::File);
+    }
 
     // -- FileActionSlot --
 

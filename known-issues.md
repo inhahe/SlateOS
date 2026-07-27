@@ -24,6 +24,43 @@ work that should be done now."
 
 **Proper fix (to investigate).** Audit the `wait4()` blocking-wait arm and the pipe read/EOF wakeup for a check-then-park TOCTOU: the waiter must re-check the zombie-child / pipe-EOF condition *after* enqueuing on the wait queue (or hold the relevant lock across enqueue+condition-check) so a wakeup delivered between the check and the park is not lost. Reproduce by looping the boot test; if it reproduces, add per-park instrumentation (log the parent's parked-on wait object + the child's wakeup post) to confirm the lost-wakeup ordering, then close the window. Until fixed, a single boot-test failure at this exact test should be re-run before treating it as a real regression.
 
+**Audit done 2026-07-27 — both stated suspects are CLEAN; do not re-audit them.**
+The check-then-park TOCTOU hypothesis above does *not* hold for either path:
+
+1. **`sys_wait4` specific-pid arm** (`kernel/src/syscall/linux.rs` ~45544)
+   already uses register-then-recheck: `try_reap` → `pcb::set_wait_task` →
+   **`try_reap` again** (and re-runs `jc_report_for_child`) before
+   `block_current()`, and it registers as a signal-waiter with the same
+   recheck idiom. A zombie transition landing anywhere in that window is
+   observed by the second `try_reap`.
+2. **Pipe read / writer-close EOF** (`kernel/src/ipc/pipe.rs` `read()` ~532,
+   close ~1007). The reader tests `write_closed` and installs
+   `reader_waiter = Some(task)` under **one** `PIPES.lock()` critical
+   section; the closer sets `write_closed = true` and takes
+   `reader_waiter` under that **same** lock. The two orderings are
+   therefore exhaustive and both safe — either the closer sees the
+   installed waiter and wakes it, or the reader sees `write_closed` and
+   returns EOF without parking.
+3. **The generic net underneath both**: `sched::wake()`
+   (`kernel/src/sched/mod.rs` ~1841) does *not* drop a wake aimed at a task
+   that is still `Running`/`Ready` — it sets `task.pending_wake`, and
+   `block_current()` (~1805) consumes that flag and returns **without
+   blocking**. So even a wake delivered strictly between "release the lock"
+   and "park" cannot be lost.
+
+**Where to look next instead.** Since no wake can be lost on these paths, the
+hang is more likely (a) a wake aimed at the **wrong task** — note
+`reader_waiter`/`writer_waiter` are *single slots*, not queues, so a second
+blocked reader/writer on the same pipe would be silently forgotten rather than
+woken; (b) a **stale `pending_wake`** consumed by an unrelated later park,
+making some *other* park return early and leaving the real waiter parked; or
+(c) not a lost wake at all but the dash-side `wait4` ↔ pipe-drain **ordering**
+(parent blocked in `wait4` for a child that is itself blocked writing into a
+full substitution pipe the parent has not drained — a genuine deadlock rather
+than a lost wakeup, which would also explain the liveness watchdog firing with
+all CPUs idle). Check (c) first: it fits the observed "no further serial
+output, all CPUs idle-ticking" signature better than a lost wakeup does.
+
 ### BUG-NATIVE-EXEC-FD-TABLE-LOST. Native-ABI `execve` dropped the child's userspace fd→handle table, so any pre-exec `dup2` redirect (e.g. `dup2(pipe_w, 1)` for output capture) was lost across `exec` — 2026-07-23 — ✅ RESOLVED 2026-07-23
 
 **Symptom.** The fastpy `capture` primitive (fork + `os.pipe` + child `os.dup2(w, 1)` + `os.execv("cat")`, parent `os.read`-drains the pipe) captured **0 bytes** instead of the child's stdout, so the self-test's byte-count cross-check tripped and it exited **113**. This is the core `$(...)`/`cmd1 | cmd2` shell primitive, so command substitution and pipelines were broken for every native (fastpy/posix) process, not just the test.

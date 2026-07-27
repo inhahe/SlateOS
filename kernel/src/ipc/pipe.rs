@@ -152,6 +152,73 @@ impl PipeEnd {
 // Pipe internals
 // ---------------------------------------------------------------------------
 
+/// The set of tasks parked on one end of a pipe.
+///
+/// A pipe end can legitimately have **several** tasks parked on it at once:
+/// `dup()` and process spawn hand the same end to multiple processes, and
+/// [`wait_readable`] (the `tee` primitive) parks on the read end without
+/// consuming, alongside a real reader.  This was previously a single
+/// `Option<TaskId>` slot, so a second parking task silently overwrote the
+/// first — and the overwritten task was then never woken by anyone, hanging
+/// forever.  Storing the full set is the only representation that cannot
+/// lose a waiter.
+///
+/// Every state change wakes *all* waiters on the affected end rather than
+/// one, matching Linux (`fs/pipe.c` parks on a non-exclusive wait queue, so
+/// `wake_up_interruptible_sync_poll()` wakes every sleeper).  Waking one
+/// would be enough when the wake means "one unit of work is available", but
+/// it is not enough for EOF/EPIPE, and it goes wrong even for data if the
+/// single woken task leaves without consuming (a signal, or a timeout that
+/// expires in the same instant).  Losers simply re-check under the lock and
+/// park again.
+struct WaiterSet {
+    /// Parked task IDs.  Order is registration order; duplicates are
+    /// rejected by [`insert`](Self::insert) so a task that re-parks after a
+    /// spurious wake does not occupy two entries.
+    tasks: Vec<TaskId>,
+}
+
+impl WaiterSet {
+    /// Create an empty waiter set.
+    const fn new() -> Self {
+        Self { tasks: Vec::new() }
+    }
+
+    /// Register `task` as parked on this end.  Idempotent.
+    fn insert(&mut self, task: TaskId) {
+        if !self.tasks.contains(&task) {
+            self.tasks.push(task);
+        }
+    }
+
+    /// Deregister `task`.  No-op if it is not registered.
+    ///
+    /// Callers must do this on *every* path out of a park loop, not just the
+    /// signal path: a stale entry names a task that is no longer parked, and
+    /// once task IDs are recycled that entry would wake an unrelated task.
+    fn remove(&mut self, task: TaskId) {
+        self.tasks.retain(|t| *t != task);
+    }
+
+    /// Take every waiter, leaving the set empty.
+    ///
+    /// The caller must drop the `PIPES` lock before waking them (lock order
+    /// `PIPES` → `SCHED`).
+    fn take_all(&mut self) -> Vec<TaskId> {
+        core::mem::take(&mut self.tasks)
+    }
+}
+
+/// Wake every task in `tasks`.
+///
+/// Split out so the call sites read as "drop the lock, then wake", which is
+/// the ordering the module's lock hierarchy requires.
+fn wake_all(tasks: Vec<TaskId>) {
+    for task_id in tasks {
+        sched::wake(task_id);
+    }
+}
+
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {
     /// The byte buffer.  Data lives in `buf[head..tail]` (logically),
@@ -165,10 +232,10 @@ struct Pipe {
     read_closed: bool,
     /// Whether the write end has been closed.
     write_closed: bool,
-    /// Task blocked on read (waiting for data).
-    reader_waiter: Option<TaskId>,
-    /// Task blocked on write (waiting for space).
-    writer_waiter: Option<TaskId>,
+    /// Tasks blocked on read (waiting for data or EOF).
+    reader_waiters: WaiterSet,
+    /// Tasks blocked on write (waiting for space or EPIPE).
+    writer_waiters: WaiterSet,
     /// Reference count for the read end.  Each `create()` and each
     /// `dup()` of a read handle adds 1; each `close()` of a read
     /// handle subtracts 1.  When this hits 0 the read end is
@@ -190,8 +257,8 @@ impl Pipe {
             len: 0,
             read_closed: false,
             write_closed: false,
-            reader_waiter: None,
-            writer_waiter: None,
+            reader_waiters: WaiterSet::new(),
+            writer_waiters: WaiterSet::new(),
             reader_refcount: 1,
             writer_refcount: 1,
         }
@@ -410,6 +477,11 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
                 .get_mut(&handle.pipe_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: on any iteration after the first we may
+            // still be listed (a signal or timer wake does not clear the
+            // entry), and every path below either returns or re-registers.
+            pipe.writer_waiters.remove(task);
+
             // Check if reader has closed.
             if pipe.read_closed {
                 return Err(KernelError::ChannelClosed);
@@ -418,14 +490,12 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             // Try to write some bytes.
             let written = pipe.write_bytes(data);
             if written > 0 {
-                // Wake the reader if it was blocked waiting for data.
+                // Wake readers blocked waiting for data.
                 let pipe_id = handle.pipe_id();
-                let reader_id = pipe.reader_waiter.take();
+                let readers = pipe.reader_waiters.take_all();
                 drop(table);
 
-                if let Some(task_id) = reader_id {
-                    sched::wake(task_id);
-                }
+                wake_all(readers);
                 crate::ktrace::record(
                     crate::ktrace::Category::Ipc,
                     crate::ktrace::event::PIPE_WRITE,
@@ -437,17 +507,13 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             }
 
             // Buffer is full.  Before parking, honour a deliverable signal —
-            // otherwise a blocked writer could never be interrupted.  Clear any
-            // stale waiter slot left by a prior signal wake.
+            // otherwise a blocked writer could never be interrupted.
             if deliverable_signal_pending(pid) {
-                if pipe.writer_waiter == Some(task) {
-                    pipe.writer_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
             // Block until space is available.
-            pipe.writer_waiter = Some(task);
+            pipe.writer_waiters.insert(task);
         }
 
         // Block (interruptibly for user processes).  The reader wakes us when it
@@ -475,7 +541,7 @@ pub fn try_write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let wake_reader;
+    let wake_readers;
     let result;
 
     {
@@ -493,13 +559,11 @@ pub fn try_write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             return Err(KernelError::WouldBlock);
         }
 
-        wake_reader = pipe.reader_waiter.take();
+        wake_readers = pipe.reader_waiters.take_all();
         result = Ok(written);
     }
 
-    if let Some(task_id) = wake_reader {
-        sched::wake(task_id);
-    }
+    wake_all(wake_readers);
     if let Ok(n) = result {
         super::stats::pipe_write(n as u64);
     }
@@ -536,17 +600,19 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 .get_mut(&handle.pipe_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: a signal or timer wake leaves our entry in
+            // place, and every path below either returns or re-registers.
+            pipe.reader_waiters.remove(task);
+
             // Try to read some bytes.
             let n = pipe.read_bytes(buf);
             if n > 0 {
-                // Wake the writer if it was blocked waiting for space.
+                // Wake writers blocked waiting for space.
                 let pipe_id = handle.pipe_id();
-                let writer_id = pipe.writer_waiter.take();
+                let writers = pipe.writer_waiters.take_all();
                 drop(table);
 
-                if let Some(task_id) = writer_id {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 crate::ktrace::record(
                     crate::ktrace::Category::Ipc,
                     crate::ktrace::event::PIPE_READ,
@@ -563,17 +629,13 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
             }
 
             // Buffer empty, writer still open.  Honour a deliverable signal
-            // before parking (otherwise a blocked reader is uninterruptible);
-            // clear any stale waiter slot left by a prior signal wake.
+            // before parking (otherwise a blocked reader is uninterruptible).
             if deliverable_signal_pending(pid) {
-                if pipe.reader_waiter == Some(task) {
-                    pipe.reader_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
             // Block.
-            pipe.reader_waiter = Some(task);
+            pipe.reader_waiters.insert(task);
         }
 
         // Block (interruptibly for user processes).  The writer wakes us when it
@@ -599,7 +661,7 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let mut wake_writer = None;
+    let mut wake_writers = Vec::new();
     let result;
 
     {
@@ -610,7 +672,7 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
 
         let n = pipe.read_bytes(buf);
         if n > 0 {
-            wake_writer = pipe.writer_waiter.take();
+            wake_writers = pipe.writer_waiters.take_all();
             result = Ok(n);
         } else if pipe.write_closed {
             result = Ok(0);
@@ -619,9 +681,7 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         }
     }
 
-    if let Some(task_id) = wake_writer {
-        sched::wake(task_id);
-    }
+    wake_all(wake_writers);
     if let Ok(n) = result {
         if n > 0 {
             super::stats::pipe_read(n as u64);
@@ -683,6 +743,9 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
             let pipe = table
                 .get_mut(&handle.pipe_id())
                 .ok_or(KernelError::InvalidHandle)?;
+            // Deregister first — every path below returns or re-registers.
+            pipe.reader_waiters.remove(task);
+
             if pipe.len > 0 {
                 return Ok(true);
             }
@@ -690,15 +753,12 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
                 return Ok(false);
             }
             // Empty, writer still open.  Honour a deliverable signal before
-            // parking; clear any stale waiter slot from a prior signal wake.
+            // parking.
             if deliverable_signal_pending(pid) {
-                if pipe.reader_waiter == Some(task) {
-                    pipe.reader_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
             // Register and block.
-            pipe.reader_waiter = Some(task);
+            pipe.reader_waiters.insert(task);
         }
         super::stats::pipe_read_block();
         park_for_pipe(pid, task);
@@ -738,11 +798,9 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
 
         let n = pipe.read_bytes(buf);
         if n > 0 {
-            let writer_id = pipe.writer_waiter.take();
+            let writers = pipe.writer_waiters.take_all();
             drop(table);
-            if let Some(task_id) = writer_id {
-                sched::wake(task_id);
-            }
+            wake_all(writers);
             super::stats::pipe_read(n as u64);
             return Ok(n);
         }
@@ -781,14 +839,16 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
                     KernelError::InvalidHandle
                 })?;
 
+            // Deregister first — every path below returns or re-registers.
+            // The timer wake in particular does not clear our entry.
+            pipe.reader_waiters.remove(task);
+
             let n = pipe.read_bytes(buf);
             if n > 0 {
-                let writer_id = pipe.writer_waiter.take();
+                let writers = pipe.writer_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
-                if let Some(task_id) = writer_id {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 super::stats::pipe_read(n as u64);
                 return Ok(n);
             }
@@ -804,19 +864,15 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  A timed wait maps the
-            // interruption to EINTR (no restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if pipe.reader_waiter == Some(task) {
-                    pipe.reader_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
-            pipe.reader_waiter = Some(task);
+            pipe.reader_waiters.insert(task);
         }
 
         super::stats::pipe_read_block();
@@ -859,11 +915,9 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
 
         let written = pipe.write_bytes(data);
         if written > 0 {
-            let reader_id = pipe.reader_waiter.take();
+            let readers = pipe.reader_waiters.take_all();
             drop(table);
-            if let Some(task_id) = reader_id {
-                sched::wake(task_id);
-            }
+            wake_all(readers);
             super::stats::pipe_write(written as u64);
             return Ok(written);
         }
@@ -898,6 +952,10 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
                     KernelError::InvalidHandle
                 })?;
 
+            // Deregister first — every path below returns or re-registers.
+            // The timer wake in particular does not clear our entry.
+            pipe.writer_waiters.remove(task);
+
             if pipe.read_closed {
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
@@ -905,12 +963,10 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
 
             let written = pipe.write_bytes(data);
             if written > 0 {
-                let reader_id = pipe.reader_waiter.take();
+                let readers = pipe.reader_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
-                if let Some(task_id) = reader_id {
-                    sched::wake(task_id);
-                }
+                wake_all(readers);
                 super::stats::pipe_write(written as u64);
                 return Ok(written);
             }
@@ -921,19 +977,15 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  A timed wait maps the
-            // interruption to EINTR (no restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if pipe.writer_waiter == Some(task) {
-                    pipe.writer_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
-            pipe.writer_waiter = Some(task);
+            pipe.writer_waiters.insert(task);
         }
 
         super::stats::pipe_write_block();
@@ -988,7 +1040,10 @@ pub fn dup(handle: PipeHandle) -> KernelResult<PipeHandle> {
 /// When both ends are fully closed, the pipe is removed from the
 /// table.
 pub fn close(handle: PipeHandle) {
-    let mut wake_task = None;
+    // Every waiter on the far end must be woken, not just one: EOF and EPIPE
+    // are broadcast conditions — they stay true forever, so a task left
+    // parked here would never be woken by anything else.
+    let mut wake_tasks = Vec::new();
 
     {
         let mut table = PIPES.lock();
@@ -1001,8 +1056,8 @@ pub fn close(handle: PipeHandle) {
                         return;
                     }
                     pipe.read_closed = true;
-                    // Wake blocked writer — it will see ChannelClosed.
-                    wake_task = pipe.writer_waiter.take();
+                    // Wake blocked writers — they will see ChannelClosed.
+                    wake_tasks = pipe.writer_waiters.take_all();
                 }
                 PipeEnd::Write => {
                     pipe.writer_refcount = pipe.writer_refcount.saturating_sub(1);
@@ -1010,8 +1065,8 @@ pub fn close(handle: PipeHandle) {
                         return;
                     }
                     pipe.write_closed = true;
-                    // Wake blocked reader — it will see EOF (0 bytes).
-                    wake_task = pipe.reader_waiter.take();
+                    // Wake blocked readers — they will see EOF (0 bytes).
+                    wake_tasks = pipe.reader_waiters.take_all();
                 }
             }
 
@@ -1022,9 +1077,7 @@ pub fn close(handle: PipeHandle) {
         }
     }
 
-    if let Some(task_id) = wake_task {
-        sched::wake(task_id);
-    }
+    wake_all(wake_tasks);
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1290,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dup_refcount()?;
     test_capacity_roundtrip()?;
     test_peek_nondestructive()?;
+    test_multi_waiter_wake()?;
 
     serial_println!("[pipe] Pipe self-test PASSED");
     Ok(())
@@ -1721,5 +1775,114 @@ fn test_blocking_roundtrip() -> KernelResult<()> {
     close(rh);
     close(wh);
     serial_println!("[pipe]   Blocking read/write: OK");
+    Ok(())
+}
+
+/// Number of multi-waiter readers that successfully read one byte.
+static PIPE_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Number of multi-waiter readers that observed EOF (`Ok(0)`).
+static PIPE_MULTI_EOF_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Multi-waiter task: park on the read end until exactly one byte arrives.
+///
+/// Both spawned copies block on the *same* read end simultaneously, which is
+/// the situation the old single-`Option<TaskId>` waiter slot could not
+/// represent: the second parker overwrote the first, and the first was then
+/// never woken by anyone.
+extern "C" fn pipe_multi_data_task(read_handle_raw: u64) {
+    let rh = PipeHandle::from_raw(read_handle_raw);
+    // One-byte buffer so each reader consumes exactly one byte and both can
+    // be satisfied by a single 2-byte write.
+    let mut buf = [0u8; 1];
+    if let Ok(1) = read(rh, &mut buf) {
+        PIPE_MULTI_DATA_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Multi-waiter task: park on an empty read end until the writer closes (EOF).
+extern "C" fn pipe_multi_eof_task(read_handle_raw: u64) {
+    let rh = PipeHandle::from_raw(read_handle_raw);
+    let mut buf = [0u8; 1];
+    if let Ok(0) = read(rh, &mut buf) {
+        PIPE_MULTI_EOF_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Test 10: **two** tasks parked on the same pipe end are both woken.
+///
+/// Regression test for `BUG-PIPE-SINGLE-WAITER-SLOT`: `Pipe` used to hold a
+/// single `Option<TaskId>` per end, so a second parking task silently
+/// overwrote the first and the overwritten task hung forever.  `dup()`,
+/// process spawn and `wait_readable` (the `tee` primitive) all make
+/// several-waiters-per-end a normal occurrence, so this must work.
+///
+/// Two phases, covering both classes of wake:
+///
+/// 1. **Data wake.** Two readers park on an empty pipe; one 2-byte write must
+///    wake *both* (each reads one byte).  With the old code only the last
+///    parker was recorded, so exactly one reader would have completed.
+/// 2. **EOF broadcast.** Two fresh readers park on an empty pipe; closing the
+///    write end must wake both with `Ok(0)`.  EOF is a permanent condition —
+///    a waiter missed here can never be woken by anything else.
+fn test_multi_waiter_wake() -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    // Give the spawned readers plenty of scheduling opportunities; a single
+    // yield only guarantees one of them ran.
+    fn yield_a_few() {
+        for _ in 0..8 {
+            sched::yield_now();
+        }
+    }
+
+    // --- Phase 1: one write wakes both parked readers. ---
+    PIPE_MULTI_DATA_OK.store(0, SeqCst);
+    let (rh, wh) = create();
+    sched::spawn(b"pipe-multi-a", 16, pipe_multi_data_task, rh.raw(), 0)?;
+    sched::spawn(b"pipe-multi-b", 16, pipe_multi_data_task, rh.raw(), 0)?;
+    // Let both readers reach the park.
+    yield_a_few();
+    write(wh, &[7, 9])?;
+    yield_a_few();
+
+    let data_ok = PIPE_MULTI_DATA_OK.load(SeqCst);
+    if data_ok != 2 {
+        serial_println!(
+            "[pipe]   FAIL: {} of 2 parked readers woke on data",
+            data_ok
+        );
+        // Close both ends so any still-parked reader is released by EOF
+        // rather than being leaked as a permanently blocked task.
+        close(wh);
+        yield_a_few();
+        close(rh);
+        return Err(KernelError::InternalError);
+    }
+    close(wh);
+    close(rh);
+
+    // --- Phase 2: writer close (EOF) wakes both parked readers. ---
+    PIPE_MULTI_EOF_OK.store(0, SeqCst);
+    let (rh2, wh2) = create();
+    sched::spawn(b"pipe-multi-c", 16, pipe_multi_eof_task, rh2.raw(), 0)?;
+    sched::spawn(b"pipe-multi-d", 16, pipe_multi_eof_task, rh2.raw(), 0)?;
+    yield_a_few();
+    close(wh2);
+    yield_a_few();
+
+    let eof_ok = PIPE_MULTI_EOF_OK.load(SeqCst);
+    close(rh2);
+    if eof_ok != 2 {
+        serial_println!(
+            "[pipe]   FAIL: {} of 2 parked readers woke on EOF",
+            eof_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[pipe]   Multi-waiter wake (data + EOF): OK");
     Ok(())
 }

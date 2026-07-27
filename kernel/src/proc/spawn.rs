@@ -11154,7 +11154,7 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
         }
     }
     match crate::fs::Vfs::read_file(TARGET) {
-        Ok(bytes) if bytes == &PAYLOAD[..NEW_SIZE as usize] => {}
+        Ok(bytes) if *bytes == PAYLOAD[..NEW_SIZE as usize] => {}
         Ok(bytes) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-truncate (ring 3) — surviving {} bytes do not match the \
@@ -11944,6 +11944,7 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
 ///   * `os.access(TARGET, 7)`  R|W|X valid, exists    → True  ('1')
 ///   * `os.access(TARGET, 8)`  invalid mode (EINVAL)  → False ('0')
 ///   * `os.access(MISSING, 0)` F_OK, missing          → False ('0')
+///
 /// i.e. the expected pattern is exactly `"1100"`, and it exits 0 iff so.
 ///
 /// False-pass-proof: a stub returning a constant bool cannot produce "1100" for
@@ -12122,6 +12123,7 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
 ///   * `samefile(TARGET, LINK)`   symlink resolves to TARGET → True  ('1')
 ///   * `samefile(TARGET, OTHER)`  distinct inodes            → False ('0')
 ///   * `samefile(TARGET, TARGET)` identical path             → True  ('1')
+///
 /// i.e. the expected pattern is exactly `"101"`, and it exits 0 iff so.
 ///
 /// False-pass-proof: a constant-bool stub cannot produce "101"; the symlink
@@ -12336,13 +12338,14 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
 /// *dangling* symlink `DANGLING` → `MISSING` (a path never created), then tests
 /// `os.path.islink` on four inputs → native `fastpy_os_path_islink` → posix
 /// `lstat()` → `SYS_FS_LSTAT` (gated on `Rights::METADATA`) → `S_ISLNK`:
-///   * `islink(LINK)`     → True  (a symlink to an existing target)
-///   * `islink(TARGET)`   → False (a regular file)
-///   * `islink(DANGLING)` → True  (a symlink, though its target is missing —
-///                                 the decisive no-follow discriminator: a
-///                                 follow-symlink `stat()` would see it as
-///                                 nonexistent and report False)
-///   * `islink(MISSING)`  → False (the path does not exist)
+///
+/// * `islink(LINK)` → True  (a symlink to an existing target)
+/// * `islink(TARGET)` → False (a regular file)
+/// * `islink(DANGLING)` → True  (a symlink, though its target is missing — the
+///   decisive no-follow discriminator: a follow-symlink `stat()` would see it
+///   as nonexistent and report False)
+/// * `islink(MISSING)` → False (the path does not exist)
+///
 /// and writes the 4-char pattern `"1010"` to `/tmp/fastpy-islink.out`, exiting
 /// 0 iff both symlinks succeeded and the pattern held.
 ///
@@ -17718,6 +17721,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
 ///     yields the target's data, but the entry's own inode is the symlink.
 ///   * `Vfs::link(nfl-link, nfl-hl-follow)` — the new name must be a *regular
 ///     file* (readlink fails) whose contents are the target's "T".
+///
 /// Skips cleanly when `/mnt` is not a writable ext4 mount or lacks symlink
 /// support (diskless boot).
 pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {

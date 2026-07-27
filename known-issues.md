@@ -14,43 +14,6 @@ work that should be done now."
 
 ## Active Bugs
 
-### BUG-PIPE-SINGLE-WAITER-SLOT. A pipe remembers only ONE blocked reader and ONE blocked writer, so a second blocker on the same pipe end is silently forgotten and never woken — 2026-07-27 — OPEN (latent)
-
-**Where:** `kernel/src/ipc/pipe.rs` — the per-pipe fields `reader_waiter:
-Option<TaskId>` and `writer_waiter: Option<TaskId>`, written in `read()`
-(~576, `pipe.reader_waiter = Some(task)`) and `write()` (~/`writer_waiter`),
-and consumed with `.take()` by the peer operation and by `close()` (~1005,
-~1014).
-
-**What:** the fields are *single slots*, not wait queues. If task A parks on
-an empty pipe (`reader_waiter = Some(A)`) and task B then parks on the same
-pipe, B's assignment **overwrites** the slot. The subsequent write/close
-`.take()`s only B and wakes only B; **A is never woken by anything** and
-parks forever. The same applies symmetrically to `writer_waiter` when two
-writers block on a full pipe.
-
-**Impact:** latent — every current self-test and the shell plumbing use a
-pipe with exactly one reader and one writer, so the slot is never contended.
-It becomes real for any legitimate multi-reader/multi-writer pipe: a worker
-pool where N children share one pipe end (a standard POSIX pattern — reads of
-≤PIPE_BUF are atomic precisely so this works), or a shell construct that
-`dup`s an end into several processes that then all block.
-
-**Found by:** the BUG-DASH-CMDSUB-INTERMITTENT-HANG audit (2026-07-27), which
-ruled out the lost-wakeup hypothesis on this path but surfaced this
-adjacent defect. Note this is *not* believed to be the cause of that hang
-(that test is strictly single-reader/single-writer).
-
-**Proper fix:** replace both `Option<TaskId>` slots with the existing wait
-queue (`kernel/src/sched/waitqueue.rs`, which already provides
-`try_wake_one`), so every blocked task is enqueued and the peer/close paths
-wake *all* relevant waiters (all readers on EOF, since EOF is broadcast
-state; one waiter on a data/space transition). Keep the enqueue inside the
-same `PIPES.lock()` critical section that tests `write_closed`/readability so
-the existing — and currently correct — ordering guarantee is preserved. Add
-a self-test that parks two readers on one pipe and asserts both observe EOF
-after the writer closes.
-
 ### BUG-DASH-CMDSUB-INTERMITTENT-HANG. The Path-Z real-dash command-substitution self-test (`echo [$(/bin/emit)] > file`) intermittently hangs the boot thread — no BOOT_OK — but passes on a re-run — 2026-07-23 — OPEN (flaky)
 
 **Symptom.** `self_test_linux_real_glibc_shell_cmdsub` (kernel/src/proc/spawn.rs ~21042, "REAL dash shell command substitution `echo [$(/bin/emit)] > file`") occasionally wedges: dash (the parent process, e.g. pid 272) forks a child (pid 273) which `execve`s `/bin/emit` and becomes a zombie ("Process 273 has no threads left — now zombie", "Task 239 exiting"), and then there is **no further serial output** — the boot never reaches BOOT_OK and the run-timeout watchdog eventually fails the boot at ~540s. On an immediate re-run (identical kernel + rootfs, `--no-build`) the same test **passes** ("read back 18 bytes == expected, exit 0: OK") and the boot reaches BOOT_OK. Observed 2026-07-23: one boot hung here, the very next boot passed it.
@@ -9671,6 +9634,68 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### BUG-PIPE-SINGLE-WAITER-SLOT. A pipe remembered only ONE blocked reader and ONE blocked writer, so a second blocker on the same pipe end was silently forgotten and never woken — FIXED 2026-07-27
+
+**Where:** `kernel/src/ipc/pipe.rs` — the per-pipe fields `reader_waiter:
+Option<TaskId>` / `writer_waiter: Option<TaskId>`, written in `read()`,
+`write()`, `wait_readable()`, `read_timeout()`, `write_timeout()` and
+consumed with `.take()` by the peer operation and by `close()`.
+
+**Bug:** the fields were *single slots*, not wait queues. If task A parked on
+an empty pipe (`reader_waiter = Some(A)`) and task B then parked on the same
+pipe, B's assignment **overwrote** the slot. The subsequent write/close
+`.take()`d only B and woke only B; **A was never woken by anything** and
+parked forever. The same applied symmetrically to `writer_waiter` when two
+writers blocked on a full pipe. Several waiters per end is not exotic:
+`dup()` and process spawn hand the same end to multiple processes, and
+`wait_readable()` (the `tee` primitive) parks on the read end alongside a
+real reader.
+
+A second, subtler defect rode along: only the *signal* exit path cleared the
+waiter slot (`if pipe.writer_waiter == Some(task) { … = None }`). The
+timeout path left a stale task id behind, which a later state change would
+then "wake" — mis-waking whatever task had since recycled that id.
+
+**Impact when found:** latent — every self-test and the shell plumbing used a
+pipe with exactly one reader and one writer, so the slot was never contended.
+It would have become real for any legitimate multi-reader/multi-writer pipe
+(a worker pool where N children share one pipe end — a standard POSIX
+pattern, since reads of ≤PIPE_BUF are atomic precisely so this works).
+
+**Found by:** the BUG-DASH-CMDSUB-INTERMITTENT-HANG audit (2026-07-27), which
+ruled out the lost-wakeup hypothesis on that path but surfaced this adjacent
+defect.
+
+**Fix:** both `Option<TaskId>` slots were replaced by a `WaiterSet` — a
+`Vec<TaskId>` with `insert`/`remove`/`take_all` — embedded in `Pipe` and
+mutated under the existing `PIPES` lock, so the documented `PIPES → SCHED`
+lock order and the enqueue-inside-the-same-critical-section guarantee are
+both preserved unchanged. (`sched::waitqueue::WaitQueue` was evaluated and
+rejected: it owns an internal `Mutex<[u64; 32]>` that would have introduced
+a *second* lock inside the `PIPES`-held critical sections, plus a new
+lock-order obligation and a spin-yield-when-full failure mode.)
+
+Three semantic changes came with it:
+
+* **Wake-all, always.** Every state change wakes *all* waiters on the
+  affected end, matching Linux (`fs/pipe.c` parks on a non-exclusive wait
+  queue, so `wake_up_interruptible_sync_poll()` wakes every sleeper). This
+  is required for correctness on EOF/EPIPE, which are permanent broadcast
+  conditions — a waiter missed there can never be woken by anything else.
+* **Deregister-first.** Every park loop now removes itself from the set at
+  the top of each iteration (inside the lock), so no exit path — success,
+  timeout, signal, or error — can leave a stale task id behind.
+* **`close()` broadcasts.** Full closure of one end takes the whole waiter
+  set of the far end and wakes all of it after dropping the table lock.
+
+**Regression test:** `test_multi_waiter_wake()` in `kernel/src/ipc/pipe.rs`
+(wired into `pipe::self_test()`). Phase 1 parks two kernel tasks on one
+empty read end and does a single 2-byte write, asserting *both* readers wake
+and each consumes one byte; phase 2 parks two more on a fresh empty pipe and
+closes the write end, asserting both observe `Ok(0)` EOF. Under the old
+single-slot code exactly one reader would have completed in each phase.
+Verified on target: `[pipe]   Multi-waiter wake (data + EOF): OK`.
 
 ### BUG-POSIX-SYMLINK-ARGSWAP. posix `symlink()` libc wrapper passed `SYS_FS_SYMLINK` args swapped vs. the kernel ABI → symlink-to-existing-target failed EEXIST — FIXED 2026-07-22
 

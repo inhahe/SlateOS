@@ -6531,13 +6531,13 @@ enum MprotectValidation {
 /// `mm/mprotect.c::do_mprotect_pkey`).  Does not touch page tables.
 ///
 /// Returns:
-///   * `Ok(None)`      — zero-length range: succeed without doing anything.
-///   * `Ok(Some(end))` — all gates passed; `end` is the (4 KiB-aligned)
-///                       exclusive end of the range to operate on.
-///   * `Err(e)`        — a validation error as a [`KernelError`], so each
-///                       ABI (Linux vs native) can map it to its own errno
-///                       convention.  Never fabricates: EINVAL cases map to
-///                       `InvalidArgument`, ENOMEM cases to `OutOfMemory`.
+///
+/// * `Ok(None)` — zero-length range: succeed without doing anything.
+/// * `Ok(Some(end))` — all gates passed; `end` is the (4 KiB-aligned) exclusive
+///   end of the range to operate on.
+/// * `Err(e)` — a validation error as a [`KernelError`], so each ABI (Linux vs
+///   native) can map it to its own errno convention.  Never fabricates: EINVAL
+///   cases map to `InvalidArgument`, ENOMEM cases to `OutOfMemory`.
 ///
 /// Gate order:
 ///   1. addr & (PAGE_SIZE - 1)                → EINVAL  (InvalidArgument)

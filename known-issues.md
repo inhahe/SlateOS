@@ -14,6 +14,43 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-PIPE-SINGLE-WAITER-SLOT. A pipe remembers only ONE blocked reader and ONE blocked writer, so a second blocker on the same pipe end is silently forgotten and never woken — 2026-07-27 — OPEN (latent)
+
+**Where:** `kernel/src/ipc/pipe.rs` — the per-pipe fields `reader_waiter:
+Option<TaskId>` and `writer_waiter: Option<TaskId>`, written in `read()`
+(~576, `pipe.reader_waiter = Some(task)`) and `write()` (~/`writer_waiter`),
+and consumed with `.take()` by the peer operation and by `close()` (~1005,
+~1014).
+
+**What:** the fields are *single slots*, not wait queues. If task A parks on
+an empty pipe (`reader_waiter = Some(A)`) and task B then parks on the same
+pipe, B's assignment **overwrites** the slot. The subsequent write/close
+`.take()`s only B and wakes only B; **A is never woken by anything** and
+parks forever. The same applies symmetrically to `writer_waiter` when two
+writers block on a full pipe.
+
+**Impact:** latent — every current self-test and the shell plumbing use a
+pipe with exactly one reader and one writer, so the slot is never contended.
+It becomes real for any legitimate multi-reader/multi-writer pipe: a worker
+pool where N children share one pipe end (a standard POSIX pattern — reads of
+≤PIPE_BUF are atomic precisely so this works), or a shell construct that
+`dup`s an end into several processes that then all block.
+
+**Found by:** the BUG-DASH-CMDSUB-INTERMITTENT-HANG audit (2026-07-27), which
+ruled out the lost-wakeup hypothesis on this path but surfaced this
+adjacent defect. Note this is *not* believed to be the cause of that hang
+(that test is strictly single-reader/single-writer).
+
+**Proper fix:** replace both `Option<TaskId>` slots with the existing wait
+queue (`kernel/src/sched/waitqueue.rs`, which already provides
+`try_wake_one`), so every blocked task is enqueued and the peer/close paths
+wake *all* relevant waiters (all readers on EOF, since EOF is broadcast
+state; one waiter on a data/space transition). Keep the enqueue inside the
+same `PIPES.lock()` critical section that tests `write_closed`/readability so
+the existing — and currently correct — ordering guarantee is preserved. Add
+a self-test that parks two readers on one pipe and asserts both observe EOF
+after the writer closes.
+
 ### BUG-DASH-CMDSUB-INTERMITTENT-HANG. The Path-Z real-dash command-substitution self-test (`echo [$(/bin/emit)] > file`) intermittently hangs the boot thread — no BOOT_OK — but passes on a re-run — 2026-07-23 — OPEN (flaky)
 
 **Symptom.** `self_test_linux_real_glibc_shell_cmdsub` (kernel/src/proc/spawn.rs ~21042, "REAL dash shell command substitution `echo [$(/bin/emit)] > file`") occasionally wedges: dash (the parent process, e.g. pid 272) forks a child (pid 273) which `execve`s `/bin/emit` and becomes a zombie ("Process 273 has no threads left — now zombie", "Task 239 exiting"), and then there is **no further serial output** — the boot never reaches BOOT_OK and the run-timeout watchdog eventually fails the boot at ~540s. On an immediate re-run (identical kernel + rootfs, `--no-build`) the same test **passes** ("read back 18 bytes == expected, exit 0: OK") and the boot reaches BOOT_OK. Observed 2026-07-23: one boot hung here, the very next boot passed it.

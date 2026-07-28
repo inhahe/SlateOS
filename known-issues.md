@@ -64,6 +64,68 @@ suite: 713 + 13 pass, `cargo clippy -p oils --all-targets` clean.
 **Still open** in TD-OILS11: a `RETURN` trap is not fired for a returning
 *sourced script* (only function returns), and async signal delivery.
 
+### BUG-OILS-MAPFILE-BULK-ASSIGN. `mapfile` assigned the array only after the whole read, and `-O` wrongly cleared it first — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**How it was found.** The first run of the new differential harness
+(`scripts/osh-bash-diff.py`, see below) against a 25-case corpus: 24 matched,
+the `mapfile-callback` case did not. That case had been written from the bash
+manual's wording, not from a hand-probe, which is exactly the kind of gap the
+harness exists to close.
+
+**Symptom.** Two divergences, both verified against bash 5.x
+(`C:/Program Files/Git/usr/bin/bash.exe`) before and after the fix:
+
+| Case | bash | osh (before) |
+|---|---|---|
+| `cb() { echo "have=$((${#arr[@]} - 1))"; }; mapfile -t -C cb -c 1 arr < f` (f = `a b c`) | `have=-1`, `have=0`, `have=1` — each callback sees the elements read *before* it | `have=-1` three times — the array was still empty in every callback |
+| `arr=(x y z w v); mapfile -t -O 1 arr < f; echo "${arr[*]}"` | `x a b c v` — `-O` overwrites in place | `a b c` — the array was cleared first, like a plain `mapfile` |
+
+**Root cause.** `builtin_mapfile` buffered every line into a local `Vec` and did
+one bulk `arrays.insert()` at the end. That made the in-progress array invisible
+to the `-C` callback (which is arbitrary shell code running in the current
+shell, so it *can* read it), and it conflated "start from index `origin`" with
+"replace the whole array". bash's rule: the callback is evaluated after the line
+is read but **before** that element is assigned, and `-O` suppresses the
+array-clearing entirely — elements outside the written range survive, and
+writing past the end leaves an index gap rather than compacting
+(`arr=(x)` + `-O 2` → indices `0 2 3 4`).
+
+**Fix.** Assign each element inside the read loop, immediately *after* its
+callback fires, re-looking up the array through
+`self.arrays.entry(array.clone())` every iteration — the callback may have
+removed or replaced the binding, so a reference held across the call could
+dangle. A new `origin_given` flag makes the pre-read reset `or_default()`
+(keep existing elements) instead of `insert(BTreeMap::new())` (clear).
+
+**Tests.** `mapfile_callback_sees_earlier_elements`,
+`mapfile_origin_overwrites_without_clearing`. Both failed before the change.
+Suite: 727 + 15 pass, `cargo clippy -p oils --all-targets` clean; corpus 25/25.
+
+### TOOL-OSH-BASH-DIFF. `scripts/osh-bash-diff.py` — the osh-vs-bash differential harness — 2026-07-27
+
+Every fidelity gap fixed above was found the same way: write a snippet, run it
+under real bash, run it under osh, eyeball the difference. That loop was
+entirely manual, so it was only ever run *once* per bug and never replayed after
+a later change. `scripts/osh-bash-diff.py` institutionalises it: each case in
+`userspace/oils/tests/corpus/*.sh` is run by both shells in a fresh temporary
+cwd and stdout/stderr/status compared. `# STDIN: <text>` feeds stdin;
+`# EXPECT-DIFF: <reason>` waives a known divergence — and the run **fails** if a
+waived case starts matching, so a stale waiver cannot hide a fix.
+
+Two traps it already had to defuse, worth knowing before touching it:
+
+* It picks the **newest** `osh` binary by mtime, not the first one that exists.
+  The first draft preferred `target/…/release/osh.exe`, which was a week stale,
+  and duly reported 14 false failures against week-old behaviour.
+* Cases are written with `write_bytes`, not `write_text`: on Windows the latter
+  translates LF→CRLF, and the two shells disagree about stray CRs, so every
+  multi-line case diverged spuriously.
+
+Reference bash on the dev host is MSYS bash, which itself differs from Linux
+bash in a few documented places (C-locale byte-wise string ops, signal
+numbering, exit 127 for fatal expansion errors) — see the TD-OILS-* "probe
+artifact" entries below. Cases hitting those need an `# EXPECT-DIFF` waiver.
+
 ### BUG-OILS-NESTED-CODE-LOSES-CALLERS-FDS. Trap handlers, `eval` and `source` ran with the real fd 0/1 instead of the caller's sink and stdin — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** Internally-generated shell code (a trap handler, an `eval` string,
@@ -2509,42 +2571,34 @@ bash's rule is simply *"handler output goes to the shell's current stdout"*, and
 the `DEBUG`-to-the-terminal lines that seemed to contradict it were the DEBUG
 traps firing in the **parent** for the commands outside the substitution.
 
-### TD-OILS-BUILTINS. `osh` is missing several bash builtins: `kill`, `ulimit`, and the interactive-only set — OPEN (each gated on OS infrastructure or interactive-shell support)
+### TD-OILS-BUILTINS. `osh` is missing the interactive-only bash builtins — OPEN (gated on interactive-shell support)
+
+**Status correction 2026-07-27.** This entry used to head the list with `kill`,
+`ulimit`, `complete` and `compopt` as unimplemented. They have all since landed
+and `type -t` now reports `builtin` for each: `kill -l`/`-L` prints the full
+Linux-x86 signal table, `kill -0`/`kill -SIG pid` works, and `ulimit -a`
+reports the limit set. Only the list below is still missing.
 
 **Where:** `userspace/oils/src/interp.rs` (`BUILTIN_NAMES`, the builtin dispatch
-in `run_builtin`, `SIGNALS` table). `type -t <name>` currently reports `file`
-(shells out to an external) or nothing for these.
+in `run_builtin`). `type -t <name>` reports nothing for these — except `fc`,
+which resolves to the MSYS external on the host and would be `command not found`
+on SlateOS.
 
-**What:** the following bash builtins are not implemented. On the host they
-either resolve to an external (MSYS `kill`/`fc`) or fail; on SlateOS, where those
-externals do not exist, they would be `command not found`:
+**What:** these bash builtins are not implemented. All are interactive-only and
+have no effect in a `-c`/script shell, so they are low priority until osh grows
+an interactive line editor:
 
-- **`kill`** — script-relevant. Two halves: (a) `kill -l`/`-L` signal
-  name↔number translation and listing is *pure formatting* and fully
-  implementable now (using osh's Linux-x86 `SIGNALS` table — note this
-  intentionally differs from MSYS/Cygwin bash's numbering, so a host probe
-  against MSYS bash shows spurious diffs); (b) actually *sending* a signal is
-  gated on TD-OILS11 (SlateOS has no Unix signal delivery; std exposes no
-  portable arbitrary-PID `kill`). osh can already terminate its own tracked
-  jobs via `Child::kill`, but not arbitrary pids/signals.
-- **`ulimit`** — read/set process resource limits. Gated on a SlateOS
-  resource-limit model (cf. TD-OILS15 `umask`, which is tracked but not
-  enforced for the same class of reason).
-- **`suspend`** — stops the shell via SIGSTOP; gated on job-control/signals
-  (cf. TD-OILS13).
-- **Interactive-only (not applicable to `-c`/script use):** `bind` (readline
-  key bindings), `complete`/`compopt` (programmable completion), `history`,
-  `fc` (history editing/re-execution), `logout` (login-shell exit). These have
-  no effect in a non-interactive shell and are low priority until osh grows an
-  interactive line editor.
+- **`bind`** — readline key bindings.
+- **`history`** — command history list/manipulation.
+- **`fc`** — history editing / re-execution (needs `history` first).
+- **`logout`** — login-shell exit.
+- **`suspend`** — stops the shell via SIGSTOP; additionally gated on
+  job-control/signals (cf. TD-OILS13).
 
-**Proper fix:** implement `kill -l`/`-L` translation + listing now (it is
-un-gated), wiring `kill pid`/`kill -SIG pid` to whatever signal/IPC mechanism
-SlateOS exposes once TD-OILS11 lands; add `ulimit` against the resource-limit
-model when it exists; defer the interactive builtins until there is an
-interactive REPL. Each should become a real builtin (registered in
+**Proper fix:** defer until there is an interactive REPL with a line editor and
+a history store; then implement each as a real builtin (registered in
 `BUILTIN_NAMES` so `type`/`command -v` report `builtin`) rather than shelling
-out.
+out. `suspend` additionally waits on TD-OILS11 signal delivery.
 
 ### TD-OILS12. `osh` `-ef` file test uses path canonicalization, not device+inode — OPEN (low priority, gated on portable inode access)
 

@@ -13998,6 +13998,7 @@ impl Shell {
         let mut count: usize = 0; // 0 = unlimited
         let mut skip: usize = 0;
         let mut origin: usize = 0;
+        let mut origin_given = false;
         let mut callback: Option<String> = None;
         let mut quantum: usize = 5000;
         let mut array = String::from("MAPFILE");
@@ -14039,6 +14040,9 @@ impl Shell {
                 "-O" => {
                     i += 1;
                     origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    // `-O` also suppresses the array-clearing below (bash): the
+                    // lines are written *over* whatever is already there.
+                    origin_given = true;
                 }
                 other if other.starts_with('-') && other.len() > 1 => {
                     let opt: String = other.chars().take(2).collect();
@@ -14116,7 +14120,20 @@ impl Shell {
         // A callback only fires when `-C` was given and the quantum is non-zero.
         let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && quantum != 0;
 
-        let mut elems: BTreeMap<usize, String> = BTreeMap::new();
+        // bash discards the array's previous contents before reading — but NOT
+        // when `-O origin` was given, where the read overwrites in place and any
+        // elements outside the written range survive: with `arr=(x y z w v)`,
+        // reading the three lines `a b c` at `-O 1` leaves `x a b c v`. Either
+        // way the name becomes array-valued, so a scalar or associative binding
+        // of the same name is dropped.
+        self.vars.remove(&array);
+        self.assoc.remove(&array);
+        self.array_valued.insert(array.clone());
+        if origin_given {
+            self.arrays.entry(array.clone()).or_default();
+        } else {
+            self.arrays.insert(array.clone(), BTreeMap::new());
+        }
         let mut idx = origin;
         // Number of elements assigned so far (1-based when checking the quantum),
         // matching bash's `line_count % quantum == 0` boundary test.
@@ -14129,12 +14146,15 @@ impl Shell {
             if strip && s.as_bytes().last() == Some(&delim) {
                 s.pop();
             }
-            // The callback runs before the element is assigned (so `${arr[$idx]}`
-            // is still empty inside it) and receives the *same* value that will
-            // be stored — i.e. the `-t`-stripped line, or the raw line (delimiter
-            // included) when `-t` is absent. bash passes the target index and the
-            // line as command arguments; the callback text itself is evaluated
-            // as-is, so only the index and line need quoting.
+            // The callback runs before *this* element is assigned (so
+            // `${arr[$idx]}` is still empty inside it) but after all the earlier
+            // ones, which it can therefore read — hence the incremental
+            // assignment below rather than one bulk insert at the end. It
+            // receives the *same* value that will be stored — i.e. the
+            // `-t`-stripped line, or the raw line (delimiter included) when `-t`
+            // is absent. bash passes the target index and the line as command
+            // arguments; the callback text itself is evaluated as-is, so only the
+            // index and line need quoting.
             assigned = assigned.saturating_add(1);
             if fire_callback
                 && assigned.is_multiple_of(quantum)
@@ -14152,13 +14172,12 @@ impl Shell {
                     return n;
                 }
             }
-            elems.insert(idx, s);
+            // Re-look up the array every iteration: the callback is arbitrary
+            // shell code and may have inserted, removed or replaced it, so a
+            // reference held across the call could dangle.
+            self.arrays.entry(array.clone()).or_default().insert(idx, s);
             idx = idx.saturating_add(1);
         }
-        self.vars.remove(&array);
-        self.assoc.remove(&array);
-        self.array_valued.insert(array.clone());
-        self.arrays.insert(array, elems);
         0
     }
 
@@ -26828,6 +26847,50 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(sh.vars.get("CB").map(String::as_str), Some(" 0"), "one callback, then unwind");
         assert!(sh.arrays.get("arr").is_none_or(BTreeMap::is_empty), "array not assigned");
         assert!(!sh.vars.contains_key("AFTER"), "commands after the mapfile do not run");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The array is filled *incrementally*, so a `-C` callback sees every
+    /// element read before it (bash evaluates the callback after the line is
+    /// read but before *that* element is assigned, so the count lags the index
+    /// by one). osh used to buffer the whole read and insert at the end, which
+    /// made the array invisible to every callback. Verified against bash 5.x:
+    /// `cb 0 [a] have=-1`, `cb 1 [b] have=0`, `cb 2 [c] have=1`.
+    #[test]
+    fn mapfile_callback_sees_earlier_elements() {
+        let path = scratch_script("mapfile_cb_incr", "a\nb\nc\n");
+        let (o, _) = run(&format!(
+            "cb() {{ echo \"cb $1 [$2] have=$((${{#arr[@]}} - 1))\"; }}\n\
+             mapfile -t -C cb -c 1 arr < {path}\n\
+             echo \"final=${{arr[*]}}\""
+        ));
+        assert_eq!(
+            o,
+            "cb 0 [a] have=-1\ncb 1 [b] have=0\ncb 2 [c] have=1\nfinal=a b c\n"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Plain `mapfile` discards the array's previous contents; `-O origin` does
+    /// NOT — it overwrites in place, so elements outside the written range
+    /// survive. bash: `arr=(x y z w v)` + three lines at `-O 1` → `x a b c v`.
+    #[test]
+    fn mapfile_origin_overwrites_without_clearing() {
+        let path = scratch_script("mapfile_origin", "a\nb\nc\n");
+        let (o, _) = run(&format!(
+            "arr=(x y z w v); mapfile -t -O 1 arr < {path}; echo \"${{arr[*]}}\""
+        ));
+        assert_eq!(o, "x a b c v\n", "-O keeps elements outside the written range");
+        // Without -O the array is replaced wholesale, trailing elements gone.
+        let (o2, _) = run(&format!(
+            "arr=(x y z w v); mapfile -t arr < {path}; echo \"${{arr[*]}}\""
+        ));
+        assert_eq!(o2, "a b c\n", "plain mapfile clears first");
+        // `-O` past the end leaves a gap rather than compacting: indices 0,2,3,4.
+        let (o3, _) = run(&format!(
+            "arr=(x); mapfile -t -O 2 arr < {path}; echo \"${{!arr[*]}} / ${{arr[*]}}\""
+        ));
+        assert_eq!(o3, "0 2 3 4 / x a b c\n");
         let _ = std::fs::remove_file(&path);
     }
 

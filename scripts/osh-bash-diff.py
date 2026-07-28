@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""Differential tester: run a corpus of shell snippets through `osh` and a
+reference `bash`, and report every divergence in stdout, stderr or exit status.
+
+`osh` (userspace/oils) is a bash-compatible shell, and the way its fidelity gaps
+have actually been found so far is by hand: write a snippet, run it under real
+bash, run it under osh, eyeball the difference. This automates exactly that loop
+so the same comparison can be replayed after every change instead of once.
+
+Corpus
+------
+Cases live in `userspace/oils/tests/corpus/*.sh`; one case per file, run with
+`<shell> case.sh` in a fresh temporary working directory (so a case may create
+files without disturbing the next one). Two magic comments are recognised:
+
+    # STDIN: <text>          feed <text> plus a newline to the shell's stdin
+                             (repeatable — each line appends)
+    # EXPECT-DIFF: <reason>  this case is *known* to differ; the run fails if it
+                             stops differing (so stale waivers can't hide a fix)
+
+Reference shell
+---------------
+Defaults to MSYS/Git-for-Windows bash on the dev host, overridable with
+`--bash`. Note that MSYS bash differs from real Linux bash in a few documented
+places (C-locale byte-wise string ops, signal numbering, exit 127 for fatal
+expansion errors) — see the TD-OILS-* "probe artifact" entries in
+`known-issues.md`. Cases that hit those need an `# EXPECT-DIFF` waiver.
+
+Usage
+-----
+    python scripts/osh-bash-diff.py                 # run the whole corpus
+    python scripts/osh-bash-diff.py -k trap         # only cases matching "trap"
+    python scripts/osh-bash-diff.py -v              # show output for every case
+
+Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
+case diverged unexpectedly or a waived case unexpectedly matched, 2 on a setup
+error (no osh binary, no reference bash).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CORPUS = REPO / "userspace" / "oils" / "tests" / "corpus"
+
+# Where the host build puts osh. The *newest* existing one wins: a stale
+# `release/` build silently testing week-old behaviour is the easiest way to
+# make this whole harness lie.
+OSH_CANDIDATES = [
+    REPO / "target" / "x86_64-pc-windows-gnu" / "release" / "osh.exe",
+    REPO / "target" / "x86_64-pc-windows-gnu" / "debug" / "osh.exe",
+    REPO / "target" / "release" / "osh",
+    REPO / "target" / "debug" / "osh",
+]
+
+BASH_CANDIDATES = [
+    Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    Path("/usr/bin/bash"),
+    Path("/bin/bash"),
+]
+
+# A case that takes longer than this is treated as a hang, not a divergence.
+CASE_TIMEOUT = 20
+
+
+@dataclass
+class Case:
+    path: Path
+    source: str
+    stdin: str
+    expect_diff: str | None
+
+    @property
+    def name(self) -> str:
+        return self.path.stem
+
+
+@dataclass
+class Run:
+    stdout: str
+    stderr: str
+    status: int
+
+
+def load_cases(pattern: str | None) -> list[Case]:
+    cases: list[Case] = []
+    for path in sorted(CORPUS.glob("*.sh")):
+        if pattern and pattern not in path.stem:
+            continue
+        source = path.read_text(encoding="utf-8")
+        stdin_lines: list[str] = []
+        expect_diff: str | None = None
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# STDIN:"):
+                stdin_lines.append(stripped[len("# STDIN:"):].lstrip())
+            elif stripped.startswith("# EXPECT-DIFF:"):
+                expect_diff = stripped[len("# EXPECT-DIFF:"):].strip()
+        stdin = "".join(f"{line}\n" for line in stdin_lines)
+        cases.append(Case(path=path, source=source, stdin=stdin, expect_diff=expect_diff))
+    return cases
+
+
+def find_shell(explicit: str | None, candidates: list[Path], what: str, newest: bool = False) -> Path:
+    if explicit:
+        path = Path(explicit)
+        if not path.exists():
+            sys.exit(f"osh-bash-diff: {what} not found: {path}")
+        return path
+    present = [c for c in candidates if c.exists()]
+    if present:
+        return max(present, key=lambda p: p.stat().st_mtime) if newest else present[0]
+    on_path = shutil.which(what)
+    if on_path:
+        return Path(on_path)
+    sys.exit(
+        f"osh-bash-diff: no {what} found (looked in "
+        + ", ".join(str(c) for c in candidates)
+        + "). Build it or pass an explicit path."
+    )
+
+
+def run_case(shell: Path, case: Case) -> Run:
+    """Run one case with `shell`, in a throwaway cwd, and capture its output."""
+    with tempfile.TemporaryDirectory(prefix="oshdiff-") as workdir:
+        script = Path(workdir) / "case.sh"
+        # Byte-for-byte, *not* `write_text`: on Windows that would translate every
+        # LF to CRLF, and the two shells disagree about stray CRs — which would
+        # show up as a spurious divergence in every multi-line case.
+        script.write_bytes(case.source.encode("utf-8"))
+        # A predictable environment: the case's own output must not depend on
+        # the invoking shell's variables, prompt or locale.
+        env = dict(os.environ)
+        env.update(
+            {
+                "PS1": "$ ",
+                "PS2": "> ",
+                "LC_ALL": "C",
+                "BASH_ENV": "",
+                "ENV": "",
+                "COLUMNS": "80",
+            }
+        )
+        try:
+            proc = subprocess.run(
+                [str(shell), "case.sh"],
+                cwd=workdir,
+                input=case.stdin.encode(),
+                capture_output=True,
+                timeout=CASE_TIMEOUT,
+                env=env,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return Run(stdout="", stderr=f"<timed out after {CASE_TIMEOUT}s>", status=-1)
+    return Run(
+        stdout=proc.stdout.decode("utf-8", "replace"),
+        stderr=proc.stderr.decode("utf-8", "replace"),
+        status=proc.returncode,
+    )
+
+
+def normalise_stderr(text: str, shell_name: str) -> str:
+    """Strip the shell's own name/line prefix from diagnostics.
+
+    Both shells prefix errors with `<name>: line N:`; comparing those verbatim
+    would flag every single diagnostic as a divergence purely because the
+    programs are called `osh` and `bash`. The *message* is what matters here, so
+    drop a leading `<shell>:`/`case.sh:` component. Line numbers are kept — they
+    are part of the fidelity being tested.
+    """
+    out = []
+    for line in text.splitlines():
+        for prefix in (f"{shell_name}: ", "case.sh: ", "./case.sh: "):
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                break
+        out.append(line)
+    return "\n".join(out)
+
+
+def describe(field: str, a: str, b: str) -> list[str]:
+    return [
+        f"    {field}:",
+        f"      bash: {a!r}",
+        f"      osh : {b!r}",
+    ]
+
+
+def compare(case: Case, bash_run: Run, osh_run: Run) -> list[str]:
+    """Return a list of human-readable difference lines (empty if identical)."""
+    diffs: list[str] = []
+    if bash_run.stdout != osh_run.stdout:
+        diffs += describe("stdout", bash_run.stdout, osh_run.stdout)
+    b_err = normalise_stderr(bash_run.stderr, "bash")
+    o_err = normalise_stderr(osh_run.stderr, "osh")
+    if b_err != o_err:
+        diffs += describe("stderr", b_err, o_err)
+    if bash_run.status != osh_run.status:
+        diffs += [f"    status: bash={bash_run.status} osh={osh_run.status}"]
+    return diffs
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--osh", help="path to the osh binary (default: newest target/ build)")
+    ap.add_argument("--bash", help="path to the reference bash")
+    ap.add_argument("-k", "--filter", help="only run cases whose name contains this substring")
+    ap.add_argument("-v", "--verbose", action="store_true", help="print each case's output")
+    args = ap.parse_args()
+
+    # Cases (and their `# EXPECT-DIFF:` reasons) are UTF-8; the Windows console's
+    # default code page would mangle any non-ASCII in them, which reads as a
+    # harness bug rather than the cosmetic issue it is.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    osh = find_shell(args.osh, OSH_CANDIDATES, "osh", newest=True)
+    bash = find_shell(args.bash, BASH_CANDIDATES, "bash")
+    cases = load_cases(args.filter)
+    if not cases:
+        sys.exit(f"osh-bash-diff: no cases found in {CORPUS}")
+
+    print(f"osh : {osh}")
+    print(f"bash: {bash}")
+    print(f"{len(cases)} case(s)\n")
+
+    failures = 0
+    waived = 0
+    for case in cases:
+        bash_run = run_case(bash, case)
+        osh_run = run_case(osh, case)
+        diffs = compare(case, bash_run, osh_run)
+        if case.expect_diff and diffs:
+            waived += 1
+            print(f"~ {case.name} (known: {case.expect_diff})")
+            continue
+        if case.expect_diff and not diffs:
+            failures += 1
+            print(f"! {case.name}: waived as differing, but now MATCHES bash — remove the")
+            print(f"    `# EXPECT-DIFF: {case.expect_diff}` waiver (and close the issue).")
+            continue
+        if diffs:
+            failures += 1
+            print(f"X {case.name}")
+            print("\n".join(diffs))
+            continue
+        print(f". {case.name}")
+        if args.verbose:
+            print(f"    stdout: {osh_run.stdout!r}")
+            print(f"    status: {osh_run.status}")
+
+    matched = len(cases) - failures - waived
+    print(f"\n{matched} matched, {waived} waived, {failures} failed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

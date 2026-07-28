@@ -12423,12 +12423,19 @@ impl Shell {
             break;
         }
 
-        // Resolve the set of target job ids.
-        let mut target_ids: Vec<usize> = Vec::new();
+        // A spec is resolved and acted on before the next one is even looked at,
+        // which is observable: `disown %2 %2` fails on the second (job 2 is gone
+        // by then) and `disown %2 %+` disowns *two* jobs, because dropping job 2
+        // hands the `+` to job 1. A bad spec is reported and skipped rather than
+        // abandoning the rest.
         if !specs.is_empty() {
+            let mut status = 0;
             for spec in &specs {
                 match self.lookup_job(spec) {
-                    JobLookup::Found(idx) => target_ids.push(self.jobs[idx].id),
+                    JobLookup::Found(idx) => {
+                        let id = self.jobs[idx].id;
+                        self.disown_job(id, mark_hup);
+                    }
                     outcome => {
                         // Like `jobs`, `disown` reports an ambiguity and then
                         // its usual "no such job".
@@ -12436,43 +12443,48 @@ impl Shell {
                             self.ambiguous_job_spec("disown", &text);
                         }
                         self.emit_stderr(format!("{}disown: {spec}: no such job\n", self.err_prefix()).as_bytes());
-                        return 1;
+                        status = 1;
                     }
                 }
             }
-        } else if all {
-            target_ids = self.jobs.iter().map(|j| j.id).collect();
-        } else if running_only {
-            target_ids = self.jobs.iter().filter(|j| j.status.is_none()).map(|j| j.id).collect();
+            return status;
+        }
+
+        let target_ids: Vec<usize> = if all || running_only {
+            // `-r` narrows to the jobs that have not finished; `-a` is every one.
+            self.jobs
+                .iter()
+                .filter(|j| !running_only || j.status.is_none())
+                .map(|j| j.id)
+                .collect()
         } else {
-            // No spec: operate on the current job — the one `jobs` marks `+`,
-            // which is not always the last row of the table.
+            // No spec and no selector: operate on the current job — the one
+            // `jobs` marks `+`, which is not always the last row of the table.
             match self.current_job_idx() {
-                Some(idx) => target_ids.push(self.jobs[idx].id),
+                Some(idx) => vec![self.jobs[idx].id],
                 None => {
                     self.emit_stderr(format!("{}disown: current: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             }
-        }
-
-        if running_only {
-            target_ids.retain(|id| {
-                self.jobs.iter().find(|j| j.id == *id).is_some_and(|j| j.status.is_none())
-            });
-        }
-
-        if mark_hup {
-            for id in &target_ids {
-                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == *id) {
-                    j.no_hup = true;
-                }
-            }
-        } else {
-            self.jobs.retain(|j| !target_ids.contains(&j.id));
-            self.reset_job_markers();
+        };
+        for id in target_ids {
+            self.disown_job(id, mark_hup);
         }
         0
+    }
+
+    /// Apply `disown` to one job: forget it outright, or — with `-h` — keep it
+    /// but spare it the SIGHUP the shell would send on exit.
+    fn disown_job(&mut self, id: usize, mark_hup: bool) {
+        if mark_hup {
+            if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                j.no_hup = true;
+            }
+        } else {
+            self.jobs.retain(|j| j.id != id);
+            self.reset_job_markers();
+        }
     }
 
     /// Whether job control is enabled. bash turns it on for interactive shells
@@ -31729,6 +31741,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "kill -{sig}"
             );
         }
+    }
+
+    #[test]
+    fn disown_acts_on_each_operand_before_reading_the_next() {
+        // Each operand is resolved against the table as it stands *after* the
+        // previous one was acted on, so `%2 %+` disowns two jobs (dropping job 2
+        // hands the `+` to job 1) and `%2 %2` fails the second time.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        sh.run_source("sleep 6 &");
+        assert_eq!(sh.run_source("disown %2 %+"), 0);
+        assert!(sh.jobs.is_empty(), "both jobs should be gone");
+
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        sh.run_source("sleep 6 &");
+        let (o, s) = run_in(&mut sh, "disown %2 %2 2>&1");
+        assert_eq!(o, "osh: disown: %2: no such job\n");
+        assert_eq!(s, 1);
+        assert_eq!(sh.jobs.len(), 1, "the first operand still took effect");
+        // A bad operand is reported and skipped, not fatal to the rest.
+        let (o, s) = run_in(&mut sh, "disown %nosuch %1 2>&1");
+        assert_eq!(o, "osh: disown: %nosuch: no such job\n");
+        assert_eq!(s, 1);
+        assert!(sh.jobs.is_empty());
+    }
+
+    /// Run `src` in `sh` and return its stdout and status — for tests that need
+    /// a shell whose job table survives from one command to the next.
+    #[cfg(test)]
+    fn run_in(sh: &mut Shell, src: &str) -> (String, i32) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut out = Out::Capture(Arc::clone(&buf));
+        let status = sh.run_source_out(src, &mut out, 0);
+        let b = buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        (String::from_utf8_lossy(&b).into_owned(), status)
     }
 
     #[test]

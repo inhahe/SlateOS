@@ -11780,6 +11780,39 @@ impl Shell {
         // rewritten as `Terminated`. bash, which reaps asynchronously, already
         // knows such a job is dead and quietly succeeds without touching it.
         self.poll_jobs();
+        // A target is a job spec or a pid, and a word that is neither is the
+        // caller's mistake rather than a process that has gone away. The pid is
+        // read the way bash reads any number, so ` 9` and `+9` both name process
+        // nine — and the messages below quote the number read rather than the
+        // word it came from.
+        let pid = if target.starts_with('%') {
+            None
+        } else {
+            match legal_number(target) {
+                Some(n) => Some(n),
+                // The empty word is the one non-number bash does not put down to
+                // spelling; it has no spelling to fault.
+                None if target.is_empty() => {
+                    self.emit_stderr(
+                        format!("{}kill: `': not a pid or valid job spec\n", self.err_prefix())
+                            .as_bytes(),
+                    );
+                    return false;
+                }
+                None => {
+                    self.emit_stderr(
+                        format!(
+                            "{}kill: {target}: arguments must be process or job IDs\n",
+                            self.err_prefix()
+                        )
+                        .as_bytes(),
+                    );
+                    return false;
+                }
+            }
+        };
+        let shown = pid.map_or_else(|| target.to_string(), |n| n.to_string());
+        let is_self = pid == Some(i64::from(std::process::id()));
         // Resolve to one of our tracked jobs, if possible. An ambiguous `%name`
         // stops here: bash names the ambiguity and does not go on to claim
         // there is no such job.
@@ -11809,11 +11842,10 @@ impl Shell {
         // Signal 0: just report whether the target exists (a live job or the
         // shell itself); never terminate.
         if signum == 0 {
-            let exists = job_idx.is_some()
-                || target.parse::<u32>().is_ok_and(|p| p == std::process::id());
+            let exists = job_idx.is_some() || is_self;
             if !exists {
                 self.emit_stderr(
-                    format!("{}kill: ({target}) - No such process\n", self.err_prefix())
+                    format!("{}kill: ({shown}) - No such process\n", self.err_prefix())
                         .as_bytes(),
                 );
             }
@@ -11833,7 +11865,7 @@ impl Shell {
                     }
                     Err(_) => {
                         self.emit_stderr(
-                            format!("{}kill: ({target}) - No such process\n", self.err_prefix())
+                            format!("{}kill: ({shown}) - No such process\n", self.err_prefix())
                                 .as_bytes(),
                         );
                         return false;
@@ -11857,13 +11889,13 @@ impl Shell {
         // machinery. SlateOS/Windows have no real Unix signals, so self-delivery
         // is simulated synchronously: a registered trap runs now, otherwise the
         // signal's default disposition (terminate / ignore) applies.
-        if target.parse::<u32>().is_ok_and(|p| p == std::process::id()) {
+        if is_self {
             return self.deliver_self_signal(signum, out, stdin);
         }
         // A pid osh did not spawn cannot be signalled without the target's
         // process-control layer; report it like bash does for a stale pid.
         self.emit_stderr(
-            format!("{}kill: ({target}) - No such process\n", self.err_prefix()).as_bytes(),
+            format!("{}kill: ({shown}) - No such process\n", self.err_prefix()).as_bytes(),
         );
         false
     }

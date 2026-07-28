@@ -14413,6 +14413,21 @@ impl Shell {
                 );
             }
         }
+        // The `-v` name is checked as it is read, before printf looks for a
+        // format at all — so `printf -v 1bad` is refused for its name rather
+        // than for the format it is also missing, and `printf -v 1bad '%d' abc`
+        // never gets far enough to complain about the number. Nothing is
+        // formatted, nothing is written, and the status is the usage error's 2
+        // rather than the 1 a refused *store* would leave.
+        if let Some(name) = &assign_var
+            && !is_valid_assignment_target(name)
+        {
+            self.errln(&format!(
+                "{}printf: `{name}': not a valid identifier",
+                self.err_prefix()
+            ));
+            return 2;
+        }
         let Some(fmt) = args.get(i) else {
             // No format operand (`printf`, or `printf -v var` with nothing
             // after): bash prints the usage synopsis (unprefixed, like the other
@@ -33039,6 +33054,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("{ read -a 1bad; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r]\"").0,
             "r=[]\n"
         );
+    }
+
+    #[test]
+    fn printf_checks_its_v_name_as_it_reads_it() {
+        // Same pair of accepted shapes as `read`'s names, refused with printf's
+        // own wording and the usage error's status 2.
+        for bad in ["1bad", "a-b", "a[", "a[]", " a", ""] {
+            assert_eq!(
+                run(&format!("printf -v '{bad}' x 2>&1; echo rc=$?")).0,
+                format!("osh: printf: `{bad}': not a valid identifier\nrc=2\n"),
+                "printf -v {bad}"
+            );
+        }
+        // The name is checked as the option is read, ahead of everything else
+        // printf would complain about — the format it is missing, and the
+        // argument that would not have converted.
+        assert_eq!(
+            run("printf -v 1bad 2>&1; echo rc=$?").0,
+            "osh: printf: `1bad': not a valid identifier\nrc=2\n"
+        );
+        assert_eq!(
+            run("printf -v 1bad '%d' abc 2>&1; echo rc=$?").0,
+            "osh: printf: `1bad': not a valid identifier\nrc=2\n"
+        );
+        // Glued or separate, it is the same name.
+        assert_eq!(
+            run("printf -v1bad x 2>&1; echo rc=$?").0,
+            "osh: printf: `1bad': not a valid identifier\nrc=2\n"
+        );
+        // An empty key reaches this check as the empty subscript it expanded
+        // to, so it is refused as a name rather than as a bad subscript.
+        assert_eq!(
+            run("declare -A m; b=''; printf -v \"m[$b]\" x 2>&1; echo rc=$?; declare -p m").0,
+            "osh: printf: `m[]': not a valid identifier\nrc=2\ndeclare -A m\n"
+        );
+        // The shapes that do name somewhere are untouched.
+        assert_eq!(run("printf -v 'a[0]' x; declare -p a").0, "declare -a a=([0]=\"x\")\n");
+        assert_eq!(
+            run("declare -A m; printf -v 'm[k v]' x; declare -p m").0,
+            "declare -A m=([\"k v\"]=\"x\" )\n"
+        );
+        assert_eq!(run("printf -v a '%s' hi; echo \"[$a]\"").0, "[hi]\n");
     }
 
     #[test]

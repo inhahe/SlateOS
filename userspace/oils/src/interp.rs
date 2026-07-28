@@ -17125,19 +17125,26 @@ impl Shell {
 
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
         // record reader; otherwise a plain newline-terminated line.
-        let (line, terminated) = if delim.is_some() || nchars.is_some() {
+        //
+        // A `read` always assigns: the record it found, or the empty one it did
+        // not. EOF is not a reason to leave the names alone — bash empties every
+        // one of them (through the ordinary assignment, so an integer name
+        // becomes 0 and a readonly one still complains) and only then reports
+        // the failure. The two ways to come back with nothing differ solely in
+        // the status they leave: a count of zero is *satisfied* by reading
+        // nothing, while EOF is a record that never finished.
+        let (line, terminated) = if nchars == Some(0) {
+            // Asking for no characters is answered without touching the input,
+            // so a following read still sees the whole of it.
+            (String::new(), true)
+        } else if delim.is_some() || nchars.is_some() {
             let d = delim.unwrap_or(b'\n');
-            match self.read_record_input(rd_stdin, rd_redir, d, nchars, exact) {
-                Some(rec) => rec,
-                None => return 1, // EOF with no data
-            }
+            self.read_record_input(rd_stdin, rd_redir, d, nchars, exact)
+                .unwrap_or_else(|| (String::new(), false))
         } else {
-            match self.read_line(rd_stdin, rd_redir) {
-                // A final line ending at EOF without a newline is a partial
-                // read: the value is still assigned, but status is 1 (bash).
-                Some((l, terminated)) => (l, terminated),
-                None => return 1, // EOF
-            }
+            // A final line ending at EOF without a newline is a partial read:
+            // the value is still assigned, but status is 1 (bash).
+            self.read_line(rd_stdin, rd_redir).unwrap_or_else(|| (String::new(), false))
         };
         // Exit status: for `-N`, success iff exactly N characters were read
         // (a short read at EOF is status 1). For `-d`/`-n`, success iff the
@@ -32777,6 +32784,85 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("read -a arr <<< 'x y'; declare -p arr").0,
             "declare -a arr=([0]=\"x\" [1]=\"y\")\n"
+        );
+    }
+
+    #[test]
+    fn read_at_eof_still_empties_its_names() {
+        // A `read` that finds nothing is still an assignment: bash empties every
+        // name it was given before reporting the EOF, so a stale value from an
+        // earlier read is never left behind to be mistaken for a fresh one.
+        assert_eq!(
+            run("r=stale; read r < /dev/null; echo \"rc=$? r=[$r]\"").0,
+            "rc=1 r=[]\n"
+        );
+        // Which matters most where it is easiest to miss: the second of two
+        // reads on the same source, where the first one succeeded.
+        assert_eq!(
+            run("r=s1; s=s2; { read r; read s; } <<< x; echo \"r=[$r] s=[$s]\"").0,
+            "r=[x] s=[]\n"
+        );
+        // Every name, not just the first, and REPLY when there are none.
+        assert_eq!(
+            run("a=1 b=2; read a b < /dev/null; echo \"[$a][$b]\"").0,
+            "[][]\n"
+        );
+        assert_eq!(
+            run("REPLY=stale; read < /dev/null; echo \"[$REPLY]\"").0,
+            "[]\n"
+        );
+        // It goes through the ordinary assignment, so the name's attributes
+        // apply to the empty value and a readonly one still refuses it.
+        assert_eq!(
+            run("declare -i r=5; read r < /dev/null; echo \"rc=$? r=[$r]\"").0,
+            "rc=1 r=[0]\n"
+        );
+        assert_eq!(
+            run("r=stale; readonly r; read r < /dev/null 2>&1; echo \"r=[$r]\"").0,
+            "osh: r: readonly variable\nr=[stale]\n"
+        );
+        // The record readers report the same way.
+        for opt in ["-d ,", "-d ''", "-n 3", "-N 3"] {
+            assert_eq!(
+                run(&format!("r=stale; read {opt} r < /dev/null; echo \"rc=$? r=[$r]\"")).0,
+                "rc=1 r=[]\n",
+                "read {opt} at EOF"
+            );
+        }
+    }
+
+    #[test]
+    fn read_of_zero_characters_is_satisfied_without_reading() {
+        // A count of zero is the one way to come back empty and still succeed:
+        // what was asked for was read in full. It is answered without touching
+        // the input, so the next read still sees all of it.
+        for opt in ["-n 0", "-N 0"] {
+            assert_eq!(
+                run(&format!("r=stale; read {opt} r <<< abc; echo \"rc=$? r=[$r]\"")).0,
+                "rc=0 r=[]\n",
+                "read {opt}"
+            );
+            assert_eq!(
+                run(&format!("{{ read {opt} a; read b; }} <<< abc; echo \"[$a][$b]\"")).0,
+                "[][abc]\n",
+                "read {opt} consumed input"
+            );
+            // Even with no input at all, since none was wanted.
+            assert_eq!(
+                run(&format!("read {opt} r < /dev/null; echo rc=$?")).0,
+                "rc=0\n",
+                "read {opt} at EOF"
+            );
+        }
+        // It is an assignment like any other, so it empties an array target and
+        // is still refused by a readonly one.
+        assert_eq!(
+            run("a=(x y); read -n 0 -a a <<< 'p q'; echo rc=$?; declare -p a").0,
+            "rc=0\ndeclare -a a=()\n"
+        );
+        assert_eq!(
+            run("r=stale; readonly r; read -n 0 r <<< abc 2>&1; echo \"rc=$? r=[$r]\"").0,
+            "osh: r: readonly variable\nrc=1 r=[stale]\n"
         );
     }
 

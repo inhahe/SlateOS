@@ -17781,9 +17781,42 @@ impl Shell {
                     cands.extend(sorted(BUILTIN_NAMES.iter().map(|s| (*s).to_string()).collect()));
                     cands.extend(self.compgen_path_commands(&word));
                 }
+                // `enable`'s two halves. Both are sorted, being slices of the
+                // same sorted builtin table.
+                "enabled" => cands.extend(sorted(
+                    BUILTIN_NAMES
+                        .iter()
+                        .filter(|n| !self.disabled_builtins.contains(**n))
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                )),
+                "disabled" => cands.extend(sorted(
+                    BUILTIN_NAMES
+                        .iter()
+                        .filter(|n| self.disabled_builtins.contains(**n))
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                )),
+                // The two option namespaces, each in the order its own builtin
+                // lists them: `shopt`'s table order, `set -o`'s alphabetical.
+                "shopt" => cands.extend(SHOPT_TABLE.iter().map(|(n, _)| (*n).to_string())),
+                "setopt" => cands.extend(STANDARD_SET_O_OPTIONS.iter().map(|s| (*s).to_string())),
+                // Everything `trap` accepts as a spec: `EXIT`, the signals in
+                // number order with their `SIG` prefix, then the pseudo-signals.
+                "signal" => {
+                    cands.push("EXIT".to_string());
+                    cands.extend(SIGNALS.iter().map(|(_, n)| format!("SIG{n}")));
+                    cands.extend(["DEBUG", "ERR", "RETURN"].map(String::from));
+                }
+                // What `help` will answer to — builtins and the compound-command
+                // constructs alike, sorted together.
+                "helptopic" => {
+                    cands.extend(sorted(HELP_TABLE.iter().map(|(n, _, _)| (*n).to_string()).collect()));
+                }
                 "file" => cands.extend(self.compgen_paths(&word, false)),
                 "directory" => cands.extend(self.compgen_paths(&word, true)),
-                // group/job/service/user and the rest: nothing.
+                // binding/group/hostname/job/running/service/stopped/user need
+                // either a live readline or a host database osh has neither of.
                 _ => {}
             }
         }
@@ -28792,6 +28825,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
         // `--` with no following word offers every candidate.
         assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
+    }
+
+    #[test]
+    fn compgen_answers_the_actions_that_read_shell_tables() {
+        // Option names come out in the order their own builtin lists them:
+        // `shopt`'s table order, `set -o`'s alphabetical one.
+        assert_eq!(run("compgen -A shopt a").0, "autocd\nassoc_expand_once\n");
+        assert_eq!(run("compgen -A setopt no").0, "noclobber\nnoexec\nnoglob\nnolog\nnotify\nnounset\n");
+        // `enabled`/`disabled` are the two halves of the builtin table, and a
+        // name moves between them as `enable -n` turns it off.
+        assert_eq!(run("compgen -A disabled").0, "");
+        assert_eq!(run("compgen -A enabled ech").0, "echo\n");
+        assert_eq!(run("enable -n echo; compgen -A disabled").0, "echo\n");
+        assert_eq!(run("enable -n echo; compgen -A enabled ech").0, "");
+        // Every spec `trap` accepts: EXIT, the signals in number order under
+        // their SIG names, then the pseudo-signals.
+        assert_eq!(run("compgen -A signal SIGT").0, "SIGTRAP\nSIGTERM\nSIGTSTP\nSIGTTIN\nSIGTTOU\n");
+        assert_eq!(run("compgen -A signal E").0, "EXIT\nERR\n");
+        assert_eq!(run("compgen -A signal RET").0, "RETURN\n");
+        // Help topics are the builtins and the compound-command constructs
+        // together, sorted — so the punctuation ones lead.
+        assert_eq!(run("compgen -A helptopic '['").0, "[\n[[ ... ]]\n");
+        assert_eq!(run("compgen -A helptopic whi").0, "while\n");
     }
 
     #[test]

@@ -877,6 +877,22 @@ impl Lexer {
             }
             self.stamp_lines(out, lines, start_line, start_pos);
         }
+        // bash's reader hands the parser a newline when the input runs out, so a
+        // script with no trailing newline — and every `-c` string, which never
+        // has one — parses exactly as if one were there. This is not cosmetic.
+        // A newline is a *token*, and the grammar accepts it only in some
+        // positions: `case x in y` is a syntax error near `newline', not an end
+        // of file, and the difference decides whether the REPL offers to
+        // continue the line. Without this the two spellings of the same script
+        // diverge, which they must not.
+        if !matches!(out.last(), None | Some(Tok::Newline)) {
+            let start_pos = self.pos;
+            out.push(Tok::Newline);
+            if !self.pending_heredocs.is_empty() {
+                self.collect_heredocs(out)?;
+            }
+            self.stamp_lines(out, lines, self.line, start_pos);
+        }
         Ok(())
     }
 
@@ -2030,11 +2046,28 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
 mod tests {
     use super::*;
 
+    /// Tokenize and drop the terminating `Newline`, so a test that counts words
+    /// counts only words. Every input carries one — see `Lexer::run_into`.
+    fn toks_of(src: &str) -> Vec<Tok> {
+        let mut toks = tokenize(src).unwrap();
+        assert!(
+            matches!(toks.last(), Some(Tok::Newline)),
+            "input not newline-terminated: {toks:?}"
+        );
+        toks.pop();
+        toks
+    }
+
     #[test]
     fn simple_words() {
         let toks = tokenize("echo hello world").unwrap();
-        assert_eq!(toks.len(), 3);
+        // Three words, plus the newline every input is terminated with even
+        // when the source has none of its own (see `Lexer::run_into`).
+        assert_eq!(toks.len(), 4);
         assert!(matches!(toks[0], Tok::Word(_)));
+        assert!(matches!(toks[3], Tok::Newline));
+        // A source that already ends in a newline does not gain a second one.
+        assert_eq!(tokenize("echo hello world\n").unwrap().len(), 4);
     }
 
     #[test]
@@ -2054,7 +2087,8 @@ mod tests {
     fn quotes_and_params() {
         let toks = tokenize(r#"echo "hi $name" 'raw $x' $y"#).unwrap();
         assert!(matches!(toks[0], Tok::Word(_)));
-        assert_eq!(toks.len(), 4);
+        // Four words plus the terminating newline.
+        assert_eq!(toks.len(), 5);
     }
 
     #[test]
@@ -2082,17 +2116,17 @@ mod tests {
     fn array_subscript_assignment_keeps_spaces() {
         // In assignment position, a `name[…]` subscript is one word even with
         // unquoted spaces inside the brackets (bash's tokenizer behaviour).
-        let toks = tokenize("h[a b]=v").unwrap();
+        let toks = toks_of("h[a b]=v");
         assert_eq!(toks.len(), 1);
         match &toks[0] {
             Tok::Word(segs) => assert_eq!(segs.as_slice(), &[Seg::Lit("h[a b]=v".into())]),
             other => panic!("expected single word, got {other:?}"),
         }
         // Chained assignments: the second word is still assignment position.
-        let toks = tokenize("h[a b]=1 h[c d]=2").unwrap();
+        let toks = toks_of("h[a b]=1 h[c d]=2");
         assert_eq!(toks.len(), 2, "expected two words, got {toks:?}");
         // In *argument* position the subscript splits normally on the space.
-        let toks = tokenize("echo h[a b]=v").unwrap();
+        let toks = toks_of("echo h[a b]=v");
         assert_eq!(toks.len(), 3, "argument-position subscript must split: {toks:?}");
     }
 
@@ -2101,7 +2135,7 @@ mod tests {
         // Inside an array literal, a keyed element `[ x ]=v` stays one element
         // even with unquoted interior spaces (bash tokenises `([ x ]=v)` as a
         // single subscript-value element). Regression for TD-OILS-ASSOC-KEY-TRIM.
-        let toks = tokenize("m=([ x ]=v [y z]=w)").unwrap();
+        let toks = toks_of("m=([ x ]=v [y z]=w)");
         assert_eq!(toks.len(), 1, "expected single ArrayAssign token, got {toks:?}");
         match &toks[0] {
             Tok::ArrayAssign { name, elems, .. } => {

@@ -650,7 +650,14 @@ impl Parser {
     /// A short human-readable name for the current token, for syntax-error
     /// messages (mirrors bash's `near unexpected token '…'`).
     fn token_display(&self) -> String {
-        match self.peek() {
+        self.token_display_at(self.pos)
+    }
+
+    /// [`Parser::token_display`] for an arbitrary position, so a diagnostic can
+    /// name a token the parser has already moved past (see
+    /// [`Parser::cond_near`]).
+    fn token_display_at(&self, pos: usize) -> String {
+        match self.toks.get(pos) {
             None => "end of input".to_string(),
             Some(Tok::Newline) => "newline".to_string(),
             Some(Tok::Op(op)) => match op {
@@ -1434,6 +1441,17 @@ impl Parser {
     }
 
     fn parse_cond_not(&mut self) -> Result<CondExpr, ParseError> {
+        // A term may start on a later line than the operator that introduced it.
+        self.skip_cond_newlines();
+        if self.peek().is_none() {
+            // Waiting for a term and the input ran out. bash names the token it
+            // did not get, rather than reporting a missing `]]` — that message
+            // is reserved for an expression that *was* complete.
+            return Err(ParseError::new(
+                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file"
+                    .to_string(),
+            ));
+        }
         if self.bare_word_here().as_deref() == Some("!") {
             self.pos += 1;
             let inner = self.parse_cond_not()?;
@@ -1461,6 +1479,9 @@ impl Parser {
                 )));
             }
             self.pos += 1;
+            // A finished term may be followed by a newline before whatever comes
+            // next (`&&`, `||`, `]]`).
+            self.skip_cond_newlines();
             // Keep the grouping in the tree. It changes nothing about the
             // result — the nesting below already reflects it — but `declare -f`
             // has to print the parentheses back, and without them the
@@ -1472,7 +1493,10 @@ impl Parser {
             && let Some(op) = unary_op_from(&text)
         {
             self.pos += 1;
+            // No newline skip before the operand: bash reads it directly, so
+            // `[[ -n\na ]]` is an error even though `[[ -n a\n]]` is not.
             let operand = self.expect_cond_word(CondPos::Unary)?;
+            self.skip_cond_newlines();
             return Ok(CondExpr::Unary(op, operand));
         }
         // Otherwise: WORD [ binop WORD ].
@@ -1480,6 +1504,7 @@ impl Parser {
         if let Some(op) = self.peek_cond_binop() {
             self.advance_cond_binop();
             let right = self.expect_cond_word(CondPos::Binary)?;
+            self.skip_cond_newlines();
             if matches!(op, RawBinOp::Regex) {
                 return Ok(CondExpr::Regex(Box::new(left), Box::new(right)));
             }
@@ -1505,7 +1530,53 @@ impl Parser {
                 "conditional binary operator expected\nsyntax error near `{tok}'"
             )));
         }
+        // A newline here is *not* skipped — this is the one position where the
+        // binary operator would go, and bash reads it without skipping so that
+        // it can tell `[[ a == b ]]` from a bare-word test. So `[[ a` at end of
+        // a line is an error, unlike `[[ -n a` which is a finished term. bash
+        // can name the token it found, so the message gains an "unexpected
+        // token" clause the word form above does not have.
+        if matches!(self.peek(), Some(Tok::Newline)) {
+            let tok = self.token_display();
+            let near = self.cond_near();
+            return Err(ParseError::new(format!(
+                "unexpected token `{tok}', conditional binary operator expected\nsyntax error near `{near}'"
+            )));
+        }
         Ok(CondExpr::Word(left))
+    }
+
+    /// Skip newline tokens inside `[[ … ]]`.
+    ///
+    /// bash's conditional parser skips newlines wherever it is waiting for the
+    /// *start* of a term, or for whatever follows a finished one, so a long
+    /// conditional can be broken across lines around its `&&`/`||`. It does not
+    /// skip in the two positions where it reads a token directly: after a bare
+    /// word (where a binary operator might follow) and at a binary operator's
+    /// right-hand operand. That asymmetry is why `[[ a == b\n]]` parses but
+    /// `[[ a\n== b ]]` does not.
+    fn skip_cond_newlines(&mut self) {
+        while matches!(self.peek(), Some(Tok::Newline)) {
+            self.pos += 1;
+        }
+    }
+
+    /// The token a conditional error is reported "near".
+    ///
+    /// bash names the last *word* it read, which is the offending token itself
+    /// whenever that is a real word (`[[ -n ]]` reports near `]]`). A newline
+    /// never becomes that token, so an error on one is reported near whatever
+    /// came before it: `[[ a` reports near `a`, and `[[ a -eq` near `-eq`.
+    fn cond_near(&self) -> String {
+        if !matches!(self.peek(), Some(Tok::Newline)) {
+            return self.token_display();
+        }
+        // Walk back over any newlines to the last real token.
+        let mut pos = self.pos;
+        while pos > 0 && matches!(self.toks.get(pos), None | Some(Tok::Newline)) {
+            pos -= 1;
+        }
+        self.token_display_at(pos)
     }
 
     /// Expect a word operand inside `[[ … ]]` (not an operator/closer). `pos`
@@ -1535,7 +1606,9 @@ impl Parser {
             return ParseError::new("syntax error: unexpected end of file".to_string());
         }
         let tok = self.token_display();
-        let near = format!("syntax error near `{tok}'");
+        // A newline never becomes the token bash reports "near", so an operand
+        // slot that a line end walked into names the operator instead.
+        let near = format!("syntax error near `{}'", self.cond_near());
         let msg = match pos {
             CondPos::Primary => near,
             CondPos::Unary => {

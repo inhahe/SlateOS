@@ -364,7 +364,7 @@ fn command_block(cmd: &Command, level: usize) -> String {
             format!("( {trimmed} )")
         }
         Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
-        Command::Arith(text) => format!("(( {text} ))"),
+        Command::Arith(text) => format!("(({text}))"),
         Command::Coproc { name, body } => {
             let mut s = String::from("coproc ");
             if let Some(n) = name {
@@ -484,7 +484,7 @@ fn command_inline(cmd: &Command) -> String {
         Command::BraceGroup(prog) => format!("{{ {}; }}", program_inline(prog)),
         Command::Subshell(prog) => format!("( {} )", program_inline(prog)),
         Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
-        Command::Arith(text) => format!("(( {text} ))"),
+        Command::Arith(text) => format!("(({text}))"),
         Command::Coproc { name, body } => {
             let mut s = String::from("coproc ");
             if let Some(n) = name {
@@ -718,10 +718,32 @@ pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> String {
     }
 }
 
+/// Re-quote a [`WordPart::SingleQuoted`] run.
+///
+/// `escaped` text was written with backslashes in the source, so it goes back
+/// out that way — one backslash per character, which is what bash's
+/// `declare -f` prints (`echo a\ b`, `echo \*`, `echo "a\"b"`). Everything else
+/// was written as `'…'` (or `$'…'`, which bash also prints as `'…'`).
+///
+/// A single-quoted run cannot contain a single quote, so an embedded one — only
+/// reachable via `$'a\'b'` — is spliced out and re-added as `'\''`, exactly as
+/// bash does.
+fn quoted_lit_src(text: &str, escaped: bool) -> String {
+    if escaped {
+        let mut s = String::with_capacity(text.len() * 2);
+        for c in text.chars() {
+            s.push('\\');
+            s.push(c);
+        }
+        return s;
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 fn part_src(p: &WordPart) -> String {
     match p {
         WordPart::Literal(s) => s.clone(),
-        WordPart::SingleQuoted(s) => format!("'{s}'"),
+        WordPart::SingleQuoted { text, escaped } => quoted_lit_src(text, *escaped),
         WordPart::DoubleQuoted(parts) => {
             let mut s = String::from("\"");
             for p in parts {
@@ -801,7 +823,13 @@ fn part_src(p: &WordPart) -> String {
         WordPart::ProcSub { input, body } => {
             format!("{}({})", if *input { '<' } else { '>' }, program_inline(body))
         }
-        WordPart::ArithSub(text) => format!("$(( {text} ))"),
+        WordPart::ArithSub { expr, bracket } => {
+            if *bracket {
+                format!("$[{expr}]")
+            } else {
+                format!("$(({expr}))")
+            }
+        }
         WordPart::BadSubst(raw) => format!("${{{raw}}}"),
         WordPart::Length(name) => format!("${{#{name}}}"),
         WordPart::ArrayRef { name, index, length } => {

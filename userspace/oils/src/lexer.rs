@@ -98,8 +98,15 @@ pub enum Op {
 pub enum Seg {
     /// Unquoted literal run.
     Lit(String),
-    /// Single-quoted run (verbatim).
-    Sq(String),
+    /// A quoted-literal run: the contents of `'…'`/`$'…'`, or a single
+    /// backslash-escaped character, which means exactly the same thing
+    /// (`a\*b` ≡ `a'*'b`).
+    ///
+    /// The `bool` is `true` for the backslash spelling. The two are
+    /// interchangeable during expansion, but bash prints a stored function
+    /// body back in whichever form the source wrote (`declare -f`), so the
+    /// distinction has to survive lexing.
+    Sq(String, bool),
     /// Double-quoted run of fragments.
     Dq(Vec<Seg>),
     /// `$name` / `$1` / `$?` … a bare parameter reference.
@@ -116,7 +123,10 @@ pub enum Seg {
     /// (see `parser::parse_cmdsub_body`), and only the lexer knows it.
     CmdSub(String, u32),
     /// `$(( … ))` — raw arithmetic expression text.
-    Arith(String),
+    /// The `bool` is `true` when the deprecated `$[ … ]` spelling was used. The
+    /// two evaluate identically, but bash prints a stored function body back in
+    /// whichever form the source wrote, so the distinction must survive here.
+    Arith(String, bool),
     /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
     /// input form `<(…)`, and the `String` is the raw inner command source.
     ProcSub(bool, String),
@@ -1024,7 +1034,7 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s));
+                    segs.push(Seg::Sq(s, false));
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
@@ -1089,7 +1099,7 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s));
+                    segs.push(Seg::Sq(s, false));
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
@@ -1130,7 +1140,7 @@ impl Lexer {
                             // representation as the escape handling in
                             // `read_word_inner`.
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_string()));
+                            segs.push(Seg::Sq(next.to_string(), true));
                         }
                     }
                 }
@@ -1292,7 +1302,7 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s));
+                    segs.push(Seg::Sq(s, false));
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
@@ -1335,7 +1345,7 @@ impl Lexer {
                             lit.push(next);
                         } else {
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_string()));
+                            segs.push(Seg::Sq(next.to_string(), true));
                         }
                     }
                 }
@@ -1424,9 +1434,19 @@ impl Lexer {
                     self.pos += 1;
                     match self.peek() {
                         // Inside double quotes, backslash only escapes these.
+                        //
+                        // Everything in a double-quoted section is already
+                        // quoted, so a one-char `Seg::Sq` means exactly what
+                        // folding the character into the literal run meant —
+                        // but it also records that the source spelled the
+                        // character with a backslash, which is how bash prints
+                        // it back (`declare -f` keeps `"a\"b"` as written, and
+                        // rendering it as a bare `"` would emit a word that no
+                        // longer re-parses).
                         Some(n @ ('"' | '\\' | '$' | '`')) => {
                             self.pos += 1;
-                            lit.push(n);
+                            flush_lit(&mut segs, &mut lit);
+                            segs.push(Seg::Sq(n.to_string(), true));
                         }
                         Some('\n') => {
                             self.pos += 1;
@@ -1474,7 +1494,7 @@ impl Lexer {
                 // escapes processed (no expansion/splitting — like `'…'`).
                 self.pos += 1;
                 let s = self.read_ansi_c_quote()?;
-                Ok(Some(Seg::Sq(s)))
+                Ok(Some(Seg::Sq(s, false)))
             }
             Some('"') if !in_dquote => {
                 // `$"…"` — locale translation. We have no message catalogs, so
@@ -1494,13 +1514,13 @@ impl Lexer {
                 self.pos += 1;
                 let open = self.cur_line();
                 let raw = self.read_balanced('[', ']').map_err(|e| e.at(open))?;
-                Ok(Some(Seg::Arith(raw)))
+                Ok(Some(Seg::Arith(raw, true)))
             }
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
                     self.pos += 2;
                     let raw = self.read_arith()?;
-                    Ok(Some(Seg::Arith(raw)))
+                    Ok(Some(Seg::Arith(raw, false)))
                 } else {
                     self.pos += 1;
                     // `$( … )` is the one construct bash blames on the *end* of
@@ -2016,7 +2036,7 @@ mod tests {
             panic!("expected word");
         }
         if let Tok::Word(segs) = &toks[2] {
-            assert!(matches!(segs[0], Seg::Arith(_)));
+            assert!(matches!(segs[0], Seg::Arith(_, false)));
         } else {
             panic!("expected word");
         }

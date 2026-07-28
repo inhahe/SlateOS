@@ -1214,9 +1214,14 @@ impl Parser {
                 "C-style for loop requires 'for (( init; cond; update ))'".into(),
             ));
         }
-        let init = parts[0].trim().to_string();
-        let cond = parts[1].trim().to_string();
-        let update = parts[2].trim().to_string();
+        // Only the *leading* whitespace is dropped. bash keeps each section's
+        // source text from its first non-blank character onwards, which shows up
+        // when a function is printed back by `declare -f`: `for (( i=0; i<2;
+        // i++ ))` comes back as `for ((i=0; i<2; i++ ))`, trailing space and
+        // all. The arithmetic evaluator ignores the whitespace either way.
+        let init = parts[0].trim_start().to_string();
+        let cond = parts[1].trim_start().to_string();
+        let update = parts[2].trim_start().to_string();
         // An optional separator (`;`/newline) may precede `do`.
         self.skip_separators();
         self.expect_reserved("do")?;
@@ -2006,7 +2011,10 @@ fn word_from_segs(segs: &[Seg]) -> Result<Word, ParseError> {
 fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
-        Seg::Sq(s) => WordPart::SingleQuoted(s.clone()),
+        Seg::Sq(s, escaped) => WordPart::SingleQuoted {
+            text: s.clone(),
+            escaped: *escaped,
+        },
         Seg::Dq(inner) => {
             let mut parts = Vec::with_capacity(inner.len());
             for s in inner {
@@ -2017,7 +2025,10 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
         Seg::Param(n) => WordPart::Param(n.clone()),
         Seg::ParamBraced(raw) => parse_braced_param(raw)?,
         Seg::CmdSub(raw, close_line) => WordPart::CommandSub(parse_cmdsub_body(raw, *close_line)?),
-        Seg::Arith(raw) => WordPart::ArithSub(raw.clone()),
+        Seg::Arith(raw, bracket) => WordPart::ArithSub {
+            expr: raw.clone(),
+            bracket: *bracket,
+        },
         Seg::ProcSub(input, raw) => WordPart::ProcSub {
             input: *input,
             body: parse(raw)?,

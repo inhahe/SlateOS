@@ -3868,7 +3868,7 @@ impl Shell {
                 // Unquoted literal text is live regex syntax.
                 WordPart::Literal(s) => pattern.push_str(s),
                 // Single quotes: everything literal.
-                WordPart::SingleQuoted(s) => escape_ere(s, &mut pattern),
+                WordPart::SingleQuoted { text, .. } => escape_ere(text, &mut pattern),
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
                 WordPart::DoubleQuoted(parts) => {
@@ -8556,7 +8556,7 @@ impl Shell {
                     cur.push_str(&s);
                     started = true;
                 }
-                WordPart::SingleQuoted(s) => {
+                WordPart::SingleQuoted { text: s, .. } => {
                     cur.push_str(s);
                     started = true;
                 }
@@ -8598,7 +8598,7 @@ impl Shell {
                     push_chars(&mut cur, &s, false);
                     open = true;
                 }
-                WordPart::SingleQuoted(s) => {
+                WordPart::SingleQuoted { text: s, .. } => {
                     push_chars(&mut cur, s, true);
                     open = true;
                 }
@@ -8792,7 +8792,7 @@ impl Shell {
                     }
                     at_tilde_pos = s.ends_with(':');
                 }
-                WordPart::SingleQuoted(t) => {
+                WordPart::SingleQuoted { text: t, .. } => {
                     cur.push_str(t);
                     at_tilde_pos = false;
                 }
@@ -8851,7 +8851,7 @@ impl Shell {
                     }
                     at_tilde_pos = value_str.ends_with(':');
                 }
-                WordPart::SingleQuoted(t) => {
+                WordPart::SingleQuoted { text: t, .. } => {
                     out.push_str(t);
                     at_tilde_pos = false;
                 }
@@ -8893,7 +8893,7 @@ impl Shell {
         for part in &word.parts {
             match part {
                 WordPart::Literal(s) => push_chars(&mut buf, s, false),
-                WordPart::SingleQuoted(s) => push_chars(&mut buf, s, true),
+                WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text, true),
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
                     push_chars(&mut buf, &s, true);
@@ -8915,7 +8915,7 @@ impl Shell {
         let mut s = String::new();
         for part in parts {
             match part {
-                WordPart::Literal(t) | WordPart::SingleQuoted(t) => s.push_str(t),
+                WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => s.push_str(t),
                 other => s.push_str(&self.expand_dynamic(other)),
             }
         }
@@ -8962,7 +8962,7 @@ impl Shell {
                         }
                     }
                 }
-                WordPart::SingleQuoted(s) => {
+                WordPart::SingleQuoted { text: s, .. } => {
                     // Single-quoted: fully literal, including any `&`.
                     out.extend(s.chars().map(ReplTok::Lit));
                 }
@@ -9137,7 +9137,7 @@ impl Shell {
             }
             WordPart::CommandSub(prog) => self.command_sub(prog),
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
-            WordPart::ArithSub(expr) => self.arith_sub(expr),
+            WordPart::ArithSub { expr, .. } => self.arith_sub(expr),
             WordPart::ArrayRef {
                 name,
                 index,
@@ -9188,7 +9188,7 @@ impl Shell {
             WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
-            WordPart::Literal(s) | WordPart::SingleQuoted(s) => s.clone(),
+            WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
         }
     }
@@ -9946,7 +9946,7 @@ impl Shell {
         for part in &w.parts {
             match part {
                 WordPart::Literal(s) => out.push_str(s),
-                WordPart::SingleQuoted(s) => {
+                WordPart::SingleQuoted { text: s, .. } => {
                     out.push('\'');
                     out.push_str(s);
                     out.push('\'');
@@ -18433,7 +18433,7 @@ fn word_is_all_quoted(w: &Word) -> bool {
     !w.parts.is_empty()
         && w.parts
             .iter()
-            .all(|p| matches!(p, WordPart::SingleQuoted(_) | WordPart::DoubleQuoted(_)))
+            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted(_)))
 }
 
 /// Case-aware glob match whose pattern carries per-character quoting

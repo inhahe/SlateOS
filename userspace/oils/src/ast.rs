@@ -357,8 +357,14 @@ impl Word {
 pub enum WordPart {
     /// Unquoted literal text (subject to later splitting/globbing).
     Literal(String),
-    /// Single-quoted text (no expansion, no splitting).
-    SingleQuoted(String),
+    /// Quoted literal text (no expansion, no splitting): the contents of
+    /// `'…'`/`$'…'`, or a single backslash-escaped character, which means the
+    /// same thing (`a\*b` ≡ `a'*'b`).
+    ///
+    /// `escaped` is `true` for the backslash spelling. Expansion treats both
+    /// identically; only [`crate::unparse`] cares, because bash prints a
+    /// stored function body back in whichever form the source wrote.
+    SingleQuoted { text: String, escaped: bool },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
     DoubleQuoted(Vec<WordPart>),
     /// `$name` / `${name}` parameter reference.
@@ -453,7 +459,9 @@ pub enum WordPart {
     /// `$(command)` / `` `command` `` command substitution.
     CommandSub(Program),
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).
-    ArithSub(String),
+    /// `bracket` records the deprecated `$[ expr ]` spelling, which evaluates
+    /// identically but is printed back as written (bash `declare -f`).
+    ArithSub { expr: String, bracket: bool },
     /// `${#name}` — the length of the parameter's value.
     Length(String),
     /// `${name[index]}`, `${name[@]}`, `${name[*]}`, and their `${#…}` length

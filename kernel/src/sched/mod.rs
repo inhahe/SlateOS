@@ -1865,31 +1865,67 @@ pub fn wake(task_id: TaskId) -> bool {
 
 /// Wake a blocked task using `try_lock` — safe in ISR context.
 ///
-/// Same as [`wake`] but uses `try_lock` instead of blocking `lock`.
-/// If the scheduler lock is already held (e.g., the ISR interrupted
-/// code that was holding it), returns `false` without blocking.
+/// Same as [`wake`] but uses `try_lock` instead of blocking `lock`, so it can
+/// be called from hard-IRQ context where the interrupted code may already own
+/// the scheduler lock.
 ///
-/// The caller (typically the timer ISR's deferred-wake path) should
-/// retry on the next tick if this fails.
+/// Returns `true` when the wake has been **accounted for** and the caller must
+/// NOT retry:
+///
+/// * the task was [`Blocked`](TaskState::Blocked) and is now
+///   [`Ready`](TaskState::Ready) — the normal case; or
+/// * the task was `Running`/`Ready`, so `pending_wake` was set and its next
+///   [`block_current`] returns immediately instead of parking; or
+/// * the task no longer exists — nothing to wake, and no retry could ever
+///   change that.
+///
+/// Returns `false` **only** when the scheduler lock was contended and nothing
+/// at all was done.  That is the sole case in which the caller should fall
+/// back to [`defer_wake`] / a softirq retry, and every caller spells exactly
+/// that: `if !try_wake(t) { defer_wake(t); }`.
+///
+/// # Why the three cases must not be conflated
+///
+/// This previously returned `false` for the not-`Blocked` case too, even
+/// though `pending_wake` had already recorded the wake.  Because of the idiom
+/// above, *every* wake aimed at a task that had not parked yet also queued a
+/// **duplicate** deferred wake.  That duplicate then fired against whatever
+/// the task was doing later: it either woke an unrelated, subsequent park
+/// early, or re-set the sticky `pending_wake` so some other `block_current()`
+/// returned without blocking.  A wake aimed at a not-yet-parked task is not a
+/// corner case — it is the ordinary register-then-recheck interleaving, and
+/// it is exactly the "stale `pending_wake` consumed by an unrelated later
+/// park" lead recorded under `BUG-DASH-CMDSUB-INTERMITTENT-HANG`.
+///
+/// A non-existent task was worse still: [`process_deferred_wakes`] only frees
+/// a slot when `try_wake` returns `true`, so a deferred wake for a dead task
+/// could never be cleared — one leaked slot pinned `DEFERRED_WAKES_PENDING`
+/// forever and forced a full 32-slot rescan on every timer tick.
 pub fn try_wake(task_id: TaskId) -> bool {
-    if let Some(mut state) = SCHED.try_lock() {
-        if let Some(task) = state.tasks.get_mut(&task_id) {
-            if task.state == TaskState::Blocked {
-                task.mark_ready(crate::apic::tick_count());
-                task.burst_ticks = 0;
-                let prio = task.effective_priority();
-                let target_cpu = choose_cpu_for_task(task);
-                task.last_cpu = target_cpu;
-                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
-                drop(state);
-                signal_cpu(target_cpu);
-                return true;
-            }
-            // Same pending-wake logic as wake() — see comment there.
-            task.pending_wake = true;
-        }
+    let Some(mut state) = SCHED.try_lock() else {
+        // Lock contended — nothing was done, so the caller must retry.
+        return false;
+    };
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        // No such task: nothing to wake, and retrying cannot help.
+        return true;
+    };
+    if task.state != TaskState::Blocked {
+        // Same pending-wake logic as wake() — see the comment there.  The
+        // wake is now recorded on the task itself, so it must NOT also be
+        // handed to the deferred queue.
+        task.pending_wake = true;
+        return true;
     }
-    false
+    task.mark_ready(crate::apic::tick_count());
+    task.burst_ticks = 0;
+    let prio = task.effective_priority();
+    let target_cpu = choose_cpu_for_task(task);
+    task.last_cpu = target_cpu;
+    PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+    drop(state);
+    signal_cpu(target_cpu);
+    true
 }
 
 /// How often (in timer ticks) to check load balance.
@@ -4653,9 +4689,12 @@ pub fn defer_wake(task_id: TaskId) {
 /// Process all pending deferred wakes (lock-free path for softirq).
 ///
 /// Called from the timer softirq (alongside `process_sleep_wakeups`).
-/// Attempts to wake each queued task.  If `try_wake` still fails
-/// (lock contended again — extremely rare), the entry stays for the
-/// next tick.
+/// Attempts to wake each queued task.  A slot is freed as soon as
+/// [`try_wake`] reports the wake accounted for — which now includes the
+/// "task was not parked, `pending_wake` set" and "task is gone" cases, so a
+/// slot can no longer be pinned forever by a wake that can never be
+/// re-delivered.  Only genuine lock contention (extremely rare) leaves an
+/// entry for the next tick.
 pub fn process_deferred_wakes() {
     // OPT: Quick check — skip the scan if no wakes were deferred.
     if !DEFERRED_WAKES_PENDING.load(Ordering::Acquire) {
@@ -5773,8 +5812,56 @@ pub fn self_test() -> KernelResult<()> {
     test_stack_watermark()?;
     test_load_average()?;
     test_liveness_watchdog()?;
+    test_try_wake_contract()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// Pin [`try_wake`]'s return contract: `false` means **only** "the scheduler
+/// lock was contended, retry me".
+///
+/// Every caller spells `if !try_wake(t) { defer_wake(t); }`, so any other
+/// `false` return manufactures a *duplicate* wake in the deferred queue that
+/// later fires against an unrelated park (see the `try_wake` docs and the
+/// stale-`pending_wake` lead under `BUG-DASH-CMDSUB-INTERMITTENT-HANG`).  The
+/// two non-obvious "accounted for" cases are checked here.
+fn test_try_wake_contract() -> KernelResult<()> {
+    // 1. A task that does not exist.  Retrying can never succeed, so
+    //    reporting "retry me" would pin a deferred slot forever (and with it
+    //    DEFERRED_WAKES_PENDING, forcing a full rescan every timer tick).
+    //    u64::MAX is never handed out by the monotonic task-id allocator.
+    if !try_wake(u64::MAX) {
+        serial_println!("[sched]   FAIL: try_wake(nonexistent task) asked to be retried");
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. A task that is not parked — here, ourselves, which is Running by
+    //    definition.  The wake is recorded as a `pending_wake` token, so it
+    //    must not be deferred as well...
+    let me = current_task_id();
+    if !try_wake(me) {
+        serial_println!("[sched]   FAIL: try_wake(running task) asked to be retried");
+        return Err(KernelError::InternalError);
+    }
+    // ...and the token must make the very next park return immediately
+    // instead of blocking.  (If that guarantee ever breaks this line parks
+    // the boot CPU, which the boot-test timeout catches as a hang — the
+    // failure is loud either way.)
+    block_current();
+
+    // 3. The token is one-shot: consumed by the park above.  Verified
+    //    directly rather than by parking again, which would genuinely block.
+    {
+        let state = SCHED.lock();
+        if state.tasks.get(&me).is_some_and(|t| t.pending_wake) {
+            drop(state);
+            serial_println!("[sched]   FAIL: pending_wake survived the park that consumed it");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[sched]   try_wake contract (retry only on lock contention): OK");
     Ok(())
 }
 

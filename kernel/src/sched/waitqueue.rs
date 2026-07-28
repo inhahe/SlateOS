@@ -408,8 +408,11 @@ impl WaitQueue {
     /// Try to wake one task using `try_lock` — safe in hard ISR context.
     ///
     /// Like [`wake_one()`](Self::wake_one) but won't block if the
-    /// queue's spinlock is contended.  Returns `true` if a task was
-    /// woken, `false` if the queue was empty or the lock was held.
+    /// queue's spinlock is contended.  Returns `true` if a waiter was
+    /// dequeued and its wake delivered (see [`super::try_wake`] — that
+    /// includes the case where the task had not parked yet and was left a
+    /// `pending_wake` token), `false` if the queue was empty or either lock
+    /// was held.
     pub fn try_wake_one(&self) -> bool {
         if let Some(mut guard) = self.waiters.try_lock() {
             if let Some(slot) = guard.iter_mut().find(|s| **s != 0) {

@@ -831,30 +831,67 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
-        // `time [-p]` is a reserved word only at the start of a pipeline; it is
-        // not in RESERVED (so it stays usable as a plain word elsewhere, e.g.
-        // in a `for … in` list). It precedes an optional `!` negation, and is
-        // only a keyword when a pipeline body follows it.
+        // bash's grammar lets `!` and `time` prefix a pipeline in any order and
+        // any number, and lets either stand as a whole command on its own:
+        //
+        //     pipeline_command : pipeline
+        //                      | BANG pipeline_command | BANG list_terminator
+        //                      | timespec pipeline_command
+        //                      | timespec list_terminator
+        //
+        // Only three flags survive that, which is why `declare -f` prints them
+        // back in a fixed order rather than as written: repeated `time` is
+        // idempotent, but each `!` toggles, so `! ! true` is just `true` and
+        // `! time true` prints as `time ! true`.
+        //
+        // `time` is a reserved word only here, at the start of a pipeline; it
+        // is deliberately not in RESERVED so it stays an ordinary word
+        // elsewhere (`for x in time`, `echo time`).
+        let mut negated = false;
         let mut timed = false;
         let mut time_posix = false;
-        if self.bare_word_here().as_deref() == Some("time")
-            && self.starts_command(self.pos + 1)
-        {
-            timed = true;
-            self.pos += 1;
-            self.skip_newlines();
-            if self.bare_word_here().as_deref() == Some("-p")
-                && self.starts_command(self.pos + 1)
-            {
-                time_posix = true;
+        // Whether *any* prefix was read, which is not the same as any flag
+        // being set: `! !` cancels out but is still a prefix, and still stands
+        // as a whole command.
+        let mut prefixed = false;
+        loop {
+            if self.reserved_here().as_deref() == Some("!") {
+                negated = !negated;
+                prefixed = true;
                 self.pos += 1;
-                self.skip_newlines();
+                continue;
             }
+            if self.bare_word_here().as_deref() == Some("time") {
+                timed = true;
+                prefixed = true;
+                self.pos += 1;
+                // `-p` (POSIX output format) and `--` (end of `time`'s own
+                // options) are recognised only in this position, at most once
+                // each and in this order, and only as literal unquoted words:
+                // `time "-p" true` and `time $x true` run a *command* named
+                // `-p`. `--` selects the POSIX format as well, so `time -- x`
+                // and `time -p x` report identically — and `declare -f` prints
+                // both back as `time -p`.
+                if self.bare_word_here().as_deref() == Some("-p") {
+                    time_posix = true;
+                    self.pos += 1;
+                }
+                if self.bare_word_here().as_deref() == Some("--") {
+                    time_posix = true;
+                    self.pos += 1;
+                }
+                continue;
+            }
+            break;
         }
-        let mut negated = false;
-        if self.reserved_here().as_deref() == Some("!") {
-            negated = true;
-            self.pos += 1;
+        // A prefix with nothing after it is the `list_terminator` case above:
+        // the flags apply to a null command, which succeeds — so a bare `!` is
+        // status 1 and a bare `time` reports a timing and status 0. Only `;` or
+        // a line end may stand here; `! && x`, `time | cat` and `( ! )` are all
+        // syntax errors, which `parse_command` reports for us.
+        if prefixed && matches!(self.peek(), None | Some(Tok::Newline) | Some(Tok::Op(Op::Semi))) {
+            let commands = vec![Command::Simple(SimpleCommand::default())];
+            return Ok(Pipeline { negated, timed, time_posix, commands });
         }
         let mut commands = vec![self.parse_command()?];
         loop {
@@ -883,16 +920,6 @@ impl Parser {
             commands.push(self.parse_command()?);
         }
         Ok(Pipeline { negated, timed, time_posix, commands })
-    }
-
-    /// Whether the token at `idx` could begin a command (used to decide whether
-    /// a bare `time`/`-p` at pipeline start is the reserved word or an argv
-    /// word — e.g. bare `time` at end of input is just the external `time`).
-    fn starts_command(&self, idx: usize) -> bool {
-        matches!(
-            self.toks.get(idx),
-            Some(Tok::Word(_)) | Some(Tok::Op(Op::LParen))
-        )
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
@@ -3494,16 +3521,26 @@ mod tests {
         assert!(p.time_posix);
         assert_eq!(p.commands.len(), 2);
 
-        // `time` precedes `!` negation.
-        let prog = parse("time ! false").unwrap();
-        let p = &prog.items[0].list.first;
-        assert!(p.timed);
-        assert!(p.negated);
+        // The two prefixes interleave freely, and only the flags survive: each
+        // `!` toggles, and a second `time` adds nothing.
+        for src in ["time ! false", "! time false", "time time ! false"] {
+            let p = &parse(src).unwrap().items[0].list.first;
+            assert!(p.timed, "{src}");
+            assert!(p.negated, "{src}");
+        }
+        assert!(!parse("! ! true").unwrap().items[0].list.first.negated);
 
-        // A bare `time` with nothing after it is an ordinary command word.
-        let prog = parse("time").unwrap();
-        let p = &prog.items[0].list.first;
-        assert!(!p.timed);
+        // `--` ends `time`'s options and selects the POSIX format, just as
+        // `-p` does; both are recognised only as literal unquoted words.
+        for src in ["time -- true", "time -p -- true"] {
+            assert!(parse(src).unwrap().items[0].list.first.time_posix, "{src}");
+        }
+
+        // A bare `time` is still the reserved word: it times a null command
+        // (there is no way to reach an external `time` without quoting it).
+        let p = &parse("time").unwrap().items[0].list.first;
+        assert!(p.timed);
+        assert_eq!(p.commands, vec![Command::Simple(SimpleCommand::default())]);
 
         // `time` inside a `for … in` list stays a plain word.
         let prog = parse("for x in time now; do echo $x; done").unwrap();

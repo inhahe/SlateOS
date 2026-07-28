@@ -3184,6 +3184,63 @@ eval -- 'echo hi'
 # bash: hi        osh (before the fix): --: command not found (rc=127)
 ```
 
+### TD-OILS-ESCAPED-KEYWORD. A backslash-escaped reserved word is still read as the keyword — 2026-07-28 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` (the segment a backslash escape
+produces) and `userspace/oils/src/parser.rs` `reserved_here` /
+`bare_word_here`, which both match on `[Seg::Lit(s)]`.
+
+**What:** quoting *any* character of a reserved word demotes it to an ordinary
+command word, so bash runs an external `if` for `\if` and fails to find one.
+osh still sees the keyword, because a backslash escape is folded into the same
+`Seg::Lit` that an unquoted character produces — there is nothing left in the
+token to distinguish `\if` from `if`. Double quotes do survive (`"time" true`
+already behaves), so this is specific to backslash escapes.
+
+Found while making bare `time` a keyword: `\time true` runs the *external*
+`time` in bash, but osh times a null command.
+
+**Proper fix:** keep escaped characters in a segment of their own rather than
+merging them into the neighbouring literal — e.g. a `Seg::Esc(char)` (or a
+`quoted: bool` on `Seg::Lit`) that word expansion treats exactly like a literal
+but that `reserved_here`/`bare_word_here` refuse to match. The single-`Lit`
+pattern those two use then rejects `\if` for free. Check `word_src` in
+`unparse.rs` at the same time: `declare -f` must still print the backslash.
+
+**Reproduce:**
+
+```sh
+\if true; then echo t; fi
+# bash: syntax error near unexpected token `then'   osh: prints t
+\while :; do break; done      # bash: syntax error near `do'   osh: silent
+\time true                    # bash: time: command not found  osh: times it
+```
+
+### TD-OILS-CMDSUB-EOF-TERMINATOR. A command substitution body is parsed as if its `)` were a line end — 2026-07-28 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` / `parser.rs`: a `$( … )` body is
+re-lexed and parsed as a standalone program, so the lexer's implicit trailing
+newline (see TD-OILS-CASE-PATTERN-EOF) lands where the `)` was.
+
+**What:** bash parses a substitution body with `)` as its terminator, and `)`
+is not a list terminator — so a construct that may legally end at a line end
+may *not* end at the `)`. osh accepts it, or names the wrong token:
+
+```sh
+echo $( ! )      # bash: syntax error near unexpected token `)'   osh: prints nothing
+echo $(for)      # bash: … near `)'                osh: … near `newline'
+```
+
+Note `( ! )` — a real subshell, parsed inline — already reports bash's error;
+only the substitution form diverges. Found while giving `!` and `time` their
+`<prefix> list_terminator` productions.
+
+**Proper fix:** parse the substitution body in the enclosing token stream
+rather than as a fresh program, so its terminator is the `)` token; failing
+that, pass a flag down that suppresses the implicit trailing newline and makes
+end-of-input report `)`. The first is the real fix — the second only repairs
+the wording of the errors, not which programs are accepted.
+
 ### TD-OILS-ANSIC-ERROR-SPELLING. A syntax error spells an ANSI-C word the way `declare -f` would, not the way it was written — 2026-07-28 — OPEN (diagnostic wording only)
 
 **Where:** `userspace/oils/src/parser.rs` `token_display`, which renders the

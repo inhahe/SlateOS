@@ -14255,6 +14255,50 @@ impl Shell {
         }
     }
 
+    /// Split a `readonly`/`export` operand into `(name, append, value)`, or
+    /// report `` `WORD': not a valid identifier `` and return `None`.
+    ///
+    /// These two builtins take a plain identifier and nothing more — unlike
+    /// `declare`, which also accepts a subscripted `a[0]=v`. What makes them
+    /// worth a shared helper is *which text* a rejected operand is quoted back
+    /// as, since that is decided by how far the scan for the `=` gets:
+    ///
+    /// * `readonly a[0]=9` does reach an `=`, so the name is `a[0]` — a name
+    ///   these builtins do not accept — and the complaint quotes just `a[0]`.
+    /// * `export 'h[a'=1` never reaches one, because the subscript is
+    ///   unbalanced and the scan stops there, so the whole `h[a=1` is the name
+    ///   and the complaint quotes all of it.
+    /// * `readonly 1bad=2` does not even start like a name, so again the whole
+    ///   word is quoted.
+    ///
+    /// The caller reports status 1 and moves on to the next operand: one bad
+    /// name does not stop the others from being declared.
+    fn attr_operand(
+        &mut self,
+        tag: &str,
+        word: &str,
+    ) -> Option<(String, bool, Option<String>)> {
+        let (name, append, value) = match attr_assignment_split(word) {
+            Some(eq) => {
+                let append = eq > 0 && word.as_bytes()[eq - 1] == b'+';
+                let end = if append { eq - 1 } else { eq };
+                (
+                    &word[..end],
+                    append,
+                    Some(word[eq + 1..].to_string()),
+                )
+            }
+            None => (word, false, None),
+        };
+        if !crate::parser::is_valid_name(name) {
+            self.emit_stderr(
+                format!("{}{tag}: `{name}': not a valid identifier\n", self.err_prefix()).as_bytes(),
+            );
+            return None;
+        }
+        Some((name.to_string(), append, value))
+    }
+
     fn builtin_export(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
         // attribute), `--` ends option processing. (`-f`, exporting functions,
@@ -14300,13 +14344,11 @@ impl Shell {
         let _ = print; // `-p` with operands behaves like plain `export`.
         let mut status = 0;
         for a in operands {
-            if let Some(eq) = a.find('=') {
-                // Support the `NAME+=value` append form alongside `NAME=value`.
-                let (k, append, v) = if eq > 0 && a.as_bytes()[eq - 1] == b'+' {
-                    (a[..eq - 1].to_string(), true, a[eq + 1..].to_string())
-                } else {
-                    (a[..eq].to_string(), false, a[eq + 1..].to_string())
-                };
+            let Some((k, append, value)) = self.attr_operand("export", a) else {
+                status = 1;
+                continue;
+            };
+            if let Some(v) = value {
                 // `export NAME=value` is an assignment: a readonly target is an
                 // error, and — as in bash — the value is left unchanged and the
                 // export attribute is not applied for that operand.
@@ -14331,9 +14373,9 @@ impl Shell {
                     self.exported.insert(k);
                 }
             } else if unexport {
-                self.exported.remove(a);
+                self.exported.remove(&k);
             } else {
-                self.exported.insert(a.clone());
+                self.exported.insert(k);
             }
         }
         status
@@ -15497,7 +15539,12 @@ impl Shell {
         if func_mode {
             return self.readonly_functions(&names, out, redir);
         }
-        if names.is_empty() || print_only {
+        // `-p` only chooses what a *nameless* call does. Given names, bash marks
+        // them readonly exactly as a plain `readonly` would and prints nothing:
+        // the flag names no question that the names leave open. (`declare -p` is
+        // the one that answers about the names it is given.)
+        let _ = print_only;
+        if names.is_empty() {
             let mut ro: Vec<String> = self.readonly.iter().cloned().collect();
             ro.sort();
             let mut listing = String::new();
@@ -15522,48 +15569,37 @@ impl Shell {
         }
         let mut status = 0;
         for name_val in names {
-            // Support `NAME=value` and the `NAME+=value` append form.
-            let (name, append, value) = match name_val.find('=') {
-                Some(eq) => {
-                    if eq > 0 && name_val.as_bytes()[eq - 1] == b'+' {
-                        (
-                            &name_val[..eq - 1],
-                            true,
-                            Some(name_val[eq + 1..].to_string()),
-                        )
-                    } else {
-                        (&name_val[..eq], false, Some(name_val[eq + 1..].to_string()))
-                    }
-                }
-                None => (name_val.as_str(), false, None),
-            };
-            if name.is_empty() {
+            // Supports `NAME=value` and the `NAME+=value` append form; anything
+            // that is not a plain identifier is refused here, and only that
+            // operand is lost.
+            let Some((name, append, value)) = self.attr_operand("readonly", name_val) else {
+                status = 1;
                 continue;
-            }
-            if value.is_some() && self.readonly.contains(name) {
+            };
+            if value.is_some() && self.readonly.contains(&name) {
                 self.emit_stderr(format!("{}{name}: readonly variable\n", self.err_prefix()).as_bytes());
                 status = 1;
                 continue;
             }
             if assoc {
-                self.assoc.entry(name.to_string()).or_default();
+                self.assoc.entry(name.clone()).or_default();
             } else if indexed {
-                self.arrays.entry(name.to_string()).or_default();
+                self.arrays.entry(name.clone()).or_default();
             }
             if let Some(v) = value
                 && !assoc
                 && !indexed
             {
                 let stored = if append {
-                    let mut cur = self.vars.get(name).cloned().unwrap_or_default();
+                    let mut cur = self.vars.get(&name).cloned().unwrap_or_default();
                     cur.push_str(&v);
                     cur
                 } else {
                     v
                 };
-                self.vars.insert(name.to_string(), stored);
+                self.vars.insert(name.clone(), stored);
             }
-            self.readonly.insert(name.to_string());
+            self.readonly.insert(name);
         }
         status
     }
@@ -20738,6 +20774,59 @@ fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
     } else {
         prefix.parse::<usize>().ok().map(DirStackRef::FromLeft)
     }
+}
+
+/// Where the `=` of an assignment word is, or `None` if `word` is not an
+/// assignment at all — bash's `assignment()`, as `readonly` and `export` use it
+/// to tell the name they are given from the value.
+///
+/// The scan is deliberately strict, and it is the *stopping* that matters: it
+/// begins only at a name-start character, walks name characters, steps over one
+/// balanced `[…]` subscript, and gives up at anything else. So `a[0]=9` yields
+/// the `=` (leaving the not-an-identifier name `a[0]` for the caller to
+/// refuse), while `h[a=1` — where the subscript never closes — yields nothing
+/// at all and is refused whole. For a `NAME+=value` the index returned is still
+/// the `=`; the caller drops the `+`.
+fn attr_assignment_split(word: &str) -> Option<usize> {
+    let b = word.as_bytes();
+    if !matches!(b.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_') {
+        return None;
+    }
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'=' => return Some(i),
+            b'+' if b.get(i + 1) == Some(&b'=') => return Some(i + 1),
+            b'[' => {
+                // One subscript, nested brackets included (`a[b[0]]=v`), and it
+                // must be the last thing before the `=`.
+                let mut depth = 0usize;
+                let mut j = i;
+                let close = loop {
+                    match b.get(j) {
+                        Some(b'[') => depth += 1,
+                        Some(b']') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break j;
+                            }
+                        }
+                        Some(_) => {}
+                        None => return None,
+                    }
+                    j += 1;
+                };
+                return match (b.get(close + 1), b.get(close + 2)) {
+                    (Some(b'='), _) => Some(close + 1),
+                    (Some(b'+'), Some(b'=')) => Some(close + 2),
+                    _ => None,
+                };
+            }
+            c if c.is_ascii_alphanumeric() || c == b'_' => i += 1,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Whether `s` can be the value of a nameref (`declare -n ref=VALUE`).
@@ -28294,6 +28383,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // $BASH is defined and, unlike $BASHOPTS, is reassignable.
         assert!(!run("echo $BASH").0.trim().is_empty());
         assert_eq!(run("BASH=foo; echo $BASH").0, "foo\n");
+    }
+
+    #[test]
+    fn readonly_and_export_take_only_plain_identifiers() {
+        // Neither builtin accepts the subscripted target `declare` does, and the
+        // text each complaint quotes is decided by how far the scan for the `=`
+        // gets: `a[0]=9` reaches one, so only the name is quoted; `h[a=1` never
+        // does, so the whole word is. See `attr_assignment_split`.
+        let (o, s) = run("a=(1 2); readonly 'a[0]=9' 2>&1; echo rc=$?; declare -p a");
+        assert_eq!(
+            o,
+            "osh: readonly: `a[0]': not a valid identifier\nrc=1\ndeclare -a a=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(s, 0);
+        assert_eq!(
+            run("export 'h[a'=1 2>&1").0,
+            "osh: export: `h[a=1': not a valid identifier\n"
+        );
+        assert_eq!(
+            run("readonly 1bad=2 2>&1").0,
+            "osh: readonly: `1bad=2': not a valid identifier\n"
+        );
+        assert_eq!(run("export '' 2>&1").0, "osh: export: `': not a valid identifier\n");
+        // One bad name costs only itself: the rest are still declared, and the
+        // call reports the failure once it has worked through them all.
+        let (o, _) = run("readonly x=1 1bad=2 y=3 2>&1; echo rc=$?; declare -p x y");
+        assert_eq!(
+            o,
+            "osh: readonly: `1bad=2': not a valid identifier\nrc=1\ndeclare -r x=\"1\"\ndeclare -r y=\"3\"\n"
+        );
+    }
+
+    #[test]
+    fn readonly_p_with_names_marks_them_instead_of_listing() {
+        // `-p` only decides what a *nameless* `readonly` does. Given names there
+        // is nothing left for it to answer, so bash marks them exactly as a plain
+        // `readonly` would and prints nothing at all.
+        assert_eq!(run("readonly -p q=5; echo \"[$q]\"; q=6; echo rc=$?").0, "[5]\n");
+        assert_eq!(run("readonly -p q=5; { q=6; } 2>&1").0, "osh: q: readonly variable\n");
+        // …whereas with no names it is the listing, which `-p` merely spells out.
+        assert!(run("readonly q=5; readonly -p").0.contains("declare -r q=\"5\"\n"));
     }
 
     #[test]

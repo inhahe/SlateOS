@@ -17641,6 +17641,7 @@ impl Shell {
         // option overwrites rather than adds: `-W 'x y' -W 'p q'` offers only
         // `p q`. The actions are the exception — they are a set.
         let mut wordlist: Option<String> = None;
+        let mut globpat: Option<String> = None;
         let mut actions: Vec<String> = Vec::new();
         let mut prefix = String::new();
         let mut suffix = String::new();
@@ -17703,11 +17704,12 @@ impl Shell {
                             return 2;
                         }
                         'W' => wordlist = Some(val),
+                        'G' => globpat = Some(val),
                         'A' => actions.push(val),
                         'P' => prefix = val,
                         'S' => suffix = val,
                         'X' => filter = Some(val),
-                        // A valid -o, and -G/-F/-C, need a live completion
+                        // A valid -o, and -F/-C, need a live completion
                         // context; kept only as "something was asked for".
                         _ => {}
                     }
@@ -17823,16 +17825,40 @@ impl Shell {
                 _ => {}
             }
         }
-        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
-        let ifs_chars: Vec<char> = ifs.chars().collect();
-        if let Some(wl) = &wordlist {
-            for tok in wl.split(|c| ifs_chars.contains(&c)).filter(|s| !s.is_empty()) {
-                cands.push(tok.to_string());
-            }
+
+        // ---- keep the candidates that start with the word prefix ----
+        // Narrowing to the word belongs to the source, not to the finished
+        // answer, because one source does not do it (see `-G` below).
+        let mut list: Vec<String> = cands.into_iter().filter(|c| c.starts_with(&word)).collect();
+
+        // ---- -G globpat: pathname expansion, offered whole ----
+        // The word never narrows this one: bash hands back everything the
+        // pattern expanded to, and hands it back in reverse.
+        if let Some(pat) = &globpat {
+            let field: Vec<EChar> = pat.chars().map(|c| EChar { c, quoted: false }).collect();
+            let mut m = glob_expand_field(
+                &self.cwd,
+                &field,
+                self.shopt.get("dotglob").copied().unwrap_or(false),
+                self.shopt.get("nocaseglob").copied().unwrap_or(false),
+                self.shopt.get("extglob").copied().unwrap_or(false),
+                self.shopt.get("globstar").copied().unwrap_or(false),
+            );
+            m.sort();
+            m.reverse();
+            list.extend(m);
         }
 
-        // ---- keep candidates that start with the word prefix ----
-        let mut list: Vec<String> = cands.into_iter().filter(|c| c.starts_with(&word)).collect();
+        // ---- -W wordlist, split on IFS ----
+        if let Some(wl) = &wordlist {
+            let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
+            let ifs_chars: Vec<char> = ifs.chars().collect();
+            list.extend(
+                wl.split(|c| ifs_chars.contains(&c))
+                    .filter(|s| !s.is_empty() && s.starts_with(&word))
+                    .map(str::to_string),
+            );
+        }
 
         // ---- -X filterpat: glob-remove (leading '!' keeps only matches) ----
         if let Some(pat) = &filter
@@ -28915,6 +28941,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.starts_with("osh: compgen: -W: option requires an argument\n"), "got {o:?}");
         assert!(o.contains("compgen: usage: compgen [-abcdefgjksuv]"), "got {o:?}");
         assert_eq!(s, 2);
+    }
+
+    #[test]
+    fn compgen_globpat_is_offered_whole_and_reversed() {
+        // `-G` is the one source the word does not narrow: the pattern is
+        // expanded as a pathname and the whole expansion is handed back, in
+        // reverse. Give it a directory of its own so nothing else can match.
+        let _cwd = cwd_guard();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_compgen_g_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
+        std::fs::write(dir.join("a1"), b"").expect("a1");
+        std::fs::write(dir.join("b1"), b"").expect("b1");
+        let base = dir.to_string_lossy().replace('\\', "/");
+        let orig = std::env::current_dir().expect("cwd");
+        let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}")).0;
+
+        // Reverse order, and a word operand leaves the list alone.
+        assert_eq!(g("-G '*1'"), "b1\na1\n");
+        assert_eq!(g("-G '*1' zzz"), "b1\na1\n");
+        // …but `-X` and `-P`/`-S` still apply to it.
+        assert_eq!(g("-G '*1' -X 'b*'"), "a1\n");
+        assert_eq!(g("-G '*1' -P '<' -S '>'"), "<b1>\n<a1>\n");
+        // A second `-G` overwrites the first: it is one compspec slot.
+        assert_eq!(g("-G 'a*' -G 'b*'"), "b1\n");
+        // A pattern that matches nothing contributes nothing, and with no other
+        // source the empty answer is status 1.
+        assert_eq!(run(&format!("cd {base}\ncompgen -G 'nosuch*'")), (String::new(), 1));
+        // Sources are emitted in bash's fixed order: actions, then -G, then -W.
+        assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
+
+        std::env::set_current_dir(&orig).expect("restore cwd");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -6488,6 +6488,86 @@ previously errored. Regression coverage: `tests/cli_options.rs`
 path) and shorter than bash's full GNU-long-option dump — exact byte-parity of
 the usage block is neither possible (different program name) nor desirable.
 
+### TD-OILS-BG-STDIN-REDIR. A `&` job does not inherit an *explicitly redirected* fd 0 — it always reads /dev/null — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_background`'s thread path
+(`StdinSrc::Cursor(&empty)`) and its direct-spawn shortcut
+(`cmd.stdin(Stdio::null())`).
+
+**What.** bash gives an asynchronous command `/dev/null` for fd 0 **only in the
+absence of an explicit redirection**. Its `stdin_redir` flag (execute_cmd.c) is
+set both by a redirection of fd 0 in the *currently active* redirect list and by
+`do_piping` when the command is a pipeline stage — and when it is set, the job
+inherits fd 0 as it stands. So all of these read real input in bash and produce
+nothing in osh:
+
+```sh
+echo A | { cat & wait; }          # bash: A     osh: (nothing)
+{ cat & wait; } < two.txt         # bash: l1 l2 osh: (nothing)
+echo A | ( cat & wait )           # bash: A     osh: (nothing)
+x=$(echo Z | { cat & wait; })     # bash: Z     osh: (empty)
+exec < two.txt; cat 0<&0 & wait   # bash: l1 l2 osh: (nothing)
+```
+
+The flag is genuinely per-redirect-list, not "fd 0 is not a terminal": `exec <
+two.txt; cat & wait` reads /dev/null in bash too, because `exec`'s redirection is
+not part of the async command's list. osh already matches every case whose answer
+is /dev/null, including that one — see the "fd 0 goes the other way" section of
+`tests/corpus/background-output.sh`. What is missing is the inherit case.
+
+**Why it is not fixed yet.** `StdinSrc` is a *borrowed* enum
+(`Cursor(&'a RefCell<io::Cursor<Vec<u8>>>)`, `Pipe(RefCell<BufReader<PipeReader>>)`),
+so it cannot be moved into the job's thread, which outlives the call. Handing a
+job the caller's fd 0 therefore needs `StdinSrc`'s payloads to be shareable and
+`Send` — an `Arc<Mutex<…>>` cursor and an `Arc`-wrapped pipe reader — which is
+the shape `Out` already has. That is the proper fix: make `StdinSrc` own `Arc`
+handles, give it a `share()` alongside `Out::share()`, and have `exec_background`
+pass `stdin.share()` when the command is a pipeline stage or carries an fd-0
+redirect and `/dev/null` otherwise. The sharing is also what gives bash's
+shared-file-offset semantics between shell and job for free.
+
+**Impact.** Narrow: a `&` job that reads its enclosing pipeline's or group's
+input. Nothing in the corpus depends on it, and the failure mode is empty input
+rather than corruption.
+
+### TD-OILS-BG-SINK-OUTLIVES-SUBSHELL. A job started inside a `( )` subshell stops holding the enclosing capture open when the subshell ends — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Out::share()` / `drain_jobs()` /
+`command_sub`, and the `Command::Subshell` arm of `exec_command`.
+
+**What.** `x=$( ( echo n & ) ); echo "[$x]"` substitutes `n` in bash and nothing
+in osh.
+
+A background job holds a copy of the collecting pipe's write end, so bash's
+`$( … )` reader does not see EOF until the job exits — *however deeply nested*
+the job's starting point was. osh reproduces this for a job started directly in
+the substitution (`command_sub` calls `drain_jobs()` before taking the capture)
+and for any pipe sink (an `io::PipeWriter` clone gives the OS refcount for free),
+but not for a job started inside a nested `( )` subshell whose sink is a
+**capture**: the subshell's `Shell` clone has its own job table, which is dropped
+when the subshell ends, detaching the thread. Its writes then land in a buffer
+nobody reads.
+
+**Proper fix.** Refcount the capture sink the way an fd is refcounted. Today
+`Out::Capture(Arc<Mutex<Vec<u8>>>)` cannot express "someone else still holds a
+write end", because `Arc`'s drop is not observable. Replacing the payload with a
+`CaptureSink` newtype (`Arc<{ buf: Mutex<Vec<u8>>, writers: Mutex<usize>, idle:
+Condvar }>`) whose `share()` claims a writer and whose guard releases it on drop
+lets `command_sub` wait for "no writers but me" — which handles the nested case
+and also *correctly declines* to wait when the inner subshell redirected fd 1
+away (`x=$( ( sleep 2 & ) > /dev/null )` returns immediately in bash). ~40
+`Out::Capture(…)` construction sites would need mechanical updating, most of them
+in tests.
+
+A cheaper "drain the subshell's jobs if its `out` is a capture" patch was
+considered and rejected: it over-waits in exactly that redirected-away case,
+because the redirect is applied as an `exec_stdout` override rather than by
+rebinding `out`.
+
+**Impact.** Narrow: a `&` job started inside a `( )` **and** inside a command
+substitution **and** writing to the substitution's stdout. Output is lost, not
+corrupted.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

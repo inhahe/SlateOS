@@ -7521,6 +7521,12 @@ impl Shell {
             std::os::unix::process::CommandExt::arg0(&mut cmd, &argv[0]);
             cmd.args(&argv[1..]);
             cmd.current_dir(&self.cwd);
+            // A `&` job that carries no redirection of its own reads /dev/null,
+            // not the shell's stdin — otherwise it would race the shell for the
+            // script it is being read from. (The thread path below does the same
+            // with an empty cursor.) Nothing that *is* redirected reaches here:
+            // a command with redirections declines the shortcut.
+            cmd.stdin(Stdio::null());
             if self.env_imported {
                 cmd.env_clear();
             }
@@ -31113,6 +31119,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A pipeline stage is the same sink.
         assert_eq!(run("{ echo hi & wait; } | tr a-z A-Z").0, "HI\n");
         assert_eq!(run("{ echo hi & } | tr a-z A-Z").0, "HI\n");
+    }
+
+    #[test]
+    fn background_job_without_a_redirect_reads_dev_null() {
+        // fd 0 goes the other way from fd 1: a job that carries no redirection
+        // of its own reads /dev/null, so it cannot race the shell for the script
+        // it is being read from. `exec < file` rebinds the *shell's* fd 0, which
+        // is not a redirection of the job, so the rule still applies — and the
+        // shell's own read position is untouched by the job.
+        let dir = std::env::temp_dir().join(format!(
+            "osh_bgstdin_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(dir.join("two.txt"), "l1\nl2\n").expect("write two.txt");
+        let mut sh = Shell::new();
+        let cap = capture_buf();
+        {
+            let mut out = Out::Capture(Arc::clone(&cap));
+            let src = format!(
+                "cd '{}'\n\
+                 exec < two.txt\n\
+                 cat & wait\n\
+                 read a & wait; echo \"read=[${{a-unset}}]\"\n\
+                 read b; echo \"parent=[$b]\"\n\
+                 cat < two.txt & wait\n",
+                dir.display().to_string().replace('\\', "/")
+            );
+            sh.run_source_out(&src, &mut out, 0);
+        }
+        let got = String::from_utf8_lossy(&take_capture(&cap)).into_owned();
+        assert_eq!(got, "read=[unset]\nparent=[l1]\nl1\nl2\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]

@@ -710,6 +710,10 @@ struct Job {
     cmd: String,
     /// Final exit status once the body has finished and been reaped.
     status: Option<i32>,
+    /// The signal that terminated the job, if one did. `status` alone cannot
+    /// say: a job killed by SIGTERM and one that ran `exit 143` both end 143,
+    /// and `jobs` words them differently (`Terminated` vs `Exit 143`).
+    signal: Option<u8>,
     /// Set by `disown -h`: the job stays in the table but is marked so it
     /// would not receive SIGHUP when the shell exits. (We have no SIGHUP
     /// delivery yet, so this is advisory bookkeeping matching bash semantics.)
@@ -7574,6 +7578,7 @@ impl Shell {
                 child,
                 cmd: argv.join(" "),
                 status,
+                signal: None,
                 no_hup: false,
             });
             self.note_new_job(id);
@@ -7627,6 +7632,7 @@ impl Shell {
             child: Some(JobBody::Thread(handle)),
             cmd: crate::unparse::and_or_src(ao),
             status: None,
+            signal: None,
             no_hup: false,
         });
         self.note_new_job(id);
@@ -11673,6 +11679,7 @@ impl Shell {
                         // Record the terminated status so `wait`/`jobs` reflect it.
                         let _ = child.wait();
                         self.jobs[idx].status = Some(128 + i32::from(signum));
+                        self.jobs[idx].signal = Some(signum);
                         self.jobs[idx].child = None;
                         return true;
                     }
@@ -11690,6 +11697,7 @@ impl Shell {
                 // signalled status so `wait`/`jobs` reflect the kill request.
                 Some(JobBody::Thread(_)) => {
                     self.jobs[idx].status = Some(128 + i32::from(signum));
+                    self.jobs[idx].signal = Some(signum);
                     self.jobs[idx].child = None;
                     return true;
                 }
@@ -11954,7 +11962,15 @@ impl Shell {
                 buf.push('\n');
                 continue;
             }
-            let state = if running { "Running" } else { "Done" };
+            // bash words the state three ways: `Running`, the description of
+            // the signal that killed the job, or `Done` for a clean exit and
+            // `Exit N` for a dirty one.
+            let state = match (running, job.signal, job.status) {
+                (true, _, _) => "Running".to_string(),
+                (_, Some(sig), _) => signal_description(sig).to_string(),
+                (_, None, Some(0) | None) => "Done".to_string(),
+                (_, None, Some(n)) => format!("Exit {n}"),
+            };
             let marker = self.job_marker(job.id);
             // bash prints a still-running job's command the way it was written,
             // `&` and all; a finished one loses the `&` because there is no
@@ -18998,6 +19014,50 @@ const SIGNALS: &[(u8, &str)] = &[
 /// unknown number. Used to key self-delivered signals into the trap table.
 fn signal_name(signum: u8) -> Option<&'static str> {
     SIGNALS.iter().find(|(num, _)| *num == signum).map(|(_, name)| *name)
+}
+
+/// How `jobs` words the death of a job killed by `signum` — `Terminated`,
+/// `Killed`, `Broken pipe` and so on.
+///
+/// bash gets these from the C library's `strsignal`, so they are the glibc
+/// wordings; the ones for signals whose default action is to stop or be ignored
+/// are unreachable through a real `jobs` listing (such a signal does not end a
+/// job) and are here only for completeness.
+fn signal_description(signum: u8) -> &'static str {
+    match signum {
+        1 => "Hangup",
+        2 => "Interrupt",
+        3 => "Quit",
+        4 => "Illegal instruction",
+        5 => "Trace/breakpoint trap",
+        6 => "Aborted",
+        7 => "Bus error",
+        8 => "Floating point exception",
+        9 => "Killed",
+        10 => "User defined signal 1",
+        11 => "Segmentation fault",
+        12 => "User defined signal 2",
+        13 => "Broken pipe",
+        14 => "Alarm clock",
+        15 => "Terminated",
+        16 => "Stack fault",
+        17 => "Child exited",
+        18 => "Continued",
+        19 => "Stopped (signal)",
+        20 => "Stopped",
+        21 => "Stopped (tty input)",
+        22 => "Stopped (tty output)",
+        23 => "Urgent I/O condition",
+        24 => "CPU time limit exceeded",
+        25 => "File size limit exceeded",
+        26 => "Virtual timer expired",
+        27 => "Profiling timer expired",
+        28 => "Window changed",
+        29 => "I/O possible",
+        30 => "Power failure",
+        31 => "Bad system call",
+        _ => "Unknown signal",
+    }
 }
 
 /// Whether a signal's *default* disposition terminates the shell. False for the
@@ -31505,6 +31565,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("jobs %9 2>&1");
         assert_eq!(o, "osh: jobs: %9: no such job\n");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn jobs_words_exits_and_signals_apart() {
+        // `Done` is only for a *clean* exit; a dirty one is spelled out, and a
+        // job that was signalled is named by the signal rather than by the
+        // 128+n status it happens to share with `exit 143`.
+        let mut sh = Shell::new();
+        for (src, want) in [
+            ("( exit 0 ) &", "Done                    ( exit 0 )"),
+            ("( exit 1 ) &", "Exit 1                  ( exit 1 )"),
+            ("( exit 255 ) &", "Exit 255                ( exit 255 )"),
+            ("( exit 143 ) &", "Exit 143                ( exit 143 )"),
+        ] {
+            sh.run_source(src);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
+        }
+        for (sig, want) in [("TERM", "Terminated"), ("INT", "Interrupt"), ("PIPE", "Broken pipe")] {
+            sh.run_source("sleep 5 &");
+            sh.run_source(&format!("kill -{sig} %1"));
+            assert_eq!(
+                listing(&mut sh, "jobs"),
+                format!("[1]+  {want:<24}sleep 5\n"),
+                "kill -{sig}"
+            );
+        }
     }
 
     #[cfg(windows)]

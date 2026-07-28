@@ -29,6 +29,18 @@ echo "=== a running job's command keeps its \`&\`; a finished one loses it"
 sleep 0.05 & sleep 0.7 & sleep 0.4; jobs
 wait
 
+echo "=== the state column words a clean exit, a dirty one and a signal apart"
+( exit 0 ) & sleep 0.4; jobs
+( exit 1 ) & sleep 0.4; jobs
+( exit 255 ) & sleep 0.4; jobs
+# bash is built with DONT_REPORT_SIGTERM/SIGPIPE and skips SIGINT, so these
+# three deaths are not announced asynchronously and are still the listing's to
+# report.
+sleep 5 & kill -TERM %1; sleep 0.4; jobs
+sleep 5 & kill -INT %1; sleep 0.4; jobs
+sleep 5 & kill -PIPE %1; sleep 0.4; jobs
+wait
+
 echo "=== the command is the source text, whatever shape it had"
 sleep 0.7 | cat & jobs
 wait

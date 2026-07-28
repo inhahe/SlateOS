@@ -9137,7 +9137,7 @@ impl Shell {
                     fields.join(" ")
                 }
             }
-            WordPart::CommandSub(prog) => self.command_sub(prog),
+            WordPart::CommandSub { body, .. } => self.command_sub(body),
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
             WordPart::ArithSub { expr, .. } => self.arith_sub(expr),
             WordPart::ArrayRef {
@@ -31227,6 +31227,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Single-statement subshell stays on one line.
         let (o2, _) = run("f() { ( echo a ); echo c; }; declare -f f");
         assert_eq!(o2, "f () \n{ \n    ( echo a );\n    echo c\n}\n", "single subshell mismatch");
+    }
+
+    #[test]
+    fn declare_f_prints_backticks_from_the_source() {
+        // bash re-prints a `$( … )` body from the parse, normalising its spacing.
+        let (o, _) = run("f() { echo $(echo    a   ;   echo b); }; declare -f f");
+        assert_eq!(o, "f () \n{ \n    echo $(echo a; echo b)\n}\n", "$( ) not re-printed");
+
+        // A backtick body is echoed from the source instead, spacing and all.
+        let (o, _) = run("f() { echo `echo    a   ;   echo b`; }; declare -f f");
+        assert_eq!(o, "f () \n{ \n    echo `echo    a   ;   echo b`\n}\n", "backtick reprinted");
+
+        // Which matters: the parsed body has lost the escapes a nested
+        // substitution needs, so re-printing it would not parse back.
+        let src = "f() { echo `echo \\`echo n\\``; }";
+        let (o, _) = run(&format!("{src}; declare -f f"));
+        assert_eq!(o, "f () \n{ \n    echo `echo \\`echo n\\``\n}\n", "escapes lost");
+        let (o, s) = run(&format!("{src}; eval \"$(declare -f f)\"; f"));
+        assert_eq!((o.as_str(), s), ("n\n", 0), "round-tripped backtick output");
+    }
+
+    #[test]
+    fn cmdsub_syntax_error_names_the_closing_paren() {
+        // bash parses a `$( … )` body in the enclosing token stream, so a body
+        // that runs out mid-construct is not an end of file there: the next
+        // token is the substitution's own `)`, and nothing runs.
+        let (o, s) = run("echo $(if)");
+        assert_eq!((o.as_str(), s), ("", 2), "cmdsub parse error");
+
+        // A backtick body really is parsed on its own, so the end of the body is
+        // where it runs out.
+        let (o, s) = run("echo `if`");
+        assert_eq!((o.as_str(), s), ("", 2), "backtick parse error");
     }
 
     #[test]

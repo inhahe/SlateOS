@@ -968,7 +968,10 @@ fn part_src(p: &WordPart) -> String {
         // A substitution is its own source context, so a here-document inside
         // one has to be flushed *within* the parentheses — carrying it out to
         // the enclosing line would leave the body outside the substitution.
-        WordPart::CommandSub(prog) => format!("$({})", flush_here_docs(&program_inline(prog))),
+        WordPart::CommandSub { body, backtick_src } => match backtick_src {
+            Some(raw) => format!("`{raw}`"),
+            None => format!("$({})", flush_here_docs(&program_inline(body))),
+        },
         WordPart::ProcSub { input, body } => format!(
             "{}({})",
             if *input { '<' } else { '>' },

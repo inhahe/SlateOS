@@ -121,7 +121,15 @@ pub enum Seg {
     /// scan had reached — the closing `)` — rather than from the body's own
     /// first line. The parser needs that line to rebase the body's numbering
     /// (see `parser::parse_cmdsub_body`), and only the lexer knows it.
-    CmdSub(String, u32),
+    ///
+    /// The third field carries a `` ` … ` `` body's *verbatim source*, and is
+    /// `None` for the `$( … )` spelling. The two forms run the same command,
+    /// but bash treats them as different constructs everywhere else: it prints
+    /// a `$( … )` body back from the parse and a backtick body from the source
+    /// text (see [`Lexer::read_backtick`]), and it parses a `$( … )` body in
+    /// the enclosing token stream, which changes how an error in it is
+    /// reported.
+    CmdSub(String, u32, Option<String>),
     /// `$(( … ))` — raw arithmetic expression text.
     /// The `bool` is `true` when the deprecated `$[ … ]` spelling was used. The
     /// two evaluate identically, but bash prints a stored function body back in
@@ -1050,9 +1058,9 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let raw = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick()?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close));
+                    segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
                 '\\' => {
                     // In the inline `=~` regex, a backslash escapes the next
@@ -1115,9 +1123,9 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let raw = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick()?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close));
+                    segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -1318,9 +1326,9 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let raw = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick()?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close));
+                    segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -1462,9 +1470,9 @@ impl Lexer {
                 '`' => {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
-                    let raw = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick()?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close));
+                    segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
                 '$' => {
                     if let Some(seg) = self.read_dollar(true)? {
@@ -1536,7 +1544,7 @@ impl Lexer {
                     let raw = self
                         .read_balanced('(', ')')
                         .map_err(|e| e.at(self.eof_line()))?;
-                    Ok(Some(Seg::CmdSub(raw, self.cur_line())))
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
                 }
             }
             Some(c) if is_name_start(c) => {
@@ -1914,12 +1922,23 @@ impl Lexer {
         Ok(())
     }
 
-    fn read_backtick(&mut self) -> Result<String, LexError> {
+    /// Read a `` ` … ` `` body, returning two things: the text to *parse*, with
+    /// the three escapes bash strips first removed, and the verbatim source
+    /// between the backticks, which is what `declare -f` prints back.
+    ///
+    /// They differ exactly where an escape appeared, and printing the parsed
+    /// text instead would not merely lose the spelling — a nested backtick
+    /// would come out unescaped, and the result would no longer parse.
+    fn read_backtick(&mut self) -> Result<(String, String), LexError> {
         let open = self.cur_line();
+        let start = self.pos;
         let mut raw = String::new();
         loop {
             match self.bump() {
-                Some('`') => return Ok(raw),
+                Some('`') => {
+                    let src = self.chars.get(start..self.pos.saturating_sub(1));
+                    return Ok((raw, src.unwrap_or_default().iter().collect()));
+                }
                 Some('\\') => {
                     // Inside backticks, `\`` and `\\` and `\$` are unescaped.
                     match self.peek() {
@@ -1986,8 +2005,8 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
             '`' => {
                 lx.pos += 1;
                 flush_lit(&mut segs, &mut lit);
-                let raw = lx.read_backtick()?;
-                segs.push(Seg::CmdSub(raw, lx.cur_line()));
+                let (raw, src) = lx.read_backtick()?;
+                segs.push(Seg::CmdSub(raw, lx.cur_line(), Some(src)));
             }
             '$' => {
                 if let Some(seg) = lx.read_dollar(true)? {
@@ -2108,7 +2127,7 @@ mod tests {
         let toks = tokenize("echo $(echo $(echo x))").unwrap();
         if let Tok::Word(segs) = &toks[1] {
             match &segs[0] {
-                Seg::CmdSub(raw, close) => {
+                Seg::CmdSub(raw, close, _) => {
                     assert_eq!(raw, "echo $(echo x)");
                     // Single-line input: the closing paren is on line 1.
                     assert_eq!(*close, 1);

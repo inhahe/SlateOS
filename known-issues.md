@@ -3029,6 +3029,76 @@ because osh's output is valid bash in every case and bash's is not always:
    `userspace/oils/tests/corpus/declare-f-heredoc.sh` sidesteps the shape by
    never opening a block with a here-doc.
 
+**Follow-on (conditional grouping) — 2026-07-28, RESOLVED same day.** The
+`[[ … ]]` parser used a parenthesised group only to shape its tree and then
+dropped it, so `declare -f` printed `[[ ( a || b ) && c ]]` back as
+`[[ a || b && c ]]` — a *different* test, since `&&` binds tighter. Fixed by
+keeping a `CondExpr::Group` node that evaluation walks through and printing
+renders; redundant groups are echoed too, as bash does. bash's one
+normalisation here (a bare-word test prints as the `-n WORD` it means) is now
+matched as well. Corpus `declare-f-cond.sh`; test
+`interp::declare_f_keeps_conditional_grouping`.
+
+**Follow-on (backtick substitutions) — 2026-07-28, RESOLVED same day.** bash
+prints a `$( … )` body back from the parse (normalising spacing) but a
+`` ` … ` `` body from the *source*, verbatim. osh re-printed both, which lost
+the spacing and — worse — the `` \` `` escapes a nested substitution needs, so
+`` echo `echo \`echo n\`` `` printed back as source that no longer parsed. The
+lexer now keeps the verbatim span alongside the unescaped body
+(`Seg::CmdSub`'s third field, `WordPart::CommandSub::backtick_src`) and the
+unparser echoes it. Corpus `declare-f-backtick.sh`; test
+`interp::declare_f_prints_backticks_from_the_source`.
+
+### TD-OILS-CMDSUB-ERR-FATALITY. `osh` reports a command-substitution syntax error at parse time in both spellings; bash defers the backtick form and makes the `$( )` form fatal to the caller — 2026-07-28 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` `parse_cmdsub_body` / `seg_to_part`;
+`userspace/oils/src/interp.rs` (`eval` builtin, `command_sub`).
+
+**What:** The *message* now matches bash for both spellings — a `$( … )` body
+that runs out mid-construct is blamed on the substitution's closing `)`,
+because bash parses that body in the enclosing token stream, while a backtick
+body is blamed on its own end of input. Two behavioural differences remain,
+both only observable when the substitution is inside `eval`; at script level
+the whole unit fails to parse in either shell, so they agree there.
+
+1. **bash parses a backtick body lazily.** ``echo `if` `` in bash prints
+   `<name>: command substitution: line 2: syntax error: unexpected end of file`
+   at *expansion* time and then runs `echo` with an empty substitution, so the
+   command succeeds. osh parses the body up front, so the command never runs.
+   The proper fix is to store the backtick body unparsed — the verbatim source
+   is already kept, for printing — and parse it in `command_sub`, with a cache
+   so a substitution inside a loop is not re-parsed per iteration.
+2. **A `$( )` body error is fatal to bash's caller.** `( eval 'echo $(if)' )`
+   exits the subshell with status 1 in bash, whose comsub parser calls
+   `jump_to_top_level` and unwinds past `eval`; osh returns 2 from `eval` and
+   carries on. Matching this needs a "fatal parse error" flow that unwinds
+   through `eval`/`source` to the shell, distinct from the ordinary status-2
+   parse error.
+
+**Reproduce:**
+```sh
+( eval 'echo A; echo $(if); echo B'; echo "inner:$?" ); echo "sub:$?"
+# bash: error, no `inner:`, sub:1     osh: error, inner:2, sub:0
+( eval 'echo `if`'; echo "inner:$?" ); echo "sub:$?"
+# bash: `command substitution:` error, blank line, inner:0
+```
+
+### TD-OILS-CASE-PATTERN-EOF. `osh` blames end of file where bash blames the newline after an unterminated `case` pattern — 2026-07-28 — OPEN (diagnostic wording only)
+
+**Where:** `userspace/oils/src/parser.rs`, the `case` pattern list.
+
+**What:** `case x in y` with no further input reports
+``syntax error near unexpected token `newline'`` in bash, plus the offending
+source-line echo, but `syntax error: unexpected end of file` in osh. bash
+requires a `)` after the pattern and blames the newline token it found
+instead; osh has already skipped the newline by then. `case x in` with nothing
+after it *does* report end of file in both, because newlines are allowed
+before the first pattern. Exit status (2) and the fact that nothing runs
+already match; only the wording and the source-line echo differ.
+
+**Proper fix:** in the pattern position, stop skipping newlines once a pattern
+word has been read, so `unexpected_here` names the `Newline` token.
+
 ### TD-OILS-ASSOC-KEY-TRIM. `osh` trims leading/trailing whitespace from an unquoted associative-array subscript key — 2026-07-19 — RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/parser.rs` subscript extraction

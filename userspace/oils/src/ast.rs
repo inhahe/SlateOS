@@ -465,7 +465,18 @@ pub enum WordPart {
         star: bool,
     },
     /// `$(command)` / `` `command` `` command substitution.
-    CommandSub(Program),
+    CommandSub {
+        body: Program,
+        /// The body's source text, kept for the `` ` … ` `` spelling only.
+        ///
+        /// bash prints the two forms back differently: a `$( … )` body is
+        /// re-printed from the parse (so `$(echo  a ;  echo b)` becomes
+        /// `$(echo a; echo b)`), while a backtick body is echoed verbatim,
+        /// newlines and all. Re-printing a backtick body is not merely untidy
+        /// either — a nested `` \` `` would lose its backslash and the result
+        /// would no longer parse. `None` is the `$( … )` spelling.
+        backtick_src: Option<String>,
+    },
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).
     /// `bracket` records the deprecated `$[ expr ]` spelling, which evaluates
     /// identically but is printed back as written (bash `declare -f`).

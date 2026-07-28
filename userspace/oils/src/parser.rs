@@ -331,10 +331,12 @@ impl IncrementalParser {
             }
         };
         // A grammar error leaves the cursor on the offending token; stamp its
-        // line exactly as `parse_tokens` does.
+        // line exactly as `parse_tokens` does — including the end-of-file case's
+        // extra line, which keys off the message rather than the cursor (an
+        // error can name a token from outside this stream).
         let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
-            let line = p.cur_line().saturating_add(u32::from(ran_out));
+            let line = p.cur_line().saturating_add(u32::from(e.is_incomplete()));
             e.or_line(line)
         });
         self.wpos = p.pos;
@@ -414,14 +416,34 @@ impl IncrementalParser {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
-pub fn parse_cmdsub_body(src: &str, close_line: u32) -> Result<Program, ParseError> {
+pub fn parse_cmdsub_body(
+    src: &str,
+    close_line: u32,
+    backtick: bool,
+) -> Result<Program, ParseError> {
     let (mut toks, lines) = tokenize_spanned(src).map_err(ParseError::from)?;
     let map = CmdSubLineMap::build(&toks, &lines, close_line);
     let lines = lines.iter().map(|&l| map.map(l)).collect();
     for t in &mut toks {
         map.rebase_tok(t);
     }
-    parse_tokens(toks, lines)
+    parse_tokens(toks, lines).map_err(|e| {
+        // bash parses a `$( … )` body in the *enclosing* token stream, so a body
+        // that ends mid-construct is not an end of file there: the next token is
+        // the substitution's own `)`, and that is what bash names. A backtick
+        // body really is parsed on its own, and there bash does report end of
+        // file — which is why only the `$( )` spelling is rewritten here.
+        //
+        // The distinction matters beyond wording: an error naming a token is not
+        // continuable, so the REPL must not offer a PS2 prompt for one. Neither
+        // form can be completed by more input anyway — the lexer already found
+        // the closing delimiter.
+        if !backtick && e.msg == "syntax error: unexpected end of file" {
+            ParseError::new("syntax error near unexpected token `)'".to_string())
+        } else {
+            e
+        }
+    })
 }
 
 /// The body-line → `$LINENO` translation described on [`parse_cmdsub_body`].
@@ -483,7 +505,7 @@ impl CmdSubLineMap {
     fn rebase_segs(&self, segs: &mut [Seg]) {
         for seg in segs {
             match seg {
-                Seg::CmdSub(_, close) => *close = self.map(*close),
+                Seg::CmdSub(_, close, _) => *close = self.map(*close),
                 Seg::Dq(inner) => self.rebase_segs(inner),
                 _ => {}
             }
@@ -527,7 +549,7 @@ fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
 fn shift_segs(segs: &mut [Seg], base: u32) {
     for seg in segs {
         match seg {
-            Seg::CmdSub(_, close) => *close = close.saturating_add(base),
+            Seg::CmdSub(_, close, _) => *close = close.saturating_add(base),
             Seg::Dq(inner) => shift_segs(inner, base),
             _ => {}
         }
@@ -547,11 +569,13 @@ fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>) -> Result<Program, ParseError> 
     // Stamp the offending line centrally. `pos` is not advanced past a failing
     // token, so the parser's cursor still points at the error site. bash reports
     // the token's own line for a grammar error, but for an *unexpected end of
-    // file* error (cursor at EOF) it reports one line past the last token — the
-    // position where the missing terminator would go. Detect that via
-    // `peek().is_none()` and add 1.
+    // file* error it reports one line past the last token — the position where
+    // the missing terminator would go. Key that off the message, not the cursor:
+    // an error can name a token that is not in this stream at all (a `$( … )`
+    // body reports the substitution's closing `)`), and those still belong on
+    // the last token's line.
     parsed.map_err(|e| {
-        let line = p.cur_line().saturating_add(u32::from(p.peek().is_none()));
+        let line = p.cur_line().saturating_add(u32::from(e.is_incomplete()));
         e.or_line(line)
     })
 }
@@ -2054,7 +2078,10 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
         }
         Seg::Param(n) => WordPart::Param(n.clone()),
         Seg::ParamBraced(raw) => parse_braced_param(raw)?,
-        Seg::CmdSub(raw, close_line) => WordPart::CommandSub(parse_cmdsub_body(raw, *close_line)?),
+        Seg::CmdSub(raw, close_line, src) => WordPart::CommandSub {
+            body: parse_cmdsub_body(raw, *close_line, src.is_some())?,
+            backtick_src: src.clone(),
+        },
         Seg::Arith(raw, bracket) => WordPart::ArithSub {
             expr: raw.clone(),
             bracket: *bracket,
@@ -3335,7 +3362,7 @@ mod tests {
         let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
             panic!();
         };
-        assert!(matches!(sc.words[1].parts[0], WordPart::CommandSub(_)));
+        assert!(matches!(sc.words[1].parts[0], WordPart::CommandSub { .. }));
     }
 
     #[test]

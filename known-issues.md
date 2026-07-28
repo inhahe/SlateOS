@@ -14,6 +14,75 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-SUBSHELL-SHARES-PROCESS-CWD. `cd` inside a subshell escapes it, because osh emulates subshells in-process and the working directory is process-global — 2026-07-27 — OPEN
+
+**Symptom.** bash runs every subshell in a forked process, so a directory
+change inside one is invisible to the parent. osh emulates subshells by
+cloning `Shell` (`clone_for_subshell`, `interp.rs`), and `cd` calls
+`std::env::set_current_dir` — which is *process*-global. Every subshell
+form therefore leaks its cwd:
+
+```sh
+mkdir -p a
+pushd a >/dev/null          # cwd = ./a
+popd | cat                  # popd runs in a pipeline stage → a subshell
+echo "${PWD##*/}"           # bash: a     osh: a   (the *variable* is fine)
+cd a | cat                  # bash: "cd: a: No such file or directory"
+                            # osh : silently succeeds — the process cwd was
+                            #       already moved to the parent dir by `popd`
+```
+
+The shell *variable* `$PWD` is correctly scoped (it lives on the `Shell`
+clone), so the divergence shows up as a mismatch between `$PWD` and the
+real `getcwd()`: every relative path the parent then opens resolves
+against the subshell's directory.
+
+**Worse: it is a data race.** Pipeline stages run *concurrently* on
+scoped threads (`exec_pipeline`, `interp.rs` ~line 2295), and background
+jobs / coprocs run on detached threads (~7136, ~7194). Two stages that
+both `cd` fight over one process-global directory, and any relative path
+opened by a third stage resolves unpredictably. `a | b` where either side
+does `cd` is nondeterministic today.
+
+**Reproduce.**
+
+```sh
+osh -c 'R=$PWD; mkdir -p a; pushd a >/dev/null; popd | cat; cd a | cat; echo "cwd=$(pwd)"'
+```
+
+bash reports `cd: a: No such file or directory` from the last stage;
+osh does not, because its real cwd had already been moved.
+
+**Proper fix.** Make the working directory *per-`Shell`* rather than
+per-process — the same way `$PWD`, the fd table and the variable
+namespace are already per-`Shell`:
+
+1. Add `cwd: String` to `Shell` (absolute, forward-slash, produced by the
+   existing `shell_path`). Seed it from `std::env::current_dir()` at
+   construction; `clone_for_subshell` copies it like any other field.
+2. Add `fn resolve(&self, p: &str) -> PathBuf` — returns `p` unchanged
+   when absolute, else joins it onto `self.cwd` — and route *every*
+   filesystem access in `interp.rs` through it. Roughly 60 non-test call
+   sites (`File::open`, `fs::metadata`, `fs::read`, `fs::read_dir`,
+   `OpenOptions`, `Path::is_file`/`is_dir`/`exists`, `fs::canonicalize`).
+   Free functions that resolve paths (`test_unary` and the `-nt`/`-ot`/
+   `-ef` helpers ~20740–20883, the glob/completion walkers ~15697,
+   ~17592, ~17657, the redirect openers ~18717/18733, and the `$PATH`
+   search ~6569–6656) need the cwd passed in.
+3. `change_dir` stops calling `set_current_dir`: it resolves the target
+   against `self.cwd`, normalises `.`/`..` textually (bash's *logical*
+   `cd`), confirms the result is a directory with `fs::metadata`, and
+   assigns `self.cwd`. It must keep producing today's messages — "No such
+   file or directory" for a missing path and "Not a directory" for a
+   plain file — which currently come free from `set_current_dir`.
+4. Spawned externals get `.current_dir(&self.cwd)` (`PCommand::new` sites
+   at ~2458, ~6677, ~6688, ~7088).
+
+**Interim severity.** High for correctness, low for the scripts the
+corpus exercises today (no corpus case changes directory inside a
+pipeline stage). It blocks any script that uses `cd` inside `$( )`,
+`( )`, a pipeline stage or a background job — a common idiom.
+
 ### BUG-OILS-LEX-ERROR-LINE. An unterminated quote/substitution was always blamed on line 1, and suppressed every command before it — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** A script whose last line opens a quote it never closes:

@@ -24237,6 +24237,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo $LINENO; echo $LINENO").0, "1\n1\n");
     }
 
+    /// `$LINENO` inside `$( … )` counts up from the *closing* delimiter's line,
+    /// by the 0-based rank of the body line among the body's command-bearing
+    /// lines — bash re-parses the captured body after the outer scan has already
+    /// passed the substitution, and the body's own blank lines never took part in
+    /// that scan. Every expectation here was measured against bash 5.x; see
+    /// known-issues.md BUG-OILS-LINENO-IN-CMDSUB for the full probe table.
+    #[test]
+    fn lineno_inside_command_substitution_counts_from_the_closing_paren() {
+        // Single line: close line 1, rank 0.
+        assert_eq!(run("x=$(echo $LINENO); echo $x").0, "1\n");
+        // Two body lines, close on line 2 → 2 and 3, *not* 1 and 2.
+        assert_eq!(run("y=$(echo $LINENO\necho $LINENO)\necho \"$y\"").0, "2\n3\n");
+        // A blank body line carries no command, so it does not advance the rank:
+        // close line 3 → 3 and 4, not 3 and 5.
+        assert_eq!(
+            run("q=$(echo $LINENO\n\necho $LINENO)\necho \"$q\"").0,
+            "3\n4\n"
+        );
+        // Two commands on one body line share a rank.
+        assert_eq!(
+            run("r=$(echo $LINENO; echo $LINENO\necho $LINENO)\necho \"$r\"").0,
+            "2\n2\n3\n"
+        );
+        // The opening line's empty remainder is not a body line either.
+        assert_eq!(run("z=$(\necho $LINENO)\necho \"$z\"").0, "2\n");
+        // Backticks follow the same rule, and a substitution nested inside one
+        // body is rebased through the outer body's numbering rather than its own.
+        assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
+        assert_eq!(run("n=$(echo $(echo $LINENO)); echo $n").0, "1\n");
+        // The enclosing script's own numbering is unaffected by the body.
+        assert_eq!(
+            run("echo $LINENO\nv=$(\necho $LINENO\n)\necho \"$v\"\necho $LINENO").0,
+            "1\n4\n6\n"
+        );
+    }
+
     #[test]
     fn special_var_underscore() {
         // `$_` is the last argument of the previous simple command.

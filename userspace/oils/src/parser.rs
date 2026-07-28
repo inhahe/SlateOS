@@ -116,6 +116,117 @@ pub fn parse_with_aliases(
     parse_tokens(toks, lines)
 }
 
+/// Parse the body of a `$( … )` / `` ` … ` `` substitution, renumbering its
+/// lines the way bash does.
+///
+/// bash scans the enclosing command first and only then re-parses the captured
+/// body, so `$LINENO` inside the body does not start at the body's own first
+/// line — it counts up from the line the outer scan had already reached, i.e.
+/// the substitution's *closing* delimiter. Measured against bash 5.x (11
+/// probes), the rule is:
+///
+/// > `$LINENO` = `close_line` + (0-based **rank** of the body line among the
+/// > body lines that carry a command).
+///
+/// A rank, not an offset: a blank line inside the body does not advance it, and
+/// two commands written on one body line share a number. So
+///
+/// ```text
+/// 1  echo $LINENO     → 1
+/// 2  v=$(
+/// 3  echo $LINENO     → 6   (close_line 6 + rank 0)
+/// 4                         (blank line — carries no command, so no rank)
+/// 5  echo $LINENO     → 7   (close_line 6 + rank 1, not rank 2)
+/// 6  )
+/// ```
+///
+/// `close_line` comes from the lexer ([`Seg::CmdSub`]'s second field).
+///
+/// Nested substitutions are rebased through the same map: their own recorded
+/// close line is body-relative, so it is translated before being handed to the
+/// recursive parse. A body line with no command of its own (possible only for
+/// the tail of a nested construct) takes the rank of the nearest preceding
+/// command-bearing line.
+///
+/// # Errors
+/// Returns [`ParseError`] on a lexing or grammar error in the body.
+pub fn parse_cmdsub_body(src: &str, close_line: u32) -> Result<Program, ParseError> {
+    let (mut toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+    let map = CmdSubLineMap::build(&toks, &lines, close_line);
+    let lines = lines.iter().map(|&l| map.map(l)).collect();
+    for t in &mut toks {
+        map.rebase_tok(t);
+    }
+    parse_tokens(toks, lines)
+}
+
+/// The body-line → `$LINENO` translation described on [`parse_cmdsub_body`].
+struct CmdSubLineMap {
+    /// `(body line, rebased line)` for each distinct command-bearing body line,
+    /// ascending. Small (one entry per body line), so a linear scan beats a map.
+    ranked: Vec<(u32, u32)>,
+    close_line: u32,
+}
+
+impl CmdSubLineMap {
+    fn build(toks: &[Tok], lines: &[u32], close_line: u32) -> Self {
+        let mut ranked: Vec<(u32, u32)> = Vec::new();
+        for (tok, &line) in toks.iter().zip(lines) {
+            // Only lines that actually carry a command count towards the rank;
+            // a `Newline` token is the *end* of a line, not content on one, so a
+            // blank body line contributes nothing.
+            if matches!(tok, Tok::Newline) {
+                continue;
+            }
+            if ranked.last().is_none_or(|&(l, _)| l != line) {
+                let rank = u32::try_from(ranked.len()).unwrap_or(u32::MAX);
+                ranked.push((line, close_line.saturating_add(rank)));
+            }
+        }
+        Self { ranked, close_line }
+    }
+
+    /// Translate one body line. Lines between two command-bearing lines (blank
+    /// lines, and the continuation lines of a multi-line token) take the number
+    /// of the nearest preceding command-bearing line, which is what makes a
+    /// `Newline` token report the line its command was on.
+    fn map(&self, line: u32) -> u32 {
+        let mut out = self.close_line;
+        for &(body_line, rebased) in &self.ranked {
+            if body_line > line {
+                break;
+            }
+            out = rebased;
+        }
+        out
+    }
+
+    /// Rewrite the close lines recorded for any substitutions nested inside this
+    /// token, so a `$( $( … ) )` body is rebased relative to the *outer* body's
+    /// already-rebased numbering rather than to its own first line.
+    fn rebase_tok(&self, tok: &mut Tok) {
+        match tok {
+            Tok::Word(segs) | Tok::HereDoc(segs) => self.rebase_segs(segs),
+            Tok::ArrayAssign { elems, .. } => {
+                for e in elems {
+                    self.rebase_segs(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rebase_segs(&self, segs: &mut [Seg]) {
+        for seg in segs {
+            match seg {
+                Seg::CmdSub(_, close) => *close = self.map(*close),
+                Seg::Dq(inner) => self.rebase_segs(inner),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>) -> Result<Program, ParseError> {
     let mut p = Parser { toks, lines, pos: 0 };
     let parsed = match p.parse_program(&[], true) {
@@ -1537,7 +1648,7 @@ fn seg_to_part(seg: &Seg) -> Result<WordPart, ParseError> {
         }
         Seg::Param(n) => WordPart::Param(n.clone()),
         Seg::ParamBraced(raw) => parse_braced_param(raw)?,
-        Seg::CmdSub(raw) => WordPart::CommandSub(parse(raw)?),
+        Seg::CmdSub(raw, close_line) => WordPart::CommandSub(parse_cmdsub_body(raw, *close_line)?),
         Seg::Arith(raw) => WordPart::ArithSub(raw.clone()),
         Seg::ProcSub(input, raw) => WordPart::ProcSub {
             input: *input,

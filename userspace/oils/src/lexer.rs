@@ -77,8 +77,15 @@ pub enum Seg {
     Param(String),
     /// `${ … }` — raw inner text, parsed later.
     ParamBraced(String),
-    /// `$( … )` / `` ` … ` `` — raw inner source, parsed later.
-    CmdSub(String),
+    /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
+    /// source line of the substitution's *closing* delimiter.
+    ///
+    /// bash re-parses a substitution body only after the enclosing command has
+    /// been scanned, so `$LINENO` inside the body counts up from the line the
+    /// scan had reached — the closing `)` — rather than from the body's own
+    /// first line. The parser needs that line to rebase the body's numbering
+    /// (see `parser::parse_cmdsub_body`), and only the lexer knows it.
+    CmdSub(String, u32),
     /// `$(( … ))` — raw arithmetic expression text.
     Arith(String),
     /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
@@ -125,6 +132,13 @@ struct Lexer {
     /// produce no `Newline` token of their own) so every token can be stamped
     /// with its true starting line for accurate diagnostics and `$LINENO`.
     line: u32,
+    /// Character index at which the current `run` iteration began. `line` is only
+    /// advanced once per iteration (in [`Lexer::stamp_lines`]), so mid-token it
+    /// still names the line the *token* started on; the newlines consumed since
+    /// `iter_start` are what [`Lexer::cur_line`] adds to get the cursor's true
+    /// line. Left at 0 by the standalone here-doc lexer, whose lines are
+    /// body-relative anyway.
+    iter_start: usize,
     /// Here-documents whose bodies are pending collection at the next newline.
     pending_heredocs: Vec<PendingHeredoc>,
     /// Nesting depth of open `[[ … ]]` conditionals. Used to enable regex-word
@@ -178,6 +192,7 @@ pub fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
         chars: src.chars().collect(),
         pos: 0,
         line: 1,
+        iter_start: 0,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -199,6 +214,7 @@ pub fn tokenize_spanned_strict(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexErr
         chars: src.chars().collect(),
         pos: 0,
         line: 1,
+        iter_start: 0,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -221,6 +237,7 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
         chars: src.chars().collect(),
         pos: 0,
         line: 1,
+        iter_start: 0,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -243,6 +260,7 @@ pub fn lex_replacement_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
         chars: src.chars().collect(),
         pos: 0,
         line: 1,
+        iter_start: 0,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -477,6 +495,7 @@ impl Lexer {
             // the counter advances past newlines swallowed inside a token body).
             let start_line = self.line;
             let start_pos = self.pos;
+            self.iter_start = start_pos;
             // RHS of `=~`: read the whole regex as one word so that `(`, `)`,
             // `|`, `<`, `>` are literal metacharacters rather than shell
             // operators. Only unquoted whitespace terminates it (bash semantics).
@@ -677,6 +696,25 @@ impl Lexer {
         Ok((out, lines))
     }
 
+    /// The 1-based source line the cursor sits on *right now*, mid-token.
+    ///
+    /// [`Lexer::line`] is only advanced once per `run` iteration, so during a
+    /// word read it still names the line the word *started* on. Adding the
+    /// newlines consumed since the iteration began gives the cursor's true
+    /// line — which is what a `$( … )` needs, its `$LINENO` base being the line
+    /// of the closing paren rather than of the word that contains it.
+    fn cur_line(&self) -> u32 {
+        let consumed = self
+            .chars
+            .get(self.iter_start..self.pos)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&ch| ch == '\n')
+            .count();
+        self.line
+            .saturating_add(u32::try_from(consumed).unwrap_or(u32::MAX))
+    }
+
     /// After one `run` iteration, stamp `start_line` onto every token appended
     /// since the iteration began, then advance `self.line` past every newline
     /// the iteration consumed (`self.chars[start_pos..self.pos]`). Counting from
@@ -799,7 +837,8 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let raw = self.read_backtick()?;
-                    segs.push(Seg::CmdSub(raw));
+                    let close = self.cur_line();
+                    segs.push(Seg::CmdSub(raw, close));
                 }
                 '\\' => {
                     // In the inline `=~` regex, a backslash escapes the next
@@ -863,7 +902,8 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let raw = self.read_backtick()?;
-                    segs.push(Seg::CmdSub(raw));
+                    let close = self.cur_line();
+                    segs.push(Seg::CmdSub(raw, close));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -1058,7 +1098,8 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let raw = self.read_backtick()?;
-                    segs.push(Seg::CmdSub(raw));
+                    let close = self.cur_line();
+                    segs.push(Seg::CmdSub(raw, close));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -1268,7 +1309,8 @@ impl Lexer {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
                     let raw = self.read_backtick()?;
-                    segs.push(Seg::CmdSub(raw));
+                    let close = self.cur_line();
+                    segs.push(Seg::CmdSub(raw, close));
                 }
                 '$' => {
                     if let Some(seg) = self.read_dollar(true)? {
@@ -1332,7 +1374,7 @@ impl Lexer {
                 } else {
                     self.pos += 1;
                     let raw = self.read_balanced('(', ')')?;
-                    Ok(Some(Seg::CmdSub(raw)))
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line())))
                 }
             }
             Some(c) if is_name_start(c) => {
@@ -1741,6 +1783,7 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
         chars: body.chars().collect(),
         pos: 0,
         line: 1,
+        iter_start: 0,
         pending_heredocs: Vec::new(),
         cond_depth: 0,
         regex_next: false,
@@ -1766,7 +1809,8 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
             '`' => {
                 lx.pos += 1;
                 flush_lit(&mut segs, &mut lit);
-                segs.push(Seg::CmdSub(lx.read_backtick()?));
+                let raw = lx.read_backtick()?;
+                segs.push(Seg::CmdSub(raw, lx.cur_line()));
             }
             '$' => {
                 if let Some(seg) = lx.read_dollar(true)? {
@@ -1821,7 +1865,7 @@ mod tests {
     fn command_sub_and_arith() {
         let toks = tokenize("echo $(date) $((1 + 2))").unwrap();
         if let Tok::Word(segs) = &toks[1] {
-            assert!(matches!(segs[0], Seg::CmdSub(_)));
+            assert!(matches!(segs[0], Seg::CmdSub(..)));
         } else {
             panic!("expected word");
         }
@@ -1887,7 +1931,11 @@ mod tests {
         let toks = tokenize("echo $(echo $(echo x))").unwrap();
         if let Tok::Word(segs) = &toks[1] {
             match &segs[0] {
-                Seg::CmdSub(raw) => assert_eq!(raw, "echo $(echo x)"),
+                Seg::CmdSub(raw, close) => {
+                    assert_eq!(raw, "echo $(echo x)");
+                    // Single-line input: the closing paren is on line 1.
+                    assert_eq!(*close, 1);
+                }
                 other => panic!("expected cmdsub, got {other:?}"),
             }
         } else {

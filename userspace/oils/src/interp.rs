@@ -3202,7 +3202,12 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
-            self.vars.insert(c.var.clone(), item);
+            // Binding the loop variable is an assignment, so the name's
+            // attributes apply (`declare -i n` evaluates each word, `declare -u`
+            // folds its case), an existing array is written at element 0, and
+            // `set -a` exports it. A nameref is the one thing *not* followed:
+            // bash stores into the reference itself, leaving its target alone.
+            self.scalar_write_store(&ScalarDest::Var(c.var.clone()), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -3326,7 +3331,18 @@ impl Shell {
                 Ok(n) if n >= 1 && n <= items.len() => items[n - 1].clone(),
                 _ => String::new(),
             };
-            self.vars.insert(c.var.clone(), choice);
+            // Binding the selection is an assignment like the `for` loop's, and
+            // fails the same way: a readonly name is reported once the choice
+            // has been read (so the prompt has already been written), the loop
+            // is given up with status 1, and the variable keeps its value.
+            if self.readonly.contains(&c.var) {
+                self.emit_stderr(
+                    format!("{}{}: readonly variable\n", self.err_prefix(), c.var).as_bytes(),
+                );
+                self.last_status = 1;
+                return Flow::Next;
+            }
+            self.scalar_write_store(&ScalarDest::Var(c.var.clone()), choice);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -4519,11 +4535,17 @@ impl Shell {
         }
     }
 
-    /// Transform an array-element value by the array name's value attributes:
-    /// under `-i` the element is evaluated as an arithmetic expression, else
-    /// under `-l`/`-u` its case is folded. Mirrors the scalar assignment path so
-    /// `declare -ia a=(1+1)` stores `2` and `declare -ua u=(ab)` stores `AB`.
-    fn apply_elem_attrs(&mut self, name: &str, val: String) -> String {
+    /// Transform a value by its name's value attributes on the way to being
+    /// stored: under `-i` it is evaluated as an arithmetic expression, else
+    /// under `-l`/`-u`/`-c` its case is folded. (Integers have no case, so the
+    /// two never both apply.) This is what makes `declare -ia a=(1+1)` store
+    /// `2`, `declare -ua u=(ab)` store `AB`, and `declare -i n; read n <<< 1+1`
+    /// store `2`.
+    ///
+    /// The `name=value` assignment command does not come through here: its `-i`
+    /// handling has to reach further, since `+=` under the attribute is numeric
+    /// addition rather than string append.
+    fn apply_value_attrs(&mut self, name: &str, val: String) -> String {
         if self.integer_attr.contains(name) {
             self.eval_int_assign(&val).to_string()
         } else {
@@ -4560,10 +4582,10 @@ impl Shell {
     }
 
     /// Store `val` at an already-resolved destination, applying `set -a` and
-    /// the case attributes. The readonly guard is deliberately *not* here: the
-    /// callers disagree on how a refusal should be reported (a diagnostic, or
-    /// an [`arith::ArithError`] that aborts an expression), so each checks
-    /// [`ScalarDest::base`] itself first.
+    /// the name's value attributes. The readonly guard is deliberately *not*
+    /// here: the callers disagree on how a refusal should be reported (a
+    /// diagnostic, or an [`arith::ArithError`] that aborts an expression), so
+    /// each checks [`ScalarDest::base`] itself first.
     fn scalar_write_store(&mut self, dest: &ScalarDest, val: String) {
         let base = dest.base().to_string();
         // `set -a` (allexport): any assigned variable is given the export
@@ -4571,7 +4593,7 @@ impl Shell {
         if self.allexport {
             self.exported.insert(base.clone());
         }
-        let val = self.fold_case_attr(&base, val);
+        let val = self.apply_value_attrs(&base, val);
         match dest {
             ScalarDest::Var(n) => self.set_scalar_store(n, val),
             ScalarDest::Elem(n, sub) => {
@@ -4975,7 +4997,7 @@ impl Shell {
                     let mut it = words.into_iter();
                     while let Some(key) = it.next() {
                         let val = it.next().unwrap_or_default();
-                        let val = self.apply_elem_attrs(&a.name, val);
+                        let val = self.apply_value_attrs(&a.name, val);
                         self.assoc_set(&a.name, key, val, false);
                     }
                 } else {
@@ -4984,7 +5006,7 @@ impl Shell {
                             ArrayElem::Keyed { index, value } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
-                                let val = self.apply_elem_attrs(&a.name, val);
+                                let val = self.apply_value_attrs(&a.name, val);
                                 self.assoc_set(&a.name, key, val, false);
                             }
                             ArrayElem::Positional(w) => {
@@ -5030,7 +5052,7 @@ impl Shell {
                             // words before parameter/other expansion.
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
-                                    let v = self.apply_elem_attrs(&a.name, v);
+                                    let v = self.apply_value_attrs(&a.name, v);
                                     elems.insert(next, v);
                                     next = next.saturating_add(1);
                                 }
@@ -5039,7 +5061,7 @@ impl Shell {
                         ArrayElem::Keyed { index, value } => {
                             let idx = self.eval_arith_index(index);
                             let val = self.expand_to_string(value);
-                            let val = self.apply_elem_attrs(&a.name, val);
+                            let val = self.apply_value_attrs(&a.name, val);
                             if let Ok(idx) = usize::try_from(idx) {
                                 elems.insert(idx, val);
                                 next = idx.saturating_add(1);
@@ -27653,6 +27675,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A branch not taken never reaches the store, so nothing is refused.
         assert_eq!(run("readonly x=1; ((0 ? x=2 : 5)); echo \"rc=$?\"").0, "rc=0\n");
+    }
+
+    #[test]
+    fn binding_a_loop_variable_is_an_assignment_like_any_other() {
+        // `for`/`select` used to write the word straight into the scalar table,
+        // so the loop variable's attributes and the shell's own options — which
+        // every other assignment obeys — passed it by.
+        assert_eq!(run("declare -i n; for n in 1+1 x; do echo \"$n\"; done").0, "2\n0\n");
+        assert_eq!(run("declare -u U; for U in ab; do echo \"$U\"; done").0, "AB\n");
+        assert_eq!(run("set -a; for v in a b; do :; done; declare -p v").0, "declare -x v=\"b\"\n");
+        // An existing array takes the word at element 0, leaving the rest.
+        assert_eq!(run("q=(1 2 3); for q in x; do :; done; echo \"${q[@]}\"").0, "x 2 3\n");
+        // A nameref is the exception: bash stores into the reference itself and
+        // leaves what it refers to alone.
+        assert_eq!(run("declare -n r=z; for r in a b; do :; done; echo \"[$z]\"").0, "[]\n");
+        // `select` binds its choice the same way, and refuses a readonly name
+        // once the choice has been read — giving up the loop with status 1.
+        assert_eq!(
+            run("declare -i n; select n in 1+1; do break; done <<< 1; echo \"$n\"").0,
+            "2\n"
+        );
+        let (o, _) = run(
+            "readonly x=1; select x in a b; do echo body; done <<< 1 2>/dev/null; echo \"rc=$? x=$x\"",
+        );
+        assert_eq!(o, "rc=1 x=1\n");
     }
 
     #[test]

@@ -13575,6 +13575,65 @@ impl Shell {
         }
     }
 
+    /// Check the value a `-n` declaration wants to bind, returning the complete
+    /// diagnostic line when bash would refuse it (and `None` when it is fine).
+    ///
+    /// Two separate rules, both measured against bash 5.2:
+    ///
+    /// * The value must name a variable ([`is_valid_nameref_target`]). For the
+    ///   `+=` form it is the *resulting* name that has to be valid — `declare -n
+    ///   r=a; declare -n r+='[1]'` legitimately builds `a[1]` — but the message
+    ///   quotes only the appended text, and it uses the generic "not a valid
+    ///   identifier" wording rather than the nameref-specific one. An empty
+    ///   result takes the generic wording in both forms.
+    /// * A nameref may not name *itself*: that is a reference with nowhere to
+    ///   go. At global scope bash rejects it outright; inside a function the
+    ///   same text legitimately means "the caller's variable of this name", so
+    ///   it is only a warning and the declaration stands (the resolution is
+    ///   handled by the ordinary local/global lookup).
+    fn nameref_value_error(
+        &mut self,
+        tag: &str,
+        name: &str,
+        value: &str,
+        append: bool,
+    ) -> Option<String> {
+        let result: Cow<'_, str> = if append {
+            match self.vars.get(name) {
+                Some(old) => Cow::Owned(format!("{old}{value}")),
+                None => Cow::Borrowed(value),
+            }
+        } else {
+            Cow::Borrowed(value)
+        };
+        if !is_valid_nameref_target(&result) {
+            // The quoted text is what this command supplied, not the result.
+            let shown = value;
+            let what = if append || result.is_empty() {
+                "not a valid identifier"
+            } else {
+                "invalid variable name for name reference"
+            };
+            return Some(format!("{}{tag}: `{shown}': {what}\n", self.err_prefix()));
+        }
+        if nameref_target_base(&result) != name {
+            return None;
+        }
+        if self.local_frames.is_empty() {
+            Some(format!(
+                "{}{tag}: {name}: nameref variable self references not allowed\n",
+                self.err_prefix()
+            ))
+        } else {
+            // A warning, not an error: emit it here and let the caller proceed.
+            let prefix = self.err_prefix();
+            self.emit_stderr(
+                format!("{prefix}{tag}: warning: {name}: circular name reference\n").as_bytes(),
+            );
+            None
+        }
+    }
+
     fn builtin_declare(&mut self, args: &[String], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
@@ -13736,6 +13795,18 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // A `-n` declaration's value is the *name* it refers to, so bash
+            // validates it here — before the readonly check below, which it
+            // therefore pre-empts (`readonly r; declare -n r='a b'` reports the
+            // nameref error). Nothing is bound when it fails.
+            if nameref
+                && let Some(v) = &value
+                && let Some(msg) = self.nameref_value_error(tag, base_name, v, append)
+            {
+                self.emit_stderr(msg.as_bytes());
+                status = 1;
+                continue;
+            }
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
@@ -13880,7 +13951,13 @@ impl Shell {
                 if self.nameref_attr.contains(name) {
                     // `declare -n ref=target` — store the target *name* literally
                     // (no case-fold, and bypassing the assignment redirect so the
-                    // nameref itself is bound, not its eventual target).
+                    // nameref itself is bound, not its eventual target). `+=`
+                    // extends the *name*, which is how `declare -n r=a; declare
+                    // -n r+='[1]'` builds the element reference `a[1]` (bash).
+                    let v = match self.vars.get(name) {
+                        Some(old) if append => format!("{old}{v}"),
+                        _ => v,
+                    };
                     self.vars.insert(name.to_string(), v);
                 } else if assoc || indexed {
                     // A string value assigned to an array via `declare`. bash
@@ -19238,6 +19315,38 @@ fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
         digits.parse::<usize>().ok().map(DirStackRef::FromLeft)
     } else {
         prefix.parse::<usize>().ok().map(DirStackRef::FromLeft)
+    }
+}
+
+/// Whether `s` can be the value of a nameref (`declare -n ref=VALUE`).
+///
+/// A nameref's value is the *name* of the variable it stands for, so bash only
+/// accepts a plain identifier or an identifier with a non-empty subscript
+/// (`declare -n ref=arr[0]`, `declare -n ref=m[key]` — the subscript is not
+/// evaluated here, so `a[x+1]` and `a[@]` are both accepted). Everything else
+/// — an empty value, `1x`, `a-b`, an unbalanced `a[`, an empty `a[]` — is
+/// rejected at declaration time rather than becoming a reference that can never
+/// resolve.
+fn is_valid_nameref_target(s: &str) -> bool {
+    match s.find('[') {
+        // `BASE[SUB]`: the subscript must close at the very end and be
+        // non-empty, and the base must still be an identifier.
+        Some(p) => {
+            s.ends_with(']')
+                && s.len() > p.saturating_add(2)
+                && crate::parser::is_valid_name(&s[..p])
+        }
+        None => crate::parser::is_valid_name(s),
+    }
+}
+
+/// The bare-name part of a nameref value: `arr[0]` refers to `arr`. Used for the
+/// self-reference check, which bash makes against the base name (so
+/// `declare -n r=r[0]` is a self-reference just as `declare -n r=r` is).
+fn nameref_target_base(s: &str) -> &str {
+    match s.find('[') {
+        Some(p) => &s[..p],
+        None => s,
     }
 }
 

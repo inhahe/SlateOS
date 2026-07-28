@@ -14,6 +14,38 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-NAMEREF-CIRCULAR-CHAIN. A nameref cycle expands to the last name in the chain instead of to nothing, with no warning — 2026-07-28 — OPEN
+
+**Symptom.** A nameref chain that closes on itself:
+
+```sh
+declare -n a=b; declare -n b=a; echo "[$a]"
+# bash: warning: a: circular name reference   →  []
+# osh:                                        →  [b]
+```
+
+Longer cycles (`a→b→c→a`) behave the same way, and so does the in-function
+self-reference `f() { local -n r=r; }`, where bash warns a *second* time at each
+expansion (the declaration-time warning is already implemented — see
+`Shell::nameref_value_error`).
+
+**Where.** `userspace/oils/src/interp.rs` — `Shell::resolve_ref_name`. It walks
+the chain with a 64-step bound and, on running out, returns whatever name it
+reached, so the cycle silently resolves to a real (usually unset) variable name
+rather than being reported.
+
+**Proper fix.** Track the names already visited and, on revisiting one, report
+the expansion as *unset* while emitting bash's `warning: NAME: circular name
+reference` line naming the **start** of the chain. The wrinkle is that
+`resolve_ref_name` is `&self` and is called from many read-only expansion paths,
+so emitting a diagnostic needs either `&mut self` throughout or a deferred
+warning slot on `Shell` that the expansion driver drains. Until then the
+declaration-time checks at least stop the *global* self-reference
+(`declare -n r=r`) from creating a cycle at all.
+
+**Coverage.** Deliberately left out of `tests/corpus/nameref.sh` so the case
+stays green; add the probes there as part of the fix.
+
 ### BUG-OILS-DEVFD-IS-A-DUP-NOT-A-REOPEN. `> /dev/stdout` duplicates fd 1 where a host with a real `/dev/fd` re-opens it, so the two descriptors share an offset instead of getting independent ones — 2026-07-28 — APPROXIMATION
 
 **Symptom.** With fd 1 on a *regular file*:

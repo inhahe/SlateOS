@@ -1573,13 +1573,14 @@ impl Shell {
         self.readonly.insert("SHELLOPTS".to_string());
         // BASH: the absolute path to the running shell binary. bash sets this at
         // startup and leaves it reassignable (NOT readonly). We use the host
-        // executable path (lossy), falling back to the bare name if it can't be
-        // determined — matching bash, which still defines BASH even when argv[0]
-        // is a bare name.
+        // executable path rendered as a shell path (`/`-separated — the shell's
+        // path model never exposes host backslashes), falling back to the bare
+        // name if it can't be determined, matching bash, which still defines
+        // BASH even when argv[0] is a bare name.
         let bash_path = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "osh".to_string());
+            .as_deref()
+            .map(shell_path)
+            .unwrap_or_else(|_| "osh".to_string());
         self.vars.insert("BASH".to_string(), bash_path);
         // BASHOPTS: bash exposes the enabled `shopt` options as a readonly,
         // colon-separated, alphabetically-sorted list. Seed it from the current

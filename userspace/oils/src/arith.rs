@@ -60,18 +60,26 @@ pub trait VarLookup {
     }
 
     /// Assign `value` to the scalar variable `name` (arithmetic `x = …`).
-    fn set(&mut self, name: &str, value: i64) {
+    ///
+    /// A write can be *refused* — the shell's readonly attribute is the reason
+    /// bash has — in which case the error aborts the expression where it stands,
+    /// leaving whatever earlier assignments it already made in place
+    /// (`(( y=1, x=2 ))` against a readonly `x` still assigns `y`).
+    fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
         let _ = (name, value);
+        Ok(())
     }
 
     /// Assign `value` to the indexed element `name[index]` (`a[i] = …`).
-    fn set_index(&mut self, name: &str, index: i64, value: i64) {
+    fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), ArithError> {
         let _ = (name, index, value);
+        Ok(())
     }
 
     /// Assign `value` to the associative element `name[key]` (`m[key] = …`).
-    fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+    fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), ArithError> {
         let _ = (name, key, value);
+        Ok(())
     }
 }
 
@@ -104,6 +112,14 @@ pub struct ArithError {
     /// value here so [`Shell::emit_arith_error`] can prefer it. `None` for a
     /// direct expression, where the caller-supplied source is already correct.
     pub expr_override: Option<String>,
+    /// The *name* the diagnostic is about, when the failure is a property of a
+    /// variable rather than of the expression's text. A refused write to a
+    /// readonly variable reads `bash: line 1: x: readonly variable` — the
+    /// subject is `x`, not the `x=5` that was being evaluated — and carries
+    /// neither the `((`/`let` builtin tag nor an `(error token is …)` suffix,
+    /// since neither the command nor any token is what went wrong. `None` for
+    /// the ordinary errors, which are about the expression and echo it.
+    pub subject: Option<String>,
 }
 
 impl ArithError {
@@ -114,6 +130,7 @@ impl ArithError {
             token: None,
             truncate_leading: false,
             expr_override: None,
+            subject: None,
         }
     }
 
@@ -124,6 +141,7 @@ impl ArithError {
             token: Some(token.into()),
             truncate_leading: false,
             expr_override: None,
+            subject: None,
         }
     }
 
@@ -135,6 +153,20 @@ impl ArithError {
             token: Some(lexeme.into()),
             truncate_leading: true,
             expr_override: None,
+            subject: None,
+        }
+    }
+
+    /// A diagnostic about a *variable* rather than about the expression — see
+    /// [`ArithError::subject`]. Implementors of [`VarLookup`] use this to refuse
+    /// a write.
+    pub fn about_var(name: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            msg: msg.into(),
+            token: None,
+            truncate_leading: false,
+            expr_override: None,
+            subject: Some(name.into()),
         }
     }
 }
@@ -1008,21 +1040,21 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
                     apply(op, cur, b)?
                 }
             };
-            store_rlv(&loc, v, vars);
+            store_rlv(&loc, v, vars)?;
             Ok(v)
         }
         Expr::PreIncr(lv, inc) => {
             let loc = resolve_lv(lv, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
             let v = load_rlv(&loc, vars, depth)?.wrapping_add(step);
-            store_rlv(&loc, v, vars);
+            store_rlv(&loc, v, vars)?;
             Ok(v)
         }
         Expr::PostIncr(lv, inc) => {
             let loc = resolve_lv(lv, vars, depth)?;
             let old = load_rlv(&loc, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
-            store_rlv(&loc, old.wrapping_add(step), vars);
+            store_rlv(&loc, old.wrapping_add(step), vars)?;
             Ok(old)
         }
     }
@@ -1058,7 +1090,11 @@ fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i6
     }
 }
 
-fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) {
+/// Write through a resolved lvalue. The store can be refused (a readonly
+/// target), and the refusal propagates as an ordinary evaluation error, so the
+/// rest of the expression is abandoned — which is what makes `(( y=1, x=2 ))`
+/// against a readonly `x` leave `y` assigned and `x` alone.
+fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) -> Result<(), ArithError> {
     match loc {
         ResolvedLv::Var(n) => vars.set(n, v),
         ResolvedLv::Index(n, i) => vars.set_index(n, *i, v),
@@ -1122,13 +1158,20 @@ mod tests {
         fn get(&self, name: &str) -> Option<i64> {
             self.0.get(name).copied()
         }
+
+        /// Test-only convenience: seed a value directly, without going through
+        /// the refusable [`VarLookup::set`] (nothing here ever refuses).
+        fn put(&mut self, name: &str, value: i64) {
+            self.0.insert(name.to_string(), value);
+        }
     }
     impl VarLookup for Map {
         fn get_str(&self, name: &str) -> Option<String> {
             self.0.get(name).map(i64::to_string)
         }
-        fn set(&mut self, name: &str, value: i64) {
+        fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             self.0.insert(name.to_string(), value);
+            Ok(())
         }
     }
 
@@ -1142,8 +1185,9 @@ mod tests {
         fn get_str(&self, name: &str) -> Option<String> {
             self.scalars.get(name).map(i64::to_string)
         }
-        fn set(&mut self, name: &str, value: i64) {
+        fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             self.scalars.insert(name.to_string(), value);
+            Ok(())
         }
         fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
             if name != "a" {
@@ -1159,15 +1203,16 @@ mod tests {
                 .and_then(|i| self.a.get(i))
                 .map(i64::to_string)
         }
-        fn set_index(&mut self, name: &str, index: i64, value: i64) {
+        fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), ArithError> {
             if name != "a" {
-                return;
+                return Ok(());
             }
             if let Ok(i) = usize::try_from(index)
                 && i < self.a.len()
             {
                 self.a[i] = value;
             }
+            Ok(())
         }
     }
 
@@ -1203,6 +1248,45 @@ mod tests {
         assert_eq!(m.a[2], 31);
     }
 
+    /// A lookup that refuses to be written through — the shape a readonly
+    /// variable presents to the evaluator.
+    #[derive(Default)]
+    struct NoWrite(HashMap<String, i64>);
+    impl VarLookup for NoWrite {
+        fn get_str(&self, name: &str) -> Option<String> {
+            self.0.get(name).map(i64::to_string)
+        }
+        fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
+            if name == "ro" {
+                return Err(ArithError::about_var(name, "readonly variable"));
+            }
+            self.0.insert(name.to_string(), value);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_write_stops_the_expression_where_it_stands() {
+        let mut m = NoWrite::default();
+        // The refusal is the expression's error, and it names the variable
+        // rather than any token of the source.
+        let e = eval("ro = 5", &mut m).unwrap_err();
+        assert_eq!(e.subject.as_deref(), Some("ro"));
+        assert_eq!(e.msg, "readonly variable");
+        assert_eq!(e.token, None);
+        // Evaluation stops at the refusal: what came before it stands, what
+        // comes after never happens.
+        assert!(eval("a = 1, ro = 2, b = 3", &mut m).is_err());
+        assert_eq!(m.0.get("a"), Some(&1));
+        assert_eq!(m.0.get("b"), None);
+        // Read-modify-write and the increments go through the same store.
+        assert!(eval("ro += 1", &mut m).is_err());
+        assert!(eval("ro++", &mut m).is_err());
+        assert!(eval("++ro", &mut m).is_err());
+        // An untaken branch never reaches the store, so it is no error at all.
+        assert_eq!(eval("0 ? ro = 9 : 7", &mut m).unwrap(), 7);
+    }
+
     /// A lookup with one associative array `m` keyed by strings.
     #[derive(Default)]
     struct AssocMap(HashMap<String, i64>);
@@ -1219,10 +1303,11 @@ mod tests {
             }
             self.0.get(key).map(i64::to_string)
         }
-        fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+        fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), ArithError> {
             if name == "m" {
                 self.0.insert(key.to_string(), value);
             }
+            Ok(())
         }
     }
 
@@ -1252,8 +1337,9 @@ mod tests {
         fn get_str(&self, name: &str) -> Option<String> {
             self.0.get(name).cloned()
         }
-        fn set(&mut self, name: &str, value: i64) {
+        fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             self.0.insert(name.to_string(), value.to_string());
+            Ok(())
         }
     }
 
@@ -1421,7 +1507,7 @@ mod tests {
     #[test]
     fn increment_decrement() {
         let mut m = Map::default();
-        m.set("x", 5);
+        m.put("x", 5);
         // Pre-increment yields the new value.
         assert_eq!(eval("++x", &mut m).unwrap(), 6);
         assert_eq!(m.get("x"), Some(6));
@@ -1442,7 +1528,7 @@ mod tests {
     #[test]
     fn increment_operators_need_an_lvalue() {
         let mut m = Map::default();
-        m.set("v", 5);
+        m.put("v", 5);
         // Nothing assignable follows, so `--2` is `-(-2)` and `++2` is `+(+2)`.
         assert_eq!(eval("--2", &mut m).unwrap(), 2);
         assert_eq!(eval("++2", &mut m).unwrap(), 2);

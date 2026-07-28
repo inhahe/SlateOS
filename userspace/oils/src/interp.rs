@@ -3189,6 +3189,19 @@ impl Shell {
                 let prefix = self.xtrace_prefix();
                 self.emit_stderr(format!("{prefix}{h}\n").as_bytes());
             }
+            // A readonly loop variable cannot be bound. bash finds this out at
+            // the moment it first tries — so the word list is expanded either
+            // way and a loop over an *empty* list is silent — then abandons the
+            // loop with status 1, leaving the variable's value alone. The rest
+            // of the command list still runs; only the loop is given up. (The
+            // `set -x` header above has already been printed by then.)
+            if self.readonly.contains(&c.var) {
+                self.emit_stderr(
+                    format!("{}{}: readonly variable\n", self.err_prefix(), c.var).as_bytes(),
+                );
+                self.last_status = 1;
+                return Flow::Next;
+            }
             self.vars.insert(c.var.clone(), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
@@ -4540,6 +4553,32 @@ impl Shell {
         let val = self.fold_case_attr(&target, val);
         self.set_scalar_store(&target, val);
         true
+    }
+
+    /// Refuse an *arithmetic* write to a readonly variable.
+    ///
+    /// The diagnostic is about the variable, not about the expression being
+    /// evaluated — `osh: line 1: x: readonly variable`, with neither the
+    /// `((`/`let` builtin tag nor an `(error token is …)` suffix — which is why
+    /// it travels as an [`arith::ArithError`] carrying a `subject` rather than
+    /// being emitted here. It names the *variable* even when an element was the
+    /// target: `(( a[0]=5 ))` against a readonly `a` reports `a`.
+    ///
+    /// Returning `Err` aborts the expression where it stands, so assignments
+    /// made earlier in a comma list stand and the ones after it never happen —
+    /// `readonly x; (( y=1, x=2 ))` leaves `y` as 1 and `x` untouched.
+    ///
+    /// The attribute belongs to whatever a nameref ultimately names, so the
+    /// chain is followed first; a circular chain names nothing and is left to
+    /// the store itself (see [`Self::set_scalar_checked`]).
+    fn arith_writable(&self, name: &str) -> Result<(), arith::ArithError> {
+        let target = self
+            .resolve_ref_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if self.readonly.contains(&target) {
+            return Err(arith::ArithError::about_var(target, "readonly variable"));
+        }
+        Ok(())
     }
 
     /// Store a scalar value under `name`, honoring bash's rule that a plain
@@ -18645,6 +18684,15 @@ impl Shell {
     /// command silences it, as in bash.
     fn emit_arith_error(&mut self, expr: &str, e: &arith::ArithError) {
         let prefix = self.err_prefix();
+        // A failure that is a property of a *variable* (a refused write to a
+        // readonly one) says so about the name and stops there: no expression
+        // echoed, no builtin tag, no error token — none of those is what went
+        // wrong. See [`arith::ArithError::subject`].
+        if let Some(subject) = &e.subject {
+            let line = format!("{prefix}{subject}: {}", e.msg);
+            self.errln(&line);
+            return;
+        }
         // When the failure occurred while recursively evaluating a variable's
         // value as arithmetic, bash echoes that resolved value (e.g. `5 apples`)
         // rather than the top-level source (`x`); `str_to_val` records it here.
@@ -18973,11 +19021,14 @@ impl VarLookup for Shell {
         self.assoc_element(name, key)
     }
 
-    fn set(&mut self, name: &str, value: i64) {
+    fn set(&mut self, name: &str, value: i64) -> Result<(), arith::ArithError> {
+        self.arith_writable(name)?;
         self.vars.insert(name.to_string(), value.to_string());
+        Ok(())
     }
 
-    fn set_index(&mut self, name: &str, index: i64, value: i64) {
+    fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), arith::ArithError> {
+        self.arith_writable(name)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
         // back from `highest_index + 1` (bash sparse semantics).
         let arr = self.arrays.entry(name.to_string()).or_default();
@@ -18985,10 +19036,13 @@ impl VarLookup for Shell {
         if let Some(real) = Self::resolve_index(index, bound) {
             arr.insert(real, value.to_string());
         }
+        Ok(())
     }
 
-    fn set_assoc(&mut self, name: &str, key: &str, value: i64) {
+    fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), arith::ArithError> {
+        self.arith_writable(name)?;
         self.assoc_set(name, key.to_string(), value.to_string(), false);
+        Ok(())
     }
 }
 
@@ -27408,6 +27462,59 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The diagnostic still names the readonly variable.
         let err = run("readonly c=1; { c=2 echo hi; } 2>&1").0;
         assert!(err.contains("c: readonly variable"), "got: {err:?}");
+    }
+
+    #[test]
+    fn readonly_refuses_an_arithmetic_write() {
+        // Arithmetic is a way of assigning like any other, so the attribute
+        // holds there too — and the complaint is about the *variable*, not the
+        // expression: no `((`/`let` tag, no echoed source, no error token.
+        let err = run("readonly x=1; { ((x=5)); } 2>&1; echo \"rc=$?\"; echo \"x=$x\"").0;
+        assert_eq!(err, "osh: x: readonly variable\nrc=1\nx=1\n");
+        // The refusal stops the expression where it stands: the assignment
+        // before it has already happened, the one after it never does.
+        let (o, _) = run("readonly x=1; ((y=1, x=2, z=3)) 2>/dev/null; echo \"y=$y z=$z x=$x\"");
+        assert_eq!(o, "y=1 z= x=1\n");
+        // Every store goes the same way — compound assignment and the two
+        // increments included.
+        for expr in ["x+=2", "x++", "++x", "x--"] {
+            let (o, _) = run(&format!(
+                "readonly x=1; (({expr})) 2>/dev/null; echo \"rc=$? x=$x\""
+            ));
+            assert_eq!(o, "rc=1 x=1\n", "for (({expr}))");
+        }
+        // An element write names the array, which is what carries the
+        // attribute; `let` and the C-style `for` header reach the same store.
+        assert_eq!(
+            run("readonly -a a=(1 2); ((a[0]=5)) 2>/dev/null; echo \"${a[0]}\"").0,
+            "1\n"
+        );
+        assert_eq!(run("readonly x=1; let x=5 2>/dev/null; echo \"rc=$?\"").0, "rc=1\n");
+        assert_eq!(
+            run("readonly x=1; for ((x=0;x<2;x++)); do echo hi; done 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        // A branch not taken never reaches the store, so nothing is refused.
+        assert_eq!(run("readonly x=1; ((0 ? x=2 : 5)); echo \"rc=$?\"").0, "rc=0\n");
+    }
+
+    #[test]
+    fn readonly_refuses_a_for_loop_variable() {
+        // The loop variable is bound by assignment, so a readonly name cannot
+        // serve as one: bash finds out at the first binding and gives up the
+        // loop with status 1, leaving the value alone. The rest of the command
+        // list still runs — only the loop is abandoned.
+        let (o, _) =
+            run("readonly x=1; for x in a b; do echo body; done 2>/dev/null; echo \"rc=$? x=$x\"; echo after");
+        assert_eq!(o, "rc=1 x=1\nafter\n");
+        // "At the first binding" is literal: a loop over an empty list never
+        // tries, and so never complains.
+        assert_eq!(
+            run("readonly x=1; for x in; do :; done 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=0\n"
+        );
+        let err = run("readonly x=1; for x in a; do :; done 2>&1").0;
+        assert_eq!(err, "osh: x: readonly variable\n");
     }
 
     #[test]

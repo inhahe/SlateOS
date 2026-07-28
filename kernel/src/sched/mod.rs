@@ -4563,13 +4563,20 @@ static SLEEP_QUEUE: [SleepEntry; MAX_SLEEPERS] = {
     [EMPTY; MAX_SLEEPERS]
 };
 
-/// Put the current task to sleep until the given tick count.
+/// Put the current task to sleep until the given tick count, **or until
+/// anything else wakes it** — whichever happens first.
 ///
-/// Blocks the current task and registers it in the sleep queue.
-/// The timer ISR will wake it once `tick_count() >= wake_tick`.
+/// Blocks the current task and registers it in the sleep queue.  The timer
+/// ISR will wake it once `tick_count() >= wake_tick`, but so will any other
+/// `wake`/`try_wake` aimed at this task (a wait-queue `wake_one`, a stale
+/// `pending_wake` token, …).  Callers that need the *whole* duration to
+/// elapse must use [`sleep_until_tick`], which loops on the clock; this
+/// variant exists for callers such as `WaitQueue::wait_until_timeout` that
+/// treat an early wake as "re-check my condition now".
 ///
-/// Returns the number of nanoseconds actually slept (approximate).
-pub fn sleep_until_tick(wake_tick: u64) {
+/// This split mirrors Linux, where `schedule_timeout()` may return early and
+/// `msleep()` loops around it until the deadline is genuinely reached.
+pub fn sleep_until_tick_interruptible(wake_tick: u64) {
     let task_id = load_current_task();
 
     // Find an empty slot.
@@ -4602,6 +4609,25 @@ pub fn sleep_until_tick(wake_tick: u64) {
 
     // Block the task.  The timer ISR will wake it.
     block_current();
+}
+
+/// Put the current task to sleep until the given tick count has *actually*
+/// arrived.
+///
+/// Unlike [`sleep_until_tick_interruptible`] this does not return early: any
+/// wake that arrives before the deadline — an unrelated `sched::wake`, or a
+/// stale `pending_wake` token left by a wake that raced with an earlier park
+/// (see known-issues.md `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`) — sends it
+/// back to sleep for the remaining time.  Without this, a `sleep(5s)` could
+/// return after a millisecond.
+///
+/// Each iteration claims a fresh sleep-queue slot.  A slot left armed by an
+/// early wake is not leaked: the timer ISR retires every expired slot
+/// whether or not its task is still blocked.
+pub fn sleep_until_tick(wake_tick: u64) {
+    while crate::apic::tick_count() < wake_tick {
+        sleep_until_tick_interruptible(wake_tick);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4834,20 +4860,25 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
     }
 }
 
-/// Sleep the current task for a precise duration in nanoseconds.
+/// Sleep the current task for a duration in nanoseconds, **or until
+/// anything else wakes it** — whichever happens first.
 ///
 /// Uses the high-resolution timer subsystem (HPET-backed) for sub-10ms
-/// precision.  Falls back to tick-based [`sleep_until_tick`] if hrtimers
-/// are unavailable.
+/// precision.  Falls back to tick-based
+/// [`sleep_until_tick_interruptible`] for durations > 100 ms.
 ///
 /// The task is blocked and woken by an hrtimer callback.  Actual sleep
 /// time depends on timer ISR frequency but is bounded by one tick
 /// (~10ms) in the current implementation.
 ///
+/// Callers that need the full duration to elapse want [`sleep_ns`]; this
+/// variant is for callers (e.g. `WaitQueue::wait_until_timeout_ns`) that
+/// treat an early wake as "re-check my condition now".
+///
 /// # Arguments
 ///
 /// - `duration_ns` — sleep duration in nanoseconds (0 = yield)
-pub fn sleep_ns(duration_ns: u64) {
+pub fn sleep_ns_interruptible(duration_ns: u64) {
     if duration_ns == 0 {
         yield_now();
         return;
@@ -4873,7 +4904,7 @@ pub fn sleep_ns(duration_ns: u64) {
             .saturating_add(9_999_999)
             .saturating_div(10_000_000);
         let wake_tick = crate::apic::tick_count().saturating_add(ticks);
-        sleep_until_tick(wake_tick);
+        sleep_until_tick_interruptible(wake_tick);
         return;
     }
 
@@ -4898,6 +4929,41 @@ pub fn sleep_ns(duration_ns: u64) {
     block_current();
 }
 
+/// Sleep the current task for `duration_ns`, all of it.
+///
+/// Unlike [`sleep_ns_interruptible`] this does not return early: any wake
+/// arriving before the deadline — an unrelated `sched::wake`, or a stale
+/// `pending_wake` token left by a wake that raced with an earlier park (see
+/// known-issues.md `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`) — sends the
+/// task back to sleep for the time that remains.  This is the contract the
+/// callers already assume: `sys_sleep`, `nanosleep`'s no-signal-context
+/// fallback (which calls this "non-interruptible"), io_ring's `IO_OP_TIMEOUT`
+/// and kswapd's periodic wakeup all mean "sleep this long", not "sleep until
+/// something happens".
+///
+/// The deadline is captured *before* arming the timer, so it is never later
+/// than the timer's own expiry and a real timer wake can never be mistaken
+/// for a spurious one (which would re-park and wait for a timer that has
+/// already fired).
+///
+/// # Arguments
+///
+/// - `duration_ns` — sleep duration in nanoseconds (0 = yield)
+pub fn sleep_ns(duration_ns: u64) {
+    if duration_ns == 0 {
+        yield_now();
+        return;
+    }
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(duration_ns);
+    loop {
+        let now_ns = crate::hrtimer::now_ns();
+        if now_ns >= deadline_ns {
+            return;
+        }
+        sleep_ns_interruptible(deadline_ns.saturating_sub(now_ns));
+    }
+}
+
 /// Sleep the current task for a given number of milliseconds.
 ///
 /// Convenience wrapper around [`sleep_ns`].  Uses hrtimer for durations
@@ -4909,6 +4975,22 @@ pub fn sleep_ns(duration_ns: u64) {
 #[inline]
 pub fn sleep_ms(ms: u64) {
     sleep_ns(ms.saturating_mul(1_000_000));
+}
+
+/// Sleep for up to `ms` milliseconds, returning early if anything wakes us.
+///
+/// Convenience wrapper around [`sleep_ns_interruptible`], for callers that
+/// deliberately arrange to be pulled out of a timed sleep (e.g. poll/select
+/// slices, which register as signal waiters before parking so a posted
+/// signal interrupts the slice instead of being noticed only when it
+/// expires).
+///
+/// # Arguments
+///
+/// - `ms` — maximum sleep duration in milliseconds (0 = yield)
+#[inline]
+pub fn sleep_ms_interruptible(ms: u64) {
+    sleep_ns_interruptible(ms.saturating_mul(1_000_000));
 }
 
 /// Sleep the current task for a given number of microseconds.

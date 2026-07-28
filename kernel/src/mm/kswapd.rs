@@ -173,10 +173,14 @@ extern "C" fn kswapd_entry(_arg: u64) {
         // ---- Sleep phase ----
         // Sleep for ~1 second, then check watermarks.  The sleep is
         // interruptible via wake_kswapd() → try_wake(), which pulls
-        // us out of the sleep queue early.
+        // us out of the sleep queue early — hence the `_interruptible`
+        // variant: plain `sleep_until_tick` loops on the clock and would
+        // swallow the wake, delaying reclaim by up to a full interval.
         if !WAKE_FLAG.load(Ordering::Acquire) {
             let now = crate::apic::tick_count();
-            crate::sched::sleep_until_tick(now.saturating_add(CHECK_INTERVAL_TICKS));
+            crate::sched::sleep_until_tick_interruptible(
+                now.saturating_add(CHECK_INTERVAL_TICKS),
+            );
 
             // After waking (either from timeout or explicit wake),
             // check if there's actually work to do.

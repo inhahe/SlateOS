@@ -29485,7 +29485,10 @@ fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
         crate::proc::signal::deregister_signalfd_waiter(p, task);
         return true;
     }
-    crate::sched::sleep_ms(slice_ms);
+    // Interruptible: `set_pending` → `try_wake` must cut the slice short.
+    // Plain `sleep_ms` loops on the clock and would sleep through the wake,
+    // deferring signal delivery to the end of the slice.
+    crate::sched::sleep_ms_interruptible(slice_ms);
     crate::proc::signal::deregister_signalfd_waiter(p, task);
     crate::proc::signal::has_pending_in_mask(p, deliverable)
 }

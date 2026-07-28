@@ -246,7 +246,13 @@ impl WaitQueue {
             // Sleep with timeout.  If wake_one() fired between
             // registration and here, pending_wake ensures
             // block_current() returns immediately.
-            super::sleep_until_tick(deadline);
+            //
+            // The *interruptible* variant is required: a `wake_one()` that
+            // arrives before the deadline must return control here so the
+            // condition is re-checked.  `sleep_until_tick` loops on the
+            // clock and would swallow that wake, degrading every
+            // `wait_until_timeout` into a full-timeout wait.
+            super::sleep_until_tick_interruptible(deadline);
 
             // Remove ourselves from the waiter list (we may have been
             // woken by wake_one, or the sleep timed out).
@@ -335,7 +341,9 @@ impl WaitQueue {
             }
 
             let remaining_ns = deadline_ns.saturating_sub(now_ns);
-            super::sleep_ns(remaining_ns);
+            // Interruptible: an early `wake_one()` must bring us back here
+            // to re-check the condition rather than being slept through.
+            super::sleep_ns_interruptible(remaining_ns);
 
             // Remove ourselves from the waiter list.
             {

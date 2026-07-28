@@ -4602,28 +4602,51 @@ impl Shell {
         true
     }
 
-    /// Refuse an *arithmetic* write to a readonly variable.
+    /// Where an *arithmetic* scalar write to `name` lands, or the refusal that
+    /// stops the expression.
     ///
-    /// The diagnostic is about the variable, not about the expression being
+    /// A refusal is about the variable, not about the expression being
     /// evaluated — `osh: line 1: x: readonly variable`, with neither the
     /// `((`/`let` builtin tag nor an `(error token is …)` suffix — which is why
     /// it travels as an [`arith::ArithError`] carrying a `subject` rather than
-    /// being emitted here. It names the *variable* even when an element was the
-    /// target: `(( a[0]=5 ))` against a readonly `a` reports `a`.
+    /// being emitted here. Returning `Err` aborts the expression where it
+    /// stands, so assignments made earlier in a comma list stand and the ones
+    /// after it never happen: `readonly x; (( y=1, x=2 ))` leaves `y` as 1 and
+    /// `x` untouched.
     ///
-    /// Returning `Err` aborts the expression where it stands, so assignments
-    /// made earlier in a comma list stand and the ones after it never happen —
-    /// `readonly x; (( y=1, x=2 ))` leaves `y` as 1 and `x` untouched.
-    ///
-    /// The attribute belongs to whatever a nameref ultimately names, so the
-    /// chain is followed first; a circular chain names nothing and is left to
-    /// the store itself (see [`Self::set_scalar_checked`]).
-    fn arith_writable(&self, name: &str) -> Result<(), arith::ArithError> {
-        let target = self
-            .resolve_ref_name(name)
-            .unwrap_or_else(|| name.to_string());
-        if self.readonly.contains(&target) {
-            return Err(arith::ArithError::about_var(target, "readonly variable"));
+    /// `Ok(None)` is a circular nameref: it designates nothing, the warning has
+    /// been given, and the write simply does not happen — which is not an error
+    /// and does not stop the expression.
+    fn arith_write_dest(&self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
+        let Some(dest) = self.scalar_write_dest(name) else {
+            return Ok(None);
+        };
+        if self.readonly.contains(dest.base()) {
+            return Err(arith::ArithError::about_var(
+                dest.base(),
+                "readonly variable",
+            ));
+        }
+        Ok(Some(dest))
+    }
+
+    /// The array an arithmetic *element* reference (`a[i]`, `m[k]`) names, after
+    /// following a nameref: `declare -n r=arr` makes `(( r[1] ))` element 1 of
+    /// `arr`. A nameref's own subscript is not consulted here — `ref[i]` is
+    /// element `i` of what `ref` refers to, not a second subscript on the
+    /// element `ref` designates. A circular chain names nothing, so the name as
+    /// written stands and the read or write falls where it may.
+    fn arith_elem_base(&self, name: &str) -> String {
+        self.resolve_ref_name(name)
+            .map_or_else(|| name.to_string(), |t| nameref_target_base(&t).to_string())
+    }
+
+    /// Refuse an arithmetic write to an element of a readonly array — the array
+    /// is what carries the attribute, so it is the array that is named. See
+    /// [`Self::arith_write_dest`] for why the refusal travels as an error.
+    fn arith_elem_writable(&self, base: &str) -> Result<(), arith::ArithError> {
+        if self.readonly.contains(base) {
+            return Err(arith::ArithError::about_var(base, "readonly variable"));
         }
         Ok(())
     }
@@ -19055,30 +19078,38 @@ impl VarLookup for Shell {
 
     fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
         // `array_element` already applies bash negative-index semantics.
-        self.array_element(name, index)
+        self.array_element(&self.arith_elem_base(name), index)
     }
 
     fn is_assoc(&self, name: &str) -> bool {
-        self.assoc.contains_key(name)
+        // Which kind of subscript `name[sub]` has is decided by the array the
+        // name ultimately reaches, so a nameref has to be followed before the
+        // question can be answered.
+        self.assoc.contains_key(&self.arith_elem_base(name))
     }
 
     fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
         // An unset key (or empty value) evaluates to 0; a non-empty value is
         // recursively arithmetic-evaluated by the caller.
-        self.assoc_element(name, key)
+        self.assoc_element(&self.arith_elem_base(name), key)
     }
 
     fn set(&mut self, name: &str, value: i64) -> Result<(), arith::ArithError> {
-        self.arith_writable(name)?;
-        self.vars.insert(name.to_string(), value.to_string());
+        // An arithmetic assignment lands exactly where the same name on the
+        // left of an `=` would: through namerefs, on element 0 of an existing
+        // array, and exported under `set -a`.
+        if let Some(dest) = self.arith_write_dest(name)? {
+            self.scalar_write_store(&dest, value.to_string());
+        }
         Ok(())
     }
 
     fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), arith::ArithError> {
-        self.arith_writable(name)?;
+        let base = self.arith_elem_base(name);
+        self.arith_elem_writable(&base)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
         // back from `highest_index + 1` (bash sparse semantics).
-        let arr = self.arrays.entry(name.to_string()).or_default();
+        let arr = self.arrays.entry(base).or_default();
         let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
         if let Some(real) = Self::resolve_index(index, bound) {
             arr.insert(real, value.to_string());
@@ -19087,8 +19118,9 @@ impl VarLookup for Shell {
     }
 
     fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), arith::ArithError> {
-        self.arith_writable(name)?;
-        self.assoc_set(name, key.to_string(), value.to_string(), false);
+        let base = self.arith_elem_base(name);
+        self.arith_elem_writable(&base)?;
+        self.assoc_set(&base, key.to_string(), value.to_string(), false);
         Ok(())
     }
 }
@@ -25936,6 +25968,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -A m; m[k]=v; declare -n r=m[k]; echo $r; r=w; echo ${m[k]}").0,
             "v\nw\n"
+        );
+    }
+
+    #[test]
+    fn an_arithmetic_assignment_lands_where_an_ordinary_one_would() {
+        // Arithmetic used to write straight into the scalar table, so it saw
+        // none of what an ordinary `x=…` sees.
+        // A nameref is followed — to a variable, and to an element.
+        assert_eq!(run("x=1; declare -n r=x; ((r=5)); echo \"$x\"").0, "5\n");
+        assert_eq!(
+            run("declare -n r=q[0]; ((r=5)); declare -p q").0,
+            "declare -a q=([0]=\"5\")\n"
+        );
+        // A subscript-less write to an existing array is element 0, and to an
+        // existing associative array is key "0".
+        assert_eq!(run("a=(1 2 3); ((a=9)); echo \"${a[@]}\"").0, "9 2 3\n");
+        assert_eq!(
+            run("declare -A m=([k]=1); ((m=9)); echo \"${m[0]}\"").0,
+            "9\n"
+        );
+        // `set -a` gives the assigned name the export attribute.
+        assert_eq!(run("set -a; ((x=5)); declare -p x").0, "declare -x x=\"5\"\n");
+        // An element reference through a nameref reaches the referent's
+        // elements, on both sides of the `=` and for both kinds of subscript.
+        assert_eq!(run("a=(1 2 3); declare -n r=a; echo $((r[1]))").0, "2\n");
+        assert_eq!(
+            run("declare -n r=a; ((r[1]=5)); echo \"${a[1]}\"").0,
+            "5\n"
+        );
+        assert_eq!(
+            run("declare -A m=([k]=7); declare -n r=m; echo $((r[k])); ((r[j]=8)); echo \"${m[j]}\"").0,
+            "7\n8\n"
         );
     }
 

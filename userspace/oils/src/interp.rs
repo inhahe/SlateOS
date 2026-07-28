@@ -17646,6 +17646,7 @@ impl Shell {
         let mut prefix = String::new();
         let mut suffix = String::new();
         let mut filter: Option<String> = None;
+        let mut o_opts: Vec<String> = Vec::new();
         // Whether any option that asks for candidates was given. bash builds a
         // compspec only if there is something to put in it, and a `compgen` with
         // nothing to build succeeds silently rather than reporting "no matches".
@@ -17709,8 +17710,11 @@ impl Shell {
                         'P' => prefix = val,
                         'S' => suffix = val,
                         'X' => filter = Some(val),
-                        // A valid -o, and -F/-C, need a live completion
-                        // context; kept only as "something was asked for".
+                        // Unlike the rest, `-o` is a set of flags, so a second
+                        // one adds to the first.
+                        'o' => o_opts.push(val),
+                        // -F/-C need a live completion context; kept only as
+                        // "something was asked for".
                         _ => {}
                     }
                     ci = chars.len(); // the cluster's remainder was the value
@@ -17878,13 +17882,34 @@ impl Shell {
             });
         }
 
-        // ---- decorate with -P/-S and emit one per line ----
-        let empty = list.is_empty();
+        // ---- decorate with -P/-S ----
+        let mut answer: Vec<String> =
+            list.iter().map(|c| format!("{prefix}{c}{suffix}")).collect();
+
+        // ---- the -o fallbacks, which stand outside the compspec ----
+        // These are readline's own completions rather than compspec sources, so
+        // nothing the compspec says about its answer reaches them: they are
+        // filtered by neither -X nor decorated by -P/-S, and they are appended
+        // to the finished answer. `plusdirs` adds directories to whatever was
+        // found, however much that was…
+        if o_opts.iter().any(|o| o == "plusdirs") {
+            answer.extend(self.compgen_paths(&word, true));
+        }
+        // …while the other two only step in when nothing at all was found —
+        // and when both are asked for, directories win over filenames.
+        if answer.is_empty() {
+            if o_opts.iter().any(|o| o == "dirnames") {
+                answer.extend(self.compgen_paths(&word, true));
+            } else if o_opts.iter().any(|o| o == "default") {
+                answer.extend(self.compgen_paths(&word, false));
+            }
+        }
+
+        // ---- emit one per line ----
+        let empty = answer.is_empty();
         let mut result = String::new();
-        for c in &list {
-            result.push_str(&prefix);
+        for c in &answer {
             result.push_str(c);
-            result.push_str(&suffix);
             result.push('\n');
         }
         let write_status = self.write_bytes(out, redir, result.as_bytes());
@@ -28992,6 +29017,50 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(g("-f a"), ["a1", "adir"]);
         // The rule follows the word's directory component, not the cwd.
         assert_eq!(g("-f adir/."), ["adir/.", "adir/.."]);
+
+        std::env::set_current_dir(&orig).expect("restore cwd");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compgen_o_fallbacks_stand_outside_the_compspec() {
+        // `-o plusdirs`/`dirnames`/`default` are readline's own completions
+        // rather than compspec sources, so the compspec's -X, -P and -S do not
+        // reach them.
+        let _cwd = cwd_guard();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_compgen_o_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("bdir")).expect("mkdir");
+        std::fs::write(dir.join("a1"), b"").expect("a1");
+        let base = dir.to_string_lossy().replace('\\', "/");
+        let orig = std::env::current_dir().expect("cwd");
+        let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}"));
+
+        // plusdirs adds directories to whatever the compspec found, after the
+        // decoration and past the filter.
+        assert_eq!(g("-o plusdirs -W 'aw' -P '<' -S '>' a").0, "<aw>\nadir\n");
+        assert_eq!(g("-o plusdirs -W 'aw' -X 'a*' a").0, "adir\n");
+        // …and it counts, so an answer it fills is not an empty one.
+        assert_eq!(g("-o default -o plusdirs a").0, "adir\n");
+        assert_eq!(g("-o plusdirs -W 'zz' a"), ("adir\n".to_string(), 0));
+        // default and dirnames step in only for an answer that came out empty —
+        // even one the filter emptied — and directories win over filenames.
+        assert_eq!(g("-o default a").0, "a1\nadir\n");
+        assert_eq!(g("-o dirnames a").0, "adir\n");
+        assert_eq!(g("-W 'a1' -o default -X '*' a").0, "a1\nadir\n");
+        assert_eq!(g("-o default -o dirnames a").0, "adir\n");
+        assert_eq!(g("-o default -P '<' -S '>' a").0, "a1\nadir\n");
+        // An empty word reaches the whole directory; a word nothing starts with
+        // reaches nothing, and that is the ordinary empty answer.
+        assert_eq!(g("-o dirnames ''").0, "adir\nbdir\n");
+        assert_eq!(g("-o default -o plusdirs zz"), (String::new(), 1));
+        // An -o that says nothing about candidates still asks for a compspec,
+        // so it gets the empty-answer status rather than the silent success.
+        assert_eq!(g("-o nosort a"), (String::new(), 1));
 
         std::env::set_current_dir(&orig).expect("restore cwd");
         std::fs::remove_dir_all(&dir).ok();

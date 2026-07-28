@@ -149,7 +149,12 @@ pub enum Tok {
     /// immediately after the `<<`/`<<-` operator token that owns it. The body's
     /// swallowed source lines are accounted for by the lexer's per-token line
     /// stamping (see [`Lexer::stamp_lines`]), so no line count is carried here.
-    HereDoc(Vec<Seg>),
+    ///
+    /// The delimiter word (quoting removed) and whether it was quoted travel
+    /// with the body: the parser cannot recover them — the operator token only
+    /// records `<<` vs `<<-` — and printing a stored function back out needs a
+    /// delimiter to name.
+    HereDoc(Vec<Seg>, String, bool),
     /// `(( … ))` — an arithmetic command, holding the raw expression text.
     ArithCmd(String),
     /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
@@ -1804,7 +1809,7 @@ impl Lexer {
         let (delim, expand) = self.read_heredoc_delim();
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
-        out.push(Tok::HereDoc(Vec::new()));
+        out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
         self.pending_heredocs.push(PendingHeredoc {
             delim,
             strip,
@@ -1903,7 +1908,7 @@ impl Lexer {
             }
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
-                *slot = Tok::HereDoc(segs);
+                *slot = Tok::HereDoc(segs, ph.delim.clone(), !ph.expand);
             }
         }
         Ok(())
@@ -1964,7 +1969,13 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
                 match lx.peek() {
                     Some(n @ ('$' | '`' | '\\')) => {
                         lx.pos += 1;
-                        lit.push(n);
+                        // As in a double-quoted section: a here-doc body is
+                        // never split or globbed, so a one-char `Seg::Sq` is
+                        // interchangeable with folding the character into the
+                        // literal run — but it also records the backslash, so
+                        // `declare -f` can print the body back as written.
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(Seg::Sq(n.to_string(), true));
                     }
                     Some('\n') => {
                         lx.pos += 1;
@@ -2126,7 +2137,7 @@ mod tests {
         let toks = tokenize("cat <<EOF\nline one\nline two\nEOF\n").unwrap();
         // Op::DLess followed by a HereDoc token carrying the body.
         let hd = toks.iter().find_map(|t| match t {
-            Tok::HereDoc(segs) => Some(segs.clone()),
+            Tok::HereDoc(segs, ..) => Some(segs.clone()),
             _ => None,
         });
         let segs = hd.expect("here-doc token");
@@ -2160,7 +2171,7 @@ mod tests {
         let segs = toks
             .iter()
             .find_map(|t| match t {
-                Tok::HereDoc(segs) => Some(segs.clone()),
+                Tok::HereDoc(segs, ..) => Some(segs.clone()),
                 _ => None,
             })
             .expect("here-doc token");

@@ -9,7 +9,8 @@ use crate::ast::{
     CaseTerm,
     Command,
     CondBinOp,
-    CondExpr, ForArithClause, ForClause, FunctionDef, IfClause, Item, LoopClause, ParamOp,
+    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LoopClause,
+    ParamOp,
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -469,7 +470,7 @@ impl CmdSubLineMap {
     /// already-rebased numbering rather than to its own first line.
     fn rebase_tok(&self, tok: &mut Tok) {
         match tok {
-            Tok::Word(segs) | Tok::HereDoc(segs) => self.rebase_segs(segs),
+            Tok::Word(segs) | Tok::HereDoc(segs, ..) => self.rebase_segs(segs),
             Tok::ArrayAssign { elems, .. } => {
                 for e in elems {
                     self.rebase_segs(e);
@@ -512,7 +513,7 @@ fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
     }
     for t in toks {
         match t {
-            Tok::Word(segs) | Tok::HereDoc(segs) => shift_segs(segs, base),
+            Tok::Word(segs) | Tok::HereDoc(segs, ..) => shift_segs(segs, base),
             Tok::ArrayAssign { elems, .. } => {
                 for e in elems {
                     shift_segs(e, base);
@@ -834,6 +835,7 @@ impl Parser {
                     op: RedirectOp::DupOut,
                     target: Word::literal("1"),
                     varfd: None,
+                    here: None,
                 };
                 commands.push(attach_redirect(prev, dup));
             }
@@ -1685,6 +1687,9 @@ impl Parser {
         // file when the target is a filename (`>&file`). We resolve that after
         // parsing the target below.
         let mut was_great_and = false;
+        // `<<-` strips leading tabs; only the operator token records which
+        // spelling was used, so capture it before the token is left behind.
+        let mut here_strip = false;
         let op = match self.bump() {
             Some(Tok::Op(Op::Less)) => RedirectOp::Read,
             Some(Tok::Op(Op::Great)) => RedirectOp::Write,
@@ -1698,7 +1703,10 @@ impl Parser {
             Some(Tok::Op(Op::LessGreat)) => RedirectOp::ReadWrite,
             Some(Tok::Op(Op::AmpGreat)) => RedirectOp::WriteBoth,
             Some(Tok::Op(Op::AmpDGreat)) => RedirectOp::AppendBoth,
-            Some(Tok::Op(Op::DLess | Op::DLessDash)) => RedirectOp::HereDoc,
+            Some(Tok::Op(op @ (Op::DLess | Op::DLessDash))) => {
+                here_strip = op == Op::DLessDash;
+                RedirectOp::HereDoc
+            }
             Some(Tok::Op(Op::TLess)) => RedirectOp::HereStr,
             _ => return Err(ParseError::new("expected redirection operator".into())),
         };
@@ -1716,11 +1724,23 @@ impl Parser {
         // target at end of input reports "unexpected end of file"; bash says
         // "newline" there because of its implicit-trailing-newline model, a
         // divergence noted in known-issues.md (TD-OILS-PARSE-ERR-LOC #4).
+        let mut here = None;
         let target = match self.peek() {
             // The lexer emits the here-doc body as its own token right after the
-            // `<<`/`<<-` operator. (Its swallowed body lines are already
-            // accounted for by the lexer's per-token line stamping.)
-            Some(Tok::Word(segs) | Tok::HereDoc(segs)) => {
+            // `<<`/`<<-` operator, carrying the delimiter it consumed. (The
+            // body's swallowed source lines are already accounted for by the
+            // lexer's per-token line stamping.)
+            Some(Tok::HereDoc(segs, delim, quoted)) => {
+                let (segs, delim, quoted) = (segs.clone(), delim.clone(), *quoted);
+                here = Some(HereDoc {
+                    delim,
+                    quoted,
+                    strip: here_strip,
+                });
+                self.pos = self.pos.saturating_add(1);
+                self.word_from_segs(&segs)?
+            }
+            Some(Tok::Word(segs)) => {
                 let segs = segs.clone();
                 self.pos = self.pos.saturating_add(1);
                 self.word_from_segs(&segs)?
@@ -1748,7 +1768,13 @@ impl Parser {
         } else {
             op
         };
-        Ok(Redirect { fd, op, target, varfd })
+        Ok(Redirect {
+            fd,
+            op,
+            target,
+            varfd,
+            here,
+        })
     }
 
     fn expect_reserved(&mut self, w: &str) -> Result<(), ParseError> {

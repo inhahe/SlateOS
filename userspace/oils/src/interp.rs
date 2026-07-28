@@ -31228,6 +31228,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn declare_f_prints_here_docs_as_here_docs() {
+        // A here-doc body belongs on the lines after the command, not inside it:
+        // re-emitting it as a here-string silently broke every multi-line body.
+        let (o, s) = run("f() {\ncat <<EOF\none\ntwo\nEOF\n}\ndeclare -f f");
+        assert_eq!(s, 0);
+        assert_eq!(o, "f () \n{ \n    cat <<EOF\none\ntwo\nEOF\n\n}\n", "here-doc layout");
+
+        // A quoted delimiter prints back in bash's normalised `'…'` spelling,
+        // whichever of the three quoting forms the source used, and `<<-` keeps
+        // its dash (its body was already stripped when it was read).
+        let (o, _) = run("f() {\ncat <<'Q'\n$x\nQ\n}\ndeclare -f f");
+        assert_eq!(o, "f () \n{ \n    cat <<'Q'\n$x\nQ\n\n}\n", "quoted delimiter");
+        let (o, _) = run("f() {\ncat <<-T\n\tbody\n\tT\n}\ndeclare -f f");
+        assert_eq!(o, "f () \n{ \n    cat <<-T\nbody\nT\n\n}\n", "<<- delimiter");
+
+        // Inside a substitution the body has to be flushed before the closing
+        // paren — carrying it out to the enclosing line would strand it.
+        let (o, _) = run("f() {\nx=$(cat <<EOF\nsub\nEOF\n)\n}\ndeclare -f f");
+        assert_eq!(o, "f () \n{ \n    x=$(cat <<EOF\nsub\nEOF\n)\n}\n", "here-doc in $( )");
+
+        // And the printed form has to re-parse to the same function.
+        let (o, s) = run("f() {\ncat <<EOF\none\ntwo\nEOF\n}\neval \"$(declare -f f)\"\nf");
+        assert_eq!(s, 0);
+        assert_eq!(o, "one\ntwo\n", "round-tripped function output");
+    }
+
+    #[test]
     fn bare_set_lists_functions() {
         // Bare `set` prints functions after the variables.
         let (o, _) = run("foo() { echo hi; }; set");

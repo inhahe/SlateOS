@@ -9,9 +9,15 @@
 //! The goal is *faithful, re-parseable* output — not a byte-for-byte match of
 //! bash's own formatter. Bodies are printed one statement per line with 4-space
 //! indentation per nesting level; conditions and other sub-lists are rendered
-//! inline with `;` separators. One deliberate simplification: here-documents are
-//! re-emitted as here-strings (`<<< …`), which deliver the same bytes to stdin;
-//! see known-issues TD-OILS16/TD-OILS18.
+//! inline with `;` separators.
+//!
+//! Here-documents are the one construct that cannot be rendered in place: the
+//! operator sits mid-line and the body has to start on the line after. They are
+//! parked inline behind marker characters and lifted out by [`flush_here_docs`]
+//! once the line is complete — which is where this deliberately diverges from
+//! bash, whose printer defers bodies to the end of the enclosing *statement*
+//! and so emits output that no longer re-parses when the here-doc is inside an
+//! `if` condition. See known-issues TD-OILS-DECLAREF-QUIRKS.
 
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, Command,
@@ -72,7 +78,9 @@ pub fn unparse_function(name: &str, body: &Program, redirects: &[Redirect]) -> S
         s.push_str(&redirect_src(r));
     }
     s.push('\n');
-    s
+    // A here-doc attached to the *definition* (`f() { …; } <<EOF`) is still
+    // parked on the closing-brace line; nothing inside has markers left.
+    flush_here_docs(&s)
 }
 
 /// Render a whole program as an indented block: one item per line at `level`.
@@ -92,22 +100,31 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Stri
         // same line (`a & b & c`), using ` & ` as an inline connector. So only
         // indent an item that begins a fresh line: the first, or one whose
         // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
+        let mut stmt = String::new();
         if i == 0 || !prog.items[i - 1].background {
-            out.push_str(&ind(level));
+            stmt.push_str(&ind(level));
         }
-        out.push_str(&item_stmt(item, level));
+        stmt.push_str(&item_stmt(item, level));
+        // A here-document parked on the statement's *last* line replaces the
+        // statement's separator: bash drops the `;` (the body has to start on
+        // the very next line) and leaves a blank line after the delimiter.
+        let trailing_here = last_line_has_here_doc(&stmt);
         let is_last = i + 1 == n;
         if item.background {
             // `item_stmt` already emitted the trailing ` &`; connect the next
             // statement inline with a space, and only break the line when this
             // backgrounded item is the last in the block.
-            out.push(if is_last { '\n' } else { ' ' });
+            stmt.push(if is_last { '\n' } else { ' ' });
         } else {
             // Separate with `;`, terminating the last one only in clause-body
             // context (`then`/`else`/`do`); group bodies leave it unterminated.
-            if !is_last || terminate_last {
-                out.push(';');
+            if (!is_last || terminate_last) && !trailing_here {
+                stmt.push(';');
             }
+            stmt.push('\n');
+        }
+        out.push_str(&flush_here_docs(&stmt));
+        if trailing_here {
             out.push('\n');
         }
     }
@@ -120,7 +137,7 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Stri
 pub fn program_inline(prog: &Program) -> String {
     let mut parts: Vec<String> = Vec::new();
     for item in &prog.items {
-        let mut s = and_or_src(&item.list);
+        let mut s = and_or_inline(&item.list);
         if item.background {
             s.push_str(" &");
         }
@@ -153,8 +170,16 @@ fn and_or_block(ao: &AndOr, level: usize) -> String {
     s
 }
 
-/// And-or list rendered strictly inline (for conditions / command subs).
+/// And-or list as bash exposes it in a trap's stored command text: rendered
+/// inline, with any here-document body flushed onto its own lines.
+#[must_use]
 pub fn and_or_src(ao: &AndOr) -> String {
+    flush_here_docs(&and_or_inline(ao))
+}
+
+/// And-or list rendered strictly inline (for conditions / command subs). Any
+/// here-document body stays parked for the caller to flush.
+fn and_or_inline(ao: &AndOr) -> String {
     let mut s = pipeline_src(&ao.first);
     for (op, pl) in &ao.rest {
         s.push_str(match op {
@@ -238,7 +263,7 @@ fn render_if(
 /// `level + 1`.
 fn command_block(cmd: &Command, level: usize) -> String {
     match cmd {
-        Command::Simple(sc) => simple_src(sc),
+        Command::Simple(sc) => simple_inline(sc),
         Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), level),
         Command::Loop(c) => {
             // `while`/`until` keep `do` on the same line as the condition
@@ -389,7 +414,7 @@ fn command_block(cmd: &Command, level: usize) -> String {
 /// which is valid bash — just not multi-line).
 fn command_inline(cmd: &Command) -> String {
     match cmd {
-        Command::Simple(sc) => simple_src(sc),
+        Command::Simple(sc) => simple_inline(sc),
         Command::If(c) => {
             let mut s = String::from("if ");
             s.push_str(&program_inline(&c.cond));
@@ -506,8 +531,17 @@ fn command_inline(cmd: &Command) -> String {
 }
 
 /// Reconstruct the source text of a simple command (assignments, words,
-/// redirections) on one line — used for `$BASH_COMMAND` in DEBUG/ERR traps.
+/// redirections) — used for `$BASH_COMMAND` in DEBUG/ERR traps. One line,
+/// except that a here-document body is flushed onto its own lines after it,
+/// which is what bash stores there too.
+#[must_use]
 pub fn simple_src(sc: &SimpleCommand) -> String {
+    flush_here_docs(&simple_inline(sc))
+}
+
+/// A simple command rendered on one line, with any here-document body left
+/// parked for the caller to flush.
+fn simple_inline(sc: &SimpleCommand) -> String {
     let mut parts: Vec<String> = Vec::new();
     for a in &sc.assignments {
         parts.push(assignment_src(a));
@@ -601,13 +635,121 @@ fn redirect_src_plain(r: &Redirect) -> String {
         // Likewise an input dup renders with its explicit source fd
         // (`0<&3`, never `<&3`).
         RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", "", &word_src(&r.target)),
-        // Here-docs are re-emitted as here-strings (same bytes to stdin); a
-        // here-string is likewise `<<<`. See the module docs / TD-OILS16.
-        RedirectOp::HereDoc | RedirectOp::HereStr => {
-            let body = word_src(&r.target);
-            format!("<<< {body}")
+        RedirectOp::HereStr => format!("<<< {}", word_src(&r.target)),
+        RedirectOp::HereDoc => here_doc_src(r),
+    }
+}
+
+/// Bracketing markers for a here-document body deferred to the end of the
+/// rendered line (see [`flush_here_docs`]).
+///
+/// A here-document is written across two places at once: the operator sits in
+/// the middle of a command line, while the body has to start on the line after
+/// it. The unparser builds its output bottom-up as plain strings, so the body
+/// is parked inline behind these markers where the operator was rendered, and
+/// lifted out to the end of the line once the line is complete. Control
+/// characters are used because shell source has no use for them, so a body can
+/// never contain one that would be mistaken for a marker.
+const HD_OPEN: char = '\u{1}';
+const HD_CLOSE: char = '\u{2}';
+
+/// `<<DELIM` / `<<-'DELIM'` plus the body, parked for [`flush_here_docs`].
+///
+/// bash normalises every quoted spelling of the delimiter (`'D'`, `"D"`, `\D`)
+/// to the single-quoted form, and prints a `<<-` body already stripped of its
+/// leading tabs — which is exactly what the lexer stored — so the reprinted
+/// `<<-` still re-reads as the same bytes.
+fn here_doc_src(r: &Redirect) -> String {
+    let Some(hd) = &r.here else {
+        // A here-doc redirect always carries its delimiter from the parser.
+        // Nothing else can deliver the body, so fall back to the here-string
+        // form, which at least feeds stdin the same bytes.
+        return format!("<<< {}", word_src(&r.target));
+    };
+    let delim = if hd.quoted {
+        format!("'{}'", hd.delim)
+    } else {
+        hd.delim.clone()
+    };
+    let dash = if hd.strip { "-" } else { "" };
+    let mut body = word_src(&r.target);
+    // Every body line the lexer captured ended in a newline; an empty body
+    // needs none, and a body whose final line somehow lost its newline still
+    // must not run into the delimiter.
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let fd = if r.fd == 0 {
+        String::new()
+    } else {
+        r.fd.to_string()
+    };
+    format!("{fd}<<{dash}{delim}{HD_OPEN}{body}{}\n{HD_CLOSE}", hd.delim)
+}
+
+/// Move every parked here-document body ([`HD_OPEN`]…[`HD_CLOSE`]) out of the
+/// line it was rendered on and re-emit it just after that line.
+///
+/// bash instead defers bodies to the end of the enclosing *statement*, which
+/// for a here-doc inside an `if` condition emits a function body that no longer
+/// re-parses (the body swallows the `then` clause). Flushing per line keeps the
+/// output readable and correct; the divergence is recorded in known-issues.md.
+fn flush_here_docs(text: &str) -> String {
+    if !text.contains(HD_OPEN) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    // Bodies parked on the line being copied out, waiting for its newline. A
+    // body spans lines of its own, so the scan cannot work line by line: it
+    // walks the text looking for whichever comes first, a marker or a newline.
+    let mut parked = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find([HD_OPEN, '\n']) {
+        out.push_str(&rest[..i]);
+        if rest[i..].starts_with('\n') {
+            out.push('\n');
+            out.push_str(&parked);
+            parked.clear();
+            rest = &rest[i + 1..];
+        } else if let Some(end) = rest[i..].find(HD_CLOSE).map(|e| i + e) {
+            parked.push_str(&rest[i + HD_OPEN.len_utf8()..end]);
+            rest = &rest[end + HD_CLOSE.len_utf8()..];
+        } else {
+            // Unterminated marker: nothing sane to do but keep the text as-is.
+            out.push_str(&rest[i..]);
+            return out;
         }
     }
+    out.push_str(rest);
+    if !parked.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&parked);
+    }
+    out
+}
+
+/// Whether the *last* line of a rendered statement carries a here-document,
+/// ignoring the newlines inside any parked body.
+///
+/// That is the case where the statement's `;` separator has to give way: the
+/// body must start on the very next line, so there is nowhere to put one.
+fn last_line_has_here_doc(text: &str) -> bool {
+    let mut found = false;
+    let mut rest = text;
+    while let Some(i) = rest.find([HD_OPEN, '\n']) {
+        if rest[i..].starts_with('\n') {
+            found = false;
+            rest = &rest[i + 1..];
+        } else if let Some(end) = rest[i..].find(HD_CLOSE).map(|e| i + e) {
+            found = true;
+            rest = &rest[end + HD_CLOSE.len_utf8()..];
+        } else {
+            return true;
+        }
+    }
+    found
 }
 
 /// `fd` prefix only when it differs from the operator's default (`>`→1, `<`→0);
@@ -819,10 +961,15 @@ fn part_src(p: &WordPart) -> String {
         WordPart::VarNames { prefix, star } => {
             format!("${{!{prefix}{}}}", if *star { "*" } else { "@" })
         }
-        WordPart::CommandSub(prog) => format!("$({})", program_inline(prog)),
-        WordPart::ProcSub { input, body } => {
-            format!("{}({})", if *input { '<' } else { '>' }, program_inline(body))
-        }
+        // A substitution is its own source context, so a here-document inside
+        // one has to be flushed *within* the parentheses — carrying it out to
+        // the enclosing line would leave the body outside the substitution.
+        WordPart::CommandSub(prog) => format!("$({})", flush_here_docs(&program_inline(prog))),
+        WordPart::ProcSub { input, body } => format!(
+            "{}({})",
+            if *input { '<' } else { '>' },
+            flush_here_docs(&program_inline(body))
+        ),
         WordPart::ArithSub { expr, bracket } => {
             if *bracket {
                 format!("$[{expr}]")

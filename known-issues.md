@@ -3004,6 +3004,31 @@ with incremented indent and a matching `fi` per level; (2) special-case the
 subshell/background inline layouts; (3) thread a "nested function" flag so
 inner `Function` defs prepend `function `.
 
+**Follow-on (here-documents) — 2026-07-28, OPEN, deliberate:** here-docs are
+now printed as here-docs rather than here-strings (see TD-OILS16/TD-OILS18),
+which matches bash for a here-doc attached to an ordinary statement. Three
+placement quirks of bash's own printer are deliberately *not* reproduced,
+because osh's output is valid bash in every case and bash's is not always:
+
+1. **Body placement.** bash defers a here-doc body to the end of the enclosing
+   *statement*; osh flushes it at the end of the *line* the operator was
+   rendered on. They agree for a simple command. They differ when the here-doc
+   sits in an `if` condition, where bash emits
+   `if cat <<EOF; then` / `echo yes` / `cond` / `EOF` — output that no longer
+   re-parses, because the body swallows the `then` clause. osh emits the body
+   directly after the `if …; then` line, which re-parses correctly.
+2. **Pipelines.** bash breaks the line after the `|` (`cat <<EOF |` / body /
+   `  tr a-z A-Z`, two-space indent); osh keeps the pipeline on one line and
+   puts the body after it. Both re-parse.
+3. **Separator suppression.** bash drops the `;` from the statement *after* a
+   here-doc statement, but only when the here-doc is the first statement of the
+   block (`{ cat <<G; …; echo one; echo two; }` prints `echo one` with no `;`,
+   while the same body with any statement before the here-doc prints
+   `echo one;`). The rule is an artifact of bash's `was_heredoc` printer state
+   and its list nesting; osh always prints the separator. Both re-parse, and
+   `userspace/oils/tests/corpus/declare-f-heredoc.sh` sidesteps the shape by
+   never opening a block with a here-doc.
+
 ### TD-OILS-ASSOC-KEY-TRIM. `osh` trims leading/trailing whitespace from an unquoted associative-array subscript key — 2026-07-19 — RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/parser.rs` subscript extraction
@@ -4387,8 +4412,15 @@ stability property test (`parse(print(f))` re-prints identically; the AST derive
 `PartialEq`). It is now used by: bare `declare -f` and `declare -f NAME` (print
 each function's reconstructed source), `type NAME` (prints the "is a function"
 line then the source), and bare `set` (lists functions after variables, closing
-TD-OILS16). One deliberate simplification: here-documents are re-emitted as
-here-strings (`<<< …`) — same bytes to stdin, re-parseable. Regression tests:
+TD-OILS16). ~~One deliberate simplification: here-documents are re-emitted as
+here-strings (`<<< …`) — same bytes to stdin, re-parseable.~~ **Superseded
+2026-07-28:** the here-string simplification was wrong for any body with more
+than one line (`cat <<EOF` / `line one` / `line two` / `EOF` printed as
+`cat <<< line one` followed by a bare `line two` line, which re-parses as a
+second command). `ast::Redirect` now carries the delimiter, its quoting and the
+`<<-` flag, and `unparse.rs` prints a real here-document; see the here-document
+follow-on under TD-OILS-DECLAREF-QUIRKS for the placement quirks of bash's own
+printer that are deliberately not reproduced. Regression tests:
 `declare_small_f_prints_body`, `type_function_prints_body`,
 `bare_set_lists_functions`, and the `unparse::tests` round-trip suite.
 

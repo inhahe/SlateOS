@@ -655,6 +655,28 @@ pub struct Redirect {
     /// ≥ 10, applies the redirect to it, and stores the number in shell variable
     /// `name`. `None` for an ordinary numeric/default fd redirect.
     pub varfd: Option<String>,
+    /// How the here-document was written, for [`RedirectOp::HereDoc`] only —
+    /// `None` for every other operator. Expansion does not need it (the body is
+    /// already lowered into `target`), but printing the redirect back does.
+    pub here: Option<HereDoc>,
+}
+
+/// The parts of a `<<`/`<<-` redirection that are not carried by its body word.
+///
+/// The delimiter has no effect on what the here-document delivers — the lexer
+/// has already consumed the body — but `declare -f` prints a stored function
+/// back as source, and that source has to name a delimiter again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HereDoc {
+    /// The delimiter word with its quoting removed (`<<'EOF'` → `EOF`).
+    pub delim: String,
+    /// The delimiter was quoted in any form (`'EOF'`, `"EOF"`, `\EOF`), which
+    /// suppressed expansion of the body. bash prints every spelling back as
+    /// `'EOF'`.
+    pub quoted: bool,
+    /// The `<<-` spelling, which strips leading tabs from the body lines and
+    /// from the closing delimiter.
+    pub strip: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

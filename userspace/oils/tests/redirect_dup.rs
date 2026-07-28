@@ -100,6 +100,19 @@ fn compound_2to1_reaches_an_inner_fd_table() {
 }
 
 #[test]
+fn builtin_redirect_scope_covers_what_the_builtin_runs() {
+    // A builtin's own `2>&1` applies to everything it runs, including bodies
+    // that get their own fd table (`eval 'cmd | cmd'`) and an `exec > file` the
+    // body performs — which moves fd 1 only, leaving the dup where it was.
+    let (out, err) = run_osh("eval '{ echo X >&2; } | sed s/^/piped:/' 2>&1");
+    assert_eq!(out, "X\n");
+    assert_eq!(err, "");
+    let (out, err) = run_osh("eval 'x=$( { echo X >&2; } ); echo [$x]' 2>&1");
+    assert_eq!(out, "X\n[]\n");
+    assert_eq!(err, "");
+}
+
+#[test]
 fn external_child_2to1_before_a_stdout_redirect() {
     // Redirects apply left to right: `2>&1 >f` sends fd 2 to the *original*
     // stdout and only fd 1 onward to the file.

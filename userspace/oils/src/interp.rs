@@ -557,9 +557,14 @@ enum StdinSrc<'a> {
 /// stack means fd 2 is the shell's real stderr (the default).
 ///
 /// All handles are `Arc`-based so the enclosing [`Shell`] stays `Send` — a
-/// pipeline stage's subshell clone is moved into a scoped thread. (Clones reset
-/// the stack to empty via [`Shell::clone_for_subshell`], so the `Arc` contents
-/// never actually cross a thread boundary, but the type must still be `Send`.)
+/// pipeline stage's subshell clone is moved into a scoped thread, and it
+/// inherits the stack (fd 2 is inherited across a fork), so the `Arc` contents
+/// really do cross a thread boundary.
+///
+/// Every variant names a *concrete* sink. There is deliberately no "whatever
+/// fd 1 currently is" variant: `2>&1` is a dup taken when the redirect is
+/// applied, so its sink is resolved to a handle at that moment and does not
+/// follow fd 1 if something rebinds it afterwards.
 #[derive(Clone)]
 enum StderrTarget {
     /// `2> file` / `2>> file` — write to this already-opened file (shared by all
@@ -573,8 +578,6 @@ enum StderrTarget {
     /// merged into the stdout capture once the body finishes (line-level
     /// interleaving with stdout is not preserved — see the module limitations).
     Buffer(Arc<Mutex<Vec<u8>>>),
-    /// `2>&1` where stdout is the shell's real stdout — write to fd 1.
-    Stdout,
     /// `2>&N` (N ≥ 3) — write to a user-space write descriptor opened by
     /// `exec N> file`. The shared `Arc<File>` is append-positioned so writes
     /// land at the descriptor's current offset (matching a builtin `>&N`).
@@ -883,7 +886,8 @@ pub struct Shell {
     /// Pushed/popped by [`Shell::exec_redirected`] around a compound command's
     /// body so its stderr redirect (`{ …; } 2> err`) covers every command in
     /// the group. Consulted by [`Shell::emit_stderr`] (diagnostics/`>&2`) and
-    /// [`Shell::run_external`] (child fd 2). Reset to empty in subshell clones.
+    /// [`Shell::run_external`] (child fd 2). Inherited by subshell clones, which
+    /// share the same sink handles — a subshell inherits fd 2.
     stderr_stack: Vec<StderrTarget>,
     /// Persistent stdout target set by a redirection-only `exec > file` /
     /// `exec >> file`: an open [`File`] handle (the file is opened once, so all
@@ -2732,15 +2736,6 @@ impl Shell {
             Command::Subshell(p) => {
                 // A subshell gets a clone of the state; mutations don't escape.
                 let mut sub = self.clone_for_subshell();
-                // A subshell inherits the fds applied to it, including an active
-                // compound-command stderr redirect (`( … ) 2>&1`, `( … ) 2>file`).
-                // `clone_for_subshell` resets `stderr_stack` (so pipeline-stage
-                // clones on threads don't chase an outer group's stderr), so copy
-                // it back here for this inline subshell — otherwise a `>&2` inside
-                // `$( ( … ) 2>&1 )` would leak to the real stderr instead of the
-                // command-substitution capture. This runs on the current thread,
-                // so `Send` is not a concern; `StderrTarget` is all `Arc`-based.
-                sub.stderr_stack.clone_from(&self.stderr_stack);
                 let flow = sub.exec_program(p, out, stdin);
                 // An explicit `exit` from the subshell body propagates outward as
                 // a status only — but it must land *before* the EXIT trap runs, so
@@ -4041,11 +4036,15 @@ impl Shell {
             pid: self.pid,
             ppid: self.ppid,
             current_line: self.current_line,
-            // A subshell inherits fd 2 = the shell's real stderr; any active
-            // compound-command stderr redirect does not carry into a pipeline
-            // stage's own subshell (and keeping the `Arc`s off the clone is what
-            // lets `Shell` stay `Send` for the scoped-thread pipeline).
-            stderr_stack: Vec::new(),
+            // A subshell inherits fd 2 as it stands, which is what an enclosing
+            // command's stderr redirect has made of it: `{ echo X >&2 | cat; }
+            // 2>&1` sends `X` to the group's fd 2, not to the real stderr, even
+            // though the stage runs in its own fd table. Every `StderrTarget` is
+            // `Arc`-based, so the clone shares the one sink (no extra OS handle
+            // is created, and nothing keeps a pipe's write end open beyond the
+            // clone's life) and `Shell` stays `Send` for the scoped-thread
+            // pipeline.
+            stderr_stack: self.stderr_stack.clone(),
             // A subshell inherits the shell's fd table, including any persistent
             // `exec > file` / `exec 2> file` redirection.
             exec_stdout: self.exec_stdout.clone(),
@@ -7266,23 +7265,6 @@ impl Shell {
                         return;
                     }
                 },
-                // An enclosing compound command's `2>&1`: fd 2 follows fd 1,
-                // which for this child means the pipeline stage's pipe, the
-                // capture buffer, a persistent `exec > file`, or the real fd 1.
-                Some(StderrTarget::Stdout) => match self.child_stdio_for_stdout(out) {
-                    Ok(Some(s)) => {
-                        cmd.stderr(s);
-                    }
-                    Ok(None) => {
-                        cmd.stderr(Stdio::piped());
-                        stderr_to_stdout_capture = true;
-                    }
-                    Err(e) => {
-                        self.errln(&format!("{}{e}", self.err_prefix()));
-                        self.last_status = 1;
-                        return;
-                    }
-                },
             }
         }
 
@@ -7851,8 +7833,13 @@ impl Shell {
             }
             match out {
                 Out::Inherit => {
-                    self.stderr_stack.push(StderrTarget::Stdout);
-                    return true;
+                    // fd 1 is the ambient descriptor: dup its current sink into a
+                    // handle, as the redirect itself would have.
+                    if let Ok(f) = self.snapshot_std_fd(1) {
+                        self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                        return true;
+                    }
+                    return false;
                 }
                 Out::Pipe(w) => {
                     if let Ok(wp) = w.try_clone() {
@@ -10037,8 +10024,19 @@ impl Shell {
                         }
                     }
                     Out::Inherit => {
-                        self.stderr_stack.push(StderrTarget::Stdout);
-                        pushed_stderr = true;
+                        // Dup fd 1's current sink now. A builtin cannot move fd 1
+                        // under its own redirect (`exec` is exempt from this
+                        // block), but one it *runs* can: `eval 'exec >f; echo X
+                        // >&2' 2>&1` must still send `X` to the original stdout.
+                        match self.snapshot_std_fd(1) {
+                            Ok(f) => {
+                                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                                pushed_stderr = true;
+                            }
+                            Err(e) => {
+                                self.errln(&format!("{}stdout: {e}", self.err_prefix()));
+                            }
+                        }
                     }
                 }
             }
@@ -16895,20 +16893,6 @@ impl Shell {
                     let _ = lock.flush();
                 }
             }
-            Some(StderrTarget::Stdout) => {
-                // fd 2 follows fd 1: a persistent `exec > file` target if set,
-                // else the real stdout.
-                if let Some(f) = &self.exec_stdout {
-                    if let Ok(mut fc) = f.try_clone() {
-                        let _ = fc.write_all(bytes);
-                    }
-                } else {
-                    let o = io::stdout();
-                    let mut lock = o.lock();
-                    let _ = lock.write_all(bytes);
-                    let _ = lock.flush();
-                }
-            }
             // `&File`/`&PipeWriter` both implement `Write`; the shared handle is
             // append-positioned (files opened once) so concurrent writers from
             // several group commands interleave without clobbering.
@@ -17213,7 +17197,7 @@ impl Shell {
 
     fn child_stdio_for_stderr(&self) -> Result<Stdio, String> {
         match self.stderr_stack.last() {
-            None | Some(StderrTarget::Stdout | StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),
+            None | Some(StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),
             Some(StderrTarget::File(f)) => f
                 .try_clone()
                 .map(Stdio::from)

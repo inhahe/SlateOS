@@ -43,6 +43,17 @@ echo "=== and it reaches every kind of inner fd table"
 { echo "[$(child)]"; } 2>&1
 f() { echo X >&2 | sed 's/^/piped: /'; }; f 2>&1
 
+echo "=== including when the enclosing fd 2 is itself a pipe or a capture"
+{ { echo X >&2; } | sed 's/^/piped: /'; } 2>&1 | cat
+x=$( { { echo X >&2; } | sed 's/^/piped: /'; } 2>&1 ); echo "  x=[$x]"
+{ { echo X >&2; } | sed 's/^/piped: /'; } 2>h.txt | cat; echo "  h=[$(cat h.txt)]"
+
+echo "=== a builtin's own redirect covers what the builtin runs"
+eval '{ echo X >&2; } | sed s/^/piped:/' 2>&1
+eval '{ echo X >&2; } | sed s/^/piped:/' 2>h.txt; echo "  h=[$(cat h.txt)]"
+eval 'x=$( { echo X >&2; } ); echo "  x=[$x]"' 2>&1
+eval 'exec >g.txt; echo X >&2' 2>&1; echo "  g=[$(cat g.txt)]"
+
 echo "=== an inner 2> of its own still wins for its own command"
 { { echo X >&2; } 2>h.txt; } 2>&1; echo "  h=[$(cat h.txt)]"
 

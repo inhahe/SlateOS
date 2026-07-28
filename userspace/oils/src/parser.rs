@@ -1034,10 +1034,32 @@ impl Parser {
         {
             return Ok(p);
         }
-        if self.at_op(Op::LParen)
-            && let Command::Subshell(p) = self.parse_subshell()?
-        {
-            return Ok(p);
+        if self.at_op(Op::LParen) {
+            // A `( … )` function body is a *subshell* body, and the parentheses
+            // are part of the function, not a wrapper the definition strips:
+            // `f() ( cd /; x=1 )` must leak neither the `cd` nor the `x`, and an
+            // `exit` inside must end only the subshell. Keep the `Subshell` node
+            // as the body's single statement rather than unwrapping it into the
+            // function's own `Program` — osh used to unwrap, which made every
+            // such function run in the caller's shell. It also renders the way
+            // bash's `declare -f` does: brace-wrapped, `( … )` inside.
+            let line = self.cur_line();
+            let sub = self.parse_subshell()?;
+            return Ok(Program {
+                items: vec![Item {
+                    list: AndOr {
+                        first: Pipeline {
+                            negated: false,
+                            timed: false,
+                            time_posix: false,
+                            commands: vec![sub],
+                        },
+                        rest: Vec::new(),
+                    },
+                    background: false,
+                    line,
+                }],
+            });
         }
         // Not a valid compound body. bash diagnoses this positionally: at EOF
         // (`f()` / `function f` with no body) it reports "unexpected end of

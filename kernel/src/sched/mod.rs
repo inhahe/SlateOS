@@ -2198,6 +2198,29 @@ static LIVENESS_LAST_CTX: AtomicU64 = AtomicU64::new(0);
 /// occurred system-wide (the busy-livelock signature).
 static LIVENESS_CTX_STALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Serial output-progress counter observed at the previous liveness check.
+///
+/// **Why the detectors need this.** [`USEFUL_WORK_TICKS`] only advances for a
+/// timer tick that preempted ring-3 code or a CPU with a *queued* task. Neither
+/// holds during the long kernel-side stretches of boot: `kmain` itself runs
+/// with no queued task, and a starting ring-3 process spends nearly all its
+/// wall time inside the kernel on its own behalf (ELF load, demand-paging
+/// storm, filesystem I/O), so ticks land in kernel mode with an empty run
+/// queue. Boot is plainly advancing, yet by the counter's definition nothing is
+/// happening — which is why both progress detectors used to fire on *every*
+/// healthy boot (observed 2026-07-27: `useful_work=8` after 25 s of ticks while
+/// the kernel was busy spawning ring-3 fastpy processes; see known-issues
+/// BUG-LIVENESS-DEADLINE-FALSE-FIRE).
+///
+/// Serial output is the signal that separates the two: this kernel narrates its
+/// boot continuously, so a *silent* interval means execution really has stopped
+/// advancing, while a chatty one means it has not — the same criterion
+/// `scripts/boot-test.sh --stall-secs` applies from the outside. Both detectors
+/// therefore require serial silence *in addition to* their own signature before
+/// declaring a hang. A livelock that keeps printing escapes them, but not the
+/// wall-clock boot deadline, which catches every hang mode by construction.
+static LIVENESS_LAST_OUTPUT: AtomicU64 = AtomicU64::new(0);
+
 /// Consecutive stalled check-intervals before declaring a hung system.
 ///
 /// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
@@ -2256,17 +2279,89 @@ const LIVENESS_BREADCRUMB_NS: u64 = 30_000_000_000;
 ///
 /// This is a purely time-based backstop that catches *any* hang mode. It is
 /// measured in wall-clock (monotonic) time so it is immune to the timer-tick
-/// starvation that broke the earlier tick-interval version. The value must sit
-/// above the slowest healthy armed-to-BOOT_OK duration and below the harness's
-/// 480 s boot-test timeout, so it dumps the task table before QEMU is killed.
+/// starvation that broke the earlier tick-interval version.
 ///
-/// Measured healthy armed-to-BOOT_OK (2026-07-02, full glibc/dash ring-3
-/// battery, poison-debug build): **67.7 s** (logged by [`liveness_disarm`]).
-/// 200 s is ~3× that — no realistic false-fire even for a much slower-than-
-/// normal healthy boot — while still leaving a 280 s margin before the 480 s
-/// kill for the dump (and for the progress-based detectors to add their own
-/// report if the livelock later degrades into a total stall).
-const LIVENESS_BOOT_DEADLINE_NS: u64 = 200_000_000_000; // 200 s
+/// **The deadline is derived from the harness's own boot timeout, not
+/// hardcoded.** A hardcoded constant is structurally wrong here: it has to sit
+/// above the slowest healthy armed-to-BOOT_OK duration *and* below the
+/// harness's kill, but the boot self-test battery keeps growing (see the
+/// `TIMEOUT` comment in `scripts/boot-test.sh`), so healthy boot time creeps up
+/// and the constant silently becomes a false-positive generator. That is
+/// exactly what happened: the constant was tuned to 200 s against a **67.7 s**
+/// healthy armed window measured 2026-07-02, and by 2026-07-27 the Path-Z
+/// ring-3 battery had pushed the healthy armed window past 200 s, so *every*
+/// healthy boot printed "BOOT DEADLINE EXCEEDED" and dumped the task table
+/// (known-issues BUG-LIVENESS-DEADLINE-FALSE-FIRE). A watchdog that cries wolf
+/// on every run is worse than no watchdog: the real dumps become invisible.
+///
+/// So `scripts/boot-test.sh` passes its own `--timeout` to the kernel as
+/// `sched.boot_deadline_ms=<TIMEOUT × 1000>` on the Limine cmdline, and
+/// [`liveness_arm`] computes
+///
+/// ```text
+///   deadline = harness_timeout − LIVENESS_DEADLINE_MARGIN_NS − (now at arm)
+/// ```
+///
+/// Subtracting the arm timestamp converts the harness's QEMU-relative budget
+/// into the armed-relative units this backstop measures in, so the fire time
+/// lands `LIVENESS_DEADLINE_MARGIN_NS` of wall-clock *before* the kill no
+/// matter how much of the budget early boot consumed. The invariant is then
+/// structural rather than a tuned guess — for scale, the healthy armed window
+/// measured **312.7 s** on 2026-07-27 (logged by [`liveness_disarm`]), 4.6× the
+/// 67.7 s the old constant was sized against. The watchdog fires iff the harness was
+/// about to give up anyway, and raising `--timeout` for a slower host or a
+/// bigger battery moves both in lockstep. Growing the self-test suite can no
+/// longer desynchronise them.
+///
+/// [`LIVENESS_BOOT_DEADLINE_DEFAULT_NS`] is the fallback for boots with no such
+/// cmdline (real hardware, a hand-rolled QEMU invocation): nothing is going to
+/// kill us there, so it only needs to be generous enough never to false-fire.
+static LIVENESS_BOOT_DEADLINE_NS: AtomicU64 =
+    AtomicU64::new(LIVENESS_BOOT_DEADLINE_DEFAULT_NS);
+
+/// Fallback boot deadline when the harness supplied no `sched.boot_deadline_ms`.
+///
+/// Deliberately generous: without a harness there is no kill to beat, so the
+/// only cost of a late fire is a later dump, whereas an early fire is a false
+/// positive. 900 s is ~2.5× the slowest healthy armed window observed on the
+/// poison-debug build.
+const LIVENESS_BOOT_DEADLINE_DEFAULT_NS: u64 = 900_000_000_000; // 900 s
+
+/// How far ahead of the harness's kill the backstop aims to fire.
+///
+/// Must be long enough to emit the full task-table dump (every task's state
+/// plus a per-CPU stack backtrace) over the 115200-baud serial line and still
+/// leave the progress-based detectors a chance to add their own report if the
+/// livelock later degrades into a total stall. 45 s is many times the observed
+/// dump duration and is small next to any sane `--timeout`.
+const LIVENESS_DEADLINE_MARGIN_NS: u64 = 45_000_000_000; // 45 s
+
+/// Kernel cmdline key carrying the harness's boot timeout, in milliseconds.
+const LIVENESS_DEADLINE_PARAM: &str = "sched.boot_deadline_ms=";
+
+/// Parse `sched.boot_deadline_ms=<n>` out of a kernel cmdline.
+///
+/// Returns the harness's whole boot budget in nanoseconds. Split out from
+/// [`liveness_arm`] so it can be unit-tested without a boot.
+fn parse_boot_deadline_ns(cmdline: &str) -> Option<u64> {
+    let ms: u64 = cmdline
+        .split_ascii_whitespace()
+        .find_map(|tok| tok.strip_prefix(LIVENESS_DEADLINE_PARAM))?
+        .parse()
+        .ok()?;
+    ms.checked_mul(1_000_000)
+}
+
+/// Convert the harness's QEMU-relative boot budget into an armed-relative
+/// deadline, or `None` if the budget is already spent (which means early boot
+/// alone ate the whole timeout — the harness will kill us imminently, so an
+/// armed-relative deadline is meaningless and we fall back to the default).
+fn armed_relative_deadline_ns(budget_ns: u64, arm_ns: u64) -> Option<u64> {
+    budget_ns
+        .checked_sub(LIVENESS_DEADLINE_MARGIN_NS)?
+        .checked_sub(arm_ns)
+        .filter(|&d| d > 0)
+}
 
 /// Record forward progress for the liveness watchdog.
 ///
@@ -2284,13 +2379,41 @@ fn note_useful_work() {
 /// Call once the scheduler is running real tasks and continuous forward
 /// progress is expected (i.e., at the start of the boot-time task/ring-3
 /// self-test phase).  Resets the progress baseline so the first interval
-/// measures from "now".
+/// measures from "now", and derives the wall-clock boot deadline from the
+/// harness's own timeout (see [`LIVENESS_BOOT_DEADLINE_NS`]).
 pub fn liveness_arm() {
     LIVENESS_LAST_WORK.store(USEFUL_WORK_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
     LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
     LIVENESS_LAST_CTX.store(total_ctx_switches(), Ordering::Relaxed);
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
-    LIVENESS_ARM_NS.store(crate::timekeeping::clock_monotonic(), Ordering::Relaxed);
+    let arm_ns = crate::timekeeping::clock_monotonic();
+    LIVENESS_ARM_NS.store(arm_ns, Ordering::Relaxed);
+
+    // Read the harness budget straight off the raw Limine cmdline rather than
+    // via `fs::kernparam`: this runs before the ring-3 phase but the kernparam
+    // snapshot is a filesystem-layer concern, and the backstop must not depend
+    // on the filesystem being up.
+    let deadline_ns = crate::boot::kernel_cmdline()
+        .and_then(parse_boot_deadline_ns)
+        .and_then(|budget| armed_relative_deadline_ns(budget, arm_ns))
+        .unwrap_or(LIVENESS_BOOT_DEADLINE_DEFAULT_NS);
+    LIVENESS_BOOT_DEADLINE_NS.store(deadline_ns, Ordering::Relaxed);
+    serial_println!(
+        "[liveness] armed at {}.{:03}s; boot deadline {}s of armed time ({})",
+        arm_ns / 1_000_000_000,
+        (arm_ns / 1_000_000) % 1000,
+        deadline_ns / 1_000_000_000,
+        if deadline_ns == LIVENESS_BOOT_DEADLINE_DEFAULT_NS {
+            "default; no sched.boot_deadline_ms on cmdline"
+        } else {
+            "derived from harness --timeout"
+        },
+    );
+
+    // Baseline the output counter *after* the line above, so arming's own
+    // report does not make the first interval look chatty.
+    LIVENESS_LAST_OUTPUT.store(crate::serial::output_count(), Ordering::Relaxed);
+
     LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
     LIVENESS_BREADCRUMB_BUCKET.store(0, Ordering::Relaxed);
     LIVENESS_ARMED.store(true, Ordering::Release);
@@ -2320,16 +2443,31 @@ fn total_ctx_switches() -> u64 {
 /// interactive prompt (where task-level progress correctly stops).
 pub fn liveness_disarm() {
     // Log the armed duration so the wall-clock boot-deadline (see
-    // LIVENESS_BOOT_DEADLINE_NS) can be tuned against real healthy-boot timing
-    // rather than a stale guess. Only meaningful when we were actually armed.
+    // LIVENESS_BOOT_DEADLINE_NS) can be checked against real healthy-boot
+    // timing rather than a stale guess.
+    //
+    // This is reported even when a detector already disarmed us: that case is
+    // precisely the one worth seeing, because it means something declared a
+    // hang on a boot that went on to reach BOOT_OK — i.e. a false positive. The
+    // earlier version skipped the line when already disarmed, which silently
+    // hid exactly that (known-issues BUG-LIVENESS-DEADLINE-FALSE-FIRE: three
+    // false-fire modes went unnoticed because the healthy-boot measurement they
+    // would have contradicted was never printed).
     let arm_ns = LIVENESS_ARM_NS.load(Ordering::Relaxed);
-    if arm_ns != 0 && LIVENESS_ARMED.load(Ordering::Acquire) {
+    if arm_ns != 0 {
+        let still_armed = LIVENESS_ARMED.load(Ordering::Acquire);
         let elapsed_ms = crate::timekeeping::clock_monotonic().saturating_sub(arm_ns) / 1_000_000;
         serial_println!(
-            "[liveness] disarmed after {}.{:03}s armed (boot-deadline is {}s)",
+            "[liveness] disarmed after {}.{:03}s armed (boot-deadline is {}s){}",
             elapsed_ms / 1000,
             elapsed_ms % 1000,
-            LIVENESS_BOOT_DEADLINE_NS / 1_000_000_000,
+            LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed) / 1_000_000_000,
+            if still_armed {
+                ""
+            } else {
+                " — WARNING: a detector already disarmed us, yet boot reached \
+                 BOOT_OK, so that report was a FALSE POSITIVE"
+            },
         );
     }
     LIVENESS_ARMED.store(false, Ordering::Release);
@@ -2387,12 +2525,12 @@ fn liveness_boot_deadline_check() {
         serial_println!(
             "[liveness] boot-window breadcrumb: {}s armed (deadline {}s, heartbeat={})",
             elapsed_ns / 1_000_000_000,
-            LIVENESS_BOOT_DEADLINE_NS / 1_000_000_000,
+            LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed) / 1_000_000_000,
             bsp_heartbeat(),
         );
     }
 
-    if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS
+    if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed)
         && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
     {
         serial_println!(
@@ -2426,6 +2564,24 @@ fn liveness_check() {
     let ctx_now = total_ctx_switches();
     let ctx_prev = LIVENESS_LAST_CTX.swap(ctx_now, Ordering::Relaxed);
 
+    // Same for the serial output-progress counter. Both detectors below require
+    // silence in addition to their own signature, because their signatures are
+    // routinely satisfied by a perfectly healthy boot (see
+    // LIVENESS_LAST_OUTPUT). Snapshot it unconditionally so the comparison is
+    // always against the immediately preceding interval.
+    let out_now = crate::serial::output_count();
+    let out_prev = LIVENESS_LAST_OUTPUT.swap(out_now, Ordering::Relaxed);
+    let silent = out_now == out_prev;
+
+    if !silent {
+        // The kernel is still narrating — boot is advancing no matter what the
+        // tick/context-switch counters say. Clear both stall counters so a hang
+        // must be *continuously* silent for LIVENESS_ALERT_COUNT intervals.
+        LIVENESS_STALL_COUNT.store(0, Ordering::Relaxed);
+        LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
+        return;
+    }
+
     if current == previous {
         // No task-level progress this interval — the total-hang signature
         // (every CPU idle-ticking).  A total stall is reported by this path,
@@ -2444,8 +2600,9 @@ fn liveness_check() {
         LIVENESS_ARMED.store(false, Ordering::Release);
         let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
         serial_println!(
-            "[liveness] SYSTEM HANG: no task-level forward progress for {}+ seconds \
-             (useful_work={}, all CPUs idle-ticking). Dumping task table:",
+            "[liveness] SYSTEM HANG: no task-level forward progress and no serial \
+             output for {}+ seconds (useful_work={}, all CPUs idle-ticking). \
+             Dumping task table:",
             stall_secs, current,
         );
         dump_all_tasks_serial();
@@ -2488,8 +2645,9 @@ fn liveness_check() {
     let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
     serial_println!(
         "[liveness] SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
-         context switches for {}+ seconds (useful_work={}, ctx_switches={}) — a \
-         task is likely monopolizing a CPU without yielding. Dumping task table:",
+         context switches and no serial output for {}+ seconds (useful_work={}, \
+         ctx_switches={}) — a task is likely monopolizing a CPU without \
+         yielding. Dumping task table:",
         stall_secs, current, ctx_now,
     );
     dump_all_tasks_serial();
@@ -6054,6 +6212,65 @@ fn test_liveness_watchdog() -> KernelResult<()> {
     });
     liveness_disarm();
     if !livelock_ok {
+        return Err(KernelError::InternalError);
+    }
+
+    // Boot-deadline derivation (see LIVENESS_BOOT_DEADLINE_NS): the cmdline
+    // parser must accept the harness's key anywhere in the line and ignore
+    // everything else, and the armed-relative conversion must subtract both the
+    // safety margin and the time early boot already spent.
+    if parse_boot_deadline_ns("quiet sched.boot_deadline_ms=480000 root=/dev/vda1")
+        != Some(480_000_000_000)
+    {
+        serial_println!("[sched]   FAIL: parse_boot_deadline_ns did not read the harness budget");
+        return Err(KernelError::InternalError);
+    }
+    if parse_boot_deadline_ns("quiet root=/dev/vda1").is_some()
+        || parse_boot_deadline_ns("sched.boot_deadline_ms=notanumber").is_some()
+    {
+        serial_println!("[sched]   FAIL: parse_boot_deadline_ns accepted a bad/absent value");
+        return Err(KernelError::InternalError);
+    }
+    // 480 s budget, 60 s already spent by early boot, 45 s margin → 375 s.
+    if armed_relative_deadline_ns(480_000_000_000, 60_000_000_000) != Some(375_000_000_000) {
+        serial_println!("[sched]   FAIL: armed_relative_deadline_ns miscomputed the deadline");
+        return Err(KernelError::InternalError);
+    }
+    // A budget already consumed by early boot yields no usable deadline rather
+    // than wrapping around to a huge one.
+    if armed_relative_deadline_ns(480_000_000_000, 500_000_000_000).is_some()
+        || armed_relative_deadline_ns(10_000_000_000, 0).is_some()
+    {
+        serial_println!("[sched]   FAIL: armed_relative_deadline_ns did not reject a spent budget");
+        return Err(KernelError::InternalError);
+    }
+
+    // Silence gate: both progress detectors must stand down while the kernel is
+    // still producing serial output, however frozen their own counters are.
+    // This is the guard against the false positives that made every healthy
+    // boot report a hang (known-issues BUG-LIVENESS-DEADLINE-FALSE-FIRE).
+    let silence_ok = crate::cpu::without_interrupts(|| {
+        liveness_arm();
+        for _ in 0..LIVENESS_ALERT_COUNT.saturating_add(2) {
+            // Freeze the useful-work counter — the total-hang signature — but
+            // emit a line each interval, as a healthy kernel-side boot phase
+            // does. `_print` bumps the output counter, so the gate must hold.
+            LIVENESS_LAST_WORK.store(USEFUL_WORK_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+            serial_print!("");
+            liveness_check();
+        }
+        if !LIVENESS_ARMED.load(Ordering::Relaxed) {
+            serial_println!("[sched]   FAIL: chatty no-tick intervals were reported as a hang");
+            return false;
+        }
+        if LIVENESS_STALL_COUNT.load(Ordering::Relaxed) != 0 {
+            serial_println!("[sched]   FAIL: silence gate did not clear the stall counter");
+            return false;
+        }
+        true
+    });
+    liveness_disarm();
+    if !silence_ok {
         return Err(KernelError::InternalError);
     }
 

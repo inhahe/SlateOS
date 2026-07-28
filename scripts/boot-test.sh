@@ -469,17 +469,28 @@ fi
 
 cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
 
-# Optional kernel cmdline injection: when SLATE_CMDLINE is set in the
-# environment, append a Limine `cmdline:` line to the staged config so the
-# kernel receives boot parameters (parsed by fs::kernparam). Used e.g. to arm
-# the B-KNULLJUMP corruption hunt under the soak harness:
+# Kernel cmdline injection (a Limine `cmdline:` line on the single boot entry;
+# indented so it associates with that entry).
+#
+# Always passed: `sched.boot_deadline_ms`, this harness's own boot timeout. The
+# kernel's boot-window liveness watchdog derives its wall-clock deadline from it
+# (see LIVENESS_BOOT_DEADLINE_NS in kernel/src/sched/mod.rs) instead of using a
+# hardcoded constant, so it always dumps the task table shortly *before* we kill
+# QEMU, and raising --timeout for a slower host or a bigger self-test battery
+# moves both in lockstep. A hardcoded kernel-side constant drifted out of sync
+# exactly this way and false-fired on every healthy boot (known-issues
+# BUG-LIVENESS-DEADLINE-FALSE-FIRE).
+#
+# Optionally appended: the contents of SLATE_CMDLINE, for extra boot parameters
+# (parsed by fs::kernparam) — e.g. to arm the B-KNULLJUMP corruption hunt under
+# the soak harness:
 #     SLATE_CMDLINE="mm.corruption_hunt=1" ./scripts/boot-test.sh
-# Normal boots leave it unset (fast, unperturbed). The line is indented to
-# associate with the single boot entry in limine.conf.
+KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
 if [ -n "${SLATE_CMDLINE:-}" ]; then
-    printf '    cmdline: %s\n' "$SLATE_CMDLINE" >> "$ESP_DIR/limine.conf"
-    echo "=== Injected kernel cmdline: $SLATE_CMDLINE ==="
+    KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"
 fi
+printf '    cmdline: %s\n' "$KERNEL_CMDLINE" >> "$ESP_DIR/limine.conf"
+echo "=== Kernel cmdline: $KERNEL_CMDLINE ==="
 
 # Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
 SWAP_IMG="$PROJECT_ROOT/build/swap.img"

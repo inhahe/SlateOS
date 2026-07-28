@@ -178,12 +178,35 @@ pub unsafe fn init() {
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments<'_>) {
     use core::fmt::Write;
+    OUTPUT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::cpu::without_interrupts(|| {
         // If the lock is poisoned (shouldn't happen with spinlocks) or the
         // write fails, silently drop the output rather than panicking inside a
         // print path.
         let _ = SERIAL.lock().write_fmt(args);
     });
+}
+
+/// Monotonic count of completed [`_print`] calls.
+///
+/// A boot-progress signal for the liveness watchdog. The scheduler's own
+/// progress counter (`USEFUL_WORK_TICKS`) only advances for timer ticks that
+/// preempt ring-3 code or a CPU with a queued task, so it stays frozen through
+/// the long *kernel-side* stretches of boot — ELF loading, page-fault storms
+/// serving a starting process, filesystem scans — even though boot is plainly
+/// advancing. Serial output is the signal that distinguishes those from a real
+/// hang, and it is the same criterion `scripts/boot-test.sh --stall-secs` uses
+/// from the outside: a wedged kernel goes silent, a merely-slow one keeps
+/// printing. See `sched::liveness_check`.
+///
+/// Counts *calls*, not bytes — the watchdog only asks "did anything come out
+/// during this interval?", so a single relaxed increment per call is enough and
+/// costs nothing next to the ~87 µs/char the UART itself takes.
+static OUTPUT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Read the serial output-progress counter (see [`OUTPUT_COUNT`]).
+pub fn output_count() -> u64 {
+    OUTPUT_COUNT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Print to the serial console (COM1).

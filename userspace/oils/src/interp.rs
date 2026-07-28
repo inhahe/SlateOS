@@ -10431,7 +10431,7 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        if builtin_runs_commands(name) && !redir.is_empty() {
+        if builtin_runs_commands(name, argv.get(1..).unwrap_or(&[])) && !redir.is_empty() {
             let plan = redir.clone();
             // The body sees an empty plan: everything in it has just been
             // installed for real, and applying it a second time at write time
@@ -10638,7 +10638,7 @@ impl Shell {
             "complete" => self.builtin_complete(args, out, redir),
             "compopt" => self.builtin_compopt(args),
             "trap" => self.builtin_trap(args, out, redir),
-            "jobs" => self.builtin_jobs(args, out, redir),
+            "jobs" => self.builtin_jobs(args, out, stdin, redir),
             "kill" => self.builtin_kill(args, out, stdin, redir),
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
@@ -12025,12 +12025,24 @@ impl Shell {
     /// so a job it reported is still nameable until the next command, whereas
     /// the jobspec form lists first and sweeps after — leaving nothing behind
     /// for a following `kill %1` to find.
-    fn builtin_jobs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_jobs(
+        &mut self,
+        args: &[String],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> i32 {
         self.poll_jobs();
         let mut long = false;
         let mut pids_only = false;
         let mut running_only = false;
         let mut stopped_only = false;
+        // `-x` is not a listing option at all: it turns the operands into a
+        // command to run. It refuses to share the line with an option that
+        // would have shaped a listing — but only one seen *before* it, since
+        // that is the point at which it looks.
+        let mut execute = false;
+        let mut listing_option = false;
         let mut specs: Vec<String> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
@@ -12044,9 +12056,8 @@ impl Shell {
                 break;
             };
             i += 1;
-            // Valid jobs options are -lnprsx; `-n` (changed-status-only) and
-            // `-x` (command substitution of jobspecs) are accepted but not yet
-            // honored here.
+            // Valid jobs options are -lnprsx; `-n` (changed-status-only) is
+            // accepted but not yet honored here.
             if let Some(c) = flags.chars().find(|c| !matches!(c, 'l' | 'n' | 'p' | 'r' | 's' | 'x')) {
                 return self.builtin_invalid_option(
                     "jobs",
@@ -12060,9 +12071,27 @@ impl Shell {
                     'p' => pids_only = true,
                     'r' => running_only = true,
                     's' => stopped_only = true,
+                    'x' => {
+                        if listing_option {
+                            self.emit_stderr(
+                                format!(
+                                    "{}jobs: no other options allowed with `-x'\n",
+                                    self.err_prefix()
+                                )
+                                .as_bytes(),
+                            );
+                            return 1;
+                        }
+                        execute = true;
+                        continue;
+                    }
                     _ => {}
                 }
+                listing_option = true;
             }
+        }
+        if execute {
+            return self.jobs_execute(&specs, out, stdin);
         }
         // With no jobspec every job is listed, in table order; with jobspecs
         // only the named ones are, and an unresolvable one is a diagnostic plus
@@ -12149,6 +12178,70 @@ impl Shell {
             self.cleanup_dead_jobs();
         }
         if status == 0 { wstatus } else { status }
+    }
+
+    /// `jobs -x command [args]` — run `command`, with every operand that *is* a
+    /// job spec replaced by the job's process id first.
+    ///
+    /// The point of it is to hand a job to something that only understands pids
+    /// (`jobs -x kill -9 %1`). Only a whole word spells a job: `x%1y` is left
+    /// alone, and so is a `%…` word that names no job — no diagnostic, since
+    /// the command may well have meant it literally. An ambiguous spec is
+    /// reported but likewise left in place.
+    ///
+    /// The command runs in the current shell, so `jobs -x eval …` can assign,
+    /// and nothing is expanded again: the operands were expanded once already
+    /// on the way in, and re-expanding a substituted word could split or glob
+    /// it. Listing is not involved at all — no job is reported, and none swept.
+    ///
+    /// bash substitutes the job's *process group*; osh has no process groups
+    /// (no terminal job control — TD-OILS13), so a job is its own process, and
+    /// the pid is what stands in. Under a bash that is not doing job control
+    /// the two differ: every child shares the shell's group, so bash answers
+    /// with a pgid that names no job in particular.
+    fn jobs_execute(&mut self, words: &[String], out: &mut Out, stdin: &StdinSrc) -> i32 {
+        if words.is_empty() {
+            return 0;
+        }
+        let argv: Vec<String> = words
+            .iter()
+            .map(|w| {
+                if !w.starts_with('%') {
+                    return w.clone();
+                }
+                match self.lookup_job(w) {
+                    JobLookup::Found(idx) => self.jobs[idx].pid.to_string(),
+                    JobLookup::Ambiguous(text) => {
+                        self.ambiguous_job_spec("jobs", &text);
+                        w.clone()
+                    }
+                    _ => w.clone(),
+                }
+            })
+            .collect();
+        // Quoted parts, so the words survive as they are: a substituted pid is
+        // not a pattern to match, and a spec left alone is not one either.
+        let sc = SimpleCommand {
+            words: argv
+                .into_iter()
+                .map(|a| Word {
+                    parts: vec![WordPart::SingleQuoted {
+                        text: a,
+                        escaped: false,
+                    }],
+                })
+                .collect(),
+            ..SimpleCommand::default()
+        };
+        match self.exec_simple(&sc, out, stdin) {
+            // An `exit` in the command unwinds the shell; a builtin can only
+            // return a status, so the side channel carries it (as `eval` does).
+            Flow::Exit(code) => {
+                self.pending_builtin_exit = Some(code);
+                code
+            }
+            _ => self.last_status,
+        }
     }
 
     /// `wait [id|pid|%job ...]` — wait for background jobs to finish. With no
@@ -18457,8 +18550,17 @@ impl RedirPlan {
 /// Such a builtin's output is not written by it — it is written by whatever it
 /// runs — so its redirections have to be installed around the body the way a
 /// compound command's are. See [`Shell::run_builtin`].
-fn builtin_runs_commands(name: &str) -> bool {
-    matches!(name, "eval" | "source" | ".")
+fn builtin_runs_commands(name: &str, args: &[String]) -> bool {
+    match name {
+        "eval" | "source" | "." => true,
+        // `jobs -x cmd …` runs `cmd`; every other spelling of `jobs` only
+        // prints, and so applies its own redirections at write time.
+        "jobs" => args
+            .iter()
+            .take_while(|a| a.as_str() != "--" && a.starts_with('-') && a.len() > 1)
+            .any(|a| a.contains('x')),
+        _ => false,
+    }
 }
 
 /// A redirection that could not be established, together with the plan built
@@ -31966,6 +32068,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let status = sh.run_source_out(src, &mut out, 0);
         let b = buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         (String::from_utf8_lossy(&b).into_owned(), status)
+    }
+
+    #[test]
+    fn jobs_x_substitutes_a_pid_for_a_whole_word_job_spec() {
+        // What `-x` is for: handing a job to something that only speaks pids.
+        // The corpus cannot check the substituted value — reference bash
+        // answers with a process group, which osh has no notion of — so it is
+        // checked here instead.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        sh.run_source("sleep 6 &");
+        let pid1 = sh.jobs[0].pid.to_string();
+        let pid2 = sh.jobs[1].pid.to_string();
+        // Every spelling of a spec resolves; a repeat resolves again.
+        let (o, s) = run_in(&mut sh, "jobs -x echo %1 %2 %+ %- %1");
+        assert_eq!(o, format!("{pid1} {pid2} {pid2} {pid1} {pid1}\n"));
+        assert_eq!(s, 0);
+        // Only a whole word is a spec, and one naming nothing is left as it is.
+        let (o, _) = run_in(&mut sh, "jobs -x echo x%1y %9 not%1");
+        assert_eq!(o, "x%1y %9 not%1\n");
+        // The words are not expanded again on the way through, so a substituted
+        // value is never split or matched against the filesystem.
+        let (o, _) = run_in(&mut sh, "jobs -x echo '*' 'a b'");
+        assert_eq!(o, "* a b\n");
+        sh.run_source("kill %1; kill %2");
     }
 
     #[test]

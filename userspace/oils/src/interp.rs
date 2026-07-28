@@ -10411,8 +10411,40 @@ impl Shell {
 
     // ---- builtins -----------------------------------------------------------
 
-    #[allow(clippy::too_many_lines)]
+    /// Run builtin `name`, with this command's redirections in force.
+    ///
+    /// Most builtins apply their own redirections at the moment they write —
+    /// [`Shell::write_bytes`] consults the plan, so `echo hi > f` needs nothing
+    /// installed. A builtin that runs *commands of its own* cannot work that
+    /// way: the bytes are produced by a nested command that never passes
+    /// through `write_bytes`, and its stdin is read by whoever it runs. Those
+    /// builtins get the compound-command treatment instead — the redirects are
+    /// installed around the whole body and torn down after it, so
+    /// `eval 'echo hi' > f` writes to the file and `eval cat <<< hi` has
+    /// something to read.
     fn run_builtin(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        assigns: &[(String, String)],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> Flow {
+        if builtin_runs_commands(name) && !redir.is_empty() {
+            let plan = redir.clone();
+            // The body sees an empty plan: everything in it has just been
+            // installed for real, and applying it a second time at write time
+            // would reopen (and so re-truncate) the very files below.
+            return self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
+                sh.run_builtin_body(name, argv, assigns, o, s, &RedirPlan::default())
+            });
+        }
+        self.run_builtin_body(name, argv, assigns, out, stdin, redir)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_builtin_body(
         &mut self,
         name: &str,
         argv: &[String],
@@ -18400,6 +18432,33 @@ struct RedirPlan {
     /// tables; on any other command they are ignored (a documented limitation —
     /// scoped per-command extra fds are not yet modelled).
     extra_fds: Vec<(i32, ExtraFdOp)>,
+}
+
+impl RedirPlan {
+    /// Whether the command had no redirections at all, and so needs none of the
+    /// setup and teardown that installing them entails.
+    fn is_empty(&self) -> bool {
+        self.stdin.is_none()
+            && self.stdin_data.is_none()
+            && self.stdin_from_fd.is_none()
+            && self.stdout.is_none()
+            && self.stderr.is_none()
+            && !self.stderr_to_stdout
+            && !self.stdout_to_stderr
+            && self.stdout_to_fd.is_none()
+            && self.stderr_to_fd.is_none()
+            && self.extra_fds.is_empty()
+    }
+}
+
+/// Whether a builtin runs commands of its own, rather than only reading and
+/// writing on its own account.
+///
+/// Such a builtin's output is not written by it — it is written by whatever it
+/// runs — so its redirections have to be installed around the body the way a
+/// compound command's are. See [`Shell::run_builtin`].
+fn builtin_runs_commands(name: &str) -> bool {
+    matches!(name, "eval" | "source" | ".")
 }
 
 /// A redirection that could not be established, together with the plan built

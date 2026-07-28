@@ -17236,7 +17236,11 @@ impl Shell {
         let mut origin_given = false;
         let mut callback: Option<String> = None;
         let mut quantum: usize = 5000;
+        // The array to fill. bash takes the *first* operand and simply ignores
+        // any after it — it never looks past `list->word`, so `mapfile a b`
+        // fills `a` and leaves `b` alone without a word of complaint.
         let mut array = String::from("MAPFILE");
+        let mut array_given = false;
         // `-u N`: read the array from user-space fd N (opened by `exec N< file`
         // or a coproc read end) instead of the ambient stdin. The raw spec is
         // kept so a non-numeric `-u abc` reproduces bash's exact diagnostic.
@@ -17287,7 +17291,12 @@ impl Shell {
                         &format!("{tag} [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"),
                     );
                 }
-                _ => array = a.clone(),
+                _ => {
+                    if !array_given {
+                        array = a.clone();
+                        array_given = true;
+                    }
+                }
             }
             i += 1;
         }
@@ -26222,6 +26231,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -n r=zz; mapfile -t r <<< hi; declare -p zz").0,
             "declare -a zz=([0]=\"hi\")\n"
+        );
+        // Only the first operand is the array; the rest are ignored outright,
+        // so a bad name after a good one costs nothing.
+        assert_eq!(
+            run("mapfile -t a 'b c' <<< hi 2>&1; echo rc=$?; declare -p a").0,
+            "rc=0\ndeclare -a a=([0]=\"hi\")\n"
         );
     }
 

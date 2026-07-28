@@ -15,7 +15,7 @@ use crate::ast::{
 };
 use crate::lexer::{
     Op, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked, tokenize, tokenize_deferred,
-    tokenize_spanned,
+    tokenize_spanned, word_is_assignment,
 };
 use std::collections::BTreeMap;
 
@@ -557,7 +557,7 @@ fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>) -> Result<Program, ParseError> 
 
 struct Parser {
     toks: Vec<Tok>,
-    /// Parallel to `toks`: the 1-based source line each token starts on, as
+    /// Parallel to `toks`: the 1-based source line each token *ends* on, as
     /// computed by the lexer. Read via [`Parser::cur_line`] and stamped onto
     /// each [`Item`] to drive `$LINENO` and error line numbers. Using per-token
     /// lines (rather than counting `Newline` tokens) keeps line numbers correct
@@ -1507,12 +1507,46 @@ impl Parser {
         self.pos += 1;
     }
 
+    /// The line to stamp on a simple command, matching what bash's parser
+    /// records for it.
+    ///
+    /// bash builds the `SIMPLE_COM` node when its grammar reduces the command's
+    /// *first* element, stamping it with `line_number` as it stands at that
+    /// moment. For a leading plain word the reduction cannot happen until one
+    /// more token has been read: the parser must see whether a `(` follows,
+    /// which would make this a function definition (`WORD '(' ')' …`) instead.
+    /// A leading redirection is the same shape — its own reduction consumes the
+    /// target word — so in both cases the line comes from the token *after* the
+    /// first. Only a leading assignment (`v=1 cmd …`, `a=(1) cmd …`) reduces on
+    /// sight, and is numbered by itself.
+    ///
+    /// The distinction is visible whenever the second token spans lines. All of
+    /// these were verified against bash 5.2:
+    ///
+    /// | source | `$LINENO` |
+    /// |---|---|
+    /// | `echo "a⏎b" $LINENO` | 2 |
+    /// | `echo $LINENO "x⏎y"` | 1 |
+    /// | `echo \⏎$LINENO` | 2 |
+    /// | `v=1 echo "a⏎b" $LINENO` | 1 |
+    fn simple_command_line(&self) -> u32 {
+        let leading_assignment = match self.toks.get(self.pos) {
+            Some(Tok::ArrayAssign { .. }) => true,
+            Some(Tok::Word(segs)) => word_is_assignment(segs),
+            _ => false,
+        };
+        if leading_assignment {
+            return self.cur_line();
+        }
+        self.lines
+            .get(self.pos.saturating_add(1))
+            .copied()
+            .unwrap_or_else(|| self.cur_line())
+    }
+
     fn parse_simple(&mut self) -> Result<Command, ParseError> {
         let mut cmd = SimpleCommand {
-            // Stamp the line the command begins on (its first token), so the
-            // interpreter can report the exact line of this command — matching
-            // bash's per-command `$LINENO` even inside a multi-line pipeline.
-            line: self.cur_line(),
+            line: self.simple_command_line(),
             ..SimpleCommand::default()
         };
         let mut seen_word = false;
@@ -2761,6 +2795,40 @@ mod tests {
             panic!("expected simple command");
         };
         assert_eq!(sc.words.len(), 3);
+    }
+
+    /// bash numbers a simple command by `line_number` at the moment its first
+    /// grammar element reduces — which for a leading plain word is *after* one
+    /// token of lookahead (needed to rule out a function definition), and for a
+    /// leading assignment is immediately. Every expectation is bash 5.2.37's
+    /// own `$LINENO` for the same source. See [`Parser::simple_command_line`].
+    #[test]
+    fn simple_command_line_follows_bashs_lookahead_rule() {
+        fn line_of(src: &str) -> u32 {
+            let prog = parse(src).unwrap();
+            let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected simple command");
+            };
+            sc.line
+        }
+        // The lookahead word ends on line 2, so the command is numbered 2 —
+        // even though it *starts* on line 1.
+        assert_eq!(line_of("echo \"a\nb\" $LINENO"), 2);
+        // A multi-line word that comes after the lookahead does not count.
+        assert_eq!(line_of("echo $LINENO \"x\ny\""), 1);
+        // A `\<newline>` between two words belongs to neither, so a lookahead
+        // word that precedes it still ends on line 1 …
+        assert_eq!(line_of("echo A \\\nB"), 1);
+        // … while one reached across it ends on line 2.
+        assert_eq!(line_of("echo \\\nB"), 2);
+        // Assignments reduce without lookahead: numbered by their own extent.
+        assert_eq!(line_of("v=1 echo \"a\nb\""), 1);
+        assert_eq!(line_of("v=\"a\nb\" echo c"), 2);
+        assert_eq!(line_of("a=(1) echo \"x\ny\""), 1);
+        assert_eq!(line_of("a=(1\n2) echo x"), 2);
+        // A lone word has only the newline to look ahead at, and reading that
+        // never fetches the following line.
+        assert_eq!(line_of("echo \"a\nb\"\ncmd\n"), 2);
     }
 
     #[test]

@@ -9662,7 +9662,15 @@ impl Shell {
                 // so `x=$(eval echo hi)` captures it, matching bash, and let an
                 // `exit` inside the string unwind the shell via the side channel
                 // (a builtin can only return an `i32`).
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin, 0);
+                //
+                // Line numbers inside the string continue the enclosing script's
+                // count: bash reports `LINENO(eval) - 1 + line_within_string`,
+                // because the string's first line *is* the line the `eval`
+                // command ended on. (`eval` on line 3 running a one-line string
+                // reports 3; running a three-line string reports 3, 4, 5.)
+                // `current_line` is already absolute, so nested evals compose.
+                let eval_base = self.current_line.saturating_sub(1);
+                let eval_flow = self.run_source_flow_out(&joined, out, stdin, eval_base);
                 self.eval_depth = self.eval_depth.saturating_sub(1);
                 match eval_flow {
                     Flow::Exit(code) => {
@@ -20953,6 +20961,14 @@ mod tests {
         let src = "echo one\nv=$(echo a\necho b\n";
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(4));
+
+        // "One past the last line" counts a final line with no newline of its
+        // own — the case an `eval` string always hits, since `eval 'v=$(echo a'`
+        // is one unterminated line and bash reports the line after it.
+        let e = parse("v=$(echo a").unwrap_err();
+        assert_eq!(e.line, Some(2));
+        let e = parse("echo one\nv=$(echo a").unwrap_err();
+        assert_eq!(e.line, Some(3));
     }
 
     #[test]

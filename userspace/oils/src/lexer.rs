@@ -546,7 +546,7 @@ fn assignment_acceptable(prev: Option<&Tok>) -> bool {
 /// is inspected; a subscript containing an expansion (`h[$i]=…`) is not chained
 /// past, which is an acceptable limitation for the rare "chained assignments
 /// with an expanded subscript" case.
-fn word_is_assignment(segs: &[Seg]) -> bool {
+pub(crate) fn word_is_assignment(segs: &[Seg]) -> bool {
     let Some(Seg::Lit(s)) = segs.first() else {
         return false;
     };
@@ -632,7 +632,9 @@ impl Lexer {
 
     fn run(&mut self) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
         let mut out = Vec::new();
-        // Parallel to `out`: the 1-based source line each token starts on.
+        // Parallel to `out`: the 1-based source line each token *ends* on (see
+        // `stamp_lines` — that is what bash's `line_number` holds once the token
+        // has been read).
         let mut lines: Vec<u32> = Vec::new();
         self.run_into(&mut out, &mut lines)?;
         Ok((out, lines))
@@ -874,15 +876,54 @@ impl Lexer {
             .saturating_add(u32::try_from(consumed).unwrap_or(u32::MAX))
     }
 
-    /// After one `run` iteration, stamp `start_line` onto every token appended
-    /// since the iteration began, then advance `self.line` past every newline
-    /// the iteration consumed (`self.chars[start_pos..self.pos]`). Counting from
-    /// the consumed character span — rather than from emitted `Newline` tokens —
-    /// keeps the line accurate across newlines hidden inside a token body (a
-    /// quoted string, a here-doc body, a command substitution).
+    /// The line an *end of input* diagnostic belongs on: one past the source's
+    /// last line.
+    ///
+    /// bash blames an unterminated `$( … )` on the end of input rather than on
+    /// its opening line, and the line it names is always one past the last: on
+    /// running out it asks for another input line, and that request bumps
+    /// `line_number` even though it comes back empty. A source with no trailing
+    /// newline still has a final partial line, which [`Lexer::cur_line`] does
+    /// not count — hence the adjustment. (Verified against bash 5.2: a 3-line
+    /// script whose line 2 opens `cat <(echo a` reports line 4, while
+    /// `eval 'v=$(echo a'` on line 2 of a script reports line 3.)
+    fn eof_line(&self) -> u32 {
+        let ends_with_newline = self.chars.last() == Some(&'\n');
+        self.cur_line()
+            .saturating_add(u32::from(!ends_with_newline))
+    }
+
+    /// After one `run` iteration, stamp every token appended since the iteration
+    /// began with the line the iteration *ended* on, then advance `self.line`
+    /// past every newline the iteration consumed
+    /// (`self.chars[start_pos..self.pos]`). Counting from the consumed character
+    /// span — rather than from emitted `Newline` tokens — keeps the line
+    /// accurate across newlines hidden inside a token body (a quoted string, a
+    /// here-doc body, a command substitution).
+    ///
+    /// The recorded line is the token's *last* line, not its first, because that
+    /// is what bash records: bash's `line_number` names the last input line it
+    /// has **fetched**, and a token is only complete once its final character
+    /// has been read. So `echo "a<newline>b" $LINENO` prints 2 — the second word
+    /// ends on line 2 — and a word reached across a `\<newline>` continuation
+    /// (`echo \<newline>$LINENO`) likewise reports the line it ends on.
+    ///
+    /// Newlines are counted only *strictly before* the iteration's final
+    /// character: reading that last character never forces the following line to
+    /// be fetched, so a token that ends *at* a newline — the `Newline` token
+    /// itself, or the one that swallowed a here-doc body — belongs to the line
+    /// it terminates rather than the one after it.
     fn stamp_lines(&mut self, out: &[Tok], lines: &mut Vec<u32>, start_line: u32, start_pos: usize) {
+        let inner = self
+            .chars
+            .get(start_pos..self.pos.saturating_sub(1))
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&ch| ch == '\n')
+            .count();
+        let end_line = start_line.saturating_add(u32::try_from(inner).unwrap_or(u32::MAX));
         while lines.len() < out.len() {
-            lines.push(start_line);
+            lines.push(end_line);
         }
         let consumed = self.chars[start_pos..self.pos]
             .iter()
@@ -1237,7 +1278,7 @@ impl Lexer {
                 // first stamps its own line and `at` will not overwrite it.
                 let raw = self
                     .read_balanced('(', ')')
-                    .map_err(|e| e.at(self.cur_line()))?;
+                    .map_err(|e| e.at(self.eof_line()))?;
                 segs.push(Seg::ProcSub(input, raw));
                 continue;
             }
@@ -1469,7 +1510,7 @@ impl Lexer {
                     // reports its own line — `at` will not overwrite.)
                     let raw = self
                         .read_balanced('(', ')')
-                        .map_err(|e| e.at(self.cur_line()))?;
+                        .map_err(|e| e.at(self.eof_line()))?;
                     Ok(Some(Seg::CmdSub(raw, self.cur_line())))
                 }
             }
@@ -1677,7 +1718,7 @@ impl Lexer {
                             } else {
                                 let inner = self
                                     .read_balanced('(', ')')
-                                    .map_err(|e| e.at(self.cur_line()))?;
+                                    .map_err(|e| e.at(self.eof_line()))?;
                                 raw.push_str(&inner);
                                 raw.push(')');
                             }

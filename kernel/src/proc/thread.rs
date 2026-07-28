@@ -32,7 +32,8 @@
 //! - All threads run in kernel mode (ring 0).  Userspace threads require
 //!   per-process address space switching and ring 3 transition (future).
 //! - Thread-local storage (TLS) is not yet supported.
-//! - Thread join/detach semantics are not yet implemented.
+//! - `join()` supports a single waiter per target thread; a second
+//!   concurrent joiner gets [`KernelError::WouldBlock`].
 
 use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::{self, ProcessId, ProcessState};
@@ -314,16 +315,11 @@ pub fn thread_exit_with_value(exit_value: i64, detached: bool) -> ! {
     // map entry — see `record_exit_value`).
     record_exit_value(task_id, exit_value, detached);
 
-    // Wake any thread that is joining on us.
-    {
-        let mut waiters = THREAD_JOIN_WAITERS.lock();
-        if let Some(waiter_task) = waiters.remove(&task_id) {
-            sched::wake(waiter_task);
-        }
-    }
-
     // Notify the thread/process system (may zombie the process if
-    // this was the last thread).
+    // this was the last thread).  This also wakes any thread joining on
+    // us — the wake lives in `on_thread_exit` so that *every* death path
+    // releases the joiner, not just this one.  The exit value is already
+    // recorded above, so the joiner is guaranteed to find it.
     on_thread_exit(task_id);
 
     // Terminate the scheduler task (never returns).
@@ -403,8 +399,28 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         waiters.insert(target_task, caller_task);
     }
 
-    // Block until the target thread exits and wakes us.
-    sched::block_current();
+    // Park until the target thread actually exits.
+    //
+    // `block_current()` can return **spuriously**: a `sched::wake` that
+    // lands while this task is still running leaves a `pending_wake`
+    // token which the next park consumes without any event having
+    // occurred (see known-issues.md
+    // `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`).  Returning on such a
+    // wake would hand the caller a bogus exit value for a thread that is
+    // still alive, so the loop re-checks the real condition: our own
+    // registration.  `on_thread_exit` removes it under the
+    // `THREAD_JOIN_WAITERS` lock immediately before waking us, so while
+    // the entry is still ours nothing has happened and we park again.
+    loop {
+        sched::block_current();
+        let released = {
+            let waiters = THREAD_JOIN_WAITERS.lock();
+            waiters.get(&target_task) != Some(&caller_task)
+        };
+        if released {
+            break;
+        }
+    }
 
     // Woken up — retrieve the exit value.
     {
@@ -414,10 +430,13 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         }
     }
 
-    // Shouldn't happen — we were woken because the target exited.
-    // Defensive fallback.
+    // The target died without recording an exit value.  That is expected
+    // for a detached thread (`record_exit_value` deliberately stores
+    // nothing) and for a thread killed by an unhandled exception or by
+    // process teardown, which run `on_thread_exit` without ever passing
+    // through `thread_exit_with_value`.  Report 0 rather than hanging.
     serial_println!(
-        "[thread] WARNING: join woke but no exit value for task {}",
+        "[thread] join: task {} exited without an exit value (detached or killed) — reporting 0",
         target_task
     );
     Ok(0)
@@ -440,6 +459,24 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // any process-state mutation while CR3 still points at this
     // thread's address space.
     super::thread_clone::on_thread_exit_hook(task_id);
+
+    // Release a thread parked in `join(task_id)`.
+    //
+    // This lives here — the *universal* thread-death hook — rather than
+    // in `thread_exit_with_value`, because a thread can die by several
+    // other paths: an unhandled exception (`idt.rs`), `exit_group`, or
+    // process teardown.  Those all reach `on_thread_exit` but never
+    // `thread_exit_with_value`, so waking only there left the joiner
+    // blocked forever.  It must also run *before* the `THREAD_OWNERS`
+    // lookup below, which returns early for tasks that were never
+    // registered as process threads — a joiner has to be released
+    // regardless of registration state.
+    {
+        let mut waiters = THREAD_JOIN_WAITERS.lock();
+        if let Some(waiter_task) = waiters.remove(&task_id) {
+            sched::wake(waiter_task);
+        }
+    }
 
     // Look up and remove the reverse mapping.
     let pid = {
@@ -787,6 +824,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_into_zombie_fails()?;
     test_thread_exit_with_value()?;
     test_thread_join()?;
+    test_blocking_join()?;
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
 
@@ -1085,6 +1123,192 @@ fn test_thread_join() -> KernelResult<()> {
     on_thread_exit(target);
     pcb::destroy(pid);
     serial_println!("[thread]   Thread join (value retrieval): OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Test 5b: the *blocking* join path
+// ---------------------------------------------------------------------------
+
+/// Set to 1 by the joiner task once `join()` has returned.
+static BJ_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The value `join()` returned (`i64::MIN` if it returned an error).
+static BJ_RESULT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+/// Non-zero if the *target* task detected a protocol violation:
+/// 1 = the joiner never registered, 2 = `join()` returned while the
+/// target was still alive.
+static BJ_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Join target: waits until the joiner has parked on it, then dies.
+///
+/// The handshake is deliberately **between the two spawned tasks**, not
+/// with the task running the self-test: both spawned tasks run at
+/// `DEFAULT_PRIORITY`, so while either is runnable the (lower-priority)
+/// boot task is never scheduled.  Gating the target on a flag set by the
+/// boot task would therefore livelock.
+///
+/// `arg != 0` records an exit value first (the `thread_exit_with_value`
+/// path); `arg == 0` records nothing (the crash / `exit_group` path,
+/// where the thread never passes through `thread_exit_with_value`).
+/// Either way the death is signalled only through `on_thread_exit`,
+/// which is where the join wake lives.
+extern "C" fn bj_target_entry(arg: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let task_id = sched::current_task_id();
+
+    // Wait for the joiner to register itself on us — that is the exact
+    // moment it is about to park.
+    let mut spins = 0u32;
+    while bj_waiter_of(task_id).is_none() && spins < 100_000 {
+        sched::yield_now();
+        spins = spins.saturating_add(1);
+    }
+    if bj_waiter_of(task_id).is_none() {
+        BJ_FAIL.store(1, SeqCst);
+        return;
+    }
+
+    // We are still alive, so a correct `join()` must still be parked.
+    // Give it many scheduling opportunities to prove it stays parked
+    // (this is what a spurious wake would break).
+    for _ in 0..256 {
+        sched::yield_now();
+    }
+    if BJ_DONE.load(SeqCst) != 0 {
+        BJ_FAIL.store(2, SeqCst);
+        return;
+    }
+
+    if arg != 0 {
+        record_exit_value(task_id, 77, false);
+    }
+    on_thread_exit(task_id);
+}
+
+/// Joiner: blocks in `join(target)` and publishes the outcome.
+extern "C" fn bj_joiner_entry(target: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    BJ_RESULT.store(join(target).unwrap_or(i64::MIN), SeqCst);
+    BJ_DONE.store(1, SeqCst);
+}
+
+/// Which task, if any, is currently registered as joining on `target`?
+fn bj_waiter_of(target: TaskId) -> Option<TaskId> {
+    let waiters = THREAD_JOIN_WAITERS.lock();
+    waiters.get(&target).copied()
+}
+
+/// Test 5b: `join()` blocks until the target *really* exits.
+///
+/// Regression test for two defects:
+///
+/// 1. `join()` used to park with a single bare `block_current()`, so a
+///    spurious wake (a stale `pending_wake` token — see known-issues.md
+///    `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`) could make it return a
+///    bogus exit value while the target was still running.  The target
+///    itself asserts the joiner is still parked (256 yields after the
+///    registration appears, `BJ_DONE` must still be 0).
+/// 2. The join wake used to live in `thread_exit_with_value`, so a
+///    thread that died by any other route (unhandled exception,
+///    `exit_group`, process teardown) never released its joiner.  Both
+///    phases kill the target through `on_thread_exit` alone; phase 2
+///    additionally records no exit value, as a crash would not.
+fn test_blocking_join() -> KernelResult<()> {
+    run_blocking_join_phase(true, 77)?;
+    run_blocking_join_phase(false, 0)
+}
+
+/// Tear down a failed phase's fixture and fail.
+///
+/// The target releases the joiner on *every* exit path it takes, so by
+/// the time the boot task runs again neither task can still be parked;
+/// this only reaps the bookkeeping.
+fn bj_fail(pid: ProcessId, target: TaskId, joiner: TaskId) -> KernelResult<()> {
+    // Release a joiner still parked on a target that bailed out early
+    // (BJ_FAIL paths return without calling `on_thread_exit`).
+    on_thread_exit(target);
+    for _ in 0..256 {
+        sched::yield_now();
+    }
+    on_thread_exit(joiner);
+    pcb::destroy(pid);
+    Err(KernelError::InternalError)
+}
+
+fn run_blocking_join_phase(record_value: bool, expected: i64) -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    BJ_DONE.store(0, SeqCst);
+    BJ_FAIL.store(0, SeqCst);
+    BJ_RESULT.store(i64::MIN, SeqCst);
+
+    let pid = pcb::create("thread-test-blocking-join", 0);
+    let target = spawn(
+        pid,
+        b"bj-target",
+        sched::task::DEFAULT_PRIORITY,
+        bj_target_entry,
+        u64::from(record_value),
+    )?;
+    let joiner = spawn(
+        pid,
+        b"bj-joiner",
+        sched::task::DEFAULT_PRIORITY,
+        bj_joiner_entry,
+        target,
+    )?;
+
+    // Both spawned tasks outrank the boot task, so this loop only makes
+    // progress once they are done (or the joiner is stuck parked with
+    // the target gone, which the bound below catches).
+    let mut spins = 0u32;
+    while BJ_DONE.load(SeqCst) == 0 && BJ_FAIL.load(SeqCst) == 0 && spins < 100_000 {
+        sched::yield_now();
+        spins = spins.saturating_add(1);
+    }
+
+    match BJ_FAIL.load(SeqCst) {
+        0 => {}
+        1 => {
+            serial_println!(
+                "[thread]   FAIL: joiner {} never registered on target {}",
+                joiner, target
+            );
+            return bj_fail(pid, target, joiner);
+        }
+        code => {
+            serial_println!(
+                "[thread]   FAIL: join() returned while the target was still alive (code {})",
+                code
+            );
+            return bj_fail(pid, target, joiner);
+        }
+    }
+
+    if BJ_DONE.load(SeqCst) == 0 {
+        serial_println!(
+            "[thread]   FAIL: joiner still blocked {} yields after the target exited",
+            spins
+        );
+        return bj_fail(pid, target, joiner);
+    }
+
+    let got = BJ_RESULT.load(SeqCst);
+    if got != expected {
+        serial_println!(
+            "[thread]   FAIL: join() returned {} (expected {}, record_value={})",
+            got, expected, record_value
+        );
+        return bj_fail(pid, target, joiner);
+    }
+
+    on_thread_exit(target);
+    on_thread_exit(joiner);
+    pcb::destroy(pid);
+    serial_println!(
+        "[thread]   Blocking join (exit value recorded: {}): OK",
+        record_value
+    );
     Ok(())
 }
 

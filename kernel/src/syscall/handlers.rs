@@ -420,6 +420,14 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
 /// If the pending counter is already > 0, consumes and returns
 /// immediately.  Otherwise, blocks the calling task until the ISR
 /// increments the counter and the deferred-wake mechanism wakes us.
+///
+/// The park is inside a re-check loop because [`sched::block_current`]
+/// can return **spuriously**: a `wake`/`try_wake` that lands while the
+/// task is still running leaves a `pending_wake` token which the next
+/// park consumes without any interrupt having fired (see
+/// known-issues.md `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`).  The only
+/// truthful signal is the pending counter itself, so the loop returns
+/// only a count that an ISR actually recorded — never a fabricated one.
 pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
     let irq = args.arg0;
 
@@ -429,31 +437,29 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
 
     #[allow(clippy::cast_possible_truncation)]
     let irq_u32 = irq as u32;
-
-    // Fast path: if interrupts are already pending, consume and return.
-    let count = crate::ioapic::irq_consume(irq_u32);
-    if count > 0 {
-        #[allow(clippy::cast_possible_wrap)]
-        return SyscallResult::ok(count as i64);
-    }
-
-    // Ensure the calling task is registered for this IRQ's wakeup.
     let task_id = sched::current_task_id();
-    crate::ioapic::irq_register_task(irq_u32, task_id);
 
-    // Slow path: block until IRQ fires.
-    //
-    // The ISR will increment the pending counter and attempt to wake
-    // us immediately (via try_wake).  If that fails, the timer ISR's
-    // deferred-wake scan will catch it within ~10 ms.
-    sched::block_current();
+    loop {
+        // Fast path (and post-wake re-check): consume whatever fired.
+        let count = crate::ioapic::irq_consume(irq_u32);
+        if count > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            return SyscallResult::ok(count as i64);
+        }
 
-    // We've been woken — consume the pending count.
-    let count = crate::ioapic::irq_consume(irq_u32);
-    // At least 1 interrupt must have fired to wake us.
-    let result = if count > 0 { count } else { 1 };
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(result as i64)
+        // Ensure the calling task is registered for this IRQ's wakeup.
+        // Re-registering each iteration is an idempotent atomic store and
+        // covers the case where the registration was cleared while we
+        // were running.
+        crate::ioapic::irq_register_task(irq_u32, task_id);
+
+        // Slow path: block until the IRQ fires.
+        //
+        // The ISR will increment the pending counter and attempt to wake
+        // us immediately (via try_wake).  If that fails, the timer ISR's
+        // deferred-wake scan will catch it within ~10 ms.
+        sched::block_current();
+    }
 }
 
 /// `SYS_IRQ_RELEASE` — release a previously registered IRQ line.

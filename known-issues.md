@@ -6679,6 +6679,30 @@ the entry closes as WONTFIX.
 **Impact.** Negligible: sending a pseudo signal is meaningless in either shell.
 Deliberately left out of the corpus.
 
+### TD-OILS-KILL-PIPELINE-STATUS. Killing a background *pipeline* gives it the signal's status, where bash gives it the last stage's own exit — OPEN 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — the `JobBody::Thread` arm of
+`Shell::kill_one`.
+
+**What.** `sleep 1 | cat & sleep 0.1; kill -TERM %1; sleep 0.2; jobs` lists
+`Done` in bash and `Terminated` in osh.
+
+**Why.** A pipeline in bash is several processes, and `kill %1` signals the
+leading stage. `sleep` dies of SIGTERM, `cat` then reads EOF and exits 0 — and a
+pipeline's status is its *last* stage's, so the job is a clean `Done`. osh runs
+the whole pipeline as one thread-backed job, so there is only one thing to
+signal and its status is the signal's.
+
+**Proper fix.** Needs per-stage job membership: record each stage of a pipeline
+job separately, signal the leader, and take the job's status from the last
+stage. That is the same structural gap as TD-OILS-KILL-PGRP and the
+thread-backed-job limitations in TD-OILS13 §1 — a job is currently one entry,
+not a set of processes.
+
+**Impact.** Narrow, and only observable through the `jobs` state word: `wait`
+already reports the last stage's status. Kept out of
+`tests/corpus/kill-dispositions.sh`, which signals only single-process jobs.
+
 ### TD-OILS-KILL-PGRP. osh has no notion of a process group, so `kill 0` and a negative pid do not reach one — OPEN 2026-07-27
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::kill_one`.

@@ -2970,6 +2970,32 @@ impl Shell {
         Flow::Next
     }
 
+    /// The terminal width the `select` menu is laid out for — bash's
+    /// `default_columns`: `$COLUMNS` when it names a positive number, else the
+    /// real window size (only under `shopt -s checkwinsize`, and only when the
+    /// shell is on a terminal), else 80. osh has no window-size query, so an
+    /// unset `$COLUMNS` always lands on 80 — the same answer bash gives whenever
+    /// it is not attached to a terminal. See known-issues TD-OILS-SELECT-COLS.
+    fn menu_columns(&self) -> usize {
+        // bash reads the variable with `atoi`, which skips leading whitespace,
+        // takes an optional sign and stops at the first non-digit — so `40x` is
+        // 40 while `abc` is 0. A leading `-` leaves no digits here, which lands
+        // on the same "not positive, use the default" branch bash takes.
+        let raw = self.vars.get("COLUMNS").map_or("", String::as_str);
+        let t = raw.trim_start();
+        let t = t.strip_prefix('+').unwrap_or(t);
+        let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+        match digits.parse::<usize>() {
+            Ok(0) => 80,
+            Ok(c) => c,
+            // No digits at all, or a run too long for `usize`. The former is
+            // bash's `atoi` returning 0; the latter is a terminal wider than
+            // any list, which lays out like any very large width.
+            Err(_) if digits.is_empty() => 80,
+            Err(_) => usize::MAX,
+        }
+    }
+
     /// `select name [in words]; do body; done` — bash's interactive menu loop.
     /// Prints the numbered word list (once, and again after a blank line) to
     /// stderr, writes the `PS3` prompt (default `#? `), reads a line from stdin,
@@ -3009,11 +3035,9 @@ impl Shell {
         let mut show_menu = true;
         loop {
             if show_menu {
-                let mut menu = String::new();
-                for (i, it) in items.iter().enumerate() {
-                    // `i + 1` cannot overflow: item counts are bounded by memory.
-                    menu.push_str(&format!("{}) {it}\n", i + 1));
-                }
+                // bash re-reads `COLS` on every menu print, so a body that
+                // reassigns `COLUMNS` changes the next menu's layout.
+                let menu = select_menu(&items, self.menu_columns());
                 self.emit_stderr(menu.as_bytes());
                 show_menu = false;
             }
@@ -18235,6 +18259,114 @@ fn signal_list_columns() -> String {
     buf
 }
 
+/// bash's `NUMBER_LEN` macro: the decimal digit count of `n`, saturating at
+/// six digits (bash's own comment concedes it "does not handle numbers >
+/// 1000000 at all"). Zero is one digit wide, as in bash.
+fn number_len(n: usize) -> usize {
+    match n {
+        0..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        1_000..=9_999 => 4,
+        10_000..=99_999 => 5,
+        _ => 6,
+    }
+}
+
+/// The display width of a menu item — bash's `displen`, which is `wcswidth` of
+/// the decoded string (falling back to the byte length when it will not
+/// decode). Our strings are already Unicode, so this is the character count:
+/// it agrees with bash for everything except zero-width and double-width
+/// characters, where bash's `wcswidth` is finer. See known-issues
+/// TD-OILS-SELECT-DISPLEN.
+fn display_width(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// bash's `indent`: pad from column `from` to column `to`, emitting a *tab*
+/// whenever one would land at or before `to` and single spaces otherwise. The
+/// tab stop is hard-coded to 8 in bash 5.2 (the `TABSIZE` variable lookup is
+/// `#if 0`'d out), so a `select` menu is not width-clean if the reader's tabs
+/// are set differently — that is bash's output, and we reproduce it.
+fn indent_to(buf: &mut String, from: usize, to: usize) {
+    const TABSIZE: usize = 8;
+    let mut from = from;
+    while from < to {
+        if to / TABSIZE > from / TABSIZE {
+            buf.push('\t');
+            from += TABSIZE - from % TABSIZE;
+        } else {
+            buf.push(' ');
+            from += 1;
+        }
+    }
+}
+
+/// Render a `select` menu the way bash's `print_select_list` does: items packed
+/// **column-major** into as many columns as `cols_avail` (bash's `COLS`) allows,
+/// with tab-padded gutters.
+///
+/// Three details are easy to get wrong and all are observable:
+///
+/// * `max_elem_len` — the widest item plus the index width, `") "` and a
+///   two-column gutter — is the *stride* between column starts. The column
+///   count is `COLS / max_elem_len`, then re-derived from the row count so the
+///   last column is as full as possible.
+/// * A layout that comes out one row tall is *transposed* into one column, so
+///   a short list prints one item per line (the familiar `select` look) rather
+///   than a single long row.
+/// * The first column right-aligns its indices to the digit count of the *row*
+///   count, every later column to that of the *item* count. With two rows and
+///   twelve items those are 1 and 2, so the leftmost column alone loses the
+///   leading blank.
+///
+/// The row loop stops as soon as it runs off the end of the list, so a short
+/// final column simply ends the row — no trailing padding is emitted.
+fn select_menu(items: &[String], cols_avail: usize) -> String {
+    if items.is_empty() {
+        return "\n".to_string();
+    }
+    let list_len = items.len();
+    let indices_len = number_len(list_len);
+    let widest = items.iter().map(|s| display_width(s)).max().unwrap_or(0);
+    // At least 5, so the divisions below cannot trap.
+    let max_elem_len = widest + indices_len + ") ".len() + 2;
+    let cols = (cols_avail / max_elem_len).max(1);
+    let mut rows = list_len / cols + usize::from(!list_len.is_multiple_of(cols));
+    let cols = list_len / rows + usize::from(!list_len.is_multiple_of(rows));
+    if rows == 1 {
+        // bash also sets `cols = 1` here, but the column count is not consulted
+        // again — the row loop is bounded by the list, not by `cols`.
+        rows = cols;
+    }
+    let first_indices_len = number_len(rows);
+    let mut buf = String::new();
+    for row in 0..rows {
+        let mut ind = row;
+        let mut pos = 0usize;
+        loop {
+            let width = if pos == 0 { first_indices_len } else { indices_len };
+            let Some(item) = items.get(ind) else { break };
+            let label = (ind + 1).to_string();
+            for _ in label.len()..width {
+                buf.push(' ');
+            }
+            buf.push_str(&label);
+            buf.push_str(") ");
+            buf.push_str(item);
+            let elem_len = display_width(item) + width + ") ".len();
+            ind += rows;
+            if ind >= list_len {
+                break;
+            }
+            indent_to(&mut buf, pos + elem_len, pos + max_elem_len);
+            pos += max_elem_len;
+        }
+        buf.push('\n');
+    }
+    buf
+}
+
 /// Parse a `kill` signal spec to its number. Accepts a signal name with or
 /// without a `SIG` prefix (case-insensitive: `KILL`, `sigkill`) and, unless
 /// `numeric_only` restricts to `-n`, a decimal signal number. Signal `0` (the
@@ -22758,6 +22890,69 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // two streams separated.
         let (o, _) = run("select x in a b; do echo \"$x\"; done <<< \"1\"");
         assert_eq!(o, "a\n\n");
+    }
+
+    #[test]
+    fn select_menu_layout_matches_bash() {
+        let items = |s: &str| -> Vec<String> { s.split(' ').map(str::to_string).collect() };
+        // A list that fits on one row is transposed into one *column* — the
+        // familiar `select` look.
+        assert_eq!(select_menu(&items("aaaa bbbb cccc"), 80), "1) aaaa\n2) bbbb\n3) cccc\n");
+        // Twelve one-character items at 80 columns: stride 1+2+2+2 = 7, so
+        // 80/7 = 11 columns, 2 rows, then 6 columns. Column-major, and the
+        // first column's indices are one digit wide while the rest are two.
+        assert_eq!(
+            select_menu(&items("a b c d e f g h i j k l"), 80),
+            "1) a    3) c   5) e   7) g   9) i  11) k\n\
+             2) b    4) d   6) f   8) h  10) j  12) l\n"
+        );
+        // Narrower screens repack the same list; at width 1 it degenerates to
+        // one column, where *every* index is two digits wide because the row
+        // count is 12.
+        assert_eq!(
+            select_menu(&items("a b c d e f g h i j k l"), 40),
+            "1) a    4) d   7) g  10) j\n\
+             2) b    5) e   8) h  11) k\n\
+             3) c    6) f   9) i  12) l\n"
+        );
+        assert!(select_menu(&items("a b c d e f g h i j k l"), 1).starts_with(" 1) a\n 2) b\n"));
+        // Gutters are padded with tabs wherever a tab stop can be reached.
+        assert_eq!(
+            select_menu(&items("i1 i2 i3 i4 i5 i6 i7 i8 i9 i10 i11"), 80),
+            "1) i1\t  3) i3\t   5) i5    7) i7    9) i9   11) i11\n\
+             2) i2\t  4) i4\t   6) i6    8) i8   10) i10\n"
+        );
+        // A short final column just ends its row — no trailing padding.
+        assert_eq!(
+            select_menu(&items("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccc"), 80),
+            "1) aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  3) cccccccccccccccccccccccccccccc\n\
+             2) bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        );
+        // bash prints a bare newline for an empty list (unreachable from
+        // `select`, which returns before printing, but part of the function).
+        assert_eq!(select_menu(&[], 80), "\n");
+    }
+
+    #[test]
+    fn select_menu_columns_read_like_atoi() {
+        // `$COLUMNS` is read with `atoi`: leading whitespace and a sign are
+        // skipped and the first non-digit ends the number, so `40x` is 40 while
+        // `abc`, `0`, a negative and an unset variable all fall back to 80.
+        let wide = "select o in aaaa bbbb cccc dddd eeee ffff gggg hhhh; do break; done </dev/null 2>&1 | head -1";
+        for v in ["40x", " 40", "+40", "0040", "40 "] {
+            assert_eq!(
+                run(&format!("COLUMNS={}; {wide}", single_quote(v))).0,
+                "1) aaaa\t 3) cccc  5) eeee  7) gggg\n",
+                "COLUMNS={v:?}"
+            );
+        }
+        for v in ["-5", "0", "abc", "", "999999999999999999999999"] {
+            assert_eq!(
+                run(&format!("COLUMNS={}; {wide}", single_quote(v))).0,
+                "1) aaaa\n",
+                "COLUMNS={v:?}"
+            );
+        }
     }
 
     #[test]

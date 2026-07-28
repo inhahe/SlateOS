@@ -2217,6 +2217,91 @@ returns native error codes for misalign/len0/bad-prot/overflow) plus the
 pre-existing Linux `self_test_mprotect_validation`/`self_test_mprotect_flush_range`
 which continue to exercise the shared core.
 
+### TD-OILS-SELECT-DISPLEN. `select`'s menu measures items in characters, not display columns — OPEN (low priority, gated on a width table) — 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — the free function `display_width`,
+used by `select_menu` to compute the widest item (and hence the column stride)
+and each element's length (and hence the gutter padding).
+
+**What:** bash's `displen()` (`lib/sh/strtrans.c` → `execute_cmd.c`) decodes the
+item to wide characters and returns `wcswidth()`, i.e. the number of *terminal
+columns* it occupies; it falls back to the byte length only when the string will
+not decode. osh returns `s.chars().count()`.
+
+The two agree for every character whose width is 1 — which is all of ASCII, all
+of Latin-1, and the overwhelming majority of what appears in a `select` menu.
+They disagree in exactly two directions:
+
+* **zero-width characters** (combining marks U+0300…, ZWJ/ZWNJ, most of
+  `Mn`/`Me`/`Cf`): bash counts 0, osh counts 1, so osh over-estimates the item
+  and pads one column too few after it;
+* **double-width characters** (East Asian Wide/Fullwidth — CJK, Hangul,
+  fullwidth forms, many emoji): bash counts 2, osh counts 1, so osh
+  under-estimates and the columns after such an item are pushed right.
+
+Neither can misalign a pure-ASCII menu, and neither affects which item a
+selection maps to — only where the gutters land.
+
+**Proper fix:** add a `char_display_width(c) -> usize` helper backed by a
+Unicode East-Asian-Width + combining-class table (UAX #11 / UAX #44) and sum it
+in `display_width`. That table is the actual cost here: osh deliberately carries
+no Unicode data tables today (`${#var}` and `${var:off:len}` count characters
+for the same reason — see TD-OILS-STRLEN-CHARS), so introducing one is a
+crate-wide decision, not a `select`-local one. Doing it would also let the
+`help`, `compgen` and `signal_list_columns` layouts stop counting characters.
+
+**Repro (measured 2026-07-27):**
+`COLUMNS=80 <sh> -c 'select o in 日本語 ab cd ef gh ij kl mn; do break; done'
+</dev/null`. The item is 3 characters / 6 display columns / 9 UTF-8 bytes, so
+the three answers give three different strides and the *shape* of the whole
+menu changes, not just a gutter:
+
+```
+bash 5.2:                        osh:
+1) 日本語  3) cd<TAB>    5) gh<TAB>  7) kl      1) 日本語
+2) ab<TAB>      4) ef<TAB>    6) ij<TAB>  8) mn      2) ab
+                                             … one item per line …
+```
+
+bash reaches `stride = 9+1+2+2 = 14` → 2 rows × 4 columns; osh reaches
+`stride = 3+1+2+2 = 8` → the layout comes out one row tall and is transposed
+into a single column. Note that *this host's* bash is in the C locale, so its
+`displen` takes the byte-length fallback (9) rather than `wcswidth` (6) — the
+two happen to agree on the final 2×4 layout here, but they are distinct
+behaviours and a proper fix must implement `wcswidth`, not the byte length.
+The differential corpus case `select-menu.sh` is deliberately all-ASCII so it
+stays byte-exact; a non-ASCII case would have to be waived.
+
+### TD-OILS-SELECT-COLS. `select`'s menu never queries the real window size — OPEN (low priority, gated on a terminal-size syscall) — 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::menu_columns`, the sole
+input to `select_menu`'s column arithmetic.
+
+**What:** bash's `default_columns()` resolves the menu width in three steps:
+`$COLUMNS` if it reads (via `atoi`) as a positive number; otherwise the real
+window size — but *only* when `shopt -s checkwinsize` is set **and** the shell
+is attached to a terminal, in which case bash issues a `TIOCGWINSZ` and also
+publishes the result back into `$COLUMNS`/`$LINES`; otherwise 80.
+
+osh implements the first and third steps exactly (including bash's `atoi`
+quirks: leading whitespace and a sign are skipped, the first non-digit ends the
+number, so `40x` is 40 and `abc` is 0 → 80). It never performs the middle step,
+so with `$COLUMNS` unset osh always lays the menu out for 80 columns.
+
+**Impact:** none for scripts — the divergence needs an *interactive* shell on a
+terminal with `checkwinsize` on and `$COLUMNS` unset, and even then it only
+changes menu cosmetics. Every non-interactive invocation (including the whole
+differential corpus, which pipes) already gets bash's own 80. It is recorded
+because the comment in `menu_columns` promises it.
+
+**Proper fix:** two prerequisites, both outside oils. (1) A terminal-size query
+on the target — SlateOS has no `TIOCGWINSZ` equivalent wired through to
+userspace yet; on the Windows dev host it would be
+`GetConsoleScreenBufferInfo`. (2) `shopt -s checkwinsize` support plus the
+"publish back into `$COLUMNS`/`$LINES` after each command" hook, which bash
+also uses for `help` and readline. Once both exist, `menu_columns` gains a
+middle arm and TD-OILS-HELP-LAYOUT's width argument changes too.
+
 ### TD-OILS-ESCAPED-METACHAR. Backslash-escaped glob/pattern metacharacters in *unquoted* words are treated as live metacharacters — 2026-07-20 — ✅ RESOLVED 2026-07-20 (glob/`case`/`[[ == ]]`/param-expansion/`=~` all fixed; only reserved-word suppression `\if` remains, tracked below)
 
 **Where (root cause):** the two word lexers folded a backslash-escaped

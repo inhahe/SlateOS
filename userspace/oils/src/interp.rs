@@ -5486,13 +5486,37 @@ impl Shell {
     }
 
     /// Resolve the base value for a parameter expansion operator, honoring an
-    /// optional element subscript. `None` (no subscript) reads the scalar/plain
-    /// parameter; `Some(w)` reads element `w` — a string key for associative
-    /// arrays, else an arithmetic index for indexed arrays. Returns `None` when
-    /// the parameter/element is unset.
+    /// optional element subscript, and report a subscript that named nowhere.
+    ///
+    /// `None` (no subscript) reads the scalar/plain parameter; `Some(w)` reads
+    /// element `w` — a string key for associative arrays, else an arithmetic
+    /// index for indexed arrays. Returns `None` when the parameter/element is
+    /// unset, which is also what a bad subscript leaves behind: every operator
+    /// reads its base value through here, and each of them carries on with the
+    /// element treated as unset once the complaint is made — so `${a[-9]-D}`
+    /// gives the default and `${a[-9]:?msg}` raises its own error after this one.
     fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<String> {
-        let name = &self.resolve_ref_use(name)?;
-        match index {
+        match self.param_elem_lookup(name, index) {
+            ElemValue::Value(v) => Some(v),
+            ElemValue::Absent => None,
+            ElemValue::BadSubscript(base) => {
+                self.errln(&format!("{}{base}: bad array subscript", self.err_prefix()));
+                None
+            }
+        }
+    }
+
+    /// [`Self::param_elem_value`] without the complaint — the raw answer,
+    /// including *why* it is nothing.
+    ///
+    /// Kept apart from the reporting wrapper for the callers that only need to
+    /// *recognise* what a reference names and will resolve it again, in full, if
+    /// it turns out not to be theirs: resolving twice must not complain twice.
+    fn param_elem_lookup(&mut self, name: &str, index: &Option<Box<Word>>) -> ElemValue {
+        let Some(name) = &self.resolve_ref_use(name) else {
+            return ElemValue::Absent;
+        };
+        let found = match index {
             None => self.param_value(name),
             Some(w) => {
                 if self.assoc.contains_key(name) {
@@ -5500,26 +5524,19 @@ impl Shell {
                     // and is reported exactly as an out-of-range index is.
                     let key = self.expand_to_string(w);
                     if key.is_empty() {
-                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
-                        return None;
+                        return ElemValue::BadSubscript(name.clone());
                     }
                     self.assoc_element(name, &key)
                 } else {
                     let idx = self.eval_arith_index(w);
-                    // Every operator reads its base value through here, and each
-                    // of them reports a subscript that names nowhere the same
-                    // non-fatal way the bare `${a[-9]}` does, then carries on
-                    // with the element treated as unset — so `${a[-9]-D}` gives
-                    // the default and `${a[-9]:?msg}` raises its own error after
-                    // this one.
                     if self.subscript_is_bad(name, idx) {
-                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
-                        return None;
+                        return ElemValue::BadSubscript(name.clone());
                     }
                     self.array_element(name, idx)
                 }
             }
-        }
+        };
+        found.map_or(ElemValue::Absent, ElemValue::Value)
     }
 
     /// Write `value` back to a parameter or array element, honoring an optional
@@ -5580,16 +5597,68 @@ impl Shell {
         true
     }
 
+    /// How a `${!ref}` reference reads back as text — `ref`, or `ref[src]` when
+    /// the pointer is an array element. The subscript is rendered from its
+    /// *source*, not its value, because that is what bash's complaints about
+    /// such a reference quote: `${!a[$n]}` names `a[$n]`.
+    fn indirect_ref_src(refname: &str, index: &Option<Box<Word>>) -> String {
+        crate::unparse::name_sub(refname, index)
+    }
+
+    /// The value a `${!ref}` expansion points *with*: `ref`'s own value, or —
+    /// when the reference carries a subscript (`${!a[0]}`) — the element's.
+    ///
+    /// Three outcomes rather than two, because an element that is not there is
+    /// not the same as a pointer that is not there. A reference whose *variable*
+    /// does not exist had nothing to point with at all, and is bash's fatal
+    /// "invalid indirect expansion"; a missing *element* of a variable that does
+    /// exist is `Ok(None)` — there is simply no target name, which every caller
+    /// then treats as an unset parameter would be treated. `Err` means the
+    /// complaint has already been made and the command is to be discarded.
+    fn indirect_pointer_value(
+        &mut self,
+        refname: &str,
+        index: &Option<Box<Word>>,
+    ) -> Result<Option<String>, ()> {
+        if index.is_some() && !self.var_is_set(refname) {
+            let src = Self::indirect_ref_src(refname, index);
+            self.errln(&format!(
+                "{}{src}: invalid indirect expansion",
+                self.err_prefix()
+            ));
+            self.discard_error = Some(1);
+            return Err(());
+        }
+        match self.param_elem_value(refname, index) {
+            Some(v) => Ok(Some(v)),
+            // A plain pointer that is unset is the fatal case; an absent element
+            // — or one whose subscript `param_elem_value` has already called bad
+            // — leaves the reference pointing nowhere, which is not an error.
+            None if index.is_none() => {
+                self.errln(&format!(
+                    "{}{refname}: invalid indirect expansion",
+                    self.err_prefix()
+                ));
+                self.discard_error = Some(1);
+                Err(())
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
     /// (scalar context; `[@]`/`[*]` join with a space).
     /// `${!ref}` — indirect expansion: read the variable whose name is the
     /// value of `ref`. The referent may itself name an array element
-    /// (`ref=a[0]` / `ref=m[key]`).
-    fn expand_indirect(&mut self, refname: &str) -> String {
+    /// (`ref=a[0]` / `ref=m[key]`), and so may the pointer (`${!a[0]}`).
+    fn expand_indirect(&mut self, refname: &str, index: &Option<Box<Word>>) -> String {
         // Nameref special case: `${!ref}` where `ref` has the `-n` attribute
         // expands to the *name* of the referenced variable, not a second level
-        // of indirection (bash). Follow the chain to the final target name.
-        if self.nameref_attr.contains(refname) {
+        // of indirection (bash). Only a *bare* reference asks this: with a
+        // subscript the nameref is followed like any other, so `declare -n r=a;
+        // ${!r[0]}` is `${!a[0]}` — the element points, and the pointer's own
+        // name never becomes the answer.
+        if index.is_none() && self.nameref_attr.contains(refname) {
             match self.resolve_ref_name(refname) {
                 Some(target) => return target,
                 None => {
@@ -5614,16 +5683,14 @@ impl Shell {
         // nothing to indirect through — bash yields empty with status 0 (unlike
         // a non-empty-but-malformed target, which is a fatal "invalid variable
         // name"). Handle the empty case here so it never reaches the validator.
-        if (refname == "@" || refname == "*") && self.positional.is_empty() {
+        if index.is_none() && (refname == "@" || refname == "*") && self.positional.is_empty() {
             return String::new();
         }
-        let Some(target) = self.param_value(refname) else {
-            // The pointer variable itself is unset: bash reports
-            // "invalid indirect expansion", discards the command with status 1
-            // and abandons the rest of the parse unit — but keeps the shell
-            // alive, so the *next* line still runs.
-            self.emit_stderr(format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes());
-            self.discard_error = Some(1);
+        // An unset pointer variable is a fatal "invalid indirect expansion":
+        // status 1, the rest of the parse unit discarded, but the shell kept
+        // alive so the *next* line still runs. An element that is merely absent
+        // points at nothing instead, which expands to nothing.
+        let Ok(Some(target)) = self.indirect_pointer_value(refname, index) else {
             return String::new();
         };
         // The resolved name must be a valid parameter name. An empty or
@@ -5663,11 +5730,24 @@ impl Shell {
     /// If `${!ref}` names a whole-array reference (`ref=a[@]` / `ref=a[*]`),
     /// return the array's element list (used by the quoted `"${!ref}"` field-
     /// preserving path). Returns `None` for scalar/element/name-list referents.
-    fn indirect_array_elems(&mut self, refname: &str) -> Option<Vec<String>> {
-        if self.nameref_attr.contains(refname) {
+    ///
+    /// This only *recognises* the whole-array case; a `None` sends the caller
+    /// back to `expand_indirect`, so nothing is reported here — otherwise every
+    /// complaint about the pointer would be made twice.
+    fn indirect_array_elems(
+        &mut self,
+        refname: &str,
+        index: &Option<Box<Word>>,
+    ) -> Option<Vec<String>> {
+        if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
-        let target = self.param_value(refname)?;
+        if index.is_some() && !self.var_is_set(refname) {
+            return None;
+        }
+        let ElemValue::Value(target) = self.param_elem_lookup(refname, index) else {
+            return None;
+        };
         if target.is_empty() {
             return None;
         }
@@ -9186,7 +9266,9 @@ impl Shell {
                         ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
                         // `"${!ref}"` where ref resolves to `name[@]` yields one
                         // field per element (bash), like `"${name[@]}"`.
-                        [WordPart::Indirect(refname)] => self.indirect_array_elems(refname),
+                        [WordPart::Indirect { refname, index }] => {
+                            self.indirect_array_elems(refname, index)
+                        }
                         // `"$@"` expands to one field per positional parameter,
                         // preserving embedded whitespace (`"$*"` joins instead and
                         // is handled by the scalar fallback below).
@@ -9671,17 +9753,16 @@ impl Shell {
                 length,
             } => self.expand_array_ref(name, index, *length),
             WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
-            WordPart::Indirect(refname) => self.expand_indirect(refname),
-            WordPart::IndirectOp { refname, target } => {
-                // `${!ref<op>}`: resolve the target variable *name* (the value of
-                // `ref`, or the nameref chain's endpoint), then apply the modifier
-                // to that variable. Mirrors `expand_indirect`'s error handling for
-                // an unset pointer / invalid target name.
+            WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
+            WordPart::IndirectOp { refname, index, target } => {
+                // `${!ref<op>}`: resolve the target variable *name* (the value
+                // read through the reference, or the nameref chain's endpoint),
+                // then apply the modifier to that variable.
                 // A circular chain has no endpoint name, so it takes the same
                 // "invalid indirect expansion" path as an unset pointer.
-                let tname = if self.nameref_attr.contains(refname) {
+                let pointed_at = if index.is_none() && self.nameref_attr.contains(refname) {
                     match self.resolve_ref_name(refname) {
-                        Some(t) => t,
+                        Some(t) => Some(t),
                         None => {
                             self.emit_stderr(
                                 format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
@@ -9691,24 +9772,30 @@ impl Shell {
                         }
                     }
                 } else {
-                    match self.param_value(refname) {
-                        Some(t) => t,
-                        None => {
-                            self.emit_stderr(
-                                format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
-                            );
+                    match self.indirect_pointer_value(refname, index) {
+                        Ok(t) => t,
+                        Err(()) => return String::new(),
+                    }
+                };
+                let tname = match pointed_at {
+                    Some(t) => {
+                        if !is_valid_indirect_target(&t) {
+                            self.emit_stderr(format!("{}{t}: invalid variable name\n", self.err_prefix()).as_bytes());
                             // Non-fatal: discards the command, status 1.
                             self.discard_error = Some(1);
                             return String::new();
                         }
+                        t
                     }
+                    // The reference points nowhere, so the modifier has no
+                    // variable to work on — and bash gives it one that is simply
+                    // unset, `${!a[9]:-D}` yielding the default and `${!a[9]+S}`
+                    // nothing. The name it uses is the reference text itself,
+                    // which no variable can be called and which is what its own
+                    // complaints go on to quote (`!a[9]: msg`). There is nothing
+                    // to validate about it, so it skips the check above.
+                    None => format!("!{}", Self::indirect_ref_src(refname, index)),
                 };
-                if !is_valid_indirect_target(&tname) {
-                    self.emit_stderr(format!("{}{tname}: invalid variable name\n", self.err_prefix()).as_bytes());
-                    // Non-fatal: discards the command, status 1.
-                    self.discard_error = Some(1);
-                    return String::new();
-                }
                 let renamed = rename_param_target(target, &tname);
                 self.expand_dynamic(&renamed)
             }
@@ -19575,6 +19662,23 @@ impl VarLookup for Shell {
 
 // ---- free helpers -----------------------------------------------------------
 
+/// What a (possibly subscripted) parameter reference resolves to.
+/// See [`Shell::param_elem_lookup`].
+///
+/// Three answers rather than the usual two, because "nothing" has two reasons
+/// that are not interchangeable: the element is simply not there, or the
+/// subscript named nowhere it could ever have been. Both leave the expansion
+/// empty, but only the second is worth a complaint — and separating them lets
+/// the complaint be made once, by whichever caller is doing the real work.
+#[derive(Debug, Clone)]
+enum ElemValue {
+    Value(String),
+    /// The parameter or element is unset.
+    Absent,
+    /// The subscript named nowhere; the string is the name to complain about.
+    BadSubscript(String),
+}
+
 /// The place a plain scalar assignment ends up, after namerefs are followed.
 /// See [`Shell::scalar_write_dest`].
 #[derive(Debug, Clone)]
@@ -26297,6 +26401,70 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
             "<a b>\n<c>\n"
+        );
+    }
+
+    #[test]
+    fn the_pointer_of_an_indirect_expansion_may_be_an_element() {
+        // `${!a[i]}` reads the *element's* value and uses that as the name, so
+        // both ends of the indirection may carry a subscript, independently.
+        assert_eq!(run("a=(xv yv); xv=HIT; echo ${!a[0]}").0, "HIT\n");
+        assert_eq!(run("a=(xv yv); n=1; yv=H2; echo ${!a[n]}").0, "H2\n");
+        assert_eq!(run("declare -A m=([k]=vv); vv=HIT; echo ${!m[k]}").0, "HIT\n");
+        assert_eq!(run("a=(b); b=(p q r); echo ${!a[0]}").0, "p\n");
+        assert_eq!(run("a=('b[1]'); b=(p q r); echo ${!a[0]}").0, "q\n");
+        assert_eq!(run("a=('b[@]'); b=(p q r); echo ${!a[0]}").0, "p q r\n");
+        assert_eq!(
+            run(r#"a=("b[@]"); b=("p q" r); for w in "${!a[0]}"; do echo "<$w>"; done"#).0,
+            "<p q>\n<r>\n"
+        );
+        // A nameref is followed like any other name here — the "expand to the
+        // target's name" rule is only for a *bare* `${!ref}`.
+        assert_eq!(run("a=(xv); xv=HIT; declare -n r=a; echo ${!r[0]} ${!r}").0, "HIT a\n");
+        // The name pointed at is validated the same way: empty or malformed is
+        // a fatal "invalid variable name", merely unset expands to nothing.
+        assert_eq!(run("a=(nosuch); echo \"[${!a[0]}]\"; echo AFTER").0, "[]\nAFTER\n");
+        assert_eq!(
+            run("a=(1bad); { echo \"[${!a[0]}]\"; } 2>&1; echo AFTER").0,
+            "osh: 1bad: invalid variable name\n"
+        );
+        // An element that is not there is not a pointer that is not there: the
+        // reference simply points nowhere, and the command carries on…
+        assert_eq!(run("a=(x); echo \"[${!a[9]}]\"; echo AFTER").0, "[]\nAFTER\n");
+        assert_eq!(run("declare -A m; echo \"[${!m[k]}]\"; echo AFTER").0, "[]\nAFTER\n");
+        // …whereas a reference whose *variable* does not exist had nothing to
+        // point with at all, and is the fatal case — quoting the subscript as it
+        // was written rather than as it evaluated.
+        assert_eq!(
+            run("unset a; n=3; { echo \"[${!a[$n]}]\"; } 2>&1; echo AFTER").0,
+            "osh: a[$n]: invalid indirect expansion\n"
+        );
+        // Pointing nowhere is exactly what an unset parameter does, so the
+        // modifiers answer accordingly — and name the reference itself, there
+        // being no target name to give.
+        assert_eq!(run("a=(x); echo \"[${!a[9]:-D}]\"").0, "[D]\n");
+        assert_eq!(run("a=(x); echo \"[${!a[9]+S}]\"").0, "[]\n");
+        assert_eq!(run("a=(x); echo \"[${!a[9]#z}]\"").0, "[]\n");
+        assert_eq!(
+            run("a=(x); { echo \"[${!a[9]:?msg}]\"; } 2>&1; echo AFTER").0,
+            "osh: !a[9]: msg\n"
+        );
+        // A subscript that names nowhere is reported once, not once per attempt
+        // to resolve it, and leaves the reference pointing nowhere.
+        assert_eq!(
+            run("a=(x y); { echo \"${!a[-5]}\"; } 2>&1; echo AFTER").0,
+            "osh: a: bad array subscript\n\nAFTER\n"
+        );
+        // Only a *specific* subscript can point: `[@]`/`[*]` are the key listing,
+        // and a second subscript is no reference at all.
+        assert_eq!(run("a=(xv yv); echo ${!a[@]}").0, "0 1\n");
+        assert_eq!(
+            run("a=(xv); xv=(p q); { echo \"[${!a[0][1]}]\"; } 2>&1").0,
+            "osh: [${!a[0][1]}]: bad substitution\n"
+        );
+        assert_eq!(
+            run("set -- z; { echo \"[${!1[0]}]\"; } 2>&1").0,
+            "osh: [${!1[0]}]: bad substitution\n"
         );
     }
 

@@ -951,14 +951,20 @@ fn part_src(p: &WordPart) -> String {
             let op = case_op_src(*mode, *all);
             format!("${{{}{}{}}}", name_sub(name, index), op, word_src(pattern))
         }
-        WordPart::Indirect(name) => format!("${{!{name}}}"),
-        WordPart::IndirectOp { target, .. } => {
-            // The `target` carries the referent name as a placeholder, so
-            // rendering it yields `${ref<op>}`; splice the indirection `!` in
-            // after the opening `${` to recover `${!ref<op>}`.
+        WordPart::Indirect { refname, index } => {
+            format!("${{!{}}}", name_sub(refname, index))
+        }
+        WordPart::IndirectOp { refname, index, target } => {
+            // The `target` carries the referent name as a bare placeholder, so
+            // rendering it yields `${ref<op>}`. Recovering `${!ref[i]<op>}` means
+            // splicing in both the indirection `!` and the pointer's own
+            // subscript, which the placeholder never held.
             let inner = part_src(target);
-            match inner.strip_prefix("${") {
-                Some(rest) => format!("${{!{rest}"),
+            match inner
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_prefix(refname.as_str()))
+            {
+                Some(op) => format!("${{!{}{op}", name_sub(refname, index)),
                 None => inner,
             }
         }

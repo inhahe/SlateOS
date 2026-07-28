@@ -474,20 +474,30 @@ pub enum WordPart {
         all: bool,
         pattern: Box<Word>,
     },
-    /// `${!name}` — indirect expansion: the value of the variable whose *name*
-    /// is the value of `name` (e.g. `ref=x; x=hi; ${!ref}` → `hi`). The stored
-    /// string is the referring variable's name; the target may itself carry an
-    /// array subscript (`ref=a[0]`).
-    Indirect(String),
+    /// `${!name}` / `${!name[i]}` — indirect expansion: the value of the
+    /// variable whose *name* is the value read through the reference (e.g.
+    /// `ref=x; x=hi; ${!ref}` → `hi`).
+    ///
+    /// `refname` is the referring variable and `index` its subscript when the
+    /// pointer is an array *element* rather than a plain variable. Both ends of
+    /// the indirection may therefore carry a subscript, and they are separate
+    /// facts: `index` says where the *name* is read from, while the name read
+    /// may itself be an element reference (`ref=a[0]`, `ref=a[@]`).
+    Indirect {
+        refname: String,
+        index: Option<Box<Word>>,
+    },
     /// `${!ref<op>}` — indirect expansion *combined with* a modifier, e.g.
     /// `${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`. Bash forms the
-    /// target variable name from the value of `refname`, then applies the rest of
-    /// the substitution to *that* variable. `target` is the modifier expansion
-    /// (a `ParamOp`/`ParamTrim`/`ParamSubstr`/`ParamReplace`/`ParamCase`/
-    /// `ParamTransform`) parsed with `refname` as a placeholder name; at expansion
-    /// time the placeholder is rewritten to the resolved target name.
+    /// target variable name from the value read through the reference, then
+    /// applies the rest of the substitution to *that* variable. `refname` and
+    /// `index` designate the pointer exactly as in `Indirect`; `target` is the
+    /// modifier expansion (a `ParamOp`/`ParamTrim`/`ParamSubstr`/`ParamReplace`/
+    /// `ParamCase`/`ParamTransform`) parsed with `refname` as a placeholder name,
+    /// rewritten to the resolved target name at expansion time.
     IndirectOp {
         refname: String,
+        index: Option<Box<Word>>,
         target: Box<WordPart>,
     },
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables that begin

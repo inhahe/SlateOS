@@ -2555,9 +2555,23 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         // identifier, a positional parameter (`${!1}`), or a special parameter
         // (`${!#}`, `${!$}`, …). Its *value* is then used as the parameter name
         // to expand. The named target may itself carry a subscript.
-        if subscript.is_none() && is_indirect_referent(&name) {
+        //
+        // The *pointer* may carry one too (`${!a[0]}`): what is read is then the
+        // element's value, and from there on the expansion is the same. Only a
+        // specific subscript can point — `[@]`/`[*]` were the key listing just
+        // above — and only a plain name can carry one, no positional or special
+        // parameter being an array.
+        let index: Option<Box<Word>> = match subscript {
+            None => None,
+            Some(ArrayIndex::Index(w)) if is_valid_name(&name) => Some(w),
+            Some(_) => return Ok(WordPart::BadSubst(raw.to_string())),
+        };
+        if is_indirect_referent(&name) {
             if remaining.is_empty() {
-                return Ok(WordPart::Indirect(name));
+                return Ok(WordPart::Indirect {
+                    refname: name,
+                    index,
+                });
             }
             // `${!ref<op>}` — indirect expansion combined with a modifier
             // (`${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`, …).
@@ -2580,6 +2594,7 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
                 ) {
                     return Ok(WordPart::IndirectOp {
                         refname: name,
+                        index,
                         target: Box::new(target),
                     });
                 }

@@ -377,6 +377,18 @@ fn resolve_against(cwd: &str, path: &str) -> String {
     format!("{}/{path}", cwd.trim_end_matches('/'))
 }
 
+/// Whether two paths name the same directory. bash compares device+inode; the
+/// standard library does not expose those portably across our host and target,
+/// so canonicalised paths are the stand-in (the same approximation `test -ef`
+/// already uses — see known-issues TD-OILS12). A path that cannot be
+/// canonicalised (missing, or not readable) is never "the same".
+fn same_directory(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Fold `.` and `x/..` out of a slash-separated path *textually*, the way
 /// bash's default (logical) `cd` does — without consulting the filesystem, so
 /// `cd sym/..` returns to the directory `sym` was named from rather than to the
@@ -1778,7 +1790,44 @@ impl Shell {
         {
             self.vars.insert("HOSTNAME".to_string(), host);
         }
+        self.seed_startup_dirs();
         self.env_imported = true;
+    }
+
+    /// Reconcile `$PWD`/`$OLDPWD` with the real working directory at startup,
+    /// the way bash does — the environment is not trusted here, because the
+    /// parent process may have `cd`-ed (or lied) after exporting them.
+    ///
+    /// An inherited `$PWD` is kept only when it actually names the current
+    /// directory, which preserves a symlinked spelling as the shell's *logical*
+    /// cwd; otherwise it is replaced with the real one. An inherited `$OLDPWD`
+    /// is kept only when it still names a directory, so `cd -` cannot be fed a
+    /// stale path. Both names are marked exported even when unset, matching
+    /// bash: a later `cd` publishes them to children automatically, while an
+    /// explicit `export -n PWD` / `unset OLDPWD` still drops the attribute.
+    fn seed_startup_dirs(&mut self) {
+        let real = self.cwd.clone();
+        let inherited = self
+            .vars
+            .get("PWD")
+            .filter(|p| path_is_rooted(p))
+            .cloned()
+            .filter(|p| same_directory(p, &real));
+        match inherited {
+            Some(p) => self.cwd = p,
+            None => {
+                self.vars.insert("PWD".to_string(), real);
+            }
+        }
+        self.exported.insert("PWD".to_string());
+        if !self
+            .vars
+            .get("OLDPWD")
+            .is_some_and(|p| self.resolve(p).is_dir())
+        {
+            self.vars.remove("OLDPWD");
+        }
+        self.exported.insert("OLDPWD".to_string());
     }
 
     /// The exit status of the most recently completed command.

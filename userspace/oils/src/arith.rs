@@ -522,6 +522,16 @@ impl AParser<'_> {
         loop {
             self.skip_ws();
             let Some(op) = self.read_op() else { break };
+            // A `++`/`--` that reached here is not an increment — `parse_postfix`
+            // declined it because the operand slot to its left is not
+            // assignable. bash's lexer would never have formed the two-character
+            // token at all, so read only its first character as the binary
+            // operator and leave the second to the operand that follows.
+            let op = if op == "++" || op == "--" {
+                op[..1].to_string()
+            } else {
+                op
+            };
             let Some((bp, right)) = binop_bp(&op) else {
                 break;
             };
@@ -548,14 +558,19 @@ impl AParser<'_> {
         // operator": if the operand is missing (`1 + + `, `~ `), bash's
         // operand-expected error token runs from this unary operator, not from
         // an earlier binary operator or the start of the expression.
+        //
+        // bash forms a prefix `++`/`--` only when an lvalue follows: its lexer
+        // looks ahead for a variable name and, not finding one, hands back a
+        // plain `+`/`-`. So `--v` decrements, but `--2` is `-(-2)` = 2 and
+        // `--(3)` is 3. Falling through to the single-character cases below
+        // reproduces that — and with it bash's error token for a missing
+        // operand (`-- ` → `- `, `++ ` → `+ `), which starts one char in
+        // precisely because that is where the second operator sits.
         if let Some(op) = self.read_op()
             && (op == "++" || op == "--")
+            && self.lvalue_follows(2)
         {
-            // bash's error token for a missing operand after a prefix `++`/`--`
-            // begins *one char into* the operator (`++ ` → `+ `, `-- ` → `- `):
-            // its lexer tokenises `++`/`--` and leaves its error pointer after
-            // the first character. Reproduce that offset.
-            self.last_op_start = self.pos + 1;
+            self.last_op_start = self.pos;
             self.pos += 2;
             let operand = self.parse_unary()?;
             let lv = lvalue_of(operand)?;
@@ -586,12 +601,30 @@ impl AParser<'_> {
         }
     }
 
+    /// Does an assignable name begin `n` characters past the cursor?
+    ///
+    /// bash's arithmetic lexer looks ahead like this before it will read `++`
+    /// or `--` as an increment operator: only a variable name may follow one,
+    /// so anything else means the two characters are separate operators.
+    fn lvalue_follows(&self, n: usize) -> bool {
+        let mut i = self.pos + n;
+        while matches!(self.chars.get(i), Some(c) if c.is_whitespace()) {
+            i += 1;
+        }
+        matches!(self.chars.get(i), Some(c) if c.is_ascii_alphabetic() || *c == '_')
+    }
+
     /// A primary atom followed by an optional postfix `++`/`--`.
     fn parse_postfix(&mut self) -> Result<Expr, ArithError> {
         let e = self.parse_atom()?;
         self.skip_ws();
+        // Only an lvalue can be incremented, and bash does not make the attempt
+        // otherwise: `2--3` is `2 - (-3)` = 5, not a decrement of `2`. Leaving
+        // the operator unconsumed hands it to `parse_binary`, which reads its
+        // first character as the binary operator it is.
         if let Some(op) = self.read_op()
             && (op == "++" || op == "--")
+            && is_lvalue(&e)
         {
             let lv = lvalue_of(e)?;
             self.pos += 2;
@@ -880,6 +913,12 @@ fn digit_value(c: char, base: u32) -> Option<u32> {
         _ => return None,
     };
     if v < base { Some(v) } else { None }
+}
+
+/// Is `e` assignable — that is, would [`lvalue_of`] accept it? Lets the parser
+/// ask before committing an expression it may still need.
+fn is_lvalue(e: &Expr) -> bool {
+    matches!(e, Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..))
 }
 
 /// Convert a parsed expression into an lvalue, or error if it is not
@@ -1395,6 +1434,32 @@ mod tests {
         assert_eq!(m.get("x"), Some(5));
         // Increment on an unset variable starts from 0.
         assert_eq!(eval("++fresh", &mut m).unwrap(), 1);
+    }
+
+    /// `++` and `--` are increment operators only where an increment is
+    /// possible; everywhere else the two characters are simply two operators in
+    /// a row. Every expectation here is bash 5.2.37's own answer.
+    #[test]
+    fn increment_operators_need_an_lvalue() {
+        let mut m = Map::default();
+        m.set("v", 5);
+        // Nothing assignable follows, so `--2` is `-(-2)` and `++2` is `+(+2)`.
+        assert_eq!(eval("--2", &mut m).unwrap(), 2);
+        assert_eq!(eval("++2", &mut m).unwrap(), 2);
+        assert_eq!(eval("--(3)", &mut m).unwrap(), 3);
+        assert_eq!(eval("++3+1", &mut m).unwrap(), 4);
+        // Nor is the operand on the *left* assignable, so these are a binary
+        // operator followed by a unary one: `2 - (-3)`, `3 - (-(-2))`.
+        assert_eq!(eval("2--3", &mut m).unwrap(), 5);
+        assert_eq!(eval("3---2", &mut m).unwrap(), 1);
+        // A name may still follow across whitespace, and a real decrement wins
+        // over the reading above wherever one is possible.
+        assert_eq!(eval("-- v", &mut m).unwrap(), 4);
+        assert_eq!(eval("v---3", &mut m).unwrap(), 1); // (v--) - 3, v now 4
+        assert_eq!(m.get("v"), Some(3));
+        // With no operand at all, the error token starts at the *second*
+        // character — which is just where the one operator bash did read
+        // begins. See `error_tokens_match_bash` for that pair of cases.
     }
 
     #[test]

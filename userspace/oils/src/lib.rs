@@ -21,6 +21,7 @@ pub mod arith;
 pub mod ast;
 pub mod brace;
 pub mod ere;
+pub(crate) mod escape;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

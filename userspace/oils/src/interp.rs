@@ -5072,7 +5072,7 @@ impl Shell {
             // (`${x@l}` is a "bad substitution"), so the parser never routes it
             // here (see `is_valid_transform_op`).
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
-            'E' => ansi_c_unescape(value),
+            'E' => crate::escape::ansi_c_unescape(value),
             // `K`/`k` on a *scalar* or single array element behave like `@Q`:
             // bash quotes the value (`${v@K}` on `v=abc` → `'abc'`). The
             // key-aware array form (`${a[@]@K}`) is intercepted earlier in the
@@ -11995,11 +11995,11 @@ impl Shell {
         }
         let joined = args[start..].join(" ");
         let mut line = if interpret {
-            let (text, suppress) = echo_expand_escapes(&joined);
-            if suppress {
+            let r = crate::escape::unescape_echo(&joined, crate::escape::EscapeMode::EchoE);
+            if r.stopped {
                 newline = false;
             }
-            text
+            r.text
         } else {
             joined
         };
@@ -12062,7 +12062,7 @@ impl Shell {
         // aborts printf). Each carries the byte offset at which it arose.
         let mut diags = PrintfDiags::default();
         let text = format_printf(fmt, &args[i + 1..], &mut diags);
-        let PrintfDiags { errors, warnings, fatal, .. } = diags;
+        let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
         // they can be written *interleaved* with stdout. bash flushes pending
@@ -12071,8 +12071,8 @@ impl Shell {
         // errors. A stable sort keeps an error ahead of a warning at the same
         // offset (matching the order they were generated).
         let mut messages: Vec<(usize, String)> =
-            Vec::with_capacity(errors.len() + warnings.len() + 1);
-        for (off, e) in &errors {
+            Vec::with_capacity(errors.len() + warnings.len() + notes.len() + 1);
+        for (off, e) in errors.iter().chain(notes.iter()) {
             messages.push((*off, format!("{}printf: {e}\n", self.err_prefix())));
         }
         for (off, w) in &warnings {
@@ -17719,220 +17719,6 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Expand ANSI-C backslash escapes in `s` (the `${v@E}` transform): the common
-/// `\n \t \r \\ \' \" \a \b \e \f \v` escapes, plus `\xHH` and `\0nnn`/`\nnn`
-/// numeric escapes. An unrecognized escape keeps its backslash.
-/// Interpret `echo -e` backslash escapes. Returns the processed text and a
-/// flag that is `true` when a `\c` escape was seen (which stops output and
-/// suppresses the trailing newline). Recognizes `\a \b \e \E \f \n \r \t \v
-/// \\`, `\0nnn` (octal, up to three digits), `\xHH` (hex, up to two digits),
-/// and `\c`. An unrecognized escape keeps its backslash (bash behavior).
-fn echo_expand_escapes(s: &str) -> (String, bool) {
-    let mut out = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '\\' || i + 1 >= chars.len() {
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        i += 1; // consume '\'
-        match chars[i] {
-            'a' => {
-                out.push('\u{07}');
-                i += 1;
-            }
-            'b' => {
-                out.push('\u{08}');
-                i += 1;
-            }
-            'e' | 'E' => {
-                out.push('\u{1b}');
-                i += 1;
-            }
-            'f' => {
-                out.push('\u{0c}');
-                i += 1;
-            }
-            'n' => {
-                out.push('\n');
-                i += 1;
-            }
-            'r' => {
-                out.push('\r');
-                i += 1;
-            }
-            't' => {
-                out.push('\t');
-                i += 1;
-            }
-            'v' => {
-                out.push('\u{0b}');
-                i += 1;
-            }
-            '\\' => {
-                out.push('\\');
-                i += 1;
-            }
-            'c' => return (out, true),
-            '0' => {
-                // `\0nnn` — up to three octal digits after the 0.
-                i += 1;
-                let mut val: u32 = 0;
-                let mut n = 0;
-                while n < 3 && i < chars.len() && chars[i].is_digit(8) {
-                    val = val.wrapping_mul(8).wrapping_add(chars[i].to_digit(8).unwrap_or(0));
-                    i += 1;
-                    n += 1;
-                }
-                if let Some(c) = char::from_u32(val) {
-                    out.push(c);
-                }
-            }
-            'x' => {
-                // `\xHH` — up to two hex digits.
-                i += 1;
-                let mut val: u32 = 0;
-                let mut n = 0;
-                while n < 2 && i < chars.len() && chars[i].is_ascii_hexdigit() {
-                    val = val.wrapping_mul(16).wrapping_add(chars[i].to_digit(16).unwrap_or(0));
-                    i += 1;
-                    n += 1;
-                }
-                if n == 0 {
-                    // No hex digit followed: keep the literal `\x`.
-                    out.push('\\');
-                    out.push('x');
-                } else if let Some(c) = char::from_u32(val) {
-                    out.push(c);
-                }
-            }
-            esc @ ('u' | 'U') => {
-                // `\uHHHH` (up to 4 hex digits) / `\UHHHHHHHH` (up to 8) — a
-                // Unicode code point, emitted as UTF-8 (osh is a UTF-8 system,
-                // matching the `$'…'` ANSI-C decoder). A missing hex digit
-                // leaves the literal `\u`/`\U`.
-                let max = if esc == 'u' { 4 } else { 8 };
-                i += 1;
-                let mut val: u32 = 0;
-                let mut n = 0;
-                while n < max && i < chars.len() && chars[i].is_ascii_hexdigit() {
-                    val = val.wrapping_mul(16).wrapping_add(chars[i].to_digit(16).unwrap_or(0));
-                    i += 1;
-                    n += 1;
-                }
-                if n == 0 {
-                    out.push('\\');
-                    out.push(esc);
-                } else if let Some(c) = char::from_u32(val) {
-                    out.push(c);
-                }
-            }
-            other => {
-                // Unrecognized escape: keep the backslash and the character.
-                out.push('\\');
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    (out, false)
-}
-
-/// Which flavour of backslash-escape decoding [`decode_escape`] performs. The
-/// two differ in exactly two respects — octal syntax and `\c` — but otherwise
-/// share the named/hex/unicode escapes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EscapeMode {
-    /// ANSI-C `$'…'` / `${v@E}` / the printf FORMAT string. Octal is `\nnn`
-    /// (1–3 octal digits; a leading `0` is just the first digit, so `\0101`
-    /// is `\010` followed by a literal `1`). `\c` is not special.
-    AnsiC,
-    /// printf `%b` / `echo -e`. Octal is `\0nnn` (a leading `0` is a *prefix*,
-    /// then 1–3 octal digits, so `\0101` is the single character `A`). `\c`
-    /// halts all further output.
-    EchoB,
-}
-
-/// Decode a single backslash escape. `chars` is positioned immediately after the
-/// `\`. The decoded text is appended to `out`. Returns `true` only when output
-/// should stop (an `EchoB`-mode `\c`).
-fn decode_escape(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    out: &mut String,
-    mode: EscapeMode,
-) -> bool {
-    let Some(c) = chars.next() else {
-        out.push('\\');
-        return false;
-    };
-    match c {
-        'n' => out.push('\n'),
-        't' => out.push('\t'),
-        'r' => out.push('\r'),
-        'a' => out.push('\u{07}'),
-        'b' => out.push('\u{08}'),
-        'e' | 'E' => out.push('\u{1b}'),
-        'f' => out.push('\u{0c}'),
-        'v' => out.push('\u{0b}'),
-        '\\' => out.push('\\'),
-        '\'' => out.push('\''),
-        '"' => out.push('"'),
-        // `%b`/`echo -e` `\c`: suppress the `\c` and everything after it.
-        'c' if mode == EscapeMode::EchoB => return true,
-        'x' => {
-            let mut hex = String::new();
-            while hex.len() < 2 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
-                hex.push(chars.next().unwrap_or('0'));
-            }
-            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                Some(ch) => out.push(ch),
-                None => {
-                    // No hex digits followed `\x`: emit it literally.
-                    out.push('\\');
-                    out.push('x');
-                }
-            }
-        }
-        'u' | 'U' => {
-            let max = if c == 'u' { 4 } else { 8 };
-            let mut hex = String::new();
-            while hex.len() < max && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
-                hex.push(chars.next().unwrap_or('0'));
-            }
-            match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                Some(ch) => out.push(ch),
-                None => {
-                    out.push('\\');
-                    out.push(c);
-                }
-            }
-        }
-        '0'..='7' => {
-            let mut oct = String::new();
-            // In `EchoB` mode a leading `0` is a prefix rather than a digit.
-            if !(mode == EscapeMode::EchoB && c == '0') {
-                oct.push(c);
-            }
-            while oct.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
-                oct.push(chars.next().unwrap_or('0'));
-            }
-            if oct.is_empty() {
-                // A bare `\0` (EchoB) is a NUL byte.
-                out.push('\0');
-            } else if let Some(ch) = u32::from_str_radix(&oct, 8).ok().and_then(char::from_u32) {
-                out.push(ch);
-            }
-        }
-        other => {
-            out.push('\\');
-            out.push(other);
-        }
-    }
-    false
-}
-
 /// Minimal shell-quoting as used by `set -x` traces: a value made only of
 /// "safe" characters (including the empty string) is emitted verbatim; anything
 /// else is wrapped in single quotes, with embedded single quotes rendered as
@@ -17955,43 +17741,6 @@ fn xtrace_quote(s: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-/// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion.
-fn ansi_c_unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
-    }
-    // A NUL byte terminates the ANSI-C string (a shell word cannot hold a NUL),
-    // so bytes produced after the first NUL are dropped — matching bash's
-    // `$'…'` / `${x@E}` behaviour. See `Lexer::read_ansi_c_quote`.
-    if let Some(nul) = out.find('\0') {
-        out.truncate(nul);
-    }
-    out
-}
-
-/// `printf %b` / `echo -e` backslash-escape expansion. The boolean is `true` if
-/// a `\c` was seen, meaning the caller must stop producing any further output.
-fn unescape_echo_b(s: &str) -> (String, bool) {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        if decode_escape(&mut chars, &mut out, EscapeMode::EchoB) {
-            return (out, true);
-        }
-    }
-    (out, false)
 }
 
 /// `${name:offset[:length]}` — a negative offset counts from the end; a negative
@@ -19196,6 +18945,10 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 struct PrintfDiags {
     errors: Vec<(usize, String)>,
     warnings: Vec<(usize, String)>,
+    /// Messages that print like an error (`printf: <msg>`, with no `warning:`
+    /// tag) but leave the exit status at 0 — currently only the malformed
+    /// `\x`/`\u`/`\U` escape notices, which bash reports without failing.
+    notes: Vec<(usize, String)>,
     fatal: Option<String>,
     base: usize,
 }
@@ -19276,9 +19029,17 @@ fn format_printf_once(
     while let Some(c) = chars.next() {
         match c {
             // FORMAT-string escapes use ANSI-C rules (octal `\nnn`, `\xHH`,
-            // `\uHHHH`, `\UHHHHHHHH`, and the named escapes).
+            // `\uHHHH`, `\UHHHHHHHH`, and the named escapes) — except that `\c`
+            // is not an escape here, and a malformed `\x`/`\u` is reported.
             '\\' => {
-                decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
+                let d = crate::escape::decode_escape(
+                    &mut chars,
+                    &mut out,
+                    crate::escape::EscapeMode::PrintfFormat,
+                );
+                if let Some(msg) = d.bad {
+                    diags.notes.push((diags.base + out.len(), msg.to_string()));
+                }
             }
             '%' => {
                 if format_conversion(&mut chars, args, arg_i, &mut out, diags) {
@@ -19515,10 +19276,17 @@ fn format_conversion(
         }
         'b' => {
             // Interpret `echo -e`-style backslash escapes in the argument; `\c`
-            // stops all further output.
-            let (s, st) = unescape_echo_b(&next_arg(arg_i));
-            stop = st;
-            s
+            // stops all further output. Unlike `echo -e`, `%b` also accepts
+            // octal without the `\0` prefix and reports a malformed `\x`/`\u`.
+            let r = crate::escape::unescape_echo(
+                &next_arg(arg_i),
+                crate::escape::EscapeMode::PrintfB,
+            );
+            stop = r.stopped;
+            for (off, msg) in r.bad {
+                diags.notes.push((field_off + off, msg.to_string()));
+            }
+            r.text
         }
         'q' => printf_quote(&next_arg(arg_i)),
         'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),

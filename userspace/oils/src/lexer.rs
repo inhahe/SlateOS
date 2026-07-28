@@ -1220,120 +1220,40 @@ impl Lexer {
         }
     }
 
-    /// Read the body of a `$'…'` ANSI-C-quoted string, processing backslash
-    /// escapes. `self.pos` is just past the opening quote; consumes through the
-    /// closing quote. The result is a literal string (no expansion/splitting).
+    /// Read the body of a `$'…'` ANSI-C-quoted string. `self.pos` is just past
+    /// the opening quote; consumes through the closing quote. The result is a
+    /// literal string (no expansion/splitting).
+    ///
+    /// Scanning and decoding are deliberately two separate passes, mirroring
+    /// bash's `parse_matched_pair` + `ansicstr` split. The scan below knows only
+    /// one rule — a backslash quotes the next character — and finding the
+    /// closing quote must not depend on what the escapes *mean*. Decoding
+    /// inline gets the token boundary wrong whenever an escape would swallow a
+    /// character that also ends the string: `$'ab\c'` is the four-character word
+    /// `ab\c` (a dangling `\c`, not a control escape consuming the quote), and
+    /// `$'\c\'` really does run to end-of-input.
     ///
     /// Note: byte escapes (`\xHH`, `\nnn`) naming a value above 0x7F are
     /// materialised as the Unicode code point of that value — the shell stores
-    /// words as UTF-8 `String`, not raw bytes, so `$'\xff'` yields U+00FF.
+    /// words as UTF-8 `String`, not raw bytes, so `$'\xff'` yields U+00FF where
+    /// bash yields the single byte 0xff.
     fn read_ansi_c_quote(&mut self) -> Result<String, LexError> {
-        let mut s = String::new();
+        let mut raw = String::new();
         loop {
             let Some(c) = self.bump() else {
                 return Err(eof_matching('\''));
             };
             if c == '\'' {
-                // bash: a NUL byte terminates the ANSI-C string. A shell word
-                // cannot hold a NUL, so any bytes the escapes produced after the
-                // first NUL are dropped — `$'a\0b'` is just `a`. Scanning still
-                // ran (escape-aware) through this closing quote, so the token
-                // stream stays correct; only the decoded value is truncated.
-                if let Some(nul) = s.find('\0') {
-                    s.truncate(nul);
-                }
-                return Ok(s);
+                return Ok(crate::escape::ansi_c_unescape(&raw));
             }
-            if c != '\\' {
-                s.push(c);
-                continue;
-            }
-            let Some(e) = self.bump() else {
-                return Err(eof_matching('\''));
-            };
-            match e {
-                'a' => s.push('\u{07}'),
-                'b' => s.push('\u{08}'),
-                'e' | 'E' => s.push('\u{1b}'),
-                'f' => s.push('\u{0c}'),
-                'n' => s.push('\n'),
-                'r' => s.push('\r'),
-                't' => s.push('\t'),
-                'v' => s.push('\u{0b}'),
-                '\\' => s.push('\\'),
-                '\'' => s.push('\''),
-                '"' => s.push('"'),
-                '?' => s.push('?'),
-                'x' => match self.read_hex_escape(2) {
-                    Some(v) => push_code(&mut s, v),
-                    None => {
-                        s.push('\\');
-                        s.push('x');
-                    }
-                },
-                'u' => match self.read_hex_escape(4) {
-                    Some(v) => push_code(&mut s, v),
-                    None => {
-                        s.push('\\');
-                        s.push('u');
-                    }
-                },
-                'U' => match self.read_hex_escape(8) {
-                    Some(v) => push_code(&mut s, v),
-                    None => {
-                        s.push('\\');
-                        s.push('U');
-                    }
-                },
-                'c' => {
-                    // Control character: `\cx` → `x & 0x1f`.
-                    if let Some(ctrl) = self.bump() {
-                        push_code(&mut s, (ctrl as u32) & 0x1f);
-                    } else {
-                        s.push('\\');
-                        s.push('c');
-                    }
-                }
-                d @ '0'..='7' => {
-                    // Octal, 1–3 digits (the first is already consumed).
-                    let mut val = d.to_digit(8).unwrap_or(0);
-                    for _ in 0..2 {
-                        match self.peek().and_then(|n| n.to_digit(8)) {
-                            Some(n) => {
-                                val = val.wrapping_mul(8).wrapping_add(n);
-                                self.pos += 1;
-                            }
-                            None => break,
-                        }
-                    }
-                    push_code(&mut s, val);
-                }
-                other => {
-                    // Unknown escape: bash keeps the backslash and the char.
-                    s.push('\\');
-                    s.push(other);
-                }
+            raw.push(c);
+            if c == '\\' {
+                let Some(e) = self.bump() else {
+                    return Err(eof_matching('\''));
+                };
+                raw.push(e);
             }
         }
-    }
-
-    /// Read up to `max` hex digits at the cursor, returning their value, or
-    /// `None` if there was no hex digit (so the caller can keep the escape
-    /// literal).
-    fn read_hex_escape(&mut self, max: usize) -> Option<u32> {
-        let mut val: u32 = 0;
-        let mut count = 0;
-        while count < max {
-            match self.peek().and_then(|c| c.to_digit(16)) {
-                Some(d) => {
-                    val = val.wrapping_mul(16).wrapping_add(d);
-                    self.pos += 1;
-                    count += 1;
-                }
-                None => break,
-            }
-        }
-        if count == 0 { None } else { Some(val) }
     }
 
     fn read_double_quote(&mut self) -> Result<Vec<Seg>, LexError> {
@@ -1818,15 +1738,6 @@ impl Lexer {
 fn flush_lit(segs: &mut Vec<Seg>, lit: &mut String) {
     if !lit.is_empty() {
         segs.push(Seg::Lit(core::mem::take(lit)));
-    }
-}
-
-/// Append the character named by a code point (from a `$'…'` numeric escape) to
-/// `s`, if it is a valid Unicode scalar value. An invalid code point (e.g. a
-/// surrogate from `\uD800`) is dropped, matching bash's leniency.
-fn push_code(s: &mut String, code: u32) {
-    if let Some(ch) = char::from_u32(code) {
-        s.push(ch);
     }
 }
 

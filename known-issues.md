@@ -14,6 +14,102 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-ESCAPE-DECODERS. Three divergent copies of the backslash-escape table — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**Symptom.** Two of them were parse bugs, not just wrong values:
+```sh
+v=$'ab\c'      # bash: the 4-char word `ab\c`; osh: "unexpected EOF looking for `''"
+v=$'\c\'       # bash: unterminated; osh: happily produced 0x1c
+x='a\cAb'; echo "${x@E}"   # bash: 61 01 62; osh: 61 5c 63 41 62
+echo -e '\101'             # bash: literal `\101`; osh: `A`
+printf '%b' '\?'           # bash: literal `\?`; osh: `?`
+printf '\xg'               # bash also warns "printf: missing hex digit for \x"
+echo $'a\401b'             # bash: 61 01 62 (byte-masked); osh: 61 c8 81 62
+```
+
+**Root cause.** osh had *three* near-copies of the escape table: an inline
+decoder in `Lexer::read_ansi_c_quote`, `decode_escape` (ANSI-C / `%b`) in
+`interp.rs`, and `echo_expand_escapes` for `echo -e`. Each had drifted
+differently, and none matched bash on all four of its escape dialects, which
+genuinely disagree:
+
+| | `$'…'`, `${v@E}` | `printf` FORMAT | `printf %b` | `echo -e` |
+|---|---|---|---|---|
+| `\c` | control character | literal `\c` | stop output | stop output |
+| `\?` `\'` `\"` | the bare character | the bare character | literal | literal |
+| octal | `\nnn` | `\nnn` | `\0nnn` or `\nnn` | `\0nnn` only |
+| bad `\x`/`\u` | silent, literal | diagnostic | diagnostic | silent, literal |
+
+The lexer bug was structural: it decoded escapes *while* scanning for the
+closing quote, so an escape that consumes a character could eat the terminator
+(`$'ab\c'`) or fail to (`$'\c\'`). bash splits these into `parse_matched_pair`
+(which knows only "a backslash quotes the next character") and `ansicstr`.
+
+**Fix.** One table, in the new `userspace/oils/src/escape.rs`, parameterised by
+an `EscapeMode` (`AnsiC` / `PrintfFormat` / `PrintfB` / `EchoE`); all three old
+copies are gone. `Lexer::read_ansi_c_quote` now scans a raw body and hands it to
+`escape::ansi_c_unescape`. `\c` gained its three ANSI-C wrinkles (`\c?` is DEL,
+`\c\\` consumes both backslashes, a dangling `\c` stays literal), `\xHH` and
+`\nnn` are masked to a byte (so `$'\400'` is a NUL that truncates the word and
+`$'\401'` is `\001`), and `printf` reports a malformed `\x`/`\u`/`\U` through a
+new `PrintfDiags::notes` channel — messages that print like an error but leave
+the exit status at 0, as bash does. Pinned by `tests/corpus/escapes.sh` and the
+unit tests in `escape.rs`.
+
+**Known remaining gap.** A byte above 0x7F is materialised as the *code point*
+of that byte, so `$'\xff'` is U+00FF (`c3 bf`) where bash writes the single byte
+`0xff`. osh stores a shell word as a Rust `String`, which cannot hold invalid
+UTF-8; closing this would mean moving words to `Vec<u8>` throughout. The masking
+above at least makes every ASCII-range result exact.
+
+### BUG-OILS-PIPE-INTO-FUNCTION-PIPELINE. A function whose body is a pipeline deadlocks on the right of a pipe — 2026-07-27 — OPEN
+
+**Symptom.** osh hangs forever (bash completes instantly):
+```sh
+h() { od -An -tx1 | tr -s ' '; }
+printf 'ab' | h          # osh: never returns; `od` blocks on read
+```
+`printf 'ab' | f` with `f() { od -An -tx1; }` (a *single* command in the body)
+works, and so does `printf 'ab' | cat`. It is specifically a body containing a
+**pipeline** that hangs. A brace group (`printf ab | { od | tr; }`) has not been
+checked yet and probably hangs the same way.
+
+**Likely root cause.** Building the *inner* pipeline leaves a copy of the outer
+pipe's write end open in the osh process (or in one of the inner children), so
+the leftmost inner command never sees EOF on stdin. See the pipeline setup and
+the function-invocation path in `userspace/oils/src/interp.rs`: every inherited
+fd that is not the child's own end must be closed after `dup2`.
+
+**Impact.** A hang, not a wrong answer — the worst failure mode for a shell, and
+`cmd | shell_function` is an extremely common shape. This blocked writing a
+`hxs() { od … | tr … ; }` helper in `tests/corpus/escapes.sh`, which had to
+inline its pipeline instead.
+
+**Proper fix.** Audit fd ownership across nested pipelines: close every
+non-owned pipe end in both the parent and each child before exec, and add a
+corpus case (`cmd | fn-with-pipeline`, nested two deep, plus the brace-group and
+subshell forms). Run it under `scripts/run-timeout.py` so a regression bounds
+itself instead of orphaning processes.
+
+### BUG-OILS-CMDSUB-NUL-BYTES. `$( )` keeps NUL bytes instead of dropping them with a warning — 2026-07-27 — OPEN
+
+**Symptom.**
+```sh
+printf '%s' "$(printf '%b' 'a\0b')" | od -An -tx1
+# bash: warning: command substitution: ignored null byte in input, then `61 62`
+# osh : no warning, `61 00 62`
+```
+
+**Root cause.** osh's command-substitution capture in
+`userspace/oils/src/interp.rs` returns the child's bytes unfiltered. bash strips
+every NUL from the captured output (a shell word cannot hold one) and warns once
+per capture that contained any.
+
+**Proper fix.** In the capture path, scan for `\0`; if present, drop those bytes
+and emit `<prefix>warning: command substitution: ignored null byte in input` to
+stderr exactly once. Then the `escapes.sh` corpus case can drop its
+"straight down a pipe" workaround for the NUL probes.
+
 ### BUG-OILS-ARITH-SUBSCRIPT-QUOTING. Quotes were removed from arithmetic subscripts — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** `a['']=z` silently overwrote element 0 instead of failing:

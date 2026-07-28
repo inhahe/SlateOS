@@ -100,7 +100,7 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::parser::{parse, parse_with_aliases};
+use crate::parser::{IncrementalParser, parse, parse_with_aliases};
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -293,6 +293,15 @@ fn io_error_message(e: &std::io::Error) -> String {
 /// models as always-on defaults (`hashall`, `interactive-comments`) or does not
 /// yet act on (line-editing `emacs`/`vi`, job-control `monitor`/`notify`,
 /// `posix`, etc.). Truthful state comes from [`Shell::shell_option_enabled`].
+/// Shell reserved words, as reported by `type`, `command -v`/`-V`, and
+/// `compgen -k`. These are the words the grammar treats specially, so they can
+/// never name an external command; every one of them is "found" by a command
+/// lookup even though nothing on `$PATH` matches.
+const SHELL_KEYWORDS: &[&str] = &[
+    "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do", "done",
+    "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
+];
+
 const STANDARD_SET_O_OPTIONS: &[&str] = &[
     "allexport",
     "braceexpand",
@@ -1622,23 +1631,41 @@ impl Shell {
     /// `echo hi | { eval "read v"; }` must read from the pipe. Only the outermost
     /// entry point ([`Shell::run_source_out`]) passes `StdinSrc::Inherit`.
     fn run_source_flow_out(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        // Expand command-word aliases only when `expand_aliases` is in effect;
-        // otherwise parse the raw tokens so a non-interactive shell leaves alias
-        // names untouched (bash parity).
-        let parsed = if self.aliases_enabled() {
-            parse_with_aliases(src, &self.aliases)
-        } else {
-            parse(src)
-        };
-        let prog = match parsed {
-            Ok(p) => p,
+        // Parse and execute one unit (one logical line) at a time rather than
+        // parsing the whole input up front, because bash's read-parse-execute
+        // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
+        // by unit N must affect how unit N+1 parses, and commands before a
+        // syntax error must still have run. See [`IncrementalParser`].
+        let mut ip = match IncrementalParser::new(src) {
+            Ok(ip) => ip,
             Err(e) => {
                 self.errln(&self.format_parse_error(&e, src));
                 self.last_status = 2;
                 return Flow::Next;
             }
         };
-        self.exec_program_top(&prog, out, stdin)
+        loop {
+            // Expand command-word aliases only when `expand_aliases` is in
+            // effect; otherwise the raw tokens are parsed so a non-interactive
+            // shell leaves alias names untouched (bash parity). Re-read every
+            // unit so a mid-script change is picked up.
+            let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
+            let Some(unit) = ip.next_unit(aliases) else {
+                return Flow::Next;
+            };
+            let prog = match unit {
+                Ok(p) => p,
+                Err(e) => {
+                    self.errln(&self.format_parse_error(&e, src));
+                    self.last_status = 2;
+                    return Flow::Next;
+                }
+            };
+            match self.exec_program_top(&prog, out, stdin) {
+                Flow::Next => {}
+                other => return other,
+            }
+        }
     }
 
     /// Resolve the exit status of a fatal word-expansion abort (nounset,
@@ -5930,6 +5957,24 @@ impl Shell {
     }
 
     /// Implement `command -v`/`-V`: report how `target` would be resolved.
+    /// The alias definition a command lookup (`type`, `command -v`/`-V`) should
+    /// report for `name`, if any.
+    ///
+    /// bash only reports aliases when `expand_aliases` is in effect: with the
+    /// option off, `alias al=…; type al` says "not found" — because running the
+    /// name would *not* reach the alias. Verified against bash 5.2.
+    fn describe_alias(&self, name: &str) -> Option<&String> {
+        if self.aliases_enabled() { self.aliases.get(name) } else { None }
+    }
+
+    /// `command -v` / `command -V` — describe what `target` would run without
+    /// running it.
+    ///
+    /// Both share bash's `describe_command()` precedence: **alias > keyword >
+    /// function > builtin > `$PATH` file**. `-v` prints the terse form (the name
+    /// itself for everything but a file, whose path is printed; an alias prints
+    /// a re-usable `alias name='value'` line) and `-V` the sentence form.
+    /// Nothing found is status 1, with a diagnostic only under `-V`.
     fn command_describe(
         &mut self,
         target: &str,
@@ -5937,7 +5982,27 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
-        if self.funcs.contains_key(target) {
+        if let Some(val) = self.describe_alias(target) {
+            let line = if verbose {
+                alias_description(target, val)
+            } else {
+                // bash's terse form for an alias is a command that would
+                // recreate it, not the bare name.
+                format!("alias {target}={}", single_quote(val))
+            };
+            let _ = self.write_line(out, redir, &line);
+            self.last_status = 0;
+        } else if SHELL_KEYWORDS.contains(&target) {
+            // A reserved word is never on `$PATH`, but it *is* what the name
+            // resolves to, so bash reports it and exits 0.
+            let line = if verbose {
+                format!("{target} is a shell keyword")
+            } else {
+                target.to_string()
+            };
+            let _ = self.write_line(out, redir, &line);
+            self.last_status = 0;
+        } else if self.funcs.contains_key(target) {
             let line = if verbose {
                 format!("{target} is a function")
             } else {
@@ -14406,10 +14471,7 @@ impl Shell {
     /// and the user/group/job/service actions) are parsed-and-ignored so
     /// scripts that pass them still run without error.
     fn builtin_compgen(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        const KEYWORDS: &[&str] = &[
-            "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do",
-            "done", "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
-        ];
+        const KEYWORDS: &[&str] = SHELL_KEYWORDS;
 
         let mut wordlists: Vec<String> = Vec::new();
         let mut actions: Vec<String> = Vec::new();
@@ -14979,13 +15041,6 @@ impl Shell {
     }
 
     fn builtin_type(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        // Shell keywords recognized by `type` (reserved words that introduce or
-        // punctuate compound commands).
-        const KEYWORDS: &[&str] = &[
-            "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do",
-            "done", "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
-        ];
-
         // Parse flags: -t (type word), -p (path if file), -P (force PATH search),
         // -a (all locations), -f (skip function lookup). Flags may be clustered.
         let mut mode_t = false;
@@ -15029,15 +15084,20 @@ impl Shell {
 
         let mut status = 0;
         for name in names {
-            let is_kw = KEYWORDS.contains(&name.as_str());
+            let alias = self.describe_alias(name).cloned();
+            let is_kw = SHELL_KEYWORDS.contains(&name.as_str());
             let is_fn = !skip_func && self.funcs.contains_key(name);
             let is_bi = self.builtin_enabled(name);
             // `-P` forces a filesystem search even when the name is a builtin,
             // function, or keyword.
             // Search the filesystem when any flag needs paths, or (for default
-            // output) only when the name isn't already a keyword/function/builtin.
-            let need_files =
-                mode_pp || mode_p || mode_a || mode_t || (!is_kw && !is_fn && !is_bi);
+            // output) only when the name isn't already an alias/keyword/function/
+            // builtin.
+            let need_files = mode_pp
+                || mode_p
+                || mode_a
+                || mode_t
+                || (alias.is_none() && !is_kw && !is_fn && !is_bi);
             let files = if need_files {
                 self.find_all_in_path(name)
             } else {
@@ -15046,7 +15106,7 @@ impl Shell {
             // A command remembered in the hash table counts as found even when a
             // fresh PATH search comes up empty (bash reports it as hashed).
             let is_hashed = self.cmd_hash.contains_key(name.as_str());
-            let found = is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
+            let found = alias.is_some() || is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
             if !found {
                 if !mode_t && !mode_p && !mode_pp {
                     self.errln(&format!("{}type: {name}: not found", self.err_prefix()));
@@ -15070,9 +15130,11 @@ impl Shell {
             }
 
             if mode_t {
-                // Single type word (highest precedence): keyword > function >
-                // builtin > file.
-                let word = if is_kw {
+                // Single type word (highest precedence): alias > keyword >
+                // function > builtin > file.
+                let word = if alias.is_some() {
+                    "alias"
+                } else if is_kw {
                     "keyword"
                 } else if is_fn {
                     "function"
@@ -15087,9 +15149,9 @@ impl Shell {
 
             if mode_p {
                 // Print the path only when the name would resolve to a file
-                // (i.e. it is not a keyword/function/builtin). With -a, print
-                // all file paths.
-                if is_kw || is_fn || is_bi {
+                // (i.e. it is not an alias/keyword/function/builtin). With -a,
+                // print all file paths.
+                if alias.is_some() || is_kw || is_fn || is_bi {
                     // Nothing to print, but the name is found ⇒ status stays 0.
                 } else if mode_a {
                     for f in &files {
@@ -15109,6 +15171,9 @@ impl Shell {
             // Default (verbose) output. Without -a, print the highest-precedence
             // location only; with -a, print every location in precedence order.
             if mode_a {
+                if let Some(val) = &alias {
+                    let _ = self.write_line(out, redir, &alias_description(name, val));
+                }
                 if is_kw {
                     let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
                 }
@@ -15127,7 +15192,9 @@ impl Shell {
                         self.write_line(out, redir, &format!("{name} is {}", f.to_string_lossy()));
                 }
             } else {
-                if is_kw {
+                if let Some(val) = &alias {
+                    let _ = self.write_line(out, redir, &alias_description(name, val));
+                } else if is_kw {
                     let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
                 } else if is_fn {
                     // bash prints the "is a function" line followed by the
@@ -16896,6 +16963,14 @@ fn sigspec_display(spec: &str) -> String {
         "EXIT" | "ERR" | "DEBUG" | "RETURN" => spec.to_string(),
         _ => format!("SIG{spec}"),
     }
+}
+
+/// The sentence bash's `describe_command()` prints for an alias, shared by
+/// `type NAME` and `command -V NAME`: ``name is aliased to `value'``. Note the
+/// asymmetric backtick/apostrophe quoting — that is bash's own style, and the
+/// value is *not* escaped inside it.
+fn alias_description(name: &str, value: &str) -> String {
+    format!("{name} is aliased to `{value}'")
 }
 
 /// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
@@ -19990,24 +20065,42 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Run `src` through the *real* top-level driver ([`Shell::run_source_out`])
+    /// with stdout captured, returning `(stdout, $?)`.
+    ///
+    /// Going through `run_source_out` — rather than `parse()` plus a direct
+    /// `exec_program_top` — is what makes these tests see the shell a script
+    /// actually gets: unit-at-a-time parsing (so a mid-script `alias` /
+    /// `shopt -s expand_aliases` is honoured, and commands before a syntax error
+    /// still run), parse-error reporting, and the `Flow::Exit` collapse.
+    /// A syntax error therefore surfaces as status 2 and a stderr diagnostic,
+    /// not a panic.
     fn run(src: &str) -> (String, i32) {
-        // Capture stdout by running through command-substitution-style capture.
         let mut sh = Shell::new();
         let mut buf = Vec::new();
-        let prog = parse(src).expect("parse");
-        {
+        let status = {
             let mut out = Out::Capture(&mut buf);
-            // Use the top-level item loop so a `Flow::Discard` (arith error, bad
-            // subscript, substring-<0, failglob) behaves like a real script/stdin
-            // shell: it aborts the current parse unit but continues with the next.
-            // Collapse a `Flow::Exit` into `last_status` exactly as the real
-            // `run_source` driver does (an `exit`, or a self-directed terminating
-            // signal, unwinds the shell with that code).
-            if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
-                sh.last_status = code;
-            }
-        }
-        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+            sh.run_source_out(src, &mut out)
+        };
+        (String::from_utf8_lossy(&buf).into_owned(), status)
+    }
+
+    /// [`run`] for a *non-interactive* shell, i.e. what a script file gets.
+    ///
+    /// [`run`] leaves the shell interactive (its default), which differs from a
+    /// script in exactly one place: `expand_aliases` defaults on for an
+    /// interactive shell and off for a script (see `Shell::shopt_default`). Any
+    /// test about alias expansion or `type`/`command -v` reporting aliases must
+    /// therefore use this helper to see the script-mode default.
+    fn run_script(src: &str) -> (String, i32) {
+        let mut sh = Shell::new();
+        sh.set_repl_interactive(false);
+        let mut buf = Vec::new();
+        let status = {
+            let mut out = Out::Capture(&mut buf);
+            sh.run_source_out(src, &mut out)
+        };
+        (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
     /// The REPL's multi-line continuation gate ([`Shell::parse_incomplete`]):
@@ -20830,6 +20923,106 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn alias_missing_lookup_errors() {
         let (_, s) = run("alias nope");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn shopt_expand_aliases_takes_effect_for_later_lines() {
+        // A non-interactive shell does not expand aliases until the script asks
+        // for it — and the ask has to work, which it only can if each line is
+        // parsed after the previous one ran. All values measured against bash
+        // 5.2 in a script file.
+
+        // Baseline: without the shopt, the alias name is left alone.
+        assert_eq!(run_script("alias hi='echo hello'\nhi").1, 127);
+
+        // With it, every *later* line sees the alias.
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias hi='echo hello'\nhi").0,
+            "hello\n"
+        );
+
+        // …but not the rest of the same line: bash reads a whole logical line
+        // before parsing it, so `a` here is still an ordinary word.
+        assert_eq!(run_script("shopt -s expand_aliases\nalias a='echo A'; a").1, 127);
+
+        // The trailing-blank rule makes the next word expandable too.
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias pre='echo P '\nalias post='Q'\npre post").0,
+            "P Q\n"
+        );
+
+        // `shopt -u` mid-script stops expansion again.
+        assert_eq!(
+            run_script(
+                "shopt -s expand_aliases\nalias hi='echo hello'\nhi\nshopt -u expand_aliases\nhi"
+            )
+            .0,
+            "hello\n"
+        );
+
+        // An alias defined by an *earlier* line of the same script is picked up
+        // even though the alias table changed after the parse began.
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias x=echo\nx one\nx two").0,
+            "one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn commands_before_a_syntax_error_still_run() {
+        // bash parses and executes one logical line at a time, so a later syntax
+        // error cannot un-run an earlier command (verified against bash 5.2:
+        // `echo hi` prints before the error is reported).
+        let (o, s) = run("echo hi\necho two )\necho three");
+        assert_eq!(o, "hi\n");
+        assert_eq!(s, 2);
+        // The parse unit is the whole logical line, though: nothing on the
+        // offending line runs, even the part before the bad token.
+        let (o, s) = run("echo one; echo two )\necho three");
+        assert_eq!(o, "");
+        assert_eq!(s, 2);
+    }
+
+    #[test]
+    fn type_and_command_v_report_keywords_and_aliases() {
+        // bash's `describe_command()` precedence: alias > keyword > function >
+        // builtin > $PATH file. Values measured against bash 5.2.
+
+        // A reserved word is "found" even though it is on no $PATH.
+        assert_eq!(run("command -v while").0, "while\n");
+        assert_eq!(run("command -v while").1, 0);
+        assert_eq!(run("command -V while").0, "while is a shell keyword\n");
+        assert_eq!(run("command -v '[['").0, "[[\n");
+
+        // Aliases are only reported while expand_aliases is in effect.
+        assert_eq!(run_script("alias al='echo x'\ntype -t al").1, 1);
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias al='echo x'\ntype -t al").0,
+            "alias\n"
+        );
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias al='echo x'\ntype al").0,
+            "al is aliased to `echo x'\n"
+        );
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias al='echo x'\ncommand -v al").0,
+            "alias al='echo x'\n"
+        );
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias al='echo x'\ncommand -V al").0,
+            "al is aliased to `echo x'\n"
+        );
+
+        // The alias outranks a builtin of the same name, and `-a` lists both.
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias echo='X'\ntype -t echo").0,
+            "alias\n"
+        );
+        assert!(
+            run_script("shopt -s expand_aliases\nalias echo='X'\ntype -a echo")
+                .0
+                .starts_with("echo is aliased to `X'\necho is a shell builtin\n")
+        );
     }
 
     #[test]

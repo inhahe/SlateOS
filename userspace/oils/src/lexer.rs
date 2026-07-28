@@ -313,13 +313,44 @@ pub fn expand_aliases(
     lines: &[u32],
     aliases: &std::collections::BTreeMap<String, String>,
 ) -> (Vec<Tok>, Vec<u32>) {
-    let mut active = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    let mut out_lines = Vec::new();
-    expand_aliases_inner(toks, lines, aliases, &mut active, &mut out, &mut out_lines);
+    let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases);
     (out, out_lines)
 }
 
+/// [`expand_aliases`] plus a parallel *origin* vector: for each output token,
+/// the index of the input token it came from, or `None` when the token was
+/// spliced in by an alias's replacement text.
+///
+/// [`crate::parser::IncrementalParser`] needs this to resume: after executing
+/// one item it must know which *original* token to continue from, and must not
+/// re-expand tokens an alias already produced.
+#[must_use]
+pub fn expand_aliases_tracked(
+    toks: &[Tok],
+    lines: &[u32],
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
+    let mut active = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    let mut out_lines = Vec::new();
+    let mut out_origin = Vec::new();
+    expand_aliases_inner(
+        toks,
+        lines,
+        aliases,
+        &mut active,
+        &mut out,
+        &mut out_lines,
+        &mut out_origin,
+        true,
+    );
+    (out, out_lines, out_origin)
+}
+
+// Three parallel output vectors plus the recursion's bookkeeping. Bundling them
+// into a struct would only move the same fields behind another indirection, and
+// this is a private helper with exactly one caller pair.
+#[allow(clippy::too_many_arguments)]
 fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
@@ -327,6 +358,10 @@ fn expand_aliases_inner(
     active: &mut std::collections::BTreeSet<String>,
     out: &mut Vec<Tok>,
     out_lines: &mut Vec<u32>,
+    out_origin: &mut Vec<Option<usize>>,
+    // False inside an alias's replacement text: those tokens have no counterpart
+    // in the caller's stream, so they record origin `None`.
+    from_input: bool,
 ) {
     // Whether the *next* token must be treated as command position regardless of
     // structure (carried across an alias whose value ended in a blank).
@@ -351,14 +386,37 @@ fn expand_aliases_inner(
             }
             // Replacement tokens all inherit the alias word's source line.
             let repl_lines = vec![tok_line; repl.len()];
+            let mark = out.len();
             active.insert(name.clone());
-            expand_aliases_inner(&repl, &repl_lines, aliases, active, out, out_lines);
+            expand_aliases_inner(
+                &repl,
+                &repl_lines,
+                aliases,
+                active,
+                out,
+                out_lines,
+                out_origin,
+                false,
+            );
             active.remove(name);
+            // The *first* token of the replacement stands in for the alias word
+            // itself, so it keeps the alias word's origin; only the tokens after
+            // it are origin-less. Without this, a caller resuming at the start of
+            // the splice would skip the alias word entirely (it would find the
+            // next `Some` origin *past* the replacement) and silently drop the
+            // command. An empty replacement contributes no token and needs no
+            // mark: resuming past it is correct, since it expands to nothing.
+            if from_input
+                && let Some(slot) = out_origin.get_mut(mark)
+            {
+                *slot = Some(i);
+            }
             force = val.ends_with(' ') || val.ends_with('\t');
             continue;
         }
         out.push(tok.clone());
         out_lines.push(tok_line);
+        out_origin.push(if from_input { Some(i) } else { None });
     }
 }
 

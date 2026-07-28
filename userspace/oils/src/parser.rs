@@ -13,7 +13,7 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::lexer::{Op, Seg, Tok, expand_aliases, tokenize, tokenize_spanned};
+use crate::lexer::{Op, Seg, Tok, expand_aliases, expand_aliases_tracked, tokenize, tokenize_spanned};
 use std::collections::BTreeMap;
 
 /// A parse error with a human-readable message and, when known, the 1-based
@@ -114,6 +114,212 @@ pub fn parse_with_aliases(
         expand_aliases(&toks, &lines, aliases)
     };
     parse_tokens(toks, lines)
+}
+
+/// A resumable top-level parse: hands back one *parse unit* at a time so the
+/// caller can execute it before the next unit is parsed.
+///
+/// bash reads, parses, and executes a script one complete command at a time, and
+/// that ordering is observable in two ways this models:
+///
+/// * **Alias state is read at parse time.** `shopt -s expand_aliases` (or a
+///   plain `alias foo=…`) executed on one line affects how *later* lines parse,
+///   which is the only way a non-interactive script can use aliases at all.
+///   Parsing the whole script up front freezes the alias decision before the
+///   first command runs, so the `shopt` could never take effect.
+/// * **A syntax error does not un-run earlier commands.** `echo hi` followed by
+///   a malformed line prints `hi` and *then* reports the error (verified against
+///   bash 5.2), because the good command was already executed when the bad one
+///   was read.
+///
+/// A **unit** is everything up to and including a terminating newline — i.e. one
+/// logical line, which may hold several `;`/`&`-separated commands and may span
+/// physical lines when a compound command or a `&&`/`|` continuation does. bash
+/// uses the same granularity: in `echo one; echo two )` nothing runs, because
+/// the whole line failed to parse, and `alias a=b; a` does not expand `a`.
+///
+/// The caller supplies the alias state per unit (`None` when `expand_aliases` is
+/// off). The stream is re-expanded from the *original* tokens whenever that
+/// state changes, so already-expanded text is never expanded twice.
+pub struct IncrementalParser {
+    /// The tokenized source exactly as lexed — never alias-expanded, so it can
+    /// be re-expanded from any point under new alias state.
+    orig: Vec<Tok>,
+    orig_lines: Vec<u32>,
+    /// `orig[pos..]` alias-expanded under `last_aliases`, prefixed by any
+    /// alias-spliced tokens carried across the last rebuild.
+    work: Vec<Tok>,
+    work_lines: Vec<u32>,
+    /// Parallel to `work`: the `orig` index each token came from, or `None` for
+    /// a token an alias spliced in (which has no original counterpart).
+    work_origin: Vec<Option<usize>>,
+    /// Cursor into `work`.
+    wpos: usize,
+    /// Index into `orig` of the first token not yet consumed: the origin of the
+    /// first `Some`-origin token at or after `wpos`.
+    pos: usize,
+    /// The alias state `work` was built under, or `None` if never built. The
+    /// inner `Option` is the caller's argument (`None` = expansion disabled), so
+    /// a `shopt -u expand_aliases` also invalidates.
+    last_aliases: Option<Option<BTreeMap<String, String>>>,
+}
+
+impl IncrementalParser {
+    /// Tokenize `src` in preparation for unit-at-a-time parsing.
+    ///
+    /// # Errors
+    /// Returns [`ParseError`] if `src` cannot be lexed (unclosed quote or
+    /// substitution). Grammar errors surface later, from [`Self::next_unit`].
+    pub fn new(src: &str) -> Result<Self, ParseError> {
+        let (orig, orig_lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+        Ok(Self {
+            orig,
+            orig_lines,
+            work: Vec::new(),
+            work_lines: Vec::new(),
+            work_origin: Vec::new(),
+            wpos: 0,
+            pos: 0,
+            last_aliases: None,
+        })
+    }
+
+    /// Re-expand the unconsumed remainder of the original token stream under
+    /// `aliases`.
+    fn rebuild(&mut self, aliases: Option<&BTreeMap<String, String>>) {
+        // Alias-spliced tokens we are standing in the middle of have no
+        // counterpart in `orig`, so carry them over verbatim: re-expanding from
+        // `pos` would replay the part of the splice already executed. (Reachable
+        // only when an alias value both contains a `;`/newline and changes the
+        // alias state, e.g. `alias a='shopt -s expand_aliases; b'`.)
+        let carry = self
+            .work_origin
+            .get(self.wpos..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|o| o.is_none())
+            .count();
+        let end = self.wpos.saturating_add(carry);
+        let mut work = self.work.get(self.wpos..end).unwrap_or(&[]).to_vec();
+        let mut work_lines = self.work_lines.get(self.wpos..end).unwrap_or(&[]).to_vec();
+        let mut work_origin = vec![None; work.len()];
+
+        let rest = self.orig.get(self.pos..).unwrap_or(&[]);
+        let rest_lines = self.orig_lines.get(self.pos..).unwrap_or(&[]);
+        match aliases {
+            Some(map) if !map.is_empty() => {
+                let (t, l, o) = expand_aliases_tracked(rest, rest_lines, map);
+                work.extend(t);
+                work_lines.extend(l);
+                work_origin.extend(o.into_iter().map(|i| i.map(|i| i.saturating_add(self.pos))));
+            }
+            _ => {
+                work.extend_from_slice(rest);
+                work_lines.extend_from_slice(rest_lines);
+                work_origin.extend((self.pos..self.orig.len()).map(Some));
+            }
+        }
+        self.work = work;
+        self.work_lines = work_lines;
+        self.work_origin = work_origin;
+        self.wpos = 0;
+        self.last_aliases = Some(aliases.cloned());
+    }
+
+    /// Parse the next unit under the given alias state, or `None` when the input
+    /// is exhausted. A returned [`ParseError`] also ends the iteration: bash
+    /// abandons the rest of a script (or `eval`/`source` string) after a syntax
+    /// error rather than resynchronising.
+    ///
+    /// `aliases` is `None` when `expand_aliases` is off. Passing a state that
+    /// differs from the previous call re-expands the remaining input, which is
+    /// how a mid-script `alias`/`shopt` takes effect.
+    pub fn next_unit(
+        &mut self,
+        aliases: Option<&BTreeMap<String, String>>,
+    ) -> Option<Result<Program, ParseError>> {
+        // Compare against the state the current `work` was expanded under. Only
+        // a change forces a rebuild, so a script with a stable (or empty) alias
+        // table pays for exactly one expansion pass.
+        let stale = match (&self.last_aliases, aliases) {
+            (None, _) => true,
+            (Some(None), None) => false,
+            (Some(Some(prev)), Some(now)) => prev != now,
+            _ => true,
+        };
+        if stale {
+            self.rebuild(aliases);
+        }
+        let mut p = Parser {
+            toks: std::mem::take(&mut self.work),
+            lines: std::mem::take(&mut self.work_lines),
+            pos: self.wpos,
+        };
+        let mut items = Vec::new();
+        let outcome = loop {
+            match p.parse_item(&[]) {
+                // End of the token stream. Anything left over is a token no item
+                // can start with (a stray `)`), reported as `parse_tokens` does.
+                Ok(None) if p.pos == p.toks.len() => break Ok(()),
+                Ok(None) => break Err(p.unexpected_here()),
+                Ok(Some(item)) => {
+                    items.push(item);
+                    // The separator `parse_item` just consumed decides what
+                    // happens next.
+                    match p.pos.checked_sub(1).and_then(|i| p.toks.get(i)) {
+                        // `;`/`&` chain another command onto the same logical
+                        // line, so the unit continues.
+                        Some(Tok::Op(Op::Semi | Op::Amp)) => {}
+                        // A newline ends the unit.
+                        Some(Tok::Newline) => break Ok(()),
+                        // No separator at all: valid only at end of input.
+                        // Otherwise the item stopped on a token that cannot
+                        // terminate a top-level list — a stray `)` — which is a
+                        // syntax error for the *whole* unit, so it must be
+                        // detected here, before the items are handed back to be
+                        // executed. (`echo one; echo two )` runs nothing in
+                        // bash, not even `echo one`.)
+                        _ if p.pos == p.toks.len() => break Ok(()),
+                        _ => break Err(p.unexpected_here()),
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        // A grammar error leaves the cursor on the offending token; stamp its
+        // line exactly as `parse_tokens` does.
+        let outcome = outcome.map_err(|e| {
+            let line = p.cur_line().saturating_add(u32::from(p.peek().is_none()));
+            e.or_line(line)
+        });
+        self.wpos = p.pos;
+        self.work = p.toks;
+        self.work_lines = p.lines;
+        match outcome {
+            Ok(()) if items.is_empty() => None,
+            Ok(()) => {
+                // Resume at the first not-yet-consumed token that came from the
+                // original stream; spliced tokens before it stay in `work`.
+                self.pos = self
+                    .work_origin
+                    .get(self.wpos..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .flatten()
+                    .next()
+                    .copied()
+                    .unwrap_or(self.orig.len());
+                Some(Ok(Program { items }))
+            }
+            Err(e) => {
+                // Abandon the rest of the input, discarding the units parsed so
+                // far in *this* unit — bash never runs a partially-parsed line.
+                self.wpos = self.work.len();
+                self.pos = self.orig.len();
+                Some(Err(e))
+            }
+        }
+    }
 }
 
 /// Parse the body of a `$( … )` / `` ` … ` `` substitution, renumbering its
@@ -391,60 +597,8 @@ impl Parser {
     /// (`; echo`, `echo a ; ; echo b`) — blank *lines* between commands are fine.
     fn parse_program(&mut self, stops: &[&str], allow_empty: bool) -> Result<Program, ParseError> {
         let mut items = Vec::new();
-        loop {
-            // Blank lines between commands are fine; a bare `;`/`&` is not — it
-            // denotes an empty command, which bash rejects.
-            self.skip_newlines();
-            if self.peek().is_none() || self.at_op(Op::RParen) {
-                break;
-            }
-            if let Some(w) = self.reserved_here()
-                && stops.contains(&w.as_str())
-            {
-                break;
-            }
-            if self.at_op(Op::Semi) || self.at_op(Op::Amp) {
-                return Err(self.unexpected_here());
-            }
-            // Stamp the line on which this item begins (the lexer already
-            // accounts for any newlines hidden inside earlier tokens).
-            let line = self.cur_line();
-            let list = self.parse_and_or()?;
-            let mut background = false;
-            let mut had_sep = false;
-            match self.peek() {
-                Some(Tok::Op(Op::Amp)) => {
-                    background = true;
-                    had_sep = true;
-                    self.pos += 1;
-                }
-                Some(Tok::Newline) => {
-                    had_sep = true;
-                    self.pos += 1;
-                }
-                Some(Tok::Op(Op::Semi)) => {
-                    had_sep = true;
-                    self.pos += 1;
-                }
-                _ => {}
-            }
-            items.push(Item { list, background, line });
-            // Without a separator (`;`, `&`, newline), the only valid follower is
-            // a terminator for this context: end of input, a closing `)`, or a
-            // stop keyword (`done`, `fi`, `esac`, `}`, …). Anything else — a bare
-            // word or a stray reserved word/operator — means two commands abut
-            // with no separator, which bash rejects as a syntax error (and which
-            // osh previously mis-ran as a second command).
-            if !had_sep {
-                let at_terminator = self.peek().is_none()
-                    || self.at_op(Op::RParen)
-                    || self
-                        .reserved_here()
-                        .is_some_and(|w| stops.contains(&w.as_str()));
-                if !at_terminator {
-                    return Err(self.unexpected_here());
-                }
-            }
+        while let Some(item) = self.parse_item(stops)? {
+            items.push(item);
         }
         if items.is_empty() && !allow_empty {
             // A compound condition/body reduced to nothing (`if ; then`, `( )`,
@@ -453,6 +607,69 @@ impl Parser {
             return Err(self.unexpected_here());
         }
         Ok(Program { items })
+    }
+
+    /// Parse exactly one item (one `;`/`&`/newline-terminated and-or list) of a
+    /// command list, leaving the cursor on the token after its separator.
+    /// Returns `Ok(None)` at the end of the list — EOF, a closing `)`, or one of
+    /// the `stops` reserved words — having consumed only blank lines.
+    ///
+    /// Split out of [`Parser::parse_program`] so [`IncrementalParser`] can drive
+    /// the same grammar one item at a time and execute between items.
+    fn parse_item(&mut self, stops: &[&str]) -> Result<Option<Item>, ParseError> {
+        // Blank lines between commands are fine; a bare `;`/`&` is not — it
+        // denotes an empty command, which bash rejects.
+        self.skip_newlines();
+        if self.peek().is_none() || self.at_op(Op::RParen) {
+            return Ok(None);
+        }
+        if let Some(w) = self.reserved_here()
+            && stops.contains(&w.as_str())
+        {
+            return Ok(None);
+        }
+        if self.at_op(Op::Semi) || self.at_op(Op::Amp) {
+            return Err(self.unexpected_here());
+        }
+        // Stamp the line on which this item begins (the lexer already accounts
+        // for any newlines hidden inside earlier tokens).
+        let line = self.cur_line();
+        let list = self.parse_and_or()?;
+        let mut background = false;
+        let mut had_sep = false;
+        match self.peek() {
+            Some(Tok::Op(Op::Amp)) => {
+                background = true;
+                had_sep = true;
+                self.pos += 1;
+            }
+            Some(Tok::Newline) => {
+                had_sep = true;
+                self.pos += 1;
+            }
+            Some(Tok::Op(Op::Semi)) => {
+                had_sep = true;
+                self.pos += 1;
+            }
+            _ => {}
+        }
+        // Without a separator (`;`, `&`, newline), the only valid follower is a
+        // terminator for this context: end of input, a closing `)`, or a stop
+        // keyword (`done`, `fi`, `esac`, `}`, …). Anything else — a bare word or
+        // a stray reserved word/operator — means two commands abut with no
+        // separator, which bash rejects as a syntax error (and which osh
+        // previously mis-ran as a second command).
+        if !had_sep {
+            let at_terminator = self.peek().is_none()
+                || self.at_op(Op::RParen)
+                || self
+                    .reserved_here()
+                    .is_some_and(|w| stops.contains(&w.as_str()));
+            if !at_terminator {
+                return Err(self.unexpected_here());
+            }
+        }
+        Ok(Some(Item { list, background, line }))
     }
 
     fn parse_and_or(&mut self) -> Result<AndOr, ParseError> {

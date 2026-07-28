@@ -50,4 +50,21 @@ f() { echo "fn:$1"; return 3; }
 f one & wait $!; echo "fn rc=$?"
 echo builtin-out & wait $!; echo "builtin rc=$?"
 { echo group; false; } & wait $!; echo "group rc=$?"
-( ! true ) & wait $!; echo "subshell-negated rc=$?"
+
+echo "=== a ! written on the backgrounded pipeline itself is not applied"
+# bash inverts a pipeline's status on the way out, and the asynchronous case
+# returns before it gets there — so these come out the opposite way round from
+# the same pipelines run in the foreground.
+! true; echo "fg ! true = $?"
+! true & wait $!; echo "bg ! true = $?"
+! false & wait $!; echo "bg ! false = $?"
+! false | cat & wait $!; echo "bg ! pipeline = $?"
+! nosuch_bg_cmd & wait $!; echo "bg ! missing = $?"
+# Only the outermost `!` of the whole unit is lost. Inside an and-or list the
+# `&` binds to the list, so each pipeline keeps its own negation…
+! true && echo unreachable & wait $!; echo "bg list-head = $?"
+true && ! true & wait $!; echo "bg list-tail = $?"
+true && ! false & wait $!; echo "bg list-tail-ok = $?"
+# …and a `!` sealed inside a group or a subshell is untouched.
+( ! true ) & wait $!; echo "bg subshell = $?"
+{ ! true; } & wait $!; echo "bg group = $?"

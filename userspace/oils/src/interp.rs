@@ -7520,7 +7520,21 @@ impl Shell {
         // subshell" behaviour; osh uses a thread rather than a fork. See
         // TD-OILS13.
         let mut sub = self.clone_for_subshell();
-        let ao_owned = ao.clone();
+        let mut ao_owned = ao.clone();
+        // A `!` written on the backgrounded pipeline itself is *not* applied to
+        // the job's status. bash inverts a pipeline's result on the way out of
+        // `execute_command_internal`, and the asynchronous case returns before
+        // reaching that point — so `! true &` finishes 0 and `! false &`
+        // finishes 1, the opposite of the foreground `! true`.
+        //
+        // Only the outermost `!` is lost, and only when it is the whole unit:
+        // in an and-or list the `&` attaches to the list, so each pipeline's own
+        // negation is applied normally inside it (`! true && echo y &` is 1),
+        // and a `!` sealed inside a group or subshell is likewise untouched
+        // (`( ! true ) &` is 1).
+        if ao_owned.rest.is_empty() {
+            ao_owned.first.negated = false;
+        }
         let handle = std::thread::spawn(move || {
             let mut out = Out::Inherit;
             // A backgrounded job's stdin is disconnected (bash redirects it from
@@ -30948,6 +30962,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(sh.run_source("wait $!"), 9);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_pipeline_loses_its_own_negation() {
+        // bash inverts a pipeline's status on the way out of the executor, and
+        // the asynchronous case returns before reaching that — so a `!` written
+        // on the backgrounded pipeline itself is simply not applied, and `! X &`
+        // comes out the opposite way round from a foreground `! X`.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source("! true"), 1, "foreground negation still applies");
+        for (src, want) in [
+            ("! true &", 0),
+            ("! false &", 1),
+            ("! false | cat &", 0),
+            // Only the outermost `!` of the whole unit is lost: inside an and-or
+            // list the `&` binds to the list, so each pipeline keeps its own.
+            ("! true && echo unreachable &", 1),
+            ("true && ! true &", 1),
+            ("true && ! false &", 0),
+            // A `!` sealed inside a group or subshell is untouched.
+            ("( ! true ) &", 1),
+            ("{ ! true; } &", 1),
+        ] {
+            assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
+            assert_eq!(sh.run_source("wait $!"), want, "job status for {src:?}");
+        }
     }
 
     #[cfg(windows)]

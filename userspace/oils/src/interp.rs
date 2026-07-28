@@ -737,10 +737,16 @@ pub struct Shell {
     /// the enclosing command reads it, then it is deleted once the command
     /// finishes (drained by the `exec_simple` wrapper from the mark it recorded).
     procsub_in_temps: Vec<String>,
-    /// Deferred *output* process substitutions `>(cmd)`: `(temp_path, body)`. The
-    /// enclosing command writes to `temp_path`; after it finishes, `body` runs
-    /// with the file's contents as its stdin, then the temp file is deleted.
-    procsub_out_jobs: Vec<(String, Program)>,
+    /// Deferred *output* process substitutions `>(cmd)`:
+    /// `(temp_path, body, $? at expansion time)`. The enclosing command writes to
+    /// `temp_path`; after it finishes, `body` runs with the file's contents as
+    /// its stdin, then the temp file is deleted.
+    ///
+    /// The recorded `$?` is what the body must see: bash forks the substitution's
+    /// process while *expanding* the command's words, so the body inherits the
+    /// status of the command before the enclosing one — not the enclosing
+    /// command's own status, which does not exist yet at that point.
+    procsub_out_jobs: Vec<(String, Program, i32)>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -8603,6 +8609,11 @@ impl Shell {
     /// is a documented limitation (see known-issues TD-OILS22).
     fn proc_sub(&mut self, input: bool, body: &Program) -> String {
         let path = unique_temp_path("osh_psub");
+        // A substitution runs in its own process in bash, so its status never
+        // becomes the shell's `$?` — the enclosing command's does. Restore the
+        // caller's status around the body so that survives here too (visible as
+        // e.g. `false > >(true)` keeping status 1).
+        let saved_status = self.last_status;
         if input {
             let mut buf = Vec::new();
             {
@@ -8612,10 +8623,12 @@ impl Shell {
             if std::fs::write(&path, &buf).is_ok() {
                 self.procsub_in_temps.push(path.clone());
             }
+            self.last_status = saved_status;
         } else {
             // Create the (empty) target so the enclosing command can open it.
             let _ = std::fs::write(&path, b"");
-            self.procsub_out_jobs.push((path.clone(), body.clone()));
+            self.procsub_out_jobs
+                .push((path.clone(), body.clone(), saved_status));
         }
         path
     }
@@ -8626,16 +8639,24 @@ impl Shell {
     /// wrapper after the command (and its whole body, for functions) finishes.
     fn finish_procsubs(&mut self, in_mark: usize, out_mark: usize) {
         if self.procsub_out_jobs.len() > out_mark {
-            let jobs: Vec<(String, Program)> = self.procsub_out_jobs.split_off(out_mark);
-            for (path, body) in jobs {
+            let jobs: Vec<(String, Program, i32)> = self.procsub_out_jobs.split_off(out_mark);
+            // The enclosing command's status is the command's own; a substitution
+            // body is a separate process whose status is never `$?` (bash only
+            // ever exposes it through `$!`/`wait`). Save it across the bodies, and
+            // give each body the `$?` it would have inherited when bash forked it
+            // — the status from *before* the enclosing command.
+            let enclosing_status = self.last_status;
+            for (path, body, forked_status) in jobs {
                 if let Ok(bytes) = std::fs::read(&path) {
                     let cursor = RefCell::new(io::Cursor::new(bytes));
                     let sin = StdinSrc::Cursor(&cursor);
                     let mut out = Out::Inherit;
+                    self.last_status = forked_status;
                     let _ = self.exec_program(&body, &mut out, &sin);
                 }
                 let _ = std::fs::remove_file(&path);
             }
+            self.last_status = enclosing_status;
         }
         if self.procsub_in_temps.len() > in_mark {
             for path in self.procsub_in_temps.split_off(in_mark) {
@@ -30114,6 +30135,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "for i in a b; do echo $i; done > >(cat > \"{FILE}\")",
         );
         assert_eq!(looped, "a\nb\n");
+    }
+
+    /// A process substitution is a separate process in bash, so its body's exit
+    /// status is never the shell's `$?` — and the `$?` the body itself sees is
+    /// the one from *before* the enclosing command, because bash forks it while
+    /// expanding the words. osh ran the deferred body inline and let its status
+    /// overwrite the enclosing command's, so `false > >(true)` reported success.
+    /// Both numbers below were measured against bash 5.x.
+    #[test]
+    fn process_sub_does_not_disturb_the_exit_status() {
+        assert_eq!(run("false > >(cat > /dev/null); echo $?").0, "1\n");
+        assert_eq!(run("(exit 3) > >(cat > /dev/null); echo $?").0, "3\n");
+        // The input form runs during expansion; its status is discarded too.
+        assert_eq!(run(": <(exit 5); echo $?").0, "0\n");
+        assert_eq!(run("false; true < <(exit 5); echo $?").0, "0\n");
+        // The body inherits the status of the command *before* the enclosing one
+        // (here `true`), not the enclosing command's own failure.
+        let seen = run_exec_redirect(
+            "true\nfalse > >(echo \"body=$?\" > \"{FILE}\"; cat > /dev/null)",
+        );
+        assert_eq!(seen, "body=0\n");
     }
 
     #[test]

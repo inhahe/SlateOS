@@ -2828,6 +2828,9 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
                 op,
                 colon,
                 arg: Box::new(word_verbatim_from_source(&arg_str, opts)?),
+                // Written directly, the name read and the name complained about
+                // are the same one; only indirection separates them.
+                label: None,
             })
         }
     }

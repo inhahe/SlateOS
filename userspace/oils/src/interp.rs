@@ -9636,7 +9636,8 @@ impl Shell {
                 op,
                 colon,
                 arg,
-            } => self.expand_param_op(name, index, *op, *colon, arg),
+                label,
+            } => self.expand_param_op(name, index, *op, *colon, arg, label.as_deref()),
             WordPart::ParamTrim {
                 name,
                 index,
@@ -9760,6 +9761,11 @@ impl Shell {
                 // then apply the modifier to that variable.
                 // A circular chain has no endpoint name, so it takes the same
                 // "invalid indirect expansion" path as an unset pointer.
+                //
+                // Whatever the modifier ends up reading, a complaint it makes is
+                // about the reference as written — the writer named `!ref`, and
+                // the variable it resolved to is not theirs to be told about.
+                let label = format!("!{}", Self::indirect_ref_src(refname, index));
                 let pointed_at = if index.is_none() && self.nameref_attr.contains(refname) {
                     match self.resolve_ref_name(refname) {
                         Some(t) => Some(t),
@@ -9790,13 +9796,13 @@ impl Shell {
                     // The reference points nowhere, so the modifier has no
                     // variable to work on — and bash gives it one that is simply
                     // unset, `${!a[9]:-D}` yielding the default and `${!a[9]+S}`
-                    // nothing. The name it uses is the reference text itself,
-                    // which no variable can be called and which is what its own
-                    // complaints go on to quote (`!a[9]: msg`). There is nothing
-                    // to validate about it, so it skips the check above.
-                    None => format!("!{}", Self::indirect_ref_src(refname, index)),
+                    // nothing. The reference text itself serves as that name: no
+                    // variable can be called `!a[9]`, so it is unset by
+                    // construction. There is nothing to validate about it, so it
+                    // skips the check above.
+                    None => label.clone(),
                 };
-                let renamed = rename_param_target(target, &tname);
+                let renamed = rename_param_target(target, &tname, &label);
                 self.expand_dynamic(&renamed)
             }
             WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
@@ -9860,6 +9866,7 @@ impl Shell {
         op: ParamOp,
         colon: bool,
         arg: &Word,
+        label: Option<&str>,
     ) -> String {
         let cur = self.param_elem_value(name, index);
         // Bash: the colon forms (`:-`, `:=`, `:+`, `:?`) treat an empty value the
@@ -9919,8 +9926,11 @@ impl Shell {
                         "parameter not set"
                     };
                     // bash renders the parameter name with its subscript exactly
-                    // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded).
-                    let disp = crate::unparse::name_sub(name, index);
+                    // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded) —
+                    // or, through an indirection, the reference the writer
+                    // actually wrote rather than the name it resolved to.
+                    let disp = label
+                        .map_or_else(|| crate::unparse::name_sub(name, index), ToString::to_string);
                     self.emit_stderr(format!("{}{disp}: {text}\n", self.err_prefix()).as_bytes());
                     // bash: `${var:?word}` on an unset/null parameter writes the
                     // message and, in a non-interactive shell, exits with status
@@ -22332,7 +22342,12 @@ fn is_valid_indirect_target(s: &str) -> bool {
 /// expansion), replacing its parameter name with the resolved target name. Only
 /// the modifier variants that can follow indirection are handled; anything else
 /// is returned unchanged (the parser guarantees `target` is one of these).
-fn rename_param_target(part: &WordPart, new_name: &str) -> WordPart {
+///
+/// `label` is how the expansion is to be *named* if it complains — the reference
+/// as written, `!ref`. The two part ways here and nowhere else: the reader was
+/// asking about a name they never wrote down, so being told the resolved one
+/// would name a variable they never mentioned.
+fn rename_param_target(part: &WordPart, new_name: &str, label: &str) -> WordPart {
     let name = new_name.to_string();
     match part.clone() {
         WordPart::ParamOp {
@@ -22347,6 +22362,7 @@ fn rename_param_target(part: &WordPart, new_name: &str) -> WordPart {
             op,
             colon,
             arg,
+            label: Some(label.to_string()),
         },
         WordPart::ParamTrim {
             index,
@@ -26402,6 +26418,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
             "<a b>\n<c>\n"
         );
+    }
+
+    #[test]
+    fn an_indirect_expansion_complains_under_the_name_it_was_written_as() {
+        // `${!ref:?}` reads whatever `ref` points at, but the writer named the
+        // reference — so that, and not the resolved target, is what the message
+        // quotes. The subscript comes back as written, like everywhere else.
+        assert_eq!(
+            run("p=nosuch; { echo \"${!p:?msg}\"; } 2>&1").0,
+            "osh: !p: msg\n"
+        );
+        assert_eq!(
+            run("p=e; e=; { echo \"${!p:?}\"; } 2>&1").0,
+            "osh: !p: parameter null or not set\n"
+        );
+        assert_eq!(
+            run("ref='a[1]'; a=(x); { echo \"${!ref?msg}\"; } 2>&1").0,
+            "osh: !ref: msg\n"
+        );
+        assert_eq!(
+            run("a=(x); n=9; { echo \"${!a[$n]:?msg}\"; } 2>&1").0,
+            "osh: !a[$n]: msg\n"
+        );
+        // Written directly, there is no second name to confuse it with.
+        assert_eq!(run("x=; { echo \"${x:?msg}\"; } 2>&1").0, "osh: x: msg\n");
+        assert_eq!(
+            run("i=2; a=(); { echo \"${a[$i]:?}\"; } 2>&1").0,
+            "osh: a[$i]: parameter null or not set\n"
+        );
+        // Only the complaint is renamed: an assignment still reaches the target.
+        assert_eq!(run("p=t; echo \"[${!p:=v}]\"; echo \"t=[$t]\"").0, "[v]\nt=[v]\n");
     }
 
     #[test]

@@ -424,6 +424,11 @@ pub enum WordPart {
         /// `+`/`?`), which act only when the parameter is genuinely *unset*.
         colon: bool,
         arg: Box<Word>,
+        /// The name a `?`/`:?` complaint quotes, when that is not the name being
+        /// read. Only indirection sets it: `${!ref:?msg}` reads whatever `ref`
+        /// points at but names `!ref`, because the target's name is an answer
+        /// the writer never gave and so is not theirs to be told about.
+        label: Option<String>,
     },
     /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}` — remove
     /// a matching prefix (`#`) or suffix (`%`); doubled operator = longest match.

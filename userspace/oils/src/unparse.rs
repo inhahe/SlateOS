@@ -899,7 +899,10 @@ fn part_src(p: &WordPart) -> String {
             s
         }
         WordPart::Param(name) => dollar_name(name),
-        WordPart::ParamOp { name, index, op, colon, arg } => {
+        // `label` is not rendered: it only ever holds the reference an indirect
+        // expansion goes by, and the `IndirectOp` arm splices that back in
+        // itself, from the reference it kept.
+        WordPart::ParamOp { name, index, op, colon, arg, label: _ } => {
             let sym = match op {
                 ParamOp::UseDefault => "-",
                 ParamOp::AssignDefault => "=",

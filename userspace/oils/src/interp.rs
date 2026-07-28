@@ -17637,7 +17637,10 @@ impl Shell {
         const ARG_LETTERS: &str = "oAGWFCXPS";
         const USAGE: &str = "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]";
 
-        let mut wordlists: Vec<String> = Vec::new();
+        // Each of these is a single slot in bash's compspec, so a repeated
+        // option overwrites rather than adds: `-W 'x y' -W 'p q'` offers only
+        // `p q`. The actions are the exception — they are a set.
+        let mut wordlist: Option<String> = None;
         let mut actions: Vec<String> = Vec::new();
         let mut prefix = String::new();
         let mut suffix = String::new();
@@ -17699,7 +17702,7 @@ impl Shell {
                             ));
                             return 2;
                         }
-                        'W' => wordlists.push(val),
+                        'W' => wordlist = Some(val),
                         'A' => actions.push(val),
                         'P' => prefix = val,
                         'S' => suffix = val,
@@ -17822,7 +17825,7 @@ impl Shell {
         }
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
         let ifs_chars: Vec<char> = ifs.chars().collect();
-        for wl in &wordlists {
+        if let Some(wl) = &wordlist {
             for tok in wl.split(|c| ifs_chars.contains(&c)).filter(|s| !s.is_empty()) {
                 cands.push(tok.to_string());
             }
@@ -28859,6 +28862,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("tr1=x; compgen -b -v tr").0, "trap\ntrue\ntr1\n");
         assert_eq!(run("compgen -b -b tr").0, "trap\ntrue\n");
         assert_eq!(run("compgen -W 'if1' -k i").0, "if\nin\nif1\n");
+        // …but a repeated -W is one slot in the spec, so the last one wins.
+        assert_eq!(run("compgen -W 'x y' -W 'p q'").0, "p\nq\n");
         // Reserved words keep the grammar's table order, not alphabetical.
         assert_eq!(run("compgen -k i").0, "if\nin\n");
         // Names come out sorted, however they went into the shell's tables.

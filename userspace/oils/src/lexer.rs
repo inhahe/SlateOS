@@ -1154,20 +1154,18 @@ impl Lexer {
                             // literal `&`) from an active one.
                             lit.push('\\');
                             lit.push(next);
-                        } else if next.is_ascii_alphanumeric() {
-                            // Escaped alphanumeric: fold into the plain literal
-                            // (an escaped letter/digit has no metacharacter
-                            // meaning), matching `read_word_inner`.
-                            lit.push(next);
                         } else {
-                            // Escaped metacharacter/punctuation in a `${…#pat}` /
-                            // `${…/pat/…}` / `${…^pat}` pattern (or replacement):
-                            // emit it as a one-char single-quoted segment so it is
-                            // treated as a *literal* by the pattern matcher — an
-                            // escaped `*`/`?`/`[` matches that character, not as a
-                            // live glob metacharacter (bash). Same rationale and
-                            // representation as the escape handling in
-                            // `read_word_inner`.
+                            // An escaped character in a `${…#pat}` /
+                            // `${…/pat/…}` / `${…^pat}` pattern (or
+                            // replacement): emit it as a one-char single-quoted
+                            // segment so it is treated as a *literal* by the
+                            // pattern matcher — an escaped `*`/`?`/`[` matches
+                            // that character, not as a live glob metacharacter
+                            // (bash). A letter or digit could not have been a
+                            // metacharacter anyway, but keeping its escape as a
+                            // segment is what lets `declare -f` print the
+                            // pattern back as written. Same rationale and
+                            // representation as in `read_word_inner`.
                             flush_lit(&mut segs, &mut lit);
                             segs.push(Seg::Sq(next.to_string(), true));
                         }
@@ -1361,16 +1359,25 @@ impl Lexer {
                         // is treated literally in globbing, `case`, and
                         // `[[ == ]]`, matching bash (previously it was folded
                         // into an unquoted literal and wrongly matched as a live
-                        // metacharacter). Two carve-outs preserve existing
-                        // behavior: (1) an escaped ASCII *alphanumeric* is folded
-                        // into the plain literal so reserved-word/command-name
-                        // recognition — which keys off a single flattened
-                        // `Seg::Lit` — still sees `\if`/`\ls` as `if`/`ls`; and
-                        // (2) inside an extglob group (`@( … )`, `ext_depth > 0`)
-                        // the group body is accumulated as one contiguous
-                        // literal, so we keep the fold there rather than split
-                        // the group across segments.
-                        if ext_depth > 0 || next.is_ascii_alphanumeric() {
+                        // metacharacter).
+                        //
+                        // This holds for letters and digits too, even though an
+                        // escaped one can never be a metacharacter: quoting any
+                        // character of a word is what stops the word being read
+                        // as a *syntactic* name, so `\if` is an ordinary command
+                        // word rather than the keyword, `\a=1` is a command
+                        // rather than an assignment, and `\f() { … }` is not a
+                        // function definition. All three read the word as a
+                        // single flattened `Seg::Lit`, so the escape has to
+                        // survive as its own segment for them to say no. The
+                        // command *name* is unaffected — it is the expansion,
+                        // and `\ls` still expands to `ls`.
+                        //
+                        // The one carve-out: inside an extglob group (`@( … )`,
+                        // `ext_depth > 0`) the body is accumulated as one
+                        // contiguous literal, so keep the fold there rather than
+                        // split the group across segments.
+                        if ext_depth > 0 {
                             lit.push(next);
                         } else {
                             flush_lit(&mut segs, &mut lit);

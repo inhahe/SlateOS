@@ -2009,11 +2009,11 @@ impl Shell {
             (vec![self.last_status], flow)
         } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
             // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
-            self.exec_concurrent_pipeline(&pipe.commands, out)
+            self.exec_concurrent_pipeline(&pipe.commands, out, stdin)
         } else {
             // A builtin/function/compound stage is present → threaded pipeline
             // (each in-process stage on its own thread, real OS pipes between).
-            self.exec_threaded_pipeline(&pipe.commands, out)
+            self.exec_threaded_pipeline(&pipe.commands, out, stdin)
         };
         // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?`.
         self.finish_pipeline(&statuses);
@@ -2071,6 +2071,63 @@ impl Shell {
         };
     }
 
+    /// Derive an owned standard-input source for the **head** stage of a
+    /// pipeline from the ambient one.
+    ///
+    /// A pipeline's first stage reads whatever the pipeline itself was handed,
+    /// and a pipeline is not always outermost: in `cmd | f` where `f`'s body is
+    /// `a | b`, the inner `a` must read the outer pipe. Both pipeline executors
+    /// used to hard-code "inherit the shell's real stdin" for the head stage, so
+    /// the inner `a` read the *script's* stdin instead — silently empty when
+    /// that was at EOF, and a permanent hang when it was a terminal.
+    ///
+    /// The result is an owned [`io::PipeReader`] (`None` meaning "inherit"),
+    /// because the head stage runs on a spawned thread — only the *last* stage
+    /// runs on the caller's — and no borrowing form of [`StdinSrc`] is `Send`:
+    /// [`StdinSrc::Cursor`] holds a shared `&RefCell`, which is not `Sync` at
+    /// any lifetime, `'static` included. A `Cursor`'s remaining bytes are
+    /// therefore pushed down a fresh OS pipe by a short-lived writer thread — a
+    /// thread rather than an inline `write_all` because the bytes can exceed
+    /// the pipe buffer, which would deadlock against a reader that has not
+    /// started yet.
+    ///
+    /// `Inherit` stays `None`: a persistent `exec < file` is consulted
+    /// per-command further down, so resolving it here would consume it twice.
+    fn pipeline_head_stdin(&mut self, stdin: &StdinSrc) -> Option<io::PipeReader> {
+        match stdin {
+            StdinSrc::Inherit => None,
+            // A clone of the read end, so the head stage streams rather than
+            // buffering (an unbounded upstream like `yes` must not be drained).
+            StdinSrc::Pipe(r) => match r.borrow().get_ref().try_clone() {
+                Ok(rp) => Some(rp),
+                Err(e) => {
+                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                    None
+                }
+            },
+            StdinSrc::Cursor(c) => {
+                let mut rest = Vec::new();
+                // Reading to the end advances the cursor, so a later `read` in
+                // the enclosing command does not replay these bytes.
+                let _ = c.borrow_mut().read_to_end(&mut rest);
+                match io::pipe() {
+                    Ok((r, mut w)) => {
+                        std::thread::spawn(move || {
+                            // The reader closing early (`… | head`) is normal:
+                            // the resulting `BrokenPipe` just ends this thread.
+                            let _ = w.write_all(&rest);
+                        });
+                        Some(r)
+                    }
+                    Err(e) => {
+                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     /// Run a multi-stage pipeline that contains at least one in-process stage
     /// (builtin, shell function, or compound command), connecting the stages
     /// with real OS pipes so they run **concurrently** and stream. Each stage
@@ -2081,8 +2138,17 @@ impl Shell {
     /// its input (`SIGPIPE` for an external producer; the [`Shell::pipe_broken`]
     /// flag unwinds an in-process producer). Returns the per-stage exit codes
     /// (in pipeline order) for `${PIPESTATUS[@]}` / `pipefail`.
-    fn exec_threaded_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> (Vec<i32>, Flow) {
+    fn exec_threaded_pipeline(
+        &mut self,
+        cmds: &[Command],
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> (Vec<i32>, Flow) {
         let n = cmds.len();
+        // The head stage reads whatever the pipeline itself was given — which is
+        // not always the shell's real stdin, because a pipeline can be nested
+        // (`cmd | f`, where `f`'s body is itself `a | b`).
+        let mut head_stdin = self.pipeline_head_stdin(stdin);
         // Build the n-1 connecting pipes up front. `readers[i]`/`writers[i]` are
         // stage i's input/output endpoints; stage 0 inherits stdin and the last
         // stage writes to the ambient `out`, so those endpoints are `None`.
@@ -2124,8 +2190,11 @@ impl Shell {
                 let Some(writer) = writers[i].take() else {
                     continue; // unreachable for non-last stages
                 };
+                // Only stage 0 has no upstream pipe, so only it needs the
+                // pipeline's own input.
+                let head = if i == 0 { head_stdin.take() } else { None };
                 let handle = scope.spawn(move || {
-                    let stdin = match reader {
+                    let stdin = match reader.or(head) {
                         Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
                         None => StdinSrc::Inherit,
                     };
@@ -2142,7 +2211,10 @@ impl Shell {
 
             // Last stage: run on this thread (writing to `out`).
             let last = n - 1;
-            let reader = readers[last].take();
+            // `.or` is a no-op for n >= 2 (stage `last` always has an upstream
+            // pipe); it keeps the head's input from being dropped if a future
+            // caller ever routes a one-stage pipeline through here.
+            let reader = readers[last].take().or_else(|| head_stdin.take());
             let stdin = match reader {
                 Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
                 None => StdinSrc::Inherit,
@@ -2216,8 +2288,33 @@ impl Shell {
     /// concurrently. Returns the per-stage exit codes (in pipeline order) so the
     /// caller can publish `${PIPESTATUS[@]}` and apply `pipefail`. The caller
     /// guarantees every stage passes [`Shell::stage_is_plain_external`].
-    fn exec_concurrent_pipeline(&mut self, cmds: &[Command], out: &mut Out) -> (Vec<i32>, Flow) {
+    fn exec_concurrent_pipeline(
+        &mut self,
+        cmds: &[Command],
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> (Vec<i32>, Flow) {
+        // The head stage reads the pipeline's own input, which is the shell's
+        // real stdin only when the pipeline is not itself nested inside another
+        // (`cmd | f`, where `f`'s body is `a | b`).
+        let mut head_stdio = self.pipeline_head_stdin(stdin).map(Stdio::from);
+        // Where the *last* stage's stdout goes. `Capture` is spawned as a pipe
+        // and drained below; `Pipe` hands the child a duplicate of the write
+        // end, so the bytes reach the enclosing pipeline directly (no relay
+        // thread, and the child's own EOF still arrives once every duplicate is
+        // closed — ours is consumed by `spawn`).
         let capturing = matches!(out, Out::Capture(_));
+        let mut last_stdio = match &*out {
+            Out::Inherit => Some(Stdio::inherit()),
+            Out::Capture(_) => Some(Stdio::piped()),
+            Out::Pipe(w) => match w.try_clone() {
+                Ok(dup) => Some(Stdio::from(dup)),
+                Err(e) => {
+                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                    Some(Stdio::null())
+                }
+            },
+        };
         let last = cmds.len().saturating_sub(1);
         let mut children: Vec<Child> = Vec::with_capacity(cmds.len());
         let mut prev_stdout: Option<ChildStdout> = None;
@@ -2264,23 +2361,24 @@ impl Shell {
                 pc.env(k, v);
             }
 
-            // stdin: first stage inherits; later stages read the previous pipe
-            // (or a closed/null stream if the previous stage failed to start).
+            // stdin: the first stage takes the pipeline's own input; later
+            // stages read the previous pipe (or a closed/null stream if the
+            // previous stage failed to start).
             if i == 0 {
-                pc.stdin(Stdio::inherit());
+                pc.stdin(head_stdio.take().unwrap_or_else(Stdio::inherit));
             } else if let Some(so) = prev_stdout.take() {
                 pc.stdin(Stdio::from(so));
             } else {
                 pc.stdin(Stdio::null());
             }
 
-            // stdout: last stage → capture or inherit; earlier stages → a pipe.
+            // stdout: the last stage writes wherever the *pipeline* writes —
+            // which is not always the shell's real stdout, because a pipeline
+            // can be nested (`a | b | f`, where `f`'s body is itself `c | d`:
+            // the inner `d` must reach the outer pipe, not the terminal).
+            // Earlier stages always write to the next connecting pipe.
             if i == last {
-                if capturing {
-                    pc.stdout(Stdio::piped());
-                } else {
-                    pc.stdout(Stdio::inherit());
-                }
+                pc.stdout(last_stdio.take().unwrap_or_else(Stdio::inherit));
             } else {
                 pc.stdout(Stdio::piped());
             }

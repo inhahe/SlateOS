@@ -4560,21 +4560,20 @@ impl Shell {
     /// Where a plain scalar write to `name` lands once nameref chains are
     /// followed, and everything the store then needs to know.
     ///
-    /// The interesting case is the second one: a nameref may designate an array
-    /// *element* rather than a variable, so `declare -n r=arr[0]; r=v` is
-    /// `arr[0]=v`. That is the one thing a caller cannot work out from a name
-    /// alone, and the reason this is worth a shared type.
+    /// The interesting case is the second one: the destination may be an array
+    /// *element* rather than a variable. That happens two ways — the name given
+    /// already carries a subscript (`read arr[0]`), or a nameref resolves to one
+    /// (`declare -n r=arr[0]; r=v`) — and the callers can tell neither apart from
+    /// a plain name, which is what makes this worth a shared type.
     ///
     /// `None` from [`Shell::scalar_write_dest`] means the chain is circular: it
     /// designates nothing, the warning has already been given, and the write
     /// simply does not happen.
     fn scalar_write_dest(&self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
-        // Only a *followed* nameref can name an element — a plain `arr[0]` used
-        // as a variable name is not one, and `name` itself never has a
-        // subscript here.
-        if target != name
-            && let Some(open) = target.find('[')
+        // A subscript is only ever a real one: no variable can be *named*
+        // `arr[0]`, so a target that looks like one is one.
+        if let Some(open) = target.find('[')
             && let Some(sub) = target.strip_suffix(']')
         {
             return Some(ScalarDest::Elem(
@@ -15005,7 +15004,7 @@ impl Shell {
     ///
     /// Two separate rules, both measured against bash 5.2:
     ///
-    /// * The value must name a variable ([`is_valid_nameref_target`]). For the
+    /// * The value must name a variable ([`is_valid_assignment_target`]). For the
     ///   `+=` form it is the *resulting* name that has to be valid — `declare -n
     ///   r=a; declare -n r+='[1]'` legitimately builds `a[1]` — but the message
     ///   quotes only the appended text, and it uses the generic "not a valid
@@ -15031,7 +15030,7 @@ impl Shell {
         } else {
             Cow::Borrowed(value)
         };
-        if !is_valid_nameref_target(&result) {
+        if !is_valid_assignment_target(&result) {
             // The quoted text is what this command supplied, not the result.
             let shown = value;
             let what = if append || result.is_empty() {
@@ -17108,19 +17107,20 @@ impl Shell {
             return i32::from(!self.input_available_now(rd_stdin, rd_redir));
         }
 
-        // `read -a array` resets the target array to empty up front (bash), so
-        // even an EOF with no data leaves a defined, empty array (`declare -p`
-        // shows `=()`), and a pre-existing array is replaced rather than merged
-        // into. A readonly target rejects the read before any reset.
-        if let Some(arr) = &array {
-            if self.readonly.contains(arr) {
-                self.emit_stderr(format!("{}{arr}: readonly variable\n", self.err_prefix()).as_bytes());
-                return 1;
-            }
-            self.vars.remove(arr);
-            self.assoc.remove(arr);
-            self.array_valued.insert(arr.clone());
-            self.arrays.insert(arr.clone(), BTreeMap::new());
+        // bash checks the *first* name before it reads anything, so a `read`
+        // that could never store what it found refuses without consuming the
+        // input — the one refusal a following read can still recover from. Every
+        // later name is checked only when the assignment reaches it, by which
+        // point the input is already gone. The `-a` array is an option argument
+        // rather than an operand, so it is not part of this early check either
+        // and is validated down with the assignment.
+        if let Some(first) = names.first()
+            && !is_valid_assignment_target(first)
+        {
+            self.emit_stderr(
+                format!("{}read: `{first}': not a valid identifier\n", self.err_prefix()).as_bytes(),
+            );
+            return 1;
         }
 
         // Choose the read strategy. Any of `-d`/`-n`/`-N` selects the
@@ -17160,8 +17160,22 @@ impl Shell {
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
 
         if let Some(arr) = array {
-            // The target was already reset to empty (and readonly-checked) up
-            // front; here we fill it with the split record.
+            // `-a` fills a whole array, so it takes a plain name: an element is
+            // not an array to put a record in. Both this and the readonly guard
+            // happen here rather than up front, because the input has already
+            // been consumed by the time bash looks at where to put it.
+            if !crate::parser::is_valid_name(&arr) {
+                self.emit_stderr(
+                    format!("{}read: `{arr}': not a valid identifier\n", self.err_prefix()).as_bytes(),
+                );
+                return 1;
+            }
+            if self.readonly.contains(&arr) {
+                self.emit_stderr(format!("{}{arr}: readonly variable\n", self.err_prefix()).as_bytes());
+                return 1;
+            }
+            // The record replaces whatever the array held rather than merging
+            // into it, so an EOF leaves a defined but empty array.
             // `-N` assigns the raw record without IFS splitting: a single
             // element holding exactly the characters read (bash).
             let map: BTreeMap<usize, String> = if exact {
@@ -17199,6 +17213,17 @@ impl Shell {
         };
         for (idx, name) in names.iter().enumerate() {
             let val = fields.get(idx).cloned().unwrap_or_default();
+            // A name that cannot be assigned to aborts the read where it stands,
+            // exactly as a readonly one does: the fields before it are already
+            // stored and the ones after it never are. (The first name was
+            // checked before the read, so only the later ones can fail here.)
+            if !is_valid_assignment_target(name) {
+                self.emit_stderr(
+                    format!("{}read: `{name}': not a valid identifier\n", self.err_prefix())
+                        .as_bytes(),
+                );
+                return 1;
+            }
             // A readonly target aborts the read at that field (bash: earlier
             // fields are already assigned, the read fails with status 1).
             if !self.set_scalar_checked(name, val) {
@@ -21377,16 +21402,16 @@ fn attr_assignment_split(word: &str) -> Option<usize> {
     None
 }
 
-/// Whether `s` can be the value of a nameref (`declare -n ref=VALUE`).
+/// Whether `s` names somewhere a value can be put: a plain identifier, or an
+/// identifier with a non-empty subscript (`arr[0]`, `m[key]`).
 ///
-/// A nameref's value is the *name* of the variable it stands for, so bash only
-/// accepts a plain identifier or an identifier with a non-empty subscript
-/// (`declare -n ref=arr[0]`, `declare -n ref=m[key]` — the subscript is not
-/// evaluated here, so `a[x+1]` and `a[@]` are both accepted). Everything else
-/// — an empty value, `1x`, `a-b`, an unbalanced `a[`, an empty `a[]` — is
-/// rejected at declaration time rather than becoming a reference that can never
-/// resolve.
-fn is_valid_nameref_target(s: &str) -> bool {
+/// This is bash's `legal_identifier() || valid_array_reference()`, the pair it
+/// checks wherever a *name* is given as a word rather than parsed as an
+/// assignment — `read arr[0]` and `declare -n ref=arr[0]` alike. The subscript
+/// is not evaluated here, so `a[x+1]` and `a[@]` are both accepted; what is
+/// rejected is anything that could never name a variable at all — an empty
+/// string, `1x`, `a-b`, an unbalanced `a[`, an empty `a[]`.
+fn is_valid_assignment_target(s: &str) -> bool {
     match s.find('[') {
         // `BASE[SUB]`: the subscript must close at the very end and be
         // non-empty, and the base must still be an identifier.
@@ -32784,6 +32809,90 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("read -a arr <<< 'x y'; declare -p arr").0,
             "declare -a arr=([0]=\"x\" [1]=\"y\")\n"
+        );
+    }
+
+    #[test]
+    fn read_stores_through_a_subscripted_name() {
+        // A `read` operand is a *name*, and bash's idea of a name includes a
+        // subscripted one — so a record can go straight into an element without
+        // a temporary in between.
+        assert_eq!(
+            run("a=(x y); read 'a[1]' <<< NEW; declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"NEW\")\n"
+        );
+        // The subscript is evaluated as arithmetic on an indexed array, and
+        // taken as a literal key on an associative one.
+        assert_eq!(run("v=5; read 'a[v]' <<< NEW; declare -p a").0, "declare -a a=([5]=\"NEW\")\n");
+        assert_eq!(
+            run("a=(x y); read 'a[1+1]' <<< NEW; declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"y\" [2]=\"NEW\")\n"
+        );
+        assert_eq!(
+            run("a=(x y z); read 'a[-1]' <<< NEW; declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"y\" [2]=\"NEW\")\n"
+        );
+        assert_eq!(
+            run("declare -A m; read 'm[k v]' <<< NEW; declare -p m").0,
+            "declare -A m=([\"k v\"]=\"NEW\" )\n"
+        );
+        // An element target is a field like any other, so it takes its own
+        // field and the array's attributes still apply to what lands in it.
+        assert_eq!(
+            run("read 'a[1]' x <<< 'p q'; declare -p a x").0,
+            "declare -a a=([1]=\"p\")\ndeclare -- x=\"q\"\n"
+        );
+        assert_eq!(
+            run("declare -i a; read 'a[0]' <<< '3+4'; declare -p a").0,
+            "declare -ai a=([0]=\"7\")\n"
+        );
+        // The refusal is the array's, and it names the array rather than the
+        // element that was aimed at.
+        assert_eq!(
+            run("a=(x y); readonly a; read 'a[1]' <<< NEW 2>&1; declare -p a").0,
+            "osh: a: readonly variable\ndeclare -ar a=([0]=\"x\" [1]=\"y\")\n"
+        );
+        // A nameref reaches the array it stands for.
+        assert_eq!(
+            run("declare -n r=arr; read 'r[0]' <<< NEW; declare -p arr").0,
+            "declare -a arr=([0]=\"NEW\")\n"
+        );
+    }
+
+    #[test]
+    fn read_checks_its_first_name_before_it_reads() {
+        // Only a name that could never hold anything is refused: an identifier,
+        // or an identifier with a non-empty subscript, is all bash accepts.
+        for bad in ["1bad", "a-b", "a[b", "a[]", ""] {
+            assert_eq!(
+                run(&format!("read '{bad}' <<< x 2>&1; echo rc=$?")).0,
+                format!("osh: read: `{bad}': not a valid identifier\nrc=1\n"),
+                "read {bad}"
+            );
+        }
+        // The *first* name is checked before anything is read, so that refusal
+        // costs the input nothing and a following read still sees all of it…
+        assert_eq!(
+            run("{ read 1bad ok; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r] ok=[${ok-unset}]\"").0,
+            "r=[p q] ok=[unset]\n"
+        );
+        // …while a later one is only reached once the record has been read and
+        // handed out, so the input is gone and the earlier names keep what they
+        // were given.
+        assert_eq!(
+            run("{ read x y 1bad; read r; } <<< 'p q z' 2>/dev/null; echo \"r=[$r] x=[$x] y=[$y]\"").0,
+            "r=[] x=[p] y=[q]\n"
+        );
+        // `-a` names an array to fill, so a subscript is not a name it takes —
+        // and being an option argument rather than an operand, it is checked
+        // only after the input has been consumed.
+        assert_eq!(
+            run("read -a 'a[1]' <<< x 2>&1; echo rc=$?").0,
+            "osh: read: `a[1]': not a valid identifier\nrc=1\n"
+        );
+        assert_eq!(
+            run("{ read -a 1bad; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r]\"").0,
+            "r=[]\n"
         );
     }
 

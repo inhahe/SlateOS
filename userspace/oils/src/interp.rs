@@ -4531,6 +4531,56 @@ impl Shell {
         }
     }
 
+    /// Where a plain scalar write to `name` lands once nameref chains are
+    /// followed, and everything the store then needs to know.
+    ///
+    /// The interesting case is the second one: a nameref may designate an array
+    /// *element* rather than a variable, so `declare -n r=arr[0]; r=v` is
+    /// `arr[0]=v`. That is the one thing a caller cannot work out from a name
+    /// alone, and the reason this is worth a shared type.
+    ///
+    /// `None` from [`Shell::scalar_write_dest`] means the chain is circular: it
+    /// designates nothing, the warning has already been given, and the write
+    /// simply does not happen.
+    fn scalar_write_dest(&self, name: &str) -> Option<ScalarDest> {
+        let target = self.resolve_ref_use(name)?;
+        // Only a *followed* nameref can name an element — a plain `arr[0]` used
+        // as a variable name is not one, and `name` itself never has a
+        // subscript here.
+        if target != name
+            && let Some(open) = target.find('[')
+            && let Some(sub) = target.strip_suffix(']')
+        {
+            return Some(ScalarDest::Elem(
+                target[..open].to_string(),
+                sub[open + 1..].to_string(),
+            ));
+        }
+        Some(ScalarDest::Var(target))
+    }
+
+    /// Store `val` at an already-resolved destination, applying `set -a` and
+    /// the case attributes. The readonly guard is deliberately *not* here: the
+    /// callers disagree on how a refusal should be reported (a diagnostic, or
+    /// an [`arith::ArithError`] that aborts an expression), so each checks
+    /// [`ScalarDest::base`] itself first.
+    fn scalar_write_store(&mut self, dest: &ScalarDest, val: String) {
+        let base = dest.base().to_string();
+        // `set -a` (allexport): any assigned variable is given the export
+        // attribute automatically.
+        if self.allexport {
+            self.exported.insert(base.clone());
+        }
+        let val = self.fold_case_attr(&base, val);
+        match dest {
+            ScalarDest::Var(n) => self.set_scalar_store(n, val),
+            ScalarDest::Elem(n, sub) => {
+                let n = n.clone();
+                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val);
+            }
+        }
+    }
+
     /// Store a plain scalar value into a variable, honoring the readonly guard,
     /// nameref redirection, the case attributes, and `set -a` export. Returns
     /// `false` (with the `readonly variable` diagnostic already emitted) when the
@@ -4540,18 +4590,15 @@ impl Shell {
     fn set_scalar_checked(&mut self, name: &str, val: String) -> bool {
         // A circular nameref names nothing to write to: report it and fail,
         // exactly as bash does for `a=5` through a cycle.
-        let Some(target) = self.resolve_ref_use(name) else {
+        let Some(dest) = self.scalar_write_dest(name) else {
             return false;
         };
-        if self.readonly.contains(&target) {
-            self.emit_stderr(format!("{}{target}: readonly variable\n", self.err_prefix()).as_bytes());
+        if self.readonly.contains(dest.base()) {
+            let base = dest.base().to_string();
+            self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
             return false;
         }
-        if self.allexport {
-            self.exported.insert(target.clone());
-        }
-        let val = self.fold_case_attr(&target, val);
-        self.set_scalar_store(&target, val);
+        self.scalar_write_store(&dest, val);
         true
     }
 
@@ -19048,6 +19095,32 @@ impl VarLookup for Shell {
 
 // ---- free helpers -----------------------------------------------------------
 
+/// The place a plain scalar assignment ends up, after namerefs are followed.
+/// See [`Shell::scalar_write_dest`].
+#[derive(Debug, Clone)]
+enum ScalarDest {
+    /// A variable, written by name (which may still land on element 0 of an
+    /// existing array — see [`Shell::set_scalar_store`]).
+    Var(String),
+    /// The element a nameref designates (`declare -n r=arr[0]`, `-n r=m[key]`):
+    /// the array's name, and the subscript text the nameref carried. Which of
+    /// the two kinds of subscript it is — arithmetic index or associative key —
+    /// is settled at store time by what `arr` turns out to be.
+    Elem(String, String),
+}
+
+impl ScalarDest {
+    /// The variable a destination belongs to — what the readonly attribute is
+    /// checked against, and what an assignment reports when it is refused. For
+    /// an element that is the *array*, since it is the array that carries the
+    /// attribute.
+    fn base(&self) -> &str {
+        match self {
+            ScalarDest::Var(n) | ScalarDest::Elem(n, _) => n,
+        }
+    }
+}
+
 /// Per-command redirection plan (expanded targets).
 #[derive(Debug, Clone, Default)]
 struct RedirPlan {
@@ -25864,6 +25937,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -A m; m[k]=v; declare -n r=m[k]; echo $r; r=w; echo ${m[k]}").0,
             "v\nw\n"
         );
+    }
+
+    #[test]
+    fn nameref_to_array_element_is_followed_by_every_writer() {
+        // Where a nameref designates an element rather than a variable, it is
+        // the *assignment* that has to notice — so every path that assigns a
+        // scalar has to, not just the `name=value` command. `read` used to
+        // create a variable literally called `q[0]` instead.
+        assert_eq!(
+            run("declare -n r=q[0]; read r <<< hi; declare -p q").0,
+            "declare -a q=([0]=\"hi\")\n"
+        );
+        assert_eq!(
+            run("declare -A m; declare -n r=m[k]; read r <<< hi; echo \"${m[k]}\"").0,
+            "hi\n"
+        );
+        // The array is what carries the readonly attribute, so it is the array
+        // the refusal names.
+        let err = run("readonly -a q=(1); declare -n r=q[0]; { read r <<< hi; } 2>&1; declare -p q").0;
+        assert_eq!(err, "osh: q: readonly variable\ndeclare -ar q=([0]=\"1\")\n");
     }
 
     #[test]

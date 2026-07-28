@@ -9085,8 +9085,44 @@ impl Shell {
     /// contexts (`[[ a -eq b ]]`) instead use the non-fatal
     /// [`Shell::eval_arith_cond_operand`], which prints on a malformed literal
     /// but yields `false` rather than aborting — matching bash.
+    /// Expand a word that is about to be handed to the arithmetic evaluator (an
+    /// array subscript, or a `${x:off:len}` bound).
+    ///
+    /// This is *not* ordinary word expansion. bash runs these through
+    /// `expand_arith_string`, which performs parameter/command substitution and
+    /// removes **double** quotes but leaves **single** quotes in place — the
+    /// arithmetic evaluator then rejects the stray `'` as an invalid token. So
+    /// `a["1"]` is index 1 while `a['1']` is `'1': syntax error: operand
+    /// expected`, and `a['']` is a syntax error rather than index 0. Re-emitting
+    /// a single-quoted run as its own source text is what reproduces that.
+    ///
+    /// Tilde expansion is likewise not performed: `~` has no meaning in an
+    /// arithmetic expression.
+    fn expand_to_arith_string(&mut self, w: &Word) -> String {
+        let mut out = String::new();
+        for part in &w.parts {
+            match part {
+                WordPart::Literal(s) => out.push_str(s),
+                WordPart::SingleQuoted(s) => {
+                    out.push('\'');
+                    out.push_str(s);
+                    out.push('\'');
+                }
+                WordPart::DoubleQuoted(parts) => {
+                    let s = self.expand_double_quoted(parts);
+                    out.push_str(&s);
+                }
+                other => {
+                    let s = self.expand_dynamic(other);
+                    out.push_str(&s);
+                }
+            }
+        }
+        out
+    }
+
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
-        let s = self.expand_to_string(w);
+        let s = self.expand_to_arith_string(w);
         let s = s.trim();
         if s.is_empty() {
             return 0;
@@ -30471,6 +30507,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("h() { echo fn; }; h=v; unset h; echo \"[$h]\"; h").0,
             "[]\nfn\n"
+        );
+    }
+
+    #[test]
+    fn arithmetic_subscripts_keep_single_quotes_and_drop_double_quotes() {
+        // An arithmetic subscript is expanded by bash's `expand_arith_string`,
+        // which removes double quotes but leaves single quotes for the
+        // evaluator to reject. The pair looks symmetric and is not.
+        // The error discards the rest of its *parse unit*, so the probe of `$?`
+        // has to live on the following line.
+        let (o, _) = run("a=(0 1 2)\n{ a['1']=x; } 2>&1\necho \"st=$? vals=${a[*]}\"");
+        assert_eq!(o, "osh: '1': syntax error: operand expected (error token is \"'1'\")\nst=1 vals=0 1 2\n");
+        assert_eq!(run("b=(0 1 2); b[\"1\"]=y; echo \"${b[1]}\"").0, "y\n");
+        // The empty case is the dangerous one: `''` must be a syntax error, not
+        // index 0, or the assignment silently overwrites the first element.
+        let (o2, _) = run("c=(0 1 2)\n{ c['']=z; } 2>&1\necho \"st=$? first=${c[0]}\"");
+        assert_eq!(
+            o2,
+            "osh: '': syntax error: operand expected (error token is \"''\")\nst=1 first=0\n"
+        );
+        // …while a double-quoted empty subscript really is index 0.
+        assert_eq!(run("d=(0 1 2); d[\"\"]=z; echo \"${d[0]}\"").0, "z\n");
+        // The read and length forms follow the same rule.
+        assert_eq!(run("e=(0 1 2); echo \"${e[\"1\"]} ${#e[\"1\"]}\"").0, "1 1\n");
+        // Substring and slice bounds are arithmetic too.
+        let (o3, _) = run("s=abcdef\n{ echo \"${s:'1'}\"; } 2>&1\necho \"st=$?\"");
+        assert_eq!(
+            o3,
+            "osh: s: '1': syntax error: operand expected (error token is \"'1'\")\nst=1\n"
+        );
+        // An *associative* subscript is an ordinary word, so its single quotes
+        // really do quote — that is how a key with spaces is written.
+        assert_eq!(
+            run("declare -A m; m['two words']=w; m['1']=b; echo \"${m['two words']} ${m[1]} ${#m[@]}\"").0,
+            "w b 2\n"
         );
     }
 

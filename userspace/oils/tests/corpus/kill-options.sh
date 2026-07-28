@@ -36,6 +36,15 @@ kill -x 999999; echo "rc=$?"
 # …and the fault is the spec's, so it is named once however many targets follow.
 kill -x 999999 999998; echo "rc=$?"
 
+echo "=== each name is written where it is worked out"
+# Merged into one stream, so the order of the two is what is being read: a spec
+# the shell cannot make sense of is complained about in its place among the
+# names, rather than ahead of all of them.
+kill -l 9 -x 15 2>&1; echo "rc=$?"
+# The same listing sent to a file, where each name is a separate write: the
+# second must not start the file over.
+kill -l 9 -x 15 >f 2>/dev/null; cat f
+
 echo "=== -- ends the run, and -? asks for the usage"
 kill -l -- 9
 kill -- -l 9; echo "rc=$?"

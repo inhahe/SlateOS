@@ -73,6 +73,17 @@ shopt login_shell; echo "rc=$?"
 shopt -s login_shell; echo "rc=$?"; shopt login_shell
 shopt restricted_shell; echo "rc=$?"
 
+echo "=== each answer keeps its place among the complaints"
+# The two streams merged, so their order is what is being read: an answer is
+# written where it is reached rather than gathered up and printed after the
+# names that had none.
+shopt nocaseglob bogus nocasematch 2>&1; echo "rc=$?"
+shopt -p nocaseglob bogus nocasematch 2>&1; echo "rc=$?"
+shopt -o xtrace bogus errexit 2>&1; echo "rc=$?"
+# The same listing sent to a file, where each answer is a separate write: the
+# second must not start the file over.
+shopt nocaseglob nocasematch >f 2>/dev/null; cat f
+
 echo "=== BASHOPTS is the enabled options, and follows every change"
 echo "$BASHOPTS"
 shopt -s nocaseglob; echo "$BASHOPTS"

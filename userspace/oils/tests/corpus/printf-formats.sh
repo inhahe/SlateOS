@@ -25,3 +25,9 @@ printf 'octal=\101 hex=\x42\n'
 # -v stores instead of printing.
 printf -v out '%s=%d' k 9
 echo "out=$out"
+
+# An argument that is not a number is complained about in its place among the
+# output, not ahead of it — and when that output is going to a file, each piece
+# of it is a separate write which must not start the file over.
+printf '%d\n' 5 bad 7 2>&1; echo "rc=$?"
+printf '%d\n' 5 bad 7 >f 2>/dev/null; cat f

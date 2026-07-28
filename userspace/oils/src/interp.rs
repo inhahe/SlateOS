@@ -580,6 +580,28 @@ enum Out {
     Pipe(io::PipeWriter),
 }
 
+/// The `>`/`>>` file a builtin is writing to, held open for that builtin's
+/// whole run.
+///
+/// [`Shell::write_bytes`] used to re-open the target on every call, which
+/// re-truncates a `>` file — so a builtin that wrote its output in pieces would
+/// keep only the last piece. Every builtin therefore had to accumulate all of
+/// its stdout and write it once, which necessarily put all of it *after* any
+/// diagnostic it had emitted along the way (bash interleaves the two). Holding
+/// the handle instead lets a builtin write as it goes.
+struct BuiltinStdout {
+    /// The path the plan named, kept verbatim so the handle can only ever serve
+    /// the redirect it was installed for — a builtin that writes through some
+    /// other plan falls back to opening for itself.
+    path: String,
+    append: bool,
+    /// Opened at the first write rather than on entry: a builtin that produces
+    /// no output must not report a failure to open a file it never used. (The
+    /// target has already been created and truncated by `resolve_redirects`, so
+    /// the file exists eagerly regardless.)
+    file: Option<std::fs::File>,
+}
+
 impl Out {
     /// A second handle on the same sink, for a writer that outlives this one.
     ///
@@ -1013,6 +1035,11 @@ pub struct Shell {
     /// collected. The job stays in the substitution's table instead, still
     /// owed to whatever `jobs` runs there.
     in_comsub: bool,
+    /// The `>`/`>>` target of the builtin currently running, held open so it can
+    /// write in pieces. Installed and restored around each builtin's dispatch by
+    /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
+    /// running one redirects nothing. See [`BuiltinStdout`].
+    builtin_stdout: Option<BuiltinStdout>,
     /// `$BASH_SUBSHELL` — the subshell nesting depth. 0 at the top level; each
     /// `( … )` group, command substitution, pipeline stage, or other subshell
     /// increments it for its clone (bash).
@@ -1562,6 +1589,7 @@ impl Shell {
             last_status: 0,
             comsub_count: 0,
             in_comsub: false,
+            builtin_stdout: None,
             subshell_depth: 0,
             last_bg_pid: None,
             pipefail: false,
@@ -4226,6 +4254,9 @@ impl Shell {
             // — `x=$( ( sleep 5 & kill -HUP %1; … ) )` prints the message on the
             // parent's stderr, and the group's `jobs` then has nothing to say.
             in_comsub: false,
+            // Belongs to a builtin that is running *now*, in this shell; a
+            // subshell starts outside any builtin of its own.
+            builtin_stdout: None,
             // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
             subshell_depth: self.subshell_depth.saturating_add(1),
             last_bg_pid: self.last_bg_pid,
@@ -10622,6 +10653,17 @@ impl Shell {
         // (`this_command_name`): `let`/`(( ))`/`declare`/`typeset`/`local`
         // arithmetic reports `<name>: line N: <builtin>: <expr>: …`. Set it for
         // the builtin's duration so `eval_int_assign` picks up the right tag.
+        // Hold this builtin's own `> file` open for its whole run, so it can
+        // write its output in pieces and interleave with its diagnostics the way
+        // bash does. Saved and restored rather than merely cleared: a builtin
+        // that runs commands (`eval`, `source`) can have another builtin with a
+        // redirect of its own running inside it.
+        let saved_builtin_stdout = self.builtin_stdout.take();
+        self.builtin_stdout = redir.stdout.as_ref().map(|(path, append)| BuiltinStdout {
+            path: path.clone(),
+            append: *append,
+            file: None,
+        });
         let saved_arith_cmd = self.arith_cmd.take();
         self.arith_cmd = match name {
             "let" => Some(Cow::Borrowed("let")),
@@ -10979,6 +11021,7 @@ impl Shell {
             }
         };
         self.arith_cmd = saved_arith_cmd;
+        self.builtin_stdout = saved_builtin_stdout;
 
         // Tear down the scoped stderr redirect. Nothing to fold afterwards: a
         // `2>&1` into a captured fd 1 wrote into fd 1's own buffer as it went.
@@ -12007,7 +12050,6 @@ impl Shell {
             let buf = signal_list_columns();
             return self.write_bytes(out, redir, buf.as_bytes());
         }
-        let mut buf = String::new();
         let mut status = 0;
         for spec in specs {
             let answer = if let Some(n) = legal_number(spec) {
@@ -12018,8 +12060,13 @@ impl Shell {
             };
             match answer {
                 Some(text) => {
-                    buf.push_str(&text);
-                    buf.push('\n');
+                    // Each answer is written where it is reached, so that a
+                    // spec the shell cannot read is complained about in its
+                    // place among them rather than ahead of all of them.
+                    let w = self.write_bytes(out, redir, format!("{text}\n").as_bytes());
+                    if w != 0 {
+                        return w;
+                    }
                 }
                 None => {
                     // bash quotes the word it was given, not the number it read
@@ -12035,8 +12082,7 @@ impl Shell {
                 }
             }
         }
-        let w = self.write_bytes(out, redir, buf.as_bytes());
-        if w != 0 { w } else { status }
+        status
     }
 
     /// Poll every tracked background job without blocking, recording the exit
@@ -15646,7 +15692,6 @@ impl Shell {
             // than ending the query — bash answers for every name it was given,
             // so `shopt bogus nocaseglob` still says where `nocaseglob` stands.
             let mut all_on = true;
-            let mut listing = String::new();
             for name in &names {
                 if !shopt_is_known(name) {
                     self.emit_stderr(
@@ -15663,10 +15708,14 @@ impl Shell {
                 if !on {
                     all_on = false;
                 }
-                listing.push_str(&shopt_line(name, on, flags.reinput));
-            }
-            if !flags.quiet {
-                self.write_bytes(out, redir, listing.as_bytes());
+                // Written where it is reached rather than gathered up and
+                // written at the end: a name the shell does not know is
+                // complained about mid-listing, and bash's two streams
+                // interleave in that order.
+                if !flags.quiet {
+                    let line = shopt_line(name, on, flags.reinput);
+                    self.write_bytes(out, redir, line.as_bytes());
+                }
             }
             return i32::from(!all_on);
         }
@@ -15775,7 +15824,6 @@ impl Shell {
         // shopt-option path, an unknown name is reported and stepped over so the
         // remaining names still get their answer.
         let mut all_on = true;
-        let mut listing = String::new();
         for name in names {
             if !SETO_NAMES.contains(&name.as_str()) {
                 self.emit_stderr(format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes());
@@ -15786,14 +15834,17 @@ impl Shell {
             if !on {
                 all_on = false;
             }
-            if flags.reinput {
-                listing.push_str(&format!("set {}o {name}\n", if on { '-' } else { '+' }));
-            } else {
-                listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
+            if flags.quiet {
+                continue;
             }
-        }
-        if !flags.quiet {
-            self.write_bytes(out, redir, listing.as_bytes());
+            // As above, each answer is written where it is reached so that it
+            // keeps its place among the complaints.
+            let line = if flags.reinput {
+                format!("set {}o {name}\n", if on { '-' } else { '+' })
+            } else {
+                format!("{name:<15}\t{}\n", if on { "on" } else { "off" })
+            };
+            self.write_bytes(out, redir, line.as_bytes());
         }
         i32::from(!all_on)
     }
@@ -18129,6 +18180,55 @@ impl Shell {
 
     // ---- output helpers -----------------------------------------------------
 
+    /// Write `bytes` to the `>`/`>>` file the running builtin redirects its
+    /// stdout to, through the handle [`Shell::run_builtin_body`] holds open for
+    /// that builtin's whole run rather than by re-opening the path.
+    ///
+    /// That distinction is the point of the handle: re-opening a `>` target
+    /// truncates it, so a builtin writing in pieces would keep only the last
+    /// piece. See [`BuiltinStdout`]. The file is opened here, at the first
+    /// write, and only when this is the very redirect the handle was installed
+    /// for — a builtin writing through some other plan opens for itself.
+    fn write_redirected(&mut self, path: &str, append: bool, bytes: &[u8]) -> i32 {
+        // Taken out of `self` for the duration: opening the file, and reporting
+        // that it could not be opened, both need `&mut self`. It goes back
+        // either way.
+        let mut held = self.builtin_stdout.take();
+        let fresh = match held.as_mut() {
+            Some(h) if h.path == path && h.append == append => {
+                if h.file.is_none() {
+                    match open_out(&self.cwd, path, append) {
+                        Ok(f) => h.file = Some(f),
+                        Err(e) => {
+                            self.builtin_stdout = held;
+                            self.errln(&format!(
+                                "{}{path}: {}",
+                                self.err_prefix(),
+                                io_error_message(&e)
+                            ));
+                            return 1;
+                        }
+                    }
+                }
+                let status = match h.file.as_mut() {
+                    Some(f) => i32::from(f.write_all(bytes).is_err()),
+                    None => 1,
+                };
+                self.builtin_stdout = held;
+                return status;
+            }
+            _ => open_out(&self.cwd, path, append),
+        };
+        self.builtin_stdout = held;
+        match fresh {
+            Ok(mut f) => i32::from(f.write_all(bytes).is_err()),
+            Err(e) => {
+                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                1
+            }
+        }
+    }
+
     fn write_line(&mut self, out: &mut Out, redir: &RedirPlan, line: &str) -> i32 {
         let mut s = line.to_string();
         s.push('\n');
@@ -18165,18 +18265,8 @@ impl Shell {
         }
         // A `>`/`>>` redirect on the builtin wins over the ambient sink.
         if let Some((path, append)) = &redir.stdout {
-            match open_out(&self.cwd, path, *append) {
-                Ok(mut f) => {
-                    if f.write_all(bytes).is_err() {
-                        return 1;
-                    }
-                    0
-                }
-                Err(e) => {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
-                    1
-                }
-            }
+            let (path, append) = (path.clone(), *append);
+            self.write_redirected(&path, append, bytes)
         } else {
             // A runtime `exec > file` inside a capture/pipe binding rebinds fd 1
             // out from under it, so it is checked before `out`.
@@ -24210,6 +24300,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Also works with the `< file` form embedded directly in a comsub arg.
         let (o2, _) = run(&format!("echo \"<$(<{p})>\""));
         assert_eq!(o2, "<hello world\nsecond line>\n");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_builtin_writing_in_pieces_keeps_its_whole_output_in_a_file() {
+        // A builtin whose output is interrupted by a diagnostic writes it in
+        // pieces so the two interleave as bash's do. Its `> file` target is
+        // therefore opened once for the builtin and written through, not
+        // re-opened per write — which would truncate away everything but the
+        // last piece. See `BuiltinStdout`.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("osh_piecewise_{}_{}.txt", std::process::id(), nanos));
+        let p = path.to_string_lossy().replace('\\', "/");
+        run(&format!("kill -l 9 -x 15 > {p} 2>/dev/null"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "KILL\nTERM\n");
+        // `>>` reaches the same file without the first piece being lost either.
+        run(&format!("kill -l 1 2 >> {p}"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "KILL\nTERM\nHUP\nINT\n");
         std::fs::remove_file(&path).ok();
     }
 

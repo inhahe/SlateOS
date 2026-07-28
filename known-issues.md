@@ -5178,7 +5178,17 @@ top-level item boundary, discarding the remaining items of the current parsed
 input unit before resuming. Also expand the offending assignment's value up-front
 (before storing) so an errored `x=$((1/0))` leaves `x` unset, matching bash.
 
-### TD-OILS-PRINTF-ERRORDER. `osh` printf emits all `invalid number` diagnostics *before* any output; bash interleaves them per format-cycle — MINOR DEVIATION 2026-07-19
+### TD-OILS-PRINTF-ERRORDER. `osh` printf emits all `invalid number` diagnostics *before* any output; bash interleaves them per format-cycle — RESOLVED 2026-07-27 (was: MINOR DEVIATION 2026-07-19)
+
+**Resolved 2026-07-27.** `printf` already emitted its output and its
+conversion errors in stream order (`printf_output_segments` / `PrintfSeg`);
+what remained was that a `> file` target was re-opened, and so re-truncated,
+on every write, which silently dropped every piece of that stream but the
+last. A builtin's redirect is now held open for its whole run
+(`BuiltinStdout`, `Shell::write_redirected`), so both `printf '%d' 5 bad 7
+2>&1` and the same into a file match bash. Covered by
+`tests/corpus/printf-formats.sh` and
+`a_builtin_writing_in_pieces_keeps_its_whole_output_in_a_file`.
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_printf` (~7975) calls
 `format_printf`, which builds the *entire* output string and collects every
@@ -5578,7 +5588,17 @@ than merged. Tests: `declare_p_empty_array_distinguishes_assigned_from_declared`
 element-assign-then-unset, `+=`, `local -a`, `mapfile`, and pre-existing-array
 cases. 548 tests pass; clippy + slateos builds clean.
 
-### TD-OILS-PRINTF-ERRORDER. `printf` emits all invalid-number errors before its stdout, not interleaved — MINOR 2026-07-19
+### TD-OILS-PRINTF-ERRORDER. `printf` emits all invalid-number errors before its stdout, not interleaved — RESOLVED 2026-07-27 (was: MINOR 2026-07-19)
+
+**Resolved 2026-07-27.** `printf` already emitted its output and its
+conversion errors in stream order (`printf_output_segments` / `PrintfSeg`);
+what remained was that a `> file` target was re-opened, and so re-truncated,
+on every write, which silently dropped every piece of that stream but the
+last. A builtin's redirect is now held open for its whole run
+(`BuiltinStdout`, `Shell::write_redirected`), so both `printf '%d' 5 bad 7
+2>&1` and the same into a file match bash. Covered by
+`tests/corpus/printf-formats.sh` and
+`a_builtin_writing_in_pieces_keeps_its_whole_output_in_a_file`.
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_printf` (~8381) and
 `format_printf` (~13806). `format_printf` builds the *entire* output string and
@@ -5719,7 +5739,17 @@ input). **Proper fix (if ever wanted):** apply quote-removal semantics to
 brace-generated literal segments so a generated lone `\` is consumed as an
 escape, matching bash.
 
-### TD-OILS-PRINTF-ERRORDER. `printf` batches all "invalid number" diagnostics *before* its stdout, where bash interleaves each at the point of the bad conversion — MINOR ORDERING DEVIATION 2026-07-19
+### TD-OILS-PRINTF-ERRORDER. `printf` batches all "invalid number" diagnostics *before* its stdout, where bash interleaves each at the point of the bad conversion — RESOLVED 2026-07-27 (was: MINOR ORDERING DEVIATION 2026-07-19)
+
+**Resolved 2026-07-27.** `printf` already emitted its output and its
+conversion errors in stream order (`printf_output_segments` / `PrintfSeg`);
+what remained was that a `> file` target was re-opened, and so re-truncated,
+on every write, which silently dropped every piece of that stream but the
+last. A builtin's redirect is now held open for its whole run
+(`BuiltinStdout`, `Shell::write_redirected`), so both `printf '%d' 5 bad 7
+2>&1` and the same into a file match bash. Covered by
+`tests/corpus/printf-formats.sh` and
+`a_builtin_writing_in_pieces_keeps_its_whole_output_in_a_file`.
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_printf` / `format_printf`.
 
@@ -6616,7 +6646,18 @@ rebinding `out`.
 substitution **and** writing to the substitution's stdout. Output is lost, not
 corrupted.
 
-### TD-OILS-KILL-L-INTERLEAVE. `kill -l` batches all its stdout into one write, so its listing lands after every diagnostic instead of interleaving with them — OPEN 2026-07-27
+### TD-OILS-KILL-L-INTERLEAVE. `kill -l` batches all its stdout into one write, so its listing lands after every diagnostic instead of interleaving with them — RESOLVED 2026-07-27
+
+**Resolved 2026-07-27** by the proper fix named below. A builtin's `>`/`>>`
+target is now opened once and held for the builtin's whole run
+(`BuiltinStdout`, installed and restored around the dispatch in
+`run_builtin_body`, used by `Shell::write_redirected`), so a builtin may write
+its stdout in pieces without the second piece truncating away the first.
+`kill_list` and `shopt`'s two query loops write each answer where they reach it,
+and their listings now keep their place among their diagnostics. Covered by
+`tests/corpus/kill-options.sh`, `tests/corpus/shopt-builtin.sh` and
+`a_builtin_writing_in_pieces_keeps_its_whole_output_in_a_file`; the same change
+closes TD-OILS-PRINTF-ERRORDER.
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::kill_list` (the `buf`
 accumulator) and `Shell::write_bytes`.

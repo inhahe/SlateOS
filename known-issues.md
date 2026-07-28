@@ -64,6 +64,117 @@ suite: 713 + 13 pass, `cargo clippy -p oils --all-targets` clean.
 **Still open** in TD-OILS11: a `RETURN` trap is not fired for a returning
 *sourced script* (only function returns), and async signal delivery.
 
+### BUG-OILS-LINENO-IN-CMDSUB. `$LINENO` restarts at 1 inside `$( … )` — 2026-07-27 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` (`command_sub`, which parses the
+substitution body as a fresh program) and whatever carries the current line into
+`Shell::err_prefix`. Corpus case:
+`userspace/oils/tests/corpus/lineno-cmdsub.sh` (waived with `# EXPECT-DIFF`, so
+the harness will fail loudly the moment this is fixed and the waiver goes stale).
+
+**Symptom.** For this script:
+
+```
+1  echo "L1=$LINENO"
+2  v=$(
+3  echo "a=$LINENO"
+4  echo "b=$LINENO"
+5  )
+6  echo "$v"
+7  echo "L7=$LINENO"
+```
+
+bash prints `L1=1`, `a=5`, `b=6`, `L7=7`; osh prints `a=1`, `b=2` — the
+substitution body restarts its own numbering. It shows up in diagnostics too:
+`v=$(echo x > /nodir/f)` says `line 1:` in osh where bash names the real line.
+
+**bash's actual rule** (reverse-engineered from 11 probes against bash 5.x, not
+from the manual — it is an artifact of bash re-parsing the body after the outer
+command has already been scanned):
+
+> Inside `$( … )`, `$LINENO` = *(source line of the closing paren)* + *(0-based
+> rank of the body line among the body's **command-bearing** lines)*.
+
+The second term is a rank, **not** an offset: blank lines inside the body do not
+advance it. Both halves are needed — each of these was measured:
+
+| Body | bash |
+|---|---|
+| `x=$(echo $LINENO)` on line 1 | `1` (rank 0, close line 1) |
+| `y=$(echo $LINENO` line 3 / `echo $LINENO)` line 4 | `4`, `5` — both offset from the *close* line, not the start |
+| `z=$(` line 6 / `echo $LINENO)` line 7 | `7` — the empty remainder of line 6 does not count |
+| `z=$(` line 1 / blank line 2 / `echo $LINENO)` line 3 | `3` — the blank line does not count either |
+| `q=$(echo $LINENO` line 5 / blank / `echo $LINENO)` line 7 | `7`, `8` — ranks 0 and 1, not 0 and 2 |
+| `r=$(echo $LINENO; echo $LINENO` line 1 / `echo $LINENO)` line 2 | `2`, `2`, `3` — two commands on one line share a rank |
+
+Any fix must reproduce *this*, not the intuitive "line where the body actually
+is" — byte-fidelity with bash is the whole point of the differential harness.
+
+**Proper fix:** `Seg::CmdSub` must carry the source line of its closing paren
+(the lexer already tracks `Lexer::line` through the newlines swallowed inside a
+substitution, so at the `segs.push(Seg::CmdSub(raw))` sites that value is
+exactly the close-paren line). `seg_to_part` then parses the body with a
+rebasing pass over the per-token `lines` vector produced by `tokenize_spanned`:
+map each distinct line that carries a non-`Newline` token to
+`close_line + rank`, and give each `Newline` token the rank of the preceding
+command-bearing line. That reproduces both the base and the blank-line collapse
+with one mechanism.
+
+### BUG-OILS-REDIRECT-ORDER-ERROR-ROUTING. A failing output redirect was diagnosed after the *whole* redirect list had been applied — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**How it was found.** The `redirection` corpus case, added to the differential
+harness on the same day it was written. It was the only one of six new cases
+(word-splitting, arrays, printf-formats, getopts, scoping, case-patterns,
+redirection) that diverged.
+
+**Symptom.** bash applies redirections strictly left to right against the real
+fd table and aborts at the *first* failure, so both where the diagnostic goes
+and which files get created depend on the order. All four rows measured against
+bash 5.x:
+
+| Case | bash | osh (before) |
+|---|---|---|
+| `echo A > nodir/f 2>/dev/null` | message on the terminal — `2>/dev/null` is never reached | message suppressed |
+| `echo B 2>/dev/null > nodir/f` | message suppressed | message suppressed (agreed by luck) |
+| `echo C > nodir/f 2>err.txt` | message on the terminal, **`err.txt` never created** | message written into `err.txt`, which was created |
+| `echo D 2>err2.txt > nodir/f` | message into `err2.txt` | message into `err2.txt` (agreed by luck) |
+
+**Root cause.** `resolve_redirects` built an order-free `RedirPlan` and left
+output targets *unopened*; the failure surfaced only when the command finally
+tried to write, by which point every redirect in the list — including a
+trailing `2>` — had been installed. `materialize_output_files` then papered over
+the "no-output builtin must still create its target" half by re-opening targets
+after the fact, with the failure explicitly ignored (`let _ = open_out(…)`).
+
+**Fix (a refactor, not a patch).**
+
+* `resolve_redirects`'s loop body moved into `resolve_one_redirect`, so the
+  `?`-heavy per-redirect logic can keep returning a bare message while the
+  caller attaches state.
+* New `open_output_target` performs the create/truncate **while the plan is
+  being resolved**, in source order. That is both the validation and the file
+  side effect, so `materialize_output_files` was deleted outright rather than
+  left as a second, weaker copy of the same rule. The noclobber (`set -C`) check
+  had to move *above* the open, which would otherwise truncate the very file
+  noclobber exists to protect.
+* `resolve_redirects` now returns `Err(Box<RedirFailure>)` carrying the plan
+  built from the redirects *before* the failing one; the four call sites hand it
+  to `report_redirect_failure`, which pushes the stderr sink that partial plan
+  implies (file, `2>&N` write fd, `2>&1`-following-fd-1, or a capture buffer),
+  emits the message through the ordinary `emit_stderr` path, and pops.
+* The whole-plan dup-then-close post-pass became `reconcile_dup_then_close`,
+  since it must run once after the loop rather than per redirect.
+
+**Tests.** `failing_output_redirect_reports_through_the_fd2_of_its_moment`
+(four expectations: message escapes a trailing `2>`, an earlier `2>` captures
+it, `2>&1` folds it into a command substitution, and a redirect to the left of
+the failure *is* applied) plus the `redirection` corpus case. 728 + 15 pass,
+clippy clean, corpus 32 matched / 1 waived.
+
+**Still order-free** (unchanged, tracked as TD-OILS14): the collapsed plan
+cannot express `>&2 2>file`, where bash's `>&2` should reach the *pre*-redirect
+stderr.
+
 ### BUG-OILS-MAPFILE-BULK-ASSIGN. `mapfile` assigned the array only after the whole read, and `-O` wrongly cleared it first — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **How it was found.** The first run of the new differential harness

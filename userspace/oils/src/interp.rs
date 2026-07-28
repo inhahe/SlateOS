@@ -2727,9 +2727,8 @@ impl Shell {
         let out_mark = self.procsub_out_jobs.len();
         let plan = match self.resolve_redirects(redirects) {
             Ok(p) => p,
-            Err(msg) => {
-                self.errln(&format!("{}{msg}", self.err_prefix()));
-                self.last_status = 1;
+            Err(fail) => {
+                self.last_status = self.report_redirect_failure(&fail, out);
                 self.finish_procsubs(in_mark, out_mark);
                 return Flow::Next;
             }
@@ -5129,10 +5128,11 @@ impl Shell {
             // the assignment's status but does not undo the assignment itself.
             if !sc.redirects.is_empty() {
                 match self.resolve_redirects(&sc.redirects) {
-                    Ok(redir) => self.materialize_output_files(&redir),
-                    Err(msg) => {
-                        self.errln(&format!("{}{msg}", self.err_prefix()));
-                        self.last_status = 1;
+                    // Resolution itself created/truncated every output target,
+                    // so a null command needs nothing further here.
+                    Ok(_) => {}
+                    Err(fail) => {
+                        self.last_status = self.report_redirect_failure(&fail, out);
                     }
                 }
             }
@@ -5235,9 +5235,8 @@ impl Shell {
         // Resolve redirections (targets are expanded now).
         let redir = match self.resolve_redirects(&sc.redirects) {
             Ok(r) => r,
-            Err(msg) => {
-                self.errln(&format!("{}{msg}", self.err_prefix()));
-                self.last_status = 1;
+            Err(fail) => {
+                self.last_status = self.report_redirect_failure(&fail, out);
                 return Flow::Next;
             }
         };
@@ -5459,9 +5458,8 @@ impl Shell {
                 Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
                     sh.exec_program(&body, o, s)
                 }),
-                Err(msg) => {
-                    self.errln(&format!("{}{msg}", self.err_prefix()));
-                    self.last_status = 1;
+                Err(fail) => {
+                    self.last_status = self.report_redirect_failure(&fail, out);
                     Flow::Next
                 }
             }
@@ -6899,11 +6897,122 @@ impl Shell {
         }
     }
 
-    fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, String> {
+    fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, Box<RedirFailure>> {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            let fd = self.redir_effective_fd(r, &mut reserved)?;
+            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved) {
+                // Hand the caller the plan built from the redirects *before* this
+                // one: bash applies redirections left to right against the real fd
+                // table, so the diagnostic for a failure goes to fd 2 as it stood
+                // at that moment (`2>err > /nodir/f` writes the message into
+                // `err`; `> /nodir/f 2>err` writes it to the original stderr and
+                // never creates `err`).
+                return Err(Box::new(RedirFailure { partial: plan, msg }));
+            }
+        }
+        Self::reconcile_dup_then_close(&mut plan);
+        Ok(plan)
+    }
+
+    /// Report a redirection failure to fd 2 *as it stood when the failing
+    /// redirect was reached*, and yield the status (always 1) the command takes.
+    ///
+    /// bash applies redirections in source order, so an earlier `2>` in the same
+    /// list is already in effect when a later one fails: `2>err > /nodir/f`
+    /// writes the diagnostic into `err`, while `> /nodir/f 2>err` writes it to
+    /// the original stderr (and never creates `err` at all, because the abort
+    /// happens first). Routing through the partial plan reproduces that; the
+    /// sink is pushed onto `stderr_stack` and popped again so the message goes
+    /// through the ordinary [`Shell::emit_stderr`] machinery.
+    fn report_redirect_failure(&mut self, fail: &RedirFailure, out: &mut Out) -> i32 {
+        let msg = format!("{}{}", self.err_prefix(), fail.msg);
+        let p = &fail.partial;
+        // `2>&1` with fd 1 captured has no `StderrTarget` that reaches the
+        // caller's buffer, so write into it directly rather than via the stack.
+        if p.stderr.is_none()
+            && p.stderr_to_fd.is_none()
+            && p.stderr_to_stdout
+            && p.stdout.is_none()
+            && let Out::Capture(buf) = out
+        {
+            buf.extend_from_slice(msg.as_bytes());
+            buf.push(b'\n');
+            return 1;
+        }
+        let pushed = self.push_partial_stderr(p, out);
+        self.errln(&msg);
+        if pushed {
+            self.stderr_stack.pop();
+        }
+        1
+    }
+
+    /// Push the `StderrTarget` implied by a *partially applied* redirect plan,
+    /// returning whether anything was pushed (and so must be popped).
+    ///
+    /// Only used by [`Shell::report_redirect_failure`]; the normal execution
+    /// paths install stderr from a complete plan in `run_builtin` /
+    /// `exec_with_redirects`, where the surrounding capture/merge bookkeeping
+    /// also applies.
+    fn push_partial_stderr(&mut self, p: &RedirPlan, out: &mut Out) -> bool {
+        if let Some((path, append)) = &p.stderr {
+            // Append even for a `2>file`: the file was already truncated when
+            // that redirect was resolved, and re-truncating would drop anything
+            // an earlier command in the same plan wrote.
+            if let Ok(f) = open_out(path, *append) {
+                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                return true;
+            }
+            return false;
+        }
+        if let Some(n) = p.stderr_to_fd
+            && let Some(f) = self.open_write_fds.get(&n)
+        {
+            self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(f)));
+            return true;
+        }
+        if p.stderr_to_stdout {
+            // fd 2 follows fd 1 as of that moment: an already-resolved `>file`
+            // target if there is one, else the caller's live stdout sink.
+            if let Some((path, append)) = &p.stdout {
+                if let Ok(f) = open_out(path, *append) {
+                    self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                    return true;
+                }
+                return false;
+            }
+            match out {
+                Out::Inherit => {
+                    self.stderr_stack.push(StderrTarget::Stdout);
+                    return true;
+                }
+                Out::Pipe(w) => {
+                    if let Ok(wp) = w.try_clone() {
+                        self.stderr_stack.push(StderrTarget::Pipe(Arc::new(wp)));
+                        return true;
+                    }
+                }
+                // Handled by the caller (it owns the buffer).
+                Out::Capture(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Fold one redirect into `plan`, performing its side effects (opening an
+    /// input file, creating/truncating an output target, allocating a `{name}`
+    /// descriptor) as it goes. Split out of [`Shell::resolve_redirects`] purely
+    /// so the `?`-heavy body can return a bare message while the caller attaches
+    /// the partial plan.
+    fn resolve_one_redirect(
+        &mut self,
+        r: &Redirect,
+        plan: &mut RedirPlan,
+        reserved: &mut Vec<i32>,
+    ) -> Result<(), String> {
+        {
+            let fd = self.redir_effective_fd(r, reserved)?;
             // A `{name}>file`-style varfd redirect (open form) binds a *new*
             // descriptor ≥ 10 that persists after the command — exactly like
             // `exec {name}>file` — so it is applied to the persistent fd table
@@ -6912,7 +7021,7 @@ impl Shell {
             // like a numeric `N>&-`, so it flows through the plan below.
             if r.varfd.is_some() && !redir_is_close(r) {
                 self.apply_persistent_redirect(r, fd)?;
-                continue;
+                return Ok(());
             }
             match r.op {
                 RedirectOp::Read => {
@@ -7010,6 +7119,7 @@ impl Shell {
                     // not apply to `&>` (bash treats it like `>|`).
                     let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
+                    open_output_target(&target, append)?;
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
                     // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
@@ -7027,7 +7137,9 @@ impl Shell {
                     let append = matches!(r.op, RedirectOp::Append);
                     // With `set -C` (noclobber), a plain `>` refuses to truncate an
                     // existing regular file; `>|` (Clobber) and `>>` (Append)
-                    // always proceed. Matches bash's noclobber semantics.
+                    // always proceed. Matches bash's noclobber semantics. Checked
+                    // *before* the open below, which would otherwise truncate the
+                    // very file noclobber exists to protect.
                     if self.noclobber
                         && matches!(r.op, RedirectOp::Write)
                         && std::path::Path::new(map_device_path(&target))
@@ -7036,6 +7148,7 @@ impl Shell {
                     {
                         return Err(format!("{target}: cannot overwrite existing file"));
                     }
+                    open_output_target(&target, append)?;
                     match fd {
                         2 => {
                             plan.stderr = Some((target, append));
@@ -7077,6 +7190,7 @@ impl Shell {
                     // target is an ambiguous redirect, as bash reports.
                     if target != "-" && target.parse::<i32>().is_err() {
                         if fd == 1 {
+                            open_output_target(&target, false)?;
                             plan.stdout = Some((target.clone(), false));
                             plan.stderr = Some((target, false));
                             // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared
@@ -7210,64 +7324,34 @@ impl Shell {
                 }
             }
         }
+        Ok(())
+    }
 
-        // Canonical dup-then-close idiom: `cmd 2>&3 3>&-` (and `1>&3 3>&-`)
-        // duplicates fd 3's target onto fd 2/1 and then closes fd 3 — all for
-        // the command's environment only. bash performs the redirects in source
-        // order, so the dup captures fd 3's target *before* the close removes it,
-        // and fd 3 is restored (still open) once the command finishes. Our
-        // `RedirPlan` is order-free: a `Close` op and a `stdout_to_fd`/
-        // `stderr_to_fd` dup naming the same descriptor would race, and
-        // `install_extra_fds` applies the close first — removing fd N before the
-        // dup resolves, yielding a spurious "N: Bad file descriptor". Since a
-        // per-command close is command-scoped anyway (restored afterward), drop
-        // the transient close of any fd the plan still dups from: the dup then
-        // resolves against the live descriptor and fd N is left in its correct
-        // post-command (still-open) state. The rare reverse ordering
-        // (`3>&- 2>&3`, which bash rejects) is indistinguishable in the collapsed
-        // plan and is treated as the useful ordering — a documented order-free
-        // simplification consistent with the rest of the redirect machinery.
+    /// Post-pass over a fully-resolved plan, reconciling the order-free
+    /// representation with bash's ordered application.
+    ///
+    /// Canonical dup-then-close idiom: `cmd 2>&3 3>&-` (and `1>&3 3>&-`)
+    /// duplicates fd 3's target onto fd 2/1 and then closes fd 3 — all for
+    /// the command's environment only. bash performs the redirects in source
+    /// order, so the dup captures fd 3's target *before* the close removes it,
+    /// and fd 3 is restored (still open) once the command finishes. Our
+    /// `RedirPlan` is order-free: a `Close` op and a `stdout_to_fd`/
+    /// `stderr_to_fd` dup naming the same descriptor would race, and
+    /// `install_extra_fds` applies the close first — removing fd N before the
+    /// dup resolves, yielding a spurious "N: Bad file descriptor". Since a
+    /// per-command close is command-scoped anyway (restored afterward), drop
+    /// the transient close of any fd the plan still dups from: the dup then
+    /// resolves against the live descriptor and fd N is left in its correct
+    /// post-command (still-open) state. The rare reverse ordering
+    /// (`3>&- 2>&3`, which bash rejects) is indistinguishable in the collapsed
+    /// plan and is treated as the useful ordering — a documented order-free
+    /// simplification consistent with the rest of the redirect machinery.
+    fn reconcile_dup_then_close(plan: &mut RedirPlan) {
         if plan.stdout_to_fd.is_some() || plan.stderr_to_fd.is_some() {
             let dup_fds = [plan.stdout_to_fd, plan.stderr_to_fd];
             plan.extra_fds.retain(|(fd, op)| {
                 !(matches!(op, ExtraFdOp::Close) && dup_fds.contains(&Some(*fd)))
             });
-        }
-
-        Ok(plan)
-    }
-
-    /// Perform a command's *output-file* redirections for their create/truncate
-    /// side effect, independent of whether the command writes anything.
-    ///
-    /// bash opens each `>`/`>>` target when the command executes, so `: > f`,
-    /// `true 2> e`, `cd .. > log`, and a bare `> f` all create (and, for `>`,
-    /// truncate) the file even though the command produces no output. osh opens
-    /// redirect targets lazily at write time — which is correct for commands
-    /// that *do* write, but leaves the file untouched for no-output builtins and
-    /// the null command. Call this for those paths so the file side effect
-    /// matches bash. Dup/stream targets (`>&N`, `2>&1`, `1>&2`) name no file and
-    /// need nothing here; here-doc/here-string/`<` stdin were already validated
-    /// in `resolve_redirects`.
-    fn materialize_output_files(&self, redir: &RedirPlan) {
-        if let Some((path, append)) = &redir.stdout {
-            // Create/truncate the target for its side effect; we write nothing,
-            // so the resulting empty (or appended-to) file is the whole point.
-            // A failure here (permission, directory, …) is reported by the same
-            // path when the command would actually write, so ignoring it keeps
-            // the no-output case aligned with bash's silent success on a
-            // writable target while not masking a genuinely broken redirect for
-            // output-producing commands.
-            let _ = open_out(path, *append);
-        }
-        // Only touch a *separate* stderr file. When stderr shares stdout's file
-        // description (`&>f`), the file was already created above; re-opening a
-        // shared target would needlessly re-truncate it (harmless when nothing
-        // is written, but avoided for clarity).
-        if !redir.stderr_shares_stdout
-            && let Some((path, append)) = &redir.stderr
-        {
-            let _ = open_out(path, *append);
         }
     }
 
@@ -8911,16 +8995,11 @@ impl Shell {
             }
         }
 
-        // Perform this builtin's output-file redirections up front so that a
-        // builtin producing no stdout (`:`, `true`, `false`, `cd`, `unset`,
-        // `shift`, …) still creates/truncates its target, as bash does. Output-
-        // producing builtins (`echo`, `printf`, …) re-open the same target when
-        // they write; a redundant create/truncate here is harmless. `exec`
-        // manages the persistent fd table itself and must not have its targets
-        // pre-opened (its redirect-only form never reaches `run_builtin`).
-        if name != "exec" {
-            self.materialize_output_files(redir);
-        }
+        // No output-file materialisation here: `resolve_redirects` already
+        // created/truncated every `>`/`>>` target when it built the plan (in
+        // source order, aborting at the first failure — see
+        // `open_output_target`), so a builtin producing no stdout (`:`, `true`,
+        // `cd`, `unset`, …) has left its target created exactly as bash does.
 
         let mut flow = Flow::Next;
         let args = &argv[1..];
@@ -15811,6 +15890,23 @@ struct RedirPlan {
     extra_fds: Vec<(i32, ExtraFdOp)>,
 }
 
+/// A redirection that could not be established, together with the plan built
+/// from the redirects *before* it.
+///
+/// bash applies redirections left to right against the real fd table and aborts
+/// at the first failure, so the diagnostic goes to fd 2 as it stood at that
+/// moment — which may already have been redirected by an earlier item in the
+/// same list. The partial plan is what lets
+/// [`Shell::report_redirect_failure`] reproduce that routing.
+///
+/// Returned boxed (`Result<RedirPlan, Box<RedirFailure>>`): carrying a whole
+/// plan by value in the `Err` arm would bloat every call site's `Result` for a
+/// path taken only when a redirect actually fails.
+struct RedirFailure {
+    partial: RedirPlan,
+    msg: String,
+}
+
 impl RedirPlan {
     /// True when the plan carries a redirect that [`Shell::exec_with_redirects`]
     /// can install for a whole command body (stdin source, stdout/stderr file or
@@ -17691,6 +17787,25 @@ fn wrap_parse_message(msg: &str, prefix: &str) -> String {
 fn nth_source_line(src: &str, line: u32) -> Option<&str> {
     let idx = usize::try_from(line).ok()?.checked_sub(1)?;
     src.split('\n').nth(idx).map(|l| l.strip_suffix('\r').unwrap_or(l))
+}
+
+/// Create/truncate (or open for append) an output redirect's target *now*,
+/// discarding the handle and keeping only the success/failure.
+///
+/// bash establishes redirections strictly left to right against the real fd
+/// table, so `> f`'s file side effect happens before the next redirect is even
+/// looked at, and the *first* failure aborts the command — later redirects are
+/// never applied and their files never created. Opening here rather than lazily
+/// (when the command finally writes) is what makes both halves observable:
+/// `> nodir/f 2>err` reports to the original stderr and leaves `err`
+/// non-existent, while `2>err > nodir/f` reports *into* `err`. It also gives
+/// no-output commands (`: > f`, `true 2> e`, a bare `> f`) the create/truncate
+/// bash performs for them.
+fn open_output_target(path: &str, append: bool) -> Result<(), String> {
+    match open_out(path, append) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{path}: {}", io_error_message(&e))),
+    }
 }
 
 fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
@@ -28708,7 +28823,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // and a bare null `> f` all create/truncate the file. osh opened
         // redirect targets lazily at write time, so these left the file
         // untouched — verified against bash 5.x during the redirect probe
-        // session. See `materialize_output_files`.
+        // session. See `open_output_target`, which now performs the open while
+        // the plan is being resolved, in source order.
         let base = std::env::temp_dir();
         let uniq = format!("osh_noout_redir_{}", std::process::id());
 
@@ -28758,6 +28874,68 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run("x=7 < /nonexistent_osh_probe_path; echo \"st=$? x=$x\"");
         assert!(o.contains("st=1"), "input-redirect failure should be status 1: {o:?}");
         assert!(o.contains("x=7"), "assignment should still apply: {o:?}");
+    }
+
+    /// bash applies redirections strictly left to right and aborts at the first
+    /// failure, so *where the diagnostic goes* depends on the order: a `2>` to
+    /// the left of the failing redirect is already in effect and captures the
+    /// message, while a `2>` to its right is never applied — its file is not
+    /// even created. osh resolved the whole (order-free) plan first and only
+    /// noticed the bad output target when the command tried to write, by which
+    /// point the trailing `2>` had been installed and swallowed the message.
+    /// Every expectation here was captured from bash 5.x.
+    #[test]
+    fn failing_output_redirect_reports_through_the_fd2_of_its_moment() {
+        let base = std::env::temp_dir();
+        let uniq = format!("osh_redir_order_{}", std::process::id());
+        // A path whose *parent* does not exist: opening it always fails.
+        let bad = format!(
+            "{}/nosuchdir_{uniq}/f",
+            base.to_string_lossy().replace('\\', "/")
+        );
+
+        // `2>` AFTER the failure: never applied, so the file is not created and
+        // the message escapes to the shell's real stderr (not captured here).
+        let after = base.join(format!("{uniq}_after"));
+        let _ = std::fs::remove_file(&after);
+        let ap = after.to_string_lossy().replace('\\', "/");
+        let (o, _) = run(&format!("echo x > \"{bad}\" 2> \"{ap}\"; echo \"s=$?\""));
+        assert_eq!(o, "s=1\n");
+        assert!(
+            !after.exists(),
+            "a redirect to the right of the failing one must never be applied"
+        );
+
+        // `2>` BEFORE the failure: in effect already, so it captures the message.
+        let before = base.join(format!("{uniq}_before"));
+        let _ = std::fs::remove_file(&before);
+        let bp = before.to_string_lossy().replace('\\', "/");
+        let (o, _) = run(&format!("echo x 2> \"{bp}\" > \"{bad}\"; echo \"s=$?\""));
+        assert_eq!(o, "s=1\n");
+        let captured = String::from_utf8(std::fs::read(&before).expect("2> file")).expect("utf8");
+        assert!(
+            captured.contains("No such file or directory"),
+            "the earlier 2> should capture the diagnostic: {captured:?}"
+        );
+        let _ = std::fs::remove_file(&before);
+
+        // `2>&1` before the failure routes the message into a capture, so it
+        // shows up in the substitution's value rather than on stderr.
+        let (o, _) = run(&format!("v=$(echo x 2>&1 > \"{bad}\"); echo \"[$v]\""));
+        assert!(
+            o.contains("No such file or directory"),
+            "2>&1 should fold the diagnostic into the capture: {o:?}"
+        );
+
+        // An output target to the *left* of the failure IS created, because bash
+        // reached it before aborting.
+        let left = base.join(format!("{uniq}_left"));
+        let _ = std::fs::remove_file(&left);
+        let lp = left.to_string_lossy().replace('\\', "/");
+        let (o, _) = run(&format!("echo x 3> \"{lp}\" > \"{bad}\"; echo \"s=$?\""));
+        assert_eq!(o, "s=1\n");
+        assert!(left.exists(), "a redirect before the failing one is applied");
+        let _ = std::fs::remove_file(&left);
     }
 
     #[test]

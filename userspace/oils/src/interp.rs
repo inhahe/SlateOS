@@ -22765,6 +22765,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn for_in_list_takes_reserved_words_as_plain_words() {
+        // The `in …` list is not command position, so nothing in it is a
+        // reserved word — not even `do`/`done`. Measured against bash 5.2.
+        let (o, _) = run("for x in if then elif else fi while until do done; do printf '[%s]' \"$x\"; done");
+        assert_eq!(o, "[if][then][elif][else][fi][while][until][do][done]");
+        let (o, _) = run("for x in case esac in function time coproc select; do printf '[%s]' \"$x\"; done");
+        assert_eq!(o, "[case][esac][in][function][time][coproc][select]");
+        // Only the *first* word after the loop variable is the `in` keyword.
+        let (o, _) = run("for x in in in; do printf '[%s]' \"$x\"; done");
+        assert_eq!(o, "[in][in]");
+        // …which is exactly why a missing separator before `do` is a syntax
+        // error: `do` was swallowed by the list, so `done` is unexpected.
+        // (through `eval`, so the diagnostic is redirectable — a parse error in
+        // the outer source would abort before any redirect could apply).
+        let (o, rc) = run("eval 'for x in a b do echo hi; done' 2>&1; echo \"rc=$?\"");
+        assert!(o.contains("syntax error near unexpected token `done'"), "{o:?}");
+        assert!(o.ends_with("rc=2\n"), "{o:?}");
+        assert_eq!(rc, 0);
+        // No `in` at all iterates `"$@"`; an empty `in` iterates nothing.
+        let (o, _) = run("set -- p q; for x; do printf '[%s]' \"$x\"; done; echo; for x in; do echo NOT-REACHED; done");
+        assert_eq!(o, "[p][q]\n");
+    }
+
+    #[test]
+    fn select_in_list_takes_reserved_words_as_plain_words() {
+        let (o, _) = run("select o in a fi b; do echo \"got=$o\"; break; done <<< '2'");
+        assert_eq!(o, "got=fi\n");
+    }
+
+    #[test]
     fn while_with_break() {
         let (o, _) = run("x=0; while true; do echo $x; x=$((x+1)); if [ $x -ge 3 ]; then break; fi; done");
         assert_eq!(o, "0\n1\n2\n");

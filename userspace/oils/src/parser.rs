@@ -1123,30 +1123,43 @@ impl Parser {
         }
         self.pos += 1;
         self.skip_newlines();
-        let words = if self.reserved_here().as_deref() == Some("in") {
-            self.pos += 1;
-            let mut ws = Vec::new();
-            while let Some(Tok::Word(segs)) = self.peek() {
-                // Stop at reserved words like `do`.
-                if let [Seg::Lit(s)] = segs.as_slice()
-                    && RESERVED.contains(&s.as_str())
-                {
-                    break;
-                }
-                let segs = segs.clone();
-                self.pos += 1;
-                ws.push(self.word_from_segs(&segs)?);
-            }
-            self.skip_separators();
-            Some(ws)
-        } else {
-            self.skip_separators();
-            None
-        };
+        let words = self.parse_in_list()?;
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
         Ok(Command::For(ForClause { var, words, body }))
+    }
+
+    /// Parse the `in …` word list shared by `for` and `select`, positioned at
+    /// the `in` (or at whatever follows the loop variable when there is none).
+    ///
+    /// A reserved word is **not** recognised here. bash's lexer only promotes a
+    /// token to a reserved word in command position, and this list is not one:
+    /// `for x in if then do done; do echo "$x"; done` iterates over the four
+    /// literals, and `select o in a fi b` offers `fi` as choice 2. The list runs
+    /// until the first token that is not a word at all — `;`, a newline, `|`,
+    /// `&`, `)` — which is also why `for x in a b do echo hi; done`, with no
+    /// separator before `do`, is a *syntax error* in bash: `do` was swallowed by
+    /// the list, so the `do` the grammar needs never arrives and the error is
+    /// reported at `done`.
+    ///
+    /// `None` means there was no `in` at all (`for x; do …` iterates `"$@"`),
+    /// which is distinct from `Some(vec![])` for an empty list (`for x in; do …`
+    /// iterates nothing).
+    fn parse_in_list(&mut self) -> Result<Option<Vec<Word>>, ParseError> {
+        if self.reserved_here().as_deref() != Some("in") {
+            self.skip_separators();
+            return Ok(None);
+        }
+        self.pos += 1;
+        let mut ws = Vec::new();
+        while let Some(Tok::Word(segs)) = self.peek() {
+            let segs = segs.clone();
+            self.pos += 1;
+            ws.push(self.word_from_segs(&segs)?);
+        }
+        self.skip_separators();
+        Ok(Some(ws))
     }
 
     /// Parse `select name [in words]; do body; done`. Structurally identical to
@@ -1161,25 +1174,7 @@ impl Parser {
         }
         self.pos += 1;
         self.skip_newlines();
-        let words = if self.reserved_here().as_deref() == Some("in") {
-            self.pos += 1;
-            let mut ws = Vec::new();
-            while let Some(Tok::Word(segs)) = self.peek() {
-                if let [Seg::Lit(s)] = segs.as_slice()
-                    && RESERVED.contains(&s.as_str())
-                {
-                    break;
-                }
-                let segs = segs.clone();
-                self.pos += 1;
-                ws.push(self.word_from_segs(&segs)?);
-            }
-            self.skip_separators();
-            Some(ws)
-        } else {
-            self.skip_separators();
-            None
-        };
+        let words = self.parse_in_list()?;
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;

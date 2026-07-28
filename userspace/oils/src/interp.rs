@@ -2336,6 +2336,28 @@ impl Shell {
         Flow::Next
     }
 
+    /// Clamp a `break`/`continue` level to the number of loops actually
+    /// enclosing it.
+    ///
+    /// `break N` / `continue N` name the Nth enclosing loop counting outward
+    /// from 1, but bash does not treat an oversized N as an error: it acts on
+    /// the *outermost* enclosing loop and carries on with the next command
+    /// (verified against bash 5: `continue 9` two loops deep restarts the outer
+    /// loop, and `break 9` leaves both loops with status 0). Without the clamp
+    /// the surplus levels keep unwinding past the last loop — through the
+    /// enclosing function or, at top level, straight out of the script, which
+    /// silently truncated the rest of the run.
+    ///
+    /// `depth` is the caller's `loop_depth`, which is reset to 0 on entry to a
+    /// function body, so the clamp never lets a level escape into the caller's
+    /// loops — matching bash, where `break` inside a function called from a
+    /// loop is the "only meaningful in a loop" no-op rather than a break of the
+    /// caller's loop. Callers must only invoke this when `depth > 0`; a zero
+    /// depth is the diagnostic case handled separately.
+    fn clamp_loop_level(n: u32, depth: u32) -> u32 {
+        n.max(1).min(depth.max(1))
+    }
+
     /// Run `f` with the loop-nesting counter bumped, so `break`/`continue`
     /// executed anywhere inside `f` see a non-zero `loop_depth` and are treated
     /// as meaningful. The counter is always restored, including on early return.
@@ -2497,9 +2519,18 @@ impl Shell {
             let line = match self.read_line(stdin, &redir) {
                 Some((l, _)) => l,
                 None => {
-                    // EOF: bash emits a newline and terminates the loop.
-                    self.emit_stderr(b"\n");
-                    break;
+                    // EOF terminates the loop. Three details, all verified
+                    // against bash 5 with the streams separated:
+                    //   * the closing newline goes to *stdout*, even though the
+                    //     menu and PS3 prompt above went to stderr;
+                    //   * REPLY is set to the empty string — overwriting any
+                    //     previous value, not merely left alone;
+                    //   * the status is 1, distinguishing "the user ran out of
+                    //     input" from a loop the body left via `break`.
+                    self.write_bytes(out, &redir, b"\n");
+                    self.vars.insert("REPLY".to_string(), String::new());
+                    self.last_status = 1;
+                    return Flow::Next;
                 }
             };
             self.vars.insert("REPLY".to_string(), line.clone());
@@ -9416,7 +9447,7 @@ impl Shell {
                     self.errln(&format!("{}break: only meaningful in a `for', `while', or `until' loop", self.err_prefix()));
                 } else {
                     let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                    flow = Flow::Break(n.max(1));
+                    flow = Flow::Break(Self::clamp_loop_level(n, self.loop_depth));
                 }
                 0
             }
@@ -9427,7 +9458,7 @@ impl Shell {
                     );
                 } else {
                     let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                    flow = Flow::Continue(n.max(1));
+                    flow = Flow::Continue(Self::clamp_loop_level(n, self.loop_depth));
                 }
                 0
             }
@@ -21579,9 +21610,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn select_eof_terminates() {
         // The here-string provides one line; the next read hits EOF and ends
-        // the loop (no infinite spin, no `break` needed).
+        // the loop (no infinite spin, no `break` needed). EOF's own closing
+        // newline goes to *stdout* — hence the second `\n` — even though the
+        // menu and PS3 prompt went to stderr. Verified against bash 5 with the
+        // two streams separated.
         let (o, _) = run("select x in a b; do echo \"$x\"; done <<< \"1\"");
-        assert_eq!(o, "a\n");
+        assert_eq!(o, "a\n\n");
+    }
+
+    #[test]
+    fn select_eof_sets_status_and_reply() {
+        // An EOF-terminated `select` reports status 1 and clears REPLY,
+        // overwriting whatever was there before — the signal that the user ran
+        // out of input rather than leaving via `break`.
+        let (o, _) = run("REPLY=preset; select x in a b; do break; done < /dev/null; echo \"s=$? r=[$REPLY] x=${x-unset}\"");
+        assert_eq!(o, "\ns=1 r=[] x=unset\n");
     }
 
     #[test]
@@ -27281,6 +27324,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A `return` in a top-level subshell is still an error (no unwind).
         let (o3, _) = run("( echo a; return 3; echo b ) 2>/dev/null; echo done");
         assert_eq!(o3, "a\nb\ndone\n");
+    }
+
+    #[test]
+    fn break_continue_level_clamped_to_loop_depth() {
+        // `break N`/`continue N` with N larger than the nesting depth act on
+        // the outermost enclosing loop and carry on — they do not keep
+        // unwinding out of the script. (bash: same.) Before the clamp the
+        // surplus levels escaped every loop and silently truncated the run.
+        let (o, _) = run(
+            "for a in 1 2; do for b in x y; do break 9; done; done; echo \"s=$?\"; echo after",
+        );
+        assert_eq!(o, "s=0\nafter\n");
+        // `continue 9` two deep restarts the *outer* loop, so the inner loop
+        // never reaches its second item and the outer body never finishes.
+        let (o2, _) = run(
+            "for a in 1 2; do for b in x y; do printf '%s%s ' \"$a\" \"$b\"; continue 9; done; echo \"inner-done-$a\"; done; echo \"s=$?\"",
+        );
+        assert_eq!(o2, "1x 2x s=0\n");
+        // A clamped level must not escape into a *caller's* loop: loop depth
+        // resets per function body, so `break 9` inside a function called from
+        // a loop is still the outside-a-loop no-op.
+        let (o3, _) = run(
+            "f() { break 9; echo in-fn; }; for a in 1 2; do echo \"iter$a\"; f; done 2>/dev/null",
+        );
+        assert_eq!(o3, "iter1\nin-fn\niter2\nin-fn\n");
     }
 
     #[test]

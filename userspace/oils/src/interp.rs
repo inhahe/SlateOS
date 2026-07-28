@@ -232,6 +232,30 @@ fn shopt_is_known(name: &str) -> bool {
     SHOPT_TABLE.iter().any(|(n, _)| *n == name)
 }
 
+/// Whether `name` is a `shopt` option the shell only *reports*: it says how the
+/// shell was started, so there is nothing for a script to decide. bash gives
+/// each of these a setter that silently does nothing, so `shopt -s login_shell`
+/// succeeds and changes nothing at all — neither the option nor `$BASHOPTS`.
+fn shopt_is_read_only(name: &str) -> bool {
+    matches!(name, "login_shell" | "restricted_shell")
+}
+
+/// The flag letters `shopt` was called with, apart from `-o` (which chooses
+/// which table to work on, and so which function does the work). Kept together
+/// because both halves of the builtin need all four.
+#[derive(Default, Clone, Copy)]
+struct ShoptFlags {
+    /// `-s`: turn the named options on — or, with no names, list only those
+    /// already on.
+    set: bool,
+    /// `-u`: the same in reverse.
+    unset: bool,
+    /// `-q`: withhold the listing and answer with the exit status alone.
+    quiet: bool,
+    /// `-p`: word each answer as the command that would restore it.
+    reinput: bool,
+}
+
 /// True when `p` is a candidate the shell may `exec` as a command, matching
 /// bash's `access(X_OK)` probe during a PATH search. On unix (incl. the
 /// slateos target) the file must be a regular file with at least one execute
@@ -15530,19 +15554,21 @@ impl Shell {
         status
     }
 
-    /// `shopt [-s|-u] [-q] [optname …]` — set/unset/query shell option toggles.
+    /// `shopt [-pqsu] [-o] [optname …]` — set, unset or report a shell option.
     ///
-    /// Supported options: `nullglob`, `dotglob`, `nocaseglob`, `nocasematch`,
-    /// `extglob`, `globstar`, `failglob`. Only `nullglob` and `dotglob`
-    /// currently affect behavior (pathname expansion); the rest are stored so
-    /// scripts that toggle them don't error, and `shopt` reports them
-    /// faithfully. `-s` enables, `-u` disables, `-q` suppresses output (status
-    /// only). With no option flag, listing/query mode is used.
+    /// With `-s`/`-u` and names, the named options change; with names but no
+    /// verb, they are reported and the exit status says whether they were *all*
+    /// on; with neither, the whole table is listed (`-s`/`-u` then filtering it
+    /// to the on or off half). `-q` withholds the listing but not the status,
+    /// and `-p` words each line as the command that would restore it. Asking for
+    /// both verbs at once is refused outright.
+    ///
+    /// Every name in `SHOPT_TABLE` is accepted and remembered so a script that
+    /// toggles one does not fail, but only the options osh actually models
+    /// change any behaviour; [`shopt_is_read_only`] covers the two that describe
+    /// how the shell was started rather than direct it, and cannot be changed.
     fn builtin_shopt(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let mut set = false;
-        let mut unset = false;
-        let mut quiet = false;
-        let mut reinput = false; // `-p`: re-inputtable `shopt -s/-u NAME` listing
+        let mut flags = ShoptFlags::default();
         // `-o`: operate on `set -o` options (noclobber, errexit, …) rather than
         // shopt options. Flags may be clustered (`shopt -qo NAME`, `-so NAME`).
         let mut opt_o = false;
@@ -15556,11 +15582,11 @@ impl Shell {
                 s if s.starts_with('-') && s.len() > 1 => {
                     for c in s.chars().skip(1) {
                         match c {
-                            's' => set = true,
-                            'u' => unset = true,
-                            'q' => quiet = true,
+                            's' => flags.set = true,
+                            'u' => flags.unset = true,
+                            'q' => flags.quiet = true,
                             'o' => opt_o = true,
-                            'p' => reinput = true,
+                            'p' => flags.reinput = true,
                             _ => {
                                 return self.builtin_invalid_option(
                                     "shopt",
@@ -15575,33 +15601,50 @@ impl Shell {
             }
             i += 1;
         }
+        // `-s` and `-u` name opposite verbs, so asking for both is not a
+        // question the builtin can answer. bash refuses the whole call — it does
+        // not fall back to listing, and it says so plainly rather than with the
+        // usage line an unknown flag gets.
+        if flags.set && flags.unset {
+            self.emit_stderr(
+                format!(
+                    "{}shopt: cannot set and unset shell options simultaneously\n",
+                    self.err_prefix()
+                )
+                .as_bytes(),
+            );
+            return 1;
+        }
         let names: Vec<&String> = args[i..].iter().collect();
 
         // `-o` mode: query/toggle `set -o` shell options, reusing the same
         // machinery (and `%-15s\t%s` listing format) as the `set` builtin.
         if opt_o {
-            return self.shopt_o_mode(&names, set, unset, quiet, out, redir);
+            return self.shopt_o_mode(&names, flags, out, redir);
         }
 
         // Listing/query mode: no names, OR names given without `-s`/`-u`. With
         // `-s`/`-u` and no names, the listing is filtered to the on/off options.
-        if names.is_empty() || (!set && !unset) {
+        if names.is_empty() || !(flags.set || flags.unset) {
             if names.is_empty() {
                 // List every known option; `-s`/`-u` filters to on/off.
                 let mut listing = String::new();
                 for &(opt, _) in SHOPT_TABLE {
                     let on = self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt));
-                    if (set && !on) || (unset && on) {
+                    if (flags.set && !on) || (flags.unset && on) {
                         continue;
                     }
-                    listing.push_str(&shopt_line(opt, on, reinput));
+                    listing.push_str(&shopt_line(opt, on, flags.reinput));
                 }
-                if !quiet {
+                if !flags.quiet {
                     self.write_bytes(out, redir, listing.as_bytes());
                 }
                 return 0;
             }
-            // Query specific names: status 0 iff all named options are set.
+            // Query specific names: status 0 iff all named options are set. A
+            // name the shell does not know is reported and passed over rather
+            // than ending the query — bash answers for every name it was given,
+            // so `shopt bogus nocaseglob` still says where `nocaseglob` stands.
             let mut all_on = true;
             let mut listing = String::new();
             for name in &names {
@@ -15609,7 +15652,8 @@ impl Shell {
                     self.emit_stderr(
                         format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
                     );
-                    return 1;
+                    all_on = false;
+                    continue;
                 }
                 let on = self
                     .shopt
@@ -15619,9 +15663,9 @@ impl Shell {
                 if !on {
                     all_on = false;
                 }
-                listing.push_str(&shopt_line(name, on, reinput));
+                listing.push_str(&shopt_line(name, on, flags.reinput));
             }
-            if !quiet {
+            if !flags.quiet {
                 self.write_bytes(out, redir, listing.as_bytes());
             }
             return i32::from(!all_on);
@@ -15642,7 +15686,12 @@ impl Shell {
                 status = 1;
                 continue;
             }
-            self.shopt.insert(name.clone(), set);
+            if shopt_is_read_only(name) {
+                // Accepted and then ignored, as bash does — the name is real, so
+                // this is not the error an unknown name gets.
+                continue;
+            }
+            self.shopt.insert(name.clone(), flags.set);
             changed = true;
         }
         // On an extdebug OFF→ON transition, seed the BASH_ARGC/BASH_ARGV stack
@@ -15685,9 +15734,7 @@ impl Shell {
     fn shopt_o_mode(
         &mut self,
         names: &[&String],
-        set: bool,
-        unset: bool,
-        quiet: bool,
+        flags: ShoptFlags,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> i32 {
@@ -15696,46 +15743,56 @@ impl Shell {
         // truly unknown name is an error (matching bash).
         const SETO_NAMES: &[&str] = STANDARD_SET_O_OPTIONS;
 
-        // Set/unset mode.
-        if set || unset {
-            let mut status = 0;
+        // Set/unset mode. bash hands each name to the same code `set -o` uses
+        // and does not pass its verdict on, so an unknown name is complained
+        // about and then forgotten: the call still succeeds. (`shopt -s bogus`
+        // *without* `-o` does fail — the two paths disagree, and this one is the
+        // odd one out.)
+        if flags.set || flags.unset {
             for name in names {
                 if !SETO_NAMES.contains(&name.as_str()) {
                     self.emit_stderr(
                         format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes(),
                     );
-                    status = 1;
                     continue;
                 }
-                self.set_named_option(name, set);
+                self.set_named_option(name, flags.set);
             }
-            return status;
+            return 0;
         }
 
-        // List mode: no names → dump every modeled option in `set -o` format.
+        // List mode: no names → dump every modeled option in `set -o` format,
+        // or as the `set ±o NAME` commands that would restore it under `-p`.
         if names.is_empty() {
-            if quiet {
+            if flags.quiet {
                 return 0;
             }
-            let listing = self.format_option_list(false);
+            let listing = self.format_option_list(flags.reinput);
             return self.write_bytes(out, redir, listing.as_bytes());
         }
 
-        // Query mode: status 0 iff every named option is enabled.
+        // Query mode: status 0 iff every named option is enabled. As in the
+        // shopt-option path, an unknown name is reported and stepped over so the
+        // remaining names still get their answer.
         let mut all_on = true;
         let mut listing = String::new();
         for name in names {
             if !SETO_NAMES.contains(&name.as_str()) {
                 self.emit_stderr(format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes());
-                return 1;
+                all_on = false;
+                continue;
             }
             let on = self.shell_option_enabled(name);
             if !on {
                 all_on = false;
             }
-            listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
+            if flags.reinput {
+                listing.push_str(&format!("set {}o {name}\n", if on { '-' } else { '+' }));
+            } else {
+                listing.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
+            }
         }
-        if !quiet {
+        if !flags.quiet {
             self.write_bytes(out, redir, listing.as_bytes());
         }
         i32::from(!all_on)
@@ -28037,6 +28094,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let out = run("shopt -s").0;
         assert!(out.contains("progcomp       \ton\n"), "got: {out}");
         assert!(!out.contains("autocd"), "got: {out}");
+    }
+
+    #[test]
+    fn shopt_refuses_both_verbs_at_once() {
+        // `-s` and `-u` ask for opposite things, so the call is refused outright
+        // — with a plain sentence rather than the usage line an unknown flag
+        // gets, and without falling back to the listing.
+        let (out, st) = run("shopt -su nocaseglob 2>&1");
+        assert_eq!(out, "osh: shopt: cannot set and unset shell options simultaneously\n");
+        assert_eq!(st, 1);
+        assert_eq!(run("shopt -su nocaseglob 2>/dev/null; shopt nocaseglob").0, "nocaseglob     \toff\n");
+        // An unknown flag is the earlier complaint of the two.
+        assert_eq!(run("shopt -zsu 2>/dev/null").1, 2);
+    }
+
+    #[test]
+    fn shopt_query_steps_over_an_unknown_name() {
+        // Every name gets its answer; the unknown one only costs the status.
+        let (out, st) = run("shopt nocaseglob bogus 2>/dev/null");
+        assert_eq!(out, "nocaseglob     \toff\n");
+        assert_eq!(st, 1);
+        // …even when every name it *could* answer for is on, so the failure is
+        // the name and not the state.
+        assert_eq!(run("shopt -s nocaseglob; shopt bogus nocaseglob 2>/dev/null").1, 1);
+    }
+
+    #[test]
+    fn shopt_o_renders_the_reinput_form_as_a_set_command() {
+        // Under `-o` the option belongs to `set`, so the command that would
+        // restore it is a `set` one — where the plain status form is shared.
+        assert_eq!(run("shopt -o -p xtrace nounset").0, "set +o xtrace\nset +o nounset\n");
+        assert_eq!(run("set -o pipefail; shopt -o -p pipefail").0, "set -o pipefail\n");
+        assert_eq!(run("shopt -o xtrace").0, "xtrace         \toff\n");
+    }
+
+    #[test]
+    fn shopt_o_forgives_an_unknown_name_when_setting() {
+        // bash hands each name to the same code `set -o` uses and does not pass
+        // on its verdict: the complaint is made and the call still succeeds.
+        let (out, st) = run("shopt -o -s bogus 2>&1");
+        assert_eq!(out, "osh: shopt: bogus: invalid option name\n");
+        assert_eq!(st, 0);
+        assert_eq!(run("shopt -o -u bogus 2>/dev/null").1, 0);
+        // Setting *without* `-o` is the strict path, and asking is strict either
+        // way — the unknown name fails those.
+        assert_eq!(run("shopt -s bogus 2>/dev/null").1, 1);
+        assert_eq!(run("shopt -o bogus 2>/dev/null").1, 1);
+    }
+
+    #[test]
+    fn shopt_read_only_options_are_reported_but_never_changed() {
+        // `login_shell` says how the shell was started, so there is nothing for
+        // a script to decide: the verb is accepted and does nothing, which is
+        // not the failure an unknown name would give.
+        assert_eq!(run("shopt -s login_shell 2>&1"), (String::new(), 0));
+        assert_eq!(run("shopt -s login_shell; shopt login_shell").0, "login_shell    \toff\n");
+        assert_eq!(run("shopt -s restricted_shell; shopt restricted_shell").0, "restricted_shell\toff\n");
+        // …and nothing reaches $BASHOPTS either.
+        assert!(!run("shopt -s login_shell; echo $BASHOPTS").0.contains("login_shell"));
     }
 
     #[test]

@@ -14,6 +14,189 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-LEX-ERROR-LINE. An unterminated quote/substitution was always blamed on line 1, and suppressed every command before it — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**Symptom.** A script whose last line opens a quote it never closes:
+
+```sh
+echo one
+echo two
+v='abc
+```
+
+```
+bash: one / two / case.sh: line 3: unexpected EOF while looking for matching `'' / status 2
+osh : case.sh: line 1: unexpected EOF while looking for matching `''  / status 2
+```
+
+Two independent divergences: the line number was always 1, and `one`/`two`
+never ran even though bash had already executed them.
+
+**Root cause.** `LexError` was a bare `pub struct LexError(pub String)` — no
+line at all — so `format_parse_error` fell back to `self.current_line`, which
+is still 1 because nothing has executed yet. And `IncrementalParser::new`
+tokenized the *whole* source up front and returned `Err` on any lex failure,
+so the incremental parse/execute model (landed as
+BUG-OILS-WHOLE-SCRIPT-PREPARSE) never got to hand out the complete lines
+that precede the bad one. bash instead reads, parses and executes one logical
+line at a time, so it only discovers the unclosed construct when it reaches
+that line — by which point everything before it has run.
+
+**bash's line-attribution rules** (measured over ~30 probes against bash
+5.2.37, not assumed):
+
+| construct | line reported |
+|---|---|
+| `'…`, `"…`, `` `… ``, `$'…`, `${…`, `$[…`, `$((…`, `a=(…` | the line the construct **opened** on |
+| `$( … )` and `<( … )` / `>( … )` | **end of input** (one past the last source line) |
+| nested constructs | the **innermost** one that hit EOF wins |
+
+The `$( … )` exception is structural: bash scans the substitution body
+without parsing it and re-parses it only after the outer word is complete, so
+the missing `)` surfaces at EOF rather than at the `$(`. Execution
+granularity is the *logical line*: everything on complete lines before the
+bad one has run, and nothing on the bad line runs
+(`echo four; echo five 'abc` prints neither).
+
+**Fix.**
+* `lexer.rs`: `LexError` became `{ msg: String, line: Option<u32> }` with
+  `new()` and an `at(line)` that only ever *fills* an empty line — so as the
+  error unwinds through nested scanners the innermost construct keeps its
+  own line. Every scanner (`read_single_quote`, `read_ansi_c_quote`,
+  `read_double_quote`, `read_dollar_brace` and its nested `'`/`"`/`` ` ``
+  loops, `read_arith`, `read_backtick`, `try_array_assign`, the `$[` and
+  `${…}`-nested `read_balanced` callers) captures its opening line and stamps
+  it; the `$( )` and `<( )`/`>( )` callers deliberately stamp
+  `self.cur_line()` — the EOF line — instead.
+* `lexer.rs`: `Lexer::run` split into `run` + `run_into(&mut out, &mut lines)`
+  so a failed lex keeps the tokens produced so far. New `tokenize_deferred`
+  returns `Tokenized { toks, lines, err }`, truncating the token stream back
+  to the last complete `Newline` before the failure (and before any pending
+  here-doc), so what remains is exactly the lines bash would already have run.
+* `parser.rs`: `From<LexError> for ParseError` carries the line across (only
+  for whole-source lexers — the fragment lexers restart at line 1 and keep
+  dropping it). `IncrementalParser::new` is now infallible: it uses
+  `tokenize_deferred` and parks the error in `pending_lex_err`, which
+  `next_unit` surfaces only once every complete preceding unit has been handed
+  out. A grammar error that only happened *because* the stream was truncated
+  (`if true; then` with its body cut off) yields to the parked lex error —
+  gated on the parser having run out of tokens, so a genuine earlier grammar
+  error (`echo one )` on line 1) still wins.
+
+**Regression tests.** Corpus cases `lex-error-line-quote.sh` (opening-line
+rule + both execution-granularity rules), `lex-error-line-cmdsub.sh` (the
+`$( )` end-of-input exception) and `lex-error-line-nested.sh`
+(innermost-wins); unit tests
+`interp::tests::lexer_error_carries_the_constructs_opening_line` and
+`interp::tests::lex_error_is_deferred_until_earlier_lines_have_run`.
+
+**Two adjacent gaps this uncovered, tracked separately below:**
+BUG-OILS-REPL-LINE-BASE and BUG-OILS-EVAL-LINE-BASE.
+
+---
+
+### BUG-OILS-REPL-LINE-BASE. The piped/interactive REPL restarts line numbering at 1 for every line read — 2026-07-27 — OPEN
+
+**Symptom.** `printf 'echo one\nnosuchcmd_xyz\n' | osh`:
+
+```
+bash: one / bash: line 2: nosuchcmd_xyz: command not found
+osh : one / osh: line 1: nosuchcmd_xyz: command not found
+```
+
+Not specific to any one diagnostic — `$LINENO`, command-not-found,
+`set -u` unbound-variable, and syntax errors are all affected:
+
+| input (piped to the shell) | bash | osh |
+|---|---|---|
+| `echo $LINENO` on lines 2 and 4 | `2`, `4` | `1`, `1` |
+| `nosuchcmd_xyz` on line 2 | `line 2:` | `line 1:` |
+| `echo two )` on line 2 | `line 2:` | `line 1:` |
+| `echo $undef` (`set -u`) on line 3 | `line 3:` | `line 1:` |
+
+**Where.** `userspace/oils/src/main.rs` `repl()` reads one logical command at
+a time and calls `sh.run_source(&buffer)` on each, and `run_source` restarts
+`current_line` at 1 for every call because the AST line numbers are relative
+to the string it was handed.
+
+**Proper fix.** Give `Shell` a line base that `run_source` adds to the AST
+line of each item (and to a lexer error's line), and have the REPL advance it
+by the number of physical lines consumed per command. Nested contexts must
+compose rather than reset — see BUG-OILS-EVAL-LINE-BASE, which needs the same
+mechanism.
+
+---
+
+### BUG-OILS-EVAL-LINE-BASE. `eval` numbers its string's lines from 1 instead of continuing the caller's — 2026-07-27 — OPEN
+
+**Symptom.**
+
+```sh
+echo x
+eval "echo a
+v='abc"
+```
+```
+bash: x / a / case.sh: eval: line 4: unexpected EOF while looking for matching `''
+osh : x / a / case.sh: eval: line 2: unexpected EOF while looking for matching `''
+```
+
+**bash's rule** (measured over 7 probes): line 1 of the eval string *is* the
+script line on which the `eval` command **ended**, i.e. reported line =
+`LINENO(eval) - 1 + line_within_string`. Confirmed independently by `$LINENO`
+inside the string: `eval "echo A$LINENO\necho B$LINENO"` on script lines 1–2
+prints `2` then `3` in bash, `1` then `2` in osh.
+
+| eval at script lines | line in eval string | bash reports |
+|---|---|---|
+| 1 | 1 | 1 |
+| 1–2 | 2 | 3 |
+| 3 | 1 | 3 |
+| 3–5 | 3 | 7 |
+| 1 | EOF (`$(`, 1-line string) | 2 |
+| 1–2 | EOF (`$(`, 2-line string) | 4 |
+
+**Second, separable divergence this exposes:** osh's `$LINENO` for a command
+spanning several physical lines is the **first** line; bash's is the **last**.
+That is what makes the offset `LINENO(eval) - 1` rather than
+`first_line(eval) - 1`, so both must be fixed together to match.
+
+**Where.** `userspace/oils/src/interp.rs` — the `eval` builtin's call into
+`run_source_flow_out`, `Shell::current_line` (set from `item.line` / `sc.line`
+at ~1818 and ~5333) and `format_parse_error` (~16315). `SimpleCommand.line` /
+`Item.line` are stamped by the parser with the construct's first line.
+
+**Proper fix.** The same line-base mechanism as BUG-OILS-REPL-LINE-BASE: a
+`line_base` on `Shell`, saved/restored around `eval`, set to
+`current_line - 1` on entry so nested evals compose naturally. Separately,
+stamp `Item`/`SimpleCommand` with the *last* line of the command for
+`$LINENO`, which will need its own bash-vs-osh probe sweep since `$LINENO`
+appears in several other contexts (functions, `source`, traps).
+
+---
+
+### BUG-OILS-SOURCED-FILE-ERROR-NAME. Errors inside a `.`/`source`d file are tagged with the *outer* script's name — 2026-07-27 — OPEN
+
+**Symptom.** With `sub.sh` containing `echo x` then `v='abc`:
+
+```sh
+. ./sub.sh
+```
+```
+bash: x / ./sub.sh: line 2: unexpected EOF while looking for matching `''
+osh : x / case.sh:   line 2: unexpected EOF while looking for matching `''
+```
+
+bash retargets `$0`-in-diagnostics to the file currently being read; osh keeps
+the top-level script name. (The line number itself is already correct.)
+
+**Where.** `userspace/oils/src/interp.rs` — `Shell::err_prefix` /
+`syntax_error_prefix` (~16265) read a single `name` field; the `source`
+builtin does not push a new one. `BASH_SOURCE` machinery already tracks the
+current file, so the prefix should read from that stack instead.
+
+---
+
 ### BUG-OILS-ESCAPE-DECODERS. Three divergent copies of the backslash-escape table — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** Two of them were parse bugs, not just wrong values:
@@ -2247,10 +2430,11 @@ path (all stderr-only; runtime-error messages already match bash):
    also echoes the offending physical source line on a second diagnostic
    line (`osh: -c: line 1: \`echo hello world ('`); `format_parse_error`
    now emits that via `nth_source_line`. Lexer-originated errors (unclosed
-   quotes/subs) still carry no parser line, so they fall back to
-   `current_line` — but they now gain the input-source token too. Covered by
+   quotes/subs) originally carried no parser line and fell back to
+   `current_line`; that gap is closed as of 2026-07-27 — see
+   **BUG-OILS-LEX-ERROR-LINE** below. Covered by
    `syntax_error_prefix_carries_source_token_line_and_echo` and
-   `lexer_error_gets_source_token_with_fallback_line`.
+   `lexer_error_carries_the_constructs_opening_line`.
 
 3. **STILL OPEN — No partial output before the error.** bash parses-and-
    executes a script one command at a time, so `echo a; echo b; echo (`

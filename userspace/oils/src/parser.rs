@@ -13,7 +13,10 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::lexer::{Op, Seg, Tok, expand_aliases, expand_aliases_tracked, tokenize, tokenize_spanned};
+use crate::lexer::{
+    Op, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked, tokenize, tokenize_deferred,
+    tokenize_spanned,
+};
 use std::collections::BTreeMap;
 
 /// A parse error with a human-readable message and, when known, the 1-based
@@ -75,12 +78,28 @@ impl core::fmt::Display for ParseError {
     }
 }
 
+/// Carry a lexer error's line across into the parser's error type.
+///
+/// Only correct for lexers run over a *whole source*, where the line the lexer
+/// counted is the line the caller will print. The fragment lexers
+/// ([`crate::lexer::lex_word_verbatim`] and friends) re-lex a substring whose
+/// line numbers restart at 1, so those sites drop the line instead and let the
+/// enclosing parse stamp its own.
+impl From<crate::lexer::LexError> for ParseError {
+    fn from(e: crate::lexer::LexError) -> Self {
+        Self {
+            msg: e.msg,
+            line: e.line,
+        }
+    }
+}
+
 /// Parse shell source into a [`Program`].
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+    let (toks, lines) = tokenize_spanned(src).map_err(ParseError::from)?;
     parse_tokens(toks, lines)
 }
 
@@ -95,7 +114,7 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: &str) -> Result<Program, ParseError> {
     let (toks, lines) =
-        crate::lexer::tokenize_spanned_strict(src).map_err(|e| ParseError::new(e.0))?;
+        crate::lexer::tokenize_spanned_strict(src).map_err(ParseError::from)?;
     parse_tokens(toks, lines)
 }
 
@@ -107,7 +126,7 @@ pub fn parse_with_aliases(
     src: &str,
     aliases: &BTreeMap<String, String>,
 ) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+    let (toks, lines) = tokenize_spanned(src).map_err(ParseError::from)?;
     let (toks, lines) = if aliases.is_empty() {
         (toks, lines)
     } else {
@@ -162,17 +181,29 @@ pub struct IncrementalParser {
     /// inner `Option` is the caller's argument (`None` = expansion disabled), so
     /// a `shopt -u expand_aliases` also invalidates.
     last_aliases: Option<Option<BTreeMap<String, String>>>,
+    /// An unterminated quote/substitution that ended the input. Held back until
+    /// the complete lines before it have been handed out and executed, because
+    /// bash reports it only after running them.
+    pending_lex_err: Option<ParseError>,
 }
 
 impl IncrementalParser {
     /// Tokenize `src` in preparation for unit-at-a-time parsing.
     ///
-    /// # Errors
-    /// Returns [`ParseError`] if `src` cannot be lexed (unclosed quote or
-    /// substitution). Grammar errors surface later, from [`Self::next_unit`].
-    pub fn new(src: &str) -> Result<Self, ParseError> {
-        let (orig, orig_lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
-        Ok(Self {
+    /// A lexer error does *not* fail this constructor. bash only discovers an
+    /// unclosed quote when it reads the line carrying it, by which time every
+    /// complete line before that one has already run. [`tokenize_deferred`]
+    /// therefore hands back the tokens up to the last complete line *plus* the
+    /// error; the error is parked in `pending_lex_err` and surfaced by
+    /// [`Self::next_unit`] only after those lines have been handed out.
+    #[must_use]
+    pub fn new(src: &str) -> Self {
+        let Tokenized {
+            toks: orig,
+            lines: orig_lines,
+            err,
+        } = tokenize_deferred(src);
+        Self {
             orig,
             orig_lines,
             work: Vec::new(),
@@ -181,7 +212,8 @@ impl IncrementalParser {
             wpos: 0,
             pos: 0,
             last_aliases: None,
-        })
+            pending_lex_err: err.map(|(e, line)| ParseError::from(e).or_line(line)),
+        }
     }
 
     /// Re-expand the unconsumed remainder of the original token stream under
@@ -288,15 +320,29 @@ impl IncrementalParser {
         };
         // A grammar error leaves the cursor on the offending token; stamp its
         // line exactly as `parse_tokens` does.
+        let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
-            let line = p.cur_line().saturating_add(u32::from(p.peek().is_none()));
+            let line = p.cur_line().saturating_add(u32::from(ran_out));
             e.or_line(line)
         });
         self.wpos = p.pos;
         self.work = p.toks;
         self.work_lines = p.lines;
+        // A parked lexer error wins over a grammar error that only happened
+        // because the token stream was *truncated* at the unclosed construct
+        // (`if true; then` + `echo 'unterm` leaves a `then` with no body). Such
+        // a failure always runs the stream dry, so requiring `ran_out`
+        // preserves a genuine earlier grammar error — `echo one )` on line 1
+        // still reports the stray `)`, never the bad quote on line 2.
+        let outcome = match outcome {
+            Err(e) if ran_out => Err(self.pending_lex_err.take().unwrap_or(e)),
+            other => other,
+        };
         match outcome {
-            Ok(()) if items.is_empty() => None,
+            // End of input. If the lexer stopped early on an unclosed
+            // construct, this is the point where bash — having executed every
+            // complete line before it — reports the error.
+            Ok(()) if items.is_empty() => self.pending_lex_err.take().map(Err),
             Ok(()) => {
                 // Resume at the first not-yet-consumed token that came from the
                 // original stream; spliced tokens before it stay in `work`.
@@ -357,7 +403,7 @@ impl IncrementalParser {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
 pub fn parse_cmdsub_body(src: &str, close_line: u32) -> Result<Program, ParseError> {
-    let (mut toks, lines) = tokenize_spanned(src).map_err(|e| ParseError::new(e.0))?;
+    let (mut toks, lines) = tokenize_spanned(src).map_err(ParseError::from)?;
     let map = CmdSubLineMap::build(&toks, &lines, close_line);
     let lines = lines.iter().map(|&l| map.map(l)).collect();
     for t in &mut toks {
@@ -2467,7 +2513,7 @@ pub(crate) fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(e.0))?;
+    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg)?);
@@ -2483,7 +2529,7 @@ fn word_replacement_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(e.0))?;
+    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg)?);
@@ -2495,7 +2541,7 @@ fn word_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let toks = tokenize(s).map_err(|e| ParseError::new(e.0))?;
+    let toks = tokenize(s).map_err(|e| ParseError::new(e.msg))?;
     let mut parts: Vec<WordPart> = Vec::new();
     let mut first = true;
     for t in &toks {

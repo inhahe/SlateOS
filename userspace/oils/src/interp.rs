@@ -1721,14 +1721,7 @@ impl Shell {
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
         // by unit N must affect how unit N+1 parses, and commands before a
         // syntax error must still have run. See [`IncrementalParser`].
-        let mut ip = match IncrementalParser::new(src) {
-            Ok(ip) => ip,
-            Err(e) => {
-                self.errln(&self.format_parse_error(&e, src));
-                self.last_status = 2;
-                return Flow::Next;
-            }
-        };
+        let mut ip = IncrementalParser::new(src);
         loop {
             // Expand command-word aliases only when `expand_aliases` is in
             // effect; otherwise the raw tokens are parsed so a non-interactive
@@ -20899,19 +20892,59 @@ mod tests {
     }
 
     #[test]
-    fn lexer_error_gets_source_token_with_fallback_line() {
-        // A lexer-originated error (unclosed construct) carries no parser line, so
-        // the prefix falls back to the current execution line — but it still gains
-        // bash's input-source token.
+    fn lexer_error_carries_the_constructs_opening_line() {
+        // A lexer-originated error (unclosed construct) is stamped with the line
+        // the construct *opened* on, which is what bash reports — not the line
+        // the lexer happened to stop on, and not a fallback of 1. It also gains
+        // bash's input-source token from the prefix.
         let mut sh = Shell::new();
         sh.set_command_mode();
         let src = "a=(1 2";
         let e = parse(src).unwrap_err();
-        assert_eq!(e.line, None, "lexer errors carry no parser line");
+        assert_eq!(e.line, Some(1));
         assert_eq!(
             sh.format_parse_error(&e, src),
             "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
+
+        // The array opens on line 3 and runs to EOF on line 5; bash names line 3.
+        let src = "echo one\necho two\na=(1 2\n3\n4\n";
+        let e = parse(src).unwrap_err();
+        assert_eq!(e.line, Some(3));
+        assert_eq!(
+            sh.format_parse_error(&e, src),
+            "osh: -c: line 3: unexpected EOF while looking for matching `)'"
+        );
+
+        // `$( … )` is the exception: its body is re-parsed after the outer scan,
+        // so the failure surfaces at end of input (one past the last line).
+        let src = "echo one\nv=$(echo a\necho b\n";
+        let e = parse(src).unwrap_err();
+        assert_eq!(e.line, Some(4));
+    }
+
+    #[test]
+    fn lex_error_is_deferred_until_earlier_lines_have_run() {
+        // bash reads/parses/executes one logical line at a time, so an unclosed
+        // quote on a later line does not suppress the lines before it. The
+        // incremental parser must therefore hand back every complete unit first
+        // and only then report the lexer error.
+        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n");
+        let mut units = 0;
+        loop {
+            match ip.next_unit(None) {
+                Some(Ok(_)) => units += 1,
+                Some(Err(e)) => {
+                    assert_eq!(units, 2, "both complete lines are handed out first");
+                    assert_eq!(e.line, Some(3));
+                    assert!(e.msg.contains("unexpected EOF while looking for"));
+                    break;
+                }
+                None => panic!("the lexer error must surface"),
+            }
+        }
+        // The error also ends the iteration.
+        assert!(ip.next_unit(None).is_none());
     }
 
     #[test]

@@ -17201,42 +17201,67 @@ impl Shell {
         eof_status
     }
 
-    /// Read the entire current input source (here-doc/here-string, `< file`
-    /// redirect, pipeline cursor/pipe, or inherited stdin) to end-of-input.
-    fn read_all_bytes(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Vec<u8> {
-        use io::Read;
-        if let Some(n) = redir.stdin_from_fd {
-            let mut buf = Vec::new();
-            if let Some(rd) = self.coproc_read_fds.get(&n) {
-                let _ = rd.borrow_mut().read_to_end(&mut buf);
-            } else if let Some(c) = self.input_fd_cursor(n) {
-                let _ = c.borrow_mut().read_to_end(&mut buf);
+    /// Read at most `max` delimiter-terminated records from the current input
+    /// source, leaving everything past them unread. `None` means "all of it".
+    /// Each record keeps its delimiter; a final unterminated one does not gain
+    /// one.
+    ///
+    /// Taking only what was asked for is the whole point: `mapfile -n 2` has to
+    /// leave the third line where a following `read` on the same descriptor can
+    /// still see it, and draining the source would destroy it. The path branch
+    /// opens the file once and reads every record from that one handle, because
+    /// re-opening per record would hand back the first line over and over.
+    fn read_records(
+        &self,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+        delim: u8,
+        max: Option<usize>,
+    ) -> Vec<Vec<u8>> {
+        fn take<R: BufRead>(r: &mut R, delim: u8, max: Option<usize>) -> Vec<Vec<u8>> {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            while max.is_none_or(|m| out.len() < m) {
+                let Some((text, terminated)) = read_record(r, delim, None, false) else {
+                    break;
+                };
+                let mut bytes = text.into_bytes();
+                if terminated {
+                    bytes.push(delim);
+                }
+                out.push(bytes);
             }
-            return buf;
+            out
+        }
+        if let Some(n) = redir.stdin_from_fd {
+            if let Some(rd) = self.coproc_read_fds.get(&n) {
+                return take(&mut *rd.borrow_mut(), delim, max);
+            }
+            return match self.input_fd_cursor(n) {
+                Some(c) => take(&mut *c.borrow_mut(), delim, max),
+                None => Vec::new(),
+            };
         }
         if let Some(data) = &redir.stdin_data {
-            return data.clone();
+            return take(&mut io::BufReader::new(&data[..]), delim, max);
         }
         if let Some(path) = &redir.stdin {
-            return std::fs::read(self.host_path(path)).unwrap_or_default();
+            return match std::fs::File::open(self.host_path(path)) {
+                Ok(f) => take(&mut io::BufReader::new(f), delim, max),
+                Err(_) => Vec::new(),
+            };
         }
-        let mut buf = Vec::new();
         match stdin {
-            StdinSrc::Cursor(c) => {
-                let _ = c.borrow_mut().read_to_end(&mut buf);
-            }
-            StdinSrc::Pipe(r) => {
-                let _ = r.borrow_mut().read_to_end(&mut buf);
-            }
+            StdinSrc::Cursor(c) => take(&mut *c.borrow_mut(), delim, max),
+            StdinSrc::Pipe(r) => take(&mut *r.borrow_mut(), delim, max),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
-                    let _ = cur.borrow_mut().read_to_end(&mut buf);
-                } else {
-                    let _ = io::stdin().lock().read_to_end(&mut buf);
+                    return take(&mut *cur.borrow_mut(), delim, max);
                 }
+                let stdin = io::stdin();
+                let mut lock = stdin.lock();
+                take(&mut lock, delim, max)
             }
         }
-        buf
     }
 
     /// The `mapfile`/`readarray [-d delim] [-n count] [-O origin] [-s skip] [-t]
@@ -17453,20 +17478,12 @@ impl Shell {
             (stdin, redir)
         };
 
-        let data = self.read_all_bytes(mf_stdin, mf_redir);
-        // Split on the delimiter, keeping the delimiter on each piece (as bash
-        // does), except for a trailing empty piece after a final delimiter.
-        let mut pieces: Vec<Vec<u8>> = Vec::new();
-        let mut cur: Vec<u8> = Vec::new();
-        for &b in &data {
-            cur.push(b);
-            if b == delim {
-                pieces.push(std::mem::take(&mut cur));
-            }
-        }
-        if !cur.is_empty() {
-            pieces.push(cur);
-        }
+        // Only as much input as the options ask for is consumed: `-n` bounds
+        // how many records are wanted, and the skipped ones have to be read to
+        // be skipped, so the two together are the bound. Without `-n` the whole
+        // input is wanted and there is nothing to leave behind.
+        let wanted = (count != 0).then(|| skip.saturating_add(count));
+        let pieces = self.read_records(mf_stdin, mf_redir, delim, wanted);
 
         // A callback only fires when `-C` was given and the quantum is non-zero.
         let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && quantum != 0;
@@ -26629,6 +26646,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("mapfile -n 2 -O y a {feed} 2>&1; echo rc=$?; declare -p a 2>&1"));
         assert!(o.starts_with("osh: mapfile: y: invalid array origin\nrc=1\n"), "got {o:?}");
         assert!(o.contains("declare: a: not found"), "the array must be untouched: {o:?}");
+    }
+
+    #[test]
+    fn mapfile_leaves_the_input_a_bound_did_not_need() {
+        // `-n` says how many records are wanted, so the rest of the input is
+        // still there for whoever reads next on the same descriptor.
+        let src = "{ mapfile -n 2 a; read r; } <<< $'l1\\nl2\\nl3\\nl4'\n\
+                   echo \"${#a[@]} r=$r\"";
+        assert_eq!(run(src).0, "2 r=l3\n");
+        // The skipped records have to be read to be skipped, so they count
+        // towards what is consumed.
+        let src = "{ mapfile -s 1 -n 2 a; read r; } <<< $'l1\\nl2\\nl3\\nl4'\n\
+                   echo \"[${a[0]}${a[1]}] r=$r\"";
+        assert_eq!(run(src).0, "[l2\nl3\n] r=l4\n");
+        // Two bounded reads in a row each pick up where the last one stopped.
+        let src = "{ mapfile -t -n 2 a; mapfile -t -n 2 b; } <<< $'l1\\nl2\\nl3\\nl4'\n\
+                   echo \"[${a[*]}][${b[*]}]\"";
+        assert_eq!(run(src).0, "[l1 l2][l3 l4]\n");
+        // Without a bound the whole input is wanted, and nothing is left.
+        let src = "{ mapfile a; read r; } <<< $'l1\\nl2'\necho \"${#a[@]} r=[$r]\"";
+        assert_eq!(run(src).0, "2 r=[]\n");
+        // The bound counts records, which `-d` redefines.
+        let src = "{ mapfile -d , -n 1 a; read r; } <<< 'x,y,z'\necho \"[${a[0]}] r=[$r]\"";
+        assert_eq!(run(src).0, "[x,] r=[y,z]\n");
     }
 
     #[test]

@@ -17896,6 +17896,12 @@ impl Shell {
     /// path, list entries of its directory component whose names start with the
     /// basename component, and return each as `dirprefix + name`. `dirs_only`
     /// restricts results to directories (`-d`).
+    ///
+    /// A dot is an ordinary character in the basename match, so `.hidden` is
+    /// offered to an empty basename just like any other name; only the two
+    /// entries `.` and `..` are held back from an empty basename. This is
+    /// readline's own filename generator with `match-hidden-files` on, which is
+    /// its default and therefore what `compgen` is expected to hand back.
     fn compgen_paths(&self, word: &str, dirs_only: bool) -> Vec<String> {
         // Split into the directory prefix (kept verbatim on each result) and the
         // basename to prefix-match. `foo/ba` -> dir "foo/", base "ba"; "ba" ->
@@ -17912,13 +17918,21 @@ impl Shell {
             return Vec::new();
         };
         let mut out: Vec<String> = Vec::new();
+        // A directory yields `.` and `..` before anything else — but only to a
+        // non-empty basename, since completing a whole directory listing with
+        // the two entries that name the directory itself would be no help.
+        // Nothing else is hidden: a leading dot is just a character here.
+        if !base.is_empty() {
+            out.extend(
+                [".", ".."]
+                    .iter()
+                    .filter(|n| n.starts_with(&base))
+                    .map(|n| format!("{dir_prefix}{n}")),
+            );
+        }
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
             if !name.starts_with(&base) {
-                continue;
-            }
-            // Hidden files only appear when the base explicitly starts with '.'.
-            if name.starts_with('.') && !base.starts_with('.') {
                 continue;
             }
             if dirs_only && !ent.path().is_dir() {
@@ -28941,6 +28955,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(o.starts_with("osh: compgen: -W: option requires an argument\n"), "got {o:?}");
         assert!(o.contains("compgen: usage: compgen [-abcdefgjksuv]"), "got {o:?}");
         assert_eq!(s, 2);
+    }
+
+    #[test]
+    fn compgen_path_holds_back_only_dot_and_dotdot() {
+        // Path completion treats a leading dot as an ordinary character, so a
+        // hidden name is offered to an empty word like any other; `.` and `..`
+        // are the only entries an empty word does not see.
+        let _cwd = cwd_guard();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_compgen_p_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
+        std::fs::write(dir.join("a1"), b"").expect("a1");
+        std::fs::write(dir.join(".ahid"), b"").expect("hidden");
+        let base = dir.to_string_lossy().replace('\\', "/");
+        let orig = std::env::current_dir().expect("cwd");
+        // Compare as sets: the order is the directory's own, which is the
+        // filesystem's business rather than the shell's.
+        let g = |rest: &str| {
+            let mut v: Vec<String> =
+                run(&format!("cd {base}\ncompgen {rest}")).0.lines().map(str::to_string).collect();
+            v.sort();
+            v
+        };
+
+        assert_eq!(g("-f ''"), [".ahid", "a1", "adir"]);
+        assert_eq!(g("-d ''"), ["adir"]);
+        // A word that is itself a dot reaches all three dot entries.
+        assert_eq!(g("-f ."), [".", "..", ".ahid"]);
+        assert_eq!(g("-d ."), [".", ".."]);
+        assert_eq!(g("-f .."), [".."]);
+        // A word with no dot never sees them.
+        assert_eq!(g("-f a"), ["a1", "adir"]);
+        // The rule follows the word's directory component, not the cwd.
+        assert_eq!(g("-f adir/."), ["adir/.", "adir/.."]);
+
+        std::env::set_current_dir(&orig).expect("restore cwd");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

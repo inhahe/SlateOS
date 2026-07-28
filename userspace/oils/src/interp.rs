@@ -307,6 +307,36 @@ fn io_error_message(e: &std::io::Error) -> String {
     }
 }
 
+/// Render a host filesystem path the way the *shell* talks about paths: `/`
+/// separated, with no Windows extended-length (`\\?\`) prefix.
+///
+/// SlateOS uses `/` as its only path separator (design.txt), and every shell
+/// idiom assumes it: `${PWD##*/}` to take a basename, `"$PWD/sub"` to build a
+/// child path, glob patterns, and osh's own `~`-contraction in `dirs_render`
+/// (which literally matches `format!("{home}/")`). On the SlateOS target this
+/// function is the identity; it exists because the Windows *development* host
+/// hands back `C:\a\b` from `current_dir`/`canonicalize`, which would otherwise
+/// leak into `$PWD`, `$OLDPWD`, `pwd`, `$DIRSTACK` and `dirs` output and silently
+/// break all of the above. Windows accepts `/` in every path API, so the
+/// converted form still round-trips as a real path.
+fn shell_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form; strip
+    // it so the reported path is the one the user could have typed.
+    let s = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+    s.replace('\\', "/")
+}
+
+/// The current working directory as a shell-facing path (see [`shell_path`]),
+/// or an empty string if the host cannot report it (e.g. the directory was
+/// removed out from under us).
+fn shell_cwd() -> String {
+    std::env::current_dir().as_deref().map(shell_path).unwrap_or_default()
+}
+
 /// The full set of standard bash `set -o` option names, in bash's alphabetical
 /// listing order (matching a Linux bash, which — unlike Cygwin/MSYS — does not
 /// expose `igncr`). Used both to validate `set -o NAME` / `shopt -o NAME` and to
@@ -5154,9 +5184,7 @@ impl Shell {
     /// The working directory for prompt `\w` (full, `$HOME`→`~`) or `\W`
     /// (basename only).
     fn prompt_cwd(&self, basename_only: bool) -> String {
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cwd = shell_cwd();
         if basename_only {
             let base = cwd.rsplit(['/', '\\']).next().unwrap_or(&cwd);
             return if base.is_empty() { "/".to_string() } else { base.to_string() };
@@ -9602,7 +9630,7 @@ impl Shell {
             self.param_value("HOME")
         } else if prefix == "+" {
             self.param_value("PWD")
-                .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+                .or_else(|| std::env::current_dir().ok().map(|p| shell_path(&p)))
         } else if prefix == "-" {
             self.param_value("OLDPWD")
         } else if let Some(n) = parse_dirstack_index(prefix) {
@@ -10132,12 +10160,11 @@ impl Shell {
     /// (to the previous cwd) and `$PWD` (to the new cwd). Returns the new cwd
     /// as a display string on success, or an OS error string on failure.
     fn change_dir(&mut self, path: &str) -> Result<String, String> {
-        let old = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .ok();
+        let old = std::env::current_dir().as_deref().map(shell_path).ok();
         std::env::set_current_dir(path).map_err(|e| io_error_message(&e))?;
         let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
+            .as_deref()
+            .map(shell_path)
             .unwrap_or_else(|_| path.to_string());
         if let Some(o) = old {
             self.vars.insert("OLDPWD".to_string(), o);
@@ -10231,7 +10258,7 @@ impl Shell {
                 if physical
                     && let Ok(canon) = std::fs::canonicalize(&cwd)
                 {
-                    cwd = canon.to_string_lossy().into_owned();
+                    cwd = shell_path(&canon);
                     self.vars.insert("PWD".to_string(), cwd.clone());
                 }
                 if echo {
@@ -10266,9 +10293,7 @@ impl Shell {
     /// The current directory stack as a list with the current directory first
     /// (the conceptual top), followed by the saved `dir_stack` entries.
     fn dir_stack_full(&self) -> Vec<String> {
-        let cur = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cur = shell_cwd();
         let mut full = Vec::with_capacity(self.dir_stack.len() + 1);
         full.push(cur);
         full.extend(self.dir_stack.iter().cloned());
@@ -10306,9 +10331,7 @@ impl Shell {
                 && (s.starts_with('+') || s.starts_with('-'))
                 && s[1..].chars().all(|c| c.is_ascii_digit())
         };
-        let cur = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cur = shell_cwd();
         match args.first().map(String::as_str) {
             None => {
                 if self.dir_stack.is_empty() {
@@ -12221,14 +12244,10 @@ impl Shell {
                 }
             }
         }
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cwd = shell_cwd();
         // `-P` reports the canonical, symlink-resolved path.
         let cwd = if physical {
-            std::fs::canonicalize(&cwd)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(cwd)
+            std::fs::canonicalize(&cwd).map(|p| shell_path(&p)).unwrap_or(cwd)
         } else {
             cwd
         };
@@ -26939,13 +26958,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn cwd_paths_use_forward_slashes() {
+        // The shell's path model is `/`-separated (design.txt), and every shell
+        // idiom depends on it. On the Windows dev host `current_dir()` and
+        // `canonicalize()` hand back `C:\a\b` and `\\?\C:\a\b`; neither form may
+        // reach `$PWD`, `pwd`, `$OLDPWD` or `$DIRSTACK`.
+        let _cwd = cwd_guard();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_slash_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        let base = dir.to_string_lossy().replace('\\', "/");
+        let orig = std::env::current_dir().expect("cwd");
+        // `cd`, `cd -P`, `pwd`, `pwd -P` and the directory stack must all agree
+        // and all be free of `\` and of the extended-length `\\?\` prefix.
+        let (o, _) = run(&format!(
+            "cd {base}/sub\n\
+             echo \"pwd=[$(pwd)] PWD=[$PWD] OLD=[$OLDPWD] D=[${{DIRSTACK[0]}}]\"\n\
+             echo \"base=${{PWD##*/}}\"\n\
+             cd -P {base}/sub\n\
+             echo \"P=[$PWD] pP=[$(pwd -P)]\"\n"
+        ));
+        std::env::set_current_dir(&orig).expect("restore cwd");
+        assert!(!o.contains('\\'), "no backslash may appear in reported paths: {o:?}");
+        assert!(!o.contains("//?/"), "the \\\\?\\ prefix must be stripped: {o:?}");
+        assert!(o.contains("base=sub\n"), "${{PWD##*/}} must yield the basename: {o:?}");
+        for line in o.lines() {
+            assert!(
+                line.matches(&format!("{base}/sub")).count() >= 1
+                    || line.starts_with("base="),
+                "every path should be the shell-form path: {line:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn dirstack_reflects_pushd_popd() {
         let _cwd = cwd_guard();
         // Initially DIRSTACK holds exactly the current directory (DIRSTACK[0]
         // tracks the live cwd, like `pwd`), matching bash's dynamic array.
-        // (Compare against `$(pwd)`, not `$PWD`: on the Windows host build the
-        // inherited `$PWD` env var is forward-slash while the live cwd is
-        // backslash — an env artifact that does not exist on the real target.)
+        // (Compare against `$(pwd)`, not `$PWD`: osh does not yet re-derive the
+        // inherited `$PWD` env var from the live cwd at startup, so under the
+        // test harness the two can name different directories.)
         let (out, _) =
             run("test \"${DIRSTACK[0]}\" = \"$(pwd)\" && echo eq; echo \"n=${#DIRSTACK[@]}\"");
         assert_eq!(out, "eq\nn=1\n");

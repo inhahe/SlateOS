@@ -477,9 +477,13 @@ fn normalize_logical(path: &str) -> String {
 /// `compgen -k`. These are the words the grammar treats specially, so they can
 /// never name an external command; every one of them is "found" by a command
 /// lookup even though nothing on `$PATH` matches.
+///
+/// The order is bash's `word_token_alist` (parse.y), because that is the order
+/// `compgen -k` and `compgen -c` hand them out in — the only place the order is
+/// observable. Everywhere else this table is only searched.
 const SHELL_KEYWORDS: &[&str] = &[
-    "if", "then", "elif", "else", "fi", "time", "for", "in", "until", "while", "do", "done",
-    "case", "esac", "coproc", "select", "function", "{", "}", "!", "[[", "]]",
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
+    "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc",
 ];
 
 const STANDARD_SET_O_OPTIONS: &[&str] = &[
@@ -17722,37 +17726,72 @@ impl Shell {
         }
 
         // ---- gather raw candidates from every specified source ----
+        // The order is bash's own, not the order the options were written in:
+        // the actions are a bitmask there, so each one generates exactly once
+        // and they run in the alphabetical order of the action table, with the
+        // `-W` wordlist appended after all of them. `compgen -v -b tr` and
+        // `compgen -b -v tr` therefore give the same answer, builtins first.
         let mut cands: Vec<String> = Vec::new();
+        fn sorted(mut names: Vec<String>) -> Vec<String> {
+            names.sort_unstable();
+            names
+        }
+        // …with the two filesystem actions held back to the end (file, then
+        // directory), which is why `compgen -d -f i` answers files first.
+        let gen_order = COMP_ACTIONS
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| *n != "file" && *n != "directory")
+            .chain(["file", "directory"]);
+        for action in gen_order {
+            if !actions.iter().any(|a| a == action) {
+                continue;
+            }
+            match action {
+                // bash reads these out of arrays it keeps sorted, so the
+                // answer is sorted however the names went in.
+                "function" => cands.extend(sorted(self.funcs.keys().cloned().collect())),
+                "alias" => cands.extend(self.aliases.keys().cloned()),
+                "builtin" => {
+                    cands.extend(sorted(BUILTIN_NAMES.iter().map(|s| (*s).to_string()).collect()));
+                }
+                // Reserved words come out in the grammar's own table order,
+                // which is neither alphabetical nor the order they are listed
+                // anywhere else.
+                "keyword" => cands.extend(KEYWORDS.iter().map(|s| (*s).to_string())),
+                "variable" => {
+                    let mut v: Vec<String> = self.vars.keys().cloned().collect();
+                    v.extend(self.arrays.keys().cloned());
+                    v.extend(self.assoc.keys().cloned());
+                    cands.extend(sorted(v));
+                }
+                // `arrayvar` is the array-valued subset, not every variable.
+                "arrayvar" => {
+                    let mut v: Vec<String> = self.arrays.keys().cloned().collect();
+                    v.extend(self.assoc.keys().cloned());
+                    cands.extend(sorted(v));
+                }
+                "export" => cands.extend(sorted(self.exported.iter().cloned().collect())),
+                // A command name is looked for in the order the shell itself
+                // would look: alias, reserved word, function, builtin, $PATH.
+                "command" => {
+                    cands.extend(self.aliases.keys().cloned());
+                    cands.extend(KEYWORDS.iter().map(|s| (*s).to_string()));
+                    cands.extend(sorted(self.funcs.keys().cloned().collect()));
+                    cands.extend(sorted(BUILTIN_NAMES.iter().map(|s| (*s).to_string()).collect()));
+                    cands.extend(self.compgen_path_commands(&word));
+                }
+                "file" => cands.extend(self.compgen_paths(&word, false)),
+                "directory" => cands.extend(self.compgen_paths(&word, true)),
+                // group/job/service/user and the rest: nothing.
+                _ => {}
+            }
+        }
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
         let ifs_chars: Vec<char> = ifs.chars().collect();
         for wl in &wordlists {
             for tok in wl.split(|c| ifs_chars.contains(&c)).filter(|s| !s.is_empty()) {
                 cands.push(tok.to_string());
-            }
-        }
-        for action in &actions {
-            match action.as_str() {
-                "function" => cands.extend(self.funcs.keys().cloned()),
-                "alias" => cands.extend(self.aliases.keys().cloned()),
-                "builtin" => cands.extend(BUILTIN_NAMES.iter().map(|s| (*s).to_string())),
-                "keyword" => cands.extend(KEYWORDS.iter().map(|s| (*s).to_string())),
-                "variable" | "arrayvar" => {
-                    cands.extend(self.vars.keys().cloned());
-                    cands.extend(self.arrays.keys().cloned());
-                    cands.extend(self.assoc.keys().cloned());
-                }
-                "export" => cands.extend(self.exported.iter().cloned()),
-                "command" => {
-                    cands.extend(BUILTIN_NAMES.iter().map(|s| (*s).to_string()));
-                    cands.extend(KEYWORDS.iter().map(|s| (*s).to_string()));
-                    cands.extend(self.funcs.keys().cloned());
-                    cands.extend(self.aliases.keys().cloned());
-                    cands.extend(self.compgen_path_commands(&word));
-                }
-                "file" => cands.extend(self.compgen_paths(&word, false)),
-                "directory" => cands.extend(self.compgen_paths(&word, true)),
-                // group/job/service/user and any unknown action: nothing.
-                _ => {}
             }
         }
 
@@ -28753,6 +28792,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
         // `--` with no following word offers every candidate.
         assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
+    }
+
+    #[test]
+    fn compgen_answers_in_bashs_order_not_the_options_order() {
+        // Actions are a set, not a sequence: each generates once, in the
+        // action table's alphabetical order, whichever way round they are
+        // written — and the -W wordlist comes after all of them.
+        assert_eq!(run("tr1=x; compgen -v -b tr").0, "trap\ntrue\ntr1\n");
+        assert_eq!(run("tr1=x; compgen -b -v tr").0, "trap\ntrue\ntr1\n");
+        assert_eq!(run("compgen -b -b tr").0, "trap\ntrue\n");
+        assert_eq!(run("compgen -W 'if1' -k i").0, "if\nin\nif1\n");
+        // Reserved words keep the grammar's table order, not alphabetical.
+        assert_eq!(run("compgen -k i").0, "if\nin\n");
+        // Names come out sorted, however they went into the shell's tables.
+        assert_eq!(run("zf(){ :;}; af(){ :;}; compgen -A function").0, "af\nzf\n");
+        assert_eq!(run("zv=1; za=2; compgen -v z").0, "za\nzv\n");
+        assert_eq!(run("export ZB=1 ZA=2; compgen -e Z").0, "ZA\nZB\n");
+        // `arrayvar` is the array-valued subset, not every variable.
+        assert_eq!(
+            run("declare -a zar=(1); declare -A zmap=([k]=v); zv=1; compgen -A arrayvar z").0,
+            "zar\nzmap\n"
+        );
+        // A command name is offered the way the shell would look it up:
+        // alias, reserved word, function, builtin — and only then $PATH, so
+        // only the head of the list is fixed here.
+        let out = run("dofn(){ :;}; compgen -c d").0;
+        assert_eq!(
+            out.lines().take(6).collect::<Vec<_>>(),
+            vec!["do", "done", "dofn", "declare", "dirs", "disown"]
+        );
     }
 
     #[test]

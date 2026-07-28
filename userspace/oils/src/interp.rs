@@ -1779,7 +1779,12 @@ impl Shell {
             // untraced function that merely inherited it is already folded into
             // that snapshot: without `errtrace` (`set -E`) a failure inside the
             // function does not fire the caller's ERR trap.
-            self.fire_trap("ERR");
+            //
+            // An `exit N` in the handler terminates the shell (bash), so the
+            // remaining `&&`/`||` list and everything after it is unwound.
+            if let Flow::Exit(code) = self.fire_trap_flow("ERR") {
+                return Flow::Exit(code);
+            }
         }
         if errexit_before_last && failed_unexempt {
             return Flow::Exit(self.last_status);
@@ -1844,7 +1849,11 @@ impl Shell {
                 if let Some(sc) = Self::stage_simple(cmd) {
                     self.vars
                         .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
-                    self.fire_trap("DEBUG");
+                    // An `exit N` in the handler unwinds the shell before the
+                    // pipeline runs at all (bash), so no stage is started.
+                    if let Flow::Exit(code) = self.fire_trap_flow("DEBUG") {
+                        return Flow::Exit(code);
+                    }
                 }
             }
         }
@@ -4956,8 +4965,14 @@ impl Shell {
         // The DEBUG trap runs before each simple command (guarded so a handler's
         // own commands don't recurse). Suppressed inside an untraced function
         // frame that merely inherited the caller's DEBUG trap (bash).
-        if !self.in_trap && self.traps.contains_key("DEBUG") && !self.trap_suppressed("DEBUG") {
-            self.fire_trap("DEBUG");
+        // An `exit N` in the handler unwinds the shell *instead of* running the
+        // command it was about to announce (bash).
+        if !self.in_trap
+            && self.traps.contains_key("DEBUG")
+            && !self.trap_suppressed("DEBUG")
+            && let Flow::Exit(code) = self.fire_trap_flow("DEBUG")
+        {
+            return Flow::Exit(code);
         }
         // Expand the command words into argv (with the current variable values,
         // before any prefix assignments take effect).
@@ -5389,14 +5404,28 @@ impl Shell {
         // still the call word — in addition to the per-command firings. Reproduce
         // that extra entry firing so the DEBUG count matches bash under
         // `functrace`/`declare -ft`.
-        if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
-            self.fire_trap("DEBUG");
+        //
+        // An `exit N` inside any of this frame's trap handlers must terminate
+        // the *shell*, but it must not skip the frame teardown below (trap
+        // mask, locals, FUNCNAME, BASH_ARGC/ARGV, positional params). So the
+        // outcome is recorded in `trap_exit` and returned only after the
+        // unwinding, never via an early `return`.
+        let mut trap_exit: Option<i32> = None;
+        if trace_this
+            && !self.in_trap
+            && self.traps.contains_key("DEBUG")
+            && let Flow::Exit(code) = self.fire_trap_flow("DEBUG")
+        {
+            trap_exit = Some(code);
         }
         // Redirections attached to the function definition (`f() { …; } >log`)
         // wrap the whole body on every invocation. Resolve and install them
         // exactly like compound-command redirects; on a resolution error bash
         // reports it and skips the body with status 1.
-        let flow = if let Some(rs) = self.func_redirects.get(name).cloned() {
+        // An entry-DEBUG handler that exited skips the body entirely.
+        let flow = if trap_exit.is_some() {
+            Flow::Next
+        } else if let Some(rs) = self.func_redirects.get(name).cloned() {
             match self.resolve_redirects(&rs) {
                 Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
                     sh.exec_program(&body, o, s)
@@ -5415,16 +5444,28 @@ impl Shell {
         // torn down (so the handler still sees the function's scope), matching
         // bash. It fires when this frame inherits RETURN (tracing on) or when the
         // body installed its own RETURN (which cleared the mask); a merely-
-        // inherited-but-masked RETURN stays suppressed.
-        if self.traps.contains_key("RETURN") && !self.trap_suppressed("RETURN") {
+        // inherited-but-masked RETURN stays suppressed. It is skipped entirely
+        // if an earlier handler already asked to exit the shell.
+        if trap_exit.is_none()
+            && self.traps.contains_key("RETURN")
+            && !self.trap_suppressed("RETURN")
+        {
             // Under tracing, bash fires DEBUG once more immediately before the
             // RETURN trap action, with `$BASH_COMMAND` still the last body
             // command. (This extra firing only appears when a RETURN trap is
             // actually present.)
-            if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
-                self.fire_trap("DEBUG");
+            if trace_this
+                && !self.in_trap
+                && self.traps.contains_key("DEBUG")
+                && let Flow::Exit(code) = self.fire_trap_flow("DEBUG")
+            {
+                trap_exit = Some(code);
             }
-            self.fire_trap("RETURN");
+            if trap_exit.is_none()
+                && let Flow::Exit(code) = self.fire_trap_flow("RETURN")
+            {
+                trap_exit = Some(code);
+            }
         }
         // Drop this frame's trap mask. Any trap the body installed remains in
         // `self.traps` (persisting globally, matching bash's `trap -p`).
@@ -5459,6 +5500,11 @@ impl Shell {
                     self.vars.remove(&k);
                 }
             }
+        }
+        // A trap handler's `exit` wins over the body's own flow: bash unwinds
+        // the whole shell rather than merely returning from the function.
+        if let Some(code) = trap_exit {
+            return Flow::Exit(code);
         }
         match flow {
             Flow::Return | Flow::Next => Flow::Next,
@@ -11200,19 +11246,19 @@ impl Shell {
     }
 
     /// Fire a synchronous trap handler (`ERR`/`DEBUG`/`RETURN`) if one is set
-    /// and we are not already inside a trap. The handler runs with the current
-    /// `$?` visible and does not clobber it (a handler that changes `$?` has it
-    /// restored afterwards, matching bash's "the trap does not alter the
-    /// command's status" behavior for these traps).
-    fn fire_trap(&mut self, name: &str) {
-        let _ = self.fire_trap_flow(name);
-    }
-
-    /// Like [`Shell::fire_trap`] but returns the trap body's control-flow
-    /// outcome, so a caller can propagate an `exit` executed inside the handler
-    /// (bash: an `exit` in a signal trap terminates the shell, and `after`
-    /// commands do not run). A non-exit body leaves `$?` untouched (bash's
+    /// and we are not already inside a trap, returning the handler body's
+    /// control-flow outcome.
+    ///
+    /// The handler runs with the current `$?` visible and does not clobber it
+    /// (a handler that changes `$?` has it restored afterwards, matching bash's
     /// "the trap does not alter the command's status" rule for these traps).
+    ///
+    /// **Every** caller must honour a returned [`Flow::Exit`]: in bash an
+    /// `exit` inside a trap handler terminates the *shell*, not just the
+    /// handler, so the triggering command's continuation and everything after
+    /// it must be unwound. Callers that own frame state (e.g.
+    /// [`Shell::call_function`]) must still run their teardown before
+    /// propagating it, rather than returning early.
     fn fire_trap_flow(&mut self, name: &str) -> Flow {
         if self.in_trap {
             return Flow::Next;
@@ -11261,18 +11307,24 @@ impl Shell {
             && !action.is_empty()
         {
             // bash: the shell's exit status is the one in effect when the trap
-            // fires; preserve it across the handler (a handler that itself runs
-            // `exit N` is a rare case we do not special-case).
+            // fires, so it is preserved across the handler — *unless* the
+            // handler itself runs `exit N`, which replaces the shell's status
+            // with N (the trap is already running, so there is nothing left to
+            // unwind; only the status changes).
             let saved = self.last_status;
+            let mut flow = Flow::Next;
             match parse_with_aliases(&action, &self.aliases) {
                 Ok(prog) => {
-                    let _ = self.exec_program(&prog, out, stdin);
+                    flow = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
                     self.errln(&self.format_parse_error(&e, &action));
                 }
             }
-            self.last_status = saved;
+            self.last_status = match flow {
+                Flow::Exit(code) => code,
+                _ => saved,
+            };
         }
     }
 
@@ -13845,7 +13897,7 @@ impl Shell {
             return data.clone();
         }
         if let Some(path) = &redir.stdin {
-            return std::fs::read(path).unwrap_or_default();
+            return std::fs::read(map_device_path(path)).unwrap_or_default();
         }
         let mut buf = Vec::new();
         match stdin {
@@ -15456,7 +15508,7 @@ impl Shell {
             return read_one_line(&mut r);
         }
         if let Some(path) = &redir.stdin {
-            let f = std::fs::File::open(path).ok()?;
+            let f = std::fs::File::open(map_device_path(path)).ok()?;
             let mut r = io::BufReader::new(f);
             return read_one_line(&mut r);
         }
@@ -15511,7 +15563,7 @@ impl Shell {
             return read_record(&mut r, delim, nchars, exact);
         }
         if let Some(path) = &redir.stdin {
-            let f = std::fs::File::open(path).ok()?;
+            let f = std::fs::File::open(map_device_path(path)).ok()?;
             let mut r = io::BufReader::new(f);
             return read_record(&mut r, delim, nchars, exact);
         }
@@ -26341,6 +26393,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf");
         assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn exit_inside_synchronous_trap_unwinds_shell() {
+        // bash: `exit N` executed inside an ERR/DEBUG/RETURN/EXIT handler
+        // terminates the *shell* with N — it does not merely end the handler.
+        // Commands after the triggering command must not run.
+
+        // ERR: `false` fires the handler, which exits 7.
+        let (o, s) = run("trap 'exit 7' ERR; false; echo after");
+        assert_eq!(o, "");
+        assert_eq!(s, 7);
+
+        // DEBUG: fires *before* the first command, so nothing runs at all.
+        let (o, s) = run("trap 'exit 5' DEBUG; echo a; echo b");
+        assert_eq!(o, "");
+        assert_eq!(s, 5);
+
+        // RETURN (under functrace, so the function inherits the trap): the
+        // handler exits when `f` returns, so `echo after` is unwound.
+        let (o, s) = run("set -T; trap 'exit 4' RETURN; f() { echo in; }; f; echo after");
+        assert_eq!(o, "in\n");
+        assert_eq!(s, 4);
+
+        // A handler that does *not* exit still leaves `$?` untouched.
+        let (o, s) = run("trap 'true' ERR; false; echo after");
+        assert_eq!(o, "after\n");
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn exit_inside_exit_trap_overrides_status() {
+        // bash: an `exit N` inside the EXIT trap replaces the shell's exit
+        // status with N. Without one, the pre-trap status is preserved.
+        let mut sh = Shell::new();
+        sh.run_source("trap 'exit 9' EXIT");
+        sh.last_status = 2;
+        sh.run_exit_trap();
+        assert_eq!(sh.last_status, 9);
+
+        let mut sh = Shell::new();
+        sh.run_source("trap 'MARK=1' EXIT");
+        sh.last_status = 3;
+        sh.run_exit_trap();
+        assert_eq!(sh.last_status, 3);
+        assert_eq!(sh.vars.get("MARK").map(String::as_str), Some("1"));
     }
 
     #[test]

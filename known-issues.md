@@ -14,6 +14,94 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-TRAP-EXIT-SWALLOWED. `exit N` inside an `ERR`/`DEBUG`/`RETURN`/`EXIT` trap handler did not terminate the shell — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**Symptom.** In bash, an `exit N` executed inside a trap handler terminates the
+**shell** with status `N`; the triggering command's continuation and everything
+after it is unwound. `osh` ran the handler, discarded its control flow, and
+carried on:
+
+```sh
+trap 'exit 7' ERR;   false; echo after   # bash: (nothing), status 7 | osh: "after", status 0
+trap 'exit 5' DEBUG; echo a; echo b      # bash: (nothing), status 5 | osh: "a\nb"
+set -T; trap 'exit 4' RETURN; f() { echo in; }; f; echo after
+                                         # bash: "in", status 4    | osh: "in\nafter"
+trap 'exit 9' EXIT                       # bash: shell exits 9     | osh: kept the pre-trap status
+```
+
+**Root cause.** `Shell::fire_trap_flow` already returned the handler body's
+`Flow`, but the only caller was the thin wrapper `fire_trap`, which threw it
+away (`let _ = …`). All five synchronous firing sites went through that wrapper.
+`run_exit_trap_out` had the same hole independently — it ran the EXIT handler
+with `let _ = self.exec_program(…)` and then unconditionally restored the
+pre-trap status. (`kill -SIG $$` was unaffected: the self-signal path already
+propagated the trap's `Flow::Exit`, which is why `self_kill_trap_exit_unwinds`
+passed while the synchronous traps were broken.)
+
+**Fix** (`userspace/oils/src/interp.rs`). Deleted the flow-discarding
+`fire_trap` wrapper entirely, so the type system now forces every site to look
+at the result, and documented on `fire_trap_flow` that a returned `Flow::Exit`
+must be honoured. The five sites:
+
+* `exec_and_or` (ERR) and `exec_pipeline` / `exec_simple_inner` (DEBUG) return
+  `Flow::Exit(code)` directly — nothing frame-scoped is live there.
+* `call_function` (entry-DEBUG under tracing, and the DEBUG+RETURN pair on
+  return) records the outcome in a local `trap_exit: Option<i32>` and returns it
+  **after** the frame teardown, never via an early `return`. Returning early
+  would have leaked the trap mask, the locals frame, the `FUNCNAME` /
+  `BASH_ARGC`/`BASH_ARGV` stacks and the saved positional parameters. An
+  entry-DEBUG that exits also skips the function body, and a pending exit
+  suppresses the later RETURN firing.
+* `run_exit_trap_out` now keeps the handler's `Flow` and sets `last_status` to
+  the handler's exit code when it is `Flow::Exit`, otherwise restores the
+  pre-trap status.
+
+**Tests.** `exit_inside_synchronous_trap_unwinds_shell` (ERR/DEBUG/RETURN, plus
+a non-exiting handler to pin the "trap does not alter `$?`" rule) and
+`exit_inside_exit_trap_overrides_status`. Both failed before the change. Full
+suite: 713 + 13 pass, `cargo clippy -p oils --all-targets` clean.
+
+**Still open** in TD-OILS11: a `RETURN` trap is not fired for a returning
+*sourced script* (only function returns), and async signal delivery.
+
+### BUG-OILS-DEVNULL-READ-UNMAPPED. Three `redir.stdin` read paths bypassed `map_device_path`, so `read x < /dev/null` on the Windows host read a stray `D:\dev\null` file — 2026-07-27 — ✅ RESOLVED 2026-07-27
+
+**Symptom.** `cargo test -p oils` failed three tests
+(`dev_null_read_yields_eof`, `dev_null_write_discards`,
+`read_a_creates_empty_array_on_eof`) with the *contents of a real file* where
+EOF was expected — 70 asterisks and a "Visual Studio 2022 Developer Command
+Prompt" banner. Pre-existing (reproduced on a clean `git stash`), so not a
+regression from the trap work that surfaced it.
+
+**Root cause.** Two independent halves.
+
+1. **Host pollution.** `D:\dev\null` exists as an ordinary 295-byte file (also
+   `D:\dev\full`, `\stderr`, `\stdout`, `\test_dev`), created by *non-osh*
+   tooling: a `cmd.exe`-side `>/dev/null` resolves `/dev/null` against the
+   current drive root. `map_device_path` (interp.rs ~17499) was added precisely
+   to stop `osh` doing this, mapping `/dev/null` → `NUL` on Windows.
+2. **Three read paths never called it.** `map_device_path` was applied at 13 of
+   16 sites, but the `read`-builtin input helpers and the stdin slurp took the
+   raw path: `std::fs::read(path)` (~13893) and two
+   `std::fs::File::open(path)` (~15504 line reader, ~15559 record reader).
+   `resolve_redirects` deliberately stores the **unmapped** path in
+   `plan.stdin` ("downstream code re-opens the path when it actually reads"),
+   so every downstream consumer has to map — and these three forgot. The
+   validating open in `resolve_redirects` *did* map, so `< /dev/null` was
+   accepted and then read from the wrong file.
+
+**Fix.** Added `map_device_path` to all three. Audited every remaining
+`File::open`/`File::create`/`OpenOptions`/`fs::read` in non-test code: the only
+other unmapped ones are `fs::metadata` calls backing the `test`/`[` file
+predicates and process-substitution temp files, neither of which should map.
+
+**Residual (host-only, deliberately not fixed).** The stray `D:\dev\*` files
+are outside the repo and were not created by this project's code, so they were
+left in place; with the mapping fix the tests pass regardless of whether they
+exist. `[ -e /dev/null ]` still stats the stray path on Windows — a host-only
+artifact with no SlateOS-target equivalent (there `/dev/null` is a real device
+node).
+
 ### BUG-DASH-CMDSUB-INTERMITTENT-HANG. The Path-Z real-dash command-substitution self-test (`echo [$(/bin/emit)] > file`) intermittently hangs the boot thread — no BOOT_OK — but passes on a re-run — 2026-07-23 — OPEN (flaky)
 
 **Symptom.** `self_test_linux_real_glibc_shell_cmdsub` (kernel/src/proc/spawn.rs ~21042, "REAL dash shell command substitution `echo [$(/bin/emit)] > file`") occasionally wedges: dash (the parent process, e.g. pid 272) forks a child (pid 273) which `execve`s `/bin/emit` and becomes a zombie ("Process 273 has no threads left — now zombie", "Task 239 exiting"), and then there is **no further serial output** — the boot never reaches BOOT_OK and the run-timeout watchdog eventually fails the boot at ~540s. On an immediate re-run (identical kernel + rootfs, `--no-build`) the same test **passes** ("read back 18 bytes == expected, exit 0: OK") and the boot reaches BOOT_OK. Observed 2026-07-23: one boot hung here, the very next boot passed it.
@@ -2252,10 +2340,11 @@ uses (`EXIT` cleanup, `ERR` reporting, `DEBUG`/`RETURN` tracing), and the
 storage/print/list/reset surface is complete.
 
 **Also (minor):** a `RETURN` trap is not yet fired for a returning **sourced
-script** (only function returns), and an `exit N` *inside* an `ERR`/`DEBUG`/
-`RETURN`/`EXIT` handler does not propagate to actually exit the shell (the
-handler runs via a nested `run_source` whose `Flow::Exit` is swallowed). Both
-are edge cases; the fix is to thread the handler's flow out of `fire_trap`.
+script** (only function returns). ~~and an `exit N` *inside* an `ERR`/`DEBUG`/
+`RETURN`/`EXIT` handler does not propagate to actually exit the shell~~ —
+**the `exit`-in-handler half is FIXED 2026-07-27**; see
+`BUG-OILS-TRAP-EXIT-SWALLOWED` below. The sourced-script `RETURN` firing
+remains open.
 
 **Also (TD-OILS-TRAP-CAPTURE, minor):** synchronous trap handler *output* is
 written through `fire_trap` → `run_source` (a fresh `Out::Inherit`, i.e. the

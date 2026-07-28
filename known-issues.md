@@ -4582,6 +4582,28 @@ incomplete:
    suppress) on stderr as `bash: line N: PID Hangup   sleep 5`, before the next
    prompt or command; osh reports such a death only when `jobs` next runs. Ties
    into TD-OILS11 (async signal delivery).
+5. **A job's death is learned synchronously, so a job osh has just signalled is
+   one it already knows is over.** bash reaps on `SIGCHLD`, so for a moment
+   after `kill %1` the job is still `Running` as far as the shell is concerned;
+   osh's `kill` reaps the child itself and knows at once. Two visible
+   consequences, both verified to be *timing*-dependent in bash (inserting a
+   `sleep 0.1` makes bash agree with osh), which is why neither is in the
+   corpus: (a) `sleep 0.3 & kill %1; jobs` lists `Running` under bash and
+   `Terminated` under osh; (b) after `sleep 0.5 & kill %sleep; wait`, bash
+   numbers the next job `[1]` — its `wait` blocked on a job it did not yet know
+   was dead, and so discarded it — where osh, seeing a job that had already
+   finished, would keep the row and number the next one `[2]`. osh handles (b)
+   by recording per job whether the shell has *learned* of the exit
+   (`Job::exit_seen`): a job that only `kill` reaped is one an operand-less
+   `wait` still counts as waited for, which restores bash's numbering. (a) has
+   no such workaround and stands. Ties into the same asynchronous-notification
+   gap as item 4.
+
+**Note — `jobs -x` answers with a pid, not a process group.** bash substitutes
+`job->pgrp`; osh has no process groups, so a job is its own process and the pid
+is what stands in. Deliberate — see design-decisions.md §89, which also explains
+why `tests/corpus/jobs-execute.sh` covers everything about `-x` except the
+substituted value (a unit test pins that instead).
 
 **Note — reference bash's `jobs` ambiguity answer is not stable, so it is not
 in the corpus.** For `sleep 0.7 & sleep 0.8 & jobs %sleep`, bash 5.2.37 prints

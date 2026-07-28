@@ -2463,7 +2463,7 @@ fn is_valid_transform_op(op: char) -> bool {
 /// Parse `s` as a single word preserving literal whitespace (no word-splitting
 /// or operator tokenization) — for the pattern and replacement of
 /// `${var/pat/repl}`, where bash applies only expansion and quote removal.
-fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
+pub(crate) fn word_verbatim_from_source(s: &str) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }

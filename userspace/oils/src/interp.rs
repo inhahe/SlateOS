@@ -13609,13 +13609,18 @@ impl Shell {
                 break;
             }
         }
+        // bash does not abort on the first failing name: it records the failure
+        // and keeps unsetting the rest, returning 1 at the end. `unset 'a[-99]'
+        // b c` still unsets `b` and `c`.
+        let mut status = 0;
         for a in &args[i..] {
             if funcs_only {
                 if self.readonly_funcs.contains(a) {
                     self.emit_stderr(
                         format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
                     );
-                    return 1;
+                    status = 1;
+                    continue;
                 }
                 self.funcs.remove(a);
                 self.fn_trace_attr.remove(a);
@@ -13627,6 +13632,34 @@ impl Shell {
                 self.vars.remove(a);
                 continue;
             }
+            // `unset name[sub]` removes a single element. The subscript is split
+            // off *before* nameref resolution so `unset ref[1]` follows `ref` to
+            // its target array, as bash does.
+            //
+            // A token only counts as an array reference when the base is a valid
+            // identifier, the bracket is not the first character, and the
+            // subscript is non-empty and closes the token. Anything else
+            // (`e[]`, `q[0]junk`, `1abc[0]`) is an ordinary — and necessarily
+            // unset — variable name, which bash quietly accepts.
+            let subscript = a.find('[').filter(|&open| open > 0).and_then(|open| {
+                a.strip_suffix(']')
+                    .filter(|_| open + 1 < a.len() - 1 && crate::parser::is_valid_name(&a[..open]))
+                    .map(|body| (&a[..open], &body[open + 1..]))
+            });
+            if let Some((base, sub_src)) = subscript {
+                let name = self.resolve_ref_name(base);
+                if self.unset_element(&name, sub_src) {
+                    continue;
+                }
+                if self.discard_error.is_some() {
+                    // A malformed arithmetic subscript (`unset 'a[x y]'`) is a
+                    // discarding expansion error: the diagnostic is already out
+                    // and the command driver abandons the parse unit.
+                    return 1;
+                }
+                status = 1;
+                continue;
+            }
             // Without `-n`, unsetting a nameref unsets the variable it points to
             // (bash semantics); resolve the target name first.
             let a = &self.resolve_ref_name(a);
@@ -13635,34 +13668,7 @@ impl Shell {
                 self.emit_stderr(
                     format!("{}unset: {a}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
                 );
-                return 1;
-            }
-            // `unset name[i]` removes a single element; `unset name` removes the
-            // whole variable (or, without `-v` and when not a set variable, the
-            // function).
-            if let Some(open) = a.find('[')
-                && a.ends_with(']')
-            {
-                let name = &a[..open];
-                // An element of a readonly array cannot be unset either — bash
-                // reports the base name as the readonly variable.
-                if self.readonly.contains(name) {
-                    self.emit_stderr(
-                        format!("{}unset: {name}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
-                    );
-                    return 1;
-                }
-                let idx_src = &a[open + 1..a.len() - 1];
-                if let Some(map) = self.assoc.get_mut(name) {
-                    // Associative: remove by string key.
-                    map.retain(|(k, _)| k != idx_src);
-                } else if let Some(arr) = self.arrays.get_mut(name)
-                    && let Ok(idx) = idx_src.parse::<usize>()
-                {
-                    // Sparse: remove only that index (leaves a gap, bash
-                    // semantics — no shifting of higher elements down).
-                    arr.remove(&idx);
-                }
+                status = 1;
                 continue;
             }
             let is_var = self.vars.contains_key(a)
@@ -13674,7 +13680,8 @@ impl Shell {
                     self.emit_stderr(
                         format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
                     );
-                    return 1;
+                    status = 1;
+                    continue;
                 }
                 self.funcs.remove(a);
                 self.fn_trace_attr.remove(a);
@@ -13692,7 +13699,122 @@ impl Shell {
             self.nameref_attr.remove(a);
             self.array_valued.remove(a);
         }
-        0
+        status
+    }
+
+    /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
+    /// *indexed* array, every element while keeping the array declared).
+    ///
+    /// Returns `false` when the reference failed; the caller then either
+    /// propagates `discard_error` (a malformed arithmetic subscript) or records
+    /// status 1. The diagnostics deliberately name the subscript's **source**
+    /// text rather than its expansion, as bash does (`unset: [$k]: bad array
+    /// subscript`), because the expansion is by definition unusable.
+    fn unset_element(&mut self, name: &str, sub_src: &str) -> bool {
+        // An element of a readonly array cannot be unset either — bash reports
+        // the base name as the readonly variable.
+        if self.readonly.contains(name) {
+            self.emit_stderr(
+                format!("{}unset: {name}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
+            );
+            return false;
+        }
+        // An unset variable is not probed at all: bash never even evaluates the
+        // subscript, so `unset 'nosuch[x y]'` is silently fine.
+        let is_assoc = self.assoc.contains_key(name);
+        let is_indexed = self.arrays.contains_key(name);
+        let is_scalar = self.vars.contains_key(name);
+        if !is_assoc && !is_indexed && !is_scalar {
+            return true;
+        }
+        // The subscript is re-parsed from the (already once-expanded) argument
+        // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
+        // same subscript written in an assignment. An unbalanced quote makes it
+        // unparseable; bash silently matches nothing in that case.
+        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src) else {
+            return true;
+        };
+        if is_assoc {
+            // A subscript is a string key here, so `[@]` and `[*]` are ordinary
+            // keys — unlike the indexed case below, they do not clear the map.
+            let key = self.expand_to_string(&word);
+            if key.is_empty() {
+                self.emit_stderr(
+                    format!("{}unset: [{sub_src}]: bad array subscript\n", self.err_prefix()).as_bytes(),
+                );
+                return false;
+            }
+            if let Some(map) = self.assoc.get_mut(name) {
+                map.retain(|(k, _)| k != &key);
+            }
+            return true;
+        }
+        if sub_src == "@" || sub_src == "*" {
+            if !is_indexed {
+                // A scalar has no all-elements subscript, and `@` is not an
+                // arithmetic expression, so this is reported before any
+                // evaluation is attempted.
+                self.emit_stderr(
+                    format!("{}unset: {name}: not an array variable\n", self.err_prefix()).as_bytes(),
+                );
+                return false;
+            }
+            // `unset a[@]` empties the array but leaves it declared (and keeps
+            // its attributes): bash prints `declare -a a=()` afterwards.
+            if let Some(arr) = self.arrays.get_mut(name) {
+                arr.clear();
+            }
+            return true;
+        }
+        // Indexed (and scalar-as-one-element) subscripts are arithmetic. bash
+        // never tags a subscript's arithmetic error with the builtin name, so
+        // evaluate with the tag cleared.
+        let saved_tag = self.arith_cmd.take();
+        let raw = self.eval_arith_index(&word);
+        self.arith_cmd = saved_tag;
+        if self.discard_error.is_some() {
+            return false;
+        }
+        if !is_indexed {
+            // A scalar is addressable as `name[0]` only, and unsetting that
+            // element unsets the whole variable. Any other index — including a
+            // negative one — is "not an array variable".
+            if raw != 0 {
+                self.emit_stderr(
+                    format!("{}unset: {name}: not an array variable\n", self.err_prefix()).as_bytes(),
+                );
+                return false;
+            }
+            self.vars.remove(name);
+            self.exported.remove(name);
+            self.integer_attr.remove(name);
+            self.lower_attr.remove(name);
+            self.upper_attr.remove(name);
+            self.capcase_attr.remove(name);
+            self.nameref_attr.remove(name);
+            self.array_valued.remove(name);
+            return true;
+        }
+        // A negative index counts back from `highest_index + 1`; underflowing
+        // past 0 is a "bad array subscript". An in-range-but-absent index is
+        // simply a no-op.
+        let bound = self
+            .arrays
+            .get(name)
+            .and_then(|arr| arr.keys().next_back().copied())
+            .map_or(0, |k| k.saturating_add(1));
+        let Some(idx) = Self::resolve_index(raw, bound) else {
+            self.emit_stderr(
+                format!("{}unset: [{sub_src}]: bad array subscript\n", self.err_prefix()).as_bytes(),
+            );
+            return false;
+        };
+        if let Some(arr) = self.arrays.get_mut(name) {
+            // Sparse: remove only that index (leaves a gap, bash semantics — no
+            // shifting of higher elements down).
+            arr.remove(&idx);
+        }
+        true
     }
 
     fn builtin_set(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -30350,6 +30472,89 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("h() { echo fn; }; h=v; unset h; echo \"[$h]\"; h").0,
             "[]\nfn\n"
         );
+    }
+
+    #[test]
+    fn unset_subscript_is_arithmetic_for_indexed_arrays() {
+        // The subscript is a full arithmetic expression, not a decimal literal:
+        // an expression, a bare variable reference and a command substitution
+        // all have to be evaluated before the element is located.
+        let (o, s) = run("a=(0 1 2 3 4); i=2; unset 'a[1+1]'; unset 'a[i]'; echo \"${!a[*]}\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "0 1 3 4\n");
+        // Removing an element leaves a gap — higher elements keep their index.
+        assert_eq!(run("b=(a b c); unset 'b[1]'; echo \"${!b[*]} n=${#b[@]}\"").0, "0 2 n=2\n");
+        // A negative index counts back from the *highest index* + 1, so a
+        // sparse array counts from its top index rather than its length.
+        assert_eq!(
+            run("declare -a s=([0]=a [5]=b); unset 's[-1]'; echo \"${!s[*]}\"").0,
+            "0\n"
+        );
+    }
+
+    #[test]
+    fn unset_all_elements_subscript_differs_by_array_kind() {
+        // Indexed: `[@]` empties the array but leaves it declared, attributes
+        // and all.
+        let (o, s) = run("declare -ai g=(1 2 3); unset 'g[@]'; echo \"n=${#g[@]}\"; declare -p g");
+        assert_eq!(s, 0);
+        assert_eq!(o, "n=0\ndeclare -ai g=()\n");
+        // Associative: a subscript is a string key, so `@` is an ordinary key —
+        // it removes that one entry and never flushes the map.
+        assert_eq!(
+            run("declare -A m=([a]=1 [@]=at); unset 'm[@]'; echo \"n=${#m[@]} a=${m[a]}\"").0,
+            "n=1 a=1\n"
+        );
+        // …and with no such key, nothing is removed at all.
+        assert_eq!(
+            run("declare -A t=([a]=1 [b]=2); unset 't[@]'; echo \"n=${#t[@]}\"").0,
+            "n=2\n"
+        );
+    }
+
+    #[test]
+    fn unset_bad_subscript_names_the_source_and_keeps_going() {
+        // The diagnostic names the subscript's *source* text in brackets with
+        // no variable name (the expansion is by definition unusable), and the
+        // remaining operands of the same `unset` are still processed.
+        let (o, s) = run(
+            "d=(0 1 2); e=(0 1 2); f=1; { unset 'd[-9]' 'e[0]' f; } 2>&1; \
+             echo \"st=$? d=${#d[@]} e=${!e[*]} f=${f-gone}\"",
+        );
+        assert_eq!(s, 0);
+        assert_eq!(o, "osh: unset: [-9]: bad array subscript\nst=1 d=3 e=1 2 f=gone\n");
+        // An associative key that expands to empty is reported the same way,
+        // naming the source rather than the empty expansion.
+        assert_eq!(
+            run("declare -A z=([k]=v); blank=; { unset 'z[$blank]'; } 2>&1; echo \"st=$? n=${#z[@]}\"").0,
+            "osh: unset: [$blank]: bad array subscript\nst=1 n=1\n"
+        );
+    }
+
+    #[test]
+    fn unset_scalar_is_addressable_only_as_element_zero() {
+        // bash treats a scalar as a one-element array: `s[0]` unsets it whole.
+        assert_eq!(run("s=hi; unset 's[0]'; echo \"[${s+set}]\"").0, "[]\n");
+        assert_eq!(run("s=hi; unset 's[1-1]'; echo \"[${s+set}]\"").0, "[]\n");
+        // Any other subscript — including `[@]`, which is not even arithmetic —
+        // is "not an array variable" and leaves the value untouched.
+        let (o, _) = run("s=hi; { unset 's[1]'; } 2>&1; echo \"st=$? v=$s\"");
+        assert_eq!(o, "osh: unset: s: not an array variable\nst=1 v=hi\n");
+        let (o2, _) = run("s=hi; { unset 's[@]'; } 2>&1; echo \"st=$? v=$s\"");
+        assert_eq!(o2, "osh: unset: s: not an array variable\nst=1 v=hi\n");
+    }
+
+    #[test]
+    fn unset_non_reference_tokens_are_plain_names() {
+        // An empty subscript, trailing junk after the `]`, and a base that is
+        // not an identifier are not array references at all: bash unsets a
+        // (necessarily absent) variable of that literal name and succeeds.
+        assert_eq!(run("n=(1 2); unset 'n[]'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=2\n");
+        assert_eq!(run("n=(1 2); unset 'n[0]junk'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=2\n");
+        assert_eq!(run("unset '1abc[0]'; echo \"st=$?\"").0, "st=0\n");
+        // An *unset* variable is never probed, so a subscript that would be a
+        // hard error on a real array is silently accepted.
+        assert_eq!(run("unset 'nosuch[x y]'; echo \"st=$?\"").0, "st=0\n");
     }
 
     #[test]

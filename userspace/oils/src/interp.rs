@@ -980,6 +980,15 @@ pub struct Shell {
     /// 0 when there was none (so `x=$?` still reads the prior status, but the
     /// assignment itself resets `$?` to 0).
     comsub_count: u64,
+    /// Whether this shell *is* a command substitution's subshell. It is the one
+    /// subshell that keeps quiet about a job's death: bash announces a job
+    /// killed by a signal asynchronously (see
+    /// [`Shell::notify_signalled_jobs`]) from every shell including a `( … )`
+    /// group, but never from inside `$( … )`, where the announcement would
+    /// otherwise appear on the parent's stderr in the middle of a value being
+    /// collected. The job stays in the substitution's table instead, still
+    /// owed to whatever `jobs` runs there.
+    in_comsub: bool,
     /// `$BASH_SUBSHELL` — the subshell nesting depth. 0 at the top level; each
     /// `( … )` group, command substitution, pipeline stage, or other subshell
     /// increments it for its clone (bash).
@@ -1528,6 +1537,7 @@ impl Shell {
             cwd: shell_cwd(),
             last_status: 0,
             comsub_count: 0,
+            in_comsub: false,
             subshell_depth: 0,
             last_bg_pid: None,
             pipefail: false,
@@ -2227,6 +2237,10 @@ impl Shell {
                 }
                 skip_line = None;
             }
+            // Between one command and the next is where bash lets a script hear
+            // that a background job was killed — before `$LINENO` moves on, so
+            // the message carries the line just finished rather than this one.
+            self.notify_signalled_jobs();
             self.current_line = item.line;
             if item.background {
                 // A single external command backgrounds as an OS process; every
@@ -2300,6 +2314,10 @@ impl Shell {
                 AndOrOp::Or => self.last_status != 0,
             };
             if run {
+                // Each `&&`/`||` continuation is a command boundary of its own,
+                // so a job that died while the left-hand side ran is announced
+                // here rather than waiting for the end of the whole list.
+                self.notify_signalled_jobs();
                 errexit_before_last = self.errexit;
                 let exempt = idx + 1 != n_rest || pipe.negated;
                 let flow = self.exec_and_or_pipeline(pipe, exempt, out, stdin);
@@ -4178,6 +4196,12 @@ impl Shell {
             cwd: self.cwd.clone(),
             last_status: self.last_status,
             comsub_count: self.comsub_count,
+            // Set by `command_sub` on its own clone, and by nothing else: bash
+            // rebuilds `subshell_environment` from scratch for each subshell it
+            // enters, so a `( … )` group *inside* a substitution announces again
+            // — `x=$( ( sleep 5 & kill -HUP %1; … ) )` prints the message on the
+            // parent's stderr, and the group's `jobs` then has nothing to say.
+            in_comsub: false,
             // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
             subshell_depth: self.subshell_depth.saturating_add(1),
             last_bg_pid: self.last_bg_pid,
@@ -9968,6 +9992,11 @@ impl Shell {
         // and the exit status ($?) propagate back.
         let cap = capture_buf();
         let mut sub = self.clone_for_subshell();
+        // Inside `$( … )` a job's death is not announced (see `in_comsub`): the
+        // message would land on the parent's stderr, unrelated to the value
+        // being collected, so bash leaves the job for the substitution's own
+        // `jobs` to report.
+        sub.in_comsub = true;
         // The DEBUG/RETURN/ERR traps follow the ordinary subshell rules set by
         // `clone_for_subshell`: inherited only under `functrace`/`errtrace`. A
         // trap that does fire inside `$( … )` writes into the capture buffer
@@ -12001,6 +12030,79 @@ impl Shell {
         }
     }
 
+    /// Announce every reaped job that a signal killed, the way bash does
+    /// asynchronously — `<name>: line N: <pid> <state padded to 24><command>`
+    /// on stderr — and forget it.
+    ///
+    /// bash does not make a script ask about a job that was *killed*. Most
+    /// signals mean something the script did not arrange, so the news is pushed
+    /// out at the next opportunity rather than held for the next `jobs`; the
+    /// three that a script normally does arrange (`INT`, `TERM`, `PIPE` — see
+    /// [`signal_announced_when_reaped`]) are the exception, and are the only
+    /// signal states a listing ever shows.
+    ///
+    /// Announcing *is* reporting, so the job is dropped in the same breath —
+    /// `%1` becomes unknown to `wait` and free for the next job to reuse, unlike
+    /// the row a `jobs` listing leaves behind for one more sweep.
+    ///
+    /// The line number is the one still current when the announcement is made:
+    /// the news arrives *between* commands, so it carries the line of the
+    /// command that has just finished, not of the one about to run.
+    fn notify_signalled_jobs(&mut self) {
+        // A command substitution is collecting a value on the parent's behalf;
+        // bash keeps it quiet so the announcement cannot appear in the middle of
+        // that. See `in_comsub`.
+        if self.in_comsub || self.jobs.is_empty() {
+            return;
+        }
+        self.poll_jobs();
+        let mut swept = false;
+        let mut idx = 0;
+        while idx < self.jobs.len() {
+            if self.announce_signalled_job(idx) {
+                self.jobs.remove(idx);
+                swept = true;
+            } else {
+                idx += 1;
+            }
+        }
+        if swept {
+            self.reset_job_markers();
+        }
+    }
+
+    /// Say the one line [`Shell::notify_signalled_jobs`] would say about the job
+    /// at `idx`, if that job is one bash announces. Returns whether it did —
+    /// which is also whether the job has now been reported, and so whether the
+    /// caller should drop it.
+    ///
+    /// Split out because `wait -n` reaps a job itself and must announce it on
+    /// the way past, before it removes the row it is about to answer with.
+    fn announce_signalled_job(&mut self, idx: usize) -> bool {
+        let Some(job) = self.jobs.get(idx) else {
+            return false;
+        };
+        let Some(sig) = job.signal else {
+            return false;
+        };
+        if self.in_comsub
+            || job.status.is_none()
+            || job.notified
+            || !signal_announced_when_reaped(sig)
+        {
+            return false;
+        }
+        let msg = format!(
+            "{}{} {:<24}{}\n",
+            self.err_prefix(),
+            job.pid,
+            signal_description(sig),
+            job.cmd
+        );
+        self.emit_stderr(msg.as_bytes());
+        true
+    }
+
     /// Forget every job that has both finished and had its status reported —
     /// bash's `cleanup_dead_jobs`.
     ///
@@ -12472,16 +12574,27 @@ impl Shell {
         // `wait` was reached. bash learns of an exit asynchronously, so a job
         // that had already finished is not one this `wait` waited for.
         self.poll_jobs();
+        let mut waited: Vec<usize> = Vec::new();
         for job in &mut self.jobs {
             if let Some(body) = job.child.take() {
                 job.status = Some(body.wait_blocking());
                 job.exit_seen = true;
-                job.notified = true;
+                waited.push(job.id);
             } else if !job.exit_seen {
                 // Dead, but not as far as the shell knew a moment ago — a job
                 // `kill` reaped for itself. bash, which would not have heard
                 // yet, blocks on it here, so it counts as waited for too.
                 job.exit_seen = true;
+                waited.push(job.id);
+            }
+        }
+        // A `wait` is one of the places bash announces a signalled job's death,
+        // and the announcement is what reports it — so it has to run before the
+        // waited-for jobs are marked, or the news would be swallowed as already
+        // told.
+        self.notify_signalled_jobs();
+        for job in &mut self.jobs {
+            if waited.contains(&job.id) {
                 job.notified = true;
             }
         }
@@ -12630,6 +12743,11 @@ impl Shell {
             } else {
                 last = job.status.unwrap_or(0);
             }
+            // Waiting for a job the shell then finds was killed still announces
+            // it — bash reports such a death wherever it hears of it, the job
+            // it was asked about included. The row goes with the announcement,
+            // so the sweep below has nothing left to do for it.
+            self.notify_signalled_jobs();
             // Sweep *before* marking this job reported, so its row outlives the
             // `wait` that read it. That ordering is what lets a second
             // `wait %1` answer with the status again — it is that second one
@@ -12684,14 +12802,17 @@ impl Shell {
     /// named ids, or all jobs when none are named) terminates, then return its
     /// status and forget it. Returns 127 when there are no candidate jobs.
     fn wait_next(&mut self, operands: &[String], pid_var: Option<&str>) -> i32 {
-        // Build the candidate index set.
+        // Build the candidate set. Jobs are named by *id*, not by position: the
+        // wait polls, and a job announced meanwhile (see
+        // `notify_signalled_jobs`) leaves the table, which would shift every
+        // index after it.
         let candidates: Vec<usize> = if operands.is_empty() {
-            (0..self.jobs.len()).collect()
+            self.jobs.iter().map(|j| j.id).collect()
         } else {
             let mut v = Vec::new();
             for spec in operands {
                 match self.lookup_job(spec) {
-                    JobLookup::Found(idx) => v.push(idx),
+                    JobLookup::Found(idx) => v.push(self.jobs[idx].id),
                     JobLookup::Ambiguous(text) => self.ambiguous_job_spec("wait", &text),
                     JobLookup::NotFound => {
                         self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
@@ -12708,10 +12829,11 @@ impl Shell {
         // Poll the candidates until one reports termination. A job already
         // reaped (child == None, status set) completes immediately.
         loop {
-            for &idx in &candidates {
-                let Some(job) = self.jobs.get_mut(idx) else {
+            for &id in &candidates {
+                let Some(idx) = self.jobs.iter().position(|j| j.id == id) else {
                     continue;
                 };
+                let job = &mut self.jobs[idx];
                 let finished = match &mut job.child {
                     Some(body) => body.is_finished(),
                     None => true,
@@ -12726,6 +12848,13 @@ impl Shell {
                 };
                 if let Some(status) = done {
                     let pid = job.pid;
+                    // Record what was just reaped so the announcement below can
+                    // see a finished job; the row goes either way.
+                    job.status = Some(status);
+                    job.exit_seen = true;
+                    // A killed job is announced wherever the shell hears of it,
+                    // the very job `wait -n` is answering with included.
+                    self.announce_signalled_job(idx);
                     self.jobs.remove(idx);
                     self.reset_job_markers();
                     // `wait -n` reaps just like a targeted `wait PID`, so the
@@ -12737,6 +12866,10 @@ impl Shell {
                     return status;
                 }
             }
+            // A job outside the candidate set may have been killed meanwhile;
+            // bash announces it here rather than making the `wait -n` finish
+            // first. Safe to drop rows: candidates are ids, not positions.
+            self.notify_signalled_jobs();
             // No candidate ready yet — yield briefly before re-polling. This is
             // a deliberate short poll of live child processes (not a retry of a
             // failing command); OS-level wait-any across std Child handles is
@@ -19657,6 +19790,21 @@ fn signal_default_terminates(signum: u8) -> bool {
 /// ignore, and reports `Running` once the child has settled.
 fn signal_terminates_async_job(signum: u8) -> bool {
     !matches!(signum, 2 /* INT */ | 3 /* QUIT */) && signal_default_terminates(signum)
+}
+
+/// Whether a job's death by this signal is *announced* rather than left for
+/// `jobs` to report.
+///
+/// bash tells a script about a background job killed by a signal the moment it
+/// notices, on stderr, instead of holding the news until something asks — but
+/// only for signals that say something the script did not already know. `INT`
+/// is exempt because an interrupt is normally the user's own doing and was
+/// aimed at the whole shell; `TERM` and `PIPE` are exempt because bash is built
+/// with `DONT_REPORT_SIGTERM` and `DONT_REPORT_SIGPIPE`, both being ordinary
+/// ways for a job to be told to stop. Those three, and only those, are the
+/// signal names a `jobs` listing can ever show.
+fn signal_announced_when_reaped(signum: u8) -> bool {
+    !matches!(signum, 2 /* INT */ | 13 /* PIPE */ | 15 /* TERM */)
 }
 
 /// Render the full signal table in bash's `trap -l` / `kill -l` layout: five
@@ -32230,6 +32378,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             );
             sh.run_source("kill -TERM %1; disown -a");
         }
+    }
+
+    #[test]
+    fn a_killed_job_is_announced_between_commands_and_forgotten() {
+        // The corpus can only watch what the announcement *does* — the message
+        // carries a pid the two shells cannot agree on — so its text is checked
+        // here, where the pid is knowable.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        let pid = sh.jobs[0].pid;
+        // The news arrives *between* commands, so the group's `2>&1` has to
+        // enclose one: `kill` writes the death down, and the `:` after it is the
+        // boundary at which the shell says so.
+        let (o, _) = run_in(&mut sh, "{ kill -HUP %1; :; } 2>&1");
+        assert_eq!(o, format!("osh: {pid} {:<24}sleep 5\n", "Hangup"));
+        // Announcing is reporting, and the row goes with it — unlike the one a
+        // `jobs` listing leaves behind for one more sweep.
+        assert!(sh.jobs.is_empty(), "the announced job is gone");
+        let (o, s) = run_in(&mut sh, "wait %1 2>&1");
+        assert_eq!(o, "osh: wait: %1: no such job\n");
+        assert_eq!(s, 127);
+
+        // The three signals a listing can word are the three that are never
+        // announced: the job is left in the table, still owed.
+        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
+            sh.run_source("sleep 5 &");
+            let (o, _) = run_in(&mut sh, &format!("{{ kill -{sig} %1; :; }} 2>&1"));
+            assert_eq!(o, "", "kill -{sig} says nothing");
+            assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want:<24}sleep 5\n"));
+            sh.run_source("disown -a");
+        }
+    }
+
+    #[test]
+    fn a_command_substitution_does_not_announce_a_killed_job() {
+        // bash suppresses the announcement inside `$( … )`, where it would land
+        // on the parent's stderr in the middle of a value being collected; the
+        // job stays in the substitution's own table instead. A `( … )` group
+        // *inside* the substitution is a fresh subshell and announces again.
+        let mut sh = Shell::new();
+        let (o, _) = run_in(&mut sh, "x=$( sleep 5 & kill -HUP %1; jobs ); echo \"[$x]\"");
+        assert_eq!(o, "[[1]+  Hangup                  sleep 5]\n");
+        let (o, _) =
+            run_in(&mut sh, "x=$( ( sleep 5 & kill -HUP %1; jobs ) 2>&1 ); echo \"[$x]\"");
+        // The group's own `2>&1` catches the announcement, so it is captured as
+        // part of the value — and the group's `jobs` then has nothing to add.
+        let head = o.strip_prefix("[osh: ").expect("the group announced the death");
+        assert!(head.ends_with(" Hangup                  sleep 5]\n"), "{o:?}");
     }
 
     #[test]

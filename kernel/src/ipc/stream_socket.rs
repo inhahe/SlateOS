@@ -45,10 +45,11 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
-use crate::sched::{self, task::TaskId};
+use crate::sched;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
+use super::waiters::{wake_all, WaiterSet};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -218,10 +219,15 @@ struct Endpoint {
     /// further sends on this endpoint fail, and the peer reading our ring
     /// sees EOF once drained.
     wr_shut: bool,
-    /// Task blocked receiving (waiting for incoming data).
-    reader_waiter: Option<TaskId>,
-    /// Task blocked sending (waiting for outgoing buffer space).
-    writer_waiter: Option<TaskId>,
+    /// Tasks blocked receiving (waiting for incoming data).
+    ///
+    /// A set, not a single slot: an endpoint is routinely shared by several
+    /// processes (this is what backs `socketpair`, and spawn-time fd
+    /// inheritance hands the same endpoint to parent and child), so several
+    /// tasks can be parked on it at once.  See [`super::waiters`].
+    reader_waiters: WaiterSet,
+    /// Tasks blocked sending (waiting for outgoing buffer space).
+    writer_waiters: WaiterSet,
 }
 
 impl Endpoint {
@@ -231,8 +237,8 @@ impl Endpoint {
             closed: false,
             rd_shut: false,
             wr_shut: false,
-            reader_waiter: None,
-            writer_waiter: None,
+            reader_waiters: WaiterSet::new(),
+            writer_waiters: WaiterSet::new(),
         }
     }
 }
@@ -379,31 +385,30 @@ pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
                 .get_mut(&handle.pair_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: on any iteration after the first we may still
+            // be listed (a signal wake does not clear the entry), and every
+            // path below either returns or re-registers.
+            pair.ep[e].writer_waiters.remove(task);
+
             if pair.send_broken(e) {
                 return Err(KernelError::ChannelClosed);
             }
 
             let written = pair.ring[e].write_bytes(data);
             if written > 0 {
-                let reader_id = pair.ep[peer].reader_waiter.take();
+                let readers = pair.ep[peer].reader_waiters.take_all();
                 drop(table);
-                if let Some(task_id) = reader_id {
-                    sched::wake(task_id);
-                }
+                wake_all(readers);
                 super::stats::stream_socket_write(written as u64);
                 return Ok(written);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot left by a prior signal wake.
+            // Honour a deliverable signal before parking.
             if deliverable_signal_pending(pid) {
-                if pair.ep[e].writer_waiter == Some(task) {
-                    pair.ep[e].writer_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
-            pair.ep[e].writer_waiter = Some(task);
+            pair.ep[e].writer_waiters.insert(task);
         }
 
         super::stats::stream_socket_write_block();
@@ -427,7 +432,7 @@ pub fn try_send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> 
     let e = handle.endpoint();
     let peer = e ^ 1;
 
-    let wake_reader;
+    let wake_readers;
     let written;
     {
         let mut table = PAIRS.lock();
@@ -443,12 +448,10 @@ pub fn try_send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> 
         if written == 0 {
             return Err(KernelError::WouldBlock);
         }
-        wake_reader = pair.ep[peer].reader_waiter.take();
+        wake_readers = pair.ep[peer].reader_waiters.take_all();
     }
 
-    if let Some(task_id) = wake_reader {
-        sched::wake(task_id);
-    }
+    wake_all(wake_readers);
     super::stats::stream_socket_write(written as u64);
     Ok(written)
 }
@@ -481,13 +484,16 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 .get_mut(&handle.pair_id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: on any iteration after the first we may still
+            // be listed (a signal wake does not clear the entry), and every
+            // path below either returns or re-registers.
+            pair.ep[e].reader_waiters.remove(task);
+
             let n = pair.ring[peer].read_bytes(buf);
             if n > 0 {
-                let writer_id = pair.ep[peer].writer_waiter.take();
+                let writers = pair.ep[peer].writer_waiters.take_all();
                 drop(table);
-                if let Some(task_id) = writer_id {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 super::stats::stream_socket_read(n as u64);
                 return Ok(n);
             }
@@ -496,16 +502,12 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 return Ok(0);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot left by a prior signal wake.
+            // Honour a deliverable signal before parking.
             if deliverable_signal_pending(pid) {
-                if pair.ep[e].reader_waiter == Some(task) {
-                    pair.ep[e].reader_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
-            pair.ep[e].reader_waiter = Some(task);
+            pair.ep[e].reader_waiters.insert(task);
         }
 
         super::stats::stream_socket_read_block();
@@ -529,7 +531,7 @@ pub fn try_recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usiz
     let e = handle.endpoint();
     let peer = e ^ 1;
 
-    let mut wake_writer = None;
+    let mut wake_writers = Vec::new();
     let result;
     {
         let mut table = PAIRS.lock();
@@ -539,7 +541,7 @@ pub fn try_recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usiz
 
         let n = pair.ring[peer].read_bytes(buf);
         if n > 0 {
-            wake_writer = pair.ep[peer].writer_waiter.take();
+            wake_writers = pair.ep[peer].writer_waiters.take_all();
             result = Ok(n);
         } else if pair.recv_eof(e) {
             result = Ok(0);
@@ -548,9 +550,7 @@ pub fn try_recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usiz
         }
     }
 
-    if let Some(task_id) = wake_writer {
-        sched::wake(task_id);
-    }
+    wake_all(wake_writers);
     if let Ok(n) = result {
         if n > 0 {
             super::stats::stream_socket_read(n as u64);
@@ -591,11 +591,9 @@ pub fn recv_timeout(
 
         let n = pair.ring[peer].read_bytes(buf);
         if n > 0 {
-            let writer_id = pair.ep[peer].writer_waiter.take();
+            let writers = pair.ep[peer].writer_waiters.take_all();
             drop(table);
-            if let Some(task_id) = writer_id {
-                sched::wake(task_id);
-            }
+            wake_all(writers);
             super::stats::stream_socket_read(n as u64);
             return Ok(n);
         }
@@ -628,14 +626,18 @@ pub fn recv_timeout(
                 KernelError::InvalidHandle
             })?;
 
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // A stale entry would later "wake" whichever task had since
+            // recycled this task ID.
+            pair.ep[e].reader_waiters.remove(task);
+
             let n = pair.ring[peer].read_bytes(buf);
             if n > 0 {
-                let writer_id = pair.ep[peer].writer_waiter.take();
+                let writers = pair.ep[peer].writer_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
-                if let Some(task_id) = writer_id {
-                    sched::wake(task_id);
-                }
+                wake_all(writers);
                 super::stats::stream_socket_read(n as u64);
                 return Ok(n);
             }
@@ -650,18 +652,14 @@ pub fn recv_timeout(
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot.  A timed wait maps the interruption to EINTR (no
-            // restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if pair.ep[e].reader_waiter == Some(task) {
-                    pair.ep[e].reader_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
-            pair.ep[e].reader_waiter = Some(task);
+            pair.ep[e].reader_waiters.insert(task);
         }
 
         super::stats::stream_socket_read_block();
@@ -705,11 +703,9 @@ pub fn send_timeout(
 
         let written = pair.ring[e].write_bytes(data);
         if written > 0 {
-            let reader_id = pair.ep[peer].reader_waiter.take();
+            let readers = pair.ep[peer].reader_waiters.take_all();
             drop(table);
-            if let Some(task_id) = reader_id {
-                sched::wake(task_id);
-            }
+            wake_all(readers);
             super::stats::stream_socket_write(written as u64);
             return Ok(written);
         }
@@ -739,6 +735,12 @@ pub fn send_timeout(
                 KernelError::InvalidHandle
             })?;
 
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // A stale entry would later "wake" whichever task had since
+            // recycled this task ID.
+            pair.ep[e].writer_waiters.remove(task);
+
             if pair.send_broken(e) {
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
@@ -746,12 +748,10 @@ pub fn send_timeout(
 
             let written = pair.ring[e].write_bytes(data);
             if written > 0 {
-                let reader_id = pair.ep[peer].reader_waiter.take();
+                let readers = pair.ep[peer].reader_waiters.take_all();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
-                if let Some(task_id) = reader_id {
-                    sched::wake(task_id);
-                }
+                wake_all(readers);
                 super::stats::stream_socket_write(written as u64);
                 return Ok(written);
             }
@@ -761,18 +761,14 @@ pub fn send_timeout(
                 return Err(KernelError::TimedOut);
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot.  A timed wait maps the interruption to EINTR (no
-            // restart) at the syscall layer.
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                if pair.ep[e].writer_waiter == Some(task) {
-                    pair.ep[e].writer_waiter = None;
-                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::Interrupted);
             }
 
-            pair.ep[e].writer_waiter = Some(task);
+            pair.ep[e].writer_waiters.insert(task);
         }
 
         super::stats::stream_socket_write_block();
@@ -817,8 +813,10 @@ pub fn dup(handle: StreamSocketHandle) -> KernelResult<StreamSocketHandle> {
 pub fn close(handle: StreamSocketHandle) {
     let e = handle.endpoint();
     let peer = e ^ 1;
-    let mut wake_reader = None;
-    let mut wake_writer = None;
+    // Every waiter on the peer must be woken, not just one of each kind: EOF
+    // and broken-pipe are permanent broadcast conditions, so a task left
+    // parked here would never be woken by anything else.
+    let mut wakes = Vec::new();
 
     {
         let mut table = PAIRS.lock();
@@ -828,10 +826,17 @@ pub fn close(handle: StreamSocketHandle) {
                 return;
             }
             pair.ep[e].closed = true;
-            // Wake the peer: its reader will observe EOF, its writer a
+            // Wake the peer: its readers will observe EOF, its writers a
             // broken pipe.
-            wake_reader = pair.ep[peer].reader_waiter.take();
-            wake_writer = pair.ep[peer].writer_waiter.take();
+            wakes = pair.ep[peer].reader_waiters.take_all();
+            wakes.append(&mut pair.ep[peer].writer_waiters.take_all());
+            // Also release anything still parked on *this* endpoint.  A live
+            // waiter here means a holder closed the last reference out from
+            // under a blocked task — a caller bug, but one that must not
+            // translate into a permanently parked task: once the pair is
+            // removed below there is nothing left that could ever wake it.
+            wakes.append(&mut pair.ep[e].reader_waiters.take_all());
+            wakes.append(&mut pair.ep[e].writer_waiters.take_all());
 
             if pair.ep[0].closed && pair.ep[1].closed {
                 table.remove(&handle.pair_id());
@@ -840,12 +845,7 @@ pub fn close(handle: StreamSocketHandle) {
         }
     }
 
-    if let Some(task_id) = wake_reader {
-        sched::wake(task_id);
-    }
-    if let Some(task_id) = wake_writer {
-        sched::wake(task_id);
-    }
+    wake_all(wakes);
 }
 
 /// Shut down one or both directions of an endpoint (`shutdown(2)`).
@@ -869,10 +869,11 @@ pub fn shutdown(handle: StreamSocketHandle, how: u32) -> KernelResult<()> {
     let e = handle.endpoint();
     let peer = e ^ 1;
 
-    // At most four distinct tasks could need waking (our reader/writer
-    // and the peer's reader/writer).  Collect them, then wake outside
-    // the lock to preserve the PAIRS → SCHED ordering.
-    let mut wakes: [Option<TaskId>; 4] = [None; 4];
+    // Collect every affected waiter (ours and the peer's), then wake outside
+    // the lock to preserve the PAIRS → SCHED ordering.  All of them must be
+    // woken: a shutdown is permanent, so a waiter missed here would never be
+    // woken by anything else.
+    let mut wakes = Vec::new();
     {
         let mut table = PAIRS.lock();
         let pair = table
@@ -881,23 +882,21 @@ pub fn shutdown(handle: StreamSocketHandle, how: u32) -> KernelResult<()> {
 
         if how == SHUT_RD || how == SHUT_RDWR {
             pair.ep[e].rd_shut = true;
-            // Our blocked reader sees EOF; the peer's blocked writer now
-            // has a broken pipe.
-            wakes[0] = pair.ep[e].reader_waiter.take();
-            wakes[1] = pair.ep[peer].writer_waiter.take();
+            // Our blocked readers see EOF; the peer's blocked writers now
+            // have a broken pipe.
+            wakes.append(&mut pair.ep[e].reader_waiters.take_all());
+            wakes.append(&mut pair.ep[peer].writer_waiters.take_all());
         }
         if how == SHUT_WR || how == SHUT_RDWR {
             pair.ep[e].wr_shut = true;
-            // Our blocked writer has a broken pipe; the peer's blocked
-            // reader will see EOF once the ring drains.
-            wakes[2] = pair.ep[e].writer_waiter.take();
-            wakes[3] = pair.ep[peer].reader_waiter.take();
+            // Our blocked writers have a broken pipe; the peer's blocked
+            // readers will see EOF once the ring drains.
+            wakes.append(&mut pair.ep[e].writer_waiters.take_all());
+            wakes.append(&mut pair.ep[peer].reader_waiters.take_all());
         }
     }
 
-    for w in wakes.into_iter().flatten() {
-        sched::wake(w);
-    }
+    wake_all(wakes);
     Ok(())
 }
 
@@ -981,6 +980,7 @@ pub fn self_test() -> KernelResult<()> {
     test_nonblocking()?;
     test_shutdown_wr()?;
     test_dup_refcount()?;
+    test_multi_waiter_wake()?;
 
     serial_println!("[stream_socket] Stream socket self-test PASSED");
     Ok(())
@@ -1241,5 +1241,106 @@ fn test_dup_refcount() -> KernelResult<()> {
 
     close(b);
     serial_println!("[stream_socket]   Dup refcount: OK");
+    Ok(())
+}
+
+/// Number of multi-waiter receivers that got one byte.
+static SS_MULTI_DATA_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Number of multi-waiter receivers that observed EOF.
+static SS_MULTI_EOF_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Multi-waiter task: park on an endpoint until exactly one byte arrives.
+extern "C" fn ss_multi_data_task(handle_raw: u64) {
+    let h = StreamSocketHandle::from_raw(handle_raw);
+    // One-byte buffer so each receiver consumes exactly one byte and both can
+    // be satisfied by a single 2-byte send.
+    let mut buf = [0u8; 1];
+    if let Ok(1) = recv(h, &mut buf) {
+        SS_MULTI_DATA_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Multi-waiter task: park on an empty endpoint until the peer closes (EOF).
+extern "C" fn ss_multi_eof_task(handle_raw: u64) {
+    let h = StreamSocketHandle::from_raw(handle_raw);
+    let mut buf = [0u8; 1];
+    if let Ok(0) = recv(h, &mut buf) {
+        SS_MULTI_EOF_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Test 8: **two** tasks parked on the same endpoint are both woken.
+///
+/// Regression test for the single-`Option<TaskId>` waiter slot (see
+/// `BUG-PIPE-SINGLE-WAITER-SLOT` in `known-issues.md`, which this module
+/// shared): a second parking task overwrote the first, and the overwritten
+/// task then hung forever.  Endpoints are shared by construction here —
+/// `socketpair` endpoints are inherited across spawn and duplicated by
+/// [`dup`] — so more than one task parked on an endpoint is normal.
+///
+/// 1. **Data wake.** Two receivers park on an empty endpoint; a single
+///    2-byte send must wake both, each taking one byte.
+/// 2. **EOF broadcast.** Two receivers park on an empty endpoint; closing
+///    the peer must wake both with `Ok(0)`.  EOF is permanent, so a waiter
+///    missed here could never be woken by anything else.
+fn test_multi_waiter_wake() -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    // Give the spawned receivers plenty of scheduling opportunities; a single
+    // yield only guarantees one of them ran.
+    fn yield_a_few() {
+        for _ in 0..8 {
+            sched::yield_now();
+        }
+    }
+
+    // --- Phase 1: one send wakes both parked receivers. ---
+    SS_MULTI_DATA_OK.store(0, SeqCst);
+    let (a, b) = create();
+    sched::spawn(b"ss-multi-a", 16, ss_multi_data_task, b.raw(), 0)?;
+    sched::spawn(b"ss-multi-b", 16, ss_multi_data_task, b.raw(), 0)?;
+    yield_a_few();
+    send(a, &[1, 2])?;
+    yield_a_few();
+
+    let data_ok = SS_MULTI_DATA_OK.load(SeqCst);
+    if data_ok != 2 {
+        serial_println!(
+            "[stream_socket]   FAIL: {} of 2 parked receivers woke on send",
+            data_ok
+        );
+        // Close the peer so any still-parked receiver is released by EOF
+        // rather than being leaked as a permanently blocked task.
+        close(a);
+        yield_a_few();
+        close(b);
+        return Err(KernelError::InternalError);
+    }
+    close(a);
+    close(b);
+
+    // --- Phase 2: peer close (EOF) wakes both parked receivers. ---
+    SS_MULTI_EOF_OK.store(0, SeqCst);
+    let (c, d) = create();
+    sched::spawn(b"ss-multi-c", 16, ss_multi_eof_task, d.raw(), 0)?;
+    sched::spawn(b"ss-multi-d", 16, ss_multi_eof_task, d.raw(), 0)?;
+    yield_a_few();
+    close(c);
+    yield_a_few();
+
+    let eof_ok = SS_MULTI_EOF_OK.load(SeqCst);
+    close(d);
+    if eof_ok != 2 {
+        serial_println!(
+            "[stream_socket]   FAIL: {} of 2 parked receivers woke on EOF",
+            eof_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[stream_socket]   Multi-waiter wake (data + EOF): OK");
     Ok(())
 }

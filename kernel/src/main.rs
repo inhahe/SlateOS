@@ -1363,6 +1363,17 @@ extern "C" fn kernel_main() -> ! {
     }
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
+    // Timerfd *blocking* path: parked readers are released by `settime` and by
+    // their own expiry `hrtimer`.  This cannot run in `ipc::timerfd::self_test()`
+    // (Step ~10) because hrtimer callbacks are dispatched from the APIC timer
+    // ISR, which only exists once the timer is initialized and IF=1 — i.e. from
+    // right here.  It is also the regression test for the timerfd half of
+    // BUG-PIPE-SINGLE-WAITER-SLOT (several readers parked on one timerfd).
+    if let Err(e) = ipc::timerfd::self_test_blocking_multi_waiter() {
+        serial_println!("FATAL: Timerfd blocking multi-waiter self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS
     // init).  Places a minimal interpreter ("ld.so" stand-in) on the

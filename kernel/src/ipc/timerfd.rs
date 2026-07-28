@@ -75,6 +75,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
+use super::waiters::{wake_all, WaiterSet};
 
 /// `CLOCK_MONOTONIC`.
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -217,17 +218,19 @@ struct TimerFd {
     interval_ns: u64,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
-    /// Task parked in a *blocking* `read()` waiting for the next expiration,
-    /// if any.  Set by [`read_expirations_blocking`] under the table lock and
-    /// taken by [`settime`] (so re-arming a disarmed timer wakes a reader that
-    /// is blocked with no armed deadline).  A single slot, matching
-    /// [`crate::ipc::eventfd`]'s single-reader model: the *armed* case is
-    /// robust to slot overwrite because each blocked reader is also woken
-    /// directly by its own per-read `hrtimer` (which captures the task id at
-    /// arm time, independent of this field); only the rare *disarmed*
-    /// blocked-forever case depends on this slot, and concurrent blocking
-    /// readers on one shared timerfd are vanishingly rare.
-    reader_waiter: Option<TaskId>,
+    /// Tasks parked in a *blocking* `read()` waiting for the next expiration.
+    /// Registered by [`read_expirations_blocking`] under the table lock and
+    /// drained by [`settime`] (so re-arming a disarmed timer wakes readers
+    /// that are blocked with no armed deadline) and by [`clock_was_set`].
+    ///
+    /// This was a single `Option<TaskId>` slot, which a second parking reader
+    /// silently overwrote.  The *armed* case survived that, because each
+    /// blocked reader is also woken by its own per-read `hrtimer` (which
+    /// captures the task id at arm time, independent of this field) — but the
+    /// *disarmed* case depends entirely on this registration, so an
+    /// overwritten reader blocked on a disarmed timerfd would never be woken
+    /// by the `settime` that armed it.  See [`super::waiters`].
+    reader_waiters: WaiterSet,
     /// Whether this timer was armed with `TFD_TIMER_CANCEL_ON_SET` (only
     /// honoured for an absolute `CLOCK_REALTIME` timer — see [`settime`]).
     /// While true, a discontinuous step of the realtime clock cancels the
@@ -248,7 +251,7 @@ impl TimerFd {
             expiry_ns: 0,
             interval_ns: 0,
             refcount: 1,
-            reader_waiter: None,
+            reader_waiters: WaiterSet::new(),
             cancel_on_set: false,
             armed_gen: 0,
         }
@@ -306,14 +309,28 @@ pub fn dup(handle: TimerFdHandle) -> KernelResult<TimerFdHandle> {
 /// Only the final `close()` (refcount → 0) removes the instance.  A
 /// double-close is harmless: the saturating decrement floors at 0 and an
 /// unknown handle is simply ignored.
+///
+/// The final close releases any reader still parked in
+/// [`read_expirations_blocking`]: they will re-look-up the (now absent) entry
+/// and return `InvalidHandle`.  Without this a reader parked on a *disarmed*
+/// timerfd — which has no `hrtimer` of its own and depends entirely on being
+/// woken — would park forever once the instance was gone.
 pub fn close(handle: TimerFdHandle) {
-    let mut table = TIMERFD_TABLE.lock();
-    if let Some(tfd) = table.get_mut(&handle.id()) {
+    let waiters;
+    {
+        let mut table = TIMERFD_TABLE.lock();
+        let Some(tfd) = table.get_mut(&handle.id()) else {
+            return;
+        };
         tfd.refcount = tfd.refcount.saturating_sub(1);
-        if tfd.refcount == 0 {
-            table.remove(&handle.id());
+        if tfd.refcount > 0 {
+            return;
         }
+        waiters = tfd.reader_waiters.take_all();
+        table.remove(&handle.id());
     }
+    // Wake outside the table lock (leaf-lock discipline).
+    wake_all(waiters);
 }
 
 /// Does this handle refer to a live timerfd instance?
@@ -370,7 +387,7 @@ pub fn settime(
     // later step.
     let gen_now = crate::timekeeping::realtime_generation();
 
-    let waiter;
+    let waiters;
     let old;
     {
         let mut table = TIMERFD_TABLE.lock();
@@ -404,16 +421,15 @@ pub fn settime(
             tfd.armed_gen = gen_now;
         }
 
-        // Re-arming changes the deadline a blocked reader is waiting on; wake it
-        // so it re-evaluates (a reader blocked on a previously-disarmed timer
-        // has no `hrtimer` of its own and depends entirely on this wakeup).
-        waiter = tfd.reader_waiter.take();
+        // Re-arming changes the deadline every blocked reader is waiting on;
+        // wake them all so they re-evaluate (a reader blocked on a
+        // previously-disarmed timer has no `hrtimer` of its own and depends
+        // entirely on this wakeup).
+        waiters = tfd.reader_waiters.take_all();
     }
 
     // Wake outside the table lock (leaf-lock discipline).
-    if let Some(tid) = waiter {
-        sched::wake(tid);
-    }
+    wake_all(waiters);
 
     Ok(old)
 }
@@ -457,16 +473,12 @@ pub fn clock_was_set() {
         let mut table = TIMERFD_TABLE.lock();
         for tfd in table.values_mut() {
             if tfd.cancel_on_set && tfd.armed_gen != gen_now {
-                if let Some(tid) = tfd.reader_waiter.take() {
-                    waiters.push(tid);
-                }
+                waiters.append(&mut tfd.reader_waiters.take_all());
             }
         }
     }
     // Wake outside the table lock (leaf-lock discipline).
-    for tid in waiters {
-        sched::wake(tid);
-    }
+    wake_all(waiters);
 }
 
 /// Query a timerfd without consuming expirations: `(it_value, it_interval)`.
@@ -611,39 +623,39 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
                 .get_mut(&handle.id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Deregister first: neither the per-read `hrtimer` wake nor a
+            // signal wake clears the entry, and every path below either
+            // returns or re-registers.  (Note this removes only *our* entry —
+            // the old single-slot code cleared the field outright on these
+            // paths, which silently deregistered a different parked reader.)
+            tfd.reader_waiters.remove(task);
+
             // Cancellation takes priority over an ordinary expiration: a
             // CANCEL_ON_SET timer whose generation is stale must report
             // ECANCELED.  Resync the generation so the cancel is reported once.
             if tfd.cancel_on_set && tfd.armed_gen != gen_now {
                 tfd.armed_gen = gen_now;
-                tfd.reader_waiter = None;
                 return Ok(BlockingRead::Cancelled);
             }
 
             let (count, new_expiry) = advance(tfd.expiry_ns, tfd.interval_ns, now);
             if count > 0 {
                 tfd.expiry_ns = new_expiry;
-                // We are returning, not parking — clear any stale registration.
-                tfd.reader_waiter = None;
                 return Ok(BlockingRead::Expirations(count));
             }
 
-            // Honour a deliverable signal before parking; clear any stale
-            // waiter slot from a prior signal wake.  A timerfd is a slow object
-            // with no inherent deadline at this point (the wait may be
+            // Honour a deliverable signal before parking.  A timerfd is a slow
+            // object with no inherent deadline at this point (the wait may be
             // indefinite when disarmed), so an interrupted blocking read is
             // restartable (SA_RESTART) — the syscall layer maps Interrupted to
             // ERESTARTSYS.
             if deliverable_signal_pending(pid) {
-                if tfd.reader_waiter == Some(task) {
-                    tfd.reader_waiter = None;
-                }
                 return Err(KernelError::Interrupted);
             }
 
-            // Not yet due — register as the parked reader and capture the
+            // Not yet due — register as a parked reader and capture the
             // deadline (if armed) before dropping the lock.
-            tfd.reader_waiter = Some(task);
+            tfd.reader_waiters.insert(task);
             next_remaining = if tfd.expiry_ns == 0 {
                 None
             } else {
@@ -654,7 +666,7 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
         }
 
         // Arm a wakeup `hrtimer` for the armed case; the disarmed case relies on
-        // `settime` waking `reader_waiter`.
+        // `settime` waking `reader_waiters`.
         let timer = next_remaining
             .map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
 
@@ -975,5 +987,129 @@ pub fn self_test() -> KernelResult<()> {
 
     serial_println!("[timerfd]   timerfd instance object (create/arm/read/dup/close): OK");
     serial_println!("[timerfd]   TFD_TIMER_CANCEL_ON_SET (TD15): OK");
+    Ok(())
+}
+
+/// Number of multi-waiter readers that were woken by `settime` and went on to
+/// consume an expiration.
+static TIMERFD_MULTI_OK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Multi-waiter task: park on a **disarmed** timerfd until it is armed and
+/// fires.
+///
+/// The disarmed case is the discriminating one: a reader parked on a disarmed
+/// timer has no `hrtimer` of its own, so its *only* wake source is the
+/// registration that [`settime`] broadcasts to.  Under the old single
+/// `Option<TaskId>` slot the second parker overwrote the first and the first
+/// was then unreachable — it would sleep forever even though the timer went on
+/// to fire periodically.
+extern "C" fn timerfd_multi_reader_task(handle_raw: u64) {
+    let t = TimerFdHandle::from_raw(handle_raw);
+    if let Ok(BlockingRead::Expirations(n)) = read_expirations_blocking(t) {
+        if n > 0 {
+            TIMERFD_MULTI_OK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Blocking-path self-test: **two** tasks parked on the same disarmed timerfd
+/// are both woken by `settime`.
+///
+/// Regression test for the timerfd half of `BUG-PIPE-SINGLE-WAITER-SLOT` (the
+/// same single-waiter-slot defect existed in all four blocking IPC objects).
+/// A timerfd is shared by `dup()` and across `fork`, so several readers on one
+/// object is normal.
+///
+/// Both readers park while the timer is disarmed, then a periodic `settime`
+/// must release both.  Each re-parks with its own expiry `hrtimer` and
+/// consumes a tick; the periodic interval guarantees a second tick for
+/// whichever reader loses the race for the first one.
+///
+/// # Why this is not part of [`self_test`]
+///
+/// [`self_test`] runs in the early deterministic-init phase, *before*
+/// `hrtimer::init()` and before `sti()`: at that point the APIC timer ISR is
+/// not running, so [`crate::hrtimer::process_expired`] is never called and no
+/// hrtimer callback can ever fire.  A reader that re-parks with an expiry
+/// timer there would sleep forever.  This test therefore runs from the boot
+/// path immediately after interrupts are enabled and `apic::self_test()` has
+/// confirmed the timer tick is live.
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] if any parked reader is not released.
+pub fn self_test_blocking_multi_waiter() -> KernelResult<()> {
+    serial_println!("[timerfd] Running timerfd blocking multi-waiter self-test...");
+    // One reader first: establishes that the disarmed-park / settime-wake /
+    // hrtimer re-park chain works at all, so a two-reader failure can only be
+    // the multi-waiter bookkeeping.
+    run_settime_wake_phase(1)?;
+    run_settime_wake_phase(2)
+}
+
+/// One phase of [`test_multi_waiter_settime_wake`]: park `readers` tasks on a
+/// disarmed timerfd, arm it periodically, and require every one of them to come
+/// back with an expiration.
+fn run_settime_wake_phase(readers: u32) -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    TIMERFD_MULTI_OK.store(0, SeqCst);
+    let t = create(CLOCK_MONOTONIC);
+    for _ in 0..readers {
+        sched::spawn(b"tfd-multi", 16, timerfd_multi_reader_task, t.raw(), 0)?;
+    }
+
+    // Let every reader reach the park on the *disarmed* timer.  A single yield
+    // only guarantees one of them ran.
+    for _ in 0..8 {
+        sched::yield_now();
+    }
+
+    // Arm periodic at 2ms.  This is the wake under test: it must release *all*
+    // parked readers, not just the most recent one.
+    settime(t, false, 2_000_000, 2_000_000, false)?;
+
+    // Bounded wait: yield until every reader has consumed a tick, or until a
+    // monotonic deadline passes.  Never spins unbounded, so a regression fails
+    // the test instead of hanging the boot CPU.  500 ms is 250 periods of the
+    // 2 ms timer — orders of magnitude more than the handful of ticks needed.
+    let start = now_for_clock(CLOCK_MONOTONIC);
+    let deadline = start.saturating_add(500_000_000); // 500ms
+    while TIMERFD_MULTI_OK.load(SeqCst) < readers && now_for_clock(CLOCK_MONOTONIC) < deadline {
+        sched::yield_now();
+    }
+
+    let woke = TIMERFD_MULTI_OK.load(SeqCst);
+    if woke != readers {
+        // Diagnostics before the close tears the object down: `pending_count`
+        // distinguishes "parked with an armed hrtimer that never fired" from
+        // "parked with no wake source at all" (a lost `settime` wake).
+        serial_println!(
+            "[timerfd]   FAIL: {} of {} parked readers woke on settime \
+             (elapsed_ns={}, gettime={:?}, hrtimers_pending={})",
+            woke,
+            readers,
+            now_for_clock(CLOCK_MONOTONIC).saturating_sub(start),
+            gettime(t),
+            crate::hrtimer::pending_count(),
+        );
+    }
+    // Final close drops the last reference, which now also releases anything
+    // still parked (with `InvalidHandle`) — so a failing run does not leak a
+    // permanently blocked task.
+    close(t);
+    if woke != readers {
+        // Give any released reader a chance to unwind before returning.
+        for _ in 0..8 {
+            sched::yield_now();
+        }
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[timerfd]   Multi-waiter wake on settime ({} parked reader(s)): OK",
+        readers
+    );
     Ok(())
 }

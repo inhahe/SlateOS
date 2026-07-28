@@ -11847,26 +11847,22 @@ impl Shell {
         }
     }
 
-    /// Block on every outstanding job and empty the job table, returning the
-    /// last job's exit status and pid (`(0, None)` when there were none).
+    /// Block on every outstanding job and empty the job table.
     ///
     /// This is what an operand-less `wait` does, and also what an enclosing sink
     /// has to do before it can call its output complete — bash's collecting pipe
     /// stays open as long as any child still holds a copy of its write end.
-    fn drain_jobs(&mut self) -> (i32, Option<u32>) {
-        let mut last = 0;
-        let mut last_pid = None;
+    ///
+    /// No status comes back because neither caller reports one: an operand-less
+    /// `wait` names no job and so returns 0, and a command substitution's result
+    /// is its output, not its jobs' fates.
+    fn drain_jobs(&mut self) {
         for job in &mut self.jobs {
             if let Some(body) = job.child.take() {
-                last = body.wait_blocking();
-                job.status = Some(last);
-            } else if let Some(s) = job.status {
-                last = s;
+                job.status = Some(body.wait_blocking());
             }
-            last_pid = Some(job.pid);
         }
         self.jobs.clear();
-        (last, last_pid)
     }
 
     fn builtin_wait(&mut self, args: &[String]) -> i32 {
@@ -11875,56 +11871,79 @@ impl Shell {
         let mut wait_any = false;
         let mut pid_var: Option<String> = None;
         let mut operands: Vec<String> = Vec::new();
+        // bash reads these with `getopt`, so the letters cluster (`wait -fn`,
+        // `wait -np VAR`) and `-p`'s argument is either the rest of its own
+        // cluster (`-pVAR`) or the next word. A lone `-` is not an option — it is
+        // an operand, and an unusable one.
+        const USAGE: &[u8] = b"wait: usage: wait [-fn] [-p var] [id ...]\n";
         let mut i = 0;
         while let Some(a) = args.get(i) {
             if a == "--" {
                 operands.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            if a == "-n" {
-                wait_any = true;
-                i += 1;
-                continue;
+            let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty()) else {
+                // First non-flag token: the rest are operands.
+                operands.extend_from_slice(&args[i..]);
+                break;
+            };
+            i += 1;
+            for (at, c) in cluster.char_indices() {
+                match c {
+                    'n' => wait_any = true,
+                    // `-f`: wait for the job to *terminate* rather than merely
+                    // change state. osh's `wait` already blocks until
+                    // termination, so this is a no-op; accept it so scripts
+                    // using `wait -f` don't error.
+                    'f' => {}
+                    'p' => {
+                        let rest = &cluster[at + c.len_utf8()..];
+                        if rest.is_empty() {
+                            let Some(v) = args.get(i) else {
+                                self.emit_stderr(format!("{}wait: -p: option requires an argument\n", self.err_prefix()).as_bytes());
+                                self.emit_stderr(USAGE);
+                                return 2;
+                            };
+                            pid_var = Some(v.clone());
+                            i += 1;
+                        } else {
+                            pid_var = Some(rest.to_string());
+                        }
+                        break;
+                    }
+                    // bash parses any leading-`-` token as options, so an
+                    // unrecognised letter (`wait -1`, `wait -x`, `wait -nx`) is
+                    // an invalid option — not a negative pid — and aborts with
+                    // status 2 plus the usage line.
+                    _ => {
+                        self.emit_stderr(
+                            format!("{}wait: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
+                        );
+                        self.emit_stderr(USAGE);
+                        return 2;
+                    }
+                }
             }
-            if a == "-f" {
-                // `-f`: wait for the job to *terminate* rather than merely change
-                // state. osh's `wait` already blocks until termination, so this is
-                // a no-op; accept it so scripts using `wait -f` don't error.
-                i += 1;
-                continue;
-            }
-            if a == "-p" {
-                let Some(v) = args.get(i + 1) else {
-                    self.emit_stderr(format!("{}wait: -p: option requires an argument\n", self.err_prefix()).as_bytes());
-                    return 2;
-                };
-                pid_var = Some(v.clone());
-                i += 2;
-                continue;
-            }
-            if let Some(rest) = a.strip_prefix("-p")
-                && !rest.is_empty()
-            {
-                pid_var = Some(rest.to_string());
-                i += 1;
-                continue;
-            }
-            // bash parses any leading-`-` token as options, so an unrecognised
-            // one (e.g. `wait -1`, `wait -x`) is an invalid option — not a
-            // negative pid — and aborts with status 2 plus the usage line.
-            if a.len() > 1
-                && a.starts_with('-')
-                && let Some(optch) = a[1..].chars().next()
-            {
-                self.emit_stderr(
-                    format!("{}wait: -{optch}: invalid option\n", self.err_prefix()).as_bytes(),
-                );
-                self.emit_stderr(b"wait: usage: wait [-fn] [-p var] [id ...]\n");
-                return 2;
-            }
-            // First non-flag token: the rest are operands.
-            operands.extend_from_slice(&args[i..]);
-            break;
+        }
+
+        // `-p` names a variable to assign, so the name has to be one: bash
+        // rejects anything else outright, before waiting for anything.
+        if let Some(var) = &pid_var
+            && !crate::parser::is_valid_name(var)
+        {
+            self.emit_stderr(
+                format!("{}wait: `{var}': not a valid identifier\n", self.err_prefix()).as_bytes(),
+            );
+            return 1;
+        }
+
+        // `-p VAR` names where the pid of the job whose status is being reported
+        // goes. bash clears it up front, so a `wait` that reports no particular
+        // job's status — an operand-less one, or a `-n` with nothing left to wait
+        // for — leaves `VAR` *unset* rather than holding a stale value.
+        if let Some(var) = &pid_var {
+            let var = var.clone();
+            self.unbind_var(&var);
         }
 
         if wait_any {
@@ -11932,15 +11951,16 @@ impl Shell {
         }
 
         if operands.is_empty() {
-            let (last, last_pid) = self.drain_jobs();
+            self.drain_jobs();
             // bash's purge point: after an argument-less `wait`, re-waiting a
             // pid that a targeted `wait` had reaped earlier reports 127 again
             // rather than replaying its remembered status.
             self.reaped_status.clear();
-            if let (Some(var), Some(pid)) = (pid_var, last_pid) {
-                self.vars.insert(var, pid.to_string());
-            }
-            return last;
+            // An operand-less `wait` names no job, so it reports no job's status:
+            // bash returns 0 however the jobs ended. `false & wait` is 0, and so
+            // is `sleep 5 & kill $!; wait` — only `wait $!`, `wait %1` and
+            // `wait -n` answer with a job's own status.
+            return 0;
         }
         let mut last = 0;
         for spec in &operands {
@@ -15013,19 +15033,30 @@ impl Shell {
                 self.fn_trace_attr.remove(a);
                 continue;
             }
-            self.vars.remove(a);
-            self.arrays.remove(a);
-            self.assoc.remove(a);
-            self.exported.remove(a);
-            // Unsetting a variable also drops its attributes (bash semantics).
-            self.integer_attr.remove(a);
-            self.lower_attr.remove(a);
-            self.upper_attr.remove(a);
-            self.capcase_attr.remove(a);
-            self.nameref_attr.remove(a);
-            self.array_valued.remove(a);
+            self.unbind_var(a);
         }
         status
+    }
+
+    /// Remove every binding a name has — scalar, indexed array, associative
+    /// array, export flag and attributes — the way bash's `unbind_variable`
+    /// does. Unsetting a variable drops its attributes with it.
+    ///
+    /// This is the whole of what `unset NAME` does once the name has been
+    /// resolved and the readonly check has passed, and is also what a builtin
+    /// that reports "no value" through a caller-named variable does to it
+    /// (`wait -p VAR` clears `VAR` before it decides whether it has a pid).
+    fn unbind_var(&mut self, name: &str) {
+        self.vars.remove(name);
+        self.arrays.remove(name);
+        self.assoc.remove(name);
+        self.exported.remove(name);
+        self.integer_attr.remove(name);
+        self.lower_attr.remove(name);
+        self.upper_attr.remove(name);
+        self.capcase_attr.remove(name);
+        self.nameref_attr.remove(name);
+        self.array_valued.remove(name);
     }
 
     /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
@@ -30946,13 +30977,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[cfg(windows)]
     #[test]
     fn wait_reaps_background_job_status() {
-        // A `&` command is tracked as a job and sets `$!`; `wait` (no operand)
-        // blocks until it finishes and yields its exit status.
+        // A `&` command is tracked as a job and sets `$!`; `wait $!` blocks
+        // until it finishes and yields its exit status.
         let mut sh = Shell::new();
         assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
         assert!(sh.last_bg_pid.is_some());
         assert_eq!(sh.jobs.len(), 1);
-        assert_eq!(sh.run_source("wait"), 7);
+        assert_eq!(sh.run_source("wait $!"), 7);
+        assert!(sh.jobs.is_empty());
+        // An operand-less `wait` also blocks until the job is done, but names no
+        // job and so reports 0 rather than its status (bash).
+        assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
+        assert_eq!(sh.run_source("wait"), 0);
         assert!(sh.jobs.is_empty());
     }
 
@@ -31120,6 +31156,69 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s4, 2);
         // `-f` (wait-for-termination) is accepted as a no-op.
         assert_eq!(run("wait -f 2>&1").1, 0);
+    }
+
+    #[test]
+    fn wait_options_cluster_and_p_names_a_variable() {
+        // bash reads `wait`'s options with getopt, so the letters cluster and an
+        // unknown one is named wherever in the cluster it appears.
+        for (src, want) in [("wait -nx 2>&1", 'x'), ("wait -fx 2>&1", 'x'), ("wait -x 2>&1", 'x')] {
+            let (o, s) = run(src);
+            assert_eq!(
+                o,
+                format!(
+                    "osh: wait: -{want}: invalid option\n\
+                     wait: usage: wait [-fn] [-p var] [id ...]\n"
+                ),
+                "{src}"
+            );
+            assert_eq!(s, 2, "{src}");
+        }
+        // `-p` takes the rest of its own cluster, or the next word; missing it
+        // is a usage error like any other.
+        for src in ["wait -p 2>&1", "wait -np 2>&1", "wait -fnp 2>&1"] {
+            let (o, s) = run(src);
+            assert_eq!(
+                o,
+                "osh: wait: -p: option requires an argument\n\
+                 wait: usage: wait [-fn] [-p var] [id ...]\n",
+                "{src}"
+            );
+            assert_eq!(s, 2, "{src}");
+        }
+        // The argument has to be a name, and that is checked before waiting.
+        for bad in ["1x", "", "a b"] {
+            let (o, s) = run(&format!("wait -p '{bad}' 2>&1"));
+            assert_eq!(o, format!("osh: wait: `{bad}': not a valid identifier\n"));
+            assert_eq!(s, 1);
+        }
+        // A lone `-` is an operand, not an option cluster.
+        let (o, s) = run("wait - 2>&1");
+        assert_eq!(o, "osh: wait: `-': not a pid or valid job spec\n");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn wait_without_operands_names_no_job() {
+        // An operand-less `wait` reports no particular job's status, so bash
+        // returns 0 however the jobs ended — and clears `-p VAR` rather than
+        // leaving it holding a pid it is not reporting on.
+        let mut sh = Shell::new();
+        for src in ["( exit 3 ) &", "( exit 3 ) & ( exit 0 ) &", "false &"] {
+            assert_eq!(sh.run_source(src), 0);
+            assert_eq!(sh.run_source("wait"), 0, "operand-less wait after {src:?}");
+        }
+        // Only a named job answers with its own status.
+        sh.run_source("( exit 3 ) &");
+        assert_eq!(sh.run_source("wait $!"), 3);
+        // `-p VAR` is cleared up front, so a `wait` that names no job unsets it…
+        sh.run_source("VAR=stale; ( exit 3 ) &");
+        assert_eq!(sh.run_source("wait -p VAR"), 0);
+        assert!(!sh.vars.contains_key("VAR"), "operand-less wait leaves -p VAR unset");
+        // …and so does a `-n` with nothing left to wait for.
+        sh.run_source("VAR=stale");
+        assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null"), 127);
+        assert!(!sh.vars.contains_key("VAR"), "`wait -n` with no jobs leaves -p VAR unset");
     }
 
     #[cfg(windows)]

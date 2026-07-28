@@ -34,9 +34,48 @@ wait "$p6" 2>/dev/null; echo "after-purge=$?"
 ( exit 0 ) &
 wait
 echo "wait-all=$?"
+# It names no job, so it reports no job's status — not even when there is only
+# one job and it failed, and not even when the job was killed. Only `wait PID`,
+# `wait %n` and `wait -n` answer with a job's own status.
+( exit 3 ) & wait; echo "wait-one-failed=$?"
+( exit 3 ) & wait -f; echo "wait-f=$?"
+( exit 3 ) & wait --; echo "wait-dashdash=$?"
+sleep 5 & kill $! 2>/dev/null; wait; echo "wait-killed=$?"
 
 # `wait` with no children at all is also 0 — not an error.
 wait; echo "wait-none=$?"
+
+# `-p VAR` is where the pid of the job whose status is reported goes, so a
+# `wait` that reports no particular job leaves VAR *unset* — it is cleared
+# before the wait, not left holding whatever it had.
+VAR=stale; ( exit 3 ) & wait -p VAR; echo "p-noargs=$? [${VAR-unset}]"
+VAR=stale; wait -n -p VAR; echo "p-nothing=$? [${VAR-unset}]"
+# With a job to name, VAR holds its pid — compared against `$!` rather than
+# printed, since a pid is not reproducible.
+( exit 3 ) & bgp=$!
+wait -p VAR "$bgp"; echo "p-named=$? [$([ "$VAR" = "$bgp" ] && echo match)]"
+( exit 3 ) & bgp=$!
+wait -n -p VAR; echo "p-next=$? [$([ "$VAR" = "$bgp" ] && echo match)]"
+# …and it has to be a name. That is checked before anything is waited for.
+( exit 3 ) & wait -p '1x'; echo "p-badname=$?"
+( exit 3 ) & wait -p ''; echo "p-emptyname=$?"
+wait >/dev/null 2>&1
+
+# The options are read with getopt, so they cluster and `-p` takes either the
+# rest of its own cluster or the next word.
+( exit 3 ) & wait -fn; echo "cluster-fn=$?"
+( exit 3 ) & wait -nf; echo "cluster-nf=$?"
+VAR=stale; ( exit 3 ) & wait -npVAR; echo "cluster-npVAR=$? [$([ -n "$VAR" ] && echo set)]"
+VAR=stale; ( exit 3 ) & wait -fnp VAR; echo "cluster-fnp=$? [$([ -n "$VAR" ] && echo set)]"
+# An unknown letter anywhere in the cluster is the one that gets named.
+wait -x; echo "opt-x=$?"
+wait -nx; echo "opt-nx=$?"
+wait -1; echo "opt-1=$?"
+wait -p; echo "opt-p-noarg=$?"
+wait -np; echo "opt-np-noarg=$?"
+# A lone `-` is not an option at all — it is an operand, and an unusable one.
+wait -; echo "opt-dash=$?"
+wait -- -n; echo "opt-after-dashdash=$?"
 
 # A background job's exit status is preserved exactly, including values above
 # 128 and the 8-bit wrap of `exit 256`.

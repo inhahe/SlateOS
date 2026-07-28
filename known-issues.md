@@ -3337,40 +3337,52 @@ form is a syntax error. Supersedes the older TD-OILS-EXTGLOB-PARSE entry below.
 osh names the `(`, and bash adds an `unexpected token `X'` clause when a binary
 operator was expected. Split out as TD-OILS-COND-TOKEN-SPELLING.
 
-### TD-OILS-COND-TOKEN-SPELLING. A `[[ … ]]` syntax error blames the bare operator where bash blames the partial word, and omits one clause — 2026-07-28 — OPEN (diagnostic wording only)
+### TD-OILS-COND-TOKEN-SPELLING. `syntax error near` names a token where bash re-scans the raw source line — 2026-07-28 — PARTIALLY RESOLVED 2026-07-28 (diagnostic wording only)
 
-**Where:** `userspace/oils/src/interp.rs` — the `[[ … ]]` conditional parser's
-error construction (the code resolved by TD-OILS-COND-ERRTEXT, which matched the
-rest of bash's conditional diagnostics).
+**Where:** `userspace/oils/src/parser.rs` — `parse_cond` / `parse_cond_primary`
+and the shared helper `cond_error_near`.
 
-**What:** two narrow gaps remain, both about *which token is named*:
+**Fixed 2026-07-28.** Two of bash's rules were missing and are now implemented:
+
+* Where a **conditional binary operator** was expected, bash names the offending
+  token when it is an *operator* and stays silent about it when it is a *word*:
+  ``[[ a ( b ]]`` → ``unexpected token `(', conditional binary operator
+  expected``, while ``[[ a b ]]`` → bare ``conditional binary operator
+  expected``. osh only did this for a newline; it now does it for every operator
+  except `&&`, `||` and `)`, which may legitimately follow a finished operand.
+* The same distinction governs the **stray-token-before-`]]`** path, where bash
+  appends ``: unexpected token `X'`` for an operator and nothing for a word. osh
+  hard-coded that suffix for `)` alone; it now applies to any operator.
+
+`cond_error_near` also reproduces bash's odd *near* text for compound operators:
+`;;` reports near `;`, and `;&`, `;;&`, `|&`, `>&` all report near `&`, while
+`>>` and `<<<` are printed whole. Verified against bash 5.2.37 for `(`, `;`,
+`|`, `&`, `>>`, `<<<`, `;;`, `;&`, `;;&`, `|&`, `>&` in both positions.
+
+**Still open — the raw-source scan.** bash does not name a *token* in the
+`syntax error near` line at all. `error_token_from_text` (parse.y) walks the
+**source line** backwards from the end of the offending token, stopping at any
+of `" \n\t;|&"`, and prints that span. For anything written with surrounding
+whitespace the result equals the token, which is why the cases above now match;
+but an operator written flush against its neighbour picks the neighbour up:
 
 ```sh
-[[ a ( b ]]
-# bash: unexpected token `(', conditional binary operator expected
-# osh : syntax error in conditional expression
-[[ -n @(a) ]]                 # (extglob off)
-# bash: syntax error in conditional expression: unexpected token `('
-#       syntax error near `@(a'
-# osh : syntax error in conditional expression
-#       syntax error near `('
+[[ -n @(a) ]]     # bash near `@(a'        osh near `('
+[[ @(a) == b ]]   # bash near `@(a'        osh near `('
+[[ a>>b ]]        # bash near `a>>b'       osh near `>>'
+[[ x|y ]]         # bash near `|y'         osh near `|'
+[[ a $(echo x) ]] # bash near `x)'         osh near `$(echo x)'
 ```
 
-The first is general: when a binary operator was expected and the offending
-token is an *operator* rather than a word, bash prefixes ``unexpected token
-`X', ``. With a word it does not — `[[ a b ]]` gives the bare `conditional
-binary operator expected` in both shells, so only the operator case diverges.
+Both shells agree the input is a syntax error and both exit 2; only the quoted
+span differs, and only when tokens are written without separating whitespace.
 
-The second is specific to bash's separate `[[ … ]]` scanner, which consumes
-`@(a` as one partial word before failing; osh's lexer has already split that
-into `@`, `(`, `a`, `)`, so the token it can name is the `(`. Both shells agree
-the construct is a syntax error and both exit 2 — only the text differs.
-
-**Proper fix:** for the first, carry the offending token into the
-binary-operator-expected error and add the clause when it is an operator. For
-the second, the conditional parser would have to name the source span from the
-start of the word being read rather than the current token — i.e. keep the
-word's start offset alongside the token. `tests/corpus/extglob-lexing.sh`
+**Proper fix:** give `Parser` the source text and the per-token character
+offsets (`Tokenized::offsets`, added for TD-OILS-EXTGLOB-UNGATED) and compute
+the near-text by bash's backward scan instead of from the token. The obstacle is
+alias expansion: `expand_aliases` splices tokens that have no source position,
+so the offsets would need an `Option` per token — the same shape
+`IncrementalParser::work_origin` already uses. `tests/corpus/extglob-lexing.sh`
 currently drops stderr on the two probes that hit this; restore it when fixed.
 
 ### TD-OILS-CMDSUB-EOF-TERMINATOR. A command substitution body is parsed as if its `)` were a line end — 2026-07-28 — OPEN

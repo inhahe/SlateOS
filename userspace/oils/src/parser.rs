@@ -1552,12 +1552,15 @@ impl Parser {
             // expression` + `syntax error near \`TOKEN'` (TD-OILS-COND-ERRTEXT).
             // This covers a leftover operator after a finished operand
             // (`[[ 3 -gt 2 -gt 1 ]]`, near `-gt`) and a leftover word after a
-            // non-word primary (`[[ -z x y ]]`, near `y`). A stray `)` additionally
-            // carries bash's `: unexpected token \`)'` suffix on the first line.
+            // non-word primary (`[[ -z x y ]]`, near `y`). An *operator* — `)`,
+            // `(`, `;`, `|`, `>>`, … — additionally carries bash's
+            // `: unexpected token \`X'` suffix on the first line, which is how
+            // bash distinguishes a token it can name from a word it cannot.
             let tok = self.token_display();
-            if self.at_op(Op::RParen) {
+            if matches!(self.peek(), Some(Tok::Op(_))) {
+                let near = cond_error_near(&tok);
                 return Err(ParseError::new(format!(
-                    "syntax error in conditional expression: unexpected token `{tok}'\nsyntax error near `{tok}'"
+                    "syntax error in conditional expression: unexpected token `{tok}'\nsyntax error near `{near}'"
                 )));
             }
             return Err(ParseError::new(format!(
@@ -1687,6 +1690,23 @@ impl Parser {
         if matches!(self.peek(), Some(Tok::Newline)) {
             let tok = self.token_display();
             let near = self.cond_near();
+            return Err(ParseError::new(format!(
+                "unexpected token `{tok}', conditional binary operator expected\nsyntax error near `{near}'"
+            )));
+        }
+        // Any other *operator* here is in the same position and is named the
+        // same way — the "unexpected token" clause is what distinguishes an
+        // operator from a word, not a newline from everything else. So
+        // `[[ a ( b ]]`, `[[ a; b ]]`, `[[ a | b ]]` and `[[ a >> b ]]` all
+        // report their own token. The exceptions are the three tokens that may
+        // legitimately follow a finished operand: `&&` and `||` continue the
+        // expression, and `)` closes a group (or, unmatched, is reported
+        // structurally by `parse_cond` with its own message form).
+        if let Some(Tok::Op(op)) = self.peek()
+            && !matches!(op, Op::AndIf | Op::OrIf | Op::RParen)
+        {
+            let tok = self.token_display();
+            let near = cond_error_near(&tok);
             return Err(ParseError::new(format!(
                 "unexpected token `{tok}', conditional binary operator expected\nsyntax error near `{near}'"
             )));
@@ -2280,6 +2300,31 @@ fn attach_redirect(cmd: Command, redir: Redirect) -> Command {
             inner: Box::new(other),
             redirects: vec![redir],
         },
+    }
+}
+
+/// bash's `syntax error near \`…'` text for an operator found where a
+/// conditional binary operator belonged.
+///
+/// bash does not name the token there. It re-scans the *source line* backwards
+/// from the end of the offending token, stopping at any of `" \n\t;|&"`
+/// (`error_token_from_text` in parse.y). For a whitespace-separated operator
+/// that comes to the same thing as the token itself — unless the operator's own
+/// last character is one of those delimiters, in which case the scan stops at
+/// once and only that character is printed. So `;;` is reported near `;`, and
+/// `;&`, `;;&`, `|&` and `>&` are all reported near `&`, while `>>` and `<<<`
+/// (which contain no delimiter) are printed whole.
+///
+/// Parentheses are *not* delimiters, which is visible in `[[ -n @(a) ]]`: bash
+/// reports that near `@(a`, having scanned back through the `(` to the space.
+///
+/// The scan is textual, so an operator written flush against the word before it
+/// picks that word up too: `[[ a>>b ]]` is reported near `a>>b`. Reproducing
+/// that needs the source text, not the token — see TD-OILS-COND-TOKEN-SPELLING.
+fn cond_error_near(tok: &str) -> String {
+    match tok.chars().next_back() {
+        Some(c @ (';' | '|' | '&')) => c.to_string(),
+        _ => tok.to_string(),
     }
 }
 
@@ -3175,6 +3220,62 @@ mod tests {
         assert_eq!(err("[[ \"a b\" -q c ]]"), format!("{want}`-q'"));
         // Outside a conditional, an operator token still names itself.
         assert_eq!(err("echo hi; ;"), "syntax error near unexpected token `;'");
+    }
+
+    /// Inside `[[ ]]` bash treats an *operator* it finds in the wrong place
+    /// differently from a word: the operator gets an `unexpected token \`X''
+    /// clause naming it, the word does not. That holds in both positions where a
+    /// stray token can turn up, and the `syntax error near' line that follows
+    /// spells the token by bash's own backward source scan rather than by name.
+    #[test]
+    fn conditional_error_names_operators_but_not_words() {
+        fn err(src: &str) -> String {
+            parse(src).expect_err("expected a parse error").msg
+        }
+        // Where a binary operator was expected, an operator is named …
+        let want = "conditional binary operator expected\nsyntax error near ";
+        assert_eq!(err("[[ a ( b ]]"), format!("unexpected token `(', {want}`('"));
+        assert_eq!(err("[[ a ; b ]]"), format!("unexpected token `;', {want}`;'"));
+        assert_eq!(err("[[ a | b ]]"), format!("unexpected token `|', {want}`|'"));
+        assert_eq!(err("[[ a & b ]]"), format!("unexpected token `&', {want}`&'"));
+        // … while a word in the same place is only reported, never named.
+        assert_eq!(err("[[ a b ]]"), format!("{want}`b'"));
+        // Where the expression was already complete, the same split applies.
+        let stray = "syntax error in conditional expression";
+        assert_eq!(
+            err("[[ -n a ; b ]]"),
+            format!("{stray}: unexpected token `;'\nsyntax error near `;'")
+        );
+        assert_eq!(err("[[ -z x y ]]"), format!("{stray}\nsyntax error near `y'"));
+        // A compound operator names itself in full, but the `near' line prints
+        // only what bash's backward scan reaches: it halts on `;', `|' or `&',
+        // so `;;' shows `;' and `;&', `;;&', `|&' and `>&' all show `&'. An
+        // operator holding none of those delimiters is printed whole.
+        for (src, tok, near) in [
+            (";;", ";;", ";"),
+            (";&", ";&", "&"),
+            (";;&", ";;&", "&"),
+            ("|&", "|&", "&"),
+            (">&", ">&", "&"),
+            (">>", ">>", ">>"),
+            ("<<<", "<<<", "<<<"),
+        ] {
+            assert_eq!(
+                err(&format!("[[ a {src} b ]]")),
+                format!("unexpected token `{tok}', {want}`{near}'"),
+                "binary-operator position: {src}"
+            );
+            assert_eq!(
+                err(&format!("[[ -n a {src} b ]]")),
+                format!("{stray}: unexpected token `{tok}'\nsyntax error near `{near}'"),
+                "stray-token position: {src}"
+            );
+        }
+        // The tokens that may legitimately follow a finished operand are still
+        // accepted rather than swept up by the operator rule.
+        for src in ["[[ a && b ]]", "[[ a || b ]]", "[[ ( a ) ]]", "[[ ( a || b ) ]]"] {
+            parse(src).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+        }
     }
 
     #[test]

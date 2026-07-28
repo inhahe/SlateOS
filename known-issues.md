@@ -5524,6 +5524,23 @@ verified `x=$( ( echo o; echo e >&2 ) 2>&1 )` now yields `o\ne` matching bash,
 as does the non-subshell form `x=$( { echo o; echo e >&2; } 2>&1 )`. No open
 subcases remain for this item.
 
+**Later subcase — capture *ordering* (RESOLVED 2026-07-28):** routing the
+subshell's stderr into the capture was only half the story. Until now fd 2
+wrote into a *separate* `StderrTarget::Buffer` that was appended to the capture
+after the body finished, so a stderr write that came **first** still landed
+last: `x=$( { echo E >&2; echo O; } 2>&1 )` gave `O\nE` where bash gives
+`E\nO`. Fixed by making the capture itself shared — `Out::Capture` now holds an
+`Arc<Mutex<Vec<u8>>>` instead of a `&mut Vec<u8>`, and a `2>&1` over a captured
+fd 1 pushes a `StderrTarget::Buffer` holding *that same* `Arc`, so the two
+streams interleave in write order exactly as they do on a shared file or pipe.
+This covers the compound path (`exec_with_redirects`), the builtin path
+(`run_builtin`) and redirect-failure diagnostics (`push_partial_stderr`, whose
+`Out::Capture` arm no longer has to be special-cased in
+`report_redirect_failure`). Regression coverage: the "including when that sink
+is a command substitution's capture" section of
+`tests/corpus/redirect-2to1-dup.sh` and the interleave probe in
+`tests/corpus/redirect-dev-fd.sh`.
+
 ### TD-OILS-IDVARS. `osh` does not define several bash identity/runtime variables (`PPID` remaining; `EUID`/`UID`/`HOSTNAME`/`BASH`/`BASHOPTS` now done) — PARTIALLY ADDRESSED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::seed_shell_vars`, the

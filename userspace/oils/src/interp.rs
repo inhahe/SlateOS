@@ -77,9 +77,9 @@
 //!   a same-file `2>&1`/`&>` interleave of stdout and stderr — is preserved.
 //!   A compound command's *stderr* is also redirectable (`{ …; } 2> err`,
 //!   `for … done 2>&1`) via a `stderr_stack` consulted by every fd-2 write.
-//!   The one exception is `2>&1` into a *captured* stdout (command substitution
-//!   `$( … 2>&1 )`), where stderr is folded into the capture after the body
-//!   (not byte-interleaved).
+//!   `2>&1` into a *captured* stdout (command substitution `$( … 2>&1 )`)
+//!   likewise interleaves: fd 2 becomes a second writer on fd 1's own capture
+//!   buffer rather than a separate one folded in afterwards.
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
@@ -522,17 +522,43 @@ enum Flow {
 }
 
 /// Where a command's standard output should go.
-enum Out<'a> {
+enum Out {
     /// Inherit the shell's real stdout.
     Inherit,
     /// Append to a capture buffer (command substitution / pipeline stage).
-    Capture(&'a mut Vec<u8>),
+    ///
+    /// Shared rather than borrowed because a capture can have **two** writers:
+    /// `x=$( { echo E >&2; echo O; } 2>&1 )` points fd 2 at fd 1's sink, and the
+    /// two must interleave in one buffer in write order. fd 2 reaches it as a
+    /// [`StderrTarget::Buffer`] holding the same `Arc` — collecting fd 2 into a
+    /// second buffer and appending it afterwards, as osh used to, loses the
+    /// ordering (bash prints `E` then `O`; that gave `O` then `E`).
+    Capture(Arc<Mutex<Vec<u8>>>),
     /// Stream to the write end of an OS pipe. Used by a *concurrent* pipeline
     /// stage that runs an in-process builtin/compound command: bytes flow to the
     /// next stage as they are produced (not buffered), and a write that fails
     /// with `BrokenPipe` (the reader closed early, e.g. `… | head`) signals the
     /// stage to abort — the in-process analogue of `SIGPIPE`.
     Pipe(io::PipeWriter),
+}
+
+/// A fresh, empty capture sink for [`Out::Capture`].
+fn capture_buf() -> Arc<Mutex<Vec<u8>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Lock a capture sink, recovering from poisoning.
+///
+/// A panic in one writer must not silently discard what another wrote: the
+/// buffer is plain collected output with no invariant a partial write could
+/// break, so the bytes stay usable and the lock is taken regardless.
+fn lock_capture(buf: &Arc<Mutex<Vec<u8>>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Take everything a capture sink has collected, leaving it empty.
+fn take_capture(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    std::mem::take(&mut *lock_capture(buf))
 }
 
 /// A command's standard input source.
@@ -573,10 +599,10 @@ enum StderrTarget {
     /// `2>&1` where stdout is a downstream pipe — merge into the same pipe so
     /// stdout and stderr interleave at the reader (bash `… 2>&1 | next`).
     Pipe(Arc<io::PipeWriter>),
-    /// `2>&1`/stderr capture into a buffer — used when the surrounding stdout is
-    /// itself captured (command substitution `$( … 2>&1 )`). The buffer is
-    /// merged into the stdout capture once the body finishes (line-level
-    /// interleaving with stdout is not preserved — see the module limitations).
+    /// `2>&1` where stdout is itself a capture (command substitution
+    /// `$( … 2>&1 )`) — this is fd 1's *own* [`Out::Capture`] buffer, so the two
+    /// streams interleave in write order exactly as they would on a shared file
+    /// or pipe.
     Buffer(Arc<Mutex<Vec<u8>>>),
     /// `2>&N` (N ≥ 3) — write to a user-space write descriptor opened by
     /// `exec N> file`. The shared `Arc<File>` is append-positioned so writes
@@ -2672,7 +2698,7 @@ impl Shell {
             let mut buf = Vec::new();
             let _ = so.read_to_end(&mut buf);
             if let Out::Capture(b) = out {
-                b.extend_from_slice(&buf);
+                lock_capture(b).extend_from_slice(&buf);
             }
         }
 
@@ -3384,11 +3410,7 @@ impl Shell {
         }
 
         // ---- stderr setup: push a target covering the whole body ----
-        // `stderr_merge_buf` is the buffer whose bytes must be folded into the
-        // stdout capture once the body finishes (the `2>&1`-into-captured-stdout
-        // case, where fd 1 and fd 2 share a command-substitution buffer).
         let mut pushed_stderr = false;
-        let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
         // fd-2 file sink for the group, kept so it can also seed a scoped
         // `exec_stderr` override — a `( … ) 2> f` / `( … ) 2>&1` subshell body
         // clones `exec_stderr` (but *not* `stderr_stack`), so this is what lets
@@ -3424,10 +3446,10 @@ impl Shell {
         } else if plan.stderr_to_stdout {
             // `2>&1` with fd 1 not a file: mirror fd 1's live sink.
             match out {
-                Out::Capture(_) => {
-                    let buf = Arc::new(Mutex::new(Vec::new()));
-                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(&buf)));
-                    stderr_merge_buf = Some(buf);
+                // fd 1 is a capture: fd 2 joins it as a second writer on the
+                // *same* buffer, so the two interleave in write order.
+                Out::Capture(buf) => {
+                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
                     pushed_stderr = true;
                 }
                 Out::Pipe(w) => match w.try_clone() {
@@ -3532,8 +3554,8 @@ impl Shell {
         // it no longer needs a buffer. Otherwise the body writes straight to
         // `out`.
         let stdout_to_err = plan.stdout_to_stderr && plan.stdout.is_none();
-        let mut capture: Option<Vec<u8>> = if stdout_to_err {
-            Some(Vec::new())
+        let capture: Option<Arc<Mutex<Vec<u8>>>> = if stdout_to_err {
+            Some(capture_buf())
         } else {
             None
         };
@@ -3573,14 +3595,14 @@ impl Shell {
                 let mut o = Out::Inherit;
                 run(self, &mut o, sin)
             } else {
-                match &mut capture {
+                match &capture {
                     Some(buf) => {
                         // The `1>&2` dup rebinds fd 1 to this buffer (flushed to
                         // the stderr sink below), which supersedes a persistent
                         // `exec > file` for the body — `exec >f; { echo hi; } >&2`
                         // writes to stderr, not to `f`.
                         let saved_exec_stdout = self.exec_stdout.take();
-                        let mut o = Out::Capture(buf);
+                        let mut o = Out::Capture(Arc::clone(buf));
                         let flow = run(self, &mut o, sin);
                         self.exec_stdout = saved_exec_stdout;
                         flow
@@ -3615,7 +3637,7 @@ impl Shell {
             } else {
                 self.stderr_stack.len()
             };
-            self.emit_stderr_depth(&buf, depth);
+            self.emit_stderr_depth(&take_capture(&buf), depth);
         }
 
         if pushed_stderr {
@@ -3626,14 +3648,6 @@ impl Shell {
         // touched fd and reinstate its prior binding (if any).
         self.restore_extra_fds(saved_fds);
 
-        // Fold captured stderr (`2>&1` into a captured stdout) into `out` after
-        // the target is popped. Interleaving with stdout is not preserved.
-        if let Some(buf) = stderr_merge_buf
-            && let Ok(g) = buf.lock()
-            && let Out::Capture(obuf) = out
-        {
-            obuf.extend_from_slice(&g);
-        }
         flow
     }
 
@@ -7308,7 +7322,7 @@ impl Shell {
                 let _ = se.read_to_end(&mut captured);
             }
             if let Out::Capture(buf) = out {
-                buf.extend_from_slice(&captured);
+                lock_capture(buf).extend_from_slice(&captured);
             }
         }
 
@@ -7825,18 +7839,6 @@ impl Shell {
     fn report_redirect_failure(&mut self, fail: &RedirFailure, out: &mut Out) -> i32 {
         let msg = format!("{}{}", self.err_prefix(), fail.msg);
         let p = &fail.partial;
-        // `2>&1` with fd 1 captured has no `StderrTarget` that reaches the
-        // caller's buffer, so write into it directly rather than via the stack.
-        if p.stderr.is_none()
-            && p.stderr_to_fd.is_none()
-            && p.stderr_to_stdout
-            && p.stdout.is_none()
-            && let Out::Capture(buf) = out
-        {
-            buf.extend_from_slice(msg.as_bytes());
-            buf.push(b'\n');
-            return 1;
-        }
         let pushed = self.push_partial_stderr(p, out);
         self.errln(&msg);
         if pushed {
@@ -7895,8 +7897,13 @@ impl Shell {
                         return true;
                     }
                 }
-                // Handled by the caller (it owns the buffer).
-                Out::Capture(_) => return false,
+                Out::Capture(buf) => {
+                    // fd 1 is a capture: fd 2 joins it as a second writer on the
+                    // same buffer, so the diagnostic lands in write order among
+                    // whatever the command already emitted on fd 1.
+                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
+                    return true;
+                }
             }
         }
         false
@@ -9625,7 +9632,7 @@ impl Shell {
         // clone of the shell state so variable/cwd/function mutations made
         // inside `$(...)` do not leak into the parent. Only the captured stdout
         // and the exit status ($?) propagate back.
-        let mut buf = Vec::new();
+        let cap = capture_buf();
         let mut sub = self.clone_for_subshell();
         // The DEBUG/RETURN/ERR traps follow the ordinary subshell rules set by
         // `clone_for_subshell`: inherited only under `functrace`/`errtrace`. A
@@ -9648,13 +9655,14 @@ impl Shell {
             // the write end of the collecting pipe, replacing any persistent
             // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&cap));
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
             // A command substitution is a subshell: fire its own EXIT trap into
             // the same capture so its output is included in the result (bash).
             sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
         self.last_status = sub.last_status;
+        let mut buf = take_capture(&cap);
         self.strip_capture_nuls(&mut buf);
         let mut s = String::from_utf8_lossy(&buf).into_owned();
         // Strip trailing newlines, as command substitution does.
@@ -9712,16 +9720,17 @@ impl Shell {
         // e.g. `false > >(true)` keeping status 1).
         let saved_status = self.last_status;
         if input {
-            let mut buf = Vec::new();
+            let cap = capture_buf();
             {
                 // Like a command substitution, the body's fd 1 is the collecting
                 // buffer, not any persistent `exec > file` (restored below —
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
-                let mut out = Out::Capture(&mut buf);
+                let mut out = Out::Capture(Arc::clone(&cap));
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
                 self.exec_stdout = saved_exec_stdout;
             }
+            let buf = take_capture(&cap);
             if std::fs::write(&path, &buf).is_ok() {
                 self.procsub_in_temps.push(path.clone());
             }
@@ -10128,7 +10137,6 @@ impl Shell {
         // combination routes `>&2` to the file (the `2>file >&2` ordering)
         // rather than the pre-redirect stderr — see known-issues TD-OILS14.
         let mut pushed_stderr = false;
-        let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
         if name != "exec" {
             if let Some((path, append)) = &redir.stderr {
                 if let Ok(f) = open_out(&self.cwd, path, *append) {
@@ -10145,10 +10153,10 @@ impl Shell {
             } else if redir.stderr_to_stdout {
                 // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
                 match out {
-                    Out::Capture(_) => {
-                        let buf = Arc::new(Mutex::new(Vec::new()));
-                        self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(&buf)));
-                        stderr_merge_buf = Some(buf);
+                    // fd 1 is a capture: fd 2 joins it as a second writer on the
+                    // *same* buffer, so the two interleave in write order.
+                    Out::Capture(buf) => {
+                        self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
                         pushed_stderr = true;
                     }
                     Out::Pipe(w) => {
@@ -10543,21 +10551,10 @@ impl Shell {
         };
         self.arith_cmd = saved_arith_cmd;
 
-        // Tear down the scoped stderr redirect and, for the `2>&1`-into-captured-
-        // stdout case, fold the buffered stderr into fd 1's sink after the
-        // builtin's own stdout (line-level interleaving is not preserved — see
-        // the module limitations).
+        // Tear down the scoped stderr redirect. Nothing to fold afterwards: a
+        // `2>&1` into a captured fd 1 wrote into fd 1's own buffer as it went.
         if pushed_stderr {
             self.stderr_stack.pop();
-        }
-        if let Some(buf) = stderr_merge_buf
-            && let Ok(g) = buf.lock()
-            && !g.is_empty()
-        {
-            let bytes = g.clone();
-            drop(g);
-            // A default plan writes straight to `out` (the fd 1 sink).
-            self.write_bytes(out, &RedirPlan::default(), &bytes);
         }
 
         // Tear down the scoped fd ≥ 3 descriptors installed for this builtin.
@@ -16915,7 +16912,7 @@ impl Shell {
             }
             match out {
                 Out::Capture(buf) => {
-                    buf.extend_from_slice(bytes);
+                    lock_capture(buf).extend_from_slice(bytes);
                     0
                 }
                 Out::Inherit => {
@@ -17235,7 +17232,7 @@ impl Shell {
             }
             match out {
                 Out::Capture(buf) => {
-                    buf.extend_from_slice(&bytes);
+                    lock_capture(buf).extend_from_slice(&bytes);
                     return;
                 }
                 Out::Pipe(w) => {
@@ -21603,11 +21600,12 @@ mod tests {
     /// not a panic.
     fn run(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let status = {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.run_source_out(src, &mut out, 0)
         };
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
@@ -21621,11 +21619,12 @@ mod tests {
     fn run_script(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.set_repl_interactive(false);
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let status = {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.run_source_out(src, &mut out, 0)
         };
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
@@ -21712,13 +21711,14 @@ mod tests {
     #[test]
     fn unterminated_heredoc_lenient_in_run_source() {
         let mut sh = Shell::new();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             // No terminating `EOF` line: bash runs `cat` with the partial body.
             let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out, 0);
             assert_eq!(status, 0, "unterminated heredoc should still execute");
         }
+        let buf = take_capture(&buf);
         assert_eq!(String::from_utf8_lossy(&buf), "partial\n");
     }
 
@@ -21784,12 +21784,13 @@ mod tests {
     fn run_cmd_mode(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.set_command_mode();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
 
@@ -22065,12 +22066,13 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let mut buf = Vec::new();
+            let buf = capture_buf();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(&mut buf);
+                let mut out = Out::Capture(Arc::clone(&buf));
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
+            let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
         }
         // Unbound-variable diagnostic on line 1.
@@ -22116,12 +22118,13 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let mut buf = Vec::new();
+            let buf = capture_buf();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(&mut buf);
+                let mut out = Out::Capture(Arc::clone(&buf));
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
+            let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
         }
         // A command-not-found on line 3 (last stage of a multi-line pipeline)
@@ -22158,12 +22161,13 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let mut buf = Vec::new();
+            let buf = capture_buf();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(&mut buf);
+                let mut out = Out::Capture(Arc::clone(&buf));
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
+            let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
         }
         // `$(( … ))` substitution: no builtin tag, `<expr>:` prefix. The
@@ -22340,12 +22344,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_with_aliases(setup: &str, src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.run_source(setup);
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse_with_aliases(src, &sh.aliases).expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
 
@@ -22391,11 +22396,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.run_source("alias g='echo hi'");
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&parse_with_aliases("g", &sh.aliases).expect("parse"), &mut out, &StdinSrc::Inherit);
         }
+        // `parse_with_aliases` applies the table unconditionally — it is the
+        // *caller* (`run_source`) that consults the gate — so the body did run.
+        // The capture is therefore not evidence either way; the gate itself is.
+        assert_eq!(take_capture(&buf), b"hi\n");
         // Even though the alias is in the table, run_source in command mode does
         // not expand it; here we prove the gate itself is off by default.
         assert!(!sh.aliases_enabled(), "expand_aliases should default off in command mode");
@@ -22448,12 +22457,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         fn run_repl(interactive: bool, src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_repl_interactive(interactive);
-            let mut buf = Vec::new();
+            let buf = capture_buf();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(&mut buf);
+                let mut out = Out::Capture(Arc::clone(&buf));
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
+            let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
         }
         // Interactive tty REPL → bare `<name>: ` prefix (no line number).
@@ -24805,14 +24815,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_with(setup: impl FnOnce(&mut Shell), src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         setup(&mut sh);
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
                 sh.last_status = code;
             }
         }
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
 
@@ -25334,11 +25345,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let mut sh = Shell::new();
             sh.set_name("scr.sh");
             sh.set_script_mode();
-            let mut buf = Vec::new();
-            let mut out = Out::Capture(&mut buf);
+            let buf = capture_buf();
+            let mut out = Out::Capture(Arc::clone(&buf));
             let prog = parse(src).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
-            String::from_utf8(buf).unwrap()
+            String::from_utf8(take_capture(&buf)).unwrap()
         };
         // Inside `f` at top level: FUNCNAME is `(f main)`, length 2.
         assert_eq!(
@@ -25472,12 +25483,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.set_execution_string("echo hi");
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         let text = String::from_utf8_lossy(&buf);
         assert_eq!(text.lines().next(), Some("[echo hi]"));
         assert!(text.contains("BASH_EXECUTION_STRING"), "listing: {text}");
@@ -25784,12 +25796,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run("{ declare \"x[-9]=z\"; } 2>&1; echo after");
         assert_eq!(o, "osh: x[-9]: bad array subscript\nafter\n");
         // READ: an underflowing negative subscript errors too, naming just the
-        // base (not the full ref), non-fatal, expanding to empty.
-        // (The harness buffers stdout/stderr separately, so the merged order
-        // differs from a live terminal; the point is the error is emitted and
-        // the expansion is non-fatal — `[]` and `after` both appear.)
+        // base (not the full ref), non-fatal, expanding to empty. The
+        // diagnostic precedes `[]` because it is emitted while *expanding* the
+        // word, before `echo` writes anything (bash prints the same order).
         let (o, _) = run("a=(1 2); { echo \"[${a[-5]}]\"; } 2>&1; echo after");
-        assert_eq!(o, "[]\nosh: a: bad array subscript\nafter\n");
+        assert_eq!(o, "osh: a: bad array subscript\n[]\nafter\n");
         // A valid negative read is fine and errors nothing.
         assert_eq!(run("a=(1 2 3); echo \"${a[-1]}\"").0, "3\n");
         // A positive out-of-range read is empty WITHOUT an error (bash).
@@ -25846,10 +25857,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // As a `declare` operand the underflow does not even discard — it only
         // fails the builtin, so the *same line* continues.
         let (o, s) = run("a=(1 2 3)\n{ declare a[-9]=v; echo \"same-line=$?\"; } 2>&1\necho \"next=$? n=${#a[@]}\"");
-        // (The harness buffers stdout and the redirected stderr separately, so
-        // the merged order differs from a live terminal — bash prints the
-        // diagnostic first.)
-        assert_eq!(o, "same-line=1\nosh: a[-9]: bad array subscript\nnext=0 n=3\n");
+        // `declare` fails before `echo` runs, so its diagnostic comes first.
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nsame-line=1\nnext=0 n=3\n");
         assert_eq!(s, 0);
         // …but a malformed arithmetic *value* under `-i` still discards.
         let (o, s) = run("{ declare -i b=1+*2; echo \"same=$?\"; } 2>&1\necho \"next=$?\"");
@@ -26363,11 +26372,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let cmd_dash = |src: &str| {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let mut buf = Vec::new();
-            let mut out = Out::Capture(&mut buf);
+            let buf = capture_buf();
+            let mut out = Out::Capture(Arc::clone(&buf));
             let prog = parse(src).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
-            String::from_utf8(buf).unwrap()
+            String::from_utf8(take_capture(&buf)).unwrap()
         };
         assert_eq!(cmd_dash("echo $-"), "hBc\n");
         assert_eq!(cmd_dash("set -eC; echo $-"), "ehBCc\n");
@@ -27558,12 +27567,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_imported(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.import_environment();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }
 
@@ -28721,19 +28731,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The parent EXIT trap is reset (not fired) inside a subshell that does
         // not set its own — only the parent's fires, once, at real exit.
         let mut sh = Shell::new();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out").expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         assert_eq!(String::from_utf8_lossy(&buf), "in\nout\n");
         // The parent's EXIT trap only fires now, at the real shell exit.
-        let mut buf2 = Vec::new();
+        let buf2 = capture_buf();
         {
-            let mut out = Out::Capture(&mut buf2);
+            let mut out = Out::Capture(Arc::clone(&buf2));
             sh.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
+        let buf2 = take_capture(&buf2);
         assert_eq!(String::from_utf8_lossy(&buf2), "P\n");
 
         // A command substitution captures its own EXIT-trap output in the result.
@@ -29290,9 +29302,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o, "osh: m['']: bad array subscript\ns=1 n=1\n");
         // Reading the value form names the *base* and expands empty (status 0).
         let (o2, _) = run("declare -A m=([k]=v)\n{ echo \"r=[${m['']}]\"; } 2>&1\necho \"s=$?\"");
-        // (The capture buffer sees the redirected stderr after the `echo`'s own
-        // write, so the diagnostic trails the line it belongs to here.)
-        assert_eq!(o2, "r=[]\nosh: m: bad array subscript\ns=0\n");
+        // The diagnostic comes from expanding the word, so it precedes the
+        // line `echo` then writes (bash prints the same order).
+        assert_eq!(o2, "osh: m: bad array subscript\nr=[]\ns=0\n");
     }
 
     #[test]
@@ -30588,12 +30600,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `jobs` reports the tracked job with its job number and command line.
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 0 &");
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         {
             let prog = parse("jobs").expect("parse");
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("[1]"), "jobs output: {s:?}");
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
@@ -30609,13 +30622,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 7 &");
         assert_eq!(sh.jobs.len(), 1);
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let status = {
             let prog = parse("fg").expect("parse");
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             sh.last_status
         };
+        let buf = take_capture(&buf);
         assert_eq!(status, 7);
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("cmd /c exit 7"), "fg output: {s:?}");
@@ -30650,12 +30664,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (The stdout capture stays empty; the message goes to real stderr.)
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 0 &");
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         {
             let prog = parse("bg").expect("parse");
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         assert!(buf.is_empty(), "bg writes to stderr, not stdout: {buf:?}");
         assert_eq!(sh.last_status, 0);
         sh.run_source("wait");
@@ -32266,12 +32281,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
         let mut sh = Shell::new();
-        let mut buf = Vec::new();
+        let buf = capture_buf();
         let prog = parse(&src).expect("parse");
         {
-            let mut out = Out::Capture(&mut buf);
+            let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
+        let buf = take_capture(&buf);
         let _ = std::fs::remove_file(&path);
         (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
     }

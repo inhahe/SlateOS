@@ -26,6 +26,8 @@ x=$(echo hi >> /dev/stdout); echo "  x=[$x]"
 
 echo "=== /dev/stdout as a stderr target merges the two streams"
 x=$( { echo E >&2; } 2>/dev/stdout ); echo "  x=[$x]"
+echo "--- interleaved in write order, not stdout-then-stderr"
+x=$( { echo E >&2; echo O; } 2>/dev/stdout ); echo "  x=[$x]"
 echo "--- left to right: 2>/dev/stdout then >file leaves fd 2 behind"
 x=$( { echo E >&2; echo O; } 2>/dev/stdout >f.txt ); echo "  x=[$x] f=[$(cat f.txt)]"
 

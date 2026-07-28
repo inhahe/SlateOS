@@ -60,4 +60,16 @@ echo "=== an inner 2> of its own still wins for its own command"
 echo "=== ordering is preserved on the shared sink"
 { echo a; echo X >&2; echo b; } 2>&1
 
+echo "--- including when that sink is a command substitution's capture"
+# fd 2 becomes a second writer on fd 1's *own* buffer, so the two interleave in
+# write order. osh used to collect fd 2 separately and append it afterwards,
+# which put a leading stderr line last.
+x=$( { echo X >&2; echo a; } 2>&1 ); echo "  x=[$x]"
+x=$( { echo a; echo X >&2; echo b; } 2>&1 ); echo "  x=[$x]"
+x=$(f() { echo X >&2; echo a; }; f 2>&1); echo "  x=[$x]"
+x=$(eval 'echo X >&2; echo a' 2>&1); echo "  x=[$x]"
+x=$( { echo a; child; echo b; } 2>&1 ); echo "  x=[$x]"
+echo "--- and when a redirect failure is the thing being merged"
+x=$( { echo a; } 2>&1 > /nonexistent-dir-xyz/f ); echo "  rc=$? x=[${x##*: }]"
+
 rm -f g.txt h.txt

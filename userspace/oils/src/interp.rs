@@ -1027,12 +1027,19 @@ pub struct Shell {
     /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
     /// a handler's own commands from recursively re-triggering the same trap.
     in_trap: bool,
-    /// Set by a self-directed `kill` (`kill -TERM $$`) whose signal has no trap
-    /// and whose default disposition is to terminate: the requested exit status
-    /// (128 + signum). The `kill` builtin arm of [`Shell::run_builtin`] converts
-    /// it into a `Flow::Exit` after the builtin returns, since a builtin can only
-    /// hand back an `i32` status and needs this side channel to unwind the shell.
-    pending_signal_exit: Option<i32>,
+    /// A builtin's request to unwind the whole shell with this exit status.
+    ///
+    /// A builtin handler can only hand back an `i32` status, so anything that
+    /// must terminate the shell rather than merely fail needs this side
+    /// channel; [`Shell::run_builtin`] converts it into a `Flow::Exit` once the
+    /// builtin returns and its scoped state (stderr stack, extra fds, temporary
+    /// assignments) has been torn down. Two producers today:
+    ///   * a self-directed `kill` (`kill -TERM $$`) whose signal has no trap and
+    ///     whose default disposition is to terminate (`128 + signum`), or whose
+    ///     trap handler ran an `exit`;
+    ///   * `source`/`.` — an `exit` in the sourced script, or in the `RETURN`
+    ///     trap that fires when the script finishes.
+    pending_builtin_exit: Option<i32>,
     /// Background jobs started with `&`, tracked so `jobs`/`wait` can report and
     /// reap them. NOT inherited by subshell clones (a subshell has no jobs).
     /// Each new job takes the lowest unused job number (bash semantics), so the
@@ -1157,7 +1164,7 @@ impl Shell {
             trap_shadow: HashMap::new(),
             exit_trap_done: false,
             in_trap: false,
-            pending_signal_exit: None,
+            pending_builtin_exit: None,
             jobs: Vec::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
@@ -1565,20 +1572,7 @@ impl Shell {
     /// `run_source_out`.
     fn run_source_flow(&mut self, src: &str) -> Flow {
         let mut out = Out::Inherit;
-        let parsed = if self.aliases_enabled() {
-            parse_with_aliases(src, &self.aliases)
-        } else {
-            parse(src)
-        };
-        let prog = match parsed {
-            Ok(p) => p,
-            Err(e) => {
-                self.errln(&self.format_parse_error(&e, src));
-                self.last_status = 2;
-                return Flow::Next;
-            }
-        };
-        self.exec_program_top(&prog, &mut out, &StdinSrc::Inherit)
+        self.run_source_flow_out(src, &mut out)
     }
 
     /// Parse and execute `src`, sending its standard output to the caller's
@@ -1586,6 +1580,21 @@ impl Shell {
     /// -C` callback) participate in an active capture — a command substitution
     /// or brace-group redirect — rather than escaping to the real fd 1.
     fn run_source_out(&mut self, src: &str, out: &mut Out) -> i32 {
+        match self.run_source_flow_out(src, out) {
+            Flow::Exit(code) => {
+                self.last_status = code;
+                code
+            }
+            _ => self.last_status,
+        }
+    }
+
+    /// The common core of [`Shell::run_source_out`] and
+    /// [`Shell::run_source_flow`]: parse `src` and run it, sending its stdout to
+    /// `out` and returning its control flow uncollapsed. A parse error is
+    /// reported, records status 2, and yields `Flow::Next` (a syntax error in an
+    /// `eval`/`source`/trap body does not unwind the shell).
+    fn run_source_flow_out(&mut self, src: &str, out: &mut Out) -> Flow {
         // Expand command-word aliases only when `expand_aliases` is in effect;
         // otherwise parse the raw tokens so a non-interactive shell leaves alias
         // names untouched (bash parity).
@@ -1599,16 +1608,10 @@ impl Shell {
             Err(e) => {
                 self.errln(&self.format_parse_error(&e, src));
                 self.last_status = 2;
-                return 2;
+                return Flow::Next;
             }
         };
-        match self.exec_program_top(&prog, out, &StdinSrc::Inherit) {
-            Flow::Exit(code) => {
-                self.last_status = code;
-                code
-            }
-            _ => self.last_status,
-        }
+        self.exec_program_top(&prog, out, &StdinSrc::Inherit)
     }
 
     /// Resolve the exit status of a fatal word-expansion abort (nounset,
@@ -3567,7 +3570,7 @@ impl Shell {
             // boundary. `false` here means "not yet fired".
             exit_trap_done: false,
             in_trap: false,
-            pending_signal_exit: None,
+            pending_builtin_exit: None,
             // A subshell does not inherit the parent's job table.
             jobs: Vec::new(),
             // The umask is a process attribute, inherited by subshells.
@@ -8973,26 +8976,28 @@ impl Shell {
                 // prefix. Restore on every exit path (the borrow of `self` ends
                 // before this returns, so a plain inc/dec is sufficient).
                 self.eval_depth = self.eval_depth.saturating_add(1);
-                let rc = self.run_source(&joined);
+                // Route the evaluated commands' stdout to *this* command's sink
+                // so `x=$(eval echo hi)` captures it, matching bash, and let an
+                // `exit` inside the string unwind the shell via the side channel
+                // (a builtin can only return an `i32`).
+                let eval_flow = self.run_source_flow_out(&joined, out);
                 self.eval_depth = self.eval_depth.saturating_sub(1);
-                rc
+                match eval_flow {
+                    Flow::Exit(code) => {
+                        self.pending_builtin_exit = Some(code);
+                        code
+                    }
+                    _ => self.last_status,
+                }
             }
-            "source" | "." => self.builtin_source(args, name),
+            "source" | "." => self.builtin_source(args, name, out),
             "type" => self.builtin_type(args, out, redir),
             "compgen" => self.builtin_compgen(args, out, redir),
             "complete" => self.builtin_complete(args, out, redir),
             "compopt" => self.builtin_compopt(args),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, redir),
-            "kill" => {
-                let rc = self.builtin_kill(args, out, redir);
-                // A self-directed `kill` with a terminating default disposition
-                // unwinds the shell (128 + signum), via this side channel.
-                if let Some(code) = self.pending_signal_exit.take() {
-                    flow = Flow::Exit(code);
-                }
-                rc
-            }
+            "kill" => self.builtin_kill(args, out, redir),
             "wait" => self.builtin_wait(args),
             "disown" => self.builtin_disown(args),
             "fg" => self.builtin_fg(args, out, redir),
@@ -9283,6 +9288,17 @@ impl Shell {
         }
 
         self.last_status = status;
+        // A builtin that must unwind the whole shell (`kill -TERM $$` with a
+        // terminating default disposition, an `exit` inside a sourced script or
+        // its RETURN trap) signals it through `pending_builtin_exit`, because a
+        // builtin handler can only return an `i32`. Convert it here — after the
+        // teardown above — so the unwind never skips restoring the stderr stack,
+        // the scoped fds or the temporary assignments. It outranks both the
+        // builtin's own `flow` and the arithmetic-error discard below.
+        if let Some(code) = self.pending_builtin_exit.take() {
+            self.arith_error = false;
+            return Flow::Exit(code);
+        }
         // An arithmetic error while binding an integer-attribute value
         // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`)
         // discards the command with status 1 — unlike `let`/`(( ))`, which only
@@ -9928,7 +9944,7 @@ impl Shell {
     /// Deliver `signum` to the shell itself (`kill -SIG $$`). A registered trap
     /// fires synchronously; a `trap '' SIG` (ignore) entry is a no-op; with no
     /// trap the signal's default disposition applies — terminate (via
-    /// [`Shell::pending_signal_exit`], which the `kill` builtin arm turns into a
+    /// [`Shell::pending_builtin_exit`], which the `kill` builtin arm turns into a
     /// `Flow::Exit(128 + signum)`) or ignore. Always reports success (the target
     /// exists). Matches bash's handling of a script signalling its own pid,
     /// modulo SlateOS/Linux signal numbering (MSYS/Cygwin numbers differ for the
@@ -9946,12 +9962,12 @@ impl Shell {
             if !action.is_empty()
                 && let Flow::Exit(code) = self.fire_trap_flow(name)
             {
-                self.pending_signal_exit = Some(code);
+                self.pending_builtin_exit = Some(code);
             }
             return true;
         }
         if signal_default_terminates(signum) {
-            self.pending_signal_exit = Some(128 + i32::from(signum));
+            self.pending_builtin_exit = Some(128 + i32::from(signum));
         }
         // Otherwise a default-ignore signal (CHLD/URG/WINCH) or a stop/continue
         // signal we do not simulate — the shell continues.
@@ -14095,7 +14111,7 @@ impl Shell {
         0
     }
 
-    fn builtin_source(&mut self, args: &[String], tag: &str) -> i32 {
+    fn builtin_source(&mut self, args: &[String], tag: &str, out: &mut Out) -> i32 {
         // `source`/`.` take no options: a leading `-x`-style token is a usage
         // error (bash reports it with the invoking name — `.` or `source`).
         // `--` ends option processing and is skipped.
@@ -14128,10 +14144,61 @@ impl Shell {
                 // Mark that we are inside a sourced script so a `return` in it is
                 // legal (and unwinds just this source, like bash).
                 self.source_depth = self.source_depth.saturating_add(1);
-                let code = self.run_source(&src);
+                // bash treats a sourced script like a function frame for the
+                // DEBUG trap: commands *inside* it fire DEBUG only under
+                // functrace (`set -T`). RETURN is deliberately NOT masked — a
+                // nested `source` fires its own RETURN trap even without
+                // functrace — and ERR fires inside a source regardless of
+                // `errtrace`. (Verified against bash 5.x.)
+                let trace_this = self.functrace;
+                self.trap_suppress.push(TrapSuppress {
+                    debug: !trace_this,
+                    ret: false,
+                    err: false,
+                });
+                // The script's stdout belongs to *this* command's sink, so
+                // `x=$(. script)` captures it (bash).
+                let flow = self.run_source_flow_out(&src, out);
+                self.trap_suppress.pop();
                 self.source_depth = self.source_depth.saturating_sub(1);
                 if let Some(p) = saved {
                     self.positional = p;
+                }
+                // `return N` inside the script unwinds just this source (its
+                // status becomes the builtin's); `exit N` unwinds the whole
+                // shell, which a builtin can only request via the side channel.
+                let code = match flow {
+                    Flow::Exit(n) => {
+                        self.pending_builtin_exit = Some(n);
+                        n
+                    }
+                    _ => self.last_status,
+                };
+                // bash fires the RETURN trap when a script run with `.`/`source`
+                // finishes, exactly as it does for a returning function. Unlike
+                // the function case this is not gated on functrace — but it IS
+                // gated on the *caller's* trap mask, so a `source` inside an
+                // untraced function does not fire it. Hence the mask frame
+                // pushed above is popped first.
+                if self.pending_builtin_exit.is_none()
+                    && self.traps.contains_key("RETURN")
+                    && !self.trap_suppressed("RETURN")
+                {
+                    // Under tracing bash fires one extra DEBUG immediately
+                    // before the RETURN action, with `$BASH_COMMAND` still the
+                    // `. script` word — mirroring the function case.
+                    if trace_this
+                        && !self.in_trap
+                        && self.traps.contains_key("DEBUG")
+                        && let Flow::Exit(n) = self.fire_trap_flow("DEBUG")
+                    {
+                        self.pending_builtin_exit = Some(n);
+                    }
+                    if self.pending_builtin_exit.is_none()
+                        && let Flow::Exit(n) = self.fire_trap_flow("RETURN")
+                    {
+                        self.pending_builtin_exit = Some(n);
+                    }
                 }
                 code
             }
@@ -26421,6 +26488,155 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("trap 'true' ERR; false; echo after");
         assert_eq!(o, "after\n");
         assert_eq!(s, 0);
+    }
+
+    /// Write `body` to a fresh temp script and return its path. The caller
+    /// removes it.
+    fn scratch_script(tag: &str, body: &str) -> String {
+        let path = uniq_path(tag);
+        std::fs::write(&path, body).expect("write script");
+        path
+    }
+
+    /// Run `src` and return the final value of shell variable `var`. Trap
+    /// handlers write to the *inherited* fd 1, not the capture sink (see
+    /// known-issues TD-OILS-TRAP-CAPTURE), so trap-firing order is asserted via
+    /// an accumulator variable rather than stdout.
+    fn run_marker(src: &str, var: &str) -> String {
+        let mut sh = Shell::new();
+        sh.run_source(src);
+        sh.vars.get(var).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn return_trap_fires_for_sourced_script() {
+        // bash fires the RETURN trap when a script run with `.`/`source`
+        // finishes — and, unlike the function case, *without* needing
+        // functrace. Every expectation below was captured from bash 5.x running
+        // the identical script.
+        let plain = scratch_script("srcret", "S=\"$S insrc\"\n");
+        let ret3 = scratch_script("srcret3", "S=\"$S insrc\"\nreturn 3\nS=\"$S never\"\n");
+        let nested = scratch_script("srcnest", &format!(". {plain}\nS=\"$S outertail\"\n"));
+        let withfn = scratch_script("srcfn", "g() { :; }\ng\n");
+        let t = "trap 'S=\"$S ret\"' RETURN";
+
+        // Natural end of the script.
+        assert_eq!(
+            run_marker(&format!("{t}; . {plain}; S=\"$S after\""), "S"),
+            " insrc ret after"
+        );
+        // `return N` from the script: the trap still fires, and the script's
+        // status survives it (the trap must not clobber `$?`).
+        assert_eq!(
+            run_marker(&format!("{t}; . {ret3}; S=\"$S after=$?\""), "S"),
+            " insrc ret after=3"
+        );
+        // A nested `source` fires its own RETURN too — a source frame does not
+        // mask RETURN for an inner source.
+        assert_eq!(
+            run_marker(&format!("{t}; . {nested}; S=\"$S after\""), "S"),
+            " insrc ret outertail ret after"
+        );
+        // But the firing IS gated on the *caller's* mask: a `source` inside an
+        // untraced function fires neither the source's nor the function's
+        // RETURN. With functrace both fire.
+        assert_eq!(
+            run_marker(&format!("{t}; h() {{ . {plain}; }}; h; S=\"$S after\""), "S"),
+            " insrc after"
+        );
+        assert_eq!(
+            run_marker(
+                &format!("set -T; {t}; h() {{ . {plain}; }}; h; S=\"$S after\""),
+                "S"
+            ),
+            " insrc ret ret after"
+        );
+        // A function *defined and called inside* the script keeps the normal
+        // no-functrace masking: only the source's own RETURN fires.
+        assert_eq!(
+            run_marker(&format!("{t}; . {withfn}; S=\"$S after\""), "S"),
+            " ret after"
+        );
+
+        for p in [&plain, &ret3, &nested, &withfn] {
+            std::fs::remove_file(p).ok();
+        }
+    }
+
+    #[test]
+    fn sourced_script_is_a_debug_trap_frame() {
+        // bash masks the DEBUG trap for commands *inside* a sourced script
+        // unless functrace is on — the same rule as an untraced function — but
+        // still fires it for the `. script` word itself. ERR, by contrast,
+        // fires inside a source regardless of `errtrace`.
+        let plain = scratch_script("srcdbg", "S=\"$S insrc\"\n");
+        let dbg = "trap 'D=\"$D|$BASH_COMMAND\"' DEBUG";
+
+        assert_eq!(
+            run_marker(&format!("{dbg}; . {plain}; X=1"), "D"),
+            format!("|. {plain}|X=1")
+        );
+        assert_eq!(
+            run_marker(&format!("set -T; {dbg}; . {plain}; X=1"), "D"),
+            format!("|. {plain}|S=\"$S insrc\"|X=1")
+        );
+
+        let failing = scratch_script("srcerr", "false\nS=\"$S tail\"\n");
+        for prelude in ["", "set -E; "] {
+            assert_eq!(
+                run_marker(
+                    &format!("{prelude}trap 'S=\"$S err\"' ERR; . {failing}; S=\"$S after\""),
+                    "S"
+                ),
+                " err tail after",
+                "prelude {prelude:?}"
+            );
+        }
+
+        std::fs::remove_file(&plain).ok();
+        std::fs::remove_file(&failing).ok();
+    }
+
+    #[test]
+    fn eval_and_source_write_to_the_callers_sink() {
+        // bash: `x=$(eval echo hi)` and `x=$(. script)` both capture. osh used
+        // to run both through a fresh `Out::Inherit`, so the output escaped to
+        // the real fd 1 and the substitution came back empty.
+        assert_eq!(run("x=$(eval echo hi); echo \"cap=[$x]\"").0, "cap=[hi]\n");
+        let plain = scratch_script("srccap", "echo in-src\n");
+        assert_eq!(
+            run(&format!("y=$(. {plain}); echo \"cap=[$y]\"")).0,
+            "cap=[in-src]\n"
+        );
+        std::fs::remove_file(&plain).ok();
+    }
+
+    #[test]
+    fn exit_unwinds_out_of_eval() {
+        // `eval 'exit 3'` terminates the shell (bash), rather than just ending
+        // the evaluated string.
+        let (o, s) = run("eval 'echo a; exit 3'; echo after");
+        assert_eq!(o, "a\n");
+        assert_eq!(s, 3);
+    }
+
+    #[test]
+    fn exit_unwinds_out_of_a_sourced_script() {
+        // `exit N` inside a sourced script terminates the *shell*, not just the
+        // script (`return` is the script-only unwind). Same for an `exit` in the
+        // RETURN trap that fires when the script finishes.
+        let quitter = scratch_script("srcexit", "echo in-src\nexit 6\necho never\n");
+        let (o, s) = run(&format!(". {quitter}; echo after"));
+        assert_eq!(o, "in-src\n");
+        assert_eq!(s, 6);
+
+        let plain = scratch_script("srcexit2", "echo in-src\n");
+        let (o, s) = run(&format!("trap 'exit 4' RETURN; . {plain}; echo after"));
+        assert_eq!(o, "in-src\n");
+        assert_eq!(s, 4);
+
+        std::fs::remove_file(&quitter).ok();
+        std::fs::remove_file(&plain).ok();
     }
 
     #[test]

@@ -84,5 +84,24 @@ echo after-builtin-redir
 # shell without errexit it merely sets a nonzero status.
 echo should-not-run > nodir/nofile.txt 2>/dev/null; echo "bad-redir-status=$?"
 
+# `exec > file` rebinds fd 1 for whatever *encloses* it, and the enclosure may
+# itself have rebound fd 1 a moment earlier — a pipeline stage's pipe, or a
+# command substitution's collecting pipe. The later rebinding wins, in both
+# directions:
+#   * `exec >` inside a stage/substitution takes fd 1 away from the pipe, so
+#     the downstream stage (or the substitution's value) gets nothing;
+#   * a substitution *started* under an outer `exec > file` still captures,
+#     because its pipe is the more recent binding.
+echo "=== exec > inside a pipeline stage"
+( exec > es1.txt; echo in-subshell ) | sed 's/^/downstream: /'
+echo "  file: $(cat es1.txt)"
+{ exec > es2.txt; echo in-group; } | sed 's/^/downstream: /'
+echo "  file: $(cat es2.txt)"
+echo "=== exec > inside a command substitution"
+v=$( exec > es3.txt; echo in-cmdsub ); echo "  value=[$v] file: $(cat es3.txt)"
+echo "=== a substitution under an outer exec > still captures"
+( exec > es4.txt; w=$(echo captured); echo "value=[$w]" )
+echo "  file: $(cat es4.txt)"
 rm -f out3.txt in4.txt redirected.txt auto.txt group.txt loop.txt \
-      both1.txt both2.txt both3.txt trunc.txt app.txt rw.txt nc.txt
+      both1.txt both2.txt both3.txt trunc.txt app.txt rw.txt nc.txt \
+      es1.txt es2.txt es3.txt es4.txt

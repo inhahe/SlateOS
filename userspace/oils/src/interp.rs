@@ -2451,6 +2451,10 @@ impl Shell {
                         Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
                         None => StdinSrc::Inherit,
                     };
+                    // The stage's pipe *is* its fd 1, replacing any persistent
+                    // `exec > file` the shell had bound — so a later `exec >`
+                    // inside the stage is what rebinds it again.
+                    sub.exec_stdout = None;
                     let mut o = Out::Pipe(writer);
                     sub.exec_command(cmd, &mut o, &stdin);
                     // A pipeline stage runs in its own subshell: fire its EXIT
@@ -3568,8 +3572,15 @@ impl Shell {
             } else {
                 match &mut capture {
                     Some(buf) => {
+                        // The `1>&2` dup rebinds fd 1 to this buffer (flushed to
+                        // the stderr sink below), which supersedes a persistent
+                        // `exec > file` for the body — `exec >f; { echo hi; } >&2`
+                        // writes to stderr, not to `f`.
+                        let saved_exec_stdout = self.exec_stdout.take();
                         let mut o = Out::Capture(buf);
-                        run(self, &mut o, sin)
+                        let flow = run(self, &mut o, sin);
+                        self.exec_stdout = saved_exec_stdout;
+                        flow
                     }
                     None => run(self, out, sin),
                 }
@@ -7085,6 +7096,19 @@ impl Shell {
                             return;
                         }
                     }
+                } else if let Some(f) = self.exec_stdout_shadowing(out) {
+                    // A runtime `exec > file` inside a capture/pipe binding
+                    // rebound fd 1 out from under it.
+                    match f.try_clone() {
+                        Ok(fc) => {
+                            cmd.stdout(Stdio::from(fc));
+                        }
+                        Err(e) => {
+                            self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
+                            self.last_status = 1;
+                            return;
+                        }
+                    }
                 } else if capturing {
                     cmd.stdout(Stdio::piped());
                 } else if let Out::Pipe(w) = out {
@@ -7429,6 +7453,8 @@ impl Shell {
         let mut sub = self.clone_for_subshell();
         let body_owned = body.clone();
         let handle = std::thread::spawn(move || {
+            // The coproc's pipe is its fd 1 (see the pipeline stage above).
+            sub.exec_stdout = None;
             let mut out = Out::Pipe(child_stdout_w);
             let sin = StdinSrc::Pipe(RefCell::new(io::BufReader::new(child_stdin_r)));
             let _ = sub.exec_command(&body_owned, &mut out, &sin);
@@ -9489,6 +9515,10 @@ impl Shell {
             sub.errexit = false;
         }
         {
+            // The substitution's capture is its fd 1 — bash gives the subshell
+            // the write end of the collecting pipe, replacing any persistent
+            // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
+            sub.exec_stdout = None;
             let mut out = Out::Capture(&mut buf);
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
             // A command substitution is a subshell: fire its own EXIT trap into
@@ -9555,8 +9585,13 @@ impl Shell {
         if input {
             let mut buf = Vec::new();
             {
+                // Like a command substitution, the body's fd 1 is the collecting
+                // buffer, not any persistent `exec > file` (restored below —
+                // unlike a substitution this runs in the current shell).
+                let saved_exec_stdout = self.exec_stdout.take();
                 let mut out = Out::Capture(&mut buf);
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
+                self.exec_stdout = saved_exec_stdout;
             }
             if std::fs::write(&path, &buf).is_ok() {
                 self.procsub_in_temps.push(path.clone());
@@ -16730,6 +16765,14 @@ impl Shell {
                 }
             }
         } else {
+            // A runtime `exec > file` inside a capture/pipe binding rebinds fd 1
+            // out from under it, so it is checked before `out`.
+            if let Some(f) = self.exec_stdout_shadowing(out) {
+                return match f.try_clone() {
+                    Ok(mut fc) => i32::from(fc.write_all(bytes).is_err()),
+                    Err(_) => 1,
+                };
+            }
             match out {
                 Out::Capture(buf) => {
                     buf.extend_from_slice(bytes);
@@ -17058,6 +17101,12 @@ impl Shell {
             return;
         } else if redir.stderr_to_stdout {
             // fd 2 follows fd 1: route to this command's stdout destination.
+            if let Some(f) = self.exec_stdout_shadowing(out)
+                && let Ok(mut fc) = f.try_clone()
+            {
+                let _ = fc.write_all(&bytes);
+                return;
+            }
             match out {
                 Out::Capture(buf) => {
                     buf.extend_from_slice(&bytes);
@@ -17090,6 +17139,29 @@ impl Shell {
     /// buffer-capture sink can't back a live child fd, so it (and the real-fd-1
     /// `Stdout` case) fall back to inheriting fd 2 — a rare edge documented in
     /// the module limitations.
+    /// The handle a runtime `exec > file` rebound fd 1 to *after* the enclosing
+    /// [`Out`] binding was established — in which case it, not `out`, is the
+    /// live fd 1 sink.
+    ///
+    /// A `Capture`/`Pipe` binding is itself an fd-1 rebinding: a command
+    /// substitution's pipe, a pipeline stage's pipe, a `>&2` dup's buffer. Every
+    /// site that establishes one therefore clears `exec_stdout` for the duration
+    /// (an outer `exec > file` no longer applies inside it — `exec >f; x=$(echo
+    /// hi)` still captures `hi`). So a *non-`None`* `exec_stdout` seen alongside
+    /// a `Capture`/`Pipe` binding can only have been set by an `exec` that ran
+    /// inside it, which by bash's "last rebinding wins" ordering takes over:
+    /// `( exec >f; echo hi ) | cat` writes to the file and feeds `cat` nothing.
+    ///
+    /// `Out::Inherit` is deliberately excluded — there the ambient fd 1 *is*
+    /// `exec_stdout`, which every caller already resolves for itself (including
+    /// the scoped override a compound `{ …; } > f` installs).
+    fn exec_stdout_shadowing(&self, out: &Out) -> Option<&std::sync::Arc<std::fs::File>> {
+        match out {
+            Out::Inherit => None,
+            Out::Capture(_) | Out::Pipe(_) => self.exec_stdout.as_ref(),
+        }
+    }
+
     /// Build a child-process [`Stdio`] that writes to fd 1's current sink, for
     /// `2>&1` (`stderr_to_stdout`) on an external command.
     ///
@@ -17104,6 +17176,12 @@ impl Shell {
     /// separately — inheriting fd 2 sends the child's diagnostics to the wrong
     /// destination and `2>&1` silently does nothing.
     fn child_stdio_for_stdout(&self, out: &Out) -> Result<Option<Stdio>, String> {
+        if let Some(f) = self.exec_stdout_shadowing(out) {
+            return f
+                .try_clone()
+                .map(|f| Some(Stdio::from(f)))
+                .map_err(|e| format!("exec stdout: {e}"));
+        }
         match out {
             Out::Capture(_) => Ok(None),
             Out::Pipe(w) => w

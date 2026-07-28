@@ -3784,6 +3784,8 @@ impl Shell {
     fn cond_eval(&mut self, e: &CondExpr) -> bool {
         match e {
             CondExpr::Word(w) => !self.expand_to_string(w).is_empty(),
+            // Parentheses only shaped the tree, which parsing already did.
+            CondExpr::Group(inner) => self.cond_eval(inner),
             CondExpr::Not(inner) => !self.cond_eval(inner),
             CondExpr::And(a, b) => self.cond_eval(a) && self.cond_eval(b),
             CondExpr::Or(a, b) => self.cond_eval(a) || self.cond_eval(b),
@@ -31225,6 +31227,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Single-statement subshell stays on one line.
         let (o2, _) = run("f() { ( echo a ); echo c; }; declare -f f");
         assert_eq!(o2, "f () \n{ \n    ( echo a );\n    echo c\n}\n", "single subshell mismatch");
+    }
+
+    #[test]
+    fn declare_f_keeps_conditional_grouping() {
+        // Dropping the parentheses changes what the test means: `( a || b ) && c`
+        // reprinted bare is `a || (b && c)`.
+        let (o, _) = run("f() { [[ ( -n a || -n b ) && -z '' ]]; }; declare -f f");
+        assert_eq!(o, "f () \n{ \n    [[ ( -n a || -n b ) && -z '' ]]\n}\n", "grouping lost");
+
+        // bash echoes redundant groups too, rather than printing a minimal form.
+        let (o, _) = run("f() { [[ ! ( ! ( -n a ) ) ]]; }; declare -f f");
+        assert_eq!(o, "f () \n{ \n    [[ ! ( ! ( -n a ) ) ]]\n}\n", "redundant group lost");
+
+        // A bare word is one of the few things bash's printer *does* normalise:
+        // it prints the `-n` test the word stands for.
+        let (o, _) = run("f() { [[ a$x ]] && [[ ! b ]]; }; declare -f f");
+        assert_eq!(o, "f () \n{ \n    [[ -n a$x ]] && [[ ! -n b ]]\n}\n", "bare word not -n");
+
+        // The group is inert at run time — the tree it wraps is already shaped.
+        let (o, s) = run("[[ ( -z '' || -n '' ) && -n x ]] && echo yes");
+        assert_eq!((o.as_str(), s), ("yes\n", 0), "grouped test evaluated wrong");
     }
 
     #[test]

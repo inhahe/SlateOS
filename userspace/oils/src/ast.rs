@@ -125,6 +125,14 @@ pub enum CondExpr {
     And(Box<CondExpr>, Box<CondExpr>),
     /// `expr || expr` — logical OR (short-circuiting).
     Or(Box<CondExpr>, Box<CondExpr>),
+    /// `( expr )` — an explicit grouping, kept even when it is redundant.
+    ///
+    /// Evaluation ignores it: the tree it wraps already has the shape the
+    /// parentheses forced. It survives only so the expression can be printed
+    /// back the way it was written, which bash does verbatim — and dropping it
+    /// would be worse than untidy, because `( a || b ) && c` reprinted without
+    /// the parentheses is `a || (b && c)`, a different test.
+    Group(Box<CondExpr>),
 }
 
 /// Unary test operators inside `[[ … ]]`.

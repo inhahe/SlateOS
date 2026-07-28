@@ -1428,7 +1428,11 @@ impl Parser {
                 )));
             }
             self.pos += 1;
-            return Ok(inner);
+            // Keep the grouping in the tree. It changes nothing about the
+            // result — the nesting below already reflects it — but `declare -f`
+            // has to print the parentheses back, and without them the
+            // expression would re-parse under the default precedence.
+            return Ok(CondExpr::Group(Box::new(inner)));
         }
         // Unary operator: `-f WORD`, `-z WORD`, …
         if let Some(text) = self.bare_word_here()

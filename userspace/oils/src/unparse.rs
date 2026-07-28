@@ -765,7 +765,10 @@ fn fd_prefixed(fd: i32, default: i32, op: &str, sep: &str, target: &str) -> Stri
 
 fn cond_src(expr: &CondExpr) -> String {
     match expr {
-        CondExpr::Word(w) => word_src(w),
+        // A bare word is a non-empty test, and bash prints it as the `-n` it
+        // means rather than as written — one of the few places its printer
+        // normalises instead of echoing the source.
+        CondExpr::Word(w) => format!("-n {}", word_src(w)),
         CondExpr::Unary(op, w) => format!("{} {}", unary_op_str(*op), word_src(w)),
         CondExpr::Binary(l, op, r) => {
             format!("{} {} {}", word_src(l), bin_op_str(*op), word_src(r))
@@ -774,6 +777,7 @@ fn cond_src(expr: &CondExpr) -> String {
         CondExpr::Not(e) => format!("! {}", cond_src(e)),
         CondExpr::And(a, b) => format!("{} && {}", cond_src(a), cond_src(b)),
         CondExpr::Or(a, b) => format!("{} || {}", cond_src(a), cond_src(b)),
+        CondExpr::Group(e) => format!("( {} )", cond_src(e)),
     }
 }
 

@@ -679,7 +679,16 @@ impl Parser {
                 Op::TLess => "<<<",
             }
             .to_string(),
-            _ => self.bare_word_here().unwrap_or_else(|| "word".to_string()),
+            // bash names the offending word by its *source* spelling, quotes and
+            // all: `[[ a '<' b ]]` is reported near `'<'`, not near a bare `<` or
+            // a placeholder. Rebuild the word from its segments and print it the
+            // way it was written. (One spelling this does not reach is `$'…'`,
+            // which the lexer has already decoded — see
+            // TD-OILS-ANSIC-ERROR-SPELLING in known-issues.md.)
+            Some(Tok::Word(segs)) => word_from_segs(segs)
+                .map_or_else(|_| "word".to_string(), |w| crate::unparse::word_src(&w)),
+            // Anything else (a newline, a here-doc body) has no word spelling.
+            _ => "word".to_string(),
         }
     }
 
@@ -2914,6 +2923,31 @@ mod tests {
         // A lone word has only the newline to look ahead at, and reading that
         // never fetches the following line.
         assert_eq!(line_of("echo \"a\nb\"\ncmd\n"), 2);
+    }
+
+    /// bash names the offending word in a syntax error by its *source* spelling,
+    /// so the message shows the quotes the user typed rather than the string
+    /// they stand for. Every expectation here is bash 5.2.37's own wording.
+    #[test]
+    fn syntax_error_names_the_token_as_written() {
+        fn err(src: &str) -> String {
+            parse(src).expect_err("expected a parse error").msg
+        }
+        // Inside `[[ ]]` bash prefixes the complaint with what it wanted, then
+        // names the word it found. Each quoting keeps its own spelling: it is
+        // `'<'` that is reported, not the `<` the quotes stand for.
+        let want = "conditional binary operator expected\nsyntax error near ";
+        assert_eq!(err("[[ a '<' b ]]"), format!("{want}`'<''"));
+        assert_eq!(err("[[ a \"<\" b ]]"), format!("{want}`\"<\"'"));
+        assert_eq!(err("[[ a \\< b ]]"), format!("{want}`\\<'"));
+        // An unexpanded parameter is named as written, not as expanded.
+        assert_eq!(err("[[ a $x-q b ]]"), format!("{want}`$x-q'"));
+        // A word that needs no quoting is still spelled plainly, and quoting
+        // elsewhere in the test does not leak into the name of the offender.
+        assert_eq!(err("[[ a -q b ]]"), format!("{want}`-q'"));
+        assert_eq!(err("[[ \"a b\" -q c ]]"), format!("{want}`-q'"));
+        // Outside a conditional, an operator token still names itself.
+        assert_eq!(err("echo hi; ;"), "syntax error near unexpected token `;'");
     }
 
     #[test]

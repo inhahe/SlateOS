@@ -175,6 +175,22 @@ pub enum Tok {
     },
 }
 
+/// Shell options that change how source text is *lexed*, so they must be known
+/// before a unit is tokenized rather than when it runs.
+///
+/// bash reads, parses and executes one unit at a time, so a `shopt` run by unit
+/// N is in force for the lexing of unit N+1 — and only from there. The default
+/// is bash's own for a non-interactive shell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LexOpts {
+    /// `shopt -s extglob`: read `?(`, `*(`, `+(`, `@(` and `!(` as the opener of
+    /// an extended-pattern group, swallowing the balanced `( … )` into the word.
+    /// With it off those are ordinary characters and the `(` is a
+    /// metacharacter — which is why `!(cmd)` is a *negated subshell* by default,
+    /// and why `echo @(a)` is a syntax error.
+    pub extglob: bool,
+}
+
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
@@ -200,6 +216,14 @@ struct Lexer {
     /// Set immediately after emitting a `=~` word inside `[[ … ]]`; the next
     /// word is read in regex mode.
     regex_next: bool,
+    /// Options that change lexing (currently just `extglob`).
+    opts: LexOpts,
+    /// Set immediately after emitting a `==`, `!=` or `=` word inside `[[ … ]]`;
+    /// the next word is that operator's *pattern* operand. bash enables extglob
+    /// for exactly that word regardless of the `extglob` option, so
+    /// `[[ abc == @(abc|x) ]]` works in a default shell while `[[ @(a) == b ]]`
+    /// and `[[ -n @(a) ]]` are both syntax errors.
+    extpat_next: bool,
     /// When `true`, a here-document whose delimiter is never reached before the
     /// input ends is reported as a [`LexError`] (an "unexpected EOF" incomplete
     /// signal) instead of being lenient-accepted with the partial body. The
@@ -223,12 +247,35 @@ struct PendingHeredoc {
     tok_index: usize,
 }
 
+impl Lexer {
+    fn new(src: &str, opts: LexOpts) -> Self {
+        Self {
+            chars: src.chars().collect(),
+            pos: 0,
+            line: 1,
+            iter_start: 0,
+            pending_heredocs: Vec::new(),
+            cond_depth: 0,
+            regex_next: false,
+            opts,
+            extpat_next: false,
+            strict_heredoc_eof: false,
+        }
+    }
+
+    /// As [`Lexer::new`], but an unterminated here-document is an error rather
+    /// than leniently accepted. See [`tokenize_spanned_strict`].
+    fn strict_heredoc(src: &str, opts: LexOpts) -> Self {
+        Self { strict_heredoc_eof: true, ..Self::new(src, opts) }
+    }
+}
+
 /// Tokenize `src` into a token stream.
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-    tokenize_spanned(src).map(|(toks, _lines)| toks)
+pub fn tokenize(src: &str, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
+    tokenize_spanned(src, opts).map(|(toks, _lines)| toks)
 }
 
 /// Tokenize `src`, returning the token stream alongside a parallel vector giving
@@ -239,17 +286,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: false,
-    };
+pub fn tokenize_spanned(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+    let mut lx = Lexer::new(src, opts);
     lx.run()
 }
 
@@ -259,6 +297,10 @@ pub struct Tokenized {
     pub toks: Vec<Tok>,
     /// Parallel to `toks`: the 1-based source line each token starts on.
     pub lines: Vec<u32>,
+    /// Parallel to `toks`: the character offset into `src` at which each token
+    /// begins. [`crate::parser::IncrementalParser`] re-lexes the unconsumed
+    /// remainder from here when a `shopt` changes how it must be read.
+    pub offsets: Vec<u32>,
     /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
     /// to the last **complete** logical line, because that is the granularity
     /// at which bash stops executing: in `echo two; echo three 'unterm`
@@ -276,21 +318,13 @@ pub struct Tokenized {
 /// them. [`crate::parser::IncrementalParser`] uses this and surfaces the error
 /// once the good prefix is exhausted.
 #[must_use]
-pub fn tokenize_deferred(src: &str) -> Tokenized {
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: false,
-    };
+pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
+    let mut lx = Lexer::new(src, opts);
     let mut toks = Vec::new();
     let mut lines = Vec::new();
-    let Err(e) = lx.run_into(&mut toks, &mut lines) else {
-        return Tokenized { toks, lines, err: None };
+    let mut offsets = Vec::new();
+    let Err(e) = lx.run_into(&mut toks, &mut lines, &mut offsets) else {
+        return Tokenized { toks, lines, offsets, err: None };
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -313,7 +347,8 @@ pub fn tokenize_deferred(src: &str) -> Tokenized {
         .map_or(0, |i| i.saturating_add(1));
     toks.truncate(keep);
     lines.truncate(keep);
-    Tokenized { toks, lines, err: Some((e, line)) }
+    offsets.truncate(keep);
+    Tokenized { toks, lines, offsets, err: Some((e, line)) }
 }
 
 /// Like [`tokenize_spanned`] but reports an unterminated here-document (its
@@ -324,17 +359,8 @@ pub fn tokenize_deferred(src: &str) -> Tokenized {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote, substitution, or here-document.
-pub fn tokenize_spanned_strict(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: true,
-    };
+pub fn tokenize_spanned_strict(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+    let mut lx = Lexer::strict_heredoc(src, opts);
     lx.run()
 }
 
@@ -348,16 +374,7 @@ pub fn tokenize_spanned_strict(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexErr
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: false,
-    };
+    let mut lx = Lexer::new(src, LexOpts::default());
     lx.read_word_verbatim(false)
 }
 
@@ -371,16 +388,7 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_replacement_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: false,
-    };
+    let mut lx = Lexer::new(src, LexOpts::default());
     lx.read_word_verbatim(true)
 }
 
@@ -427,8 +435,9 @@ pub fn expand_aliases(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<String, String>,
+    opts: LexOpts,
 ) -> (Vec<Tok>, Vec<u32>) {
-    let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases);
+    let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases, opts);
     (out, out_lines)
 }
 
@@ -444,6 +453,7 @@ pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<String, String>,
+    opts: LexOpts,
 ) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
     let mut active = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -453,6 +463,7 @@ pub fn expand_aliases_tracked(
         toks,
         lines,
         aliases,
+        opts,
         &mut active,
         &mut out,
         &mut out_lines,
@@ -470,6 +481,7 @@ fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<String, String>,
+    opts: LexOpts,
     active: &mut std::collections::BTreeSet<String>,
     out: &mut Vec<Tok>,
     out_lines: &mut Vec<u32>,
@@ -492,7 +504,7 @@ fn expand_aliases_inner(
             && let [Seg::Lit(name)] = segs.as_slice()
             && !active.contains(name)
             && let Some(val) = aliases.get(name)
-            && let Ok(mut repl) = tokenize(val)
+            && let Ok(mut repl) = tokenize(val, opts)
         {
             // Drop a trailing newline the lexer may append so the splice stays
             // within the current command.
@@ -507,6 +519,7 @@ fn expand_aliases_inner(
                 &repl,
                 &repl_lines,
                 aliases,
+                opts,
                 active,
                 out,
                 out_lines,
@@ -659,7 +672,7 @@ impl Lexer {
         // `stamp_lines` — that is what bash's `line_number` holds once the token
         // has been read).
         let mut lines: Vec<u32> = Vec::new();
-        self.run_into(&mut out, &mut lines)?;
+        self.run_into(&mut out, &mut lines, &mut Vec::new())?;
         Ok((out, lines))
     }
 
@@ -667,7 +680,12 @@ impl Lexer {
     /// before an error. Split out of [`Lexer::run`] so [`tokenize_deferred`] can
     /// hold on to the good prefix: bash executes every complete line preceding
     /// an unterminated construct before reporting it.
-    fn run_into(&mut self, out: &mut Vec<Tok>, lines: &mut Vec<u32>) -> Result<(), LexError> {
+    fn run_into(
+        &mut self,
+        out: &mut Vec<Tok>,
+        lines: &mut Vec<u32>,
+        offsets: &mut Vec<u32>,
+    ) -> Result<(), LexError> {
         loop {
             // Skip inline blanks (but not newlines — those are tokens).
             while matches!(self.peek(), Some(' ' | '\t')) {
@@ -687,10 +705,14 @@ impl Lexer {
                 self.regex_next = false;
                 let segs = self.read_word_regex()?;
                 self.emit_word(out, segs);
-                self.stamp_lines(out, lines, start_line, start_pos);
+                self.stamp_lines(out, lines, offsets, start_line, start_pos);
                 continue;
             }
             self.regex_next = false;
+            // The `[[ … == PATTERN ]]` flag set by the operator word is consumed
+            // by whatever token comes next, so take it here rather than leaving
+            // it to leak past an operator onto a later word.
+            let extpat = std::mem::take(&mut self.extpat_next);
             match c {
                 '\n' => {
                     self.pos += 1;
@@ -779,7 +801,7 @@ impl Lexer {
                     // not a redirection operator. `read_word` consumes the whole
                     // `<(…)`/`>(…)` group as a `Seg::ProcSub` (and allows adjacent
                     // literals to concatenate).
-                    let segs = self.read_word()?;
+                    let segs = self.read_word(extpat)?;
                     self.emit_word(out, segs);
                 }
                 '<' => {
@@ -855,7 +877,7 @@ impl Lexer {
                             out.push(Tok::Word(vec![Seg::Lit(digits)]));
                         }
                     } else {
-                        let segs = self.read_word()?;
+                        let segs = self.read_word(extpat)?;
                         self.emit_word(out, segs);
                     }
                 }
@@ -866,16 +888,16 @@ impl Lexer {
                         out.push(tok);
                     } else {
                         let assign_ok = assignment_acceptable(out.last());
-                        let segs = self.read_word_inner(assign_ok, false)?;
+                        let segs = self.read_word_inner(assign_ok, false, extpat)?;
                         self.emit_word(out, segs);
                     }
                 }
                 _ => {
-                    let segs = self.read_word()?;
+                    let segs = self.read_word(extpat)?;
                     self.emit_word(out, segs);
                 }
             }
-            self.stamp_lines(out, lines, start_line, start_pos);
+            self.stamp_lines(out, lines, offsets, start_line, start_pos);
         }
         // bash's reader hands the parser a newline when the input runs out, so a
         // script with no trailing newline — and every `-c` string, which never
@@ -891,7 +913,7 @@ impl Lexer {
             if !self.pending_heredocs.is_empty() {
                 self.collect_heredocs(out)?;
             }
-            self.stamp_lines(out, lines, self.line, start_pos);
+            self.stamp_lines(out, lines, offsets, self.line, start_pos);
         }
         Ok(())
     }
@@ -952,7 +974,14 @@ impl Lexer {
     /// be fetched, so a token that ends *at* a newline — the `Newline` token
     /// itself, or the one that swallowed a here-doc body — belongs to the line
     /// it terminates rather than the one after it.
-    fn stamp_lines(&mut self, out: &[Tok], lines: &mut Vec<u32>, start_line: u32, start_pos: usize) {
+    fn stamp_lines(
+        &mut self,
+        out: &[Tok],
+        lines: &mut Vec<u32>,
+        offsets: &mut Vec<u32>,
+        start_line: u32,
+        start_pos: usize,
+    ) {
         let inner = self
             .chars
             .get(start_pos..self.pos.saturating_sub(1))
@@ -961,8 +990,12 @@ impl Lexer {
             .filter(|&&ch| ch == '\n')
             .count();
         let end_line = start_line.saturating_add(u32::try_from(inner).unwrap_or(u32::MAX));
+        let start = u32::try_from(start_pos).unwrap_or(u32::MAX);
         while lines.len() < out.len() {
             lines.push(end_line);
+        }
+        while offsets.len() < out.len() {
+            offsets.push(start);
         }
         let consumed = self.chars[start_pos..self.pos]
             .iter()
@@ -1043,6 +1076,12 @@ impl Lexer {
                 "[[" => self.cond_depth = self.cond_depth.saturating_add(1),
                 "]]" => self.cond_depth = self.cond_depth.saturating_sub(1),
                 "=~" if self.cond_depth > 0 => self.regex_next = true,
+                // The right-hand side of a `[[ … ]]` match is a *pattern*, and
+                // bash lexes extended patterns there whether or not `extglob` is
+                // set — so `[[ abc == @(abc|x) ]]` works in a default shell.
+                // Only in this position: `[[ @(a) == b ]]` and `[[ -n @(a) ]]`
+                // are both syntax errors near `(`.
+                "==" | "!=" | "=" if self.cond_depth > 0 => self.extpat_next = true,
                 _ => {}
             }
         }
@@ -1189,8 +1228,8 @@ impl Lexer {
         Ok(segs)
     }
 
-    fn read_word(&mut self) -> Result<Vec<Seg>, LexError> {
-        self.read_word_inner(false, false)
+    fn read_word(&mut self, extpat: bool) -> Result<Vec<Seg>, LexError> {
+        self.read_word_inner(false, false, extpat)
     }
 
     /// Read one array-literal element word. Like [`Self::read_word`] but a
@@ -1198,7 +1237,7 @@ impl Lexer {
     /// even across unquoted whitespace inside the brackets, matching bash's
     /// array-literal tokenization (`declare -A m=([ x ]=v)` keys on ` x `).
     fn read_array_elem_word(&mut self) -> Result<Vec<Seg>, LexError> {
-        self.read_word_inner(false, true)
+        self.read_word_inner(false, true, false)
     }
 
     /// Read one word; when `assign_ok`, an array-subscript at the head of the
@@ -1206,7 +1245,15 @@ impl Lexer {
     /// whitespace, matching bash's assignment-word tokenization. When
     /// `array_elem`, a word that *begins* with `[` slurps its `[…]` subscript the
     /// same way (for array-literal keyed elements, which have no name prefix).
-    fn read_word_inner(&mut self, assign_ok: bool, array_elem: bool) -> Result<Vec<Seg>, LexError> {
+    /// `extpat` forces extglob recognition on for this one word regardless of
+    /// the `extglob` option — bash does that for the pattern operand of a
+    /// `[[ … ]]` match.
+    fn read_word_inner(
+        &mut self,
+        assign_ok: bool,
+        array_elem: bool,
+        extpat: bool,
+    ) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
         // Bracket-nesting depth while consuming a leading `name[subscript]`
@@ -1217,12 +1264,16 @@ impl Lexer {
         // Depth of nested `extglob` groups. Inside a group the pattern
         // metacharacters `(`, `)`, `|`, whitespace, etc. are literal word content
         // rather than word/operator delimiters, so the whole `@(a|b c)` stays one
-        // word token. The extglob decision is deferred to match time (compile_glob
-        // only treats these specially when `shopt -s extglob` is set); without
-        // extglob the group is matched literally. Parameter expansion and quoting
-        // inside the group are still processed normally. NOTE: because parsing is
-        // independent of runtime `shopt`, `!(cmd)` written with no space is now a
-        // pattern word, not a negated subshell — use `! (cmd)` for the latter.
+        // word token. Parameter expansion and quoting inside the group are still
+        // processed normally.
+        //
+        // Whether a group is recognised *at all* is a lexing decision bash makes
+        // from the `extglob` option, which is why the option is passed in rather
+        // than consulted at match time: with it off, `!(cmd)` is a negated
+        // subshell and `echo @(a)` is a syntax error near `(`. `extpat` adds
+        // bash's one exception — the pattern operand of `[[ … == … ]]`, where
+        // extglob is always on.
+        let extglob = self.opts.extglob || extpat;
         let mut ext_depth = 0usize;
         while let Some(c) = self.peek() {
             // Array-subscript assignment head: when this word begins with a valid
@@ -1267,7 +1318,7 @@ impl Lexer {
                 }
             }
             // Opener: `X(` where X ∈ ?*+@! (unquoted). Begins/nests a group.
-            if matches!(c, '?' | '*' | '+' | '@' | '!') && self.peek_at(1) == Some('(') {
+            if extglob && matches!(c, '?' | '*' | '+' | '@' | '!') && self.peek_at(1) == Some('(') {
                 lit.push(c);
                 lit.push('(');
                 self.pos += 2;
@@ -1992,16 +2043,7 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
     if !expand {
         return Ok(vec![Seg::Lit(body.to_string())]);
     }
-    let mut lx = Lexer {
-        chars: body.chars().collect(),
-        pos: 0,
-        line: 1,
-        iter_start: 0,
-        pending_heredocs: Vec::new(),
-        cond_depth: 0,
-        regex_next: false,
-        strict_heredoc_eof: false,
-    };
+    let mut lx = Lexer::new(body, LexOpts::default());
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = String::new();
     while let Some(c) = lx.peek() {
@@ -2053,6 +2095,18 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
 mod tests {
     use super::*;
 
+    /// Lex under bash's non-interactive defaults, which is what all but the
+    /// option-specific tests want. Shadows [`super::tokenize`] so the option
+    /// argument does not have to be spelled out 30 times.
+    fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
+        super::tokenize(src, LexOpts::default())
+    }
+
+    /// As [`tokenize`], with per-token line numbers.
+    fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+        super::tokenize_spanned(src, LexOpts::default())
+    }
+
     /// Tokenize and drop the terminating `Newline`, so a test that counts words
     /// counts only words. Every input carries one — see `Lexer::run_into`.
     fn toks_of(src: &str) -> Vec<Tok> {
@@ -2063,6 +2117,91 @@ mod tests {
         );
         toks.pop();
         toks
+    }
+
+    /// `extglob` is a lexing option, so with it off `@(` is an ordinary `@` word
+    /// followed by the `(` *metacharacter* — several tokens, not one. Every
+    /// expectation here is bash 5.2.37's own.
+    #[test]
+    fn extglob_gates_pattern_groups() {
+        for open in ['?', '*', '+', '@', '!'] {
+            let src = format!("echo {open}(a|b)");
+            assert_eq!(
+                toks_of(&src),
+                vec![
+                    Tok::Word(vec![Seg::Lit("echo".into())]),
+                    Tok::Word(vec![Seg::Lit(open.to_string())]),
+                    Tok::Op(Op::LParen),
+                    Tok::Word(vec![Seg::Lit("a".into())]),
+                    Tok::Op(Op::Pipe),
+                    Tok::Word(vec![Seg::Lit("b".into())]),
+                    Tok::Op(Op::RParen),
+                ],
+                "extglob off: {src}"
+            );
+            let mut with = super::tokenize(&src, LexOpts { extglob: true }).unwrap();
+            with.pop();
+            assert_eq!(
+                with,
+                vec![
+                    Tok::Word(vec![Seg::Lit("echo".into())]),
+                    Tok::Word(vec![Seg::Lit(format!("{open}(a|b)"))]),
+                ],
+                "extglob on: {src}"
+            );
+        }
+        // A word may also *end* in one of those characters, which is why the
+        // gate matters for more than patterns: `f?() { :; }` is a function
+        // definition in bash, and only lexes as one when extglob is off.
+        assert_eq!(
+            toks_of("f?()"),
+            vec![
+                Tok::Word(vec![Seg::Lit("f?".into())]),
+                Tok::Op(Op::LParen),
+                Tok::Op(Op::RParen),
+            ]
+        );
+    }
+
+    /// bash lexes an extended pattern for the operand of a `[[ … ]]` match
+    /// whatever the option says — but only there.
+    #[test]
+    fn extglob_always_on_for_dbracket_pattern() {
+        for op in ["==", "!=", "="] {
+            assert_eq!(
+                toks_of(&format!("[[ abc {op} @(abc|x) ]]")),
+                vec![
+                    Tok::Word(vec![Seg::Lit("[[".into())]),
+                    Tok::Word(vec![Seg::Lit("abc".into())]),
+                    Tok::Word(vec![Seg::Lit((*op).into())]),
+                    Tok::Word(vec![Seg::Lit("@(abc|x)".into())]),
+                    Tok::Word(vec![Seg::Lit("]]".into())]),
+                ],
+                "operand of {op}"
+            );
+        }
+        // Any other position in the same construct is lexed normally, so the
+        // `(` stays a metacharacter and the parser reports a syntax error.
+        assert_eq!(
+            toks_of("[[ @(a) == b ]]"),
+            vec![
+                Tok::Word(vec![Seg::Lit("[[".into())]),
+                Tok::Word(vec![Seg::Lit("@".into())]),
+                Tok::Op(Op::LParen),
+                Tok::Word(vec![Seg::Lit("a".into())]),
+                Tok::Op(Op::RParen),
+                Tok::Word(vec![Seg::Lit("==".into())]),
+                Tok::Word(vec![Seg::Lit("b".into())]),
+                Tok::Word(vec![Seg::Lit("]]".into())]),
+            ]
+        );
+        // The flag is one-shot: it must not leak past the operand onto the
+        // words after it. `[[ a == b && c == @(d) ]]` is nine tokens either
+        // way, so check the tail is unaffected by the earlier match.
+        assert_eq!(
+            toks_of("[[ a == b && c == @(d) ]]").last(),
+            Some(&Tok::Word(vec![Seg::Lit("]]".into())]))
+        );
     }
 
     #[test]

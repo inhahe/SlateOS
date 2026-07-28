@@ -3267,7 +3267,7 @@ a.b() { echo hi; }; a.b           # bash: hi        osh (before): syntax error n
 `?(` as an extglob group unconditionally. That is TD-OILS-EXTGLOB-UNGATED, not
 this issue.
 
-### TD-OILS-EXTGLOB-UNGATED. Extglob patterns are always recognised, where bash gates them on `shopt -s extglob` — 2026-07-28 — OPEN
+### TD-OILS-EXTGLOB-UNGATED. Extglob patterns are always recognised, where bash gates them on `shopt -s extglob` — 2026-07-28 — ✅ RESOLVED 2026-07-28
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_word_inner`'s `ext_depth`
 tracking treats `?(`, `*(`, `+(`, `@(` and `!(` as an extglob group whenever it
@@ -3298,6 +3298,80 @@ pattern *matching* on the same flag so that a literal `@(a|b)` string compares
 as itself. Then `shopt -s extglob` must take effect only for input lexed after
 it runs, matching bash. Add a corpus case covering both readings and the
 function-name spelling above.
+
+**Fixed:** the option now travels with the source instead of being consulted at
+run time. `lexer::LexOpts` is a small `Copy` struct (`extglob`) threaded through
+every entry point that turns text into tokens — `tokenize`, `tokenize_spanned`,
+`tokenize_deferred`, `tokenize_spanned_strict`, `expand_aliases`, `parse_opts`,
+`parse_with_aliases`, `parse_cmdsub_body`, `parse_braced_param` — and stored on
+`Parser` so a body re-lexed *during* parsing (`$( … )`, `<( … )`, a `${…}`
+containing either) is read the same way as its enclosing text. `read_word_inner`
+enters `ext_depth` only when the option is on; matching was already gated, so
+only lexing changed.
+
+Read-parse-execute order is reproduced exactly. `Tokenized` now carries a
+`offsets` vector — the character offset each token starts at — and
+`IncrementalParser` keeps the source, its line base, and the options the tokens
+were lexed under. `next_unit` takes the current options; when they differ it
+throws away the unread tail and lexes it again from `offsets[pos]`, shifting the
+fresh line numbers by the newlines before that offset. So `shopt -s extglob`
+governs the *next* unit and never its own line — `shopt -s extglob; echo @(a)`
+is still a syntax error, exactly as in bash, while the same two commands on
+separate lines work. `Shell::lex_opts()` samples the shopt immediately before
+each parse, and the incremental driver re-samples it per unit.
+
+bash's one exception is reproduced too: the pattern operand of a `[[ … ]]`
+`==`/`!=`/`=` always lexes extglob, whatever the option, so `[[ abc == @(abc|x)
+]]` matches in a default shell while `[[ @(a) == b ]]` and `[[ -n @(a) ]]` are
+syntax errors. `emit_word` sets a one-shot `extpat_next` flag when it emits one
+of those operators inside `[[ … ]]`, and the next word consumes it. `case`
+patterns get no such exemption, matching bash.
+
+Covered by `tests/corpus/extglob-lexing.sh` (the default reading, the negated
+subshell `!(cmd)`, the `[[ ]]` exception, the deferred effect of `shopt -s`,
+inheritance into a `$( )` body, and `shopt -u` restoring the metacharacter) and
+by the `extglob_in_test_and_case` unit test, which now asserts the same-line
+form is a syntax error. Supersedes the older TD-OILS-EXTGLOB-PARSE entry below.
+
+**Left over:** bash's `[[ … ]]` diagnostics name the partial word `@(a` where
+osh names the `(`, and bash adds an `unexpected token `X'` clause when a binary
+operator was expected. Split out as TD-OILS-COND-TOKEN-SPELLING.
+
+### TD-OILS-COND-TOKEN-SPELLING. A `[[ … ]]` syntax error blames the bare operator where bash blames the partial word, and omits one clause — 2026-07-28 — OPEN (diagnostic wording only)
+
+**Where:** `userspace/oils/src/interp.rs` — the `[[ … ]]` conditional parser's
+error construction (the code resolved by TD-OILS-COND-ERRTEXT, which matched the
+rest of bash's conditional diagnostics).
+
+**What:** two narrow gaps remain, both about *which token is named*:
+
+```sh
+[[ a ( b ]]
+# bash: unexpected token `(', conditional binary operator expected
+# osh : syntax error in conditional expression
+[[ -n @(a) ]]                 # (extglob off)
+# bash: syntax error in conditional expression: unexpected token `('
+#       syntax error near `@(a'
+# osh : syntax error in conditional expression
+#       syntax error near `('
+```
+
+The first is general: when a binary operator was expected and the offending
+token is an *operator* rather than a word, bash prefixes ``unexpected token
+`X', ``. With a word it does not — `[[ a b ]]` gives the bare `conditional
+binary operator expected` in both shells, so only the operator case diverges.
+
+The second is specific to bash's separate `[[ … ]]` scanner, which consumes
+`@(a` as one partial word before failing; osh's lexer has already split that
+into `@`, `(`, `a`, `)`, so the token it can name is the `(`. Both shells agree
+the construct is a syntax error and both exit 2 — only the text differs.
+
+**Proper fix:** for the first, carry the offending token into the
+binary-operator-expected error and add the clause when it is an operator. For
+the second, the conditional parser would have to name the source span from the
+start of the word being read rather than the current token — i.e. keep the
+word's start offset alongside the token. `tests/corpus/extglob-lexing.sh`
+currently drops stderr on the two probes that hit this; restore it when fixed.
 
 ### TD-OILS-CMDSUB-EOF-TERMINATOR. A command substitution body is parsed as if its `)` were a line end — 2026-07-28 — OPEN
 
@@ -5279,7 +5353,7 @@ the `syntax error near \`TOKEN'` second line; emit both lines with the `osh:
 line N:` prefix on each, mirroring how bash repeats the `bash: -c: line N:`
 prefix per line.
 
-### TD-OILS-EXTGLOB-PARSE. `osh` always *parses* extended-glob syntax (`+(…)` etc.) even when `extglob` is off; bash gates it at parse time — MINOR LENIENCY DEVIATION 2026-07-19
+### TD-OILS-EXTGLOB-PARSE. `osh` always *parses* extended-glob syntax (`+(…)` etc.) even when `extglob` is off; bash gates it at parse time — ✅ RESOLVED 2026-07-28 (superseded by TD-OILS-EXTGLOB-UNGATED)
 
 **Where:** `userspace/oils/src/parser.rs` / `lexer.rs` (word/case-pattern
 lexing always recognises `?(`/`*(`/`+(`/`@(`/`!(` groups), vs `interp.rs`
@@ -5308,6 +5382,14 @@ the pattern is parsed), so this is documented rather than "fixed" by making the
 parser stricter. **Proper fix (if ever wanted):** have the lexer treat `X(` as an
 extended group only when a parse-time `extglob` flag is set, and surface a syntax
 error otherwise — but this buys only bug-for-bug parity on invalid input.
+
+**Resolved 2026-07-28.** The "why deferred" reasoning above turned out to be
+backwards: the leniency is *not* harmless, because with extglob off bash reads
+`!(cmd)` as a **negated subshell** — `if !(false); then …` is ordinary shell —
+and a function name may legitimately end in a glob character (`f?() { …; }`).
+osh swallowed both as pattern groups. And threading parse-time state was already
+architecturally available, since `run_source_flow_out` executes unit-by-unit and
+re-reads alias state per unit. See TD-OILS-EXTGLOB-UNGATED above for the fix.
 
 ### TD-OILS-BRACE-CHARRANGE-BACKSLASH. MSYS reference bash mishandles `{A..z}`-style char ranges crossing ASCII `\` (92); `osh` follows real (Linux) bash — INTENTIONAL, `osh` is correct 2026-07-20
 

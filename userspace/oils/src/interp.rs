@@ -101,7 +101,7 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::parser::{IncrementalParser, parse, parse_with_aliases};
+use crate::parser::{IncrementalParser, parse_opts, parse_with_aliases};
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -1717,6 +1717,19 @@ impl Shell {
         Ok(())
     }
 
+    /// The shell options that change how source text is *lexed*, as of now.
+    ///
+    /// bash decides these while reading, not while running, so the value must be
+    /// sampled immediately before each parse. `shopt -s extglob` on one line
+    /// therefore governs the next line, never its own — which is exactly what
+    /// [`crate::parser::IncrementalParser::next_unit`] reproduces by re-lexing
+    /// the unread tail when this changes.
+    pub(crate) fn lex_opts(&self) -> crate::lexer::LexOpts {
+        crate::lexer::LexOpts {
+            extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+        }
+    }
+
     /// Apply a `-o NAME` / `+o NAME` long shell option from the command line
     /// (`bash -o pipefail`). Returns `false` for an unrecognised name.
     pub fn apply_named_option(&mut self, name: &str, enable: bool) -> bool {
@@ -1954,10 +1967,11 @@ impl Shell {
         // quotes/substitutions and unfinished compound commands / trailing
         // operators (all surfaced as bash's "unexpected end of file" / "unexpected
         // EOF while looking for …" diagnostics).
+        let opts = self.lex_opts();
         let parsed = if self.aliases_enabled() {
-            parse_with_aliases(src, &self.aliases)
+            parse_with_aliases(src, &self.aliases, opts)
         } else {
-            parse(src)
+            parse_opts(src, opts)
         };
         if matches!(&parsed, Err(e) if e.is_incomplete()) {
             return true;
@@ -1976,7 +1990,7 @@ impl Shell {
         if !src.ends_with('\n') {
             strict_src.push('\n');
         }
-        matches!(crate::parser::parse_strict_heredoc(&strict_src), Err(e) if e.is_incomplete())
+        matches!(crate::parser::parse_strict_heredoc(&strict_src, self.lex_opts()), Err(e) if e.is_incomplete())
     }
 
     /// [`Shell::run_source`] with an explicit stdout sink, so a caller that
@@ -2025,14 +2039,17 @@ impl Shell {
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
         // by unit N must affect how unit N+1 parses, and commands before a
         // syntax error must still have run. See [`IncrementalParser`].
-        let mut ip = IncrementalParser::new(src, line_base);
+        let mut ip = IncrementalParser::new(src, line_base, self.lex_opts());
         loop {
             // Expand command-word aliases only when `expand_aliases` is in
             // effect; otherwise the raw tokens are parsed so a non-interactive
             // shell leaves alias names untouched (bash parity). Re-read every
             // unit so a mid-script change is picked up.
+            // Same for the lexing options: `shopt -s extglob` run by one unit
+            // changes how the *next* one is read, so re-sample it here.
+            let opts = self.lex_opts();
             let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
-            let Some(unit) = ip.next_unit(aliases) else {
+            let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
             let prog = match unit {
@@ -10115,7 +10132,7 @@ impl Shell {
                     if i < chars.len() {
                         i += 1; // consume the closing '}'
                     }
-                    let val = match crate::parser::parse_braced_param(&inner) {
+                    let val = match crate::parser::parse_braced_param(&inner, self.lex_opts()) {
                         Ok(part) => {
                             let word = Word { parts: vec![part] };
                             self.expand_to_string(&word)
@@ -12991,7 +13008,7 @@ impl Shell {
             // unwind; only the status changes).
             let saved = self.last_status;
             let mut flow = Flow::Next;
-            match parse_with_aliases(&action, &self.aliases) {
+            match parse_with_aliases(&action, &self.aliases, self.lex_opts()) {
                 Ok(prog) => {
                     flow = self.exec_program(&prog, out, stdin);
                 }
@@ -14928,7 +14945,7 @@ impl Shell {
         // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
         // same subscript written in an assignment. An unbalanced quote makes it
         // unparseable; bash silently matches nothing in that case.
-        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src) else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.lex_opts()) else {
             return true;
         };
         if is_assoc {
@@ -22254,10 +22271,10 @@ mod tests {
         // quote on a later line does not suppress the lines before it. The
         // incremental parser must therefore hand back every complete unit first
         // and only then report the lexer error.
-        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n", 0);
+        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n", 0, crate::lexer::LexOpts::default());
         let mut units = 0;
         loop {
-            match ip.next_unit(None) {
+            match ip.next_unit(None, crate::lexer::LexOpts::default()) {
                 Some(Ok(_)) => units += 1,
                 Some(Err(e)) => {
                     assert_eq!(units, 2, "both complete lines are handed out first");
@@ -22269,7 +22286,7 @@ mod tests {
             }
         }
         // The error also ends the iteration.
-        assert!(ip.next_unit(None).is_none());
+        assert!(ip.next_unit(None, crate::lexer::LexOpts::default()).is_none());
     }
 
     #[test]
@@ -22605,7 +22622,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.run_source(setup);
         let buf = capture_buf();
-        let prog = parse_with_aliases(src, &sh.aliases).expect("parse");
+        let prog = parse_with_aliases(src, &sh.aliases, sh.lex_opts()).expect("parse");
         {
             let mut out = Out::Capture(Arc::clone(&buf));
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -22659,7 +22676,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let buf = capture_buf();
         {
             let mut out = Out::Capture(Arc::clone(&buf));
-            sh.exec_program(&parse_with_aliases("g", &sh.aliases).expect("parse"), &mut out, &StdinSrc::Inherit);
+            sh.exec_program(&parse_with_aliases("g", &sh.aliases, sh.lex_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
         }
         // `parse_with_aliases` applies the table unconditionally — it is the
         // *caller* (`run_source`) that consults the gate — so the body did run.
@@ -24123,10 +24140,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("shopt -s extglob; [[ bar == !(bar) ]] && echo y || echo n").0,
             "n\n"
         );
-        // In `case`.
+        // In `case` — but only from the *next* unit, since `extglob` decides how
+        // `@(` is lexed and bash has already read this line by the time the
+        // `shopt` runs. Written on one line it is a syntax error, as in bash.
+        assert_eq!(
+            run("shopt -s extglob\ncase abc in @(a|x)bc) echo m;; *) echo no;; esac").0,
+            "m\n"
+        );
         assert_eq!(
             run("shopt -s extglob; case abc in @(a|x)bc) echo m;; *) echo no;; esac").0,
-            "m\n"
+            ""
         );
     }
 

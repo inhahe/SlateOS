@@ -83,6 +83,7 @@
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -907,18 +908,33 @@ pub struct Shell {
     /// The simple-command driver, the bare-assignment path and the prefix-value
     /// path each take the flag after expansion and return `Flow::Discard`.
     discard_error: Option<i32>,
+    /// Source text of the word (or double-quoted section) currently being
+    /// expanded, for the "bad substitution" diagnostic. bash names the *whole*
+    /// string its `expand_word_internal` was handed, not just the offending
+    /// `${…}`: `pre${x@Z}post: bad substitution`. A double-quoted section is
+    /// re-entered with its contents (quotes already stripped), so
+    /// `a"b${x@Z}"c` reports `b${x@Z}`. Saved/restored around every entry so
+    /// nesting (command substitution, `${y:-${x@Z}}`) resolves innermost-first.
+    bad_sub_word: Option<String>,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
     /// after evaluating the expression and overrides the status to 2.
     cond_regex_error: bool,
-    /// The name of the builtin whose execution should prefix an arithmetic
-    /// diagnostic — bash's `this_command_name`. bash reports arithmetic errors
-    /// raised while a builtin runs as `<name>: line N: <builtin>: <expr>: …`
-    /// (`let`, `((`, `declare`, `typeset`, `local`); errors from plain
-    /// assignments and word/`$(( … ))` expansion carry no builtin tag. Set for
-    /// the duration of the relevant builtin, `None` otherwise.
-    arith_cmd: Option<&'static str>,
+    /// The tag that should prefix an arithmetic diagnostic — bash's
+    /// `this_command_name`. bash reports arithmetic errors raised while a
+    /// builtin runs as `<name>: line N: <builtin>: <expr>: …` (`let`, `((`,
+    /// `declare`, `typeset`, `local`); errors from plain assignments and
+    /// word/`$(( … ))` expansion carry no tag. Set for the duration of the
+    /// relevant builtin, `None` otherwise.
+    ///
+    /// It is not only builtins: bash's `parameter_brace_substring` *replaces*
+    /// `this_command_name` with the parameter reference for the duration of the
+    /// offset/length evaluation, so `${a[0]:1 z}` reports
+    /// `a[0]: 1 z: syntax error in expression`. Hence the owned string — that
+    /// tag is computed at runtime. (An array *subscript* gets no such tag:
+    /// `${a[1 z]}` reports the bare expression.)
+    arith_cmd: Option<Cow<'static, str>>,
     /// True while an assignment is being applied on behalf of a
     /// `declare`/`local`/`readonly`/`export` *operand* rather than a bare
     /// `name=…` / `name=(…)` assignment command. bash re-parses the builtin's
@@ -1223,6 +1239,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             discard_error: None,
+            bad_sub_word: None,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -2661,8 +2678,8 @@ impl Shell {
     /// duration (bash's `this_command_name`) — used by the `(( … ))` command and
     /// the C-style `for (( … ))` sections, whose errors bash tags with `((`.
     fn eval_arith_cmd(&mut self, raw: &str, tag: &'static str) -> Option<i64> {
-        let saved = self.arith_cmd;
-        self.arith_cmd = Some(tag);
+        let saved = self.arith_cmd.take();
+        self.arith_cmd = Some(Cow::Borrowed(tag));
         let r = self.eval_arith_raw(raw);
         self.arith_cmd = saved;
         r
@@ -3279,8 +3296,8 @@ impl Shell {
         }
         let expanded = self.expand_arith_params(raw);
         // bash tags `(( … ))`-command arithmetic errors with `((`.
-        let saved_arith_cmd = self.arith_cmd;
-        self.arith_cmd = Some("((");
+        let saved_arith_cmd = self.arith_cmd.take();
+        self.arith_cmd = Some(Cow::Borrowed("(("));
         match arith::eval(&expanded, self) {
             Ok(v) => self.last_status = i32::from(v == 0),
             Err(e) => {
@@ -3641,6 +3658,7 @@ impl Shell {
             errexit_suppress: self.errexit_suppress,
             unbound_error: None,
             discard_error: None,
+            bad_sub_word: None,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -4286,6 +4304,7 @@ impl Shell {
     fn slice_elements(
         &mut self,
         name: &str,
+        star: bool,
         offset: &Word,
         length: &Option<Box<Word>>,
     ) -> Vec<String> {
@@ -4296,8 +4315,16 @@ impl Shell {
         } else {
             self.array_elements(name)
         };
+        // The reference bash tags an offset/length arithmetic error with:
+        // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
+        let all = if star { '*' } else { '@' };
+        let param_ref = if name == "@" || name == "*" {
+            all.to_string()
+        } else {
+            format!("{name}[{all}]")
+        };
         let n = elems.len() as i64;
-        let off = self.eval_arith_index(offset);
+        let off = self.eval_arith_substr_bound(offset, &param_ref);
         // A negative offset counts from the end; if its magnitude exceeds the
         // element count the start lands before the first element, and bash
         // yields an empty slice (it does NOT clamp to 0 and return everything).
@@ -4307,7 +4334,7 @@ impl Shell {
         let start = if off < 0 { n + off } else { off.min(n) };
         let end = match length {
             Some(l) => {
-                let l = self.eval_arith_index(l);
+                let l = self.eval_arith_substr_bound(l, &param_ref);
                 // Unlike a string substring (where a negative length counts back
                 // from the end of the string), an array / positional-parameter
                 // slice rejects a negative length as a fatal expansion error
@@ -4368,7 +4395,7 @@ impl Shell {
                 self.array_elements(name).len()
             };
             if count > 0 {
-                self.bad_substitution(raw);
+                self.bad_transform_substitution(raw);
             }
             return Vec::new();
         }
@@ -7712,7 +7739,20 @@ impl Shell {
 
     /// Expand a word, optionally field-splitting the results of unquoted
     /// expansions. Returns zero or more fields.
+    ///
+    /// This is the outermost word-expansion entry, so it also establishes the
+    /// word-source context a "bad substitution" diagnostic names — bash reports
+    /// the whole word, not just the offending `${…}`. It nests: an operand word
+    /// (`${y:-${x@Z}}`) is expanded by a recursive call, so the innermost word
+    /// in flight wins, exactly as bash's recursive `expand_word_internal` does.
     fn expand_word(&mut self, word: &Word, split: bool) -> Vec<String> {
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let fields = self.expand_word_inner(word, split);
+        self.bad_sub_word = saved;
+        fields
+    }
+
+    fn expand_word_inner(&mut self, word: &Word, split: bool) -> Vec<String> {
         if split {
             // Command-argument context: field-split unquoted expansions, then
             // apply pathname (glob) expansion to each resulting field.
@@ -7820,6 +7860,12 @@ impl Shell {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
                     // preserving embedded whitespace; empty arrays yield no field.
                     // `"${!arr[@]}"` does the same over the keys/indices.
+                    // A bad substitution reached from inside these quotes names
+                    // the quoted section's *contents*, without the enclosing
+                    // quotes — same rule `expand_double_quoted` applies on the
+                    // scalar path below (bash re-enters the quoted run as its
+                    // own word).
+                    let saved_word = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
                     let per_element: Option<Vec<String>> = match parts.as_slice() {
                         [
                             WordPart::ArrayRef {
@@ -7842,7 +7888,7 @@ impl Shell {
                                 offset,
                                 length,
                             },
-                        ] => Some(self.slice_elements(name, offset, length)),
+                        ] => Some(self.slice_elements(name, false, offset, length)),
                         // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
                         // after the element-wise transform.
                         [
@@ -7874,6 +7920,7 @@ impl Shell {
                         [WordPart::Param(p)] if p == "@" => Some(self.positional.clone()),
                         _ => None,
                     };
+                    self.bad_sub_word = saved_word;
                     if let Some(items) = per_element {
                         for (i, el) in items.into_iter().enumerate() {
                             if i > 0 {
@@ -7972,6 +8019,13 @@ impl Shell {
     /// literal text is scanned for colon-delimited tilde positions; a `:`
     /// produced by a parameter/command expansion does not create one.
     fn expand_assignment_value(&mut self, word: &Word) -> String {
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let out = self.expand_assignment_value_inner(word);
+        self.bad_sub_word = saved;
+        out
+    }
+
+    fn expand_assignment_value_inner(&mut self, word: &Word) -> String {
         let mut cur = String::new();
         // The very start of the value is a tilde position.
         let mut at_tilde_pos = true;
@@ -8082,6 +8136,13 @@ impl Shell {
     /// rules mirror `expand_word_annotated`: unquoted `Literal` and dynamic
     /// expansions are live; single/double-quoted runs are literal.
     fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let buf = self.expand_word_pattern_inner(word);
+        self.bad_sub_word = saved;
+        buf
+    }
+
+    fn expand_word_pattern_inner(&mut self, word: &Word) -> Vec<EChar> {
         let mut buf: Vec<EChar> = Vec::new();
         for part in &word.parts {
             match part {
@@ -8101,6 +8162,10 @@ impl Shell {
     }
 
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> String {
+        // bash re-enters `expand_word_internal` on the quoted section's
+        // *contents*, so a "bad substitution" inside quotes names the section
+        // without its quote characters (`a"b${x@Z}"c` → `b${x@Z}`).
+        let saved = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
         let mut s = String::new();
         for part in parts {
             match part {
@@ -8108,6 +8173,7 @@ impl Shell {
                 other => s.push_str(&self.expand_dynamic(other)),
             }
         }
+        self.bad_sub_word = saved;
         s
     }
 
@@ -8241,8 +8307,11 @@ impl Shell {
                 // command, status 1) — the same class as an array-slice negative
                 // length. Route it through `discard_error` so the simple-command
                 // driver discards the command.
-                let off = self.eval_arith_index(offset);
-                let len = length.as_ref().map(|l| self.eval_arith_index(l));
+                let param_ref = crate::unparse::name_sub(name, index);
+                let off = self.eval_arith_substr_bound(offset, &param_ref);
+                let len = length
+                    .as_ref()
+                    .map(|l| self.eval_arith_substr_bound(l, &param_ref));
                 match param_substr(&value, off, len) {
                     Ok(s) => s,
                     Err(bad_len) => {
@@ -8294,17 +8363,17 @@ impl Shell {
                 // Empty/unknown/multi-char `@` operator: empty for an unset
                 // parameter (status 0), "bad substitution" for a set one.
                 if self.param_elem_value(name, index).is_some() {
-                    self.bad_substitution(raw)
+                    self.bad_transform_substitution(raw)
                 } else {
                     String::new()
                 }
             }
             WordPart::ArraySlice {
                 name,
+                star,
                 offset,
                 length,
-                ..
-            } => self.slice_elements(name, offset, length).join(" "),
+            } => self.slice_elements(name, *star, offset, length).join(" "),
             WordPart::ArrayBulk { name, op, .. } => self.bulk_elements(name, op).join(" "),
             WordPart::ArrayOp {
                 name,
@@ -8368,17 +8437,49 @@ impl Shell {
     }
 
     /// Report a runtime "bad substitution" (bash: an unrecognised `${…}` form
-    /// caught during word expansion). Emits `${raw}: bad substitution` and sets
-    /// the shared word-expansion discard signal (`discard_error`) so the
-    /// simple-command driver aborts the command without running it — a
-    /// DISCARD-class error: `$?`=1, the rest of the current parse unit is
-    /// dropped, but the shell keeps reading (a following line still runs).
-    fn bad_substitution(&mut self, raw: &str) -> String {
-        self.emit_stderr(
-            format!("{}${{{raw}}}: bad substitution\n", self.err_prefix()).as_bytes(),
-        );
-        self.discard_error = Some(1);
+    /// caught during word expansion). The diagnostic names the whole word being
+    /// expanded, not merely the offending `${…}` — see [`Shell::bad_sub_word`];
+    /// `raw` is the fallback used when no word context is active.
+    ///
+    /// bash splits these into two classes, and the difference is visible:
+    ///
+    /// * a bad `@` **transform** operator (`${x@Z}`, `${x@}`, `${x@QU}`) is
+    ///   *fatal* in a non-interactive shell — bash's `parameter_brace_transform`
+    ///   returns `expand_wdesc_fatal`, which `call_expand_word_internal` turns
+    ///   into `FORCE_EOF`, so the shell exits with status 1;
+    /// * every other unrecognised form (`${x!}`, `${!!}`, `${#a[0]extra}`)
+    ///   returns `expand_wdesc_error` → `DISCARD`: the command is dropped with
+    ///   `$?`=1 but the next line still runs.
+    ///
+    /// bash aborts the whole expansion at the first such error, so a word with
+    /// two of them reports only once; the early return here matches that.
+    fn bad_substitution_with(&mut self, raw: &str, fatal: bool) -> String {
+        if self.unbound_error.is_some() || self.discard_error.is_some() {
+            return String::new();
+        }
+        let shown = self
+            .bad_sub_word
+            .clone()
+            .unwrap_or_else(|| format!("${{{raw}}}"));
+        self.emit_stderr(format!("{}{shown}: bad substitution\n", self.err_prefix()).as_bytes());
+        if fatal {
+            self.unbound_error = Some(1);
+        } else {
+            self.discard_error = Some(1);
+        }
         String::new()
+    }
+
+    /// The non-fatal (DISCARD-class) "bad substitution" — see
+    /// [`Shell::bad_substitution_with`].
+    fn bad_substitution(&mut self, raw: &str) -> String {
+        self.bad_substitution_with(raw, false)
+    }
+
+    /// The fatal "bad substitution" raised by an unrecognised `@` transform
+    /// operator — see [`Shell::bad_substitution_with`].
+    fn bad_transform_substitution(&mut self, raw: &str) -> String {
+        self.bad_substitution_with(raw, true)
     }
 
     fn expand_param_op(
@@ -8959,8 +9060,8 @@ impl Shell {
         if s.is_empty() {
             return Some(0);
         }
-        let saved = self.arith_cmd;
-        self.arith_cmd = Some("[[");
+        let saved = self.arith_cmd.take();
+        self.arith_cmd = Some(Cow::Borrowed("[["));
         let r = match arith::eval(s, self) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -8998,6 +9099,17 @@ impl Shell {
                 0
             }
         }
+    }
+
+    /// [`Self::eval_arith_index`] for a `${param:off:len}` substring/slice
+    /// bound. bash's `parameter_brace_substring` swaps `this_command_name` for
+    /// the parameter reference while evaluating those two expressions, so the
+    /// diagnostic reads `a[0]: 1 z: syntax error in expression`.
+    fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: &str) -> i64 {
+        let saved = self.arith_cmd.replace(Cow::Owned(param_ref.to_string()));
+        let v = self.eval_arith_index(w);
+        self.arith_cmd = saved;
+        v
     }
 
     fn arith_sub(&mut self, expr: &str) -> String {
@@ -9307,12 +9419,12 @@ impl Shell {
         // (`this_command_name`): `let`/`(( ))`/`declare`/`typeset`/`local`
         // arithmetic reports `<name>: line N: <builtin>: <expr>: …`. Set it for
         // the builtin's duration so `eval_int_assign` picks up the right tag.
-        let saved_arith_cmd = self.arith_cmd;
+        let saved_arith_cmd = self.arith_cmd.take();
         self.arith_cmd = match name {
-            "let" => Some("let"),
-            "declare" => Some("declare"),
-            "typeset" => Some("typeset"),
-            "local" => Some("local"),
+            "let" => Some(Cow::Borrowed("let")),
+            "declare" => Some(Cow::Borrowed("declare")),
+            "typeset" => Some(Cow::Borrowed("typeset")),
+            "local" => Some(Cow::Borrowed("local")),
             _ => None,
         };
         let status = match name {
@@ -15976,10 +16088,11 @@ impl Shell {
         {
             expr = &expr[..pos + tok.len()];
         }
-        match self.arith_cmd {
-            Some(tag) => self.errln(&format!("{prefix}{tag}: {expr}: {e}")),
-            None => self.errln(&format!("{prefix}{expr}: {e}")),
-        }
+        let line = match self.arith_cmd.clone() {
+            Some(tag) => format!("{prefix}{tag}: {expr}: {e}"),
+            None => format!("{prefix}{expr}: {e}"),
+        };
+        self.errln(&line);
     }
 
     /// Write a command-level diagnostic (e.g. `foo: command not found`, or a

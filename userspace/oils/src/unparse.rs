@@ -674,8 +674,18 @@ fn bin_op_str(op: CondBinOp) -> &'static str {
 /// Reconstruct source text for a whole word (all parts concatenated).
 #[must_use]
 pub fn word_src(w: &Word) -> String {
+    parts_src(&w.parts)
+}
+
+/// Reconstruct source text for a run of word parts *without* any enclosing
+/// quotes — the inside of a `WordPart::DoubleQuoted`, say. bash's
+/// "bad substitution" diagnostic names exactly this: the string its
+/// `expand_word_internal` was handed, which for a double-quoted section is the
+/// section's contents with the quote characters already stripped.
+#[must_use]
+pub fn parts_src(parts: &[WordPart]) -> String {
     let mut s = String::new();
-    for p in &w.parts {
+    for p in parts {
         s.push_str(&part_src(p));
     }
     s

@@ -263,6 +263,26 @@ fn shopt_line(name: &str, on: bool, reinput: bool) -> String {
     }
 }
 
+/// Parse an `exit`/`return` status argument the way bash does.
+///
+/// bash reads the argument as a wide integer and truncates it to the low 8
+/// bits that `wait(2)` can actually carry: `exit 256` is 0, `exit -1` is 255,
+/// `exit -300` is 212 and `exit 99999999999` is 255 (all verified against bash
+/// 5). Masking *here* rather than only where the shell process finally exits
+/// matters because a status also travels purely in-process — out of a
+/// subshell, or out of a function via `return` — where no OS-level truncation
+/// would ever apply and the unmasked value would leak into `$?`.
+///
+/// The wide parse is load-bearing too: an argument beyond `i32` range is a
+/// legitimate value to bash (it masks it), not the "numeric argument required"
+/// error a narrower parse would produce.
+///
+/// `Err` signals a non-numeric argument, which the caller reports as
+/// "numeric argument required" and turns into status 2.
+fn parse_exit_status(arg: &str) -> Result<i32, ()> {
+    arg.trim().parse::<i64>().map(|n| (n & 0xFF) as i32).map_err(|_| ())
+}
+
 /// Render an `io::Error` the way bash renders `strerror(errno)` — e.g.
 /// "No such file or directory" rather than the host `std::io::Error` Display,
 /// which on Windows reads "The system cannot find the file specified. (os error
@@ -1069,6 +1089,22 @@ pub struct Shell {
     /// Each new job takes the lowest unused job number (bash semantics), so the
     /// numbering restarts at 1 once the table drains.
     jobs: Vec<Job>,
+    /// Exit statuses of background jobs already reaped by a *targeted* `wait`
+    /// (`wait PID` or `wait -n`), keyed by pid.
+    ///
+    /// bash remembers a terminated job's status after reaping it, so `wait PID`
+    /// is repeatable and keeps returning the same value rather than degrading
+    /// to "pid N is not a child of this shell". The memory is deliberately
+    /// *separate* from [`jobs`](Self::jobs): a reaped job vanishes from the
+    /// `jobs` listing immediately, yet `wait` on its pid still answers — both
+    /// verified against bash 5, and a single table could not model both.
+    ///
+    /// Cleared by an argument-less `wait`, which is bash's purge point: after a
+    /// bare `wait`, re-waiting a previously reaped pid *does* report 127.
+    ///
+    /// NOT inherited by subshell clones, for the same reason `jobs` isn't — a
+    /// subshell has no children of its own.
+    reaped_status: HashMap<u32, i32>,
     /// The file-creation mask (`umask`). The low 9 bits (owner/group/other rwx)
     /// are the bits *cleared* from a newly created file's permissions. Consulted
     /// when a redirection creates a file (applied via the file mode on unix-family
@@ -1191,6 +1227,7 @@ impl Shell {
             pending_builtin_exit: None,
             exit_requested: false,
             jobs: Vec::new(),
+            reaped_status: HashMap::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
             rlimits: default_rlimits(),
@@ -3660,8 +3697,11 @@ impl Shell {
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
             exit_requested: false,
-            // A subshell does not inherit the parent's job table.
+            // A subshell does not inherit the parent's job table — nor, for the
+            // same reason, its memory of already-reaped jobs: those were the
+            // parent's children, not the subshell's.
             jobs: Vec::new(),
+            reaped_status: HashMap::new(),
             // The umask is a process attribute, inherited by subshells.
             umask_val: self.umask_val,
             // The command hash table is inherited by subshells (bash).
@@ -9393,9 +9433,9 @@ impl Shell {
                 // status 2. A bare `exit` uses `$?`.
                 let code = match args.first() {
                     None => self.last_status,
-                    Some(s) => match s.trim().parse::<i32>() {
+                    Some(s) => match parse_exit_status(s) {
                         Ok(n) => n,
-                        Err(_) => {
+                        Err(()) => {
                             self.errln(&format!(
                                 "{}exit: {s}: numeric argument required",
                                 self.err_prefix()
@@ -9418,9 +9458,9 @@ impl Shell {
                 // a function emits BOTH this and the "can only return" line.
                 let code = match args.first() {
                     None => self.last_status,
-                    Some(s) => match s.trim().parse::<i32>() {
+                    Some(s) => match parse_exit_status(s) {
                         Ok(n) => n,
-                        Err(_) => {
+                        Err(()) => {
                             self.errln(&format!(
                                 "{}return: {s}: numeric argument required",
                                 self.err_prefix()
@@ -10395,6 +10435,10 @@ impl Shell {
                 last_pid = Some(job.pid);
             }
             self.jobs.clear();
+            // bash's purge point: after an argument-less `wait`, re-waiting a
+            // pid that a targeted `wait` had reaped earlier reports 127 again
+            // rather than replaying its remembered status.
+            self.reaped_status.clear();
             if let (Some(var), Some(pid)) = (pid_var, last_pid) {
                 self.vars.insert(var, pid.to_string());
             }
@@ -10403,7 +10447,17 @@ impl Shell {
         let mut last = 0;
         for spec in &operands {
             let Some(idx) = self.resolve_job_spec(spec) else {
-                last = self.wait_bad_operand(spec);
+                // Not a live job — but it may be one we already reaped, whose
+                // status bash keeps answering with (silently, no diagnostic).
+                match spec.parse::<u32>().ok().and_then(|p| self.reaped_status.get(&p)) {
+                    Some(&status) => {
+                        last = status;
+                        if let Some(var) = &pid_var {
+                            self.vars.insert(var.clone(), spec.clone());
+                        }
+                    }
+                    None => last = self.wait_bad_operand(spec),
+                }
                 continue;
             };
             let pid = self.jobs[idx].pid;
@@ -10414,6 +10468,7 @@ impl Shell {
                 last = job.status.unwrap_or(0);
             }
             self.jobs.remove(idx);
+            self.reaped_status.insert(pid, last);
             if let Some(var) = &pid_var {
                 self.vars.insert(var.clone(), pid.to_string());
             }
@@ -10501,6 +10556,9 @@ impl Shell {
                 if let Some(status) = done {
                     let pid = job.pid;
                     self.jobs.remove(idx);
+                    // `wait -n` reaps just like a targeted `wait PID`, so the
+                    // status stays answerable for a later `wait PID`.
+                    self.reaped_status.insert(pid, status);
                     if let Some(var) = pid_var {
                         self.vars.insert(var.to_string(), pid.to_string());
                     }
@@ -27324,6 +27382,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A `return` in a top-level subshell is still an error (no unwind).
         let (o3, _) = run("( echo a; return 3; echo b ) 2>/dev/null; echo done");
         assert_eq!(o3, "a\nb\ndone\n");
+    }
+
+    #[test]
+    fn exit_and_return_status_masked_to_8_bits() {
+        // A status only carries 8 bits. bash masks in the `exit`/`return`
+        // builtins, not merely where the shell process finally exits, so an
+        // in-process status -- out of a subshell or a function -- is truncated
+        // too. (bash 5: 256 -> 0, 300 -> 44, -1 -> 255, -300 -> 212.)
+        let (o, _) = run("( exit 256 ); echo \"a=$?\"; ( exit 300 ); echo \"b=$?\"");
+        assert_eq!(o, "a=0\nb=44\n");
+        let (o2, _) = run("( exit -1 ); echo \"c=$?\"; ( exit -300 ); echo \"d=$?\"");
+        assert_eq!(o2, "c=255\nd=212\n");
+        let (o3, _) = run("f() { return 260; }; f; echo \"e=$?\"; g() { return -1; }; g; echo \"f=$?\"");
+        assert_eq!(o3, "e=4\nf=255\n");
+        // Beyond i32 range is a legitimate value to bash (it masks it), not the
+        // "numeric argument required" error a narrower parse would produce.
+        let (o4, _) = run("( exit 99999999999 ) 2>/dev/null; echo \"g=$?\"");
+        assert_eq!(o4, "g=255\n");
+    }
+
+    #[test]
+    fn wait_on_reaped_pid_replays_remembered_status() {
+        // A targeted `wait` is repeatable: the terminated job's status stays
+        // answerable, silently, rather than degrading to "not a child".
+        let (o, _) = run(
+            "( exit 6 ) & p=$!; wait $p; echo \"a=$?\"; wait $p 2>/dev/null; echo \"b=$?\"; wait $p 2>/dev/null; echo \"c=$?\"",
+        );
+        assert_eq!(o, "a=6\nb=6\nc=6\n");
+        // The memory is separate from the `jobs` table: a reaped job leaves the
+        // listing at once even while `wait` still answers for it.
+        let (o2, _) = run("( exit 6 ) & p=$!; wait $p >/dev/null; jobs; echo \"empty=$?\"");
+        assert_eq!(o2, "empty=0\n");
+        // An argument-less `wait` purges the memory.
+        let (o3, _) = run(
+            "( exit 6 ) & p=$!; wait $p >/dev/null; wait; wait $p 2>/dev/null; echo \"purged=$?\"",
+        );
+        assert_eq!(o3, "purged=127\n");
+        // `wait -n` reaps the same way, so its status is remembered too.
+        let (o4, _) = run("( exit 9 ) & p=$!; wait -n >/dev/null; wait $p 2>/dev/null; echo \"n=$?\"");
+        assert_eq!(o4, "n=9\n");
+        // A pid that was never ours is still the 127 error case.
+        let (o5, _) = run("wait 1 2>/dev/null; echo \"stranger=$?\"");
+        assert_eq!(o5, "stranger=127\n");
     }
 
     #[test]
